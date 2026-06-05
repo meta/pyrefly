@@ -627,7 +627,7 @@ impl ClassField {
         }
     }
 
-    fn instantiate_helper(&self, f: &mut dyn FnMut(&mut Type)) -> Self {
+    pub(crate) fn instantiate_helper(&self, f: &mut dyn FnMut(&mut Type)) -> Self {
         match &self.0 {
             ClassFieldInner::Property { ty, is_abstract } => {
                 let mut ty = ty.clone();
@@ -2763,6 +2763,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) -> Option<Type> {
+        let initial_value_expr = match field_definition {
+            ClassFieldDefinition::AssignedInBody { value, .. } => {
+                if let ExprOrBinding::Expr(expr) = value.as_ref() {
+                    Some(expr)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
         self.get_enum_class_field_type(
             class,
             name,
@@ -2775,19 +2786,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
         .or_else(|| self.get_property_class_field_type(class, name, field_definition))
         .or_else(|| self.get_pydantic_root_model_class_field_type(class, name))
-        .or_else(|| {
-            let initial_value_expr = match field_definition {
-                ClassFieldDefinition::AssignedInBody { value, .. } => {
-                    if let ExprOrBinding::Expr(expr) = value.as_ref() {
-                        Some(expr)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-            self.get_django_field_type(ty, class, Some(name), initial_value_expr)
-        })
+        .or_else(|| self.get_django_field_type(ty, class, Some(name), initial_value_expr))
     }
 
     /// Recognize `x = property(fget, fset, fdel)` and return the corresponding
@@ -3283,6 +3282,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Otherwise, analyze the value to determine the type
         let (inherited_ty, inherited_annotation) =
             self.get_inherited_type_and_annotation(class, name);
+        if !inferred_from_method
+            && direct_annotation.is_none()
+            && self.get_metadata_for_class(class).is_django_model()
+            && inherited_annotation
+                .as_ref()
+                .and_then(|ann| ann.ty.as_ref())
+                .is_none_or(|ty| {
+                    matches!(ty, Type::ClassType(cls) if
+                        cls.has_qname("django.db.models.manager", "Manager")
+                        || cls.has_qname("django.db.models.manager", "BaseManager"))
+                })
+            && let ExprOrBinding::Expr(e) = value
+            && let Some(manager) = self.get_django_manager_from_queryset_type(class, e)
+        {
+            // Standard manager interfaces allow model rebinding. Explicit custom interfaces
+            // retain their declared type and use ordinary assignment checking below.
+            self.attribute_expr_infer(e, None, name, errors);
+            return (manager, None, IsInherited::Maybe);
+        }
         let mut is_inherited = if inherited_ty.is_none() {
             IsInherited::No
         } else {
@@ -3708,7 +3726,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         None
     }
 
-    fn as_instance_attribute(
+    pub(crate) fn as_instance_attribute(
         &self,
         field_name: &Name,
         field: &ClassField,
@@ -3719,7 +3737,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // quantified to capture `cls`. Note that `__new__` is the only method that needs this
         // special case because it's not legal to use `Self` in other static methods.
         let self_quantified =
-            if field_name == &dunder::NEW && matches!(instance.kind, InstanceKind::ClassType) {
+            if field_name == &dunder::NEW && matches!(instance.kind, InstanceKind::ClassType(_)) {
                 Some(self.get_self_quantified(instance.class, instance.to_type(self.heap)))
             } else {
                 None
@@ -4428,6 +4446,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     continue;
                 }
             }
+            if metadata.is_django_model()
+                && !class_field.has_explicit_annotation()
+                && self.is_django_manager_type(&class_field.ty())
+                && self.is_django_manager_type(&want_class_field.ty())
+            {
+                // Django binds each manager replacement to the receiving model.
+                continue;
+            }
             let want_is_static = want_class_field.is_staticmethod();
             let want_is_class = want_class_field.is_classmethod();
             if (want_is_static || want_is_class) && class_field.is_ordinary_instance_method() {
@@ -5115,6 +5141,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub fn get_instance_attribute(&self, cls: &ClassType, name: &Name) -> Option<ClassAttribute> {
+        if let Some(attribute) = self.get_django_instance_attribute(cls, name) {
+            return Some(attribute);
+        }
         self.get_class_member(cls.class_object(), name)
             .map(|field| self.as_instance_attribute(name, field.as_ref(), &Instance::of_class(cls)))
     }
