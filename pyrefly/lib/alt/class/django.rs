@@ -10,6 +10,8 @@ use pyrefly_python::module_name::is_python_identifier;
 use pyrefly_types::callable::Callable;
 use pyrefly_types::callable::ParamList;
 use pyrefly_types::class::Class;
+use pyrefly_types::class::ClassType;
+use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::function::FuncMetadata;
 use pyrefly_types::function::Function;
 use pyrefly_types::function::PropertyMetadata;
@@ -30,12 +32,14 @@ use starlark_map::small_map::SmallMap;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
+use crate::alt::class::class_field::ClassAttribute;
 use crate::alt::class::class_field::ClassField;
 use crate::alt::class::enums::VALUE_PROP;
 use crate::alt::types::class_metadata::ClassMetadata;
 use crate::alt::types::class_metadata::ClassSynthesizedField;
 use crate::alt::types::class_metadata::ClassSynthesizedFields;
 use crate::alt::types::class_metadata::DjangoReverseRelationIndex;
+use crate::alt::types::instance::Instance;
 use crate::binding::binding::BindingDjangoRelations;
 use crate::binding::binding::ClassFieldDefinition;
 use crate::binding::binding::ExprOrBinding;
@@ -83,6 +87,7 @@ const MODEL: Name = Name::new_static("Model");
 const ANNOTATE: Name = Name::new_static("annotate");
 const MANYRELATEDMANAGER: Name = Name::new_static("ManyRelatedManager");
 const SYMMETRICAL: Name = Name::new_static("symmetrical");
+const AS_MANAGER: Name = Name::new_static("as_manager");
 
 pub(crate) struct DjangoAnnotateCall {
     metadata: FuncMetadata,
@@ -172,12 +177,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::ClassType(queryset) => queryset,
             result => return result,
         };
-        if !queryset.has_qname("django.db.models.query", "QuerySet") || queryset.targs().len() != 2
-        {
+        let Some(mut base) = self.django_queryset_base(&queryset) else {
+            return self.heap.mk_class_type(queryset);
+        };
+        if base.targs().len() != 2 {
             return self.heap.mk_class_type(queryset);
         }
 
-        let row = queryset.targs().as_slice()[1].clone();
+        let row = base.targs().as_slice()[1].clone();
         if !self.is_django_model_row(&row) {
             return self.heap.mk_class_type(queryset);
         }
@@ -188,7 +195,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         });
         // The intersection preserves call-site metadata while generic QuerySet operations use the
         // original row as their fallback type.
-        queryset.targs_mut().as_mut()[1] = self.heap.mk_intersect(vec![annotation], row);
+        base.targs_mut().as_mut()[1] = self.heap.mk_intersect(vec![annotation], row);
+        if queryset.has_qname("django.db.models.query", "QuerySet") {
+            queryset = base;
+        } else {
+            queryset = queryset.with_django_metadata(DjangoClassMetadata::QuerySet { base });
+        }
         self.heap.mk_class_type(queryset)
     }
 
@@ -354,6 +366,193 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             })
     }
 
+    /// Bind a generated manager and its initial queryset for a class-body assignment.
+    /// The caller checks that the receiving class is a Django model.
+    pub fn get_django_manager_from_queryset_type(
+        &self,
+        model: &Class,
+        initial_value_expr: &Expr,
+    ) -> Option<Type> {
+        let call = initial_value_expr.as_call_expr()?;
+        let Expr::Attribute(attr) = call.func.as_ref() else {
+            return None;
+        };
+        if attr.attr.id != AS_MANAGER {
+            return None;
+        }
+        let callee = self.expr_infer(&call.func, &self.error_swallower());
+        if !callee
+            .toplevel_func_metadata()
+            .is_some_and(Self::is_django_as_manager)
+        {
+            return None;
+        }
+        let receiver = self.expr_infer(&attr.value, &self.error_swallower());
+        let (_, mut queryset_type) = self.unwrap_class_object_silently(&receiver)?;
+        let Type::ClassType(queryset) = &queryset_type else {
+            return None;
+        };
+        let base = self.django_queryset_base(queryset)?;
+        let [original_model, original_row] = base.targs().as_slice() else {
+            return None;
+        };
+        let original_model = original_model.clone();
+        let original_row = original_row.clone();
+        let model = self.heap.mk_self_type(self.as_class_type_unchecked(model));
+
+        // Only construction fills missing model/row arguments. Explicit method returns
+        // never pass through this binding step.
+        queryset_type.subst_mut_fn(&mut |q| {
+            if [&original_model, &original_row]
+                .iter()
+                .any(|arg| matches!(arg, Type::Quantified(arg) if arg.as_ref() == q))
+            {
+                Some(model.clone())
+            } else {
+                Some(q.as_gradual_type())
+            }
+        });
+        let Type::ClassType(queryset) = queryset_type else {
+            unreachable!("substitution preserves the queryset class instance");
+        };
+        // Derive the base from the substituted arguments, including nested row types.
+        let mut base = self
+            .django_queryset_base(&queryset)
+            .expect("substitution preserves the QuerySet base");
+        base.targs_mut().as_mut()[0] = model.clone();
+        if original_row == original_model
+            || matches!(original_row, Type::Any(_) | Type::Quantified(_))
+        {
+            base.targs_mut().as_mut()[1] = model.clone();
+        }
+        let queryset = if queryset.has_qname("django.db.models.query", "QuerySet") {
+            base
+        } else {
+            queryset.with_django_metadata(DjangoClassMetadata::QuerySet { base })
+        };
+        let Type::ClassDef(manager) = self.try_get_from_export(
+            ModuleName::from_str("django.db.models.manager"),
+            Name::new_static("Manager"),
+        )?
+        else {
+            return None;
+        };
+        let manager = self.specialize_nontypeddict_to_classtype(
+            manager,
+            vec![model],
+            TextRange::default(),
+            &self.error_swallower(),
+        );
+        Some(
+            self.heap.mk_class_type(
+                manager.with_django_metadata(DjangoClassMetadata::Manager { queryset }),
+            ),
+        )
+    }
+
+    /// Return the effective QuerySet base, including a construction-time specialization.
+    fn django_queryset_base(&self, cls: &ClassType) -> Option<ClassType> {
+        if let Some(DjangoClassMetadata::QuerySet { base }) = cls.django_metadata() {
+            Some(base.clone())
+        } else if cls.has_qname("django.db.models.query", "QuerySet") {
+            Some(cls.clone())
+        } else {
+            self.get_mro_for_class(cls.class_object())
+                .ancestors(self.stdlib)
+                .find(|base| base.has_qname("django.db.models.query", "QuerySet"))
+                .map(|base| base.substitute_with(&cls.substitution()))
+        }
+    }
+
+    /// Identify Django's implementation, including access through a subclass.
+    fn is_django_as_manager(metadata: &FuncMetadata) -> bool {
+        metadata.kind.to_func_symbol().is_some_and(|symbol| {
+            symbol.name == AS_MANAGER
+                && symbol
+                    .cls
+                    .as_ref()
+                    .is_some_and(|cls| cls.has_toplevel_qname("django.db.models.query", "QuerySet"))
+        })
+    }
+
+    /// Check manager replacements by nominal type, independently of their attribute names.
+    pub(crate) fn is_django_manager_type(&self, ty: &Type) -> bool {
+        matches!(ty, Type::ClassType(cls) if
+            cls.has_qname("django.db.models.manager", "BaseManager")
+            || self.get_mro_for_class(cls.class_object()).ancestors(self.stdlib)
+                .any(|base| base.has_qname("django.db.models.manager", "BaseManager")))
+    }
+
+    /// Resolve generated members through the same path as ordinary instance members.
+    pub(crate) fn get_django_instance_attribute(
+        &self,
+        cls: &ClassType,
+        name: &Name,
+    ) -> Option<ClassAttribute> {
+        match cls.django_metadata()? {
+            DjangoClassMetadata::Manager { queryset } => {
+                let manager_member =
+                    self.get_class_member_with_defining_class(cls.class_object(), name);
+                if let Some(member) = &manager_member
+                    && member
+                        .defining_class
+                        .has_toplevel_qname("django.db.models.manager", "BaseManager")
+                {
+                    if !matches!(name.as_str(), "all" | "get_queryset") {
+                        return None;
+                    }
+                    let mut attribute =
+                        self.as_instance_attribute(name, &member.value, &Instance::of_class(cls));
+                    // Bind manager-owned methods before inserting the model's Self type.
+                    // Only the return changes; parameters and function metadata remain intact.
+                    match &mut attribute {
+                        ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => {
+                            ty.transform_toplevel_callable_signatures(|signature, _| {
+                                signature.ret = self.heap.mk_class_type(queryset.clone());
+                            });
+                        }
+                        _ => unreachable!("BaseManager.all and get_queryset are ordinary methods"),
+                    }
+                    return Some(attribute);
+                }
+
+                let member =
+                    self.get_class_member_with_defining_class(queryset.class_object(), name)?;
+                if !member.value.is_ordinary_instance_method() && !member.value.is_staticmethod() {
+                    return None;
+                }
+                if manager_member.is_none() {
+                    let policy = self
+                        .get_class_fields(&member.defining_class)
+                        .and_then(|fields| fields.django_queryset_only(name));
+                    let queryset_only = member
+                        .defining_class
+                        .has_toplevel_qname("django.db.models.query", "QuerySet")
+                        && matches!(name.as_str(), "delete" | "adelete" | "as_manager");
+                    if policy == Some(true)
+                        || (policy.is_none() && (name.as_str().starts_with('_') || queryset_only))
+                    {
+                        return None;
+                    }
+                }
+                self.get_instance_attribute(queryset, name)
+            }
+            DjangoClassMetadata::QuerySet { base } => {
+                let member = self.get_class_member_with_defining_class(cls.class_object(), name)?;
+                if !self.has_superclass(base.class_object(), &member.defining_class) {
+                    return None;
+                }
+                let field = self.get_class_member(base.class_object(), name)?;
+                Some(self.as_instance_attribute(
+                    name,
+                    field.as_ref(),
+                    &Instance::of_protocol(base, self.heap.mk_class_type(cls.clone())),
+                ))
+            }
+        }
+    }
+
+    // Get ManyRelatedManager class from django stubs
     fn get_manager_type(&self, target_model_type: Type) -> Option<Type> {
         let model_class = self.try_get_from_export(ModuleName::django_models(), MODEL)?;
         let model_instance_type = self.class_def_to_instance_type(model_class);
