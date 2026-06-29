@@ -447,10 +447,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut columns = vec![Vec::new(); arity];
         for row in rows {
             if arity == 1 {
-                columns[0].push(
-                    self.expr_infer(row, &hint_errors)
-                        .promote_implicit_literals(self.stdlib),
-                );
+                columns[0].push(self.expr_infer(row, &hint_errors).promote(self.stdlib));
                 continue;
             }
             let elts = match row {
@@ -462,10 +459,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 return None;
             }
             for (column, elt) in columns.iter_mut().zip(elts) {
-                column.push(
-                    self.expr_infer(elt, &hint_errors)
-                        .promote_implicit_literals(self.stdlib),
-                );
+                column.push(self.expr_infer(elt, &hint_errors).promote(self.stdlib));
             }
         }
         columns
