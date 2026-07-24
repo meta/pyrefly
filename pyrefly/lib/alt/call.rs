@@ -122,6 +122,8 @@ fn nests_calls(x: &Expr, depth: u32) -> bool {
 pub enum ConstructorKind {
     // `MyClass`
     BareClassName,
+    // `MyClass[int]`
+    SpecializedClass,
     // `type[MyClass]`
     TypeOfClass,
     // `type[Self]`
@@ -1986,7 +1988,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ));
                 }
                 let metadata = self.get_metadata_for_class(cls.class_object());
-                if metadata.is_protocol() && constructor_kind == ConstructorKind::BareClassName {
+                let is_direct_class = matches!(
+                    &constructor_kind,
+                    ConstructorKind::BareClassName | ConstructorKind::SpecializedClass
+                );
+                if metadata.is_protocol() && is_direct_class {
                     self.error_with_context(
                         call_errors,
                         arguments_range,
@@ -2001,9 +2007,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     let abstract_members = self.get_abstract_members_for_class(cls.class_object());
                     let unimplemented_abstract_methods =
                         abstract_members.unimplemented_abstract_methods();
-                    if constructor_kind == ConstructorKind::BareClassName
-                        && !unimplemented_abstract_methods.is_empty()
-                    {
+                    if is_direct_class && !unimplemented_abstract_methods.is_empty() {
                         self.error_with_context(
                             call_errors,
                             arguments_range,
@@ -2019,9 +2023,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             ),
                             context,
                         );
-                    } else if constructor_kind == ConstructorKind::BareClassName
-                        && metadata.is_explicitly_abstract()
-                    {
+                    } else if is_direct_class && metadata.is_explicitly_abstract() {
                         self.error_with_context(
                             call_errors,
                             arguments_range,
