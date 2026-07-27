@@ -1791,6 +1791,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let [(attribute, _)] = base_results.as_slice() else {
                 return None;
             };
+            let projected;
+            let attribute = if let Attribute::ClassAttribute(ClassAttribute::Descriptor(
+                desc,
+                DescriptorBase::Instance(_) | DescriptorBase::SelfInstance(_),
+            )) = attribute
+            {
+                projected = Attribute::class_attribute(self.descriptor_as_attribute(desc)?);
+                &projected
+            } else {
+                attribute
+            };
             let (ty, set_type) = match attribute {
                 Attribute::Simple(ty) => (ty, None),
                 Attribute::ClassAttribute(ClassAttribute::ReadWrite {

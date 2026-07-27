@@ -297,6 +297,8 @@ pub struct Descriptor {
     setter: bool,
     /// Does `__delete__` exist on the descriptor?
     deleter: bool,
+    /// Whether a decorated method defines this descriptor.
+    is_method: bool,
     /// How the descriptor field was initialized. Used to distinguish class-body
     /// descriptors (which have an actual object on the class) from annotation-only
     /// descriptors (which rely on metaclass or other runtime machinery).
@@ -415,7 +417,7 @@ enum ClassFieldInner {
     /// Nested class definitions (class statements inside class body).
     /// These are always of type `Type::ClassDef`, and we treat them as read-only.
     NestedClass { ty: Type },
-    /// Class attributes (includes staticmethods, Django fields, regular attrs).
+    /// Class attributes (includes staticmethods and regular attrs).
     /// These may also be shadowed on instances, unless they are marked as ClassVar.
     ///
     /// To minimize false positives, we treat attributes annotated but not initialized on the
@@ -424,8 +426,6 @@ enum ClassFieldInner {
     /// should succeed.
     ClassAttribute {
         ty: Type,
-        /// Django fields can accept values with a different type from their read type.
-        django_set_type: Option<Type>,
         annotation: Option<Annotation>,
         initialization: ClassFieldInitialization,
         read_only_reason: Option<ReadOnlyReason>,
@@ -435,10 +435,6 @@ enum ClassFieldInner {
         /// Whether this declaration is eligible for the `instance-var-assign` diagnostic.
         is_instance_var: bool,
         is_staticmethod: bool,
-        /// Django ForeignKey - triggers synthesis of _id field
-        is_foreign_key: bool,
-        /// Django field with choices - triggers synthesis of get_FOO_display method
-        has_choices: bool,
     },
     /// Instance-only attributes (defined in methods, not in class body).
     InstanceAttribute {
@@ -504,7 +500,6 @@ impl ClassField {
         Self(
             ClassFieldInner::ClassAttribute {
                 ty,
-                django_set_type: None,
                 annotation,
                 initialization,
                 read_only_reason,
@@ -512,8 +507,6 @@ impl ClassField {
                 is_classvar: false,
                 is_instance_var,
                 is_staticmethod: false,
-                is_foreign_key: false,
-                has_choices: false,
             },
             IsInherited::Maybe,
         )
@@ -618,7 +611,6 @@ impl ClassField {
             ClassField(
                 ClassFieldInner::ClassAttribute {
                     ty,
-                    django_set_type: None,
                     annotation: None,
                     initialization: ClassFieldInitialization::ClassBody(None),
                     read_only_reason: None,
@@ -626,8 +618,6 @@ impl ClassField {
                     is_classvar,
                     is_instance_var: false,
                     is_staticmethod: false,
-                    is_foreign_key: false,
-                    has_choices: false,
                 },
                 IsInherited::Maybe,
             )
@@ -638,7 +628,6 @@ impl ClassField {
         Self(
             ClassFieldInner::ClassAttribute {
                 ty: heap.mk_any_implicit(),
-                django_set_type: None,
                 annotation: None,
                 initialization: ClassFieldInitialization::recursive(),
                 read_only_reason: None,
@@ -646,8 +635,6 @@ impl ClassField {
                 is_classvar: false,
                 is_instance_var: false,
                 is_staticmethod: false,
-                is_foreign_key: false,
-                has_choices: false,
             },
             IsInherited::Maybe,
         )
@@ -733,7 +720,6 @@ impl ClassField {
             }
             ClassFieldInner::ClassAttribute {
                 ty,
-                django_set_type,
                 annotation,
                 initialization,
                 read_only_reason,
@@ -741,19 +727,12 @@ impl ClassField {
                 is_classvar,
                 is_instance_var,
                 is_staticmethod,
-                is_foreign_key,
-                has_choices,
             } => {
                 let mut ty = ty.clone();
                 f(&mut ty);
-                let mut django_set_type = django_set_type.clone();
-                if let Some(ty) = &mut django_set_type {
-                    f(ty);
-                }
                 Self(
                     ClassFieldInner::ClassAttribute {
                         ty,
-                        django_set_type,
                         annotation: annotation.clone(),
                         initialization: initialization.clone(),
                         read_only_reason: read_only_reason.clone(),
@@ -761,8 +740,6 @@ impl ClassField {
                         is_classvar: *is_classvar,
                         is_instance_var: *is_instance_var,
                         is_staticmethod: *is_staticmethod,
-                        is_foreign_key: *is_foreign_key,
-                        has_choices: *has_choices,
                     },
                     self.1.clone(),
                 )
@@ -890,9 +867,8 @@ impl ClassField {
             | ClassFieldInner::NestedClass { .. }
             | ClassFieldInner::ClassAttribute { .. } => false,
             ClassFieldInner::Method { is_classvar, .. } => !is_classvar,
-            ClassFieldInner::Property { .. }
-            | ClassFieldInner::Descriptor { .. }
-            | ClassFieldInner::ProxyMethod { .. } => true,
+            ClassFieldInner::Descriptor { descriptor, .. } => descriptor.is_method,
+            ClassFieldInner::Property { .. } | ClassFieldInner::ProxyMethod { .. } => true,
         }
     }
 
@@ -945,30 +921,6 @@ impl ClassField {
             ClassFieldInner::ProxyMethod { .. } => false,
             ClassFieldInner::NestedClass { .. } => false,
             ClassFieldInner::ClassAttribute { .. } => false,
-            ClassFieldInner::InstanceAttribute { .. } => false,
-        }
-    }
-
-    pub fn is_foreign_key(&self) -> bool {
-        match &self.0 {
-            ClassFieldInner::Property { .. } => false,
-            ClassFieldInner::Descriptor { .. } => false,
-            ClassFieldInner::Method { .. } => false,
-            ClassFieldInner::ProxyMethod { .. } => false,
-            ClassFieldInner::NestedClass { .. } => false,
-            ClassFieldInner::ClassAttribute { is_foreign_key, .. } => *is_foreign_key,
-            ClassFieldInner::InstanceAttribute { .. } => false,
-        }
-    }
-
-    pub fn has_choices(&self) -> bool {
-        match &self.0 {
-            ClassFieldInner::Property { .. } => false,
-            ClassFieldInner::Descriptor { .. } => false,
-            ClassFieldInner::Method { .. } => false,
-            ClassFieldInner::ProxyMethod { .. } => false,
-            ClassFieldInner::NestedClass { .. } => false,
-            ClassFieldInner::ClassAttribute { has_choices, .. } => *has_choices,
             ClassFieldInner::InstanceAttribute { .. } => false,
         }
     }
@@ -2075,8 +2027,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 has_instance_write: _,
             } => {
                 let direct_annotation = annot.map(|a| self.get_idx(a).annotation.clone());
-                // Inherited properties and descriptors keep their setters. Django fields do so
-                // only for unannotated writes; annotations retain normal declaration checks.
+                // Inherited properties and descriptors keep their setters.
                 if !Ast::is_mangled_attr(name)
                     && let Some(parent_field) = self.get_field_from_ancestors(
                         class,
@@ -2086,20 +2037,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     )
                 {
                     let inherits_setter = match parent_field.value.as_ref() {
-                        ClassField(
-                            ClassFieldInner::Property { .. } | ClassFieldInner::Descriptor { .. },
-                            _,
-                        ) => true,
+                        ClassField(ClassFieldInner::Property { .. }, _) => true,
+                        ClassField(ClassFieldInner::Descriptor { descriptor, .. }, _) => {
+                            direct_annotation.is_none()
+                                || !self
+                                    .resolve_descriptor_setter(
+                                        name,
+                                        descriptor,
+                                        &self.error_swallower(),
+                                    )
+                                    .is_some_and(|setter| {
+                                        setter.toplevel_func_metadata().is_some_and(|metadata| {
+                                            metadata.flags.descriptor_setter.is_some()
+                                        })
+                                    })
+                        }
                         ClassField(
                             ClassFieldInner::ClassAttribute {
-                                django_set_type,
-                                is_instance_var,
-                                ..
+                                is_instance_var, ..
                             },
                             _,
                         ) => {
                             inherited_instance_var = *is_instance_var;
-                            django_set_type.is_some() && direct_annotation.is_none()
+                            false
                         }
                         _ => false,
                     };
@@ -2362,7 +2322,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         // Identify whether this is a descriptor. Construct the stored descriptor only after
         // forcing the field type so its class cannot retain solver variables.
-        let mut descriptor_methods = None;
+        let mut descriptor_info = None;
         let mut descriptor_range = None;
         let is_annotation_initialized_in_method = match field_definition {
             ClassFieldDefinition::DeclaredByAnnotation {
@@ -2394,7 +2354,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         || has_deleter
                         || has_getter && !is_annotation_initialized_in_method
                     {
-                        descriptor_methods = Some((has_getter, has_setter, has_deleter));
+                        descriptor_info =
+                            Some(((has_getter, has_setter, has_deleter), ty.clone()));
                     }
                 }
                 // Only members with `__get__` participate in descriptor reads. A member with only
@@ -2412,38 +2373,33 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 _ => {}
             };
         }
-        // Check if this is a Django ForeignKey or OneToOneField
-        let is_foreign_key = metadata.is_django_model()
-            && matches!(&ty, Type::ClassType(cls) if self.is_foreign_key_like_field(cls.class_object()));
-
-        // Check if this is a Django field with choices
-        let has_choices = if let ClassFieldDefinition::AssignedInBody { value, .. } =
-            field_definition
-            && let ExprOrBinding::Expr(expr) = value.as_ref()
-            && let Some(call_expr) = expr.as_call_expr()
-        {
-            metadata.is_django_model() && self.has_django_field_choices(call_expr)
-        } else {
-            false
-        };
-
-        let (ty, django_set_type) = if let Some(special_types) = self.get_special_class_field_type(
+        let ty = if let Some(special_ty) = self.get_special_class_field_type(
             class,
             name,
             direct_annotation.as_ref(),
             &ty,
             unpromoted_ty.as_ref(),
             field_definition,
-            descriptor_methods.is_some() || descriptor_range.is_some(),
+            descriptor_info.is_some() || descriptor_range.is_some(),
             range,
             errors,
         ) {
-            // Don't use the descriptor, since we've set a custom type instead.
-            descriptor_methods = None;
-            descriptor_range = None;
-            special_types
+            // Preserve descriptor behavior when specialization returns a descriptor instance.
+            descriptor_info = if let Type::ClassType(cls) = &special_ty {
+                let getter = self.get_instance_attribute(cls, &dunder::GET).is_some();
+                let setter = self.get_instance_attribute(cls, &dunder::SET).is_some();
+                let deleter = self.get_instance_attribute(cls, &dunder::DELETE).is_some();
+                (getter || setter || deleter)
+                    .then(|| ((getter, setter, deleter), special_ty.clone()))
+            } else {
+                None
+            };
+            if !matches!(special_ty, Type::Union(_)) {
+                descriptor_range = None;
+            }
+            special_ty
         } else {
-            (ty, None)
+            ty
         };
 
         // Pin any vars in the type: leaking a var in a class field is particularly
@@ -2452,19 +2408,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // TODO(stroxler): Ideally we would implement some simple heuristics, similar to
         // first-use based inference we use with assignments, to get more useful types here.
         let ty = self.solver().force(ty);
-        let django_set_type = django_set_type.map(|ty| self.solver().force(ty));
-        let descriptor = match (descriptor_methods, &ty) {
-            (Some((getter, setter, deleter)), Type::ClassType(cls)) => Some(Descriptor {
+        let descriptor = descriptor_info.map(|((getter, setter, deleter), descriptor_type)| {
+            let Type::ClassType(cls) = self.solver().force(descriptor_type) else {
+                unreachable!("a detected descriptor must have a class type")
+            };
+            Descriptor {
                 range,
-                cls: cls.clone(),
+                cls,
                 getter,
                 setter,
                 deleter,
+                is_method: matches!(field_definition, ClassFieldDefinition::MethodLike { .. }),
                 initialization: initialization.clone(),
                 is_override: descriptor_is_override,
-            }),
-            _ => None,
-        };
+            }
+        });
 
         let direct_annotation_idx = match field_definition {
             ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => Some(*annotation),
@@ -2656,7 +2614,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ClassField(
                         ClassFieldInner::ClassAttribute {
                             ty,
-                            django_set_type,
                             annotation,
                             initialization,
                             read_only_reason,
@@ -2664,8 +2621,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             is_classvar: is_class_var,
                             is_instance_var,
                             is_staticmethod,
-                            is_foreign_key,
-                            has_choices,
                         },
                         is_inherited,
                     )
@@ -2839,8 +2794,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Apply any class-specific logic for postprocessing the type of a class field. Hook into this
     /// function if you need to modify the type of an existing field. If you need to add a new
-    /// field, see ClassSynthesizedField instead. The result contains the read type and an optional
-    /// Django assignment type.
+    /// field, see ClassSynthesizedField instead.
     fn get_special_class_field_type(
         &self,
         class: &Class,
@@ -2852,18 +2806,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         is_descriptor: bool,
         range: TextRange,
         errors: &ErrorCollector,
-    ) -> Option<(Type, Option<Type>)> {
-        let initial_value_expr = match field_definition {
-            ClassFieldDefinition::AssignedInBody { value, .. } => {
-                if let ExprOrBinding::Expr(expr) = value.as_ref() {
-                    Some(expr)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-
+    ) -> Option<Type> {
         self.get_enum_class_field_type(
             class,
             name,
@@ -2876,11 +2819,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
         .or_else(|| self.get_property_class_field_type(class, name, field_definition))
         .or_else(|| self.get_pydantic_root_model_class_field_type(class, name))
-        .map(|ty| (ty, None))
-        .or_else(|| {
-            self.get_django_field_types(ty, class, Some(name), initial_value_expr)
-                .map(|(get_type, set_type)| (get_type, Some(set_type)))
-        })
+        .or_else(|| self.get_django_class_field_type(ty, class, name, field_definition))
     }
 
     /// Recognize `x = property(fget, fset, fdel)` and return the corresponding
@@ -3407,6 +3346,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             IsInherited::Maybe
         };
+        if !inferred_from_method
+            && inherited_annotation.is_some()
+            && let ExprOrBinding::Expr(expr) = value
+        {
+            let field_ty = self.attribute_expr_infer(expr, None, name, &self.error_swallower());
+            if matches!(&field_ty, Type::ClassType(cls)
+                if self.get_class_member(cls.class_object(), &dunder::GET).is_some())
+            {
+                // The initializer installs a descriptor, whose instance contract is checked by the
+                // override check. The inherited value annotation cannot type its initializer.
+                return (
+                    self.attribute_expr_infer(expr, None, name, errors),
+                    None,
+                    is_inherited,
+                );
+            }
+        }
         let final_annotation = Self::merge_direct_qualifiers_with_inherited_annotation(
             inherited_annotation.clone(),
             direct_qualifiers,
@@ -3935,7 +3891,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             ClassFieldInner::ClassAttribute {
                 mut ty,
-                django_set_type,
                 is_classvar,
                 read_only_reason,
                 descriptor_range,
@@ -3976,7 +3931,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 read_type: ty,
                                 is_method: IsMethod::No,
                                 is_instance_var: false,
-                                write_type: django_set_type,
+                                write_type: None,
                             }
                         }
                     }
@@ -5983,6 +5938,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             ClassAttribute::Descriptor(x, base) => match base {
                 DescriptorBase::Instance(_) | DescriptorBase::SelfInstance(_)
+                    if let Some(attribute) = self.descriptor_as_attribute(&x) =>
+                {
+                    self.resolve_class_attr_setter(
+                        attribute,
+                        instance_class,
+                        class_base,
+                        attr_name,
+                        allow_assign_to_final,
+                        range,
+                        errors,
+                        context,
+                    )
+                }
+                DescriptorBase::Instance(_) | DescriptorBase::SelfInstance(_)
                     if let Some(setter) = self.resolve_descriptor_setter(attr_name, &x, errors) =>
                 {
                     // TODO(mfish33) we allow uninitialized descriptors in this case. This
@@ -6404,14 +6373,77 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             (
+                ClassAttribute::Descriptor(desc, base),
+                ClassAttribute::ReadWrite {
+                    read_type: want_ty, ..
+                }
+                | ClassAttribute::ReadOnly(want_ty, _),
+            ) if !desc.is_method && !want_ty.has_toplevel_func_metadata() => {
+                let (read_ty, setter) = self.resolve_descriptor_types(desc, base);
+                is_subset(&read_ty, want_ty).map_err(|subset_error| {
+                    Box::new(AttrSubsetError::Covariant {
+                        got: read_ty.clone(),
+                        want: want_ty.clone(),
+                        got_is_property: false,
+                        want_is_property: false,
+                        subset_error,
+                    })
+                })?;
+                if let ClassAttribute::ReadWrite { write_type, .. } = want {
+                    let Some(set_ty) = setter else {
+                        return Err(Box::new(AttrSubsetError::ReadOnly));
+                    };
+                    let want_ty = write_type.as_ref().unwrap_or(want_ty);
+                    is_subset(want_ty, &set_ty).map_err(|subset_error| {
+                        Box::new(AttrSubsetError::Contravariant {
+                            got: set_ty,
+                            want: want_ty.clone(),
+                            got_is_property: false,
+                            want_is_property: false,
+                            subset_error,
+                        })
+                    })?;
+                }
+                Ok(())
+            }
+            (
+                ClassAttribute::ReadWrite {
+                    read_type: got_ty, ..
+                }
+                | ClassAttribute::ReadOnly(got_ty, _),
+                ClassAttribute::Descriptor(desc, base),
+            ) if !desc.is_method && !got_ty.has_toplevel_func_metadata() => {
+                let (read_ty, setter) = self.resolve_descriptor_types(desc, base);
+                is_subset(got_ty, &read_ty).map_err(|subset_error| {
+                    Box::new(AttrSubsetError::Covariant {
+                        got: got_ty.clone(),
+                        want: read_ty.clone(),
+                        got_is_property: false,
+                        want_is_property: false,
+                        subset_error,
+                    })
+                })?;
+                if let Some(set_ty) = setter {
+                    let ClassAttribute::ReadWrite { write_type, .. } = got else {
+                        return Err(Box::new(AttrSubsetError::ReadOnly));
+                    };
+                    let got_ty = write_type.as_ref().unwrap_or(got_ty);
+                    is_subset(&set_ty, got_ty).map_err(|subset_error| {
+                        Box::new(AttrSubsetError::Contravariant {
+                            got: got_ty.clone(),
+                            want: set_ty,
+                            got_is_property: false,
+                            want_is_property: false,
+                            subset_error,
+                        })
+                    })?;
+                }
+                Ok(())
+            }
+            (
                 ClassAttribute::Descriptor(got_d, got_base),
                 ClassAttribute::Descriptor(want_d, want_base),
             ) => {
-                let got_ty = self.heap.mk_class_type(got_d.cls.clone());
-                let want_ty = self.heap.mk_class_type(want_d.cls.clone());
-                if is_subset(&got_ty, &want_ty).is_ok() {
-                    return Ok(());
-                }
                 let (got_read_ty, got_setter) = self.resolve_descriptor_types(got_d, got_base);
                 let (want_read_ty, want_setter) = self.resolve_descriptor_types(want_d, want_base);
                 is_subset(&got_read_ty, &want_read_ty).map_err(|subset_error| {
@@ -6445,7 +6477,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ClassAttribute::Descriptor(got_d, got_base),
                 ClassAttribute::Property(want_getter, want_setter, _),
             ) => {
-                let (got_read_ty, got_setter) = self.resolve_descriptor_types(got_d, got_base);
+                let (got_read_ty, _) = self.resolve_descriptor_types(got_d, got_base);
+                let got_setter = self
+                    .resolve_descriptor_setter(&dunder::SET, got_d, &self.error_swallower())
+                    .map(|setter| self.get_descriptor_setter_value(&setter));
                 is_subset(
                     &self.heap.mk_callable_ellipsis(got_read_ty.clone()),
                     want_getter,
@@ -6633,6 +6668,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    /// Project a generated storage descriptor into its instance attribute contract.
+    pub(crate) fn descriptor_as_attribute(&self, desc: &Descriptor) -> Option<ClassAttribute> {
+        let setter = self.resolve_descriptor_setter(&dunder::SET, desc, &self.error_swallower())?;
+        let contract = setter
+            .toplevel_func_metadata()?
+            .flags
+            .descriptor_setter
+            .as_ref()?;
+        Some(ClassAttribute::ReadWrite {
+            read_type: contract.read_type.clone(),
+            write_type: Some(self.get_descriptor_setter_value(&setter)),
+            is_method: IsMethod::No,
+            is_instance_var: false,
+        })
+    }
+
     fn resolve_descriptor_types(
         &self,
         desc: &Descriptor,
@@ -6648,7 +6699,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         };
         let setter_val = self
             .resolve_descriptor_setter(&dunder::SET, desc, &error_swallower)
-            .map(|setter| self.get_descriptor_setter_value(&setter));
+            .map(|setter| {
+                setter
+                    .toplevel_func_metadata()
+                    .and_then(|metadata| metadata.flags.descriptor_setter.as_ref())
+                    .map_or_else(
+                        || self.get_descriptor_setter_value(&setter),
+                        |contract| contract.override_type.clone(),
+                    )
+            });
         (read_ty, setter_val)
     }
 
@@ -6671,9 +6730,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) -> Option<Type> {
-        if let Some(getter) = self.get_class_member(cls.class_object(), &dunder::GET) {
-            let attr =
-                self.as_instance_attribute(&dunder::GET, getter.as_ref(), &Instance::of_class(cls));
+        if let Some(attr) = self.get_instance_attribute(cls, &dunder::GET) {
             // `__get__` is bound and called like a method, never re-fed through the
             // descriptor protocol. If it is itself a descriptor, recursing here would
             // loop forever, so report no usable getter.
@@ -6707,13 +6764,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) -> Option<Type> {
         if x.setter
-            && let Some(setter) = self.get_class_member(x.cls.class_object(), &dunder::SET)
+            && let Some(attr) = self.get_instance_attribute(&x.cls, &dunder::SET)
         {
-            let attr = self.as_instance_attribute(
-                &dunder::SET,
-                setter.as_ref(),
-                &Instance::of_class(&x.cls),
-            );
             Some(
                 self.resolve_get_class_attr(attr_name, attr, x.range, errors, None)
                     .unwrap_or_else(|e| {

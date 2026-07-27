@@ -7,13 +7,17 @@
 
 use std::iter;
 
+use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_name::is_python_identifier;
 use pyrefly_types::callable::Callable;
+use pyrefly_types::callable::Param;
 use pyrefly_types::callable::ParamList;
+use pyrefly_types::callable::Required;
 use pyrefly_types::class::Class;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::class::DjangoClassMetadata;
+use pyrefly_types::function::DescriptorSetterMetadata;
 use pyrefly_types::function::FuncMetadata;
 use pyrefly_types::function::Function;
 use pyrefly_types::function::PropertyMetadata;
@@ -23,6 +27,9 @@ use pyrefly_types::keywords::KwCall;
 use pyrefly_types::keywords::TypeMap;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::tuple::Tuple;
+use pyrefly_types::types::AnyStyle;
+use pyrefly_types::types::Overload;
+use pyrefly_types::types::OverloadType;
 use pyrefly_types::types::Type;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::Expr;
@@ -31,6 +38,7 @@ use ruff_python_ast::ExprStringLiteral;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
+use vec1::vec1;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
@@ -251,6 +259,93 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
     }
 
+    /// Infer missing descriptor arguments without replacing explicit arguments.
+    fn specialize_django_field_descriptor(
+        &self,
+        field: &ClassType,
+        get_type: Type,
+        set_type: Type,
+    ) -> ClassType {
+        let mut field = field.clone();
+        for (param, arg) in field.targs_mut().iter_paired_mut() {
+            match param.name().as_str() {
+                "_ST" => {
+                    if matches!(arg, Type::Any(AnyStyle::Implicit)) {
+                        *arg = set_type.clone();
+                    }
+                }
+                "_GT" if matches!(arg, Type::Any(AnyStyle::Implicit)) => {
+                    *arg = get_type.clone();
+                }
+                "_To" | "_Through" if matches!(arg, Type::Any(AnyStyle::Implicit)) => {
+                    if let Type::ClassType(manager) = &get_type
+                        && let [target, through] = manager.targs().as_slice()
+                    {
+                        *arg = if param.name().as_str() == "_To" {
+                            target.clone()
+                        } else {
+                            through.clone()
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+        field
+    }
+
+    /// Specialize model fields while retaining their normal descriptor overloads.
+    pub fn get_django_class_field_type(
+        &self,
+        ty: &Type,
+        class: &Class,
+        name: &Name,
+        definition: &ClassFieldDefinition,
+    ) -> Option<Type> {
+        let initial_value = match definition {
+            ClassFieldDefinition::AssignedInBody { value, .. } => match value.as_ref() {
+                ExprOrBinding::Expr(expr) => Some(expr),
+                ExprOrBinding::Binding(_) => None,
+            },
+            _ => None,
+        };
+        let specialized = self.distribute_over_union(ty, |member| {
+            let Some((get_type, set_type)) =
+                self.get_django_field_types(member, class, Some(name), initial_value)
+            else {
+                return member.clone();
+            };
+            if let Type::ClassType(field) = member
+                && self.inherits_from_django_field(field.class_object())
+            {
+                let Type::ClassType(field) = self.solver().force(member.clone()) else {
+                    unreachable!("forcing a field instance preserves its class type")
+                };
+                let override_type = if field.targs().iter_paired().any(|(param, arg)| {
+                    param.name().as_str() == "_ST" && !matches!(arg, Type::Any(AnyStyle::Implicit))
+                }) {
+                    set_type.clone()
+                } else {
+                    get_type.clone()
+                };
+                let field = self.specialize_django_field_descriptor(
+                    &field,
+                    get_type.clone(),
+                    set_type.clone(),
+                );
+                self.heap
+                    .mk_class_type(field.with_django_metadata(DjangoClassMetadata::Field {
+                        get_type,
+                        set_type,
+                        override_type,
+                    }))
+            } else {
+                get_type
+            }
+        });
+        (specialized != *ty).then_some(specialized)
+    }
+
     /// Return the read and assignment types of a Django field.
     pub fn get_django_field_types(
         &self,
@@ -268,12 +363,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .first()
                     .map(|ty| (ty.clone(), ty.clone()))
             }
-            Type::ClassType(cls) => self.get_django_field_types_from_class(
-                cls.class_object(),
-                class,
-                field_name,
-                initial_value_expr,
-            ),
+            Type::ClassType(cls) => {
+                let (mut get_type, mut set_type) = self.get_django_field_types_from_class(
+                    cls.class_object(),
+                    class,
+                    field_name,
+                    initial_value_expr,
+                )?;
+                // Explicit descriptor arguments take precedence over inferred defaults.
+                for (param, arg) in cls.targs().iter_paired() {
+                    let arg = self.solver().force(arg.clone());
+                    if !matches!(arg, Type::Any(AnyStyle::Implicit)) {
+                        match param.name().as_str() {
+                            "_GT" => get_type = arg,
+                            "_ST" => set_type = arg,
+                            _ => {}
+                        }
+                    }
+                }
+                Some((get_type, set_type))
+            }
             Type::ClassDef(cls) => {
                 self.get_django_field_types_from_class(cls, class, field_name, initial_value_expr)
             }
@@ -588,6 +697,84 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         name: &Name,
     ) -> Option<ClassAttribute> {
         match cls.django_metadata()? {
+            DjangoClassMetadata::Field {
+                get_type,
+                set_type,
+                override_type,
+            } => {
+                if name == &dunder::GET {
+                    if let Some(field) = self.get_class_member(cls.class_object(), name) {
+                        let mut attr =
+                            self.as_instance_attribute(name, &field, &Instance::of_class(cls));
+                        if let ClassAttribute::ReadWrite { read_type, .. } = &mut attr {
+                            read_type.transform_toplevel_callable_signatures(|signature, _| {
+                            if matches!(signature.get_positional_param(1), Some(Type::ClassType(instance))
+                                if instance.has_qname("django.db.models.base", "Model")) {
+                                signature.ret = get_type.clone();
+                            }
+                        });
+                        }
+                        return Some(attr);
+                    }
+                    let metadata = FuncMetadata::method(cls.class_object(), dunder::GET);
+                    let signatures = vec1![
+                        (self.heap.mk_none(), self.heap.mk_class_type(cls.clone())),
+                        (
+                            self.heap.mk_class_type(self.stdlib.object().clone()),
+                            get_type.clone(),
+                        ),
+                    ]
+                    .mapped(|(instance_type, ret)| {
+                        OverloadType::Function(Function {
+                            signature: Callable::list(
+                                ParamList::new(vec![
+                                    self.class_self_param(cls.class_object(), false),
+                                    Param::PosOnly(None, instance_type, Required::Required),
+                                    Param::PosOnly(
+                                        None,
+                                        self.heap.mk_any_explicit(),
+                                        Required::Required,
+                                    ),
+                                ]),
+                                ret,
+                            ),
+                            metadata: metadata.clone(),
+                        })
+                    });
+                    return Some(self.as_instance_attribute(
+                        name,
+                        &ClassField::new_synthesized(self.heap.mk_overload(Overload {
+                            signatures,
+                            metadata: Box::new(metadata),
+                        })),
+                        &Instance::of_class(cls),
+                    ));
+                }
+                if name != &dunder::SET {
+                    return None;
+                }
+                let mut metadata = FuncMetadata::method(cls.class_object(), dunder::SET);
+                metadata.flags.descriptor_setter = Some(Box::new(DescriptorSetterMetadata {
+                    read_type: get_type.clone(),
+                    override_type: override_type.clone(),
+                }));
+                let method = self.heap.mk_function(Function {
+                    signature: Callable::list(
+                        ParamList::new(vec![
+                            self.class_self_param(cls.class_object(), false),
+                            Param::PosOnly(None, self.heap.mk_any_explicit(), Required::Required),
+                            Param::PosOnly(None, set_type.clone(), Required::Required),
+                        ]),
+                        self.heap.mk_none(),
+                    ),
+                    metadata,
+                });
+                Some(self.as_instance_attribute(
+                    name,
+                    &ClassField::new_synthesized(method),
+                    &Instance::of_class(cls),
+                ))
+            }
             DjangoClassMetadata::Manager { queryset } => {
                 let manager_member =
                     self.get_class_member_with_defining_class(cls.class_object(), name);
@@ -868,8 +1055,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Attribute lookup handles cycles between models' primary keys.
             let pk_type = if self
                 .get_non_synthesized_class_member(model, pk_field_name)
-                .is_some_and(|field| field.is_foreign_key())
-            {
+                .is_some_and(|field| {
+                    matches!(field.ty(), Type::ClassType(field)
+                        if self.is_foreign_key_like_field(field.class_object()))
+                }) {
                 self.attr_infer_for_type(
                     &pk_type,
                     &PK,
@@ -892,11 +1081,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     fn is_django_field_nullable(&self, call_expr: &ExprCall) -> bool {
         has_keyword_true(call_expr, &NULL)
-    }
-
-    /// Check if a Django field has a `choices` argument.
-    pub fn has_django_field_choices(&self, call_expr: &ExprCall) -> bool {
-        find_keyword(call_expr, &CHOICES).is_some()
     }
 
     /// Check if a Django field has `blank=True`.
@@ -950,14 +1134,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Returns the primary key type of the related model.
-    fn get_foreign_key_id_type(&self, class_field: &ClassField) -> Option<Type> {
-        // Check if this is a ForeignKey field using the cached metadata
-        if !class_field.is_foreign_key() {
+    fn get_foreign_key_id_type(&self, class: &Class, class_field: &ClassField) -> Option<Type> {
+        let field_type = class_field.ty();
+        if !matches!(&field_type, Type::ClassType(field)
+            if self.is_foreign_key_like_field(field.class_object()))
+        {
             return None;
         }
 
         // Get the related model type from the field
-        let ty = class_field.ty();
+        let (ty, _) = self.get_django_field_types(&field_type, class, None, None)?;
         let (related_cls, is_foreign_key_nullable) = match ty {
             Type::Union(f) => {
                 // Nullable foreign key: extract the class type from the union
@@ -1002,7 +1188,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // to avoid triggering type resolution during synthesis, which can cause cycles.
         for field_name in &django_metadata.foreign_key_like_fields {
             if let Some(class_field) = self.get_field_from_current_class_only(cls, field_name)
-                && let Some(fk_id_type) = self.get_foreign_key_id_type(class_field)
+                && let Some(fk_id_type) = self.get_foreign_key_id_type(cls, class_field)
             {
                 let id_field_name = Name::new(format!("{}_id", field_name));
                 fields.insert(id_field_name, ClassSynthesizedField::new(fk_id_type));
