@@ -1376,15 +1376,16 @@ pub enum BindingExpect {
         /// reaches the use, the variable may be uninitialized.
         unset_nodes: Vec<UnsetNodeId>,
     },
-    /// Check whether a class-body attribute is initialized on every completing path.
+    /// Check that a class attribute is initialized on every control-flow path.
     UninitializedAttributeCheck {
         name: Name,
         range: TextRange,
-        class: Idx<KeyClass>,
-        /// The latest merges on the paths on which the attribute is unset, as for
-        /// `UninitializedCheck`. `None` means some path has no termination key, so the attribute
-        /// may be uninitialized.
-        unset_nodes: Option<Vec<UnsetNodeId>>,
+        /// The owning class when this is an instance attribute. Its `__getattr__` may make a
+        /// conditionally initialized attribute safe to access.
+        getattr_class: Option<Idx<KeyClass>>,
+        /// `None` means binding proved the declaration conditional. Otherwise, initialization
+        /// depends on whether all of these branches terminate with `Never`.
+        termination_keys: Option<Vec<UnsetNodeId>>,
     },
     /// Check for forward reference string literal in union type.
     /// At runtime, `type.__or__` cannot handle string literals, so expressions
@@ -1560,16 +1561,16 @@ impl DisplayWith<Bindings> for BindingExpect {
             Self::UninitializedAttributeCheck {
                 name,
                 range,
-                class,
-                unset_nodes,
+                getattr_class,
+                termination_keys,
             } => {
                 write!(
                     f,
                     "UninitializedAttributeCheck({}, {}, {:?}, {:?})",
                     name,
                     ctx.module().display(range),
-                    class,
-                    unset_nodes
+                    getattr_class,
+                    termination_keys
                 )
             }
             Self::ForwardRefUnion {
