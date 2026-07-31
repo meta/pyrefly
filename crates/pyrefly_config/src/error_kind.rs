@@ -275,6 +275,8 @@ pub enum ErrorKind {
     InconsistentOverloadDefault,
     /// Cannot assign to a class-body-declared instance variable via the class (e.g. `C.instance_var = ...`).
     InstanceVarAssign,
+    /// A function declares a non-None, non-Never return type but can only loop forever.
+    InfiniteLoop,
     /// Internal Pyrefly error.
     InternalError,
     /// An `@abstractmethod` is defined in a class that is not abstract.
@@ -665,6 +667,7 @@ impl ErrorKind {
             ErrorKind::InactiveCode => Severity::Hint,
             ErrorKind::IncompatibleComparison => Severity::Ignore,
             ErrorKind::InstanceVarAssign => Severity::Ignore,
+            ErrorKind::InfiniteLoop => Severity::Warn,
             ErrorKind::InvalidAbstractMethod => Severity::Ignore,
             ErrorKind::InvalidCast => Severity::Ignore,
             ErrorKind::InvalidDecorator => Severity::Warn,

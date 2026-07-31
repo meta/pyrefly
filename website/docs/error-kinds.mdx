@@ -1040,6 +1040,19 @@ assigned via the class; inherited fields are also covered. Standard class metada
 instances and is not flagged. Writes intercepted by metaclass data descriptors
 are also exempt from this diagnostic. Assignments via `setattr` and `del` are out
 of scope.
+## infinite-loop
+
+Default severity: `warn`
+
+This warning is emitted when a function declares a return type other than
+`None`, `Never`, or `NoReturn`, but its body has no reachable return and ends
+in an unconditional loop.
+
+```python
+def f() -> int:  # Function declared to return `int` but can never return [infinite-loop]
+    while True:
+        pass
+```
 
 ## internal-error
 
