@@ -269,6 +269,9 @@ pub(super) fn type_to_indexed_shape(
     table: &mut TypeTableBuilder,
 ) -> usize {
     match ty {
+        Type::UnittestMock(mock) => {
+            type_to_indexed_shape(context, &Type::ClassType(mock.class.clone()), table)
+        }
         Type::ClassDef(cls) => {
             let name = qname_to_string(cls.qname());
             let class_index = insert_indexed_named(

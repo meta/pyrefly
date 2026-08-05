@@ -244,6 +244,8 @@ pub struct FuncFlags {
     /// A method directly inside a `Protocol` class.
     pub is_in_protocol_class: bool,
     pub is_in_type_checking_block: bool,
+    /// A mock assertion checks expected arguments without invoking the target function.
+    pub is_unittest_mock_assertion: bool,
     /// Set when the definition has both `*args` and `**kwargs` and both are typed
     /// `Any` — explicitly, or implicitly because they are unannotated. Per the
     /// typing spec such a signature is equivalent to `...`. Captured at definition

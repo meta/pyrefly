@@ -8,6 +8,10 @@
 use crate::test::util::TestEnv;
 use crate::testcase;
 
+fn mock_env(source: &str) -> TestEnv {
+    TestEnv::one("other", source).enable_invalid_mock_assertion_error()
+}
+
 testcase!(
     test_target_string_checked,
     TestEnv::one("other", ""),
@@ -284,73 +288,67 @@ with patch.multiple("other.missing", attribute=DEFAULT):
 
 // https://github.com/facebook/pyrefly/issues/3913
 testcase!(
-    bug = "Mock assertions do not check the target signature",
     test_assert_called_with_checks_target_signature,
-    TestEnv::one("other", "def foo(x: int, *, y: str) -> None: ..."),
+    mock_env("def foo(x: int, *, y: str) -> None: ..."),
     r#"
 from unittest.mock import patch
 
 with patch("other.foo") as mock_foo:
     mock_foo.assert_called_with(1, y="ok")
-    mock_foo.assert_called_once_with("bad", y="ok")  # BUG: This should report that x requires int, not str.
-    mock_foo.assert_any_call(1, y=2)  # BUG: This should report that y requires str, not int.
+    mock_foo.assert_called_once_with("bad", y="ok")  # E: Argument `Literal['bad']` is not assignable to parameter `x` with type `int` in function `other.foo`
+    mock_foo.assert_any_call(1, y=2)  # E: Argument `Literal[2]` is not assignable to parameter `y` with type `str` in function `other.foo`
 "#,
 );
 
-// Calling a mock for `assert_type` must use its ordinary signature instead of the type checker's
-// special handling for direct `assert_type` calls.
+// Mock calls and assertions must not apply the patched function's special typing behavior.
 testcase!(
-    test_patch_special_function_call_uses_target_signature,
+    test_patch_special_function_keeps_mock_behavior,
+    TestEnv::new().enable_invalid_mock_assertion_error(),
     r#"
 from unittest.mock import patch
 
 with patch("typing.assert_type") as mock_assert_type:
     mock_assert_type("not an int", int)
+    mock_assert_type.assert_called_once_with("not an int", int)
 "#,
 );
 
 // https://github.com/facebook/pyrefly/issues/3913
 testcase!(
-    bug = "Mock assertions do not check the target signature",
     test_patch_start_checks_target_signature,
-    TestEnv::one("other", "def foo(x: int) -> None: ..."),
+    mock_env("def foo(x: int) -> None: ..."),
     r#"
 from unittest.mock import patch
 
 patcher = patch("other.foo")
 mock_foo = patcher.start()
-mock_foo.assert_called_with("bad")  # BUG: This should report that x requires int, not str.
+mock_foo.assert_called_with("bad")  # E: Argument `Literal['bad']` is not assignable to parameter `x` with type `int` in function `other.foo`
 patcher.stop()
 "#,
 );
 
 // https://github.com/facebook/pyrefly/issues/3913
 testcase!(
-    bug = "Mock assertions do not check the target signature",
     test_async_patch_checks_await_assertion,
-    TestEnv::one("other", "async def foo(x: int) -> None: ..."),
+    mock_env("async def foo(x: int) -> None: ..."),
     r#"
 from unittest.mock import patch
 
 with patch("other.foo") as mock_foo:
     mock_foo.assert_awaited_with(1)
-    mock_foo.assert_awaited_once_with("bad")  # BUG: This should report that x requires int, not str.
+    mock_foo.assert_awaited_once_with("bad")  # E: Argument `Literal['bad']` is not assignable to parameter `x` with type `int` in function `other.foo`
 "#,
 );
 
 // https://github.com/facebook/pyrefly/issues/3913
 testcase!(
-    bug = "Mock assertions do not check the target signature",
     test_patch_bound_method_checks_bound_signature,
-    TestEnv::one(
-        "other",
-        "class C:\n    def method(self, x: int) -> None: ...\ninstance = C()",
-    ),
+    mock_env("class C:\n    def method(self, x: int) -> None: ...\ninstance = C()"),
     r#"
 from unittest.mock import patch
 
 with patch("other.instance.method") as mock_method:
-    mock_method.assert_called_once_with("bad")  # BUG: This should report that x requires int, not str.
+    mock_method.assert_called_once_with("bad")  # E: Argument `Literal['bad']` is not assignable to parameter `x` with type `int` in function `other.C.method`
 "#,
 );
 
@@ -365,5 +363,169 @@ class Replacement:
 
 with patch("other.foo", new_callable=Replacement) as replacement:
     replacement.marker = "ok"
+"#,
+);
+
+testcase!(
+    test_patch_class_method_receiver,
+    mock_env(
+        "class C:\n    def method(self, x: int) -> None: ...\n    @staticmethod\n    def static(x: int) -> None: ...\n    @classmethod\n    def class_method(cls, x: int) -> None: ..."
+    ),
+    r#"
+from other import C
+from unittest.mock import patch
+
+with patch("other.C.method") as mock_method:
+    C().method(1)
+    mock_method.assert_called_once_with(1)
+    mock_method.assert_called_with("bad")  # E: Argument `Literal['bad']` is not assignable to parameter `x` with type `int`
+
+with patch("other.C.method", autospec=True) as mock_method:
+    instance = C()
+    instance.method(1)
+    mock_method.assert_called_once_with(instance, 1)
+    mock_method.assert_called_once_with(instance, "bad")  # E: Argument `Literal['bad']` is not assignable to parameter `x` with type `int`
+
+with patch("other.C.static") as mock_static:
+    mock_static.assert_called_once_with(1)
+
+with patch("other.C.class_method") as mock_class_method:
+    mock_class_method.assert_called_once_with(1)
+"#,
+);
+
+testcase!(
+    test_patch_call_keeps_mock_behavior,
+    mock_env("def foo(x: int) -> int: ..."),
+    r#"
+from typing import Any, assert_type
+from unittest.mock import MagicMock, patch
+
+with patch("other.foo", return_value="ok") as mock_foo:
+    result: str = mock_foo(1)
+    assert_type(mock_foo(1), Any)
+    accepts_mock: MagicMock = mock_foo
+
+with patch("other.foo") as mock_foo:
+    mock_foo("any argument").child().assert_called_once_with()
+    mock_foo.return_value = "configured later"
+    result: str = mock_foo(1)
+"#,
+);
+
+testcase!(
+    test_patch_alternate_autospec_keeps_mock_behavior,
+    mock_env("def foo(x: int) -> None: ..."),
+    r#"
+from unittest.mock import patch
+
+def replacement() -> None: ...
+
+with patch("other.foo", autospec=replacement) as mock_foo:
+    mock_foo()
+    mock_foo.assert_called_once_with()
+
+with patch("other.foo", spec=replacement) as mock_foo:
+    mock_foo.assert_called_once_with()
+
+with patch("other.foo", spec_set=replacement) as mock_foo:
+    mock_foo.assert_called_once_with()
+
+def test_unknown_autospec(autospec: object) -> None:
+    with patch("other.foo", autospec=autospec) as mock_foo:
+        mock_foo()
+        mock_foo.assert_called_once_with()
+"#,
+);
+
+testcase!(
+    test_patch_assertion_accepts_equality_matcher,
+    mock_env("def foo(x: int, *, y: int) -> None: ..."),
+    r#"
+from unittest.mock import ANY, patch
+
+class IntMatcher:
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, int)
+
+with patch("other.foo") as mock_foo:
+    mock_foo.assert_called_once_with(IntMatcher(), y=IntMatcher())
+    mock_foo.assert_called_with(ANY, y=ANY)
+    mock_foo.assert_called_with("bad", y=1)  # E: Argument `Literal['bad']` is not assignable to parameter `x` with type `int`
+    mock_foo.assert_called_with(IntMatcher(), y="bad")  # E: Argument `Literal['bad']` is not assignable to parameter `y` with type `int`
+"#,
+);
+
+testcase!(
+    test_patch_async_generator_uses_magic_mock,
+    mock_env(
+        "from collections.abc import AsyncIterator\nasync def generate(x: int) -> AsyncIterator[int]:\n    yield x"
+    ),
+    r#"
+from typing import assert_type
+from unittest.mock import MagicMock, patch
+
+with patch("other.generate") as mock_generate:
+    accepts_mock: MagicMock = mock_generate
+    assert_type(mock_generate, MagicMock)
+    mock_generate.assert_called_once_with(1)
+"#,
+);
+
+testcase!(
+    test_patch_equality_matcher_does_not_create_any_diagnostics,
+    mock_env("def foo(x: int) -> None: ...").enable_explicit_any_use_error(),
+    r#"
+from unittest.mock import patch
+
+class IntMatcher:
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, int)
+
+with patch("other.foo") as mock_foo:
+    mock_foo.assert_called_once_with(IntMatcher())
+"#,
+);
+
+testcase!(
+    test_patch_overloaded_assertion,
+    mock_env(
+        "from typing import overload\n@overload\ndef foo(x: int) -> int: ...\n@overload\ndef foo(x: str) -> str: ...\ndef foo(x: int | str) -> int | str: ..."
+    ),
+    r#"
+from typing import Any, assert_type
+from unittest.mock import patch
+
+with patch("other.foo") as mock_foo:
+    assert_type(mock_foo(1), Any)
+    mock_foo.assert_called_once_with(1)
+    mock_foo.assert_called_once_with("one")
+    mock_foo.assert_called_once_with([])  # E: No matching overload
+"#,
+);
+
+testcase!(
+    test_patch_assertion_check_disabled_by_default,
+    TestEnv::one("other", "def foo(x: int) -> int: ..."),
+    r#"
+from unittest.mock import patch
+
+with patch("other.foo") as mock_foo:
+    mock_foo.assert_called_with("previously accepted")
+    mock_foo.assert_called_once_with()
+    result: str = mock_foo(1)
+"#,
+);
+
+testcase!(
+    test_patch_assertion_error_kind,
+    mock_env("def foo(x: int) -> None: ..."),
+    r#"
+from unittest.mock import patch
+
+with patch("other.foo") as mock_foo:
+    mock_foo.assert_called_with("bad")  # pyrefly: ignore[invalid-mock-assertion]
+    mock_foo.assert_called_once_with()  # pyrefly: ignore[invalid-mock-assertion]
+    mock_foo.assert_called_with(unknown)  # E: Could not find name `unknown`
 "#,
 );

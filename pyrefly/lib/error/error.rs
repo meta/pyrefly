@@ -844,6 +844,12 @@ impl Error {
         self.error_kind
     }
 
+    /// Set the diagnostic kind while preserving its message, range, and annotations.
+    pub(crate) fn set_kind(&mut self, kind: ErrorKind) {
+        self.error_kind = kind;
+        self.severity = kind.default_severity();
+    }
+
     /// Return the secondary annotations attached to this error.
     pub fn secondary_annotations(&self) -> &[SecondaryAnnotation] {
         &self.secondary_annotations

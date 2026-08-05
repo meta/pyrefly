@@ -233,6 +233,9 @@ impl TypeConverter<'_> {
     /// Convert a pyrefly `Type` to a TSP protocol `Type`.
     fn convert(&self, ty: &PyreflyType) -> TspType {
         match ty {
+            PyreflyType::UnittestMock(mock) => {
+                self.convert_class_type(&mock.class, TypeFlags::INSTANCE)
+            }
             // --- Built-in special types ---
             PyreflyType::Any(_) => builtin("any"),
             PyreflyType::Never(_) => builtin("never"),

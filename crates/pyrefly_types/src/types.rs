@@ -75,6 +75,7 @@ use crate::type_var::Restriction;
 use crate::type_var::TypeVar;
 use crate::type_var_tuple::TypeVarTuple;
 use crate::typed_dict::TypedDict;
+use crate::unittest_mock::UnittestMock;
 
 /// An introduced synthetic variable to range over as yet unknown types.
 #[derive(Debug, Copy, Clone, Dupe, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -961,6 +962,8 @@ pub enum Type {
     /// Instances of classes have this type, and a term of the form `C[arg1, arg2]`
     /// would have the form `Type::Type(box Type::ClassType(C, [arg1, arg2]))`.
     ClassType(ClassType),
+    /// A generated `unittest.mock` instance with a retained assertion signature.
+    UnittestMock(Box<UnittestMock>),
     /// Instances of TypedDicts have this type, and a term of the form `TD[arg1, arg2]`
     /// would have the form `Type::Type(box Type::TypedDict(TD, [arg1, arg2]))`. Note
     /// that TypedDict class definitions are still represented as `ClassDef(TD)`, just
@@ -1093,6 +1096,7 @@ impl Visit for Type {
             Type::Intersect(x) => x.visit(f),
             Type::ClassDef(x) => x.visit(f),
             Type::ClassType(x) => x.visit(f),
+            Type::UnittestMock(x) => x.visit(f),
             Type::TypedDict(x) => x.visit(f),
             Type::PartialTypedDict(x) => x.visit(f),
             Type::ShapedArray(x) => x.visit(f),
@@ -1157,6 +1161,7 @@ impl VisitMut for Type {
             Type::Intersect(x) => x.visit_mut(f),
             Type::ClassDef(x) => x.visit_mut(f),
             Type::ClassType(x) => x.visit_mut(f),
+            Type::UnittestMock(x) => x.visit_mut(f),
             Type::TypedDict(x) => x.visit_mut(f),
             Type::PartialTypedDict(x) => x.visit_mut(f),
             Type::ShapedArray(x) => x.visit_mut(f),
@@ -2470,6 +2475,7 @@ impl Type {
             | Type::Union(_)
             | Type::ClassDef(_)
             | Type::ClassType(_)
+            | Type::UnittestMock(_)
             | Type::TypedDict(_)
             | Type::PartialTypedDict(_)
             | Type::ShapedArray(_)

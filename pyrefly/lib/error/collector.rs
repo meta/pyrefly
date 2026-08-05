@@ -188,6 +188,18 @@ impl ErrorCollector {
         }
     }
 
+    /// Add hard diagnostics under a single kind for a specialized check.
+    pub(crate) fn extend_hard_with_kind(&self, other: ErrorCollector, kind: ErrorKind) {
+        if self.is_active() {
+            let mut other = other.errors.into_inner();
+            other.items.retain(|error| !error.error_kind().is_soft());
+            for error in &mut other.items {
+                error.set_kind(kind);
+            }
+            self.errors.lock().extend(other);
+        }
+    }
+
     /// Add the errors from another collector that satisfy `keep`.
     pub(crate) fn extend_filtered(
         &self,

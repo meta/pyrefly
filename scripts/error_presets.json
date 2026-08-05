@@ -70,6 +70,7 @@
     "invalid-decorator": ["legacy", "default", "strict", "all"],
     "invalid-inheritance": ["legacy", "default", "strict", "all"],
     "invalid-literal": ["basic", "legacy", "default", "strict", "all"],
+    "invalid-mock-assertion": ["all"],
     "invalid-overload": ["legacy", "default", "strict", "all"],
     "invalid-param-spec": ["legacy", "default", "strict", "all"],
     "invalid-pattern": ["legacy", "default", "strict", "all"],

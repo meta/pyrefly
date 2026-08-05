@@ -635,6 +635,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         context: Option<&dyn Fn() -> ErrorContext>,
         todo_ctx: &str,
     ) -> Type {
+        if let Some(signature) = self.unittest_mock_assertion_signature(base, attr_name) {
+            return signature;
+        }
         let attr_base = self.as_attribute_base(base.clone());
         let lookup_result = attr_base.clone().map_or_else(
             || LookupResult::internal_error(InternalError::AttributeBaseUndefined(base.clone())),
@@ -2662,6 +2665,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     fn as_attribute_base1(&self, ty: Type, acc: &mut Vec<AttributeBase1>) {
         match ty {
+            Type::UnittestMock(mock) => self.as_attribute_base1(Type::ClassType(mock.class), acc),
             Type::ClassType(class_type) => {
                 if let Some(shaped_array) =
                     self.try_reproject_class_type_to_shaped_array(&class_type)

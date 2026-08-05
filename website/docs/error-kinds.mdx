@@ -1150,6 +1150,39 @@ class A:
 Literal[A()]
 ```
 
+## invalid-mock-assertion
+
+Default severity: `ignore`
+
+Expected arguments in a `unittest.mock.patch` assertion do not match the patched
+function's parameter types or required arguments. This check is opt-in.
+
+Enable it in `pyrefly.toml`:
+
+```toml
+[errors]
+invalid-mock-assertion = "error"
+```
+
+```python
+from unittest.mock import patch
+
+def send(count: int) -> None: ...
+
+with patch("example.send") as mock_send:
+    mock_send.assert_called_once_with("one")  # invalid-mock-assertion
+```
+
+Mock calls retain their dynamic return type. For ordinary patches of class
+methods, assertions omit `self`. With `autospec=True`, assertions retain `self`.
+Objects with custom equality methods can serve as matchers for expected values.
+Pyrefly cannot determine which values these matchers accept, so it does not check
+their argument types. Other arguments in the same assertion still receive checks.
+
+This check uses literal patch targets with function or method signatures.
+Explicit replacements, custom mock factories, and alternate or dynamic
+`autospec`, `spec`, and `spec_set` values retain the stub behavior.
+
 ## invalid-overload
 
 The `@overload` decorator requires that the decorated function has at least two overloaded signatures and a base implementation.

@@ -295,6 +295,8 @@ pub enum ErrorKind {
     InvalidInheritance,
     /// Attempting to use a value that is not a valid kind of Literal.
     InvalidLiteral,
+    /// Expected arguments in a mock assertion do not match the patched target's signature.
+    InvalidMockAssertion,
     /// An error caused by incorrect usage of the @overload decorator.
     /// e.g. not defining multiple variants for an overloaded function.
     InvalidOverload,
@@ -664,6 +666,7 @@ impl ErrorKind {
             ErrorKind::InvalidAbstractMethod => Severity::Ignore,
             ErrorKind::InvalidCast => Severity::Ignore,
             ErrorKind::InvalidDecorator => Severity::Warn,
+            ErrorKind::InvalidMockAssertion => Severity::Ignore,
             ErrorKind::MethodAssign => Severity::Ignore,
             ErrorKind::MisplacedIgnore => Severity::Warn,
             ErrorKind::MissingAttributePatchTarget => Severity::Warn,

@@ -280,6 +280,7 @@ pub struct TestEnv {
     pytorch_efficiency_lint_error: bool,
     incompatible_comparison_error: bool,
     invalid_cast_warning: bool,
+    invalid_mock_assertion_error: bool,
     untyped_class_decorator_error: bool,
     untyped_function_decorator_error: bool,
     untyped_namedtuple_error: bool,
@@ -357,6 +358,7 @@ impl TestEnv {
             pytorch_efficiency_lint_error: false,
             incompatible_comparison_error: false,
             invalid_cast_warning: false,
+            invalid_mock_assertion_error: false,
             untyped_class_decorator_error: false,
             untyped_function_decorator_error: false,
             untyped_namedtuple_error: false,
@@ -597,6 +599,11 @@ impl TestEnv {
 
     pub fn enable_incompatible_comparison_error(mut self) -> Self {
         self.incompatible_comparison_error = true;
+        self
+    }
+
+    pub fn enable_invalid_mock_assertion_error(mut self) -> Self {
+        self.invalid_mock_assertion_error = true;
         self
     }
 
@@ -892,6 +899,9 @@ impl TestEnv {
             errors.set_error_severity(ErrorKind::ProtectedAccess, Severity::Error);
         }
         report_unreachable_at_warn(errors);
+        if self.invalid_mock_assertion_error {
+            errors.set_error_severity(ErrorKind::InvalidMockAssertion, Severity::Error);
+        }
         if self.implicitly_defined_attribute_error {
             errors.set_error_severity(ErrorKind::ImplicitlyDefinedAttribute, Severity::Error);
         }

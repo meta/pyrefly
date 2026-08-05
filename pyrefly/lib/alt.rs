@@ -40,4 +40,5 @@ pub mod subscript;
 pub mod traits;
 pub mod type_level_dsl;
 pub mod types;
+pub mod unittest_mock;
 pub mod unwrap;

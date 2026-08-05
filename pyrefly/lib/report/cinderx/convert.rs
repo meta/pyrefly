@@ -180,6 +180,11 @@ pub(crate) fn type_to_structured(
     pending_class_traits: &mut Vec<(usize, Class)>,
 ) -> usize {
     match ty {
+        Type::UnittestMock(mock) => type_to_structured(
+            &Type::ClassType(mock.class.clone()),
+            table,
+            pending_class_traits,
+        ),
         Type::ClassType(ct) => {
             let arg_indices: Vec<usize> = ct
                 .targs()

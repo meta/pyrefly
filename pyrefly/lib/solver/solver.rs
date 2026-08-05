@@ -3572,7 +3572,15 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             return Err(SubsetError::Other);
         }
         // Normalize before var solving so decorator metadata does not get pinned as part of a type.
-        if let Type::KwCall(call) = got {
+        if let Type::UnittestMock(mock) = got {
+            let res = self.is_subset_eq(&Type::ClassType(mock.class.clone()), want);
+            self.gas.restore();
+            return res;
+        } else if let Type::UnittestMock(mock) = want {
+            let res = self.is_subset_eq(got, &Type::ClassType(mock.class.clone()));
+            self.gas.restore();
+            return res;
+        } else if let Type::KwCall(call) = got {
             let res = self.is_subset_eq(&call.return_ty, want);
             self.gas.restore();
             return res;

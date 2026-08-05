@@ -1107,6 +1107,9 @@ impl<'a> TypeDisplayContext<'a> {
                 // Display as the class name (e.g., MaxPool2d)
                 self.fmt_helper_generic(&Type::ClassType(module.class.clone()), false, output)
             }
+            Type::UnittestMock(mock) => {
+                self.fmt_helper_generic(&Type::ClassType(mock.class.clone()), false, output)
+            }
             Type::DataFrame(schema) if self.strip_library_schemas => {
                 self.fmt_helper_generic(&schema.underlying_type(), false, output)
             }

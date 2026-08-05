@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use pyrefly_python::dunder;
-use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::function::BodyKind;
@@ -29,7 +28,6 @@ use pyrefly_util::visit::Visit;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
-use ruff_python_ast::ExprStringLiteral;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
@@ -75,7 +73,6 @@ use crate::types::function::FunctionKind;
 use crate::types::keywords::KwCall;
 use crate::types::keywords::TypeMap;
 use crate::types::literal::Lit;
-use crate::types::module::ModuleType;
 use crate::types::type_var::Restriction;
 use crate::types::typed_dict::TypedDict;
 use crate::types::types::AnyStyle;
@@ -404,6 +401,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     fn as_call_target_impl(&self, ty: Type, quantified: Option<Quantified>) -> CallTargetLookup {
         match ty {
+            Type::UnittestMock(mock) => {
+                self.as_call_target_impl(Type::ClassType(mock.class), quantified)
+            }
             Type::Callable(c) => {
                 CallTargetLookup::Ok(Box::new(CallTarget::Callable(TargetWithTParams(None, *c))))
             }
@@ -3109,7 +3109,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 )
         } else {
             self.expand_mut(&mut callee.ty);
-            self.check_unittest_mock_patch_target(&callee.ty, &callee.expr.arguments, errors);
+            let unittest_mock_patch_target =
+                self.check_unittest_mock_patch_target(&callee.ty, &callee.expr.arguments, errors);
 
             let call = CallWithTypes::new();
             let (args, kws) = if callee.ty.is_union() {
@@ -3151,6 +3152,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     errors,
                 );
                 match ty.callee_kind() {
+                _ if ty.toplevel_func_metadata().is_some_and(|metadata| metadata.flags.is_unittest_mock_assertion) =>
+                    self.call_unittest_mock_assertion(ty, &args, &kws, callee.expr, errors),
                 Some(CalleeKind::Function(FunctionKind::AssertType)) => self
                     .call_assert_type(
                         &callee.expr.arguments.args,
@@ -3428,93 +3431,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }});
             // TypeIs and TypeGuard functions return bool at runtime
-            match result {
+            let result = match result {
                 Type::TypeIs(_) | Type::TypeGuard(_) => {
                     self.heap.mk_class_type(self.stdlib.bool().clone())
                 }
                 other => other,
+            };
+            match unittest_mock_patch_target {
+                Some(target) => {
+                    self.specialize_unittest_mock_patch(result, target, &callee.expr.arguments)
+                }
+                None => result,
             }
         };
 
         let result = self.apply_django_annotate_call(result, django_annotate_call);
         self.apply_polars_call_specialization(result, polars_call)
-    }
-
-    fn check_unittest_mock_patch_target(
-        &self,
-        callee_ty: &Type,
-        arguments: &Arguments,
-        errors: &ErrorCollector,
-    ) {
-        let Type::ClassType(cls) = callee_ty else {
-            return;
-        };
-        if !cls.has_qname("unittest.mock", "_patcher") {
-            return;
-        }
-        if arguments.args.len() > 1 || arguments.keywords.iter().any(|kw| kw.arg.is_none()) {
-            return;
-        }
-        if arguments
-            .find_keyword("create")
-            .is_some_and(|kw| !matches!(&kw.value, Expr::BooleanLiteral(lit) if !lit.value))
-        {
-            return;
-        }
-        let Some(target_expr) = arguments.find_argument_value("target", 0) else {
-            return;
-        };
-        let Expr::StringLiteral(ExprStringLiteral { value, .. }) = target_expr else {
-            return;
-        };
-        let range = target_expr.range();
-        let target = value.to_str();
-        let parts: Vec<&str> = target.split('.').collect();
-        if parts.len() < 2 || parts.iter().any(|p| p.is_empty()) {
-            return;
-        }
-
-        let Some((module_prefix_len, module)) = (1..parts.len()).rev().find_map(|i| {
-            let candidate = ModuleName::from_str(&parts[..i].join("."));
-            (candidate == self.module().name()
-                || self.exports.module_exists(candidate).finding().is_some())
-            .then_some((i, candidate))
-        }) else {
-            // The target may be resolved dynamically at runtime, so only check paths rooted in a
-            // module that is available in the current environment.
-            return;
-        };
-
-        let attrs = &parts[module_prefix_len..];
-        let mut base_ty = ModuleType::new_as(module).to_type(self.heap);
-        for (i, attr) in attrs.iter().enumerate() {
-            let name = Name::new(*attr);
-            // Patching a public builtin name on a module always succeeds: `mock.patch` sets
-            // `create=True` itself in that case, overriding whatever the caller passed. So
-            // `patch("mod.open")` is legal even when `mod` defines no `open` of its own.
-            // Documented at
-            // https://docs.python.org/3/library/unittest.mock.html#unittest.mock.patch ("If you
-            // are patching builtins in a module then you don't need to pass `create=True`").
-            if i + 1 == attrs.len()
-                && base_ty.as_module().is_some()
-                && !attr.starts_with('_')
-                && self.exports.export_exists(ModuleName::builtins(), &name)
-                && !self
-                    .exports
-                    .is_implicit_reexport(ModuleName::builtins(), &name)
-            {
-                return;
-            }
-            base_ty = self.type_of_attr_get(
-                &base_ty,
-                &name,
-                range,
-                errors,
-                ErrorKind::MissingAttributePatchTarget,
-                None,
-                "unittest.mock.patch target",
-            );
-        }
     }
 
     fn call_inspect_unwrap(&self, x: &ExprCall, errors: &ErrorCollector) -> Option<Type> {
@@ -3591,7 +3523,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             result
         })
     }
-
     pub fn freeform_call_infer(
         &self,
         ty: Type,
