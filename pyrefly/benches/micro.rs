@@ -548,6 +548,37 @@ fn nested_nongeneric_constructor(c: &mut Criterion) {
     );
 }
 
+/// Measure nested `getattr` arguments, including calls that retain builtin fallback typing.
+fn nested_getattr(c: &mut Criterion) {
+    for (attr, expected) in [("child", "C"), ("missing", "Any")] {
+        for depth in [10, 20, 40] {
+            for position in ["receiver", "default"] {
+                let mut expr = String::from("c");
+                for _ in 0..depth {
+                    expr = if position == "receiver" {
+                        format!("getattr({expr}, {attr:?})")
+                    } else {
+                        format!("getattr(c, {attr:?}, {expr})")
+                    };
+                }
+                let expected = if position == "default" {
+                    format!("{expected} | C")
+                } else {
+                    expected.to_owned()
+                };
+                measure(
+                    c,
+                    &format!("getattr_{attr}_{position}_{depth}"),
+                    format!(
+                        "from typing import Any, assert_type\nclass C:\n    child: C\ndef test(c: C) -> None:\n    assert_type({expr}, {expected})\n",
+                    ),
+                    0,
+                );
+            }
+        }
+    }
+}
+
 fn user_method_dispatch(c: &mut Criterion) {
     measure(c, "user_method_calls_256", user_method_calls(256), 0);
 }
@@ -971,6 +1002,7 @@ criterion_group!(
     overloads,
     nested_generic_constructor,
     nested_nongeneric_constructor,
+    nested_getattr,
     user_method_dispatch,
     builtin_method_dispatch,
     method_name_collision,

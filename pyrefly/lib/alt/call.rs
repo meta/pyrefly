@@ -9,6 +9,7 @@ use std::iter;
 use std::sync::Arc;
 
 use itertools::Itertools;
+use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModuleStyle;
@@ -3304,6 +3305,33 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         &args,
                         ty.clone(),
                         &kws,
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
+                        hint,
+                        errors,
+                    )
+                }
+                Some(CalleeKind::Function(FunctionKind::Def(func)))
+                    if func.has_toplevel_qname("builtins", "getattr")
+                        && callee.expr.arguments.keywords.is_empty()
+                        && let Some(Expr::StringLiteral(attr_literal)) = callee.expr.arguments.args.get(1)
+                        && let attr_name = Name::new(attr_literal.value.to_string())
+                        && !Ast::is_mangled_attr(&attr_name) =>
+                {
+                    let (obj, default) = match args.as_slice() {
+                        [CallArg::Arg(obj), CallArg::Arg(_)] => (*obj, None),
+                        [CallArg::Arg(obj), CallArg::Arg(_), CallArg::Arg(default)] => (*obj, Some(*default)),
+                        _ => return self.freeform_call_infer(
+                            ty.clone(), &args, &kws, callee.expr.func.range(),
+                            callee.expr.arguments.range(), hint, errors,
+                        ).ty,
+                    };
+                    self.call_getattr(
+                        obj,
+                        &attr_name,
+                        attr_literal.range(),
+                        default,
+                        ty.clone(),
                         callee.expr.func.range(),
                         callee.expr.arguments.range(),
                         hint,

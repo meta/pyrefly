@@ -28,6 +28,7 @@ use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
 use crate::alt::expr::ExprOptions;
+use crate::alt::expr::TypeOrExpr;
 use crate::alt::shape_extension::is_int_tuple_bound;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::types::decorated_function::Decorator;
@@ -41,6 +42,7 @@ use crate::types::callable::Params;
 use crate::types::callable::unexpected_keyword;
 use crate::types::class::Class;
 use crate::types::function::FunctionKind;
+use crate::types::literal::Lit;
 use crate::types::tuple::Tuple;
 use crate::types::types::Forallable;
 use crate::types::types::Type;
@@ -191,6 +193,58 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return ret;
         }
         default
+    }
+
+    /// Refine a literal-name `getattr` call when attribute lookup succeeds without errors.
+    pub fn call_getattr(
+        &self,
+        obj_arg: TypeOrExpr,
+        attr_name: &Name,
+        attr_range: TextRange,
+        default_arg: Option<TypeOrExpr>,
+        callee_ty: Type,
+        func_range: TextRange,
+        arguments_range: TextRange,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+    ) -> Type {
+        // Reuse inferred arguments for validation and lookup to keep nested calls linear.
+        let obj_ty = obj_arg.infer(self, errors);
+        let default = default_arg.map(|arg| (arg.infer(self, errors), arg.range()));
+        let name_ty = Lit::Str(attr_name.as_str().into()).to_implicit_type();
+        let mut args = vec![
+            CallArg::ty(&obj_ty, obj_arg.range()),
+            CallArg::ty(&name_ty, attr_range),
+        ];
+        if let Some((ty, range)) = &default {
+            args.push(CallArg::ty(ty, *range));
+        }
+        let fallback = self
+            .freeform_call_infer(
+                callee_ty,
+                &args,
+                &[],
+                func_range,
+                arguments_range,
+                hint,
+                errors,
+            )
+            .ty;
+        if !matches!(obj_ty, Type::ClassType(_)) {
+            return fallback;
+        }
+        // Hook or descriptor errors make refinement unavailable, but do not invalidate the call.
+        let lookup_errors = self.error_collector();
+        let attr_ty =
+            self.attr_infer_for_type(&obj_ty, attr_name, attr_range, &lookup_errors, None);
+        if !lookup_errors.is_empty() || attr_ty.is_error() {
+            return fallback;
+        }
+        if let Some((default_ty, _)) = default {
+            self.unions(vec![attr_ty, default_ty])
+        } else {
+            attr_ty
+        }
     }
 
     pub fn call_reveal_type(
