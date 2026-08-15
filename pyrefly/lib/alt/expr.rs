@@ -3125,6 +3125,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     *ty = self.heap.mk_type_of(self.promote(cls, range, errors));
                 }
             }
+            Type::SpecializedClass(cls) => {
+                *ty = self.heap.mk_type_of(Type::ClassType(cls.clone()));
+            }
             Type::ClassType(cls) if cls.is(KnownClass::Type) => {
                 *ty = self.heap.mk_type_of(self.heap.mk_any_implicit());
             }
@@ -5511,8 +5514,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             result
         } else {
             let targs = self.parse_class_type_args(cls, xs.iter(), type_form_context, errors);
-            self.heap
-                .mk_type_of(self.specialize(cls, targs, range, errors))
+            match self.specialize(cls, targs, range, errors) {
+                Type::ClassType(class_type) => Type::SpecializedClass(class_type),
+                Type::TypedDict(typed_dict) => self.heap.mk_type_of(Type::TypedDict(typed_dict)),
+                _ => unreachable!("specializing a class produces a class or TypedDict instance"),
+            }
         }
     }
 

@@ -471,6 +471,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 _ => unreachable!(),
             },
+            Type::SpecializedClass(cls) => CallTargetLookup::Ok(Box::new(CallTarget::Class(
+                cls,
+                ConstructorKind::SpecializedClass,
+                None,
+            ))),
             Type::Type(f) if matches!(&*f, Type::ClassType(_)) => {
                 let Type::ClassType(cls) = *f else {
                     unreachable!("guarded by matches! above")
