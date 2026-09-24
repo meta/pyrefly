@@ -558,6 +558,13 @@ impl RuleOverrides {
             self.report_implicit_override,
             ErrorKind::MissingOverrideDecorator,
         );
+        // Unannotated overrides can report either kind: narrowing stays
+        // `bad-override-mutable-attribute`, while widening and incompatible
+        // pairs report plain `bad-override`.
+        add(
+            self.report_incompatible_unannotated_override,
+            ErrorKind::BadOverride,
+        );
         add(
             self.report_incompatible_unannotated_override,
             ErrorKind::BadOverrideMutableAttribute,
@@ -857,6 +864,20 @@ include = ["basedpyright.py"]
         );
         assert_eq!(errors.severity(ErrorKind::MissingImport), Severity::Ignore);
         Ok(())
+    }
+
+    #[test]
+    fn test_incompatible_unannotated_override_maps_to_both_override_kinds() {
+        let overrides = RuleOverrides {
+            report_incompatible_unannotated_override: Some(Severity::Error),
+            ..Default::default()
+        };
+        let errors = overrides.to_config().expect("expected error config");
+        assert_eq!(errors.severity(ErrorKind::BadOverride), Severity::Error);
+        assert_eq!(
+            errors.severity(ErrorKind::BadOverrideMutableAttribute),
+            Severity::Error
+        );
     }
 
     #[test]
