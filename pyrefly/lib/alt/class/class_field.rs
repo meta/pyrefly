@@ -1722,9 +1722,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .is_some_and(|annot| annot.has_qualifier(&Qualifier::ClassVar))
                 {
                     ClassFieldInitialization::Magic
-                } else if let Some(flags) =
-                    self.extract_pydantic_field_from_annotation(*annot, name, metadata)
-                {
+                } else if let Some(flags) = self.extract_pydantic_field_from_annotation(
+                    *annot,
+                    name,
+                    direct_annotation
+                        .as_ref()
+                        .and_then(|annotation| annotation.ty.as_ref()),
+                    metadata,
+                ) {
                     ClassFieldInitialization::ClassBody(Some(Box::new(flags)))
                 } else {
                     ClassFieldInitialization::Uninitialized
@@ -1810,7 +1815,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let mut direct_annotation = annot.map(|a| self.get_idx(a).annotation.clone());
                 let mut annotation_flags = annot
                     .and_then(|annot| {
-                        self.extract_pydantic_field_from_annotation(annot, name, metadata)
+                        self.extract_pydantic_field_from_annotation(
+                            annot,
+                            name,
+                            direct_annotation
+                                .as_ref()
+                                .and_then(|annotation| annotation.ty.as_ref()),
+                            metadata,
+                        )
                     })
                     .map(|flags| DataclassFieldKeywords {
                         default: flags.default,
@@ -1819,6 +1831,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         pydantic_unchecked_metadata: flags.pydantic_unchecked_metadata
                             || flags.init_by_alias.is_some(),
                         pydantic_has_custom_schema: flags.pydantic_has_custom_schema,
+                        converter_param: flags.converter_param,
                         ..DataclassFieldKeywords::new()
                     });
                 if metadata.is_protocol()
@@ -1835,7 +1848,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ),
                     );
                 }
-                let flags = if let ExprOrBinding::Expr(e) = value.as_ref()
+                let mut flags = if let ExprOrBinding::Expr(e) = value.as_ref()
                     && let Some(dm) = metadata.dataclass_metadata()
                     && let Expr::Call(call) = e
                 {
@@ -1974,6 +1987,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 } else {
                     None
                 };
+                if let Some(flags) = &mut flags
+                    && let Some(annotation_flags) = &mut annotation_flags
+                {
+                    flags.converter_param = annotation_flags.converter_param.take();
+                }
                 let initialization = ClassFieldInitialization::ClassBody(
                     flags
                         .or_else(|| {
