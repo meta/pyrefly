@@ -20,6 +20,7 @@ use crate::solver::solver::SubsetError;
 use crate::types::callable::Param;
 use crate::types::callable::Required;
 use crate::types::class::ClassType;
+use crate::types::literal::Lit;
 use crate::types::tuple::Tuple;
 use crate::types::types::Type;
 use crate::types::types::Var;
@@ -254,6 +255,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 return false;
             }
+            Type::Literal(lit) if matches!(lit.value, Lit::Str(_) | Lit::Bytes(_)) => return false,
             Type::LiteralString(_) => return false,
             // Tuples are always sequences for pattern matching
             Type::Tuple(_) => return true,
