@@ -3287,11 +3287,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 name,
                 range,
                 getattr_class,
-                termination_keys,
+                termination_key_groups,
             } => {
-                let may_be_uninitialized = termination_keys
-                    .as_ref()
-                    .is_none_or(|nodes| self.some_unset_path_continues(nodes));
+                let may_be_uninitialized = !termination_key_groups
+                    .iter()
+                    .any(|nodes| !self.some_unset_path_continues(nodes));
                 let has_getattr_fallback = getattr_class.is_some_and(|class_idx| {
                     self.get_idx(class_idx)
                         .0
