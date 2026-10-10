@@ -3876,6 +3876,105 @@ print(y)
     "#,
 );
 
+// Regression test for https://github.com/facebook/pyrefly/issues/5186.
+testcase!(
+    test_noreturn_try_except_narrowing,
+    r#"
+from __future__ import annotations
+from typing import Never, assert_type
+
+def fail() -> Never:
+    raise Exception()
+
+def try_never(x: str | None) -> str:
+    if x is None:
+        try:
+            fail()
+        except Exception:
+            raise Exception()
+    assert_type(x, str)
+    return x
+
+def except_never(x: str | None) -> str:
+    if x is None:
+        try:
+            raise Exception()
+        except Exception:
+            fail()
+    assert_type(x, str)
+    return x
+
+def nested_try(x: str | None) -> str:
+    if x is None:
+        try:
+            try:
+                fail()
+            except ValueError:
+                raise
+        except Exception:
+            raise
+    assert_type(x, str)
+    return x
+
+def handler_returns(x: str | None) -> None:
+    if x is None:
+        try:
+            fail()
+        except Exception:
+            pass
+    assert_type(x, str | None)
+
+def try_returns(x: str | None) -> None:
+    if x is None:
+        try:
+            print(x)
+        except Exception:
+            raise
+    assert_type(x, str | None)
+"#,
+);
+
+testcase!(
+    test_noreturn_single_live_branch_initialization,
+    r#"
+from typing import Never
+
+def fail() -> Never:
+    raise Exception()
+
+def f(flag: bool, values: list[int]) -> None:
+    for value in values:
+        x = value
+    if flag:
+        return
+    else:
+        fail()
+    print(x)  # E: This code is unreachable
+
+def returns() -> None:
+    pass
+
+def ordinary_call(flag: bool, values: list[int]) -> None:
+    for value in values:
+        x = value
+    if flag:
+        return
+    else:
+        returns()
+    print(x)  # E: `x` may be uninitialized
+"#,
+);
+
+#[test]
+fn test_noreturn_single_live_branch_long_guard_chain() -> anyhow::Result<()> {
+    let mut contents = String::from("def f(x: str | None) -> str:\n");
+    for _ in 0..100 {
+        contents.push_str("    if x is None:\n        return ''\n");
+    }
+    contents.push_str("    return x\n");
+    testcase_for_macro(TestEnv::new(), &contents, file!(), line!())
+}
+
 // Issue #2406: NoReturn in except block should make variable always initialized
 testcase!(
     test_noreturn_try_except_simple,
