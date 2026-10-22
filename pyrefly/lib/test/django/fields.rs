@@ -157,6 +157,138 @@ def update[T: Counter](counter: T) -> None:
 );
 
 django_testcase!(
+    test_inherited_field_explicit_annotation,
+    r#"
+from typing import Final
+from django.db import models
+
+class Counter(models.Model):
+    count = models.IntegerField()
+
+class AnnotatedCounter(Counter):
+    def reset(self) -> None:
+        self.count: int = "123"  # E: `Literal['123']` is not assignable to attribute `count` with type `int`
+
+class FinalCounter(Counter):
+    def __init__(self) -> None:
+        self.count: Final[int] = 1  # E: `FinalCounter.count` is read-only, but `Counter.count` is read-write
+
+    def reset(self) -> None:
+        self.count = 2  # E: Cannot set field `count`
+
+class PlainCounter(Counter):
+    count: int
+
+    def reset(self) -> None:
+        self.count = "123"  # E: is not assignable to attribute `count` with type `int`
+"#,
+);
+
+django_testcase!(
+    test_field_override_compatibility,
+    r#"
+from django.db import models
+
+class AbstractName(models.Model):
+    name = models.CharField(max_length=100)
+
+    class Meta:
+        abstract = True
+
+class EmailName(AbstractName):
+    name = models.EmailField()
+
+class TextName(AbstractName):
+    name = models.TextField()
+
+class AnnotatedName(AbstractName):
+    name: str
+
+class PropertyName(AbstractName):
+    @property
+    def name(self) -> str:
+        return "name"
+
+    @name.setter
+    def name(self, value: str) -> None:
+        pass
+
+class BadName(AbstractName):
+    name: int  # E: Class member `BadName.name` overrides parent class `AbstractName` in an inconsistent manner
+
+class ExplicitSetter(models.Model):
+    @property
+    def count(self) -> int:
+        return 1
+
+    @count.setter
+    def count(self, value: str) -> None:
+        pass
+
+class FieldSetter(ExplicitSetter):
+    count = models.IntegerField()
+
+class BytesSetter(models.Model):
+    @property
+    def count(self) -> int:
+        return 1
+
+    @count.setter
+    def count(self, value: bytes) -> None:
+        pass
+
+class BadFieldSetter(BytesSetter):
+    count = models.IntegerField()  # E: `BadFieldSetter.count` has type `Combinable | float | int | str`, which is not assignable from `(value: bytes) -> None`
+"#,
+);
+
+django_testcase!(
+    test_field_intersection_assignment,
+    r#"
+from typing import ClassVar, Final
+from django.db import models
+from django.db.models import F
+
+class CharRecord(models.Model):
+    value = models.CharField(max_length=100)
+
+class TextRecord(models.Model):
+    value = models.TextField()
+
+class PlainRecord:
+    value: str
+
+class FinalRecord:
+    value: Final[str] = "fixed"
+
+class ClassRecord:
+    value: ClassVar[str] = "shared"
+
+def update_char(record: CharRecord) -> None:
+    if isinstance(record, TextRecord):
+        record.value = "text"
+        record.value = F("value")
+        record.value = 1  # E: is not assignable to attribute `value`
+    if isinstance(record, PlainRecord):
+        record.value = "text"
+        record.value = F("value")  # E: is not assignable to attribute `value`
+    if isinstance(record, FinalRecord):
+        record.value = "text"  # E: Cannot set field `value`
+    if isinstance(record, ClassRecord):
+        record.value = "text"  # E: Cannot set field `value`
+
+def update_text(record: TextRecord) -> None:
+    if isinstance(record, CharRecord):
+        record.value = F("value")
+        record.value = 1  # E: is not assignable to attribute `value`
+
+def update_final(record: FinalRecord) -> None:
+    if isinstance(record, CharRecord):
+        record.value = "text"  # E: Cannot set field `value`
+"#,
+);
+
+django_testcase!(
     test_textfield_nullable,
     r#"
 from django.db import models
