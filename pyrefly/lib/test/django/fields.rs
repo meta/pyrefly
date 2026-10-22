@@ -7,6 +7,155 @@
 
 use crate::django_testcase;
 
+// https://github.com/facebook/pyrefly/issues/5322
+django_testcase!(
+    test_field_expression_assignment,
+    r#"
+from typing import assert_type
+from django.db import models
+from django.db.models import F, Value
+
+class Book(models.Model):
+    is_draft = models.BooleanField()
+    pages = models.IntegerField()
+    title = models.CharField(max_length=100)
+    optional_pages = models.IntegerField(null=True)
+    ordinary: bool = False
+
+def update(book: Book) -> None:
+    book.is_draft = F("other")
+    assert_type(book.is_draft, bool)
+    book.is_draft = Value(True)
+    assert_type(book.is_draft, bool)
+    book.pages = F("pages") + 1
+    assert_type(book.pages, int)
+    book.title = Value("New title")
+    assert_type(book.title, str)
+    book.optional_pages = F("pages")
+    assert_type(book.optional_pages, int | None)
+    book.optional_pages = None
+    book.is_draft = "invalid"  # E: is not assignable to attribute `is_draft`
+    book.is_draft = None  # E: is not assignable to attribute `is_draft`
+    book.ordinary = F("other")  # E: is not assignable to attribute `ordinary`
+
+class SpecialBook(Book):
+    pass
+
+def update_subclass(book: SpecialBook) -> None:
+    book.is_draft = F("other")
+    assert_type(book.is_draft, bool)
+"#,
+);
+
+django_testcase!(
+    test_field_assignment_narrowing,
+    r#"
+from typing import assert_type
+from django.db import models
+from django.db.models import F
+
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+class Book(models.Model):
+    pages = models.IntegerField(null=True)
+    title = models.CharField(max_length=100, null=True)
+    author = models.ForeignKey(Author, on_delete=models.CASCADE, null=True)
+
+    def set_pages(self, pages: int) -> int:
+        self.pages = pages
+        return self.pages + 1
+
+def update(book: Book, pages: int, title: str, author: Author) -> None:
+    book.pages = pages
+    assert_type(book.pages, int)
+    book.title = title
+    assert_type(book.title, str)
+    book.author = author
+    assert_type(book.author, Author)
+    book.author.name.upper()
+    book.pages = F("pages") + 1
+    assert_type(book.pages, int | None)
+    book.pages = "123"
+    assert_type(book.pages, int | None)
+    book.pages = None
+    assert_type(book.pages, None)
+
+def defaults(book: Book) -> int:
+    if book.pages is None:
+        book.pages = 1
+    if book.title is None:
+        book.title = "Untitled"
+    book.title.upper()
+    return book.pages + 1
+
+def update_generic[T: Book](book: T, pages: int) -> int:
+    book.pages = pages
+    return book.pages + 1
+"#,
+);
+
+django_testcase!(
+    test_field_choices_assignment,
+    r#"
+from typing import Literal, assert_type
+from django.db import models
+from django.db.models import F, Value
+
+class Card(models.Model):
+    suit = models.CharField(max_length=1, choices=(("A", "A"), ("B", "B")))
+    optional_suit = models.CharField(max_length=1, choices=(("A", "A"), ("B", "B")), null=True)
+
+def update(card: Card, suit: Literal["A", "B"]) -> None:
+    card.suit = suit
+    assert_type(card.suit, Literal["A", "B"])
+    card.suit = "INVALID"  # E: is not assignable to attribute `suit`
+    card.suit = 1  # E: is not assignable to attribute `suit`
+    card.optional_suit = "INVALID"  # E: is not assignable to attribute `optional_suit`
+    card.optional_suit = None
+    assert_type(card.optional_suit, None)
+    card.suit = F("suit")
+    assert_type(card.suit, Literal["A", "B"])
+    card.suit = Value("A")
+    assert_type(card.suit, Literal["A", "B"])
+    card.optional_suit = F("suit")
+    assert_type(card.optional_suit, Literal["A", "B"] | None)
+"#,
+);
+
+django_testcase!(
+    test_field_expression_assignment_receivers,
+    r#"
+from typing import assert_type
+from django.db import models
+from django.db.models import F, Value
+
+class Counter(models.Model):
+    count = models.IntegerField()
+    optional_count = models.IntegerField(null=True)
+
+    def bump(self) -> None:
+        self.count = F("count") + 1
+        assert_type(self.count, int)
+        self.optional_count = Value(1)
+        assert_type(self.optional_count, int | None)
+
+    def bump_explicit(self: Counter) -> None:
+        self.count = F("count") + 1
+
+class SpecialCounter(Counter):
+    def bump(self) -> None:
+        self.count = F("count") + 1
+        assert_type(self.count, int)
+
+def update[T: Counter](counter: T) -> None:
+    counter.count = F("count") + 1
+    assert_type(counter.count, int)
+    counter.optional_count = Value(1)
+    assert_type(counter.optional_count, int | None)
+"#,
+);
+
 django_testcase!(
     test_textfield_nullable,
     r#"
