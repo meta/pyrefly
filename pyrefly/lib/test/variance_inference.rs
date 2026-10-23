@@ -606,6 +606,21 @@ class Foo(Generic[T_co]):
 );
 
 testcase!(
+    test_constrained_typevar_protocol_variance_mismatch,
+    r#"
+from typing import Protocol, TypeVar
+
+T = TypeVar("T", str, bytes)
+
+class Foo(Protocol[T]):
+    def value(self) -> T: ...
+
+class Bar(Protocol[T]):
+    def consume(self, x: T) -> None: ...
+"#,
+);
+
+testcase!(
     test_shallow_contravariant_in_return,
     r#"
 from typing import TypeVar, Generic
