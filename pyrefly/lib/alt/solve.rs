@@ -3948,16 +3948,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // with a narrower variance. We only check invariant TypeVars here
         // because wrong variance on covariant/contravariant TypeVars is
         // already caught by InvalidVariance at the usage site.
+        // Constrained TypeVars are excluded because variance cannot be declared on them.
         let metadata = self.get_metadata_for_class(class);
         if metadata.is_protocol()
-            && tparams
-                .as_vec()
-                .iter()
-                .any(|p| p.is_type_var() && p.variance() == PreInferenceVariance::Invariant)
+            && tparams.as_vec().iter().any(|p| {
+                p.is_type_var()
+                    && p.variance() == PreInferenceVariance::Invariant
+                    && !matches!(p.restriction(), Restriction::Constraints(_))
+            })
         {
             let inferred = self.infer_variance_ignoring_declared(class);
             for tparam in tparams.as_vec() {
-                if !tparam.is_type_var() || tparam.variance() != PreInferenceVariance::Invariant {
+                if !tparam.is_type_var()
+                    || tparam.variance() != PreInferenceVariance::Invariant
+                    || matches!(tparam.restriction(), Restriction::Constraints(_))
+                {
                     continue;
                 }
                 let inferred_v = inferred.get(tparam.name());
