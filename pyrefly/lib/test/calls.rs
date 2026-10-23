@@ -420,6 +420,96 @@ fn test_env_3_12() -> TestEnv {
 }
 
 testcase!(
+    test_deprecated_union_decorator,
+    r#"
+from collections.abc import Callable
+from typing import assert_type
+from warnings import deprecated
+
+def cache[**P, T](fn: Callable[P, T]) -> Callable[P, T] | Callable[[str], T]: ...
+
+@deprecated("Use another function")
+@cache
+def old_function(value: str) -> str: ...
+
+assert_type(old_function(""), str)  # E: `old_function` is deprecated
+_ = old_function  # E: `old_function` is deprecated
+
+@cache
+@deprecated("Use another function")
+def inner_deprecated(value: str) -> str: ...
+
+assert_type(inner_deprecated(""), str)  # E: `inner_deprecated` is deprecated
+_ = inner_deprecated  # E: `inner_deprecated` is deprecated
+
+@cache
+def current_function(value: str) -> str: ...
+
+assert_type(current_function(""), str)
+_ = current_function
+    "#,
+);
+
+testcase!(
+    test_deprecated_union_callback_decorator,
+    r#"
+from collections.abc import Callable
+from typing import Protocol, assert_type
+from warnings import deprecated
+
+class P(Protocol):
+    @deprecated("Use another callback")
+    def __call__(self, x: int) -> int: ...
+
+def dec(fn: Callable[[int], int]) -> P | None: ...
+
+@dec
+def f(x: int) -> int: ...
+
+if f is not None:
+    assert_type(f(1), int)  # E: Use another callback
+
+def direct_dec(fn: Callable[[int], int]) -> P: ...
+
+@direct_dec
+def direct(x: int) -> int: ...
+
+_ = direct
+assert_type(direct(1), int)  # E: Use another callback
+
+@deprecated("Use another function")
+@direct_dec
+def both(x: int) -> int: ...
+
+_ = both  # E: Use another function
+assert_type(both(1), int)  # E: Use another function
+    "#,
+);
+
+testcase!(
+    test_deprecated_union_expression,
+    r#"
+from collections.abc import Callable
+from typing import assert_type
+from warnings import deprecated
+
+@deprecated("Use new instead")
+def old(x: int) -> int: ...
+
+def new(x: int) -> int: ...
+
+def select(flag: bool, cb: Callable[[int], int] | None) -> None:
+    g = old if flag else new  # E: `old` is deprecated
+    h = cb or old  # E: `old` is deprecated
+    _ = flag and old  # E: `old` is deprecated
+    _ = old if flag else old  # E: `old` is deprecated  # E: `old` is deprecated
+    _ = cb or (old if flag else new)  # E: `old` is deprecated
+    assert_type(g(1), int)  # E: `old` is deprecated
+    assert_type(h(1), int)  # E: `old` is deprecated
+    "#,
+);
+
+testcase!(
     test_deprecated_call_3_12,
     test_env_3_12(),
     r#"
