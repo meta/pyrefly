@@ -776,10 +776,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         stmt: &FunctionDefData,
         errors: &ErrorCollector,
     ) -> Type {
-        let ret = self
+        let mut ret = self
             .get(&Key::ReturnType(ShortIdentifier::new(&stmt.name)))
             .ty()
             .clone();
+        if def.metadata.flags.is_cached_property && def.metadata.flags.is_return_inferred {
+            // A cached property stores a writable value, so inferred literals must be widened.
+            ret = ret.promote_implicit_literals(self.stdlib);
+        }
         // `stmt.returns` is always set to None because the binding step calls `mem::take` on it
         let has_return_annotation = self.bindings().function_has_return_annotation(&stmt.name);
         if !has_return_annotation
