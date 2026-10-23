@@ -82,6 +82,27 @@ def check(c: ClsSetattr) -> None:
 );
 
 testcase!(
+    test_setattr_attribute_initialization,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+class BothBranches:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            setattr(self, "x", 1)
+            object.__setattr__(self, "y", 1)
+        else:
+            self.x = 2
+            setattr(self, "y", 2)
+
+class OneBranch:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            setattr(self, "x", 1)  # E: Attribute `x` may be uninitialized
+            object.__setattr__(self, "y", 1)  # E: Attribute `y` may be uninitialized
+"#,
+);
+
+testcase!(
     test_class_body_initialization_is_independent_of_methods,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -100,6 +121,39 @@ class Helper:
 
     def initialize(self) -> None:
         self.x = 2
+"#,
+);
+
+// A path on which the attribute is unset reaches the end of the class body only if every branch
+// it passes through completes.
+testcase!(
+    test_class_attribute_unset_path_cut_off_by_later_branch,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+def coin() -> bool: ...
+
+class CutOff:
+    if coin():
+        value = 1
+    else:
+        pass
+    if coin():
+        value = 2
+    else:
+        stop()
+
+class NotCutOff:
+    if coin():
+        value = 1  # E: Attribute `value` may be uninitialized
+    else:
+        pass
+    if coin():
+        print(0)
+    else:
+        stop()
 "#,
 );
 

@@ -4366,6 +4366,12 @@ impl MergeStyle {
     }
 }
 
+/// The result of analyzing whether a variable is defined after merging branches.
+/// This enum captures the three distinct states:
+/// - `Defined`: Variable is defined in all non-terminating branches
+/// - `DeferredCheck`: Some branches don't define the variable, but they may terminate
+///   (have `Never` type). The check is deferred to solve time.
+/// - `NotDefined`: Variable is not defined in some branches that may not terminate
 enum DefinitionStatus {
     /// Variable is defined in all non-terminating branches.
     Defined,
@@ -4886,7 +4892,15 @@ impl<'a> BindingsBuilder<'a> {
             || base.is_definitely_unreachable)
             && flows.iter().all(|f| f.is_definitely_unreachable);
 
-        let n_branches = flows.len() + usize::from(matches!(merge_style, MergeStyle::Loop));
+        // For a regular loop, we merge the base so there's one extra branch being merged.
+        // For LoopDefinitelyRuns, we don't count the base as an extra branch because we
+        // know the loop body will definitely execute at least once.
+        let n_branches = flows.len()
+            + if matches!(merge_style, MergeStyle::Loop) {
+                1
+            } else {
+                0
+            };
 
         // Collect all termination keys from flows (for building dense MergeItems)
         let all_termination_keys: Vec<Option<Idx<Key>>> =
