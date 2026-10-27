@@ -1866,6 +1866,116 @@ def test(foo: Foo) -> None:
 );
 
 testcase!(
+    test_builtin_getattr_literal_attribute_name,
+    r#"
+from typing import Any, assert_type
+
+class Foo:
+    x: int
+
+    def __init__(self) -> None:
+        pass
+
+def test(foo: Foo, attr_name: str) -> None:
+    assert_type(getattr(foo, "x"), int)
+    assert_type(getattr(foo, "x", None), int | None)
+    assert_type(getattr(foo, "y"), Any)
+    assert_type(getattr(foo, "y", None), Any | None)
+    assert_type(getattr(foo, attr_name), Any)
+    assert_type(getattr(foo, attr_name, None), Any | None)
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_mangled_attribute_name,
+    r#"
+from typing import Any, assert_type
+
+class C:
+    __x: int
+
+    def __getattr__(self, name: str) -> str:
+        return "fallback"
+
+def test(c: C) -> None:
+    assert_type(getattr(c, "__x"), Any)
+    assert_type(getattr(c, "__x", None), Any | None)
+    getattr(c, "__x").upper()
+    assert_type(getattr(c, "__class__"), type[C])
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_hook_lookup_failure,
+    r#"
+from typing import Any, Literal, assert_type, overload
+
+class C:
+    @overload
+    def __getattr__(self, name: Literal["x"]) -> int: ...
+    @overload
+    def __getattr__(self, name: Literal["y"]) -> str: ...
+    def __getattr__(self, name: str) -> int | str:
+        if name == "x":
+            return 1
+        if name == "y":
+            return "value"
+        raise AttributeError(name)
+
+def test(c: C) -> None:
+    assert_type(getattr(c, "x"), int)
+    assert_type(getattr(c, "y", None), str | None)
+    assert_type(getattr(c, "missing"), Any)
+    assert_type(getattr(c, "missing", None), Any | None)
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_argument_errors,
+    r#"
+class C:
+    x: int
+
+def test(c: C) -> None:
+    getattr(undefined_receiver, "x")  # E: Could not find name `undefined_receiver`
+    getattr(c, "x", undefined_default)  # E: Could not find name `undefined_default`
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_container_defaults,
+    TestEnv::new().enable_implicit_any_empty_container_error(),
+    r#"
+from typing import Any, assert_type
+
+class C:
+    x: int
+
+def test(c: C) -> None:
+    assert_type(getattr(c, "x", []), int | list[Any])
+    assert_type(getattr(c, "x", {}), int | dict[Any, Any])
+    assert_type(getattr(c, "missing", []), Any | list[Any])
+    assert_type(getattr(c, "missing", {}), Any | dict[Any, Any])
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_non_special_call_shapes,
+    r#"
+from typing import Any, assert_type
+
+class Foo:
+    x: int
+
+def test(foo: Foo) -> None:
+    assert_type(getattr(*(foo, "x")), Any)
+    assert_type(getattr(*[foo], "x"), Any)
+    assert_type(getattr(foo, "x", *(None,)), Any | None)
+    getattr(foo, "x", None, None)  # E:
+    "#,
+);
+
+testcase!(
     test_object_setattr,
     r#"
 from typing import assert_type

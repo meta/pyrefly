@@ -6,7 +6,27 @@
  */
 
 use crate::test::util::TestEnv;
+use crate::test::util::testcase_for_macro;
 use crate::testcase;
+
+// Nested calls must infer each receiver and default only once, including failed lookups.
+#[test]
+fn test_builtin_getattr_nested_arguments() -> anyhow::Result<()> {
+    let mut code = String::from(
+        "from typing import Any, assert_type\nclass C:\n    child: C\ndef test(c: C) -> None:\n",
+    );
+    for (name, expected) in [("child", "C"), ("missing", "Any")] {
+        let mut receiver = String::from("c");
+        let mut default = String::from("None");
+        for _ in 0..24 {
+            receiver = format!("getattr({receiver}, {name:?})");
+            default = format!("getattr(c, {name:?}, {default})");
+        }
+        code.push_str(&format!("    assert_type({receiver}, {expected})\n"));
+        code.push_str(&format!("    assert_type({default}, {expected} | None)\n"));
+    }
+    testcase_for_macro(TestEnv::new(), &code, file!(), line!())
+}
 
 // At some point in the past, this test took many minutes and consumed 50Gb of RAM.
 testcase!(
