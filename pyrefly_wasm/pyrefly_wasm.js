@@ -334,6 +334,18 @@ export class State {
         return this.call('autoComplete', [line | 0, column | 0]);
     }
 
+    gotoDefinitionLocations(line, column) {
+        return this.call('gotoDefinitionLocations', [line | 0, column | 0]);
+    }
+
+    autoCompleteLsp(line, column) {
+        return this.call('autoCompleteLsp', [line | 0, column | 0]);
+    }
+
+    pendingImports() {
+        return this.call('pendingImports');
+    }
+
     inlayHint(callArgumentNames) {
         return this.call('inlayHint', Boolean(callArgumentNames));
     }
