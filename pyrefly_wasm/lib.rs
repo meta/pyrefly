@@ -35,7 +35,10 @@ enum Request {
     SemanticTokens(Option<Range>),
     SemanticTokensLegend,
     GotoDefinition(i32, i32, bool),
+    GotoDefinitionLocations(i32, i32),
     AutoComplete(i32, i32),
+    AutoCompleteLsp(i32, i32),
+    PendingImports,
     InlayHint(bool),
 }
 
@@ -72,6 +75,13 @@ fn dispatch(playground: &mut Playground, request: Request) -> serde_json::Result
                 serde_json::to_value(results)
             }
         }
+        Request::GotoDefinitionLocations(line, column) => {
+            serde_json::to_value(playground.goto_definition_locations(Position::new(line, column)))
+        }
+        Request::AutoCompleteLsp(line, column) => {
+            serde_json::to_value(playground.autocomplete_lsp(Position::new(line, column)))
+        }
+        Request::PendingImports => serde_json::to_value(playground.pending_imports()),
         Request::AutoComplete(line, column) => {
             serde_json::to_value(playground.autocomplete(Position::new(line, column)))
         }
@@ -159,4 +169,22 @@ pub unsafe extern "C" fn pyrefly_call(handle: usize, ptr: *mut u8, len: usize) -
         Err(e) => json!({ "err": e.to_string() }),
     };
     into_host(response.to_string().into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_requests_return_empty_arrays_without_files() {
+        let mut playground = Playground::new(Some("3.12")).unwrap();
+        for request in [
+            json!({"method": "gotoDefinitionLocations", "args": [1, 1]}),
+            json!({"method": "autoCompleteLsp", "args": [1, 1]}),
+            json!({"method": "pendingImports"}),
+        ] {
+            let request = serde_json::from_value(request).unwrap();
+            assert_eq!(dispatch(&mut playground, request).unwrap(), json!([]));
+        }
+    }
 }
