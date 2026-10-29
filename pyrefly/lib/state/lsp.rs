@@ -3574,6 +3574,13 @@ impl<'a> Transaction<'a> {
         // Actions that carry more than one edit (e.g. the missing-`@override` fix,
         // which inserts both the decorator and an import).
         let mut multi_actions: Vec<(String, Vec<(Module, TextRange, String)>)> = Vec::new();
+        if let Some(actions) = self.implement_abstract_members_code_actions(handle, range) {
+            multi_actions.extend(
+                actions
+                    .into_iter()
+                    .map(|action| (action.title, action.edits)),
+            );
+        }
         // Deduplicates the actions pushed onto `other_actions`. The same fix can
         // be generated more than once -- e.g. several errors on one line all
         // produce an identical "add pyrefly ignore" action, or one unused binding
@@ -3795,9 +3802,8 @@ impl<'a> Transaction<'a> {
         // this will be the public/non-deprecated version)
         import_actions.dedup_by(|a, b| a.insert_text == b.insert_text);
 
-        // Every quick-fix producer except the missing-`@override` fix yields a single
-        // edit; wrap those in a one-element edit list so they share the multi-edit shape
-        // that `multi_actions` and the LSP layer expect.
+        // Wrap each single-edit action so it shares the representation used by
+        // `multi_actions` and the LSP layer.
         fn wrap_single(
             (title, module, range, insert_text): (String, Module, TextRange, String),
         ) -> (String, Vec<(Module, TextRange, String)>) {
