@@ -984,6 +984,9 @@ impl<'a> BindingsBuilder<'a> {
                         delete_idx,
                         Binding::Delete(Box::new(target.clone())),
                     );
+                    if let Expr::Attribute(attribute) = &target {
+                        self.scopes.record_self_attr_delete(attribute);
+                    }
                     if let Expr::Attribute(_) = target
                         && let Some((identifier, _)) = identifier_and_chain_prefix_for_expr(&target)
                     {
@@ -1276,6 +1279,7 @@ impl<'a> BindingsBuilder<'a> {
                             None,
                         ),
                     );
+                    let has_value = x.value.is_some();
                     let value = match x.value {
                         Some(mut assigned) => {
                             self.bind_attr_assign(attr.clone(), &mut assigned, |_attr, value, _| {
@@ -1292,10 +1296,12 @@ impl<'a> BindingsBuilder<'a> {
                             ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))
                         }
                     };
-                    if !self
-                        .scopes
-                        .record_self_attr_assign(&attr, value.clone(), Some(ann_key))
-                    {
+                    if !self.scopes.record_self_attr_assign(
+                        &attr,
+                        value.clone(),
+                        Some(ann_key),
+                        has_value,
+                    ) {
                         self.error(
                             x.range,
                             ErrorKind::BadAssignment,
