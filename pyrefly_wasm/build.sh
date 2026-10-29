@@ -18,7 +18,14 @@ if command -v rustup > /dev/null; then
 fi
 cargo build --release --target wasm32-wasip1
 
-# wasm-opt is assumed to be in PATH: https://github.com/WebAssembly/binaryen
 mkdir -p target
 cp pyrefly_wasm.js target/pyrefly_wasm.js
-wasm-opt "${CARGO_TARGET_DIR:-../target}/wasm32-wasip1/release/pyrefly_wasm.wasm" -Os -o target/pyrefly_wasm_bg.wasm.opt
+cp "${CARGO_TARGET_DIR:-../target}/wasm32-wasip1/release/pyrefly_wasm.wasm" target/pyrefly_wasm_bg.wasm
+
+# wasm-opt is required only for the optimized website bundle.
+if [[ "$*" != *--no-opt* ]]; then
+  wasm-opt target/pyrefly_wasm_bg.wasm -Os -o target/pyrefly_wasm_bg.wasm.opt
+fi
+
+# Publish the hashes only after both WASM build inputs are ready.
+node write-manifest.cjs
