@@ -69,6 +69,7 @@ use uv_pep440::Version;
 #[cfg(not(target_arch = "wasm32"))]
 use uv_pep440::VersionSpecifiers;
 
+use crate::base::ClassDecoratorBehavior;
 use crate::base::ConfigBase;
 use crate::base::ExtraConfigs;
 use crate::base::InferReturnTypes;
@@ -1268,6 +1269,15 @@ impl ConfigFile {
             .unwrap_or_else(|| self.root.infer_return_types.unwrap())
     }
 
+    pub fn class_decorator_behavior(&self, path: &ModulePath) -> ClassDecoratorBehavior {
+        self.get_from_config_overrides(ConfigBase::get_class_decorator_behavior, path)
+            .unwrap_or_else(|| {
+                self.root
+                    .class_decorator_behavior
+                    .expect("configure() sets the root class decorator behavior")
+            })
+    }
+
     pub fn disable_type_errors_in_ide(&self, path: &ModulePath) -> bool {
         self.get_from_config_overrides(ConfigBase::get_disable_type_errors_in_ide, path)
             .unwrap_or_else(|| self.root.disable_type_errors_in_ide.unwrap_or_default())
@@ -1818,6 +1828,7 @@ impl ConfigFile {
             }
             apply_preset_default!(check_unannotated_defs);
             apply_preset_default!(infer_return_types);
+            apply_preset_default!(class_decorator_behavior);
             apply_preset_default!(infer_with_first_use);
             apply_preset_default!(strict_callable_subtyping);
             apply_preset_default!(strict_partial_subtyping);
@@ -1869,6 +1880,10 @@ impl ConfigFile {
 
         if self.root.infer_return_types.is_none() {
             self.root.infer_return_types = Some(InferReturnTypes::Checked);
+        }
+
+        if self.root.class_decorator_behavior.is_none() {
+            self.root.class_decorator_behavior = Some(ClassDecoratorBehavior::default());
         }
 
         if self.root.ignore_errors_in_generated_code.is_none() {
@@ -2810,6 +2825,7 @@ mod tests {
                     untyped_def_behavior: Some(UntypedDefBehavior::CheckAndInferReturnType),
                     check_unannotated_defs: None,
                     infer_return_types: None,
+                    class_decorator_behavior: None,
                     permissive_ignores: None,
                     enabled_ignores: None,
                     type_ignore_unknown_tag_behavior: None,
@@ -2842,6 +2858,7 @@ mod tests {
                         untyped_def_behavior: Some(UntypedDefBehavior::CheckAndInferReturnAny),
                         check_unannotated_defs: None,
                         infer_return_types: None,
+                        class_decorator_behavior: None,
                         permissive_ignores: None,
                         enabled_ignores: None,
                         type_ignore_unknown_tag_behavior: None,
@@ -3532,6 +3549,7 @@ output-format = "omit-errors"
                 untyped_def_behavior: Some(UntypedDefBehavior::CheckAndInferReturnType),
                 check_unannotated_defs: None,
                 infer_return_types: None,
+                class_decorator_behavior: None,
                 disable_type_errors_in_ide: Some(true),
                 ignore_errors_in_generated_code: Some(false),
                 infer_with_first_use: Some(true),
@@ -3806,6 +3824,49 @@ output-format = "omit-errors"
             config.errors(&project).severity(ErrorKind::BadReturn),
             Severity::Warn
         );
+    }
+
+    #[test]
+    fn test_class_decorator_behavior_config() {
+        let mut config = ConfigFile::default();
+        config.interpreters.skip_interpreter_query = true;
+        assert!(config.configure().is_empty());
+        assert_eq!(
+            config.class_decorator_behavior(&test_path("src/main.py")),
+            ClassDecoratorBehavior::TypedOnly,
+        );
+
+        for (value, expected) in [
+            ("ignore", ClassDecoratorBehavior::Ignore),
+            ("typed-only", ClassDecoratorBehavior::TypedOnly),
+            ("all", ClassDecoratorBehavior::All),
+        ] {
+            let mut config: ConfigFile = toml::from_str(&format!(
+                "class-decorator-behavior = '{value}'\n\
+                 [[sub-config]]\n\
+                 matches = 'legacy/**'\n\
+                 class-decorator-behavior = 'ignore'\n"
+            ))
+            .unwrap();
+            config.interpreters.skip_interpreter_query = true;
+            assert!(config.configure().is_empty());
+            assert_eq!(
+                config.class_decorator_behavior(&test_path("src/main.py")),
+                expected,
+            );
+            assert_eq!(
+                config.class_decorator_behavior(&test_path("legacy/main.py")),
+                ClassDecoratorBehavior::Ignore,
+            );
+            let target_config = default_config_test_config(Some(serde_json::json!({
+                "class-decorator-behavior": value
+            })));
+            assert_eq!(
+                target_config.class_decorator_behavior(&test_path("src/main.py")),
+                expected,
+            );
+        }
+        assert!(toml::from_str::<ConfigFile>("class-decorator-behavior = 'invalid'").is_err());
     }
 
     /// `type-ignore-unknown-tag-behavior` resolves through the same chain as every
@@ -4927,6 +4988,7 @@ output-format = "omit-errors"
                 untyped_def_behavior: Some(UntypedDefBehavior::CheckAndInferReturnType),
                 check_unannotated_defs: None,
                 infer_return_types: None,
+                class_decorator_behavior: None,
                 disable_type_errors_in_ide: Some(true),
                 ignore_errors_in_generated_code: Some(false),
                 infer_with_first_use: Some(true),
@@ -4972,6 +5034,7 @@ output-format = "omit-errors"
                 untyped_def_behavior: Some(UntypedDefBehavior::CheckAndInferReturnType),
                 check_unannotated_defs: None,
                 infer_return_types: None,
+                class_decorator_behavior: None,
                 disable_type_errors_in_ide: Some(true),
                 ignore_errors_in_generated_code: Some(false),
                 infer_with_first_use: Some(true),

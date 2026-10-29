@@ -50,6 +50,29 @@ pub enum InferReturnTypes {
     Checked,
 }
 
+/// Controls how class decorators affect the type bound to the class name.
+#[derive(
+    Debug,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    Clone,
+    Copy,
+    Default,
+    ValueEnum
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClassDecoratorBehavior {
+    /// Preserve the class regardless of decorator return types.
+    Ignore,
+    /// Apply typed decorators and preserve the class for untyped decorators.
+    #[default]
+    TypedOnly,
+    /// Apply all decorators, including those that return `Any` or `Unknown`.
+    All,
+}
+
 /// How to handle when recursion depth limit is exceeded.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone, Copy, Default)]
 #[derive(ValueEnum)]
@@ -331,6 +354,9 @@ pub struct ConfigBase {
     ///   are only eligible when `check-unannotated-defs` is true.
     pub infer_return_types: Option<InferReturnTypes>,
 
+    /// How class decorators affect the class type. Defaults to `typed-only`.
+    pub class_decorator_behavior: Option<ClassDecoratorBehavior>,
+
     /// Whether to disable type errors in language server. By default errors will be shown in IDEs.
     pub disable_type_errors_in_ide: Option<bool>,
 
@@ -465,6 +491,10 @@ impl ConfigBase {
 
     pub fn get_infer_return_types(base: &Self) -> Option<InferReturnTypes> {
         base.infer_return_types
+    }
+
+    pub fn get_class_decorator_behavior(base: &Self) -> Option<ClassDecoratorBehavior> {
+        base.class_decorator_behavior
     }
 
     pub fn get_disable_type_errors_in_ide(base: &Self) -> Option<bool> {
