@@ -292,12 +292,13 @@ fn import_edits_for_type(
         );
         let position = import_edit.range.start();
         let insert_text = import_edit.insert_text;
-        // Only dedup against full import lines: merge edits have `new_text` like
+        // Only dedup against full import lines: merge edits have `insert_text` like
         // `, X`, and a substring check for that would spuriously match unrelated
         // code (function args, type annotations). Merge edits are already
-        // deduplicated inside `merge_range_for_import`.
-        if (insert_text.starts_with("from ") || insert_text.starts_with("import "))
-            && module_contents.contains(&insert_text)
+        // deduplicated inside `find_import_merge_edit`.
+        if insert_text.is_empty()
+            || ((insert_text.starts_with("from ") || insert_text.starts_with("import "))
+                && module_contents.contains(&insert_text))
         {
             return;
         }
