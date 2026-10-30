@@ -2722,6 +2722,40 @@ for article in Article.objects.annotate(extra_title=models.F("title")):
 }
 
 #[test]
+fn completion_django_queryset_manager_methods() {
+    let code = r#"
+from django.db import models
+
+class Q(models.QuerySet["M"]):
+    def active(self) -> int:
+        return 1
+
+    def _private(self) -> int:
+        return 1
+
+class M(models.Model):
+    objects = Q.as_manager()
+
+M.objects.
+#         ^
+"#;
+    let mut env = django_env();
+    env.add("main", code);
+    let (state, handle) = env.with_default_require_level(Require::Exports).to_state();
+    let completions = state.transaction().completion(
+        &handle("main"),
+        extract_cursors_for_test(code)[0],
+        ImportFormat::Absolute,
+        true,
+        None,
+    );
+    assert!(completions.iter().any(|item| item.label == "active"));
+    assert!(completions.iter().any(|item| item.label == "db_manager"));
+    assert!(!completions.iter().any(|item| item.label == "_private"));
+    assert!(!completions.iter().any(|item| item.label == "delete"));
+}
+
+#[test]
 fn kwargs_completion_pydantic_constructor_ignores_inherited_unannotated_new() {
     let sqlmodel = r#"
 from typing import Any
