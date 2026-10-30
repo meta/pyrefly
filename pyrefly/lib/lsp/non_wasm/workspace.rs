@@ -61,6 +61,7 @@ pub struct Workspace {
     pub disable_language_services: bool,
     pub disabled_language_services: Option<DisabledLanguageServices>,
     pub runnable_code_lens: bool,
+    pub references_code_lens: bool,
     pub display_type_errors: Option<DisplayTypeErrors>,
     pub type_checking_mode: Option<TypeCheckingMode>,
     /// Workspace-scoped IDE-only kill switch. When `true`, all type-error
@@ -256,6 +257,8 @@ struct PyreflyClientConfig {
     /// `pyrefly.toml`.
     extra_project_excludes: Option<Globs>,
     runnable_code_lens: Option<bool>,
+    #[serde(default)]
+    references_code_lens: bool,
     diagnostic_mode: Option<DiagnosticMode>,
     #[serde(default, deserialize_with = "deserialize_analysis")]
     analysis: Option<LspAnalysisConfig>,
@@ -592,6 +595,7 @@ impl Workspaces {
             if let Some(runnable_code_lens) = pyrefly.runnable_code_lens {
                 self.update_runnable_code_lens(scope_uri, runnable_code_lens);
             }
+            self.update_references_code_lens(scope_uri, pyrefly.references_code_lens);
             if let Some(stream_diagnostics) = pyrefly.stream_diagnostics {
                 self.update_stream_diagnostics(scope_uri, stream_diagnostics);
             }
@@ -684,6 +688,20 @@ impl Workspaces {
                 }
             }
             None => self.default.write().runnable_code_lens = runnable_code_lens,
+        }
+    }
+
+    /// Apply the reference CodeLens setting for one scope.
+    fn update_references_code_lens(&self, scope_uri: &Option<Uri>, enabled: bool) {
+        match scope_uri {
+            Some(uri) => {
+                if let Ok(path) = uri.to_file_path()
+                    && let Some(workspace) = self.workspaces.write().get_mut(&path)
+                {
+                    workspace.references_code_lens = enabled;
+                }
+            }
+            None => self.default.write().references_code_lens = enabled,
         }
     }
 

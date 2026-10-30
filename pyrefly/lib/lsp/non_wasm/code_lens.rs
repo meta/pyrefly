@@ -7,12 +7,10 @@
 
 use lsp_types::Location;
 use lsp_types::Range;
-use lsp_types::Uri;
 use lsp_types::VersionedTextDocumentIdentifier;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-
 
 /// A document batch for override lenses. Ranges use the specified editor version.
 #[derive(Debug, Deserialize, Serialize)]

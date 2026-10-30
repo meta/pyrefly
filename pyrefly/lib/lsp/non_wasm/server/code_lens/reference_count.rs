@@ -7,27 +7,27 @@
 
 //! Lazy reference-count CodeLens creation and resolution.
 
+use std::collections::HashSet;
+
 use lsp_types::CodeLens;
 use lsp_types::Command;
 use lsp_types::DocumentSymbol;
 use lsp_types::Location;
+use lsp_types::Range;
 use lsp_types::SymbolKind;
 use lsp_types::Uri;
 use pyrefly_build::handle::Handle;
 use pyrefly_util::telemetry::EmptyResponseReason;
-use ruff_text_size::TextRange;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::ModuleInfo;
-use crate::lsp::non_wasm::module_helpers::PathRemapper;
-use crate::lsp::non_wasm::module_helpers::module_info_to_uri;
+use super::CodeLensError;
 use crate::state::state::Transaction;
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(super) struct ReferenceCodeLensData {
     pub(super) uri: Uri,
+    pub(super) version: Option<i32>,
 }
 
 /// Collect unresolved lenses without performing definition lookup or global reference searches.
@@ -35,44 +35,38 @@ pub(super) fn unresolved_code_lenses(
     transaction: &Transaction<'_>,
     handle: &Handle,
     uri: &Uri,
+    version: Option<i32>,
 ) -> Result<Vec<CodeLens>, EmptyResponseReason> {
     let symbols = transaction
         .symbols(handle, None)
         .ok_or(EmptyResponseReason::ModuleInfoNotFound)?;
     let mut lenses = Vec::new();
-    collect_symbol_lenses(&symbols, uri, &mut lenses);
+    collect_symbol_lenses(&symbols, uri, version, &mut lenses);
     Ok(lenses)
 }
 
 /// Decode the opaque data attached to an unresolved reference-count lens.
-pub(super) fn resolve_data(lens: &CodeLens) -> Result<ReferenceCodeLensData, String> {
-    let data = lens
-        .data
-        .clone()
-        .ok_or_else(|| "Reference CodeLens is missing resolve data".to_owned())?;
-    serde_json::from_value(data)
-        .map_err(|error| format!("Invalid reference CodeLens resolve data: {error}"))
+pub(super) fn resolve_data(lens: &CodeLens) -> Result<ReferenceCodeLensData, CodeLensError> {
+    let data = lens.data.clone().ok_or(CodeLensError::MissingData)?;
+    serde_json::from_value(data).map_err(CodeLensError::InvalidData)
 }
 
 /// Attach the reference command, excluding every location backed by a notebook cell.
 pub(super) fn resolve_code_lens(
     mut lens: CodeLens,
     source_uri: &Uri,
-    results: Vec<(ModuleInfo, Vec<TextRange>)>,
-    path_remapper: Option<&PathRemapper>,
+    results: Vec<(Uri, Vec<Range>)>,
+    notebook_cells: &HashSet<Uri>,
 ) -> CodeLens {
     let mut locations = Vec::new();
-    for (info, ranges) in results {
-        let Some(uri) = module_info_to_uri(&info, path_remapper) else {
+    for (uri, ranges) in results {
+        if notebook_cells.contains(&uri) || uri.path().ends_with(".ipynb") {
             continue;
-        };
+        }
         for range in ranges {
-            if info.to_cell_for_lsp(range.start()).is_some() {
-                continue;
-            }
             locations.push(Location {
                 uri: uri.clone(),
-                range: info.to_lsp_range(range),
+                range,
             });
         }
     }
@@ -85,7 +79,7 @@ pub(super) fn resolve_code_lens(
     };
     lens.command = Some(Command {
         title,
-        command: "editor.action.showReferences".to_owned(),
+        command: "pyrefly.showReferences".to_owned(),
         arguments: Some(vec![
             serde_json::to_value(source_uri).expect("URI should serialize for code lens"),
             serde_json::to_value(lens.range.start)
@@ -99,7 +93,12 @@ pub(super) fn resolve_code_lens(
 }
 
 /// Traverse document symbols and create one unresolved lens per reference-countable definition.
-fn collect_symbol_lenses(symbols: &[DocumentSymbol], uri: &Uri, lenses: &mut Vec<CodeLens>) {
+fn collect_symbol_lenses(
+    symbols: &[DocumentSymbol],
+    uri: &Uri,
+    version: Option<i32>,
+    lenses: &mut Vec<CodeLens>,
+) {
     for symbol in symbols {
         if matches!(
             symbol.kind,
@@ -109,13 +108,16 @@ fn collect_symbol_lenses(symbols: &[DocumentSymbol], uri: &Uri, lenses: &mut Vec
                 range: symbol.selection_range,
                 command: None,
                 data: Some(
-                    serde_json::to_value(ReferenceCodeLensData { uri: uri.clone() })
-                        .expect("Reference CodeLens data should serialize"),
+                    serde_json::to_value(ReferenceCodeLensData {
+                        uri: uri.clone(),
+                        version,
+                    })
+                    .expect("Reference CodeLens data should serialize"),
                 ),
             });
         }
         if let Some(children) = symbol.children.as_deref() {
-            collect_symbol_lenses(children, uri, lenses);
+            collect_symbol_lenses(children, uri, version, lenses);
         }
     }
 }
