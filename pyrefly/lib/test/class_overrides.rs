@@ -783,6 +783,109 @@ class B(A):
     "#,
 );
 
+// Regression test for https://github.com/facebook/pyrefly/issues/3062
+testcase!(
+    test_cached_property_overrides_unannotated_class_variable,
+    r#"
+from functools import cached_property
+
+class BaseDatabaseFeatures:
+    can_introspect_fk = True
+    update_can_self_select = True
+
+class MySQLFeatures(BaseDatabaseFeatures):
+    @cached_property
+    def can_introspect_fk(self):
+        return self._check()
+
+    @cached_property
+    def update_can_self_select(self):
+        return True
+
+    def _check(self) -> bool:
+        return False
+    "#,
+);
+
+testcase!(
+    test_cached_property_protocol_write,
+    r#"
+from functools import cached_property
+from typing import Literal, Protocol, assert_type
+
+class Writable(Protocol):
+    x: bool
+
+class Cached:
+    @cached_property
+    def x(self):
+        return True
+
+def write(value: Writable) -> None:
+    value.x = False
+
+def require_true(value: Literal[True]) -> None: ...
+
+def check(value: Cached) -> None:
+    assert_type(value.x, bool)
+    write(value)
+    assert_type(value.x, bool)
+    require_true(value.x)  # E: Argument `bool` is not assignable
+    value.x = False
+    assert_type(value.x, bool)
+    "#,
+);
+
+testcase!(
+    test_cached_property_inherited_write,
+    r#"
+from functools import cached_property
+from typing import Literal, assert_type
+
+class Base:
+    x = True
+
+class Child(Base):
+    @cached_property
+    def x(self):
+        return True
+
+def write(value: Base) -> None:
+    value.x = False
+
+def require_true(value: Literal[True]) -> None: ...
+
+def check(value: Child) -> None:
+    assert_type(value.x, bool)
+    write(value)
+    require_true(value.x)  # E: Argument `bool` is not assignable
+    value.x = False
+    assert_type(value.x, bool)
+    "#,
+);
+
+testcase!(
+    test_cached_property_read_only_parent,
+    r#"
+from dataclasses import dataclass
+from functools import cached_property
+
+@dataclass(frozen=True)
+class Base:
+    x: int
+
+class Compatible(Base):
+    @cached_property
+    def x(self) -> bool:
+        return True
+
+class Incompatible(Base):
+    @cached_property
+    def x(self) -> str:  # pyrefly: ignore[bad-override-mutable-attribute]  # E: Class member `Incompatible.x` overrides parent class `Base` in an inconsistent manner
+        return "wrong"
+    "#,
+);
+
 testcase!(
     test_inherit_type_attribute,
     r#"
