@@ -11,6 +11,7 @@ use pyrefly_python::dunder;
 use pyrefly_types::dimension::Int;
 use pyrefly_types::dimension::canonicalize;
 use pyrefly_types::dimension::int_type_is_provably_nonnegative;
+use pyrefly_types::function::BodyKind;
 use pyrefly_types::lit_int::LitInt;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::quantified::Quantified;
@@ -48,6 +49,7 @@ use crate::module::typeshed::typeshed;
 use crate::types::class::Class;
 use crate::types::literal::Lit;
 use crate::types::tuple::Tuple;
+use crate::types::types::BoundMethodType;
 use crate::types::types::Type;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -225,6 +227,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         Some(result_ty)
     }
 
+    /// Callers distribute operands over unions before resolving each operand pair.
     fn try_binop_calls(
         &self,
         calls: &[(&Name, &Type, &Type)],
@@ -233,6 +236,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         context: &dyn Fn() -> ErrorContext,
     ) -> Type {
         let mut first_call = None;
+        let mut successful_ret = self.heap.mk_never();
+        let not_implemented_type = self.stdlib.not_implemented_type();
         for (dunder, target, arg) in calls {
             let method_type_dunder = self.type_of_magic_dunder_attr(
                 target,
@@ -246,6 +251,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             );
             let Some(method_type_dunder) = method_type_dunder else {
                 continue;
+            };
+            let inferred_inherited_return = match (&method_type_dunder, target) {
+                (Type::BoundMethod(method), Type::ClassType(cls))
+                    if !matches!(method.func, BoundMethodType::Overload(_)) =>
+                {
+                    let metadata = method.func.metadata();
+                    metadata.flags.is_return_inferred
+                        && metadata.flags.body_kind != BodyKind::ReturnNotImplemented
+                        && metadata
+                            .kind
+                            .class()
+                            .is_some_and(|owner| owner != *cls.class_object())
+                }
+                _ => false,
             };
             let callee_errors = self.error_collector();
             let call_errors = self.error_collector();
@@ -262,12 +281,51 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // valid dunder call, so gate on hard errors only.
             if !call_errors.has_hard() {
                 errors.extend(callee_errors);
-                return ret;
+                let ret = match ret {
+                    Type::ClassType(cls) if cls == *not_implemented_type => {
+                        if inferred_inherited_return {
+                            // Inference uses the base implementation and can miss subclass overrides
+                            // of methods called by this inherited operator.
+                            self.heap.mk_any_implicit()
+                        } else {
+                            continue;
+                        }
+                    }
+                    Type::Union(mut union) => {
+                        if let Some(index) = union.members.iter().position(
+                            |member| matches!(member, Type::ClassType(cls) if cls == not_implemented_type),
+                        ) {
+                            union.members.remove(index);
+                            let ret_without_not_implemented = self.unions(union.members);
+                            successful_ret = self.union(successful_ret, ret_without_not_implemented);
+                            continue;
+                        }
+                        Type::Union(union)
+                    }
+                    ret => ret,
+                };
+                return if successful_ret.is_never() {
+                    ret
+                } else {
+                    self.union(successful_ret, ret)
+                };
             } else if first_call.is_none() {
                 first_call = Some((callee_errors, call_errors, ret));
             }
         }
-        if let Some((callee_errors, call_errors, ret)) = first_call {
+        if first_call.is_none()
+            && calls
+                .first()
+                .is_some_and(|(name, _, _)| *name == &dunder::EQ || *name == &dunder::NE)
+        {
+            // Equality uses identity comparison when both methods return NotImplemented.
+            self.union(
+                successful_ret,
+                self.heap.mk_class_type(self.stdlib.bool().clone()),
+            )
+        } else if !successful_ret.is_never() {
+            successful_ret
+        } else if let Some((callee_errors, call_errors, ret)) = first_call {
             errors.extend(callee_errors);
             errors.extend(call_errors);
             ret
