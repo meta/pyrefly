@@ -260,6 +260,91 @@ second: list[int]
     );
 }
 
+#[test]
+fn test_annotated_metadata_has_expression_type_traces() {
+    let tdir = TempDir::new().unwrap();
+    let main_path = tdir.path().join("main.py");
+    let pkg_path = tdir.path().join("pkg.py");
+    let utils_path = tdir.path().join("utils.py");
+    let code = r#"from typing import Annotated
+import pkg
+
+def takes(x: Annotated[int, pkg.utils.ValueRange, pkg.utils.Unit]) -> None: ...
+"#;
+    fs_anyhow::write(&main_path, code).unwrap();
+    fs_anyhow::write(&pkg_path, "import utils\n").unwrap();
+    fs_anyhow::write(&utils_path, "class ValueRange: ...\nclass Unit: ...\n").unwrap();
+
+    let mut config = ConfigFile::default();
+    config.python_environment.set_empty_to_default();
+    config.search_path_from_args.push(tdir.path().to_path_buf());
+    config.configure();
+    let query = Query::new(
+        ConfigFinder::new_constant(ArcId::new(config)),
+        TEST_THREAD_COUNT,
+    );
+    let main = ModuleName::from_str("main");
+    let pkg = ModuleName::from_str("pkg");
+    let utils = ModuleName::from_str("utils");
+    let errors = query.add_files(vec![
+        (main, ModulePath::filesystem(main_path.clone())),
+        (pkg, ModulePath::filesystem(pkg_path)),
+        (utils, ModulePath::filesystem(utils_path)),
+    ]);
+    assert!(errors.is_empty(), "Unexpected errors: {errors:?}");
+
+    let response = query
+        .get_type_table_in_file_with_timing(main, ModulePath::filesystem(main_path))
+        .unwrap()
+        .0;
+    let table = indexed_shape_values(&response.type_table);
+    // Finds the type index traced for the `occurrence`-th match of `text` in the `def` line.
+    let def_line = code.lines().nth(3).unwrap();
+    let type_of = |text: &str, occurrence: usize| {
+        let (start, _) = def_line.match_indices(text).nth(occurrence).unwrap();
+        let (start, end) = (start as u32, (start + text.len()) as u32);
+        response
+            .types
+            .iter()
+            .find_map(|entry| {
+                let range = &entry.location;
+                (range.start_line.get() == 4
+                    && range.start_col == start
+                    && range.end_line.get() == 4
+                    && range.end_col == end)
+                    .then_some(entry.type_index)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expected a type trace for `{text}` at 4:{start}-4:{end}; got {:?}",
+                    response.types
+                )
+            })
+    };
+
+    let value_range = table
+        .iter()
+        .position(|shape| is_indexed_named_shape(shape, "utils.ValueRange", &[]))
+        .unwrap();
+    let unit = table
+        .iter()
+        .position(|shape| is_indexed_named_shape(shape, "utils.Unit", &[]))
+        .unwrap();
+    assert!(
+        is_indexed_named_shape(
+            &table[type_of("pkg.utils.ValueRange", 0)],
+            "typing.Type",
+            &[value_range]
+        ),
+        "Unexpected ValueRange trace: {table:#?}"
+    );
+    assert!(
+        is_indexed_named_shape(&table[type_of("pkg.utils.Unit", 0)], "typing.Type", &[unit]),
+        "Unexpected Unit trace: {table:#?}"
+    );
+    assert_eq!(type_of("pkg.utils", 0), type_of("pkg.utils", 1));
+}
+
 /// Enum-member literals must carry the enum class's fully module-qualified name
 /// (`main.Color.RED`), not the bare class name (`Color.RED`), in the inline
 /// shape path — matching the module-qualified display string and the

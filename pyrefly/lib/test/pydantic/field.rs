@@ -13,6 +13,156 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 pydantic_testcase!(
+    test_model_validate_mutable_input_provenance,
+    r#"
+from pydantic import BaseModel, Field
+
+class Model(BaseModel):
+    x: int = Field(ge=0)
+
+payload = {"x": -1}
+payload.update({"x": 1})
+Model.model_validate(payload)
+
+aliased = {"x": -1}
+other = aliased
+other["x"] = 1
+Model.model_validate(aliased)
+
+class Outer(BaseModel):
+    items: list[Model]
+
+items = [{"x": -1}]
+items.clear()
+Outer.model_validate({"items": items})
+
+# Inline structure and scalar literal types remain checkable.
+negative = -1
+Model.model_validate({"x": negative})  # E: violates Pydantic `ge` constraint
+Outer.model_validate({"items": [{"x": -1}]})  # E: violates Pydantic `ge` constraint
+"#,
+);
+
+pydantic_testcase!(
+    test_model_validate_transforming_field_validators,
+    r#"
+from pydantic import BaseModel, Field, field_validator
+
+class Before(BaseModel):
+    x: int = Field(ge=0)
+
+    @field_validator("x", mode="before")
+    @classmethod
+    def normalize(cls, value: int) -> int:
+        return abs(value)
+
+class Child(Before):
+    pass
+
+Before.model_validate({"x": -1})
+Child.model_validate({"x": -1})
+
+class Plain(BaseModel):
+    x: int = Field(ge=0)
+
+    @field_validator("x", mode="plain")
+    @classmethod
+    def normalize(cls, value: object) -> int:
+        return 1
+
+Plain.model_validate({"x": -1})
+
+class Item(BaseModel):
+    x: int = Field(ge=0)
+
+class Wrapper(BaseModel):
+    child: Item
+    unchecked: int = Field(ge=0)
+
+    @field_validator("child", mode="before")
+    @classmethod
+    def normalize_child(cls, value: object) -> Item:
+        return Item(x=1)
+
+Wrapper.model_validate({"child": {"x": -1}, "unchecked": 1})
+Wrapper.model_validate({"child": {"x": 1}, "unchecked": -1})  # E: violates Pydantic `ge` constraint
+"#,
+);
+
+pydantic_testcase!(
+    test_model_validate_additional_input_validators,
+    r#"
+from typing import Annotated
+from pydantic import BaseModel, BeforeValidator, Field, PlainValidator, field_validator
+
+def positive(value: int) -> int:
+    return abs(value)
+
+class Wildcard(BaseModel):
+    x: int = Field(ge=0)
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def normalize(cls, value: int) -> int:
+        return abs(value)
+
+class WildcardChild(Wildcard):
+    pass
+
+Wildcard.model_validate({"x": -1})
+WildcardChild.model_validate({"x": -1})
+
+class Assigned(BaseModel):
+    x: Annotated[int, BeforeValidator(positive)] = Field(ge=0)
+
+class AnnotationOnly(BaseModel):
+    x: Annotated[int, Field(ge=0), BeforeValidator(positive)]
+
+class Plain(BaseModel):
+    x: Annotated[int, Field(ge=0), PlainValidator(positive)]
+
+Assigned.model_validate({"x": -1})
+AnnotationOnly.model_validate({"x": -1})
+Plain.model_validate({"x": -1})
+"#,
+);
+
+pydantic_testcase!(
+    test_model_validate_unsupported_validation_aliases,
+    r#"
+from typing import Annotated
+from pydantic import AliasChoices, AliasPath, BaseModel, ConfigDict, Field
+
+class Choice(BaseModel):
+    x: int = Field(ge=0, validation_alias=AliasChoices("y", "x"))
+
+Choice.model_validate({"y": 1, "x": -1})
+Choice.model_validate({"y": 1, "x": -1}, by_alias=False, by_name=True)  # E: violates Pydantic `ge` constraint
+
+class Fallback(BaseModel):
+    x: int = Field(ge=0, alias="z", validation_alias=AliasChoices("y", "z"))
+
+Fallback.model_validate({"y": 1, "z": -1})
+
+class Path(BaseModel):
+    model_config = ConfigDict(validate_by_name=True)
+    x: int = Field(ge=0, validation_alias=AliasPath("values", 0))
+
+Path.model_validate({"values": [1], "x": -1})
+
+class AnnotatedChoice(BaseModel):
+    x: Annotated[int, Field(ge=0, validation_alias=AliasChoices("y", "x"))]
+
+AnnotatedChoice.model_validate({"y": 1, "x": -1})
+
+class StringAlias(BaseModel):
+    x: int = Field(ge=0, validation_alias="y")
+
+StringAlias.model_validate({"y": -1})  # E: violates Pydantic `ge` constraint
+"#,
+);
+
+pydantic_testcase!(
     test_field_conflicting_defaults_uses_overload_error,
     r#"
 from pydantic import BaseModel, Field, PrivateAttr
@@ -169,6 +319,126 @@ Model(x=5)
 );
 
 pydantic_testcase!(
+    test_field_range_decimal,
+    r#"
+from decimal import Decimal
+from typing import Annotated
+from pydantic import BaseModel, Field
+
+class DecimalField(BaseModel):
+    a: Decimal = Field(ge=0)
+    b: Decimal = Field(gt=0)
+    c: Decimal = Field(le=100)
+    d: Decimal = Field(lt=100)
+    e: Decimal | None = Field(default=None, ge=0)
+    f: Decimal = Field(ge="bad")  # E: Pydantic `ge` value has type `Literal['bad']`, which is not assignable to field type `Decimal`
+    g: Annotated[Decimal, Field(ge=0)]
+    h: Annotated[Decimal, Field(ge="bad")]  # E: Pydantic `ge` value has type `Literal['bad']`, which is not assignable to field type `Decimal`
+    i: Decimal = Field(ge=True)  # E: Pydantic `ge` value has type `Literal[True]`, which is not assignable to field type `Decimal`
+    j: Annotated[Decimal, Field(ge=False)]  # E: Pydantic `ge` value has type `Literal[False]`, which is not assignable to field type `Decimal`
+"#,
+);
+
+pydantic_testcase!(
+    test_field_range_decimal_numeric_types,
+    r#"
+from decimal import Decimal
+from enum import IntEnum
+from typing import Annotated, Literal, NewType
+from pydantic import BaseModel, Field
+
+class IntBound(int):
+    pass
+
+class FloatBound(float):
+    pass
+
+class Bound(IntEnum):
+    ZERO = 0
+
+NominalBound = NewType("NominalBound", int)
+
+def numeric_bounds(
+    literal: Literal[0],
+    numeric: int | float,
+    mixed: int | Decimal,
+    integer: IntBound,
+    floating: FloatBound,
+    enum: Bound,
+    nominal: NominalBound,
+) -> None:
+    class Model(BaseModel):
+        a: Decimal = Field(ge=literal)
+        b: Decimal = Field(gt=numeric)
+        c: Decimal = Field(le=mixed)
+        d: Decimal = Field(lt=integer)
+        e: Decimal = Field(ge=floating)
+        f: Decimal = Field(ge=enum)
+        g: Decimal = Field(ge=nominal)
+        h: Decimal | None = Field(default=None, ge=literal)
+        i: Annotated[Decimal, Field(ge=literal)]
+        j: Annotated[Decimal, "metadata"] | None = Field(default=None, ge=literal)
+
+def constrained[T: (int, Decimal)](bound: T) -> None:
+    class Model(BaseModel):
+        a: Decimal = Field(ge=bound)
+
+def bounded[T: float](bound: T) -> None:
+    class Model(BaseModel):
+        a: Decimal = Field(ge=bound)
+
+type DecimalAnnotated = Annotated[Decimal, "metadata"]
+
+class ExistingForms(BaseModel):
+    a: Decimal = Field(ge=0.5)
+    b: Decimal = Field(gt=Decimal("0"))
+    c: DecimalAnnotated | None = Field(default=None, ge=0)
+"#,
+);
+
+pydantic_testcase!(
+    test_field_range_decimal_invalid_types,
+    r#"
+from decimal import Decimal
+from pydantic import BaseModel, Field
+
+def invalid_bounds(
+    boolean: bool,
+    maybe_bool: bool | Decimal,
+    maybe_bytes: int | bytes,
+    maybe_complex: int | complex,
+) -> None:
+    class Model(BaseModel):
+        a: Decimal = Field(ge=boolean)  # E: Pydantic `ge` value has type `bool`, which is not assignable to field type `Decimal`
+        b: Decimal = Field(ge=maybe_bool)  # E: Pydantic `ge` value has type `Decimal | bool`, which is not assignable to field type `Decimal`
+        c: Decimal = Field(ge=maybe_bytes)  # E: Pydantic `ge` value has type `bytes | int`, which is not assignable to field type `Decimal`
+        d: Decimal = Field(ge=maybe_complex)  # E: Pydantic `ge` value has type `complex | int`, which is not assignable to field type `Decimal`
+
+def boolean_bound[T: bool](bound: T) -> None:
+    class Model(BaseModel):
+        a: Decimal = Field(ge=bound)  # E: Pydantic `ge` value has type `T`, which is not assignable to field type `Decimal`
+
+def boolean_constraint[T: (bool, Decimal)](bound: T) -> None:
+    class Model(BaseModel):
+        a: Decimal = Field(ge=bound)  # E: Pydantic `ge` value has type `T`, which is not assignable to field type `Decimal`
+"#,
+);
+
+pydantic_testcase!(
+    bug = "Decimal range bounds still reject runtime-coercible numeric strings",
+    test_field_range_decimal_numeric_strings,
+    r#"
+from decimal import Decimal
+from typing import Annotated
+from pydantic import BaseModel, Field
+
+class Model(BaseModel):
+    a: Decimal = Field(ge="0")  # E: Pydantic `ge` value has type `Literal['0']`, which is not assignable to field type `Decimal`
+    b: Annotated[Decimal, Field(ge="0")]  # E: Pydantic `ge` value has type `Literal['0']`, which is not assignable to field type `Decimal`
+"#,
+);
+
+pydantic_testcase!(
     test_field_optional,
     r#"
 from pydantic import BaseModel, Field
@@ -185,6 +455,333 @@ Example(id="123")  # E: Missing argument `attribute_1`
 );
 
 pydantic_testcase!(
+    test_model_construct,
+    r#"
+from typing import assert_type
+
+from pydantic import BaseModel, Field
+
+class Model(BaseModel):
+    x: int
+    y: str = "default"
+    z: bool = Field(alias="aliased")
+
+model = Model.model_construct(x=1, z=True)
+assert_type(model, Model)
+Model.model_construct(x="1", z=True)  # E: Argument `Literal['1']` is not assignable to parameter `x`
+Model.model_construct(x=1, z=0)  # E: Argument `Literal[0]` is not assignable to parameter `z`
+Model.model_construct(x=1, aliased=True)  # E: Missing argument `z`
+Model.model_construct(z=True)  # E: Missing argument `x`
+Model.model_construct(x=1, z=True, _fields_set={"x"})
+Model.model_construct(x=1, z=True, _fields_set={1})  # E: `set[int]` is not assignable to parameter `_fields_set`
+
+# Normal construction performs validation and can accept coercible input.
+Model(x="1", aliased=True)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_generic,
+    r#"
+from typing import assert_type
+
+from pydantic import BaseModel
+
+class Model[T](BaseModel):
+    value: T
+
+model = Model[int].model_construct(value=1)
+assert_type(model, Model[int])
+Model[int].model_construct(value="1")  # E: `Literal['1']` is not assignable to parameter `value`
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_instance_binding,
+    r#"
+from typing import assert_type
+
+from pydantic import BaseModel
+
+class Model(BaseModel):
+    value: int
+
+model = Model(value=1)
+assert_type(Model.model_construct(value=1), Model)
+assert_type(model.model_construct(value=1), Model)
+assert_type(model.model_construct({"value"}, value=1), Model)
+construct = model.model_construct
+assert_type(construct(value=1), Model)
+
+class GenericModel[T](BaseModel):
+    value: T
+
+instance = GenericModel[int](value=1)
+assert_type(instance.model_construct(value=1), GenericModel[int])
+
+class ReceiverNames(BaseModel):
+    cls: int
+    self: str
+
+assert_type(ReceiverNames.model_construct(cls=1, self="value"), ReceiverNames)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_inference,
+    r#"
+from typing import assert_type
+
+from pydantic import BaseModel
+
+class Model[T](BaseModel):
+    value: T
+
+assert_type(Model.model_construct(value=1), Model[int])
+construct = Model.model_construct
+assert_type(construct(value="s"), Model[str])
+
+class Child(Model[int]):
+    pass
+
+assert_type(Child.model_construct(value=1), Child)
+Child.model_construct(value="s")  # E: `Literal['s']` is not assignable to parameter `value`
+assert_type(Child(value=1).model_construct(value=1), Child)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_subclass_override,
+    r#"
+from typing import Any, Self, assert_type
+
+from pydantic import BaseModel
+
+class Standard(BaseModel):
+    value: int
+
+class OverridingChild(Standard):
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, **values: Any) -> Self:
+        return super().model_construct(_fields_set, **values)
+
+class Grandchild(OverridingChild):
+    pass
+
+assert_type(OverridingChild.model_construct(), OverridingChild)
+assert_type(OverridingChild(value=1).model_construct(), OverridingChild)
+assert_type(Grandchild.model_construct(), Grandchild)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_instance_self_return,
+    r#"
+from typing import Self, assert_type
+
+from pydantic import BaseModel
+
+class Model(BaseModel):
+    value: int
+
+    def clone(self) -> Self:
+        return self.model_construct(value=self.value)
+
+class Child(Model):
+    pass
+
+assert_type(Child(value=1).clone(), Child)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_self_return,
+    r#"
+from typing import Self, assert_type
+
+from pydantic import BaseModel
+
+class Model(BaseModel):
+    value: int
+
+    @classmethod
+    def make(cls, value: int) -> Self:
+        return cls.model_construct(value=value)
+
+class Child(Model):
+    label: str = "default"
+
+assert_type(Child.make(1), Child)
+
+def make[T: Model](cls: type[T], value: int) -> T:
+    return cls.model_construct(value=value)
+
+assert_type(make(Child, 1), Child)
+
+class GenericModel[T](BaseModel):
+    value: T
+
+    @classmethod
+    def make(cls, value: T) -> Self:
+        return cls.model_construct(value=value)
+
+class GenericChild(GenericModel[int]):
+    pass
+
+assert_type(GenericModel[int].make(1), GenericModel[int])
+assert_type(GenericChild.make(1), GenericChild)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_inherited_override,
+    r#"
+from typing import Any, Self, assert_type
+
+from pydantic import BaseModel
+
+class Model(BaseModel):
+    value: int
+
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, **values: Any) -> Self:
+        values.setdefault("value", 1)
+        values.setdefault("other", "default")
+        return super().model_construct(_fields_set=_fields_set, **values)
+
+class Child(Model):
+    other: str
+
+class Grandchild(Child):
+    pass
+
+assert_type(Model.model_construct(), Model)
+assert_type(Child.model_construct(), Child)
+assert_type(Grandchild.model_construct(), Grandchild)
+Child.model_construct(value="accepted by override")
+Grandchild.model_construct(other=1)
+
+class Standard(BaseModel):
+    value: int
+
+class StandardChild(Standard):
+    other: str
+
+StandardChild.model_construct(value=1, other="valid")
+StandardChild.model_construct(value=1)  # E: Missing argument `other`
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_annotated_defaults,
+    r#"
+from typing import Annotated
+
+from pydantic import BaseModel, Field
+
+class Model(BaseModel):
+    value: Annotated[int, Field(default=1)] = Field()
+    factory: Annotated[int, Field(default_factory=int)] = Field()
+    assigned: Annotated[int, Field()] = Field(default=2)
+    required: Annotated[int, Field()] = Field()
+
+Model(required=3)
+Model.model_construct(required=3)
+Model.model_construct()  # E: Missing argument `required`
+Model.model_construct(required=3, value="1")  # E: `Literal['1']` is not assignable to parameter `value`
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_instance_fields_set_keyword,
+    r#"
+from typing import assert_type
+from pydantic import BaseModel
+
+class Model(BaseModel):
+    value: int
+
+model = Model(value=1)
+assert_type(model.model_construct(value=2, _fields_set={"value"}), Model)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_multiple_inheritance_override,
+    r#"
+from typing import Any, Self, assert_type
+from pydantic import BaseModel
+
+class Standard(BaseModel):
+    value: int
+
+class Override(BaseModel):
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, **values: Any) -> Self:
+        values.setdefault("value", 1)
+        return super().model_construct(_fields_set=_fields_set, **values)
+
+class Child(Standard, Override):
+    pass
+
+assert_type(Child.model_construct(), Child)
+instance = Child(value=1)
+assert_type(instance.model_construct(), Child)
+construct = instance.model_construct
+assert_type(construct(), Child)
+
+class LocalOverride(Child):
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, **values: Any) -> Self:
+        return super().model_construct(_fields_set, **values)
+
+assert_type(LocalOverride.model_construct(), LocalOverride)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_construct_multiple_inheritance_generic_override,
+    r#"
+from typing import Any, Self, assert_type
+from pydantic import BaseModel
+
+class Standard(BaseModel):
+    value: int
+
+class Override[T](BaseModel):
+    @classmethod
+    def model_construct(cls, _fields_set: set[str] | None = None, *, marker: T | None = None, **values: Any) -> Self:
+        return super().model_construct(_fields_set, **values)
+
+class Child(Standard, Override[int]):
+    pass
+
+class Grandchild(Child):
+    pass
+
+assert_type(Child.model_construct(marker=1), Child)
+assert_type(Grandchild.model_construct(marker=1), Grandchild)
+Child.model_construct(value=1, marker="invalid")  # E: `Literal['invalid']` is not assignable to parameter `marker`
+Grandchild.model_construct(value=1, marker="invalid")  # E: `Literal['invalid']` is not assignable to parameter `marker`
+"#,
+);
+
+// Pydantic's intentionally permissive extras are explicit Any, not unknown input.
+testcase!(
+    test_model_construct_explicit_kwargs,
+    pydantic_env().enable_partially_unknown_type_error(),
+    r#"
+from pydantic import BaseModel
+
+class Model(BaseModel):
+    value: int
+
+Model.model_construct(value=1)
+Model.model_construct(value=1, extra="accepted")
+"#,
+);
+
+pydantic_testcase!(
     test_frozen_field_override_covariant,
     r#"
 from pydantic import BaseModel, Field
@@ -194,6 +791,320 @@ class Foo(BaseModel):
 
 class Bar(Foo):
     id: int = Field(frozen=True)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_validate_nested_field_range,
+    r#"
+from pydantic import BaseModel, Field
+
+class Item(BaseModel):
+    sku: str
+    quantity: int = Field(ge=1)
+
+class Inventory(BaseModel):
+    items: list[Item]
+
+Inventory.model_validate({"items": [{"sku": "A-100", "quantity": 5}]})
+Inventory.model_validate({"items": [{"sku": "B-200", "quantity": -3}]})  # E: Argument value `Literal[-3]` violates Pydantic `ge` constraint `Literal[1]` for field `quantity`
+
+# Named mutable input is intentionally not inspected structurally.
+bad = {"items": [{"sku": "B-200", "quantity": -3}]}
+Inventory.model_validate(bad)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_validate_union_alternatives,
+    r#"
+from pydantic import BaseModel, Field
+
+class Positive(BaseModel):
+    x: int = Field(ge=0)
+
+class Negative(BaseModel):
+    x: int = Field(le=-1)
+
+class Either(BaseModel):
+    item: Positive | Negative
+    items: list[Positive | Negative]
+
+Either.model_validate({"item": {"x": -1}, "items": [{"x": -1}, {"x": 1}]})
+Either.model_validate({"item": {"x": 1}, "items": []})
+"#,
+);
+
+pydantic_testcase!(
+    test_model_validate_custom_input,
+    r#"
+from typing import Self, assert_type
+from pydantic import BaseModel, Field
+
+class Parent(BaseModel):
+    x: int = Field(ge=0)
+
+    @classmethod
+    def model_validate(
+        cls, obj: object = None, *, strict=None, from_attributes=None,
+        context=None, by_alias=None, by_name=None,
+    ) -> Self:
+        return cls(x=1)
+
+class Child(Parent):
+    pass
+
+class Builtin(BaseModel):
+    pass
+
+class Multiple(Builtin, Parent):
+    pass
+
+assert_type(Child.model_validate(), Child)
+assert_type(Multiple.model_validate(), Multiple)
+Parent.model_validate({"x": -1})
+Child.model_validate({"x": -1})
+"#,
+);
+
+pydantic_testcase!(
+    test_model_validate_alias_selection,
+    r#"
+from pydantic import BaseModel, ConfigDict, Field
+
+class Both(BaseModel):
+    model_config = ConfigDict(validate_by_name=True, validate_by_alias=True)
+    x: int = Field(ge=0, alias="y")
+
+Both.model_validate({"x": -1, "y": 1})
+Both.model_validate({"x": 1, "y": -1})  # E: violates Pydantic `ge` constraint
+Both.model_validate({"x": 1, "y": -1}, by_name=True, by_alias=False)
+Both.model_validate({"x": -1, "y": 1}, by_name=True, by_alias=False)  # E: violates Pydantic `ge` constraint
+
+class AliasOnly(BaseModel):
+    x: int = Field(ge=0, validation_alias="y")
+
+AliasOnly.model_validate({"x": 1, "y": -1}, by_name=True, by_alias=False)
+AliasOnly.model_validate({"x": -1, "y": 1}, by_name=True, by_alias=False)  # E: violates Pydantic `ge` constraint
+
+class NameOnly(BaseModel):
+    model_config = ConfigDict(validate_by_name=True, validate_by_alias=False)
+    x: int = Field(ge=0, alias="y")
+
+NameOnly.model_validate({"x": -1, "y": 1}, by_alias=True, by_name=False)
+NameOnly.model_validate({"x": 1, "y": -1})
+
+def dynamic(flag: bool) -> None:
+    Both.model_validate({"x": -1, "y": 1}, by_alias=flag, by_name=True)
+    Both.model_validate({"x": -1, "y": 1}, **{"by_alias": flag, "by_name": True})
+
+class Outer(BaseModel):
+    child: Both
+
+Outer.model_validate({"child": {"x": 1, "y": -1}}, by_name=True, by_alias=False)
+"#,
+);
+
+pydantic_testcase!(
+    test_model_validate_dictionary_spreads,
+    r#"
+from pydantic import BaseModel, Field
+
+class Model(BaseModel):
+    x: int = Field(ge=0)
+
+patch: dict[str, int] = {"x": 1}
+Model.model_validate({"x": -1, **patch})
+Model.model_validate({"x": -1, **{"x": 1}})
+Model.model_validate({**patch, "x": -1})  # E: violates Pydantic `ge` constraint
+Model.model_validate({"x": 1, **{"x": -1}})  # E: violates Pydantic `ge` constraint
+
+def dynamic_key(key: str) -> None:
+    Model.model_validate({"x": -1, key: 1})
+
+class Aliased(BaseModel):
+    model_config = {"validate_by_name": True}
+    x: int = Field(ge=0, alias="y")
+
+Aliased.model_validate({**patch, "x": -1})
+Aliased.model_validate({**patch, "x": -1, "y": 1})
+Aliased.model_validate({**patch, "y": -1})  # E: violates Pydantic `ge` constraint
+"#,
+);
+
+/// Supply a library signature with a version-specific keyword.
+fn model_validate_library_env() -> TestEnv {
+    TestEnv::one(
+        "pydantic.main",
+        r#"
+from typing import Any, Literal, Self, dataclass_transform
+
+@dataclass_transform()
+class BaseModel:
+    @classmethod
+    def model_validate(
+        cls, obj: object, *, extra: Literal["allow", "ignore", "forbid"] | None = None,
+        context: Any = None,
+    ) -> Self: ...
+"#,
+    )
+}
+
+testcase!(
+    test_model_validate_library_signature,
+    model_validate_library_env(),
+    r#"
+from typing import assert_type
+from pydantic.main import BaseModel
+
+class Model(BaseModel):
+    x: int
+
+assert_type(Model.model_validate({"x": 1}, extra="forbid"), Model)
+Model.model_validate({"x": 1}, extra="invalid")  # E: is not assignable to parameter `extra`
+"#,
+);
+
+pydantic_testcase!(
+    test_model_validate_shared_descendants,
+    r#"
+from pydantic import BaseModel
+
+class M0(BaseModel):
+    x: int
+
+class M1(BaseModel):
+    left: M0
+    right: M0
+
+class M2(BaseModel):
+    left: M1
+    right: M1
+
+class M3(BaseModel):
+    left: M2
+    right: M2
+
+class M4(BaseModel):
+    left: M3
+    right: M3
+
+class M5(BaseModel):
+    left: M4
+    right: M4
+
+class M6(BaseModel):
+    left: M5
+    right: M5
+
+class M7(BaseModel):
+    left: M6
+    right: M6
+
+class M8(BaseModel):
+    left: M7
+    right: M7
+
+class M9(BaseModel):
+    left: M8
+    right: M8
+
+class M10(BaseModel):
+    left: M9
+    right: M9
+
+class M11(BaseModel):
+    left: M10
+    right: M10
+
+class M12(BaseModel):
+    left: M11
+    right: M11
+
+class M13(BaseModel):
+    left: M12
+    right: M12
+
+class M14(BaseModel):
+    left: M13
+    right: M13
+"#,
+);
+
+pydantic_testcase!(
+    test_model_validate_from_attributes_accepts_object,
+    r#"
+from pydantic import BaseModel
+
+class Model(BaseModel):
+    x: int
+
+def validate(obj: object) -> Model:
+    return Model.model_validate(obj, from_attributes=True)
+"#,
+);
+
+pydantic_testcase!(
+    test_custom_model_validate_is_not_overwritten,
+    r#"
+from typing import Self
+from pydantic import BaseModel
+
+class Model(BaseModel):
+    x: int
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: object,
+        *,
+        strict: bool | None = None,
+        from_attributes: bool | None = None,
+        context: object | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        return cls(x=0)
+
+def validate(obj: object) -> int:
+    return Model.model_validate(obj).x
+"#,
+);
+
+pydantic_testcase!(
+    test_super_model_validate_returns_self,
+    r#"
+from typing import Self
+from pydantic import BaseModel
+
+class Parent(BaseModel):
+    x: int
+
+class Child(Parent):
+    y: int
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: object,
+        *,
+        strict: bool | None = None,
+        from_attributes: bool | None = None,
+        context: object | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        return super().model_validate(
+            obj,
+            strict=strict,
+            from_attributes=from_attributes,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
+
+def validate(obj: object) -> int:
+    return Child.model_validate(obj, from_attributes=True).y
 "#,
 );
 
@@ -429,6 +1340,138 @@ class A[T: BaseModel]:
 
 a = A(MyModel)
 a.print_model_fields()
+    "#,
+);
+
+// `Annotated` metadata with a `__get_pydantic_core_schema__` hook replaces the field validation,
+// so the `__init__` parameter accepts `Any`.
+// Attribute assignment still checks against the declared type.
+
+pydantic_testcase!(
+    test_annotated_custom_schema_widens_init_param,
+    r#"
+from typing import Annotated, Any, reveal_type
+from pydantic import BaseModel, ConfigDict
+
+from uuid import UUID
+from pydantic.types import UuidVersion
+
+class DType: ...
+
+class DTypeAdapter:
+    def __get_pydantic_core_schema__(
+        self,
+        _source_type: Any,
+        _handler: Any,
+    )-> Any: ...
+
+class Model(BaseModel):
+    model_config = ConfigDict(strict=True)
+    dtype: Annotated[DType, DTypeAdapter()]
+    other: DType
+
+class Model2(BaseModel):
+    model_config = ConfigDict(strict=True)
+    x: Annotated[UUID, UuidVersion(4)]
+
+reveal_type(Model.__init__) # E: revealed type: (self: Model, *, dtype: Any, other: DType, **Unknown) -> None
+m = Model(dtype=">i4", other=DType())
+Model(dtype=DType(), other=">i4") # E: Argument `Literal['>i4']` is not assignable to parameter `other`
+m.dtype = ">i4" # E: `Literal['>i4']` is not assignable to attribute `dtype` with type `DType`
+
+Model2(x="not-a-uuid") # E: Argument `Literal['not-a-uuid']` is not assignable to parameter `x`
+
+    "#,
+);
+
+pydantic_testcase!(
+    test_annotated_custom_schema_with_default,
+    r#"
+from typing import Annotated, Any, reveal_type
+from pydantic import BaseModel, ConfigDict, Field
+
+class DType: ...
+
+class DTypeAdapter:
+    def __get_pydantic_core_schema__(
+        self,
+        _source_type: Any,
+        _handler: Any,
+    )-> Any: ...
+
+adapter = DTypeAdapter()
+
+class Model(BaseModel):
+    model_config = ConfigDict(strict=True)
+    x: Annotated[DType, adapter] = DType()
+    y: Annotated[DType, DTypeAdapter()] = Field(default=DType())
+
+reveal_type(Model.__init__) # E: revealed type: (self: Model, *, x: Any = ..., y: Any = ..., **Unknown) -> None
+Model(x=">i4", y=">i4")
+    "#,
+);
+
+pydantic_testcase!(
+    test_annotated_custom_schema_inherited,
+    r#"
+from typing import Annotated, Any
+from pydantic import BaseModel, ConfigDict
+
+class DType: ...
+
+class DTypeAdapter:
+    def __get_pydantic_core_schema__(self, _source_type: Any, _handler: Any) -> Any: ...
+
+class Parent(BaseModel):
+    model_config = ConfigDict(strict=True)
+    dtype: Annotated[DType, DTypeAdapter()]
+
+class Child(Parent):
+    pass
+
+Child(dtype=">i4")
+    "#,
+);
+
+// Metadata of type `Any` has every attribute, so it must not count as a schema hook.
+// Metadata without the hook, such as `Field(...)`, leaves the parameter type alone.
+pydantic_testcase!(
+    test_annotated_metadata_without_custom_schema,
+    r#"
+from typing import Annotated, Any
+from pydantic import BaseModel, ConfigDict, Field
+
+mystery: Any = ...
+
+class Model(BaseModel):
+    model_config = ConfigDict(strict=True)
+    x: Annotated[int, mystery]
+    y: Annotated[int, Field(gt=0)]
+
+Model(x=0, y=1)
+Model(x="0", y=1) # E: `Literal['0']` is not assignable to parameter `x`
+Model(x=0, y="1") # E: `Literal['1']` is not assignable to parameter `y`
+    
+    "#,
+);
+
+pydantic_testcase!(
+    test_annotated_custom_schema_widens_lax_conversion_table_type,
+    r#"
+from typing import Annotated, Any, reveal_type
+from pydantic import BaseModel
+
+class Adapter:
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler: Any) -> Any: ...
+
+class Model(BaseModel):
+    n: Annotated[int, Adapter()]
+    m: int
+
+reveal_type(Model.__init__) # E: revealed type: (self: Model, *, n: Any, m: LaxInt, **Unknown) -> None
+Model(n=None, m=1)
+Model(n=1, m=None)  # E: Argument `None` is not assignable to parameter `m`
     "#,
 );
 

@@ -463,11 +463,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 return Some(aliased_member_lit.to_implicit_type());
             }
+            // `member(x)` makes `x` a member, so the member's value is `x`, the same way
+            // `nonmember(x)` below is just `x`.
+            let value_ty = if let Type::ClassType(cls) = ty
+                && cls.has_qname("enum", "member")
+                && let [targ] = cls.targs().as_slice()
+            {
+                targ
+            } else {
+                ty
+            };
             Some(
                 Lit::Enum(Box::new(LitEnum {
                     class: enum_.cls.clone(),
                     member: name.clone(),
-                    ty: self.solver().force(ty.clone()),
+                    ty: self.solver().force(value_ty.clone()),
                 }))
                 .to_implicit_type(),
             )

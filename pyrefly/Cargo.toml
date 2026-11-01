@@ -86,11 +86,11 @@ ruff_text_size = "0.0.14"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.154", features = ["alloc", "float_roundtrip", "raw_value", "unbounded_depth"] }
 serde_repr = "0.1.21"
-similar = { version = "3.2.0", features = ["bytes", "inline", "unicode"] }
+similar = { version = "3.2.1", features = ["bytes", "inline", "unicode"] }
 starlark_map = "0.14.2"
 static_assertions = "1.1.0"
 tempfile = "3.27.0"
-thin-vec = "0.2.20"
+thin-vec = "0.2.21"
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["macros", "rt"] }
 toml = { version = "1.1.8", features = ["preserve_order"] }
