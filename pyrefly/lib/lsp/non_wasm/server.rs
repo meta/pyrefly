@@ -299,6 +299,11 @@ use crate::lsp::non_wasm::call_hierarchy::find_function_at_position_in_ast;
 use crate::lsp::non_wasm::call_hierarchy::prepare_call_hierarchy_item;
 use crate::lsp::non_wasm::call_hierarchy::transform_incoming_calls;
 use crate::lsp::non_wasm::call_hierarchy::transform_outgoing_calls;
+use crate::lsp::non_wasm::code_lens::OverrideCodeLensParams;
+use crate::lsp::non_wasm::code_lens::OverrideCodeLensRefreshNotification;
+use crate::lsp::non_wasm::code_lens::OverrideCodeLensRequest;
+use crate::lsp::non_wasm::code_lens::OverrideCodeLensTarget;
+use crate::lsp::non_wasm::code_lens::OverrideCodeLensTargets;
 use crate::lsp::non_wasm::code_lens::runnable_lsp_code_lens;
 use crate::lsp::non_wasm::convert_module_package::convert_module_package_code_actions;
 use crate::lsp::non_wasm::document_symbols::flatten_to_symbol_information;
@@ -324,7 +329,7 @@ use crate::lsp::non_wasm::queue::HeavyTaskQueue;
 use crate::lsp::non_wasm::queue::LspEvent;
 use crate::lsp::non_wasm::queue::LspQueue;
 use crate::lsp::non_wasm::queue::QueuedEvent;
-use crate::lsp::non_wasm::safe_delete_file::safe_delete_file_code_action;
+use crate::lsp::non_wasm::safe_delete_file::safe_delete_file_code_actions;
 use crate::lsp::non_wasm::stdlib::should_show_stdlib_error;
 use crate::lsp::non_wasm::transaction_manager::TransactionManager;
 use crate::lsp::non_wasm::type_error_display_status::BuildSystemStatus;
@@ -1217,6 +1222,7 @@ pub struct Server {
     /// These registrations are additive and never removed, so this set only grows.
     watched_exact_paths: Mutex<SmallSet<PathBuf>>,
     version_info: Mutex<HashMap<PathBuf, i32>>,
+    override_code_lens_refresh_support: AtomicBool,
     id: Uuid,
     /// The surface/entrypoint for the language server (`--from` CLI arg)
     surface: Option<String>,
@@ -2232,7 +2238,13 @@ impl Server {
                         .collect();
                     let ruff_notebook =
                         params.notebook_document.to_ruff_notebook(&cell_contents)?;
-                    let lsp_notebook = LspNotebook::new(ruff_notebook, notebook_document);
+                    let cell_versions = params
+                        .cell_text_documents
+                        .iter()
+                        .map(|doc| (doc.uri.clone(), doc.version))
+                        .collect();
+                    let lsp_notebook =
+                        LspNotebook::new(ruff_notebook, notebook_document, cell_versions);
                     let notebook_path = url.to_file_path().unwrap_or_else(|_| {
                         self.unsaved_file_tracker
                             .ensure_path_for_open(&url, "jupyter")
@@ -2444,6 +2456,7 @@ impl Server {
                     Some(&self.lsp_thread_pool),
                 );
                 info!("Handling non-canceled request {} ({})", x.method, &x.id);
+                let mut queued_override_code_lens = false;
                 if let Some(params) = as_request::<DefinitionRequest>(&x) {
                     if let Some(params) = self
                         .extract_request_params_or_send_err_response::<DefinitionRequest>(
@@ -2685,6 +2698,27 @@ impl Server {
                             }
                         };
                         self.send_response(new_response(x.id, Ok(response)));
+                    }
+                } else if let Some(params) = as_request::<OverrideCodeLensRequest>(&x) {
+                    if let Some(params) = self
+                        .extract_request_params_or_send_err_response::<OverrideCodeLensRequest>(
+                            params, &x.id,
+                        )
+                    {
+                        match self.async_override_code_lens(
+                            x.id.clone(),
+                            params,
+                            telemetry_event.activity_key.clone(),
+                        ) {
+                            Ok(()) => queued_override_code_lens = true,
+                            Err(reason) => {
+                                telemetry_event.set_empty_response_reason(reason);
+                                self.send_response(new_response(
+                                    x.id,
+                                    Ok(Vec::<OverrideCodeLensTargets>::new()),
+                                ));
+                            }
+                        }
                     }
                 } else if let Some(params) = as_request::<CodeLensRequest>(&x) {
                     if let Some(params) = self
@@ -2982,9 +3016,11 @@ impl Server {
                     ));
                     info!("Unhandled request: {x:?}");
                 }
-                self.cancellation_handles
-                    .lock()
-                    .remove(&request_id_for_cancel);
+                if !queued_override_code_lens {
+                    self.cancellation_handles
+                        .lock()
+                        .remove(&request_id_for_cancel);
+                }
                 ide_transaction_manager.save(transaction, telemetry_event);
             }
         }
@@ -3086,6 +3122,7 @@ impl Server {
             watched_patterns: Mutex::new(SmallSet::new()),
             watched_exact_paths: Mutex::new(SmallSet::new()),
             version_info: Mutex::new(HashMap::new()),
+            override_code_lens_refresh_support: AtomicBool::new(false),
             id: Uuid::new_v4(),
             surface,
             agent_session_id,
@@ -3460,18 +3497,6 @@ impl Server {
             .unwrap_or(false)
     }
 
-    /// Helper to append unreachable-code, unused parameter, import, and variable diagnostics.
-    fn append_ide_specific_diagnostics(
-        transaction: &Transaction<'_>,
-        handle: &Handle,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) {
-        Self::append_unreachable_hints(transaction, handle, diagnostics);
-        Self::append_unused_parameter_diagnostics(transaction, handle, diagnostics);
-        Self::append_unused_import_diagnostics(transaction, handle, diagnostics);
-        Self::append_unused_variable_diagnostics(transaction, handle, diagnostics);
-    }
-
     /// Publish diagnostics & send a semantic token refresh for the given handles
     fn publish_for_handles<'a>(
         &self,
@@ -3535,13 +3560,12 @@ impl Server {
             if notebook_cell_urls.contains_key(path) {
                 continue;
             }
-            // Skip IDE-specific diagnostics (unreachable code, unused params, etc.)
-            // for non-open workspace files to reduce noise.
+            // Skip unreachable-code hints for non-open workspace files to reduce noise.
             if !open_diag_paths.contains(path) {
                 continue;
             }
             let handle = make_open_handle(&self.state, path);
-            Self::append_ide_specific_diagnostics(transaction, &handle, diagnostics);
+            Self::append_unreachable_hints(transaction, &handle, diagnostics);
         }
         self.publish_diagnostics(
             diags,
@@ -3559,6 +3583,18 @@ impl Server {
             .unwrap_or(false)
         {
             self.send_request::<SemanticTokensRefreshRequest>(());
+        }
+        if !handles.is_empty()
+            && self
+                .override_code_lens_refresh_support
+                .load(Ordering::Relaxed)
+        {
+            self.connection
+                .send(Message::Notification(new_notification::<
+                    OverrideCodeLensRefreshNotification,
+                >(serde_json::json!(
+                    {}
+                ))));
         }
     }
 
@@ -4075,6 +4111,8 @@ impl Server {
                 // out would match no baselined `unused-ignore` row, so a save would drop it.
                 let unused_ignores = errors.collect_unused_ignore_errors_for_display(&collected);
                 collected.ordinary.extend(unused_ignores.ordinary);
+                collected.ordinary.extend(unused_ignores.hints);
+                collected.ordinary.append(&mut collected.hints);
                 let applied = errors.apply_baseline(
                     &mut collected,
                     Some(&baseline_path),
@@ -4463,6 +4501,7 @@ impl Server {
         };
 
         let mut notebook_document = original_notebook.notebook_document().clone();
+        let mut cell_versions = original_notebook.cell_versions().clone();
         let mut cell_content_map: HashMap<Uri, String> = HashMap::new();
         // Changed metadata
         if let Some(metadata) = &params.change.metadata {
@@ -4511,6 +4550,7 @@ impl Server {
                 // Set contents for new cells
                 if let Some(opened_cells) = &structure.did_open {
                     for opened_cell in opened_cells {
+                        cell_versions.insert(opened_cell.uri.clone(), opened_cell.version);
                         cell_content_map.insert(opened_cell.uri.clone(), opened_cell.text.clone());
                         self.open_notebook_cells
                             .write()
@@ -4546,6 +4586,7 @@ impl Server {
                         .filter_map(|v| serde_json::from_value(v.clone()).ok())
                         .collect();
                     let new_text = apply_change_events(original_text, content_changes);
+                    cell_versions.insert(cell_uri.clone(), text_change.document.version);
                     cell_content_map.insert(cell_uri, new_text);
                 }
             }
@@ -4555,7 +4596,11 @@ impl Server {
             .clone()
             .to_ruff_notebook(&cell_content_map)?;
 
-        let new_notebook = Arc::new(LspNotebook::new(ruff_notebook, notebook_document));
+        let new_notebook = Arc::new(LspNotebook::new(
+            ruff_notebook,
+            notebook_document,
+            cell_versions,
+        ));
         *original = Arc::new(LspFile::Notebook(new_notebook));
         drop(lock);
         // Update version_info only after the mutation has fully succeeded, so
@@ -5258,9 +5303,9 @@ impl Server {
                 Some(&self.lsp_thread_pool),
             ) {
                 actions.extend(quickfixes.into_iter().filter_map(|(title, edits)| {
-                    // A quick fix may carry more than one edit (e.g. the missing
-                    // `@override` fix inserts both the decorator and an import). Group
-                    // every edit by the document it targets into a single workspace edit
+                    // Fixes for missing `@override` and context-manager annotations
+                    // can include several edits. Group every edit by its target document
+                    // into a single workspace edit
                     // so the whole fix applies in one action.
                     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
                     for (info, range, insert_text) in edits {
@@ -5270,11 +5315,11 @@ impl Server {
                         })?;
                         let mut edit_uri = lsp_location.uri;
                         let mut edit_range = lsp_location.range;
-                        // For notebook cells: if the import quick-fix targets a different
-                        // cell than the one where the action was triggered, redirect the
-                        // edit to the top of the current cell.  This mirrors Pylance's
-                        // behaviour where "insert import" always goes into the active cell.
-                        if let Some(current_cell_idx) = triggered_cell_index {
+                        // Import insertions in notebooks go into the active cell.
+                        // Replacements must retain their target cell and range.
+                        if range.is_empty()
+                            && let Some(current_cell_idx) = triggered_cell_index
+                        {
                             let edit_cell_idx = info.to_cell_for_lsp(range.start());
                             if edit_cell_idx != Some(current_cell_idx) {
                                 // Redirect to the current cell, inserting at line 0.
@@ -5491,13 +5536,29 @@ impl Server {
             }
             record_code_action_telemetry("move_symbol_new_file", start);
             let start = Instant::now();
-            if let Some(action) = safe_delete_file_code_action(
+            let supports_find_usages = self
+                .initialize_params
+                .initialization_options
+                .as_ref()
+                .and_then(|options| options.get("pyrefly"))
+                .and_then(|options| options.get("findFileUsages"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if let Some(mut file_actions) = safe_delete_file_code_actions(
                 &self.initialize_params.capabilities,
+                supports_find_usages,
                 &self.state,
                 transaction,
                 uri,
+                |path| {
+                    self.open_files
+                        .read()
+                        .contains_key(path)
+                        .then(|| make_open_handle(&self.state, path))
+                },
+                |location| self.to_lsp_location(location),
             ) {
-                actions.push(action);
+                actions.append(&mut file_actions);
             }
             record_code_action_telemetry("safe_delete_file", start);
         }
@@ -5761,7 +5822,10 @@ impl Server {
                     import_behavior: ImportBehavior::StopAtRenamedImports,
                     ..Default::default()
                 },
-                options: ReferenceOptions::all(params.context.include_declaration),
+                options: ReferenceOptions {
+                    include_interface_declaration: false,
+                    ..ReferenceOptions::all(params.context.include_declaration)
+                },
                 activity_key,
             },
             move |results| {
@@ -6005,6 +6069,181 @@ impl Server {
         Ok(Some(res))
     }
 
+    /// Returns the text document version, including versions of individual notebook cells.
+    fn text_document_version(&self, uri: &Uri) -> Option<i32> {
+        let path = self.path_for_uri_or_notebook_cell(uri)?;
+        if self.open_notebook_cells.read().contains_key(uri) {
+            let files = self.open_files.read();
+            let LspFile::Notebook(notebook) = files.get(&path)?.as_ref() else {
+                return None;
+            };
+            notebook.cell_versions().get(uri).copied()
+        } else {
+            self.version_info.lock().get(&path).copied()
+        }
+    }
+
+    /// Queues one cancellable search for all method lenses in a document.
+    fn async_override_code_lens(
+        &self,
+        request_id: RequestId,
+        params: OverrideCodeLensParams,
+        activity_key: Option<ActivityKey>,
+    ) -> Result<(), EmptyResponseReason> {
+        let uri = &params.text_document.text_document_identifier.uri;
+        let handle = self.make_handle_if_enabled(uri, Some(CodeLensRequest::METHOD.as_str()))?;
+        if params.refresh_support {
+            self.override_code_lens_refresh_support
+                .store(true, Ordering::Relaxed);
+        }
+        // Register before enqueueing so cancellation also stops work waiting in the queue.
+        let queued_cancellation = CancellationHandle::default();
+        self.cancellation_handles
+            .lock()
+            .insert(request_id.clone(), queued_cancellation.clone());
+        self.find_reference_queue.queue_task(
+            TelemetryEventKind::FindFromDefinition,
+            Box::new(move |server, _, telemetry_event| {
+                telemetry_event.set_activity_key(activity_key);
+                let mut transaction = server.state.cancellable_transaction();
+                let result = (|| {
+                    {
+                        // Replace the queued token atomically with the running transaction token.
+                        let mut handles = server.cancellation_handles.lock();
+                        if queued_cancellation.is_cancelled() {
+                            return Err(Cancelled);
+                        }
+                        handles.insert(request_id.clone(), transaction.get_cancellation_handle());
+                    }
+                    if server
+                        .text_document_version(&params.text_document.text_document_identifier.uri)
+                        != Some(params.text_document.version)
+                    {
+                        return Err(Cancelled);
+                    }
+                    server.validate_in_memory_for_transaction(
+                        transaction.as_mut(),
+                        telemetry_event,
+                        None,
+                    );
+                    transaction.run(&[handle.dupe()], Require::Everything, None)?;
+                    let info = transaction
+                        .as_ref()
+                        .get_module_info(&handle)
+                        .ok_or(Cancelled)?;
+                    let ranges = params
+                        .ranges
+                        .iter()
+                        .map(|range| {
+                            info.from_lsp_range(
+                                *range,
+                                server.maybe_get_code_cell_index(
+                                    &params.text_document.text_document_identifier.uri,
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let targets = transaction.override_code_lens_targets(&handle, &ranges)?;
+                    if transaction.get_cancellation_handle().is_cancelled()
+                        || server.text_document_version(
+                            &params.text_document.text_document_identifier.uri,
+                        ) != Some(params.text_document.version)
+                    {
+                        return Err(Cancelled);
+                    }
+                    let notebooks = server.snapshot_open_notebooks();
+                    let mut names = SmallMap::<ModulePath, SmallMap<TextRange, String>>::new();
+                    let mut to_locations = |targets: Vec<TextRangeWithModule>| {
+                        targets
+                            .into_iter()
+                            .filter_map(|target| {
+                                let mut uri = module_info_to_uri(
+                                    &target.module,
+                                    server.path_remapper.as_ref(),
+                                )?;
+                                if let Some(cell) =
+                                    target.module.to_cell_for_lsp(target.range.start())
+                                    && let Some(path) = to_real_path(target.module.path())
+                                    && let Some(notebook) = notebooks.get(&path)
+                                    && let Some(cell_uri) = notebook.get_code_cell_url(cell)
+                                {
+                                    uri = cell_uri.clone();
+                                }
+                                let module_names =
+                                    names.entry(target.module.path().dupe()).or_insert_with(|| {
+                                        let target_handle = Handle::new(
+                                            target.module.name(),
+                                            target.module.path().dupe(),
+                                            *handle.sys_info(),
+                                        );
+                                        transaction
+                                            .as_ref()
+                                            .get_exports_data(&target_handle)
+                                            .symbols()
+                                            .map(|symbols| {
+                                                symbols
+                                                    .iter()
+                                                    .map(|(symbol, parent)| {
+                                                        let name = target
+                                                            .module
+                                                            .code_at(symbol.name.range());
+                                                        let name = match parent {
+                                                            Some(parent) => format!(
+                                                                "{}.{}",
+                                                                target
+                                                                    .module
+                                                                    .code_at(parent.name.range()),
+                                                                name
+                                                            ),
+                                                            None => name.to_owned(),
+                                                        };
+                                                        (symbol.name.range(), name)
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default()
+                                    });
+                                let name =
+                                    module_names.get(&target.range).cloned().unwrap_or_else(|| {
+                                        target.module.code_at(target.range).to_owned()
+                                    });
+                                Some(OverrideCodeLensTarget {
+                                    location: Location {
+                                        uri,
+                                        range: target.module.to_lsp_range(target.range),
+                                    },
+                                    name,
+                                })
+                            })
+                            .collect()
+                    };
+                    Ok(targets
+                        .into_iter()
+                        .map(|targets| OverrideCodeLensTargets {
+                            parents: to_locations(targets.parents),
+                            implementations: to_locations(targets.implementations),
+                        })
+                        .collect::<Vec<_>>())
+                })();
+                server.cancellation_handles.lock().remove(&request_id);
+                let response = match result {
+                    Ok(targets) => new_response(request_id, Ok(targets)),
+                    Err(Cancelled) => {
+                        telemetry_event.canceled = true;
+                        Response::new_err(
+                            request_id,
+                            ErrorCode::RequestCanceled as i32,
+                            "Override CodeLens request is canceled or its document version changed"
+                                .to_owned(),
+                        )
+                    }
+                };
+                server.connection.send(Message::Response(response));
+            }),
+        );
+        Ok(())
+    }
+
     fn code_lens(
         &self,
         transaction: &Transaction<'_>,
@@ -6246,87 +6485,6 @@ impl Server {
         }
     }
 
-    fn append_unused_parameter_diagnostics(
-        transaction: &Transaction<'_>,
-        handle: &Handle,
-        items: &mut Vec<Diagnostic>,
-    ) {
-        if let Some(answers) = transaction.get_answers(handle) {
-            let bindings = answers.bindings();
-            let module_info = bindings.module();
-            for unused in bindings.unused_parameters() {
-                if Ast::is_intentionally_unused(unused.name.as_str()) {
-                    continue;
-                }
-                let lsp_range = module_info.to_lsp_range(unused.range);
-                items.push(Diagnostic {
-                    range: lsp_range,
-                    severity: Some(DiagnosticSeverity::Hint),
-                    source: Some("Pyrefly".to_owned()),
-                    message: format!("Parameter `{}` is unused", unused.name.as_str()).into(),
-                    code: Some(Code::String("unused-parameter".to_owned())),
-                    code_description: None,
-                    related_information: None,
-                    tags: Some(vec![DiagnosticTag::Unnecessary]),
-                    data: None,
-                });
-            }
-        }
-    }
-
-    fn append_unused_import_diagnostics(
-        transaction: &Transaction<'_>,
-        handle: &Handle,
-        items: &mut Vec<Diagnostic>,
-    ) {
-        if let Some(answers) = transaction.get_answers(handle) {
-            let bindings = answers.bindings();
-            let module_info = bindings.module();
-            for unused in bindings.unused_imports() {
-                let lsp_range = module_info.to_lsp_range(unused.range);
-                items.push(Diagnostic {
-                    range: lsp_range,
-                    severity: Some(DiagnosticSeverity::Hint),
-                    source: Some("Pyrefly".to_owned()),
-                    message: format!("Import `{}` may be unused", unused.name.as_str()).into(),
-                    code: Some(Code::String("unused-import".to_owned())),
-                    code_description: None,
-                    related_information: None,
-                    tags: Some(vec![DiagnosticTag::Unnecessary]),
-                    data: None,
-                });
-            }
-        }
-    }
-
-    fn append_unused_variable_diagnostics(
-        transaction: &Transaction<'_>,
-        handle: &Handle,
-        items: &mut Vec<Diagnostic>,
-    ) {
-        if let Some(answers) = transaction.get_answers(handle) {
-            let bindings = answers.bindings();
-            let module_info = bindings.module();
-            for unused in bindings.unused_variables() {
-                if Ast::is_intentionally_unused(unused.name.as_str()) {
-                    continue;
-                }
-                let lsp_range = module_info.to_lsp_range(unused.range);
-                items.push(Diagnostic {
-                    range: lsp_range,
-                    severity: Some(DiagnosticSeverity::Hint),
-                    source: Some("Pyrefly".to_owned()),
-                    message: format!("Variable `{}` is unused", unused.name.as_str()).into(),
-                    code: Some(Code::String("unused-variable".to_owned())),
-                    code_description: None,
-                    related_information: None,
-                    tags: Some(vec![DiagnosticTag::Unnecessary]),
-                    data: None,
-                });
-            }
-        }
-    }
-
     fn docstring_ranges(
         &self,
         transaction: &Transaction<'_>,
@@ -6512,7 +6670,7 @@ impl Server {
                 items.push(diag);
             }
         }
-        Self::append_ide_specific_diagnostics(transaction, &handle, &mut items);
+        Self::append_unreachable_hints(transaction, &handle, &mut items);
         DocumentDiagnosticReport::RelatedFullDocumentDiagnosticReport(
             RelatedFullDocumentDiagnosticReport {
                 full_document_diagnostic_report: FullDocumentDiagnosticReport {

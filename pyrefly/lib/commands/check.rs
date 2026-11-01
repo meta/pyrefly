@@ -81,6 +81,7 @@ use crate::commands::files::FilesArgs;
 use crate::commands::files::UpsellDecision;
 use crate::commands::files::get_config_finder_for_snippet;
 use crate::commands::util::CommandExitStatus;
+use crate::commands::util::VersionMismatch;
 use crate::config::error_kind::Severity;
 use crate::config::finder::ConfigFinder;
 use crate::error::baseline::StaleRowScope;
@@ -1695,6 +1696,18 @@ impl CheckArgs {
         );
         let (loaded_handles, _, sourcedb_errors) = handles.all(state.as_ref().config_finder());
 
+        // With several files to check, config errors are not fatal when the configs are found,
+        // but a check by the wrong Pyrefly version reports errors that the required version
+        // might not, so stop here.
+        let config_errors = state.as_ref().config_finder().errors();
+        if config_errors.iter().any(ConfigError::is_version_mismatch) {
+            for error in &config_errors {
+                error.print();
+            }
+            return Err(VersionMismatch.into());
+        }
+        state.as_ref().config_finder().add_errors(config_errors);
+
         let config = loaded_handles.first().map(|handle| {
             state.as_ref().config_finder().python_file(
                 ModuleNameWithKind::guaranteed(handle.module()),
@@ -1950,6 +1963,9 @@ impl CheckArgs {
         // Pass pre-collected errors to avoid redundant error collection.
         let unused_ignore_errors = loads.collect_unused_ignore_errors_for_display(&collected);
         collected.ordinary.extend(unused_ignore_errors.ordinary);
+        collected.ordinary.extend(unused_ignore_errors.hints);
+        // Hints go through baselines and `--min-severity` like other diagnostics.
+        collected.ordinary.append(&mut collected.hints);
 
         let baseline_apply_result = loads.apply_baseline(
             &mut collected,
@@ -2158,7 +2174,12 @@ impl CheckArgs {
         timings.report_errors = report_errors_start.elapsed();
 
         if self.output.summary != Summary::None {
-            let suppress_count = errors.suppressed.len();
+            // A suppressed hint was never going to be shown, so it isn't counted either.
+            let suppress_count = errors
+                .suppressed
+                .iter()
+                .filter(|e| e.severity() != Severity::Hint)
+                .count();
             let label = if min_severity < Severity::Error {
                 "diagnostic"
             } else {
@@ -2181,17 +2202,18 @@ impl CheckArgs {
                     number_thousands(baselined_diagnostics_count)
                 ));
             }
-            if !hidden_errors.is_empty() {
-                let mut hidden_warnings = 0;
-                let mut hidden_info = 0;
-                for e in hidden_errors {
-                    match e.severity() {
-                        Severity::Error => panic!("Error-level findings can never be hidden"),
-                        Severity::Warn => hidden_warnings += 1,
-                        Severity::Info => hidden_info += 1,
-                        Severity::Ignore => {}
-                    }
+            let mut hidden_warnings = 0;
+            let mut hidden_info = 0;
+            for e in hidden_errors {
+                match e.severity() {
+                    Severity::Error => panic!("Error-level findings can never be hidden"),
+                    Severity::Warn => hidden_warnings += 1,
+                    Severity::Info => hidden_info += 1,
+                    // Hints are meant for the IDE, so a hidden hint is not worth mentioning.
+                    Severity::Hint | Severity::Ignore => {}
                 }
+            }
+            if hidden_warnings + hidden_info > 0 {
                 let mut hidden_parts = Vec::new();
                 if hidden_warnings > 0 {
                     hidden_parts.push(count(hidden_warnings, "warning"));

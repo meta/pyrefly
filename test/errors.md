@@ -189,6 +189,48 @@ $ touch $TMPDIR/pyrefly.toml && \
 [1]
 ```
 
+## A `hint` is not shown or counted by default
+
+```scrut {output_stream: stderr}
+$ mkdir -p $TMPDIR/hint && \
+> printf '[errors]\nbad-assignment = "hint"\n' > $TMPDIR/hint/pyrefly.toml && \
+> echo "x: str = 0" > $TMPDIR/hint/test.py && \
+> $PYREFLY check $TMPDIR/hint/test.py --output-format=min-text
+ INFO 0 errors
+```
+
+## `--min-severity hint` shows hints and causes nonzero exit
+
+```scrut
+$ mkdir -p $TMPDIR/hint && \
+> printf '[errors]\nbad-assignment = "hint"\n' > $TMPDIR/hint/pyrefly.toml && \
+> echo "x: str = 0" > $TMPDIR/hint/test.py && \
+> $PYREFLY check $TMPDIR/hint/test.py --min-severity=hint --output-format=min-text
+ HINT */hint/test.py:1:10-11: `Literal[0]` is not assignable to `str` [bad-assignment] (glob)
+[1]
+```
+
+## A suppressed `hint` is not counted in the summary
+
+```scrut {output_stream: stderr}
+$ mkdir -p $TMPDIR/hint && \
+> printf '[errors]\nbad-assignment = "hint"\n' > $TMPDIR/hint/pyrefly.toml && \
+> echo "x: str = 0  # pyrefly: ignore" > $TMPDIR/hint/test.py && \
+> $PYREFLY check $TMPDIR/hint/test.py --output-format=min-text
+ INFO 0 errors
+```
+
+## `unused-parameter` can be raised to `error`
+
+```scrut
+$ mkdir -p $TMPDIR/unused && \
+> printf '[errors]\nunused-parameter = "error"\n' > $TMPDIR/unused/pyrefly.toml && \
+> printf 'def f(x: int) -> int:\n    return 1\n' > $TMPDIR/unused/test.py && \
+> $PYREFLY check $TMPDIR/unused/test.py --output-format=min-text
+ERROR */unused/test.py:1:7-8: Parameter `x` is unused [unused-parameter] (glob)
+[1]
+```
+
 ## `--output-format junit-xml` emits well-formed XML
 
 ```scrut {output_stream: stdout}

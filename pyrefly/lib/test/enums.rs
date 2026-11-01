@@ -1545,3 +1545,22 @@ class Color(Enum):
 Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(1)))))))))))))))))))))
     "#,
 );
+
+// https://github.com/facebook/pyrefly/issues/5279
+testcase!(
+    test_enum_member_keyword_value,
+    r#"
+from collections.abc import Callable
+from enum import Enum, member
+
+def decimal(value: int, /) -> str:
+    return str(value)
+
+class Format(Enum):
+    DECIMAL = member(value=decimal)
+
+    def render(self, value: int, /) -> str:
+        formatter: Callable[[int], str] = self.value
+        return formatter(value)
+"#,
+);
