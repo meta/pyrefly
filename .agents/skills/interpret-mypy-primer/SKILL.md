@@ -101,5 +101,3 @@ plumbing differs.
   signal (plus the `instagram-server` and `pytorch` signals) carries it. Build before/after
   with `buck2 build @fbcode//mode/opt fbcode//pyrefly:pyrefly` (copy the binary out
   immediately — the output path is reused across builds) rather than cargo.
-- **For a large or land-blocking differential, use the `triage-pyrefly-ci` skill**, which
-  fans out one agent per entry to produce per-error verdicts with evidence.
