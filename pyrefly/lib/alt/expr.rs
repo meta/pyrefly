@@ -19,7 +19,6 @@ use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
-use pyrefly_types::data_frame::DataFrameKind;
 use pyrefly_types::dimension::Int;
 use pyrefly_types::dimension::canonicalize;
 use pyrefly_types::dimension::gradual_size;
@@ -90,10 +89,11 @@ use crate::alt::answers::AttributeReferenceKind;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::answers_solver::TypeCheckOptions;
+use crate::alt::call::CallStyle;
 use crate::alt::callable::CallArg;
 use crate::alt::class::typed_dict::TypedDictErrorKind;
 use crate::alt::nn_module_specials::is_nn_module_dict;
-use crate::alt::polars_specials::is_polars_series;
+use crate::alt::polars_specials::is_polars_api_series;
 use crate::alt::regex::RegexValidationError;
 use crate::alt::regex::validate_pattern;
 use crate::alt::shape_extension::is_int_tuple_bound;
@@ -305,6 +305,44 @@ impl<'a, 'b, 'subset> ExprOptions<'a, 'b, 'subset> {
     pub fn with_type_form_context(mut self, context: Option<TypeFormContext<'subset>>) -> Self {
         self.type_form_context = context;
         self
+    }
+}
+
+/// The type that a subscript is applied to.
+#[derive(Clone, Copy)]
+struct SubscriptTarget<'a> {
+    /// The type whose kind selects any builtin subscript handling.
+    base: &'a Type,
+    /// The restricted TypeVar whose bound or constraint `base` is, if any.
+    receiver: Option<&'a Type>,
+    /// An index already inferred outside speculative member matching.
+    index_ty: Option<&'a Type>,
+}
+
+impl<'a> SubscriptTarget<'a> {
+    fn new(base: &'a Type) -> Self {
+        Self {
+            base,
+            receiver: None,
+            index_ty: None,
+        }
+    }
+
+    fn with_base<'b>(self, base: &'b Type) -> SubscriptTarget<'b>
+    where
+        'a: 'b,
+    {
+        SubscriptTarget {
+            base,
+            receiver: self.receiver,
+            index_ty: self.index_ty,
+        }
+    }
+
+    /// The type to call `__getitem__` on. This is the TypeVar when there is one, so that `Self`
+    /// in the signature of `__getitem__` binds to the TypeVar.
+    fn getitem_receiver(self) -> &'a Type {
+        self.receiver.unwrap_or(self.base)
     }
 }
 
@@ -1020,6 +1058,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     errors,
                     errors,
                     |cur_hint, callable_errors, _| {
+                        let _lambda_context = self.enter_lambda_binding_context(
+                            param_ids
+                                .iter()
+                                .map(|(_, id)| *id)
+                                .chain(vararg.map(|(_, id)| id))
+                                .chain(kwarg.map(|(_, id)| id)),
+                        );
                         let implicit_any = |name: &Name, range: TextRange| {
                             self.error(
                                 callable_errors,
@@ -1481,6 +1526,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // TypeVar (e.g. `list[T]()` at module scope) is an error: `T` is not bound by any
         // enclosing generic scope. Only subscript callees can introduce such a raw TypeVar.
         if matches!(&*x.func, Expr::Subscript(_)) {
+            self.quantify_call_base_legacy_typevars(&mut callee_ty, x.func.range());
             self.check_legacy_typevar_scoping(&mut callee_ty, x.func.range(), errors);
         }
 
@@ -3849,7 +3895,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Type {
         let mut aliases = SmallSet::new();
         self.subscript_infer_for_type_with_key_present_inner(
-            base,
+            SubscriptTarget::new(base),
             slice,
             range,
             errors,
@@ -3873,7 +3919,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     fn subscript_infer_for_type_with_key_present_inner(
         &self,
-        base: &Type,
+        target: SubscriptTarget<'_>,
         slice: &Expr,
         range: TextRange,
         errors: &ErrorCollector,
@@ -3882,7 +3928,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         aliases: &mut SmallSet<TypeAliasData>,
     ) -> Type {
         let xs = Ast::unpack_slice(slice);
-        let slice_ty = LazyCell::new(|| self.expr_infer(slice, errors));
+        let is_builtin_sequence = |base: &Type| match base {
+            Type::Tuple(_) => true,
+            Type::ClassType(cls) | Type::SelfType(cls) => {
+                cls.is_builtin("list")
+                    || (self.as_tuple(cls).is_some() && !self.class_overrides_tuple_getitem(cls))
+            }
+            _ => false,
+        };
+        let slice_ty = LazyCell::new(|| {
+            target
+                .index_ty
+                .cloned()
+                .unwrap_or_else(|| self.expr_infer(slice, errors))
+        });
         // The slice error depends only on `slice`, not on the union member, so compute it
         // at most once. Otherwise a union of builtin sequences (e.g.
         // `list[int] | tuple[int, ...]`) would emit the same error once per matching member.
@@ -3892,7 +3951,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             _ => None,
         });
-        self.distribute_over_union(base, |base| {
+        self.distribute_over_union(target.base, |base| {
             let mut base = base.clone();
             if let Type::Var(v) = base {
                 base = self.solver().force_var(v);
@@ -3900,15 +3959,137 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if matches!(&base, Type::ClassDef(t) if t.name() == "tuple") {
                 base = self.heap.mk_type_of(self.heap.mk_special_form(SpecialForm::Tuple));
             }
-            if let Type::Intersect(x) = base {
-                // TODO: Handle subscription of intersections properly.
-                base = x.1;
+            if let Type::Intersect(x) = &base {
+                let (specialized, generic): (Vec<_>, Vec<_>) = x.0.iter().partition(|member| {
+                    is_builtin_sequence(member) || matches!(member, Type::TypedDict(_))
+                });
+                if !specialized.is_empty() {
+                    let index_ty = &*slice_ty;
+                    let first_use_types = self.active_first_use_types();
+                    let mut roots = vec![&base, index_ty];
+                    roots.extend(first_use_types.iter());
+                    let mut results = Vec::new();
+                    let mut failures = Vec::new();
+                    for member in specialized {
+                        let snapshot = self.solver().snapshot_reachable_vars(&roots);
+                        let member_errors = if matches!(index_ty, Type::Any(AnyStyle::Error)) {
+                            self.error_swallower()
+                        } else {
+                            self.error_collector()
+                        };
+                        let result = self.subscript_infer_for_type_with_key_present_inner(
+                            SubscriptTarget {
+                                base: member,
+                                receiver: None,
+                                index_ty: Some(index_ty),
+                            },
+                            slice,
+                            range,
+                            &member_errors,
+                            key_present,
+                            type_form_context,
+                            &mut aliases.clone(),
+                        );
+                        if member_errors.has_hard() {
+                            failures.push((member_errors, None));
+                        } else {
+                            results.push(self.solver().expand(result));
+                            errors.extend(member_errors);
+                        }
+                        self.solver().restore_vars(snapshot);
+                    }
+                    if !generic.is_empty() {
+                        let generic = self.intersect_guarantees(
+                            &generic.into_iter().cloned().collect::<Vec<_>>(),
+                        );
+                        let member_errors = self.error_collector();
+                        let return_errors = self.error_collector();
+                        let context = || ErrorContext::Index(self.for_display(base.clone()));
+                        let snapshot = self.solver().snapshot_reachable_vars(&roots);
+                        if let Some(callee) = self.type_of_magic_dunder_attr(
+                            &generic,
+                            &dunder::GETITEM,
+                            range,
+                            &member_errors,
+                            Some(&context),
+                            "Expr::subscript",
+                            true,
+                        ) {
+                            self.record_resolved_trace(range, &callee);
+                            let target = self.as_call_target_or_error(
+                                callee,
+                                CallStyle::Method(&dunder::GETITEM),
+                                range,
+                                &member_errors,
+                                Some(&context),
+                            );
+                            let index_arg = match slice {
+                                Expr::Slice(_) => CallArg::ty(index_ty, slice.range()),
+                                _ => CallArg::expr(slice),
+                            };
+                            let solver = self.for_intersection_arguments();
+                            let outcome = solver.call_infer_with_callee_range(
+                                target,
+                                &[index_arg],
+                                &[],
+                                range,
+                                None,
+                                errors,
+                                &member_errors,
+                                &return_errors,
+                                Some(&context),
+                                None,
+                                None,
+                            );
+                            if member_errors.has_hard() {
+                                failures.push((member_errors, Some(return_errors)));
+                            } else {
+                                let returns = self.solver().per_row(&outcome.overload_table, || {
+                                    self.solver().expand(outcome.ty.clone())
+                                });
+                                results.push(
+                                    Type::combine_overload_results(returns.into_vec(), self.heap)
+                                        .expect("an applicable index has at least one return"),
+                                );
+                                errors.extend(member_errors);
+                                errors.extend(return_errors);
+                            }
+                        }
+                        self.solver().restore_vars(snapshot);
+                    }
+                    if !results.is_empty() {
+                        return self.intersect_guarantees(&results);
+                    }
+                    if !failures.is_empty() {
+                        for (failure, return_errors) in failures {
+                            errors.extend(failure);
+                            if let Some(return_errors) = return_errors {
+                                errors.extend(return_errors);
+                            }
+                        }
+                        return self.heap.mk_any_error();
+                    }
+                }
+                let receiver = target.with_base(&base).getitem_receiver();
+                if let Some(result) = self.call_magic_dunder_method(
+                    receiver,
+                    &dunder::GETITEM,
+                    range,
+                    &[CallArg::expr(slice)],
+                    &[],
+                    errors,
+                    Some(&|| ErrorContext::Index(self.for_display(receiver.clone()))),
+                ) {
+                    return result;
+                }
+                // Special subscription forms without a magic method retain their existing fallback.
+                base = x.1.clone();
             }
             if let Type::Overloaded(branches) = &base {
                 return self.read_overloaded_branches(branches, errors, &|branch, errors| {
                     let mut aliases = aliases.clone();
                     self.subscript_infer_for_type_with_key_present_inner(
-                        branch,
+                        target.with_base(branch),
                         slice,
                         range,
                         errors,
@@ -3918,25 +4099,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     )
                 });
             }
-            let is_builtin_sequence = match &base {
-                Type::Tuple(_) => true,
-                Type::ClassType(cls) | Type::SelfType(cls) => {
-                    cls.is_builtin("list")
-                        || (self.as_tuple(cls).is_some()
-                            && !self.class_overrides_tuple_getitem(cls))
-                }
-                _ => false,
-            };
+            let is_builtin_sequence = is_builtin_sequence(&base);
 
             if is_builtin_sequence
                 && let Some(error_ty) = &*slice_error
             {
                 return error_ty.clone();
             }
-            let builtin_sequence_slice_ty = match slice {
+            let builtin_sequence_slice_ty = target.index_ty.or_else(|| match slice {
                 Expr::Slice(_) if is_builtin_sequence => Some(&*slice_ty),
                 _ => None,
-            };
+            });
 
             match base {
                 Type::Forall(forall) => {
@@ -4202,15 +4375,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.infer_shaped_array_index(shaped_array_type, slice, range, errors)
                 }
                 // Shaped arrays that opt out of built-in indexing use their declared method.
-                Type::ShapedArray(_) => self.call_method_or_error(
-                    &base,
-                    &dunder::GETITEM,
-                    range,
-                    &[CallArg::expr(slice)],
-                    &[],
-                    errors,
-                    Some(&|| ErrorContext::Index(self.for_display(base.clone()))),
-                ),
+                Type::ShapedArray(_) => {
+                    let receiver = target.with_base(&base).getitem_receiver();
+                    self.call_method_or_error(
+                        receiver,
+                        &dunder::GETITEM,
+                        range,
+                        &[CallArg::expr(slice)],
+                        &[],
+                        errors,
+                        Some(&|| ErrorContext::Index(self.for_display(receiver.clone()))),
+                    )
+                }
                 // Shaped arrays that have not gone through annotation
                 // canonicalization still use tensor indexing logic.
                 Type::ClassType(ref cls)
@@ -4234,35 +4410,45 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 // Special handling for nn.ModuleDict with TypedDict type argument
                 Type::ClassType(ref cls) if is_nn_module_dict(cls) => {
-                    self.try_nn_module_dict_index(cls, &base, slice, range, errors)
+                    self.try_nn_module_dict_index(
+                        cls,
+                        target.with_base(&base).getitem_receiver(),
+                        slice,
+                        range,
+                        errors,
+                    )
                 }
                 Type::ClassType(ref cls) | Type::SelfType(ref cls) if cls.is_builtin("list") => {
                     let index_arg = match builtin_sequence_slice_ty {
                         Some(ty) => CallArg::ty(ty, slice.range()),
                         None => CallArg::expr(slice),
                     };
+                    let receiver = target.with_base(&base).getitem_receiver();
                     self.call_method_or_error(
-                        &base,
+                        receiver,
                         &dunder::GETITEM,
                         range,
                         &[index_arg],
                         &[],
                         errors,
-                        Some(&|| ErrorContext::Index(self.for_display(base.clone()))),
+                        Some(&|| ErrorContext::Index(self.for_display(receiver.clone()))),
                     )
                 }
-                Type::ClassType(_) | Type::SelfType(_) => self.call_method_or_error(
-                    &base,
-                    &dunder::GETITEM,
-                    range,
-                    &[CallArg::expr(slice)],
-                    &[],
-                    errors,
-                    Some(&|| ErrorContext::Index(self.for_display(base.clone()))),
-                ),
+                Type::ClassType(_) | Type::SelfType(_) => {
+                    let receiver = target.with_base(&base).getitem_receiver();
+                    self.call_method_or_error(
+                        receiver,
+                        &dunder::GETITEM,
+                        range,
+                        &[CallArg::expr(slice)],
+                        &[],
+                        errors,
+                        Some(&|| ErrorContext::Index(self.for_display(receiver.clone()))),
+                    )
+                }
                 Type::DataFrame(schema) => {
                     if let Expr::List(ExprList { elts, .. }) = slice
-                        && schema.kind == DataFrameKind::Polars
+                        && schema.kind.is_polars_api()
                     {
                         if elts.is_empty() {
                             return Type::DataFrame(schema);
@@ -4278,7 +4464,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         && let Some(name) = self.polars_column_name(slice)
                     {
                         match schema.columns.iter().find(|(c, _)| **c == name) {
-                            Some((_, dtype)) if schema.kind == DataFrameKind::Polars => {
+                            Some((_, dtype)) if schema.kind.is_polars_api() => {
                                 column_dtype = Some(dtype.clone());
                             }
                             Some(_) => {}
@@ -4294,7 +4480,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         }
                     }
                     let result = self.subscript_infer_for_type_with_key_present_inner(
-                        &schema.underlying_type(),
+                        target.with_base(&schema.underlying_type()),
                         slice,
                         range,
                         errors,
@@ -4305,7 +4491,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // Preserve the stub's Series class when attaching an element dtype.
                     match (column_dtype, result) {
                         (Some(dtype), Type::ClassType(cls))
-                            if is_polars_series(cls.class_object()) =>
+                            if is_polars_api_series(cls.class_object()) =>
                         {
                             SeriesSchema {
                                 underlying: cls,
@@ -4317,7 +4503,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                 }
                 Type::Series(schema) => self.subscript_infer_for_type_with_key_present_inner(
-                    &schema.underlying_type(),
+                    target.with_base(&schema.underlying_type()),
                     slice,
                     range,
                     errors,
@@ -4329,7 +4515,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     match q.restriction() {
                         Restriction::Bound(bound) => self
                             .subscript_infer_for_type_with_key_present_inner(
-                                bound,
+                                SubscriptTarget {
+                                    base: bound,
+                                    receiver: Some(&base),
+                                    index_ty: target.index_ty,
+                                },
                                 slice,
                                 range,
                                 errors,
@@ -4340,7 +4530,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         Restriction::Constraints(constraints) => {
                             self.unions(constraints.map(|constraint| {
                                 self.subscript_infer_for_type_with_key_present_inner(
-                                    constraint,
+                                    SubscriptTarget {
+                                        base: constraint,
+                                        receiver: Some(&base),
+                                    index_ty: target.index_ty,
+                                    },
                                     slice,
                                     range,
                                     errors,
@@ -4352,7 +4546,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         }
                         Restriction::ShapeExtension(extension) => self
                             .subscript_infer_for_type_with_key_present_inner(
-                                &extension.upper_bound(self.stdlib, self.heap),
+                                SubscriptTarget {
+                                    base: &extension.upper_bound(self.stdlib, self.heap),
+                                    receiver: Some(&base),
+                                    index_ty: target.index_ty,
+                                },
                                 slice,
                                 range,
                                 errors,
@@ -4366,10 +4564,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                 }
                 Type::TypedDict(typed_dict) => {
-                    let key_ty = self.expr_infer(slice, errors);
+                    let key_ty = &*slice_ty;
                     // Don't warn on anonymous typed dicts
                     let warn_on_not_required_access = matches!(typed_dict, TypedDict::TypedDict(_));
-                    self.distribute_over_union(&key_ty, |ty| match self.literal_typed_dict_key_name(ty) {
+                    self.distribute_over_union(key_ty, |ty| match self.literal_typed_dict_key_name(ty) {
                         Some(key_name) => {
                             if let Some(field) = self.typed_dict_field(&typed_dict, &key_name) {
                                 if warn_on_not_required_access && !field.required && !key_present {
@@ -4455,7 +4653,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         self.heap.mk_any_implicit()
                     } else {
                         let result = self.subscript_infer_for_type_with_key_present_inner(
-                            &self.untype_alias(&ta),
+                            target.with_base(&self.untype_alias(&ta)),
                             slice,
                             range,
                             errors,

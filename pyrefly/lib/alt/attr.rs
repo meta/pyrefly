@@ -15,7 +15,6 @@ use pyrefly_types::literal::LitEnum;
 use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::shaped_array::shape_to_tuple_carrier;
 use pyrefly_types::shaped_array::shape_to_tuple_carrier_arg;
-use pyrefly_types::simplify::intersect;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::typed_dict::TypedDictInner;
 use pyrefly_types::types::Forallable;
@@ -495,6 +494,8 @@ enum AttributeBase1 {
     EnumLiteral(LitEnum),
     LiteralString,
     ClassInstance(ClassType),
+    /// A function with a precise `__wrapped__` attribute and ordinary function behavior.
+    WrappedFunction(ClassType, Type),
     ClassObject(ClassBase),
     Module(ModuleType),
     /// Attribute access on a type parameter in a value position.
@@ -744,6 +745,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         match base {
             AttributeBase1::ClassInstance(class) => {
                 self.add_class_fields(class.class_object(), candidates);
+            }
+            AttributeBase1::WrappedFunction(class, _) => {
+                self.add_class_fields(class.class_object(), candidates);
+                candidates.insert(Name::new_static("__wrapped__"));
             }
             AttributeBase1::ClassObject(class_base) => {
                 self.add_class_fields(class_base.class_object(), candidates);
@@ -1529,12 +1534,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if (!got_attrs.is_empty())
                 && let Some(want) = self.get_protocol_attribute(protocol, got.clone(), attr_name)
             {
+                let want_is_dunder_method = attr_name.starts_with("__")
+                    && attr_name.ends_with("__")
+                    && matches!(want, ClassAttribute::ReadWrite(_, IsMethod::Yes));
                 for (got_attr, _) in got_attrs.iter() {
-                    // A `__getattr__` fallback on a class object is not evidence that the
-                    // missing member exists: `__getattr__` governs instance attribute
-                    // access, not attributes of the class object itself. Reject rather
-                    // than letting the fallback satisfy the protocol requirement.
-                    if got_is_class_object && matches!(got_attr, Attribute::GetAttr(..)) {
+                    // A `__getattr__` fallback is not evidence that the missing member exists
+                    // when Python would not consult `__getattr__` for it: `__getattr__` governs
+                    // instance attribute access, not attributes of the class object itself, and
+                    // Python looks up dunder methods on the type, bypassing the instance's
+                    // `__getattr__`. Reject rather than letting the fallback satisfy the protocol
+                    // requirement.
+                    if (got_is_class_object || want_is_dunder_method)
+                        && matches!(got_attr, Attribute::GetAttr(..))
+                    {
                         return Err(SubsetError::MissingAttribute(
                             protocol.name().clone(),
                             attr_name.clone(),
@@ -1640,13 +1652,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             Attribute::Simple(ty) => Ok(ty),
             Attribute::ModuleFallback(_, name, ty) => {
-                self.error_with_context(
-                    errors,
+                errors.error_builder(
                     range,
                     ErrorKind::ImplicitImport,
                     format!("Module `{name}` exists, but was not imported explicitly. You are relying on other modules to load it."),
-                    context,
-                );
+                )
+                .with_context(context)
+                .with_quick_fix(ErrorQuickFix::ImportModule { module: name })
+                .emit();
                 Ok(ty)
             }
             Attribute::GetAttr(_, getattr_attr, name) => self
@@ -1754,7 +1767,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             types.push(ty.clone());
         }
         let combined = match combine {
-            Combine::Intersect => intersect(types, Type::any_implicit(), self.heap),
+            Combine::Intersect => self.intersect_guarantees(&types),
             Combine::Overloaded => Type::combine_overload_results(types, self.heap)?,
         };
         let attribute = if is_class_attribute {
@@ -1837,9 +1850,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     None if metadata.has_base_any() => {
                         acc.found_type(self.heap.mk_any_implicit(), base)
                     }
-                    None if metadata
-                        .named_tuple_metadata()
-                        .is_some_and(|m| m.has_dynamic_fields) =>
+                    // Namedtuple field names cannot start with `_`, so a dynamic field can
+                    // never supply an underscore attribute such as `__await__`.
+                    None if !attr_name.starts_with('_')
+                        && metadata
+                            .named_tuple_metadata()
+                            .is_some_and(|m| m.has_dynamic_fields) =>
                     {
                         acc.found_type(self.heap.mk_any_implicit(), base)
                     }
@@ -1930,6 +1946,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     acc.not_found(NotFoundOn::ClassObject(class.class_object().dupe(), base))
                 } else {
                     self.lookup_attr_static1((**protocol_base).clone(), attr_name, acc)
+                }
+            }
+            AttributeBase1::WrappedFunction(class, wrapped) => {
+                if attr_name.as_str() == "__wrapped__" {
+                    acc.found_type(wrapped.clone(), base);
+                } else {
+                    self.lookup_attr_static1(
+                        AttributeBase1::ClassInstance(class.clone()),
+                        attr_name,
+                        acc,
+                    );
                 }
             }
             AttributeBase1::BoundMethod(bound_func) => {
@@ -2284,6 +2311,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             AttributeBase1::ClassInstance(cls)
+            | AttributeBase1::WrappedFunction(cls, _)
             | AttributeBase1::SelfType(cls)
             | AttributeBase1::EnumLiteral(LitEnum { class: cls, .. })
             | AttributeBase1::Quantified(_, cls)
@@ -2554,6 +2582,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         Vec1::try_from_vec(acc).map(AttributeBase).ok()
     }
 
+    /// The classes that an attribute lookup on `base` searches, or `None` if the lookup searches
+    /// anything other than classes, such as a module or `Any`.
+    pub(crate) fn attribute_lookup_classes(&self, base: &Type) -> Option<Vec<Class>> {
+        let mut bases = self.as_attribute_base(base.clone())?.0.into_vec();
+        let mut classes = Vec::new();
+        while let Some(base) = bases.pop() {
+            match base {
+                AttributeBase1::ClassInstance(cls)
+                | AttributeBase1::SelfType(cls)
+                | AttributeBase1::Quantified(_, cls) => classes.push(cls.class_object().dupe()),
+                AttributeBase1::EnumLiteral(lit) => classes.push(lit.class.class_object().dupe()),
+                AttributeBase1::ClassObject(cls) => classes.push(cls.class_object().dupe()),
+                AttributeBase1::Composite { bases: more, .. } => bases.extend(more),
+                _ => return None,
+            }
+        }
+        Some(classes)
+    }
+
     pub(crate) fn try_reproject_class_type_to_shaped_array(
         &self,
         cls: &ClassType,
@@ -2710,6 +2757,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::Callable(c) if matches!(c.params, Params::Partial(_)) => acc.push(
                 AttributeBase1::ClassInstance(self.stdlib.partial(c.ret.clone())),
             ),
+            _ if !matches!(ty, Type::BoundMethod(_))
+                && let Some(metadata) = ty.toplevel_func_metadata()
+                && let Some(wrapped) = &metadata.flags.wrapped =>
+            {
+                let class = if let FunctionKind::CallbackProtocol(cls) = &metadata.kind {
+                    (**cls).clone()
+                } else {
+                    self.stdlib.function_type().clone()
+                };
+                acc.push(AttributeBase1::WrappedFunction(class, (**wrapped).clone()));
+            }
             Type::Callable(_) => acc.push(AttributeBase1::ClassInstance(
                 self.stdlib.function_type().clone(),
             )),
@@ -3558,6 +3616,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             | AttributeBase1::EnumLiteral(LitEnum { class, .. })
             | AttributeBase1::Quantified(_, class) => {
                 self.completions_class_type(class, expected_attribute_name, res)
+            }
+            AttributeBase1::WrappedFunction(class, _) => {
+                self.completions_class_type(class, expected_attribute_name, res);
+                let name = Name::new_static("__wrapped__");
+                if expected_attribute_name.is_none_or(|expected| *expected == name) {
+                    res.push(AttrInfo {
+                        name,
+                        ty: None,
+                        is_deprecated: false,
+                        definition: AttrDefinition::Synthetic,
+                        is_reexport: false,
+                        is_from_object: false,
+                    });
+                }
             }
             AttributeBase1::ShapedArrayInstance(tensor) => {
                 self.completions_class_type(&tensor.base_class, expected_attribute_name, res)

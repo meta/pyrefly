@@ -54,6 +54,509 @@ reveal_type(decorated)  # E: revealed type: (x: int) -> str
 );
 
 testcase!(
+    test_inspect_unwrap_follows_wrapped_chain,
+    r#"
+from functools import wraps
+from inspect import unwrap
+from typing import assert_type, reveal_type
+
+def inner(x: int) -> str:
+    return f"{x}"
+
+@wraps(inner)
+def middle(x: object) -> None:
+    pass
+
+@wraps(middle)
+def outer(x: object) -> None:
+    pass
+
+reveal_type(unwrap(outer))  # E: revealed type: (x: int) -> str
+assert_type(outer(object()), None)
+assert_type(middle.__wrapped__(1), str)
+assert_type(outer.__wrapped__(object()), None)
+assert_type(unwrap(outer, stop=None)(1), str)
+    "#,
+);
+
+testcase!(
+    test_functools_wrapped_call_chains,
+    r#"
+from functools import update_wrapper, wraps
+from inspect import unwrap
+from typing import Any, assert_type
+
+def inner(x: int) -> str:
+    return str(x)
+
+def middle(x: object) -> None:
+    pass
+
+def outer(x: object) -> bool:
+    return False
+
+wrapped_middle = update_wrapper(middle, inner)
+wrapped_outer = update_wrapper(wrapper=outer, wrapped=wrapped_middle)
+assert_type(wrapped_outer(object()), bool)
+assert_type(wrapped_outer.__wrapped__(object()), None)
+assert_type(unwrap(wrapped_outer)(1), Any)
+
+called_middle = wraps(inner)(middle)
+called_outer = wraps(called_middle)(outer)
+assert_type(called_outer(object()), bool)
+assert_type(called_outer.__wrapped__(object()), None)
+assert_type(unwrap(called_outer)(1), Any)
+    "#,
+);
+
+testcase!(
+    test_functools_wraps_generic_chain,
+    r#"
+from functools import wraps
+from inspect import unwrap
+from typing import assert_type
+
+def inner[T](x: T) -> list[T]:
+    return [x]
+
+@wraps(inner)
+def outer[T](x: T) -> tuple[T]:
+    return (x,)
+
+assert_type(outer(1), tuple[int])
+assert_type(outer.__wrapped__(1), list[int])
+assert_type(unwrap(outer)(1), list[int])
+    "#,
+);
+
+testcase!(
+    test_functools_wraps_preserves_method_and_property,
+    r#"
+from functools import wraps
+from typing import Any, Callable, assert_type
+
+def decorate(fn: Callable[[Any, int], int]):
+    @wraps(fn)
+    def wrapper(self: Any, x: int) -> int:
+        return fn(self, x)
+    return wrapper
+
+def property_source(self: Any) -> int:
+    return 1
+
+class Parent:
+    def method(self, x: int) -> int:
+        return x
+
+class Child(Parent):
+    @decorate
+    def method(self, x: int) -> int:
+        return x
+
+    @property
+    @wraps(property_source)
+    def value(self) -> int:
+        return 1
+
+assert_type(Child().method(1), int)
+assert_type(Child().value, int)
+    "#,
+);
+
+testcase!(
+    test_functools_wraps_unknown_target_preserves_signature,
+    TestEnv::new().enable_partially_unknown_type_error(),
+    r#"
+from functools import wraps
+from typing import Callable, assert_type
+
+def untyped(x):
+    return x
+
+@wraps(untyped)  # E: The type of this argument is partially unknown  # E: The type of this argument is partially unknown
+def wrapper(x: int) -> int:
+    return x
+
+def consume(f: Callable[[int], int]) -> int:
+    return f(1)
+
+assert_type(consume(wrapper), int)
+    "#,
+);
+
+testcase!(
+    test_functools_update_wrapper_loop,
+    r#"
+from functools import partial, update_wrapper
+from typing import Callable
+
+def build(handler: Callable[[int], int], apps: tuple[list[Callable[..., int]], ...]) -> Callable[[int], int]:
+    for app in apps[::-1]:
+        for middleware in app:
+            handler = update_wrapper(partial(middleware, handler=handler), handler)
+    return handler
+    "#,
+);
+
+testcase!(
+    test_functools_update_wrapper_function_loop,
+    r#"
+from functools import update_wrapper
+from typing import assert_type
+
+def source(x: int) -> int:
+    return x
+
+def wrapper(x: int) -> int:
+    return x
+
+def repeatedly(count: int) -> int:
+    fn = source
+    for _ in range(count):
+        fn = update_wrapper(wrapper, fn)
+    return fn(1)
+
+assert_type(repeatedly(3), int)
+    "#,
+);
+
+testcase!(
+    test_inspect_unwrap_mutated_middle,
+    r#"
+from functools import update_wrapper, wraps
+from inspect import unwrap
+from typing import Any, assert_type
+
+def leaf() -> str:
+    return "leaf"
+
+def middle() -> int:
+    return 1
+
+update_wrapper(middle, leaf)
+
+@wraps(middle)
+def outer() -> bool:
+    return False
+
+assert_type(unwrap(outer)(), Any)
+    "#,
+);
+
+testcase!(
+    test_inspect_unwrap_retargeted_function,
+    r#"
+from functools import update_wrapper, wraps
+from inspect import unwrap
+from typing import Any, assert_type
+
+def original() -> int:
+    return 1
+
+def replacement() -> str:
+    return "replacement"
+
+@wraps(original)
+def wrapper() -> bool:
+    return False
+
+alias = wrapper
+update_wrapper(alias, replacement)
+assert_type(unwrap(wrapper)(), Any)
+assert_type(unwrap(alias)(), Any)
+    "#,
+);
+
+testcase!(
+    test_inspect_unwrap_target_mutated_later,
+    r#"
+from functools import update_wrapper, wraps
+from inspect import unwrap
+from typing import Any, assert_type
+
+def leaf() -> str:
+    return "leaf"
+
+def middle() -> int:
+    return 1
+
+@wraps(middle)
+def outer() -> bool:
+    return False
+
+update_wrapper(middle, leaf)
+assert_type(unwrap(outer)(), Any)
+    "#,
+);
+
+testcase!(
+    test_inspect_unwrap_factory_before_mutation,
+    r#"
+from functools import update_wrapper as mutate, wraps
+from inspect import unwrap
+from typing import Any, assert_type
+
+def leaf() -> str:
+    return "leaf"
+
+def target() -> int:
+    return 1
+
+factory = wraps(target)
+mutate(target, leaf)
+
+@factory
+def outer() -> bool:
+    return False
+
+assert_type(unwrap(outer)(), Any)
+    "#,
+);
+
+testcase!(
+    test_inspect_unwrap_control_flow_mutations,
+    r#"
+from functools import update_wrapper, wraps
+from inspect import unwrap
+from typing import Any, Callable, assert_type
+
+def leaf() -> str:
+    return "leaf"
+
+def branch(flag: bool) -> None:
+    def target() -> int:
+        return 1
+
+    @wraps(target)
+    def outer() -> bool:
+        return False
+
+    alias: Callable[[], int] = target
+    if flag:
+        update_wrapper(alias, leaf)
+    assert_type(unwrap(outer)(), Any)
+
+def loop(count: int) -> None:
+    def target() -> int:
+        return 1
+
+    @wraps(target)
+    def outer() -> bool:
+        return False
+
+    for _ in range(count):
+        update_wrapper(target, leaf)
+    assert_type(unwrap(outer)(), Any)
+
+def caught() -> None:
+    def target() -> int:
+        return 1
+
+    @wraps(target)
+    def outer() -> bool:
+        return False
+
+    try:
+        update_wrapper(target, leaf)
+        raise RuntimeError()
+    except RuntimeError:
+        assert_type(unwrap(outer)(), Any)
+
+branch(True)
+loop(101)
+caught()
+    "#,
+);
+
+testcase!(
+    test_inspect_unwrap_direct_wraps_mutation,
+    r#"
+from functools import wraps
+from inspect import unwrap
+from typing import Any, assert_type
+
+def leaf() -> str:
+    return "leaf"
+
+def target() -> int:
+    return 1
+
+@wraps(target)
+def outer() -> bool:
+    return False
+
+wraps(leaf)(target)
+assert_type(unwrap(outer)(), Any)
+    "#,
+);
+
+testcase!(
+    test_functools_wrapper_loop_forms,
+    r#"
+from functools import update_wrapper, wraps
+from typing import assert_type
+
+def source(x: int) -> int:
+    return x
+
+def first(x: int) -> int:
+    return x
+
+def second(x: int) -> int:
+    return x
+
+def called(count: int) -> int:
+    fn = source
+    for _ in range(count):
+        fn = wraps(fn)(first)
+    return fn(1)
+
+def decorated(count: int) -> int:
+    fn = source
+    for _ in range(count):
+        @wraps(fn)
+        def wrapper(x: int) -> int:
+            return x
+        fn = wrapper
+    return fn(1)
+
+def alternating(count: int) -> int:
+    fn = source
+    for _ in range(count):
+        fn = update_wrapper(first, fn)
+        fn = update_wrapper(second, fn)
+    return fn(1)
+
+def conditional(count: int, flag: bool) -> int:
+    fn = source
+    for _ in range(count):
+        if flag:
+            fn = update_wrapper(first, fn)
+        else:
+            fn = update_wrapper(second, fn)
+    return fn(1)
+
+assert_type(called(3), int)
+assert_type(decorated(3), int)
+assert_type(alternating(3), int)
+assert_type(conditional(3, True), int)
+    "#,
+);
+
+testcase!(
+    test_functools_generic_wrapper_loop,
+    r#"
+from functools import wraps
+from typing import Callable, assert_type
+
+def decorate[F: Callable[..., object]](fn: F):
+    @wraps(fn)
+    def wrapper(*args: object, **kwargs: object) -> object:
+        return fn(*args, **kwargs)
+    return wrapper
+
+def source(x: int) -> int:
+    return x
+
+def repeatedly(count: int) -> object:
+    fn = source
+    for _ in range(count):
+        fn = decorate(fn)
+    return fn(1)
+
+assert_type(repeatedly(3), object)
+    "#,
+);
+
+testcase!(
+    test_inspect_unwrap_unknown_wrapping_state,
+    r#"
+from functools import update_wrapper, wraps
+from inspect import unwrap
+from typing import Any, Callable, assert_type
+
+def inner() -> str:
+    return "wrapped"
+
+@wraps(inner)
+def wrapper() -> int:
+    return 1
+
+def annotated(fn: Callable[[], int]) -> None:
+    assert_type(unwrap(fn), Any)
+
+    @wraps(fn)
+    def outer() -> bool:
+        return False
+
+    assert_type(unwrap(outer), Any)
+
+annotated(wrapper)
+
+def mutated() -> int:
+    return 1
+
+update_wrapper(mutated, inner)
+assert_type(unwrap(mutated), Any)
+    "#,
+);
+
+testcase!(
+    test_inspect_unwrap_union_branches,
+    r#"
+from functools import wraps
+from inspect import unwrap
+from typing import Any, assert_type
+
+def inner() -> str:
+    return "wrapped"
+
+@wraps(inner)
+def wrapper() -> int:
+    return 1
+
+def plain() -> int:
+    return 2
+
+@wraps(inner)
+def another() -> bool:
+    return False
+
+def check(flag: bool) -> None:
+    choice = wrapper if flag else plain
+    assert_type(unwrap(choice)(), Any | str)
+
+    @wraps(choice)
+    def outer() -> bool:
+        return False
+
+    assert_type(unwrap(outer)(), int | str)
+
+    shared_target = wrapper if flag else another
+    assert_type(unwrap(shared_target)(), str)
+    "#,
+);
+
+testcase!(
+    test_inspect_unwrap_starred_arguments,
+    r#"
+from functools import wraps
+from inspect import unwrap
+from typing import Any, assert_type
+
+def inner() -> str:
+    return "wrapped"
+
+@wraps(inner)
+def wrapper() -> int:
+    return 1
+
+assert_type(unwrap(*(wrapper,)), Any)
+assert_type(unwrap(*(wrapper,), stop=None), Any)
+    "#,
+);
+
+testcase!(
     test_signature_modifying_function_decorator,
     r#"
 from typing import assert_type, Callable, Any
@@ -525,6 +1028,37 @@ def f0(arg: Callable[..., int]) -> Callable[..., int]: ...
 @dec  # E: Argument `int` is not assignable to parameter `arg` with type `(...) -> Any` in function `dec`
 @f0
 def f0(arg: Callable[..., int]) -> Callable[..., int]: ...
+    "#,
+);
+
+// This reproduces return inference without annotating the decorator or its wrapper.
+// https://github.com/facebook/pyrefly/issues/1115
+testcase!(
+    test_inferred_decorator_union_alias_display,
+    r#"
+from collections.abc import Callable
+from typing import reveal_type
+
+type ResponseReturnValue = str | bytes | tuple[str, int]
+
+def unauthorized() -> ResponseReturnValue: ...
+
+def login_required[**P, R](func: Callable[P, R]):
+    def wrapped(*args: P.args, **kwargs: P.kwargs):
+        if args:
+            return unauthorized()
+        return func(*args, **kwargs)
+    return wrapped
+
+def handler() -> int:
+    return 0
+
+def setup_required(view: Callable[..., int]) -> Callable[..., int]: ...
+
+# The inferred return union exceeds the width limit and widens to Unknown.
+decorated = login_required(handler)
+reveal_type(decorated)  # E: revealed type: () -> Unknown
+setup_required(decorated)
     "#,
 );
 

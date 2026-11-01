@@ -17,6 +17,7 @@ use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_util::gas::Gas;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ModModule;
+use ruff_python_ast::Stmt;
 use ruff_python_ast::helpers::is_docstring_stmt;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
@@ -317,6 +318,26 @@ pub fn common_alias_target_module(alias: &str) -> Option<&'static str> {
     COMMON_MODULE_ALIASES.get(alias).copied()
 }
 
+/// Prepare an import edit after the module docstring and future-import header.
+pub(crate) fn prepare_import_insertion(
+    ast: &ModModule,
+    mut import_text: String,
+) -> (TextSize, String) {
+    if let Some(first_stmt) = ast.body.iter().find(|stmt| {
+        !is_docstring_stmt(stmt)
+            && !matches!(stmt, Stmt::ImportFrom(import)
+                if import.level == 0
+                    && import.module.as_ref().is_some_and(|module| module.id.as_str() == "__future__"))
+    }) {
+        return (first_stmt.range().start(), import_text);
+    }
+    // Appending after a header needs a line boundary, even without a final newline.
+    if !ast.range.is_empty() {
+        import_text.insert(0, '\n');
+    }
+    (ast.range.end(), import_text)
+}
+
 /// Insert `import <module>` (optionally with an alias) at the top of the file.
 /// Returns (position, import text, completion label).
 pub fn import_regular_import_edit(
@@ -324,11 +345,6 @@ pub fn import_regular_import_edit(
     handle_to_import_from: Handle,
     alias: Option<&str>,
 ) -> (TextSize, String, String) {
-    let position = if let Some(first_stmt) = ast.body.iter().find(|stmt| !is_docstring_stmt(stmt)) {
-        first_stmt.range().start()
-    } else {
-        ast.range.end()
-    };
     let module_name_to_import = handle_to_import_from.module();
     let (import_text, completion_label) = match alias {
         Some(alias) => (
@@ -340,6 +356,7 @@ pub fn import_regular_import_edit(
             module_name_to_import.as_str().to_owned(),
         ),
     };
+    let (position, import_text) = prepare_import_insertion(ast, import_text);
     (position, import_text, completion_label)
 }
 
@@ -350,11 +367,6 @@ pub(crate) fn insert_import_edit_with_forced_import_format(
     export_name: &str,
     use_absolute_import: bool,
 ) -> ImportEdit {
-    let position = if let Some(first_stmt) = ast.body.iter().find(|stmt| !is_docstring_stmt(stmt)) {
-        first_stmt.range().start()
-    } else {
-        ast.range.end()
-    };
     let module_name_to_import = if use_absolute_import {
         handle_to_import_from.module()
     } else if let Some(relative_module) = ModuleName::relative_module_name_between(
@@ -369,7 +381,7 @@ pub(crate) fn insert_import_edit_with_forced_import_format(
         "from {} import {export_name}",
         module_name_to_import.as_str(),
     );
-    let insert_text = format!("{display_text}\n",);
+    let (position, insert_text) = prepare_import_insertion(ast, format!("{display_text}\n"));
     ImportEdit {
         range: TextRange::at(position, TextSize::new(0)),
         insert_text,

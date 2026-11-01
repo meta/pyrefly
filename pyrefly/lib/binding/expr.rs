@@ -783,8 +783,8 @@ impl<'a> BindingsBuilder<'a> {
 
         match x {
             Expr::Attribute(attr) => {
-                self.check_private_attribute_usage(attr);
                 self.ensure_expr(&mut attr.value, usage);
+                self.check_private_attribute_usage(attr);
             }
             Expr::Subscript(ExprSubscript { value, slice, .. }) => {
                 // Some subscripts are (or contain) type expressions even when they appear in a
@@ -986,6 +986,17 @@ impl<'a> BindingsBuilder<'a> {
                 // binding-variant choice — it drives a demand edge to
                 // `target::Exports`.
                 let special = self.as_special_export(&call.func);
+                // Factory creation (`wraps(f)`, including `@wraps(f)`) does not mutate a function.
+                // Applying the factory or calling `update_wrapper` may mutate aliased objects;
+                // argument splats and invalid calls are conservatively included in the summary.
+                if !self.has_functools_wrapper_mutation
+                    && (special == Some(SpecialExport::FunctoolsUpdateWrapper)
+                        || matches!(call.func.as_ref(), Expr::Call(factory)
+                            if self.as_special_export(&factory.func)
+                                == Some(SpecialExport::FunctoolsWraps)))
+                {
+                    self.has_functools_wrapper_mutation = true;
+                }
                 let call_range = call.range();
                 match special {
                     Some(
@@ -1255,17 +1266,17 @@ impl<'a> BindingsBuilder<'a> {
     }
 
     fn check_private_attribute_usage(&mut self, attr: &ExprAttribute) {
-        if !Ast::is_mangled_attr(&attr.attr.id) {
+        if !Ast::is_mangled_attr(&attr.attr.id) && !Ast::is_protected_attr(&attr.attr.id) {
             return;
         }
         let expect = PrivateAttributeAccessCheck {
             value: (*attr.value).clone(),
             attr: attr.attr.clone(),
-            class_idx: self.scopes.current_method_context(),
+            class_idxs: self.scopes.enclosing_class_keys(),
         };
         self.insert_binding(
             KeyExpect::PrivateAttributeAccess(attr.attr.range()),
-            BindingExpect::PrivateAttributeAccess(expect),
+            BindingExpect::PrivateAttributeAccess(Box::new(expect)),
         );
     }
 

@@ -196,10 +196,12 @@ pub struct FuncFlags {
     /// Parameter indices whose annotations directly name a type parameter of the defining class.
     /// This is used when a subclass binds that parameter to a shape `Flag`.
     pub shape_flag_constructor_sources: Option<Box<Vec<usize>>>,
-    /// A function decorated with `@deprecated`
-    pub deprecation: Option<Deprecation>,
+    /// A function decorated with `@deprecated`. Boxing keeps callable types small.
+    pub deprecation: Option<Box<Deprecation>>,
     /// Metadata for `@property`, `@foo.setter`, and `@foo.deleter`.
     pub property_metadata: Option<PropertyMetadata>,
+    /// The object referenced by `__wrapped__`, without changing the wrapper's signature.
+    pub wrapped: Option<Box<Type>>,
     /// A function decorated with `functools.cached_property` or equivalent.
     pub is_cached_property: bool,
     pub has_enum_member_decoration: bool,
@@ -436,6 +438,9 @@ pub enum FunctionKind {
     AssertType,
     AssertShape,
     RevealType,
+    InspectUnwrap,
+    FunctoolsWraps,
+    FunctoolsUpdateWrapper,
     Final,
     RuntimeCheckable,
     Synthesized(Arc<FuncSymbol>),
@@ -525,6 +530,9 @@ impl FunctionKind {
             ("typing" | "typing_extensions", "assert_type") => Self::AssertType,
             ("shape_extensions", "assert_shape") => Self::AssertShape,
             ("typing" | "typing_extensions", "reveal_type") => Self::RevealType,
+            ("inspect", "unwrap") => Self::InspectUnwrap,
+            ("functools", "wraps") => Self::FunctoolsWraps,
+            ("functools", "update_wrapper") => Self::FunctoolsUpdateWrapper,
             ("typing" | "typing_extensions", "final") => Self::Final,
             ("typing" | "typing_extensions", "runtime_checkable") => Self::RuntimeCheckable,
             ("typing" | "typing_extensions", "dataclass_transform") => Self::DataclassTransform,
@@ -564,6 +572,9 @@ impl FunctionKind {
             Self::AssertType => ModuleName::typing(),
             Self::AssertShape => ModuleName::from_str("shape_extensions"),
             Self::RevealType => ModuleName::typing(),
+            Self::InspectUnwrap => ModuleName::from_str("inspect"),
+            Self::FunctoolsWraps => ModuleName::functools(),
+            Self::FunctoolsUpdateWrapper => ModuleName::functools(),
             Self::RuntimeCheckable => ModuleName::typing(),
             Self::CallbackProtocol(cls) => cls.qname().module_name(),
             Self::SingleDispatchRegister(_) => ModuleName::functools(),
@@ -605,6 +616,9 @@ impl FunctionKind {
             Self::AssertType => Cow::Owned(Name::new_static("assert_type")),
             Self::AssertShape => Cow::Owned(Name::new_static("assert_shape")),
             Self::RevealType => Cow::Owned(Name::new_static("reveal_type")),
+            Self::InspectUnwrap => Cow::Owned(Name::new_static("unwrap")),
+            Self::FunctoolsWraps => Cow::Owned(Name::new_static("wraps")),
+            Self::FunctoolsUpdateWrapper => Cow::Owned(Name::new_static("update_wrapper")),
             Self::RuntimeCheckable => Cow::Owned(Name::new_static("runtime_checkable")),
             Self::CallbackProtocol(_) => Cow::Owned(dunder::CALL),
             Self::SingleDispatchRegister(_) => Cow::Owned(Name::new_static("register")),
@@ -646,6 +660,9 @@ impl FunctionKind {
             Self::AssertType => None,
             Self::AssertShape => None,
             Self::RevealType => None,
+            Self::InspectUnwrap => None,
+            Self::FunctoolsWraps => None,
+            Self::FunctoolsUpdateWrapper => None,
             Self::RuntimeCheckable => None,
             Self::NumbaJit => None,
             Self::NumbaNjit => None,

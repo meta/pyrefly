@@ -56,6 +56,8 @@ pub enum SpecialExport {
     Generic,
     Protocol,
     PydanticConfigDict,
+    PydanticFieldValidator,
+    PydanticModelValidator,
     PydanticToCamel,
     PydanticToPascal,
     PydanticToSnake,
@@ -94,6 +96,8 @@ pub enum SpecialExport {
     AttrsLegacyAttrib,
     AttrsNextGenField,
     AttrsNothing,
+    FunctoolsWraps,
+    FunctoolsUpdateWrapper,
 }
 
 impl SpecialExport {
@@ -142,6 +146,8 @@ impl SpecialExport {
             "override" => Some(Self::Override),
             "abstractmethod" => Some(Self::AbstractMethod),
             "ConfigDict" => Some(Self::PydanticConfigDict),
+            "field_validator" => Some(Self::PydanticFieldValidator),
+            "model_validator" => Some(Self::PydanticModelValidator),
             "to_camel" => Some(Self::PydanticToCamel),
             "to_pascal" => Some(Self::PydanticToPascal),
             "to_snake" => Some(Self::PydanticToSnake),
@@ -179,6 +185,8 @@ impl SpecialExport {
             "attr" | "attrib" | "ib" => Some(Self::AttrsLegacyAttrib),
             "field" => Some(Self::AttrsNextGenField),
             "NOTHING" => Some(Self::AttrsNothing),
+            "wraps" => Some(Self::FunctoolsWraps),
+            "update_wrapper" => Some(Self::FunctoolsUpdateWrapper),
             _ => None,
         }
     }
@@ -223,6 +231,7 @@ impl SpecialExport {
                 matches!(m.as_str(), "typing" | "typing_extensions")
             }
             Self::CollectionsNamedTuple => matches!(m.as_str(), "collections"),
+            Self::FunctoolsWraps | Self::FunctoolsUpdateWrapper => m == ModuleName::functools(),
             Self::Enum | Self::StrEnum | Self::IntEnum => matches!(m.as_str(), "enum"),
             Self::Super
             | Self::Len
@@ -250,7 +259,10 @@ impl SpecialExport {
             Self::Exit => matches!(m.as_str(), "sys" | "builtins"),
             Self::OsExit => matches!(m.as_str(), "os"),
             Self::AbstractMethod | Self::AbstractClassMethod => matches!(m.as_str(), "abc"),
-            Self::PydanticConfigDict => matches!(m.as_str(), "pydantic"),
+            Self::PydanticConfigDict => matches!(m.as_str(), "pydantic" | "pydantic.config"),
+            Self::PydanticFieldValidator | Self::PydanticModelValidator => {
+                matches!(m.as_str(), "pydantic" | "pydantic.functional_validators")
+            }
             Self::PydanticToCamel | Self::PydanticToPascal | Self::PydanticToSnake => {
                 m == ModuleName::pydantic_alias_generators()
             }

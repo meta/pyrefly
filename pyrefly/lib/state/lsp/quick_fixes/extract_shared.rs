@@ -26,6 +26,7 @@ use ruff_text_size::TextSize;
 use vec1::Vec1;
 
 use crate::ModuleInfo;
+use crate::state::ide::prepare_import_insertion;
 use crate::state::lsp::FindDefinitionItemWithDocstring;
 use crate::state::lsp::FindPreference;
 use crate::state::lsp::Transaction;
@@ -407,14 +408,6 @@ pub(super) fn build_from_import_line(
     ))
 }
 
-pub(super) fn import_insertion_point(ast: &ModModule) -> TextSize {
-    if let Some(first_stmt) = ast.body.iter().find(|stmt| !is_docstring_stmt(stmt)) {
-        first_stmt.range().start()
-    } else {
-        ast.range.end()
-    }
-}
-
 pub(super) fn build_from_import_edit(
     module_info: &Module,
     ast: &ModModule,
@@ -422,7 +415,7 @@ pub(super) fn build_from_import_edit(
     names: &[&str],
 ) -> Option<(Module, TextRange, String)> {
     let import_text = build_from_import_line(ast, module_name, names)?;
-    let position = import_insertion_point(ast);
+    let (position, import_text) = prepare_import_insertion(ast, import_text);
     Some((
         module_info.clone(),
         TextRange::at(position, TextSize::new(0)),

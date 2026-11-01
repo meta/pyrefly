@@ -684,6 +684,141 @@ fn test_references_for_aliased_import_with_config() {
 }
 
 #[test]
+fn test_references_from_third_party_source_with_stub() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("references_third_party");
+    let scope_uri = Uri::from_file_path(root_path.clone()).unwrap();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
+    interaction.set_root(root_path.clone());
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![("test".to_owned(), scope_uri)]),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let library = root_path.join("venv/lib/python3.12/site-packages/third_party_lib.py");
+    let user_code = root_path.join("user.py");
+
+    interaction.client.did_open("user.py");
+    interaction
+        .client
+        .did_open("venv/lib/python3.12/site-packages/third_party_lib.py");
+
+    interaction
+        .client
+        .references(
+            "venv/lib/python3.12/site-packages/third_party_lib.py",
+            0,
+            6,
+            true,
+        )
+        .expect_response(json!([
+            {
+                "range": {"start":{"line":2,"character":11},"end":{"line":2,"character":16}},
+                "uri": Uri::from_file_path(&user_code).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":2,"character":23},"end":{"line":2,"character":28}},
+                "uri": Uri::from_file_path(&user_code).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":3,"character":12},"end":{"line":3,"character":17}},
+                "uri": Uri::from_file_path(&user_code).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":0,"character":6},"end":{"line":0,"character":11}},
+                "uri": Uri::from_file_path(&library).unwrap().to_string()
+            },
+        ]))
+        .unwrap();
+
+    interaction
+        .client
+        .references(
+            "venv/lib/python3.12/site-packages/third_party_lib.py",
+            1,
+            8,
+            true,
+        )
+        .expect_response(json!([
+            {
+                "range": {"start":{"line":4,"character":6},"end":{"line":4,"character":13}},
+                "uri": Uri::from_file_path(&user_code).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":1,"character":8},"end":{"line":1,"character":15}},
+                "uri": Uri::from_file_path(&library).unwrap().to_string()
+            },
+        ]))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_references_from_third_party_source_with_stubs_package() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("references_stubs_package");
+    let scope_uri = Uri::from_file_path(root_path.clone()).unwrap();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
+    interaction.set_root(root_path.clone());
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![("test".to_owned(), scope_uri)]),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let library = root_path.join("venv/lib/python3.12/site-packages/mylib/__init__.py");
+    let user_code = root_path.join("user.py");
+
+    interaction.client.did_open("user.py");
+    interaction
+        .client
+        .did_open("venv/lib/python3.12/site-packages/mylib/__init__.py");
+
+    // `user.py` is checked against the separate `mylib-stubs` package.
+    interaction
+        .client
+        .references(
+            "venv/lib/python3.12/site-packages/mylib/__init__.py",
+            0,
+            4,
+            true,
+        )
+        .expect_response(json!([
+            {
+                "range": {"start":{"line":0,"character":18},"end":{"line":0,"character":22}},
+                "uri": Uri::from_file_path(&user_code).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":2,"character":0},"end":{"line":2,"character":4}},
+                "uri": Uri::from_file_path(&user_code).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":0,"character":4},"end":{"line":0,"character":8}},
+                "uri": Uri::from_file_path(&library).unwrap().to_string()
+            },
+        ]))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
 fn test_references_after_file_modification_with_config() {
     let root = get_test_files_root();
     let root_path = root.path().join("tests_requiring_config");

@@ -2058,7 +2058,7 @@ impl ConfigFile {
                             .parse::<Version>()
                             .expect("Pyrefly's package version must be PEP 440 compatible");
                         if !specifiers.contains(&parsed_running_version) {
-                            errors.push(ConfigError::error(anyhow!(
+                            errors.push(ConfigError::version_mismatch(anyhow!(
                                 "Pyrefly {running_version} does not satisfy `required-version = \"{required_version}\"`"
                             )));
                         }
@@ -3139,6 +3139,23 @@ mod tests {
     }
 
     #[test]
+    fn test_deserializing_unused_parameter_severity() {
+        let config_str = "
+             [errors]
+             unused-parameter = \"ignore\"
+             ";
+        let config = ConfigFile::parse_config(config_str).unwrap();
+        assert_eq!(
+            config
+                .root
+                .errors
+                .unwrap()
+                .severity(ErrorKind::UnusedParameter),
+            Severity::Ignore
+        );
+    }
+
+    #[test]
     fn test_toml_parse_error_recovers_value_span() {
         // The offending value lives in a `#[serde(flatten)]`ed field, so
         // `toml_edit` drops its span; `toml_error_span` recovers it by probing.
@@ -3944,6 +3961,38 @@ output-format = "omit-errors"
     }
 
     #[test]
+    fn test_possibly_uninitialized_attribute_configuration() {
+        for (source, possibly_initialized_attribute_severity, missing_attribute_severity) in [
+            ("", Severity::Ignore, Severity::Error),
+            ("preset = 'strict'", Severity::Error, Severity::Error),
+            (
+                "preset = 'strict'\n[errors]\npossibly-uninitialized-attribute = 'ignore'",
+                Severity::Ignore,
+                Severity::Error,
+            ),
+            (
+                "preset = 'strict'\n[errors]\nmissing-attribute = 'ignore'",
+                Severity::Error,
+                Severity::Ignore,
+            ),
+        ] {
+            let mut config = ConfigFile::parse_config(source).unwrap();
+            config.configure();
+            let errors = config.root.errors.as_ref().unwrap();
+            assert_eq!(
+                errors.severity(ErrorKind::PossiblyUninitializedAttribute),
+                possibly_initialized_attribute_severity,
+                "configuration: {source}",
+            );
+            assert_eq!(
+                errors.severity(ErrorKind::MissingAttribute),
+                missing_attribute_severity,
+                "configuration: {source}",
+            );
+        }
+    }
+
+    #[test]
     fn test_preset_off_silences_all_errors() {
         // The `off` preset silences every error kind and leaves all other
         // settings at their defaults.
@@ -3981,6 +4030,19 @@ output-format = "omit-errors"
     }
 
     #[test]
+    fn test_preset_all_keeps_hints() {
+        let mut config = ConfigFile {
+            preset: Some(Preset::All),
+            ..Default::default()
+        };
+        config.configure();
+
+        let errors = config.root.errors.as_ref().unwrap();
+        assert_eq!(errors.severity(ErrorKind::UnusedIgnore), Severity::Error);
+        assert_eq!(errors.severity(ErrorKind::UnusedParameter), Severity::Hint);
+    }
+
+    #[test]
     fn test_preset_basic_enables_only_high_confidence_errors() {
         // Basic is an opt-in preset: only a small set of high-confidence
         // diagnostics fires, everything else is silenced. The enabled kinds
@@ -3994,9 +4056,9 @@ output-format = "omit-errors"
 
         let errors = config.root.errors.as_ref().unwrap();
 
-        // All enabled kinds are errors. Keeping them at `Error` (rather than
-        // `Warn`) avoids the surprise of switching presets changing
-        // `min-severity` requirements.
+        // Every enabled kind except the hints below is an error. Keeping them
+        // at `Error` (rather than `Warn`) avoids the surprise of switching
+        // presets changing `min-severity` requirements.
         for kind in [
             ErrorKind::BadClassDefinition,
             ErrorKind::BadInstantiation,
@@ -4020,6 +4082,17 @@ output-format = "omit-errors"
                 errors.severity(kind),
                 Severity::Error,
                 "Basic preset should enable {kind:?} as Error"
+            );
+        }
+        for kind in [
+            ErrorKind::UnusedImport,
+            ErrorKind::UnusedParameter,
+            ErrorKind::UnusedVariable,
+        ] {
+            assert_eq!(
+                errors.severity(kind),
+                Severity::Hint,
+                "Basic preset should keep {kind:?} as Hint"
             );
         }
         // A representative sample of kinds that should be silenced. Exhaustive

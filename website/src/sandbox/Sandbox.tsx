@@ -1552,6 +1552,7 @@ function mapPyreflyErrorsToMarkerData(
             endColumn: error.endColumn,
             message: message,
             severity: error.severity,
+            tags: [...error.tags],
         };
     });
 }

@@ -6,6 +6,7 @@
  */
 
 use std::path::PathBuf;
+use std::slice;
 
 use lsp_types::Contents;
 use lsp_types::Hover;
@@ -36,6 +37,43 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
         }) => markup.value,
         _ => "None".to_owned(),
     }
+}
+
+// BUG: Hover shows string literal types for __all__ and __slots__ entries.
+// It should show (variable) foo: int and (attribute) bar: str (issue #4344).
+#[test]
+fn hover_symbol_literals() {
+    let code = r#"
+foo: int = 1
+__all__ = ["foo"]
+#            ^
+
+class C:
+    __slots__ = ("bar",)
+#                  ^
+
+    def __init__(self) -> None:
+        self.bar: str = ""
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+3 | __all__ = ["foo"]
+                 ^
+```python
+(variable) foo: Literal['foo']
+```
+
+7 |     __slots__ = ("bar",)
+                       ^
+```python
+Literal['bar']
+```
+"#
+        .trim(),
+        report.trim(),
+    );
 }
 
 fn get_test_report_at_verbosity(
@@ -571,6 +609,33 @@ greeter("hi")
 }
 
 #[test]
+fn hover_on_overloaded_callable_instance_shows_one_signature() {
+    let code = r#"
+from typing import Any, overload
+
+class Ufunc:
+    @overload
+    def __call__(self, x: int) -> int: ...
+    @overload
+    def __call__(self, x: str, y: str) -> str: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+power = Ufunc()
+power()
+#^
+"#;
+    let report = get_batched_lsp_operations_report_allow_error(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("x: int") && report.contains("-> int"),
+        "Expected hover to show the first overload, got: {report}"
+    );
+    assert!(
+        !report.contains("y: str") && !report.contains("-> str"),
+        "Expected other overloads to remain in signature help, got: {report}"
+    );
+}
+
+#[test]
 fn hover_on_callable_protocol_attribute_uses_dunder_call_signature() {
     let code = r#"
 from typing import Protocol, cast
@@ -1038,6 +1103,36 @@ def foo(x: int, y: int) -> None:
 foo(x=1, y=2)
 #   ^
 foo(x=1, y=2)
+#        ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("**Parameter `x`**"),
+        "Expected parameter documentation for x, got: {report}"
+    );
+    assert!(report.contains("documentation for x"));
+    assert!(report.contains("**Parameter `y`**"));
+    assert!(report.contains("documentation for y"));
+}
+
+#[test]
+fn hover_shows_parameter_doc_for_numpydoc() {
+    let code = r#"
+def foo(x: int, y: str) -> None:
+    """Documented function.
+
+    Parameters
+    ----------
+    x : int
+        documentation for x
+    y : str
+        documentation for y
+    """
+    ...
+
+foo(x=1, y="hello")
+#   ^
+foo(x=1, y="hello")
 #        ^
 "#;
     let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
@@ -1633,6 +1728,48 @@ from lib import bar as baz
 }
 
 #[test]
+fn hover_on_imported_annotated_metadata_in_parameter_annotation() {
+    let pkg = r#"
+import utils
+"#;
+    let utils = r#"
+class ValueRange:
+    pass
+
+class Unit:
+    pass
+"#;
+    let code = r#"
+from typing import Annotated
+import pkg
+
+def takes(x: Annotated[int, pkg.utils.ValueRange, pkg.utils.Unit]) -> None: ...
+#                                      ^
+"#;
+    let report = get_batched_lsp_operations_report(
+        &[("main", code), ("pkg", pkg), ("utils", utils)],
+        get_test_report,
+    );
+    assert_eq!(
+        r#"
+# main.py
+5 | def takes(x: Annotated[int, pkg.utils.ValueRange, pkg.utils.Unit]) -> None: ...
+                                           ^
+```python
+(class) ValueRange: type[utils.ValueRange]
+```
+
+
+# pkg.py
+
+# utils.py
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
 fn hover_on_import_different_name_alias_second_token_test() {
     let lib = r#"
 def bar() -> None: ...
@@ -1806,6 +1943,131 @@ from lib import Widget
 Widget docstring"#
             .trim(),
         report.trim(),
+    );
+}
+
+/// Render hover while the library stays at the dependency require level.
+fn get_test_report_with_closed_library(lib: &str, main: &str) -> String {
+    let mut env = TestEnv::new().with_run_require(Require::Exports);
+    env.add("lib", lib);
+    env.add("main", main);
+    let (state, handles) = env.to_state();
+    let main_handle = handles("main");
+    let mut transaction = state.transaction();
+    transaction.run(slice::from_ref(&main_handle), Require::Everything, None);
+    assert!(
+        transaction.get_ast(&handles("lib")).is_none(),
+        "The library must not retain an AST when only the main file is open"
+    );
+    let report = match get_hover(
+        &transaction,
+        &main_handle,
+        extract_cursors_for_test(main)[0],
+        true,
+    ) {
+        Some(Hover {
+            contents: Contents::MarkupContent(markup),
+            ..
+        }) => markup.value,
+        _ => "None".to_owned(),
+    };
+    assert!(
+        transaction.get_ast(&handles("lib")).is_none(),
+        "Hover must not upgrade the library's AST retention"
+    );
+    report
+}
+
+#[test]
+fn hover_on_property_returning_class_in_closed_library() {
+    let lib = r#"
+class Target:
+    """Target class documentation."""
+class Factory:
+    @property
+    def target(self) -> type[Target]: ...
+"#;
+    let main = "from lib import Factory\nf = Factory()\nf.target\n#  ^\n";
+    let report = get_test_report_with_closed_library(lib, main);
+    assert_eq!(
+        "```python\n(class) target: type[lib.Target]\n```\n---\nTarget class documentation.",
+        report.trim(),
+    );
+}
+
+#[test]
+fn hover_on_property_returning_nested_class_in_closed_library() {
+    let lib = r#"
+class Target:
+    """Unrelated top-level documentation."""
+class Outer:
+    class Target:
+        """Nested target documentation."""
+class Factory:
+    @property
+    def target(self) -> type[Outer.Target]: ...
+"#;
+    let main = "from lib import Factory\nf = Factory()\nf.target\n#  ^\n";
+    let report = get_test_report_with_closed_library(lib, main);
+    assert_eq!(
+        "```python\n(class) target: type[lib.Outer.Target]\n```\n---\nNested target documentation.",
+        report.trim(),
+    );
+}
+
+#[test]
+fn hover_on_class_alias_in_closed_library() {
+    let lib = "class Target:\n    \"\"\"Target class documentation.\"\"\"\n";
+    let main = "from lib import Target\ncls = Target\n#^\n";
+    let report = get_test_report_with_closed_library(lib, main);
+    assert_eq!(
+        "```python\n(class) cls: def cls() -> Target: ...\n```\n---\nTarget class documentation.",
+        report.trim(),
+    );
+}
+
+#[test]
+fn hover_property_docstring_precedes_class_docstring_in_closed_library() {
+    let lib = r#"
+class Target:
+    """Target class documentation."""
+class Factory:
+    @property
+    def target(self) -> type[Target]:
+        """Property documentation."""
+        return Target
+"#;
+    let main = "from lib import Factory\nf = Factory()\nf.target\n#  ^\n";
+    let report = get_test_report_with_closed_library(lib, main);
+    assert!(report.contains("Property documentation."), "{report}");
+    assert!(!report.contains("Target class documentation."), "{report}");
+}
+
+#[test]
+fn hover_on_property_returning_class_shows_class_docstring() {
+    let lib = r#"
+from typing import Type
+
+class current_timestamp:
+    """The CURRENT_TIMESTAMP() SQL function."""
+    def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+class Func:
+    @property
+    def current_timestamp(self) -> Type[current_timestamp]: ...
+"#;
+    let code = r#"
+from lib import Func
+
+f = Func()
+f.current_timestamp
+#  ^
+"#;
+    let report =
+        get_batched_lsp_operations_report(&[("main", code), ("lib", lib)], get_test_report);
+    assert!(
+        report.contains("The CURRENT_TIMESTAMP() SQL function."),
+        "Expected hover to show the class docstring, got: {report}"
     );
 }
 
