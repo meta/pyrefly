@@ -1033,77 +1033,97 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
     }
 
-    /// EnumMeta.__call__ types the value parameter as Any. For value-lookup calls
-    /// (`MyEnum(x)`), refine against a class-defined `__init__` first parameter when
-    /// present, otherwise against the inferred member value type when it is not Any.
-    /// Do not use `__new__` here: it is for member construction at class definition time
-    /// (see SeFileType), while call sites look up by `_value_`.
-    fn check_enum_value_lookup_call(
+    /// `EnumMeta.__call__` types its `value` parameter as `Any`. For a plain value lookup
+    /// (`MyEnum(x)` / `MyEnum(value=x)`), return the type the lookup argument should be
+    /// checked against, or `None` when we cannot soundly refine it.
+    ///
+    /// Value lookup goes `EnumMeta.__call__` -> `Enum.__new__` -> existing member,
+    /// `_missing_(value)`, or `ValueError`. The enum's own `__init__`/`__new__` only run at
+    /// class-definition time, so they are deliberately not consulted here. We bail out when
+    /// the call contract may differ from stock `EnumMeta`: a custom metaclass, a user-defined
+    /// `_missing_`, the functional API, or an `Any` value type (e.g. a `__new__` that
+    /// rewrites `_value_` without a data-type mixin).
+    fn enum_value_lookup_expected_arg_type(
         &self,
         cls: &ClassType,
-        args: &[CallArg],
         keywords: &[CallKeyword],
-        arguments_range: TextRange,
-        errors: &ErrorCollector,
-        context: Option<&dyn Fn() -> ErrorContext>,
-    ) {
-        // Functional API uses a `names=` argument; leave that to EnumMeta.__call__.
+    ) -> Option<Type> {
         if keywords
             .iter()
-            .any(|kw| kw.arg.is_some_and(|id| id.as_str() == "names"))
+            .any(|kw| kw.arg.is_none_or(|id| id.as_str() != "value"))
         {
-            return;
+            return None;
         }
-
-        if let Some(init) = self.enum_custom_init_for_value_lookup(cls) {
-            let _ = self.call_infer(
-                self.as_call_target_or_error(
-                    init,
-                    CallStyle::Method(&dunder::INIT),
-                    arguments_range,
-                    errors,
-                    context,
-                ),
-                args,
-                keywords,
-                arguments_range,
-                errors,
-                context,
-                None,
-                None,
-            );
-            return;
+        let metadata = self.get_metadata_for_class(cls.class_object());
+        let enum_metadata = metadata.enum_metadata()?;
+        let enum_module = ModuleName::enum_();
+        let is_stock_metaclass = metadata.custom_metaclass().is_some_and(|m| {
+            m.class_object()
+                .has_toplevel_qname(enum_module.as_str(), "EnumMeta")
+                || m.class_object()
+                    .has_toplevel_qname(enum_module.as_str(), "EnumType")
+        });
+        if !is_stock_metaclass {
+            return None;
         }
-
-        let Some(want) = self.enum_value_lookup_expected_arg_type(cls) else {
-            return;
-        };
-        if want.is_any() {
-            return;
+        if let Some(missing) = self.get_class_member_with_defining_class(
+            cls.class_object(),
+            &Name::new_static("_missing_"),
+        ) && missing.defining_class.module_name() != enum_module
+        {
+            return None;
         }
+        // A user-defined `__new__` can store a `_value_` of any type, regardless of mixin.
+        if let Some(new) =
+            self.get_class_member_with_defining_class(cls.class_object(), &dunder::NEW)
+            && new.defining_class.module_name() != enum_module
+            && new.defining_class.module_name() != ModuleName::builtins()
+        {
+            return None;
+        }
+        let value_ty = self.enum_value_lookup_on_class(cls, enum_metadata);
+        if value_ty.is_any() {
+            return None;
+        }
+        // Member literals say which values exist, but lookup accepts any value of the base
+        // type and raises at runtime when it is missing, so promote literals.
+        let promoted = value_ty.promote_implicit_literals(self.stdlib);
+        let mut options = vec![promoted.clone(), Type::ClassType(cls.clone())];
+        // Lookup uses equality, so numeric values compare equal across int/float/complex
+        // (`Color(1.0)` finds a member whose value is `1`).
+        let int = self.heap.mk_class_type(self.stdlib.int().clone());
+        let float = self.heap.mk_class_type(self.stdlib.float().clone());
+        if self.is_subset_eq(&int, &promoted) || self.is_subset_eq(&float, &promoted) {
+            options.push(float);
+            options.push(self.heap.mk_class_type(self.stdlib.complex().clone()));
+        }
+        Some(self.unions(options))
+    }
 
-        // Single positional value, or `value=` keyword (EnumMeta value-lookup form).
-        let value_arg = if args.len() == 1 && keywords.is_empty() {
-            match &args[0] {
-                CallArg::Arg(v) => Some(v),
-                CallArg::Star(..) => None,
-            }
-        } else if args.is_empty() {
-            keywords.iter().find_map(|kw| {
-                if kw.arg.is_some_and(|id| id.as_str() == "value") {
-                    Some(&kw.value)
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
+    /// Check the value-lookup argument of an enum call against the expected lookup type.
+    /// Returns rewritten args/keywords that carry the already-inferred argument type, so the
+    /// metaclass `__call__` check does not infer the argument expression a second time
+    /// (re-inferring is exponential for nested enum calls).
+    fn check_enum_value_lookup_arg<'b>(
+        &self,
+        cls: &ClassType,
+        args: &[CallArg<'b>],
+        keywords: &[CallKeyword<'b>],
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+    ) -> Option<(Type, TextRange, bool)> {
+        let value_expr = match (args, keywords) {
+            ([CallArg::Arg(TypeOrExpr::Expr(e))], []) => (*e, true),
+            ([], [kw]) => match kw.value {
+                TypeOrExpr::Expr(e) => (e, false),
+                TypeOrExpr::Type(..) => return None,
+            },
+            _ => return None,
         };
-        let Some(value_arg) = value_arg else {
-            return;
-        };
-        let got = value_arg.infer(self, errors);
-        self.check_type_as_call_argument(&got, &want, value_arg.range(), errors, &|| {
+        let want = self.enum_value_lookup_expected_arg_type(cls, keywords)?;
+        let (expr, positional) = value_expr;
+        let got = self.expr_infer(expr, errors);
+        self.check_type_as_call_argument(&got, &want, expr.range(), errors, &|| {
             let mut tcc = TypeCheckContext::of_kind(TypeCheckKind::CallArgument(
                 Some(Name::new_static("value")),
                 None,
@@ -1113,36 +1133,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             tcc
         });
-    }
-
-    /// `__init__` defined on the user enum (not object / enum.Enum*), used to type value lookup.
-    fn enum_custom_init_for_value_lookup(&self, cls: &ClassType) -> Option<Type> {
-        let member =
-            self.get_class_member_with_defining_class(cls.class_object(), &dunder::INIT)?;
-        let definer = &member.defining_class;
-        if definer.has_toplevel_qname("builtins", "object")
-            || definer.has_toplevel_qname(ModuleName::enum_().as_str(), "Enum")
-            || definer.has_toplevel_qname(ModuleName::enum_().as_str(), "IntEnum")
-            || definer.has_toplevel_qname(ModuleName::enum_().as_str(), "StrEnum")
-            || definer.has_toplevel_qname(ModuleName::enum_().as_str(), "Flag")
-            || definer.has_toplevel_qname(ModuleName::enum_().as_str(), "IntFlag")
-            || definer.has_toplevel_qname(ModuleName::enum_().as_str(), "ReprEnum")
-        {
-            return None;
-        }
-        self.get_dunder_init(cls, false)
-    }
-
-    fn enum_value_lookup_expected_arg_type(&self, cls: &ClassType) -> Option<Type> {
-        let metadata = self.get_metadata_for_class(cls.class_object());
-        let enum_metadata = metadata.enum_metadata()?;
-        let value_ty = self.enum_value_lookup_on_class(cls, enum_metadata);
-        // Member literals (`Literal["a", "b"]`) describe which values exist, but
-        // Enum(x) accepts any value of that base type (`str`) and raises at
-        // runtime when the value is missing. Promote so `cls(val: str)` stays
-        // valid. Also accept an already-constructed member (`cls(cls.A)`).
-        let promoted = value_ty.promote_implicit_literals(self.stdlib);
-        Some(self.unions(vec![promoted, Type::ClassType(cls.clone())]))
+        Some((got, expr.range(), positional))
     }
 
     /// If the metaclass defines a custom `__call__`, call it. If the `__call__` comes from `type`, ignore
@@ -1380,6 +1371,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let errors = self.error_collector();
         // The solutions the constructor call settled on.
         let mut ctor_table = None;
+        // For enum value lookup, infer the lookup argument once, check it, and hand the
+        // inferred type (not the expression) to the metaclass `__call__` check.
+        let enum_lookup = if class_metadata.is_enum() {
+            self.check_enum_value_lookup_arg(&cls, args, keywords, &errors, context)
+        } else {
+            None
+        };
+        let enum_args;
+        let enum_keywords;
+        let (args, keywords) = match &enum_lookup {
+            Some((ty, range, true)) => {
+                enum_args = [CallArg::Arg(TypeOrExpr::Type(ty, *range))];
+                (&enum_args[..], keywords)
+            }
+            Some((ty, range, false)) => {
+                enum_keywords = [CallKeyword {
+                    range: keywords[0].range,
+                    arg: keywords[0].arg,
+                    value: TypeOrExpr::Type(ty, *range),
+                }];
+                (args, &enum_keywords[..])
+            }
+            None => (args, keywords),
+        };
         if let Some(ret) = self.call_metaclass(
             &cls,
             arguments_range,
@@ -1406,16 +1421,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Enum construction is routed through EnumMeta.__call__, which performs
             // member lookup by value. A custom enum __new__ is used for member creation
             // during class definition and should not be re-applied at call sites.
-            // EnumMeta types `value` as Any; refine against __init__ / member value types.
             if class_metadata.is_enum() {
-                self.check_enum_value_lookup_call(
-                    &cls,
-                    args,
-                    keywords,
-                    arguments_range,
-                    &errors,
-                    context,
-                );
                 let ty = if constructor_kind == ConstructorKind::TypeOfSelf {
                     self.heap.mk_self_type(cls)
                 } else {

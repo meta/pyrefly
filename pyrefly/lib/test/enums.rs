@@ -1395,40 +1395,6 @@ assert_type(x, Literal["q"])
 );
 
 testcase!(
-    test_enum_call_rejects_incompatible_value,
-    r#"
-from enum import Enum
-from typing import TYPE_CHECKING, Self
-
-class Category(Enum):
-    if TYPE_CHECKING:
-        @property
-        def value(self) -> str: ...
-
-        def __init__(self, value: str) -> None:
-            self._id: str
-    else:
-        def __init__(self, value: str, id: str) -> None:
-            self._value_ = value
-            self._id = id
-
-    GAMES = "GAMES", "0_0"
-    MUSIC = "MUSIC", "1_1"
-
-    @property
-    def id(self) -> str:
-        return self._id
-
-    @classmethod
-    def _missing_(cls, value: object) -> Self:
-        raise ValueError(value)
-
-Category("GAMES")
-Category(None)  # E: Argument `None` is not assignable to parameter `value` with type `str`
-    "#,
-);
-
-testcase!(
     test_enum_call_rejects_none_for_int_members,
     r#"
 from enum import Enum
@@ -1438,6 +1404,144 @@ class Color(Enum):
     GREEN = 2
 
 Color(1)
-Color(None)  # E: Argument `None` is not assignable to parameter `value` with type `Color | int`
+Color(value=2)
+Color(Color.RED)
+Color(None)  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+Color(value=None)  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+    "#,
+);
+
+testcase!(
+    test_enum_call_cross_numeric_equality,
+    r#"
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+
+# 1.0 == 1, so lookup succeeds at runtime.
+Color(1.0)
+Color(True)
+    "#,
+);
+
+testcase!(
+    test_enum_call_ignores_multi_param_init,
+    r#"
+from enum import Enum
+
+class Planet(Enum):
+    MERCURY = (3.303e+23, 2.4397e6)
+    EARTH = (5.976e+24, 6.37814e6)
+
+    def __init__(self, mass: float, radius: float) -> None:
+        self.mass = mass
+        self.radius = radius
+
+# `__init__` runs at class definition, not at lookup.
+Planet((5.976e+24, 6.37814e6))
+Planet(Planet.EARTH)
+Planet(value=(3.303e+23, 2.4397e6))
+    "#,
+);
+
+testcase!(
+    test_enum_call_init_param_names_irrelevant,
+    r#"
+from enum import Enum
+
+class Category(Enum):
+    GAMES = "GAMES", "0_0"
+    MUSIC = "MUSIC", "1_1"
+
+    def __init__(self, label: str, id: str) -> None:
+        self._value_ = label
+        self.id = id
+
+Category(Category.GAMES)
+Category(value=("GAMES", "0_0"))
+    "#,
+);
+
+testcase!(
+    test_enum_call_new_changes_value_type,
+    r#"
+from enum import Enum
+
+class Coordinate(Enum):
+    def __new__(cls, value: int, label: str):
+        obj = object.__new__(cls)
+        obj._value_ = label
+        return obj
+
+    PX = (0, "P.X")
+    PY = (1, "P.Y")
+
+# `_value_` is the label string, not the `(int, str)` creation arguments.
+Coordinate("P.X")
+Coordinate(Coordinate.PX)
+
+class IntCoordinate(int, Enum):
+    def __new__(cls, value: int, label: str):
+        obj = int.__new__(cls, value)
+        obj._value_ = value
+        return obj
+
+    PX = (0, "P.X")
+
+IntCoordinate(0)
+
+class Untyped(Enum):
+    def __new__(cls, raw: str):
+        obj = object.__new__(cls)
+        obj._value_ = len(raw)
+        return obj
+
+    A = "a"
+    BB = "bb"
+
+Untyped(1)
+Untyped("anything")
+    "#,
+);
+
+testcase!(
+    test_enum_call_custom_metaclass_and_missing,
+    r#"
+from enum import Enum, EnumMeta
+from typing import Any, Self
+
+class LenientMeta(EnumMeta):
+    def __call__(cls, value: Any, *args: Any, **kwargs: Any) -> Any:
+        return super().__call__(value, *args, **kwargs)
+
+class WithMeta(Enum, metaclass=LenientMeta):
+    A = 1
+
+WithMeta(None)
+WithMeta("a")
+
+class WithMissing(Enum):
+    A = 1
+
+    @classmethod
+    def _missing_(cls, value: object) -> Self:
+        return cls.A
+
+WithMissing(None)
+WithMissing("a")
+    "#,
+);
+
+testcase!(
+    test_enum_call_deeply_nested,
+    r#"
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+
+Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(1)))))))))))))))))))))
     "#,
 );
