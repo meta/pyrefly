@@ -3091,7 +3091,6 @@ def from_target(t: Target) -> Target:
 );
 
 testcase!(
-testcase!(
     test_typed_dict_unpacking_anonymous_typed_dict,
     r#"
 from typing import NotRequired, TypedDict
