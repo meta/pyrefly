@@ -3091,25 +3091,22 @@ def from_target(t: Target) -> Target:
 );
 
 testcase!(
+testcase!(
+    test_typed_dict_unpacking_anonymous_typed_dict,
+    r#"
+from typing import NotRequired, TypedDict
 
-        test_typed_dict_unpacking_anonymous_typed_dict,
+class Target(TypedDict):
+    x: int
 
-        r#"
-        from typing import NotRequired, TypedDict
+class PartialSource(TypedDict):
+    x: NotRequired[int]
 
-        class Target(TypedDict):
-            x: int
+def from_dict_literal() -> Target:
+    source = {"x": 1}
+        return {**source}
 
-            class PartialSource(TypedDict):
-                x: NotRequired[int]
-
-                def from_dict_literal() -> Target:
-                    source = {"x": 1}
-
-                        return {**source}
-
-                        def from_not_required(s: PartialSource) -> Target:
-
-                            return {**s} # E: Missing required key `x` for TypedDict `Target`
-                            "#,
-    );
+def from_not_required(s: PartialSource) -> Target:
+    return {**s} # E: Missing required key `x` for TypedDict `Target`
+"#,
+);
