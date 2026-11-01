@@ -596,6 +596,118 @@ fn parameter_name_hint_labels(code: &str, assert_zero_errors: bool) -> Vec<Strin
         .collect()
 }
 
+#[test]
+fn test_issue_5105_hide_hint_when_arg_matches_param_name() {
+    // Matching argument name is hidden while non-matching is shown.
+    let code = r#"
+def foo(a: int, b: int) -> None:
+    pass
+
+a = 1
+c = 2
+foo(a, c)
+"#;
+    assert_eq!(parameter_name_hint_labels(code, true), vec!["b= "]);
+
+    // When all arguments match parameter names, all parameter hints are hidden.
+    let code = r#"
+def foo(a: int, b: int) -> None:
+    pass
+
+a = 1
+b = 2
+foo(a, b)
+"#;
+    assert_eq!(parameter_name_hint_labels(code, true), Vec::<String>::new());
+
+    // Attribute access `obj.a` against parameter `a` is still shown.
+    let code = r#"
+class Box:
+    a: int = 1
+
+def foo(a: int, b: int) -> None:
+    pass
+
+obj = Box()
+c = 2
+foo(obj.a, c)
+"#;
+    assert_eq!(parameter_name_hint_labels(code, true), vec!["a= ", "b= "]);
+
+    // Method calls also hide matching parameter names.
+    let code = r#"
+class Service:
+    def process(self, x: int, y: int) -> None:
+        pass
+
+s = Service()
+x = 10
+other = 20
+s.process(x, other)
+"#;
+    assert_eq!(parameter_name_hint_labels(code, true), vec!["y= "]);
+
+    // Positional-only parameters also hide matching parameter names.
+    let code = r#"
+def foo(a: int, /, b: int) -> None:
+    pass
+
+a = 1
+b = 2
+foo(a, b)
+"#;
+    assert_eq!(parameter_name_hint_labels(code, true), Vec::<String>::new());
+
+    let code = r#"
+def foo(a: int, /, b: int) -> None:
+    pass
+
+x = 1
+foo(x, 2)
+"#;
+    assert_eq!(parameter_name_hint_labels(code, true), vec!["a= ", "b= "]);
+
+    // Variadic argument matching *args suppresses the *args= hint.
+    let code = r#"
+def foo(*args: int) -> None:
+    pass
+
+args = (1, 2)
+foo(*args)
+"#;
+    assert_eq!(parameter_name_hint_labels(code, true), Vec::<String>::new());
+
+    // Variadic argument with different name *items retains the *args= hint.
+    let code = r#"
+def foo(*args: int) -> None:
+    pass
+
+items = (1, 2)
+foo(*items)
+"#;
+    assert_eq!(parameter_name_hint_labels(code, true), vec!["*args= "]);
+
+    // Passing unstarred `args` to `*args` does NOT match and retains the *args= hint.
+    let code = r#"
+def foo(*args: int) -> None:
+    pass
+
+args = 1
+foo(args)
+"#;
+    assert_eq!(parameter_name_hint_labels(code, true), vec!["*args= "]);
+
+    // Passing starred `*a` to non-vararg parameter `a` does NOT match and retains hint.
+    let code = r#"
+def foo(a: int) -> None:
+    pass
+
+a = (1,)
+foo(*a)
+"#;
+    assert_eq!(parameter_name_hint_labels(code, true), vec!["a= "]);
+}
+
 // Regression coverage for #4611: instance-method parameter-name hints must
 // align one-to-one with positional arguments (`self` never consumes a slot).
 #[test]

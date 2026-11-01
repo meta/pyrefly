@@ -206,6 +206,17 @@ impl<'param> ParamNameMatch<'param> {
             self.name.as_str().to_owned()
         }
     }
+
+    fn matches_arg(&self, arg: &Expr) -> bool {
+        if self.is_vararg {
+            matches!(
+                arg,
+                Expr::Starred(starred) if matches!(&*starred.value, Expr::Name(name) if name.id == *self.name)
+            )
+        } else {
+            matches!(arg, Expr::Name(name) if name.id == *self.name)
+        }
+    }
 }
 
 impl<'a> Transaction<'a> {
@@ -592,6 +603,7 @@ impl<'a> Transaction<'a> {
                                 && param_match.name.as_str() != "__self"
                                 && param_match.name.as_str() != "cls"
                                 && param_match.name.as_str() != "_cls"
+                                && !param_match.matches_arg(arg)
                             {
                                 param_hints.push((
                                     arg.range().start(),
