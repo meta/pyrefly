@@ -32,6 +32,8 @@ use crate::export::special::SpecialExport;
 use crate::export::symbols::FlatSymbols;
 use crate::module::module_info::ModuleInfo;
 use crate::state::loader::FindingOrError;
+use crate::state::pytest::PytestFixtureDefinition;
+use crate::state::pytest::collect_pytest_fixture_definitions;
 use crate::state::state::ModuleChanges;
 
 /// Find the exports of a given module. Beware: these APIs record dependencies between modules during lookups. Using the
@@ -130,6 +132,8 @@ pub struct Exports {
     /// as methods, backing IDE symbol features. Built only while indexing a
     /// first-party module; `None` everywhere else.
     symbols: Option<FlatSymbols>,
+    /// Fixture metadata remains available after the module AST is evicted.
+    pytest_fixtures: Vec<PytestFixtureDefinition>,
 }
 
 impl Display for Exports {
@@ -189,6 +193,22 @@ impl Exports {
             exports: Calculation::new(),
             docstring_range: Docstring::range_from_stmts(x),
             symbols,
+            pytest_fixtures: collect_pytest_fixture_definitions(x),
+        }
+    }
+
+    pub(crate) fn pytest_fixtures(&self) -> &[PytestFixtureDefinition] {
+        &self.pytest_fixtures
+    }
+
+    /// Look up a named fixture import without resolving unrelated wildcard imports.
+    pub(crate) fn pytest_fixture_import(&self, name: &Name) -> Option<(ModuleName, Name)> {
+        match &self.definitions.definitions.get(name)?.style {
+            DefinitionStyle::ImportAs(module, original) => Some((*module, original.clone())),
+            DefinitionStyle::ImportAsEq(module) | DefinitionStyle::Import(module) => {
+                Some((*module, name.clone()))
+            }
+            _ => None,
         }
     }
 

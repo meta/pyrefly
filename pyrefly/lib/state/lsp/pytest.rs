@@ -5,8 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::HashSet;
+
 use pyrefly_build::handle::Handle;
-use pyrefly_python::ast::Ast;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_name::ModuleNameWithKind;
 use pyrefly_python::module_path::ModulePath;
@@ -20,9 +21,10 @@ use vec1::Vec1;
 use super::DefinitionMetadata;
 use super::FindDefinitionItemWithDocstring;
 use super::FindPreference;
+use crate::config::config::ConfigSource;
 use crate::state::pytest::find_pytest_fixture_definitions_for_parameter;
-use crate::state::pytest::find_pytest_fixture_definitions_in_conftest;
 use crate::state::pytest::find_pytest_fixture_parameter_references;
+use crate::state::pytest::is_directly_parametrized;
 use crate::state::pytest::is_pytest_fixture_parameter_context;
 use crate::state::state::Transaction;
 
@@ -35,9 +37,14 @@ pub(crate) fn pytest_conftest_handles(
     let Some(mut dir) = module_path.as_path().parent() else {
         return Vec::new();
     };
-    let root = module_path
-        .root_of(handle.module())
-        .unwrap_or_else(|| dir.to_path_buf());
+    let config = transaction.get_config(handle);
+    let root = config
+        .as_ref()
+        .and_then(|config| match &config.source {
+            ConfigSource::Synthetic(root) => root.as_deref(),
+            source => source.root_from_file(),
+        })
+        .filter(|root| dir.starts_with(root));
     let filenames = if preference.prefer_pyi {
         ["conftest.pyi", "conftest.py"]
     } else {
@@ -64,7 +71,7 @@ pub(crate) fn pytest_conftest_handles(
                 handles.push(filesystem_config.handle_from_module_path(filesystem_path));
             }
         }
-        if dir == root {
+        if Some(dir) == root {
             break;
         }
         let Some(parent) = dir.parent() else {
@@ -90,7 +97,9 @@ impl<'a> Transaction<'a> {
         let mod_module = self.get_ast(handle)?;
         let answers = self.get_answers(handle)?;
         let bindings = answers.bindings();
-        if !is_pytest_fixture_parameter_context(bindings, covering_nodes) {
+        if !is_pytest_fixture_parameter_context(bindings, covering_nodes)
+            || is_directly_parametrized(&mod_module, covering_nodes, identifier.id())
+        {
             return None;
         }
         let matches = find_pytest_fixture_definitions_for_parameter(
@@ -110,30 +119,49 @@ impl<'a> Transaction<'a> {
                 display_name: Some(fixture.name.as_str().to_owned()),
             })
             .collect();
-        if definitions.is_empty() {
-            for conftest_handle in pytest_conftest_handles(self, handle, preference) {
-                let _ = self.get_exports(&conftest_handle);
-                let conftest_module_info = self
-                    .get_module_info(&conftest_handle)
-                    .expect("conftest module must be loaded after demanding exports");
-                let conftest_ast = Ast::parse(
-                    conftest_module_info.contents(),
-                    conftest_module_info.source_type(),
-                )
-                .0;
-                definitions.extend(
-                    find_pytest_fixture_definitions_in_conftest(&conftest_ast, identifier.id())
-                        .into_iter()
-                        .map(|fixture| FindDefinitionItemWithDocstring {
+        if definitions.is_empty() && preference.follow_pytest_conftest {
+            'conftests: for conftest_handle in pytest_conftest_handles(self, handle, preference) {
+                let mut target_handle = conftest_handle;
+                let mut target_name = identifier.id.clone();
+                let mut imported = false;
+                let mut seen = HashSet::new();
+                while seen.insert((target_handle.clone(), target_name.clone())) {
+                    let exports = self.get_exports_data(&target_handle);
+                    if let Some(fixture) = exports.pytest_fixtures().iter().find(|fixture| {
+                        if imported {
+                            fixture.name == target_name
+                                && fixture
+                                    .fixture_name
+                                    .as_ref()
+                                    .is_none_or(|name| name == identifier.id())
+                        } else {
+                            fixture.fixture_name.as_ref().unwrap_or(&fixture.name)
+                                == identifier.id()
+                        }
+                    }) {
+                        let module = self
+                            .get_module_info(&target_handle)
+                            .expect("fixture module must be loaded after demanding export data");
+                        definitions.push(FindDefinitionItemWithDocstring {
                             metadata: DefinitionMetadata::Variable(Some(SymbolKind::Function)),
                             definition_range: fixture.range,
-                            module: conftest_module_info.clone(),
+                            module,
                             docstring_range: fixture.docstring_range,
                             display_name: Some(fixture.name.as_str().to_owned()),
-                        }),
-                );
-                if !definitions.is_empty() {
-                    break;
+                        });
+                        break 'conftests;
+                    }
+                    let Some((module, name)) = exports.pytest_fixture_import(&target_name) else {
+                        break;
+                    };
+                    let Some(import_handle) =
+                        self.import_handle_with_preference(&target_handle, module, preference)
+                    else {
+                        break;
+                    };
+                    target_handle = import_handle;
+                    target_name = name;
+                    imported = true;
                 }
             }
         }

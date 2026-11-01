@@ -282,6 +282,8 @@ pub struct FindPreference {
     /// controls whether to prioritize finding pyi or py files. if false, we will search all search paths until a .py file is found before
     /// falling back to a .pyi.
     pub prefer_pyi: bool,
+    /// Allow conftest navigation without changing parameter identity for reference operations.
+    pub follow_pytest_conftest: bool,
     /// When true (the default), if the cursor is on a name/attribute in call
     /// position, resolve through `__init__`/`__new__`/`__call__` dunders
     /// instead of returning the class or variable definition. Set to false
@@ -310,6 +312,7 @@ impl Default for FindPreference {
         Self {
             import_behavior: ImportBehavior::JumpThroughEverything,
             prefer_pyi: true,
+            follow_pytest_conftest: false,
             resolve_call_dunders: true,
             replacement_policy: ImportReplacementPolicy::Respect,
             disable_style_fallback: false,
@@ -3431,6 +3434,7 @@ impl<'a> Transaction<'a> {
             position,
             FindPreference {
                 prefer_pyi: false,
+                follow_pytest_conftest: true,
                 replacement_policy: ImportReplacementPolicy::Bypass,
                 include_interpreter_stdlib: true,
                 ..Default::default()
@@ -3496,6 +3500,7 @@ impl<'a> Transaction<'a> {
             FindPreference {
                 import_behavior: ImportBehavior::StopAtEverything,
                 prefer_pyi: true,
+                follow_pytest_conftest: true,
                 ..Default::default()
             },
         )?;
