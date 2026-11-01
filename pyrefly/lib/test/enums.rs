@@ -1564,3 +1564,28 @@ class Format(Enum):
         return formatter(value)
 "#,
 );
+
+fn env_enum_stub_ellipsis() -> TestEnv {
+    let mut env = TestEnv::new();
+    env.add_with_path(
+        "res",
+        "res.pyi",
+        r#"
+from enum import Enum
+
+class Resolution(Enum):
+    RESO_NS = ...
+    RESO_US = ...
+"#,
+    );
+    env
+}
+
+testcase!(
+    test_enum_lookup_stub_ellipsis_values_unchecked,
+    env_enum_stub_ellipsis(),
+    r#"
+import res
+res.Resolution(7)
+"#,
+);

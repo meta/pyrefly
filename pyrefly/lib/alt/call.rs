@@ -1169,7 +1169,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return None;
         }
         let value_ty = self.enum_value_lookup_on_class(cls, enum_metadata);
-        if value_ty.is_any() {
+        // Stub enums often write `X = ...`; that is a placeholder, not the real value type.
+        let mut has_ellipsis = false;
+        value_ty.universe(&mut |t| has_ellipsis |= t.is_ellipsis_value());
+        if value_ty.is_any() || has_ellipsis {
             return None;
         }
         // Member literals say which values exist, but lookup accepts any value of the base
