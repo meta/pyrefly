@@ -70,6 +70,98 @@ def f(xs: list[int]) -> None:
 }
 
 #[test]
+fn inherited_classvar_inlay_hint_prefers_resolved_field_type() {
+    let code = r#"
+from typing import ClassVar
+
+def value() -> str:
+    return "value"
+
+class A:
+    x: ClassVar[tuple[str, ...]] = ("A",)
+
+class B(A):
+    x = (value(),)
+"#;
+    assert_eq!(
+        r#"
+# main.py
+11 |     x = (value(),)
+          ^ inlay-hint: `: tuple[str, ...]`
+"#
+        .trim(),
+        generate_inlay_hint_report(code, Default::default()).trim(),
+    );
+}
+
+#[test]
+fn class_field_shadowing_inlay_hint() {
+    // Captured writes are unrelated to same-named instance fields.
+    for (body, expected) in [
+        (
+            "x = 0\nclass C:\n    global x\n    x = value()\n    def __init__(self) -> None:\n        self.x: str = 'field'\n",
+            ": int",
+        ),
+        (
+            "def f() -> None:\n    x = 0\n    class C:\n        nonlocal x\n        x = value()\n        def __init__(self) -> None:\n            self.x: str = 'field'\n",
+            ": int",
+        ),
+        (
+            "class C:\n    x: str = 'field'\n    def f(self) -> None:\n        x = value()\n",
+            ": int",
+        ),
+        ("x = value()\n", ": int"),
+    ] {
+        let code = format!("def value() -> int:\n    return 1\n{body}");
+        let position = code.find("x = value()").unwrap() + 1;
+        let (handles, state) =
+            mk_multi_file_state_assert_no_errors(&[("main", &code)], Require::Exports);
+        let hints = state
+            .transaction()
+            .inlay_hints(
+                handles.get("main").unwrap(),
+                Default::default(),
+                Default::default(),
+            )
+            .unwrap();
+        let hint = hints
+            .iter()
+            .find(|hint| usize::from(hint.position) == position)
+            .expect("expected a hint for the nonliteral assignment");
+        let label: String = hint
+            .label_parts
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect();
+        assert_eq!(expected, label, "hint for {code}");
+    }
+}
+
+#[test]
+fn inherited_field_hint_insertability() {
+    // Hints remain visible without edits that could discard inherited declaration qualifiers.
+    for body in [
+        "class A:\n    x: ClassVar[tuple[str, ...]] = ()\nclass B(A):\n    x = (value(),)\n",
+        "class A:\n    x: str = ''\nclass B(A):\n    def __init__(self) -> None:\n        self.x = value()\n",
+    ] {
+        let code =
+            format!("from typing import ClassVar\ndef value() -> str:\n    return 'value'\n{body}");
+        let (handles, state) =
+            mk_multi_file_state_assert_no_errors(&[("main", &code)], Require::Exports);
+        let hints = state
+            .transaction()
+            .inlay_hints(
+                handles.get("main").unwrap(),
+                Default::default(),
+                Default::default(),
+            )
+            .unwrap();
+        assert_eq!(1, hints.len(), "hints for {code}");
+        assert!(hints[0].edits.is_none(), "insertability for {code}");
+    }
+}
+
+#[test]
 fn basic_test() {
     let code = r#"from typing import Literal
 

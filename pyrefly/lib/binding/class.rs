@@ -37,6 +37,7 @@ use crate::binding::attrs::collect_attrs_decorator_methods;
 use crate::binding::base_class::BaseClass;
 use crate::binding::base_class::BaseClassGeneric;
 use crate::binding::base_class::BaseClassGenericKind;
+use crate::binding::base_class::BaseClassSite;
 use crate::binding::binding::AnnotationTarget;
 use crate::binding::binding::Binding;
 use crate::binding::binding::BindingAbstractClassCheck;
@@ -360,7 +361,11 @@ impl<'a> BindingsBuilder<'a> {
                 },
             );
 
-            let base_class = self.base_class_of(base.clone());
+            let base_class = self.base_class_of(base.clone(), BaseClassSite::ClassStatement);
+            if matches!(base_class, BaseClass::Call(..)) {
+                self.call_base_classes
+                    .push((base.range(), class_indices.def_index));
+            }
             // NOTE(grievejia): If any of the class base is a specialized generic class (e.g. `Foo[Bar]`), and if the tparam of the
             // generic class has a bound or constraint, we won't be validating the type `Bar` against that bound/constraint of the
             // tparam eagerly in order to avoid dependency cycle. But the validation needs to happen somewhere.
@@ -373,7 +378,7 @@ impl<'a> BindingsBuilder<'a> {
             // usage tracking.
             if matches!(
                 base_class,
-                BaseClass::BaseClassExpr(..) | BaseClass::TypeOf(..)
+                BaseClass::BaseClassExpr(..) | BaseClass::Call(..) | BaseClass::TypeOf(..)
             ) {
                 self.insert_binding(
                     KeyExpect::TypeCheckBaseClassExpr(base.range()),
@@ -462,7 +467,7 @@ impl<'a> BindingsBuilder<'a> {
             body,
             &NestingContext::class(ShortIdentifier::new(&x.name), parent.dupe()),
         );
-        let (field_definitions, nn_module_registrations) =
+        let (field_definitions, nn_module_registrations, uninitialized_fields) =
             self.scopes.finish_class_and_get_field_definitions();
         self.insert_binding_idx(
             class_indices.synthesized_fields_idx,
@@ -499,6 +504,21 @@ impl<'a> BindingsBuilder<'a> {
 
             let attrs_field_specifier =
                 self.attrs_field_specifier(&definition, name.key(), range, &attrs_decorators);
+
+            // Stub files declare attributes without runtime initialization.
+            if !self.module_info.path().is_interface()
+                && let Some(termination_keys) = uninitialized_fields.get(name.key())
+            {
+                self.insert_binding(
+                    KeyExpect::UninitializedAttributeCheck(range),
+                    BindingExpect::UninitializedAttributeCheck {
+                        name: name.key().clone(),
+                        range,
+                        class: class_indices.class_idx,
+                        termination_keys: termination_keys.clone(),
+                    },
+                );
+            }
 
             fields.insert_hashed(
                 name.clone(),
@@ -1087,7 +1107,7 @@ impl<'a> BindingsBuilder<'a> {
     ) {
         let base_classes = base
             .into_iter()
-            .map(|base| self.base_class_of(base))
+            .map(|base| self.base_class_of(base, BaseClassSite::FunctionalForm))
             .chain(special_base)
             .collect::<Vec<_>>();
         let base_classes: Arc<[BaseClass]> = Arc::from(base_classes.into_boxed_slice());

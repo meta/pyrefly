@@ -1822,6 +1822,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     Some(ty) => parse_base_class_type(ty),
                 }
             }
+            BaseClass::Call(x) => {
+                // Call diagnostics are reported by `TypeCheckBaseClassExpr`.
+                let errors = ErrorCollector::new(self.module().dupe(), ErrorStyle::Never);
+                let ty = self.expr_infer(x.as_expr(), &errors);
+                match self.untype_opt(ty.clone(), x.range(), &errors) {
+                    None => BaseClassParseResult::InvalidType(ty, x.range()),
+                    Some(ty) => parse_base_class_type(ty),
+                }
+            }
             BaseClass::NamedTuple(..) => parse_base_class_type(
                 self.heap
                     .mk_class_type(self.stdlib.named_tuple_fallback().clone()),
