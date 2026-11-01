@@ -6943,6 +6943,25 @@ opts: Options = {}
 f(name="test", **opts)  # E: Multiple values for argument `name`
 ```
 
+## protected-access
+
+Default severity: `ignore`
+
+The `protected-access` error is reported when a protected class member, whose name starts with a
+single underscore, is accessed from outside its defining class or a subclass.
+
+```python
+class Service:
+    def _reset(self) -> None: ...
+
+Service()._reset()  # protected-access
+```
+
+Protected member access is allowed within the defining class and its subclasses, including nested
+class and function scopes. Members defined in stub files and the public underscore-prefixed
+NamedTuple APIs are exempt. Double-underscore private attributes are checked separately under
+[`no-access`](#no-access).
+
 ## protocol-implicitly-defined-attribute
 
 Protocols must declare the attributes they require directly in the class body. Assigning to a new `self` attribute inside a protocol method introduces a member that implementations of the protocol would never be required to provide.
@@ -10173,7 +10192,7 @@ several kinds.
 | `reportUntypedClassDecorator`         | `untyped-class-decorator`                                                                                                                                                                          | Automatic        | Direct       |                                                                                                                     |
 | `reportUntypedBaseClass`              | `unsupported-dynamic-base`, `unknown-base-class`                                                                                                                                                   | Manual           | Related      | `unknown-base-class` skips bases from unresolved imports; `unsupported-dynamic-base` covers `type()` calls.         |
 | `reportUntypedNamedTuple`             | `untyped-namedtuple`                                                                                                                                                                               | Automatic        | Direct       |                                                                                                                     |
-| `reportPrivateUsage`                  | `no-access`                                                                                                                                                                                        | Automatic        | Related      | The tools differ in what they consider protected or private usage.                                                  |
+| `reportPrivateUsage`                  | `protected-access`                                                                                                                                                                                        | Automatic        | Related      | The tools differ in what they consider protected or private usage.                                                  |
 | `reportTypeCommentUsage`              | No direct equivalent                                                                                                                                                                               | Not mapped       | None         | Use a linter if the goal is to prohibit legacy type comments.                                                       |
 | `reportPrivateImportUsage`            | `implicit-reexport` and/or `no-access`                                                                                                                                                             | Manual           | Related      | No one-to-one automatic mapping.                                                                                    |
 | `reportConstantRedefinition`          | `treat-all-caps-as-final = true` plus `bad-assignment`                                                                                                                                             | Manual           | Related      | This changes inference policy rather than enabling a single diagnostic kind.                                        |
