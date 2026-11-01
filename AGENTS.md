@@ -158,8 +158,7 @@ available tooling differs. **How to detect which one you are in:** check for a
 - When a change alters which errors pyrefly reports, interpret its mypy_primer
   differential and record the result **in the pull request description** (not
   buried in a comment). See the `interpret-mypy-primer` skill for how to
-  analyze the differential, classify the added/fixed errors as true vs false
-  positives, and write it up.
+  analyze the differential, classify the added/removed errors, and write it up.
 
 ### Running tests in a GitHub checkout
 
