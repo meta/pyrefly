@@ -1646,6 +1646,16 @@ impl Answers {
         Some(self.get_idx(idx)?.ty().clone())
     }
 
+    /// The resolved declaration type of an annotated class-body field, including inherited
+    /// annotations. No attribute-access substitutions are applied, so `Self` stays relative.
+    pub(crate) fn get_class_field_type_at_definition(&self, idx: Idx<Key>) -> Option<Type> {
+        let bindings = self.bindings();
+        let field_key = bindings.class_field_for_definition(idx)?;
+        let field_idx = bindings.key_to_idx_hashed_opt(Hashed::new(field_key))?;
+        let field = self.get_idx(field_idx)?;
+        field.has_explicit_annotation().then(|| field.ty())
+    }
+
     pub fn get_annotation_type_at(&self, idx: Idx<KeyAnnotation>) -> Option<Type> {
         self.get_idx(idx)?.annotation.ty.clone()
     }

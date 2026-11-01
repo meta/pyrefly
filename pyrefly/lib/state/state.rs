@@ -129,6 +129,7 @@ use crate::state::load::FileContents;
 use crate::state::load::Load;
 use crate::state::loader::FindingOrError;
 use crate::state::loader::LoaderFindCache;
+use crate::state::lsp::EndpointModuleCache;
 use crate::state::memory::MemoryFiles;
 use crate::state::memory::MemoryFilesLookup;
 use crate::state::memory::MemoryFilesOverlay;
@@ -959,6 +960,10 @@ impl<'a> Transaction<'a> {
         self.with_module_inner(handle, |x| x.get_ast())
     }
 
+    pub(crate) fn endpoint_module_cache(&self) -> &EndpointModuleCache {
+        &self.data.state.endpoint_module_cache
+    }
+
     pub(crate) fn get_parsed_module(&self, handle: &Handle) -> Option<Arc<ParsedModule>> {
         self.with_module_inner(handle, |x| x.get_parsed_module())
     }
@@ -1108,7 +1113,7 @@ impl<'a> Transaction<'a> {
         self.get_load(handle).map(|x| x.module_info.dupe())
     }
 
-    /// Whether any other module depends on this one.
+    /// Return the modules that directly depend on this one.
     ///
     /// A dependency edge means the depending module's result was computed from
     /// this file's contents, which is exactly the question safe deletion asks,
@@ -1123,13 +1128,15 @@ impl<'a> Transaction<'a> {
     /// filesystem handle: as with `get_transitive_rdeps`, the rdeps of an
     /// in-memory handle contain only itself, which would make any file an IDE
     /// has open look unused.
-    pub fn is_depended_on_by_anything(&self, handle: &Handle) -> bool {
+    pub fn get_rdeps(&self, handle: &Handle) -> HashSet<Handle> {
         let path = handle.path().as_path();
         self.get_module(handle)
             .rdeps
             .lock()
             .iter()
-            .any(|rdep| rdep.path().as_path() != path)
+            .filter(|rdep| rdep.path().as_path() != path)
+            .cloned()
+            .collect()
     }
 
     /// Compute transitive dependency closure for the given handle.
@@ -2744,6 +2751,13 @@ impl<'a> Transaction<'a> {
             .exports(&self.lookup(module_data))
     }
 
+    /// Names available through a wildcard import, respecting the module's `__all__`.
+    pub(crate) fn get_wildcard_exports(&self, handle: &Handle) -> Arc<SmallSet<Name>> {
+        let module_data = self.get_module(handle);
+        self.lookup_export(module_data)
+            .wildcard(&self.lookup(module_data))
+    }
+
     pub(crate) fn builtin_module_for_name(
         &self,
         handle: &Handle,
@@ -3510,6 +3524,7 @@ pub struct State {
     threads: ThreadPool,
     uniques: UniqueFactory,
     config_finder: ConfigFinder,
+    endpoint_module_cache: EndpointModuleCache,
     state: RwLock<StateData>,
     run_count: AtomicUsize,
     committing_transaction_lock: Mutex<()>,
@@ -3545,6 +3560,7 @@ impl State {
             threads: ThreadPool::new(thread_count),
             uniques: UniqueFactory::new(),
             config_finder,
+            endpoint_module_cache: EndpointModuleCache::default(),
             state: RwLock::new(StateData::new()),
             run_count: AtomicUsize::new(0),
             committing_transaction_lock: Mutex::new(()),
