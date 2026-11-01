@@ -3089,3 +3089,27 @@ def from_target(t: Target) -> Target:
     return {**t}
 "#,
 );
+
+testcase!(
+
+        test_typed_dict_unpacking_anonymous_typed_dict,
+
+        r#"
+        from typing import NotRequired, TypedDict
+
+        class Target(TypedDict):
+            x: int
+
+            class PartialSource(TypedDict):
+                x: NotRequired[int]
+
+                def from_dict_literal() -> Target:
+                    source = {"x": 1}
+
+                        return {**source}
+
+                        def from_not_required(s: PartialSource) -> Target:
+
+                            return {**s} # E: Missing required key `x` for TypedDict `Target`
+                            "#,
+    );
