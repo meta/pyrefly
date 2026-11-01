@@ -10,6 +10,8 @@ use std::collections::BTreeSet;
 
 use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
+use lsp_types::CompletionItemTextEdit;
+use lsp_types::TextEdit;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::short_identifier::ShortIdentifier;
@@ -27,6 +29,7 @@ use ruff_python_ast::ModModule;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
+use serde_json::to_string;
 
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::polars_specials::polars_function_treats_strings_as_columns;
@@ -1085,6 +1088,49 @@ impl<'a> Transaction<'a> {
                 detail,
                 kind: Some(CompletionItemKind::Field),
                 insert_text,
+                ..Default::default()
+            }));
+        }
+    }
+
+    /// Offers the keys of a TypedDict after `base.` as completions that rewrite the
+    /// attribute access `base.key` into the subscript `base["key"]`.
+    pub(crate) fn add_typed_dict_attribute_key_completions(
+        &self,
+        handle: &Handle,
+        base_type: &Type,
+        base_range: TextRange,
+        attribute: &Identifier,
+        completions: &mut Vec<RankedCompletion>,
+    ) {
+        if !Self::type_contains_typed_dict(base_type) {
+            return;
+        }
+        let Some(module_info) = self.get_module_info(handle) else {
+            return;
+        };
+        let edit_range =
+            module_info.to_lsp_range(TextRange::new(base_range.end(), attribute.range().end()));
+        // LSP requires a completion's text edit to be on a single line.
+        if edit_range.start.line != edit_range.end.line {
+            return;
+        }
+        let Some(keys) = self.collect_typed_dict_keys(handle, base_type.clone()) else {
+            return;
+        };
+        // Clients filter on the text from the start of the edit, which includes the dot.
+        let accessor = module_info.code_at(TextRange::new(base_range.end(), attribute.start()));
+        for (key, ty) in keys {
+            let quoted_key = to_string(&key).expect("Serializing a string cannot fail");
+            completions.push(RankedCompletion::new(CompletionItem {
+                filter_text: Some(format!("{accessor}{key}")),
+                label: key,
+                detail: Some(ty.to_string()),
+                kind: Some(CompletionItemKind::Field),
+                text_edit: Some(CompletionItemTextEdit::TextEdit(TextEdit {
+                    range: edit_range,
+                    new_text: format!("[{quoted_key}]"),
+                })),
                 ..Default::default()
             }));
         }

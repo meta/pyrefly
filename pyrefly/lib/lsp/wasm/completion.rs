@@ -1190,7 +1190,7 @@ impl Transaction<'_> {
                 }
             }
             Some(IdentifierWithContext {
-                identifier: _,
+                identifier,
                 context: IdentifierContext::Attribute { base_range, .. },
             }) => {
                 let expected_type = covering_nodes
@@ -1224,6 +1224,13 @@ impl Transaction<'_> {
                             }
                         }
                     }
+                    self.add_typed_dict_attribute_key_completions(
+                        handle,
+                        &base_type,
+                        base_range,
+                        &identifier,
+                        &mut result,
+                    );
                     self.add_attribute_completions_for_type(
                         handle,
                         base_type,
