@@ -2770,6 +2770,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let class_ty = classes.pop().expect("checked length above");
                 if let Type::ClassDef(cls) = class_ty
                     && self.get_class_tparams(&cls).is_none()
+                    && !self.get_metadata_for_class(&cls).has_base_any()
                 {
                     return Some(
                         self.heap
