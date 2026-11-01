@@ -1,6 +1,6 @@
 ---
 name: interpret-mypy-primer
-description: Interpret, analyze, and summarize a pyrefly mypy_primer error differential — the type errors a change ADDS or FIXES across the open-source corpus — classifying the changes as true positives (real bugs caught/fixed) vs false positives (regressions), and recording the result in the change's summary. Use when a pyrefly change alters which errors are reported (a new or retyped diagnostic, a new error kind, or an inference change).
+description: Interpret a pyrefly mypy_primer error differential — the type errors a change ADDS or FIXES across the open-source corpus — classifying the changes as true positives (real bugs caught/fixed) vs false positives (regressions), and summarizing the result. Use when a pyrefly change alters which errors are reported (a new or retyped diagnostic, a new error kind, or an inference change).
 ---
 
 # Interpreting a pyrefly mypy_primer differential
@@ -12,9 +12,7 @@ per project. Pyrefly's CI runs this on pull requests and posts the differential 
 comment.
 
 The counts alone do not tell you whether a change found real bugs or broke valid code.
-This skill turns a raw differential into a verdict and a short write-up you put in the
-change's summary. Use it whenever a change alters which errors pyrefly reports; a pure
-refactor with no diagnostic change does not need it.
+This skill turns a raw differential into a verdict and a short write-up.
 
 Core principle: **do not assert, verify.** Sample the added/removed errors, reproduce
 them minimally, and let reference checkers and the Python runtime decide true-positive
@@ -80,10 +78,9 @@ errors — fix the cause, not each symptom, and re-run. Framework classes
 (`dataclass_transform`, metaclasses, `Annotated`) are a common false-positive source and
 need the real framework in the reproducer, not a plain stand-in.
 
-## 5. Record the result in the change's summary
+## 5. Summarize the result
 
-Put a short paragraph in the **pull request description** (not buried in a comment),
-stating:
+Summarize the result in a short paragraph stating:
 
 - the per-preset deltas (`+X / -Y`), and that the additions are `<kind>`;
 - the shipping-preset (`default`/`strict`) impact specifically;
@@ -106,6 +103,3 @@ plumbing differs.
   immediately — the output path is reused across builds) rather than cargo.
 - **For a large or land-blocking differential, use the `triage-pyrefly-ci` skill**, which
   fans out one agent per entry to produce per-error verdicts with evidence.
-- **Record the paragraph in the Phabricator diff Summary** (`meta phabricator.diff update
-  --number=D<n> --summary=...` then `jf sync -r D<n>`), not just the Test Plan — the
-  Summary is where reviewers and future readers look for real-world impact.
