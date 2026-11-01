@@ -72,6 +72,7 @@ use crate::binding::bindings::BindingTable;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::InitializedInFlow;
+use crate::binding::classmethod::ClassmethodReceiverState;
 use crate::binding::expr::Usage;
 use crate::binding::function::SelfAssignments;
 use crate::binding::narrow::ExcludedNonePair;
@@ -1095,6 +1096,7 @@ struct ScopeClass {
     indices: ClassIndices,
     attributes_from_recognized_methods: SmallMap<Name, SmallMap<Name, InstanceAttribute>>,
     attributes_from_other_methods: SmallMap<Name, SmallMap<Name, InstanceAttribute>>,
+    classmethod_receivers: Option<Box<ClassmethodReceiverState>>,
     /// Attributes that `__new__` assigns on the instance it creates.
     attributes_set_on_new_instance: SmallSet<Name>,
     nn_module_registrations: NNModuleRegistrations,
@@ -1108,6 +1110,7 @@ impl ScopeClass {
             indices,
             attributes_from_recognized_methods: SmallMap::new(),
             attributes_from_other_methods: SmallMap::new(),
+            classmethod_receivers: None,
             attributes_set_on_new_instance: SmallSet::new(),
             nn_module_registrations: SmallMap::new(),
             has_protocol_base,
@@ -1789,6 +1792,59 @@ impl Scopes {
         match self.current().kind {
             ScopeKind::Class(_) => true,
             _ => false,
+        }
+    }
+
+    /// Receiver inference must not mutate a definition shared with another control-flow path.
+    pub fn in_unconditional_class_body(&self) -> bool {
+        self.in_class_body()
+            && self.current().forks.is_empty()
+            && self.current().loops.is_empty()
+            && self.current().with_may_raise.is_empty()
+            && self.current().finally_depth == 0
+    }
+
+    /// Annotation-like scopes preserve eager class receiver bookkeeping. Function
+    /// and comprehension bodies are barriers, just as they are for class-name lookup.
+    pub(super) fn classmethod_receivers(&self) -> Option<&ClassmethodReceiverState> {
+        for scope in self.iter_rev() {
+            match &scope.kind {
+                ScopeKind::Class(class) => return class.classmethod_receivers.as_deref(),
+                ScopeKind::Annotation { .. } | ScopeKind::TypeAlias => {}
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    pub(super) fn classmethod_receivers_mut(
+        &mut self,
+    ) -> Option<&mut Option<Box<ClassmethodReceiverState>>> {
+        for scope in self.iter_rev_mut() {
+            match &mut scope.kind {
+                ScopeKind::Class(class) => return Some(&mut class.classmethod_receivers),
+                ScopeKind::Annotation { .. } | ScopeKind::TypeAlias => {}
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    pub fn mark_method_as_classmethod(&mut self, method_name: &Name, method_range: TextRange) {
+        let ScopeKind::Class(class_scope) = &mut self.current_mut().kind else {
+            unreachable!("a reassigned classmethod is only marked in a class body")
+        };
+        for attributes in [
+            &mut class_scope.attributes_from_recognized_methods,
+            &mut class_scope.attributes_from_other_methods,
+        ] {
+            if let Some(attributes) = attributes.get_mut(method_name) {
+                for attribute in attributes.values_mut() {
+                    if method_range.contains_range(attribute.2) {
+                        attribute.3 = MethodSelfKind::Class;
+                    }
+                }
+            }
         }
     }
 
