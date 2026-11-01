@@ -958,6 +958,14 @@ impl ConfigFile {
     /// refreshed.
     const DEPENDENCY_METADATA_FILE_NAMES: &[&str] = &["uv.lock"];
 
+    /// Extension of the path configuration files that Python's `site` module reads from the
+    /// top level of each site-packages directory.
+    const PTH_EXTENSION: &str = "pth";
+
+    /// File extensions whose changes can alter what an interpreter query reports, so cached
+    /// queries must be discarded.
+    const INTERPRETER_METADATA_EXTENSIONS: &[&str] = &[Self::PTH_EXTENSION];
+
     /// Files that don't contain pyrefly-specific config information but indicate that we're at the
     /// root of a Python project, which should be added to the search path.
     pub const ADDITIONAL_ROOT_FILE_NAMES: &[&str] = &["mypy.ini", "pyrightconfig.json"];
@@ -968,12 +976,21 @@ impl ConfigFile {
 
     /// Whether this path contains metadata that can change project configuration or dependencies.
     pub fn is_watched_metadata(path: &Path) -> bool {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                Self::CONFIG_FILE_NAMES.contains(&name)
-                    || Self::DEPENDENCY_METADATA_FILE_NAMES.contains(&name)
-            })
+        Self::invalidates_interpreter_queries(path)
+            || path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|name| {
+                    Self::CONFIG_FILE_NAMES.contains(&name)
+                        || Self::DEPENDENCY_METADATA_FILE_NAMES.contains(&name)
+                })
+    }
+
+    /// Whether a change to this path can alter what an interpreter query reports.
+    pub fn invalidates_interpreter_queries(path: &Path) -> bool {
+        path.extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|extension| Self::INTERPRETER_METADATA_EXTENSIONS.contains(&extension))
     }
 
     /// Patterns for metadata files that affect a project rooted at `root`.
@@ -1484,6 +1501,12 @@ impl ConfigFile {
                         format!("**/*.{suffix}"),
                     ));
                 });
+            config.site_package_path().for_each(|site_packages| {
+                result.insert(WatchPattern::root(
+                    InternedPath::from_path(site_packages),
+                    format!("*.{}", Self::PTH_EXTENSION),
+                ));
+            });
         }
 
         for source_db in source_dbs {
@@ -2035,7 +2058,7 @@ impl ConfigFile {
                             .parse::<Version>()
                             .expect("Pyrefly's package version must be PEP 440 compatible");
                         if !specifiers.contains(&parsed_running_version) {
-                            errors.push(ConfigError::error(anyhow!(
+                            errors.push(ConfigError::version_mismatch(anyhow!(
                                 "Pyrefly {running_version} does not satisfy `required-version = \"{required_version}\"`"
                             )));
                         }
@@ -3116,6 +3139,23 @@ mod tests {
     }
 
     #[test]
+    fn test_deserializing_unused_parameter_severity() {
+        let config_str = "
+             [errors]
+             unused-parameter = \"ignore\"
+             ";
+        let config = ConfigFile::parse_config(config_str).unwrap();
+        assert_eq!(
+            config
+                .root
+                .errors
+                .unwrap()
+                .severity(ErrorKind::UnusedParameter),
+            Severity::Ignore
+        );
+    }
+
+    #[test]
     fn test_toml_parse_error_recovers_value_span() {
         // The offending value lives in a `#[serde(flatten)]`ed field, so
         // `toml_edit` drops its span; `toml_error_span` recovers it by probing.
@@ -3612,6 +3652,57 @@ output-format = "omit-errors"
     }
 
     #[test]
+    fn test_invalidates_interpreter_queries() {
+        for (path, expected) in [
+            ("/venv/lib/site-packages/_editable_impl_foo.pth", true),
+            ("/project/uv.lock", false),
+            ("/project/pyproject.toml", false),
+            ("/project/pyrefly.toml", false),
+            ("/venv/lib/site-packages/foo.py", false),
+            ("/venv/lib/site-packages/foo.PTH", false),
+        ] {
+            let path = Path::new(path);
+            assert_eq!(
+                ConfigFile::invalidates_interpreter_queries(path),
+                expected,
+                "{}",
+                path.display()
+            );
+            if expected {
+                assert!(ConfigFile::is_watched_metadata(path), "{}", path.display());
+            }
+        }
+    }
+
+    #[test]
+    fn test_site_package_pth_files_are_watched() {
+        let tempdir = TempDir::new().unwrap();
+        let site_packages = tempdir.path().join("site-packages");
+        std::fs::create_dir(&site_packages).unwrap();
+        let mut config = ConfigFile {
+            interpreters: Interpreters {
+                skip_interpreter_query: true,
+                ..Default::default()
+            },
+            python_environment: PythonEnvironment {
+                site_package_path: Some(vec![site_packages.clone()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.configure();
+        let mut configs = SmallSet::new();
+        configs.insert(ArcId::new(config));
+
+        assert!(
+            ConfigFile::get_paths_to_watch(&configs).contains(&WatchPattern::root(
+                InternedPath::from_path(&site_packages),
+                "*.pth".to_owned(),
+            ))
+        );
+    }
+
+    #[test]
     fn test_sub_config_errors_inherit_root() {
         let mut config = ConfigFile {
             root: ConfigBase {
@@ -3832,6 +3923,7 @@ output-format = "omit-errors"
                 "strict should enable {kind:?} via the implicit-any parent"
             );
         }
+        assert_eq!(errors.severity(ErrorKind::ExplicitAnyUse), Severity::Ignore);
         assert_eq!(
             errors.severity(ErrorKind::UnknownAttributeType),
             Severity::Ignore
@@ -3866,6 +3958,38 @@ output-format = "omit-errors"
         );
         assert_eq!(config.root.strict_callable_subtyping, Some(true));
         assert_eq!(config.root.strict_partial_subtyping, Some(true));
+    }
+
+    #[test]
+    fn test_possibly_uninitialized_attribute_configuration() {
+        for (source, possibly_initialized_attribute_severity, missing_attribute_severity) in [
+            ("", Severity::Ignore, Severity::Error),
+            ("preset = 'strict'", Severity::Error, Severity::Error),
+            (
+                "preset = 'strict'\n[errors]\npossibly-uninitialized-attribute = 'ignore'",
+                Severity::Ignore,
+                Severity::Error,
+            ),
+            (
+                "preset = 'strict'\n[errors]\nmissing-attribute = 'ignore'",
+                Severity::Error,
+                Severity::Ignore,
+            ),
+        ] {
+            let mut config = ConfigFile::parse_config(source).unwrap();
+            config.configure();
+            let errors = config.root.errors.as_ref().unwrap();
+            assert_eq!(
+                errors.severity(ErrorKind::PossiblyUninitializedAttribute),
+                possibly_initialized_attribute_severity,
+                "configuration: {source}",
+            );
+            assert_eq!(
+                errors.severity(ErrorKind::MissingAttribute),
+                missing_attribute_severity,
+                "configuration: {source}",
+            );
+        }
     }
 
     #[test]
@@ -3906,6 +4030,19 @@ output-format = "omit-errors"
     }
 
     #[test]
+    fn test_preset_all_keeps_hints() {
+        let mut config = ConfigFile {
+            preset: Some(Preset::All),
+            ..Default::default()
+        };
+        config.configure();
+
+        let errors = config.root.errors.as_ref().unwrap();
+        assert_eq!(errors.severity(ErrorKind::UnusedIgnore), Severity::Error);
+        assert_eq!(errors.severity(ErrorKind::UnusedParameter), Severity::Hint);
+    }
+
+    #[test]
     fn test_preset_basic_enables_only_high_confidence_errors() {
         // Basic is an opt-in preset: only a small set of high-confidence
         // diagnostics fires, everything else is silenced. The enabled kinds
@@ -3919,9 +4056,9 @@ output-format = "omit-errors"
 
         let errors = config.root.errors.as_ref().unwrap();
 
-        // All enabled kinds are errors. Keeping them at `Error` (rather than
-        // `Warn`) avoids the surprise of switching presets changing
-        // `min-severity` requirements.
+        // Every enabled kind except the hints below is an error. Keeping them
+        // at `Error` (rather than `Warn`) avoids the surprise of switching
+        // presets changing `min-severity` requirements.
         for kind in [
             ErrorKind::BadClassDefinition,
             ErrorKind::BadInstantiation,
@@ -3945,6 +4082,17 @@ output-format = "omit-errors"
                 errors.severity(kind),
                 Severity::Error,
                 "Basic preset should enable {kind:?} as Error"
+            );
+        }
+        for kind in [
+            ErrorKind::UnusedImport,
+            ErrorKind::UnusedParameter,
+            ErrorKind::UnusedVariable,
+        ] {
+            assert_eq!(
+                errors.severity(kind),
+                Severity::Hint,
+                "Basic preset should keep {kind:?} as Hint"
             );
         }
         // A representative sample of kinds that should be silenced. Exhaustive

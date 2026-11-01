@@ -50,6 +50,15 @@ def test_arithmetic_method_shapes() -> None:
     assert_shape(left.nextafter(right).shape, (2, 3))
 
 
+def test_lerp_tensor_weight_shapes() -> None:
+    start = torch.zeros(2)
+    end = torch.ones(2)
+    weight = torch.full((3, 1), 0.5)
+
+    assert_shape(torch.lerp(start, end, weight).shape, (3, 2))
+    assert_shape(start.lerp(end, weight).shape, (3, 2))
+
+
 def test_arithmetic_operator_shapes() -> None:
     left = torch.ones((2, 1))
     right = torch.ones((1, 3))
@@ -68,6 +77,27 @@ def test_arithmetic_scalar_shapes() -> None:
     assert_shape(x.sub(1.0).shape, (2, 3))
     assert_shape(torch.mul(x, 2.0).shape, (2, 3))
     assert_shape(x.div(2.0).shape, (2, 3))
+
+
+def test_min_max_reject_scalar_operands() -> None:
+    tensor = torch.ones((2, 3))
+
+    with assert_raises(TypeError):
+        torch.maximum(tensor, 1)  # E: is not assignable to parameter `other`
+    with assert_raises(TypeError):
+        torch.minimum(tensor, 1)  # E: is not assignable to parameter `other`
+    with assert_raises(TypeError):
+        torch.fmax(tensor, 1)  # E: is not assignable to parameter `other`
+    with assert_raises(TypeError):
+        torch.fmin(tensor, 1)  # E: is not assignable to parameter `other`
+    with assert_raises(TypeError):
+        tensor.maximum(1)  # E: is not assignable to parameter `other`
+    with assert_raises(TypeError):
+        tensor.minimum(1)  # E: is not assignable to parameter `other`
+    with assert_raises(TypeError):
+        tensor.fmax(1)  # E: is not assignable to parameter `other`
+    with assert_raises(TypeError):
+        tensor.fmin(1)  # E: is not assignable to parameter `other`
 
 
 def test_nonliteral_scalar_expression_shapes() -> None:

@@ -865,6 +865,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         kws: &[CallKeyword],
         errors: &ErrorCollector,
     ) -> Option<Type> {
+        if let Type::KwCall(call) = callee
+            && call.has_function_kind(FunctionKind::FunctoolsWraps)
+            && kws.is_empty()
+            && let [CallArg::Arg(arg)] = args
+            && let Some(wrapped) = call.keywords.0.get(&Name::new_static("__wrapped__"))
+        {
+            let arg_errors = self.error_collector();
+            let mut wrapper = arg.infer(self, &arg_errors);
+            if wrapper.set_wrapped(wrapped.clone()) {
+                errors.extend(arg_errors);
+                return Some(wrapper);
+            }
+        }
         let decorator = Decorator {
             ty: callee.clone(),
             deprecation: None,
@@ -875,7 +888,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if kws.is_empty()
             && let [CallArg::Arg(arg)] = args
         {
-            let mut arg_ty = arg.infer(self, errors);
+            // If the decorator does not apply, the call is solved normally, which infers the
+            // argument again with the parameter type as a hint. Keep these unhinted errors only if
+            // this is the argument's sole inference.
+            let arg_errors = self.error_collector();
+            let mut arg_ty = arg.infer(self, &arg_errors);
             // Try to apply the decorator to arg_ty. Does nothing if the decorator does not have known
             // typing effects or if arg_ty is not a function.
             let mut applied = false;
@@ -883,7 +900,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 applied |=
                     self.set_flag_from_special_decorator(&mut meta.flags, &special_decorator);
             };
-            if applied { Some(arg_ty) } else { None }
+            if applied {
+                errors.extend(arg_errors);
+                Some(arg_ty)
+            } else {
+                None
+            }
         } else {
             None
         }

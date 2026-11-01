@@ -39,7 +39,14 @@ impl SchemaCompleteness {
 )]
 pub enum DataFrameKind {
     Polars,
+    Narwhals,
     Pandas,
+}
+
+impl DataFrameKind {
+    pub fn is_polars_api(self) -> bool {
+        matches!(self, Self::Polars | Self::Narwhals)
+    }
 }
 
 /// Whether a schema is inferred or declared by an explicit annotation.
@@ -143,6 +150,7 @@ mod tests {
                 module,
                 PrecomputedTParams::NotGeneric,
                 false,
+                None,
             ),
             TArgs::default(),
         )

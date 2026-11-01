@@ -88,6 +88,7 @@ struct DocstringRenderState {
     code_block: Option<CodeBlockKind>,
     code_block_indent: usize,
     literal_block_marker_indent: usize,
+    fence_backticks: usize,
 }
 
 impl DocstringRenderState {
@@ -100,6 +101,7 @@ impl DocstringRenderState {
             code_block: None,
             code_block_indent: 0,
             literal_block_marker_indent: 0,
+            fence_backticks: 0,
         }
     }
 
@@ -109,15 +111,16 @@ impl DocstringRenderState {
         let base_line = dedent_docstring_line(line, min_indent, is_first);
         let mut current = base_line.to_owned();
 
-        let saw_literal_marker = self.apply_literal_block_marker(&mut current, raw_leading_spaces);
+        // Inside a fenced code block, a line ending in `::` is code, not a literal-block marker.
+        let saw_literal_marker = self.code_block != Some(CodeBlockKind::Fenced)
+            && self.apply_literal_block_marker(&mut current, raw_leading_spaces);
 
         let trimmed_start = current.trim_start();
         let is_blank = trimmed_start.is_empty();
         let is_doctest_prompt = is_doctest_prompt(trimmed_start);
         let leading_spaces = leading_space_count(&current);
 
-        if self.handle_active_code_block(is_blank, is_doctest_prompt, raw_leading_spaces, &current)
-        {
+        if self.write_code_block_line(is_blank, is_doctest_prompt, raw_leading_spaces, &current) {
             return;
         }
 
@@ -151,8 +154,13 @@ impl DocstringRenderState {
         false
     }
 
-    /// Consume a line while inside a fenced code block, if applicable.
-    fn handle_active_code_block(
+    /// Write this line as part of the open code block, if there is one.
+    ///
+    /// Returns true if the line has been written. Returns false if no code block is open, or if
+    /// this line ends a doctest or literal block. Those blocks end at the first line that is not
+    /// part of them, so the caller still has to render that line. A fenced block ends at its own
+    /// closing fence, which is written here.
+    fn write_code_block_line(
         &mut self,
         is_blank: bool,
         is_doctest_prompt: bool,
@@ -185,6 +193,16 @@ impl DocstringRenderState {
                         .push(strip_code_indent(current, self.code_block_indent));
                     true
                 }
+            }
+            CodeBlockKind::Fenced => {
+                if is_closing_code_fence(current, self.fence_backticks) {
+                    self.code_block = None;
+                    self.output.push(current.trim_start().to_owned());
+                } else {
+                    self.output
+                        .push(strip_code_indent(current, self.code_block_indent));
+                }
+                true
             }
         }
     }
@@ -223,6 +241,15 @@ impl DocstringRenderState {
             return true;
         }
 
+        if let Some(backticks) = code_fence_opening(current) {
+            self.code_block = Some(CodeBlockKind::Fenced);
+            self.code_block_indent = leading_spaces;
+            self.fence_backticks = backticks;
+            self.output.push(current.trim_start().to_owned());
+            self.pending_literal_block = false;
+            return true;
+        }
+
         if self.pending_literal_block
             && !is_blank
             && raw_leading_spaces <= self.pending_literal_block_indent
@@ -236,8 +263,12 @@ impl DocstringRenderState {
 
     /// Close any open fences and join output lines with markdown line breaks.
     fn finish(mut self) -> String {
-        if self.code_block.is_some() {
-            self.output.push("```".to_owned());
+        match self.code_block {
+            Some(CodeBlockKind::Fenced) => self.output.push("`".repeat(self.fence_backticks)),
+            Some(CodeBlockKind::Doctest | CodeBlockKind::Literal) => {
+                self.output.push("```".to_owned())
+            }
+            None => {}
         }
 
         // Note: markdown doesn't break on just `\n`
@@ -247,8 +278,23 @@ impl DocstringRenderState {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum CodeBlockKind {
+    /// A doctest example: lines starting with a `>>>` or `...` prompt, and the blank lines
+    /// between them.
+    ///
+    /// Counts: `>>> add(1, 2)`, `... more`, and a bare `>>>`.
+    /// Doesn't count: an output line such as `3`, which ends the block, or `>>>>` and `....`.
     Doctest,
+    /// A reStructuredText literal block: the lines indented more than a preceding line that
+    /// ends in `::`, and the blank lines between them.
+    ///
+    /// Counts: an indented `x = 1` after a line `Example::`.
+    /// Doesn't count: a line no more indented than `Example::`, which ends the block; an
+    /// indented line with no `::` line before it; a `::` line inside a fenced code block.
     Literal,
+    /// A Markdown fenced code block written by the docstring author. It starts at a line of
+    /// three or more backticks, optionally followed by an info string such as `python`, and ends
+    /// at a line of at least as many backticks and nothing else.
+    Fenced,
 }
 
 /// Return true if this line looks like a doctest prompt.
@@ -260,6 +306,23 @@ fn is_doctest_prompt(line: &str) -> bool {
         return line.as_bytes().get(3).is_none_or(|b| *b != b'.');
     }
     false
+}
+
+/// If this line opens a Markdown code fence, return its number of backticks: three or more,
+/// optionally followed by an info string such as `python`. The info string cannot contain
+/// backticks, so a line like ```` ```x = 1``` ```` is inline code rather than a fence.
+fn code_fence_opening(line: &str) -> Option<usize> {
+    let line = line.trim_start();
+    let info = line.trim_start_matches('`');
+    let backticks = line.len() - info.len();
+    (backticks >= 3 && !info.contains('`')).then_some(backticks)
+}
+
+/// Return true if this line closes a fenced code block opened with `backticks` backticks. As in
+/// CommonMark, the closing fence has at least as many backticks and nothing else.
+fn is_closing_code_fence(line: &str, backticks: usize) -> bool {
+    let line = line.trim();
+    line.len() >= backticks && line.bytes().all(|b| b == b'`')
 }
 
 /// Strip a reStructuredText literal-block marker (`::`) and return the updated line.
@@ -420,32 +483,34 @@ where
         .unwrap_or(0)
 }
 
-/// Persist the documentation collected so far for the current parameter.
+/// Persist the documentation collected so far for the current parameters.
 fn commit_parameter_doc(
-    current_param: &mut Option<String>,
+    current_params: &mut Vec<String>,
     current_lines: &mut Vec<String>,
     docs: &mut HashMap<String, String>,
 ) {
-    if let Some(name) = current_param.take() {
-        let content = current_lines.join("\n").trim().to_owned();
-        current_lines.clear();
-        if !content.is_empty() {
-            docs.entry(name).or_insert(content);
-        }
+    let content = current_lines.join("\n").trim().to_owned();
+    current_lines.clear();
+    if content.is_empty() {
+        current_params.clear();
+        return;
+    }
+    for name in current_params.drain(..) {
+        docs.entry(name).or_insert_with(|| content.clone());
     }
 }
 
 /// Parse [`Sphinx`](https://www.sphinx-doc.org/en/master/usage/extensions/napoleon.html)
 /// style `:param foo: description` blocks into a map of parameter docs.
 fn parse_sphinx_params(lines: &[String], docs: &mut HashMap<String, String>) {
-    let mut current_param = None;
+    let mut current_params = Vec::new();
     let mut current_lines = Vec::new();
     let mut base_indent = 0usize;
 
     for line in lines {
         let trimmed = line.trim_start();
         if trimmed.starts_with(":param") {
-            commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+            commit_parameter_doc(&mut current_params, &mut current_lines, docs);
 
             let rest = trimmed.trim_start_matches(":param").trim_start();
             let (name_part, desc_part) = match rest.split_once(':') {
@@ -465,8 +530,7 @@ fn parse_sphinx_params(lines: &[String], docs: &mut HashMap<String, String>) {
                 continue;
             }
             base_indent = leading_space_count(line);
-            current_param = Some(name);
-            current_lines.clear();
+            current_params = vec![name];
             let desc = desc_part.trim_start();
             if !desc.is_empty() {
                 current_lines.push(desc.to_owned());
@@ -475,25 +539,25 @@ fn parse_sphinx_params(lines: &[String], docs: &mut HashMap<String, String>) {
         }
 
         if trimmed.starts_with(':') {
-            commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+            commit_parameter_doc(&mut current_params, &mut current_lines, docs);
             continue;
         }
 
-        if current_param.is_some() {
+        if !current_params.is_empty() {
             if trimmed.is_empty() {
-                commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+                commit_parameter_doc(&mut current_params, &mut current_lines, docs);
                 continue;
             }
             let indent = leading_space_count(line);
             if indent > base_indent {
                 current_lines.push(line.trim_start().to_owned());
             } else {
-                commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+                commit_parameter_doc(&mut current_params, &mut current_lines, docs);
             }
         }
     }
 
-    commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+    commit_parameter_doc(&mut current_params, &mut current_lines, docs);
 }
 
 fn is_google_section(header: &str) -> bool {
@@ -531,7 +595,7 @@ fn extract_google_param_name(header: &str) -> Option<String> {
 fn parse_google_params(lines: &[String], docs: &mut HashMap<String, String>) {
     let mut in_section = false;
     let mut section_indent = 0usize;
-    let mut current_param = None;
+    let mut current_params = Vec::new();
     let mut current_lines = Vec::new();
     let mut param_indent = 0usize;
 
@@ -540,24 +604,24 @@ fn parse_google_params(lines: &[String], docs: &mut HashMap<String, String>) {
         let trimmed = line.trim();
 
         if trimmed.is_empty() {
-            commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+            commit_parameter_doc(&mut current_params, &mut current_lines, docs);
             continue;
         }
 
         if trimmed.ends_with(':') {
             let header = trimmed.trim_end_matches(':');
             if is_google_section(header) {
-                commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+                commit_parameter_doc(&mut current_params, &mut current_lines, docs);
                 in_section = true;
                 section_indent = indent;
                 continue;
             }
             if in_section && indent <= section_indent {
-                commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+                commit_parameter_doc(&mut current_params, &mut current_lines, docs);
                 in_section = false;
             }
         } else if in_section && indent <= section_indent {
-            commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+            commit_parameter_doc(&mut current_params, &mut current_lines, docs);
             in_section = false;
         }
 
@@ -566,7 +630,7 @@ fn parse_google_params(lines: &[String], docs: &mut HashMap<String, String>) {
         }
 
         if indent <= section_indent {
-            commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+            commit_parameter_doc(&mut current_params, &mut current_lines, docs);
             in_section = false;
             continue;
         }
@@ -575,9 +639,8 @@ fn parse_google_params(lines: &[String], docs: &mut HashMap<String, String>) {
         if let Some((header, rest)) = content.split_once(':')
             && let Some(name) = extract_google_param_name(header.trim())
         {
-            commit_parameter_doc(&mut current_param, &mut current_lines, docs);
-            current_param = Some(name);
-            current_lines.clear();
+            commit_parameter_doc(&mut current_params, &mut current_lines, docs);
+            current_params = vec![name];
             param_indent = indent;
             let desc = rest.trim_start();
             if !desc.is_empty() {
@@ -586,21 +649,122 @@ fn parse_google_params(lines: &[String], docs: &mut HashMap<String, String>) {
             continue;
         }
 
-        if current_param.is_some() {
+        if !current_params.is_empty() {
             if indent > param_indent {
                 current_lines.push(content.trim_start().to_owned());
             } else {
-                commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+                commit_parameter_doc(&mut current_params, &mut current_lines, docs);
             }
         }
     }
 
-    commit_parameter_doc(&mut current_param, &mut current_lines, docs);
+    commit_parameter_doc(&mut current_params, &mut current_lines, docs);
+}
+
+/// Return true if `line` is the dashed underline of a numpydoc section header.
+fn is_numpydoc_underline(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.len() >= 3 && trimmed.bytes().all(|byte| byte == b'-')
+}
+
+fn is_numpydoc_section(header: &str) -> bool {
+    matches!(header, "Parameters" | "Other Parameters")
+}
+
+/// Extract the names from a numpydoc parameter declaration such as
+/// `x, y : int` or `*args`. The type is optional.
+fn extract_numpydoc_param_names(line: &str) -> Option<Vec<String>> {
+    let names = line.split_once(':').map_or(line, |(names, _)| names);
+    let names = names
+        .split(',')
+        .map(|name| name.trim().trim_matches('`').trim_start_matches('*'))
+        .filter(|name| {
+            let mut chars = name.chars();
+            chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    (!names.is_empty()).then_some(names)
+}
+
+/// Parse numpydoc-style `Parameters` sections of the form:
+///
+/// ```text
+/// Parameters
+/// ----------
+/// foo : int
+///     Description of foo.
+/// bar, baz : str
+///     Description of bar and baz.
+/// ```
+///
+/// See <https://numpydoc.readthedocs.io/en/latest/format.html#parameters>.
+fn parse_numpydoc_params(lines: &[String], docs: &mut HashMap<String, String>) {
+    let mut in_section = false;
+    let mut section_indent = 0usize;
+    let mut current_params = Vec::new();
+    let mut current_lines = Vec::new();
+    let mut param_indent = 0usize;
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let indent = leading_space_count(line);
+
+        // Within a parameter section, deeper-indented headings belong to descriptions.
+        if !trimmed.is_empty()
+            && (!in_section || indent <= section_indent)
+            && lines.get(index + 1).is_some_and(|next| {
+                leading_space_count(next) == indent && is_numpydoc_underline(next)
+            })
+        {
+            commit_parameter_doc(&mut current_params, &mut current_lines, docs);
+            in_section = is_numpydoc_section(trimmed);
+            section_indent = indent;
+            continue;
+        }
+
+        if indent == section_indent && is_numpydoc_underline(line) {
+            continue;
+        }
+
+        if !in_section {
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            if !current_params.is_empty()
+                && current_lines.last().is_some_and(|line| !line.is_empty())
+            {
+                current_lines.push(String::new());
+            }
+            continue;
+        }
+
+        if let Some(names) = extract_numpydoc_param_names(trimmed)
+            && (current_params.is_empty() || indent <= param_indent)
+        {
+            commit_parameter_doc(&mut current_params, &mut current_lines, docs);
+            current_params = names;
+            param_indent = indent;
+            continue;
+        }
+
+        if !current_params.is_empty() {
+            if indent > param_indent {
+                current_lines.push(trimmed.to_owned());
+            } else {
+                commit_parameter_doc(&mut current_params, &mut current_lines, docs);
+            }
+        }
+    }
+
+    commit_parameter_doc(&mut current_params, &mut current_lines, docs);
 }
 
 /// Extract a map of `parameter -> markdown` documentation snippets from the
-/// supplied docstring, supporting both Sphinx (`:param foo:`) and
-/// Google-style (`Args:`) formats.
+/// supplied docstring, supporting Sphinx (`:param foo:`), Google-style
+/// (`Args:`), and numpydoc (`Parameters`) formats.
 pub fn parse_parameter_documentation(docstring: &str) -> HashMap<String, String> {
     let lines = dedented_lines_for_parsing(docstring);
     let mut docs = HashMap::new();
@@ -609,12 +773,17 @@ pub fn parse_parameter_documentation(docstring: &str) -> HashMap<String, String>
     }
     parse_sphinx_params(&lines, &mut docs);
     parse_google_params(&lines, &mut docs);
+    parse_numpydoc_params(&lines, &mut docs);
     docs
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+
+    use crate::docstring::CodeBlockKind;
     use crate::docstring::Docstring;
+    use crate::docstring::DocstringRenderState;
     use crate::docstring::parse_parameter_documentation;
 
     #[test]
@@ -732,8 +901,6 @@ mod tests {
 
     #[test]
     fn test_docstring_fenced_code_block_indentation() {
-        // bug: indentation inside a fenced code block is rendered as `&nbsp;`.
-        // https://github.com/facebook/pyrefly/issues/5008
         let docstring = r#""""
     **Example:**
     ```python
@@ -748,7 +915,177 @@ mod tests {
 **Example:**
 ```python
 test = Test(
-&nbsp;&nbsp;&nbsp;&nbsp;name = "Test"
+    name = "Test"
+)
+```
+"#
+        );
+    }
+
+    /// Return the line ranges that `DocstringRenderState` identifies as each kind of code block.
+    fn code_block_ranges(lines: &[&str]) -> Vec<(CodeBlockKind, Range<usize>)> {
+        let mut state = DocstringRenderState::new();
+        let mut ranges: Vec<(CodeBlockKind, Range<usize>)> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            let before = state.code_block;
+            state.handle_line(line, i == 0, 0);
+            // A closing fence belongs to the block it closes.
+            let fenced = before.filter(|kind| *kind == CodeBlockKind::Fenced);
+            let Some(kind) = state.code_block.or(fenced) else {
+                continue;
+            };
+            if before == Some(kind) {
+                ranges.last_mut().expect("an open block has a range").1.end = i + 1;
+            } else {
+                ranges.push((kind, i..i + 1));
+            }
+        }
+        ranges
+    }
+
+    #[test]
+    fn test_docstring_code_block_ranges() {
+        let lines = [
+            "Summary",
+            ">>> f()",
+            "Example::",
+            "",
+            "    x = 1",
+            "After",
+            "```python",
+            ">>> g()",
+            "```",
+            "```",
+            "y = 2",
+            "```",
+            "Done",
+        ];
+        assert_eq!(
+            code_block_ranges(&lines),
+            vec![
+                (CodeBlockKind::Doctest, 1..2),
+                (CodeBlockKind::Literal, 4..5),
+                (CodeBlockKind::Fenced, 6..9),
+                (CodeBlockKind::Fenced, 9..12),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_docstring_fenced_code_block_edge_cases() {
+        // An unclosed fence runs to the end of the docstring.
+        assert_eq!(
+            code_block_ranges(&["```", "x = 1"]),
+            vec![(CodeBlockKind::Fenced, 0..2)]
+        );
+        // An empty fence is still a code block.
+        assert_eq!(
+            code_block_ranges(&["```", "```", "after"]),
+            vec![(CodeBlockKind::Fenced, 0..2)]
+        );
+        // Backticks that open and close on the same line are inline code, not a fence.
+        assert_eq!(
+            code_block_ranges(&["```x = 1```", "```", "y = 2", "```"]),
+            vec![(CodeBlockKind::Fenced, 1..4)]
+        );
+    }
+
+    #[test]
+    fn test_docstring_fenced_code_block_next_to_other_kinds() {
+        // A `::` line inside a fence is code, so no literal block follows the fence.
+        assert_eq!(
+            code_block_ranges(&["```rst", "Example::", "```", "    indented"]),
+            vec![(CodeBlockKind::Fenced, 0..3)]
+        );
+        // A fence right after a `::` marker wins, and the marker doesn't apply after it.
+        assert_eq!(
+            code_block_ranges(&["Example::", "", "```", "x", "```", "    after"]),
+            vec![(CodeBlockKind::Fenced, 2..5)]
+        );
+        // Backticks inside a literal block are literal text.
+        assert_eq!(
+            code_block_ranges(&["Example::", "", "    ```", "    x", "Done"]),
+            vec![(CodeBlockKind::Literal, 2..4)]
+        );
+        assert_eq!(
+            code_block_ranges(&["Example::", "", "    x", "    ```", "    y", "Done"]),
+            vec![(CodeBlockKind::Literal, 2..5)]
+        );
+        // An indented fence, as in a parameter description.
+        assert_eq!(
+            code_block_ranges(&[
+                "Args:",
+                "    x: an arg",
+                "    ```",
+                "    code",
+                "    ```",
+                "After"
+            ]),
+            vec![(CodeBlockKind::Fenced, 2..5)]
+        );
+        // A `>>>` line right after a fence starts a doctest block.
+        assert_eq!(
+            code_block_ranges(&["```", "x", "```", ">>> f()"]),
+            vec![
+                (CodeBlockKind::Fenced, 0..3),
+                (CodeBlockKind::Doctest, 3..4)
+            ]
+        );
+    }
+
+    #[test]
+    fn test_docstring_fenced_code_block_closing_fence() {
+        // The closing fence needs at least as many backticks as the opening one.
+        assert_eq!(
+            code_block_ranges(&["````", "```", "x", "````"]),
+            vec![(CodeBlockKind::Fenced, 0..4)]
+        );
+        assert_eq!(
+            code_block_ranges(&["```", "x", "````", "after"]),
+            vec![(CodeBlockKind::Fenced, 0..3)]
+        );
+        // A line with an info string doesn't close a fence.
+        assert_eq!(
+            code_block_ranges(&["```", "```python", "x", "```"]),
+            vec![(CodeBlockKind::Fenced, 0..4)]
+        );
+    }
+
+    #[test]
+    fn test_docstring_fenced_code_block_rendering() {
+        // A line ending in `::` inside a fence keeps both colons.
+        assert_eq!(
+            Docstring::clean("\"\"\"Summary\n```rst\nExample::\n```\n\"\"\"").as_str(),
+            "Summary  \n```rst  \nExample::  \n```"
+        );
+        // An unclosed fence gets exactly one closing fence, as long as the opening one.
+        assert_eq!(
+            Docstring::clean("\"\"\"Summary\n```\nx = 1\n\"\"\"").as_str(),
+            "Summary  \n```  \nx = 1  \n```"
+        );
+        assert_eq!(
+            Docstring::clean("\"\"\"Summary\n````\nx = 1\n\"\"\"").as_str(),
+            "Summary  \n````  \nx = 1  \n````"
+        );
+    }
+
+    #[test]
+    fn test_docstring_fenced_code_block_under_header() {
+        let docstring = r#""""
+    Examples:
+        ```python
+        test = Test(
+            name = "Test"
+        )
+        ```
+    """"#;
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            r#"
+Examples:
+```python
+test = Test(
+    name = "Test"
 )
 ```
 "#
@@ -1011,5 +1348,252 @@ Args:
         let docs = parse_parameter_documentation(doc);
         assert_eq!(docs.get("foo").unwrap(), "dict param");
         assert_eq!(docs.get("bar").unwrap(), "tuple param");
+    }
+
+    #[test]
+    fn test_parse_numpydoc_param_docs() {
+        let doc = r#"
+Parameters
+----------
+foo : int
+    first line
+    second line
+bar : str
+    another
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(docs.get("foo").unwrap(), "first line\nsecond line");
+        assert_eq!(docs.get("bar").unwrap(), "another");
+    }
+
+    #[test]
+    fn test_parse_numpydoc_multiple_names_and_varargs() {
+        let doc = r#"
+Parameters
+----------
+foo, bar : int
+    shared description
+*args : tuple
+    positional arguments
+**kwargs : dict
+    keyword arguments
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(docs.get("foo").unwrap(), "shared description");
+        assert_eq!(docs.get("bar").unwrap(), "shared description");
+        assert_eq!(docs.get("args").unwrap(), "positional arguments");
+        assert_eq!(docs.get("kwargs").unwrap(), "keyword arguments");
+    }
+
+    #[test]
+    fn test_parse_numpydoc_other_parameters_and_section_end() {
+        let doc = r#"
+Parameters
+----------
+foo : int
+    foo description
+
+Other Parameters
+----------------
+bar : str
+    bar description
+
+Returns
+-------
+int
+    the return value
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(docs.get("foo").unwrap(), "foo description");
+        assert_eq!(docs.get("bar").unwrap(), "bar description");
+        assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_numpydoc_indented_in_docstring() {
+        let doc = r#"""
+    Summary.
+
+    Parameters
+    ----------
+    foo : int
+        first line
+        second line
+    """#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(docs.get("foo").unwrap(), "first line\nsecond line");
+    }
+
+    #[test]
+    fn test_parse_numpydoc_type_with_default() {
+        let doc = r#"
+Parameters
+----------
+foo, bar : int, default: 1
+    shared description
+baz : Dict[str, int]
+    complex type
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(docs.get("foo").unwrap(), "shared description");
+        assert_eq!(docs.get("bar").unwrap(), "shared description");
+        assert_eq!(docs.get("baz").unwrap(), "complex type");
+    }
+
+    #[test]
+    fn test_parse_numpydoc_without_description_is_ignored() {
+        let doc = r#"
+Parameters
+----------
+foo : int
+bar : str
+    bar description
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(docs.get("foo"), None);
+        assert_eq!(docs.get("bar").unwrap(), "bar description");
+    }
+
+    #[test]
+    fn test_parse_numpydoc_untyped_params() {
+        let doc = r#"
+Parameters
+----------
+foo, bar
+    shared description
+*args
+    positional arguments
+**kwargs
+    keyword arguments
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(docs.get("foo").unwrap(), "shared description");
+        assert_eq!(docs.get("bar").unwrap(), "shared description");
+        assert_eq!(docs.get("args").unwrap(), "positional arguments");
+        assert_eq!(docs.get("kwargs").unwrap(), "keyword arguments");
+    }
+
+    #[test]
+    fn test_parse_numpydoc_preserves_multiple_paragraphs() {
+        let doc = r#"
+Parameters
+----------
+foo : int
+    First paragraph.
+
+    Second paragraph.
+bar : str
+    another
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(
+            docs.get("foo").unwrap(),
+            "First paragraph.\n\nSecond paragraph."
+        );
+        assert_eq!(docs.get("bar").unwrap(), "another");
+    }
+
+    #[test]
+    fn test_parse_numpydoc_literal_dashes() {
+        let doc = r#"
+Summary.
+
+    Parameters
+    ----------
+    separator : str
+        Example separator::
+
+            ----
+
+        Used between records.
+    count : int
+        Number of records.
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(
+            docs.get("separator").unwrap(),
+            "Example separator::\n\n----\n\nUsed between records."
+        );
+        assert_eq!(docs.get("count").unwrap(), "Number of records.");
+    }
+
+    #[test]
+    fn test_parse_numpydoc_nested_heading() {
+        let doc = r#"
+Parameters
+----------
+separator : str
+    First paragraph.
+
+    Details
+    -------
+    Used between records.
+count : int
+    Number of records.
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(
+            docs.get("separator").unwrap(),
+            "First paragraph.\n\nDetails\n-------\nUsed between records."
+        );
+        assert_eq!(docs.get("count").unwrap(), "Number of records.");
+    }
+
+    #[test]
+    fn test_parse_numpydoc_misaligned_underline() {
+        let doc = r#"
+Parameters
+    ----------
+separator : str
+    Used between records.
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert!(docs.is_empty());
+    }
+
+    #[test]
+    fn test_parse_numpydoc_indented_section_boundary() {
+        let doc = r#"
+Summary.
+
+    Parameters
+    ----------
+    separator : str
+        Used between records.
+
+    Other Parameters
+    ----------------
+    count : int
+        Number of records.
+
+    Returns
+    -------
+    result : str
+        Joined records.
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(docs.get("separator").unwrap(), "Used between records.");
+        assert_eq!(docs.get("count").unwrap(), "Number of records.");
+        assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_numpydoc_dedented_section_boundary() {
+        let doc = r#"
+Notes
+-----
+    Parameters
+    ----------
+    separator : str
+        Used between records.
+
+Returns
+-------
+result : str
+    Joined records.
+"#;
+        let docs = parse_parameter_documentation(doc);
+        assert_eq!(docs.get("separator").unwrap(), "Used between records.");
+        assert_eq!(docs.len(), 1);
     }
 }

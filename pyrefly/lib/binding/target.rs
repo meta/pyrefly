@@ -187,7 +187,11 @@ impl<'a> BindingsBuilder<'a> {
         &mut self,
         mut attr: ExprAttribute,
         mut assigned: Option<&mut Expr>,
-        make_assigned_value: impl FnOnce(Option<&Expr>, Option<Idx<KeyAnnotation>>) -> ExprOrBinding,
+        make_assigned_value: impl FnOnce(
+            &ExprAttribute,
+            Option<&Expr>,
+            Option<Idx<KeyAnnotation>>,
+        ) -> ExprOrBinding,
         ensure_assigned: bool,
     ) -> ExprOrBinding {
         let narrowing_identifier =
@@ -205,11 +209,22 @@ impl<'a> BindingsBuilder<'a> {
                     method.recognized_attribute_defining_method
                         && matches!(method.instance_or_class, MethodSelfKind::Instance)
                 });
+        // Updating a function's docstring does not retain its instance-callable view.
+        // Only the direct store base is exempt; assignment RHS captures still count.
+        let metadata_write = self.track_classmethod_uses
+            && attr.attr.id.as_str() == "__doc__"
+            && matches!(attr.value.as_ref(), Expr::Name(_));
+        if metadata_write {
+            self.track_classmethod_uses = false;
+        }
         self.ensure_expr(&mut attr.value, user.usage());
+        if metadata_write {
+            self.track_classmethod_uses = true;
+        }
         if ensure_assigned && let Some(assigned) = &mut assigned {
             self.ensure_expr(assigned, user.usage());
         }
-        let value = make_assigned_value(assigned.as_deref(), None);
+        let value = make_assigned_value(&attr, assigned.as_deref(), None);
         let idx = self.insert_binding_current(
             user,
             Binding::AssignToAttribute(Box::new(AssignToAttribute {
@@ -228,12 +243,16 @@ impl<'a> BindingsBuilder<'a> {
         &mut self,
         attr: ExprAttribute,
         assigned: &mut Expr,
-        make_assigned_value: impl FnOnce(&Expr, Option<Idx<KeyAnnotation>>) -> ExprOrBinding,
+        make_assigned_value: impl FnOnce(
+            &ExprAttribute,
+            &Expr,
+            Option<Idx<KeyAnnotation>>,
+        ) -> ExprOrBinding,
     ) -> ExprOrBinding {
         self.bind_attr_assign_impl(
             attr,
             Some(assigned),
-            |expr, ann| make_assigned_value(expr.unwrap(), ann),
+            |attr, value, ann| make_assigned_value(attr, value.unwrap(), ann),
             true,
         )
     }
@@ -244,7 +263,11 @@ impl<'a> BindingsBuilder<'a> {
         &mut self,
         mut subscript: ExprSubscript,
         mut assigned: Option<&mut Expr>,
-        make_assigned_value: impl FnOnce(Option<&Expr>, Option<Idx<KeyAnnotation>>) -> ExprOrBinding,
+        make_assigned_value: impl FnOnce(
+            &ExprSubscript,
+            Option<&Expr>,
+            Option<Idx<KeyAnnotation>>,
+        ) -> ExprOrBinding,
         ensure_assigned: bool,
     ) {
         let narrowing_identifier =
@@ -260,7 +283,7 @@ impl<'a> BindingsBuilder<'a> {
         if ensure_assigned && let Some(assigned) = &mut assigned {
             self.ensure_expr(assigned, user.usage());
         }
-        let value = make_assigned_value(assigned.as_deref(), None);
+        let value = make_assigned_value(&subscript, assigned.as_deref(), None);
         let idx = self.insert_binding_current(
             user,
             Binding::AssignToSubscript(Box::new((subscript, Box::new(value)))),
@@ -274,12 +297,16 @@ impl<'a> BindingsBuilder<'a> {
         &mut self,
         subscript: ExprSubscript,
         assigned: &mut Expr,
-        make_assigned_value: impl FnOnce(&Expr, Option<Idx<KeyAnnotation>>) -> ExprOrBinding,
+        make_assigned_value: impl FnOnce(
+            &ExprSubscript,
+            &Expr,
+            Option<Idx<KeyAnnotation>>,
+        ) -> ExprOrBinding,
     ) {
         self.bind_subscript_assign_impl(
             subscript,
             Some(assigned),
-            |expr, ann| make_assigned_value(expr.unwrap(), ann),
+            |subscr, value, ann| make_assigned_value(subscr, value.unwrap(), ann),
             true,
         )
     }
@@ -324,18 +351,19 @@ impl<'a> BindingsBuilder<'a> {
                 let attr_value = self.bind_attr_assign_impl(
                     x.clone(),
                     assigned,
-                    make_assigned_value,
+                    |_attr, value, ann| make_assigned_value(value, ann),
                     ensure_assigned,
                 );
                 // If this is a self-assignment, record it because we may use it to infer
                 // the existence of an instance-only attribute.
                 self.scopes.record_self_attr_assign(x, attr_value, None);
+                self.scopes.record_new_instance_attr_assign(x);
             }
             Expr::Subscript(x) => {
                 self.bind_subscript_assign_impl(
                     x.clone(),
                     assigned,
-                    make_assigned_value,
+                    |_subscr, value, ann| make_assigned_value(value, ann),
                     ensure_assigned,
                 );
             }
@@ -788,7 +816,7 @@ impl<'a> BindingsBuilder<'a> {
                 expr: value,
                 legacy_tparams: tparams,
                 is_in_function_scope: self.scopes.in_function_scope(),
-                is_class_body_assignment: self.scopes.in_class_body(),
+                class_key: self.scopes.current_class_key(),
                 first_use: FirstUse::Undetermined,
                 def_idx: if uses_first_use { Some(def_idx) } else { None },
                 receiver_idx,

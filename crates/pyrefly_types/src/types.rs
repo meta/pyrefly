@@ -428,6 +428,10 @@ pub enum AnyStyle {
 }
 
 impl AnyStyle {
+    /// Downgrade an explicit `Any` to an implicit one, for a type that is derived from an `Any`
+    /// rather than being the user's `Any` itself, so that the derived type is not reported as a
+    /// use of an annotation the user wrote. An operation on an `Any` operand keeps the operand's
+    /// style instead of downgrading it: see `Type::merge_any_operands`.
     pub fn propagate(self) -> Type {
         match self {
             Self::Implicit | Self::Error => Type::Any(self),
@@ -435,6 +439,9 @@ impl AnyStyle {
         }
     }
 
+    /// Combine the styles of two `Any`s that flow into a single value. An error `Any` wins, so
+    /// that fallout from an earlier error is never blamed on the user's explicit `Any`, and an
+    /// implicit `Any` beats an explicit one for the same reason.
     pub fn merge(self, other: Self) -> Type {
         match (self, other) {
             (Self::Error, _) | (_, Self::Error) => Type::Any(Self::Error),
@@ -1397,6 +1404,34 @@ impl Type {
         matches!(self, Type::Any(_))
     }
 
+    /// Whether an implicit `Any` appears anywhere within this type, including the
+    /// type itself. Used to report a partially unknown type such as `list[Unknown]`.
+    pub fn contains_implicit_any(&self) -> bool {
+        fn walk(ty: &Type, found: &mut bool) {
+            if *found {
+                return;
+            }
+            if matches!(ty, Type::Any(AnyStyle::Implicit)) {
+                *found = true;
+                return;
+            }
+            // Unknown types in `__wrapped__` do not make the wrapper's signature unknown.
+            if ty
+                .toplevel_func_metadata()
+                .is_some_and(|metadata| metadata.flags.wrapped.is_some())
+            {
+                for (signature, _) in ty.toplevel_callable_signatures() {
+                    signature.visit(&mut |child| walk(child, found));
+                }
+            } else {
+                ty.recurse(&mut |child| walk(child, found));
+            }
+        }
+        let mut found = false;
+        walk(self, &mut found);
+        found
+    }
+
     pub fn is_object(&self) -> bool {
         matches!(self, Type::ClassType(cls) if cls.is_builtin("object"))
     }
@@ -1953,6 +1988,45 @@ impl Type {
         }
     }
 
+    /// Set a known wrapped target, widening unknown or repeated identities to `Any`.
+    /// Returns `false` when this type has no function metadata.
+    pub fn set_wrapped(&mut self, wrapped: Type) -> bool {
+        fn needs_widening(ty: &Type, kind: &FunctionKind) -> bool {
+            if let Type::Union(union) = ty {
+                return union.members.iter().any(|ty| needs_widening(ty, kind));
+            }
+            // Substitution can replace an opaque target with a whole wrapped function.
+            if matches!(
+                ty,
+                Type::Quantified(_) | Type::Var(_) | Type::ElementOfTypeVarTuple(_)
+            ) {
+                return true;
+            }
+            let Some(metadata) = ty.toplevel_func_metadata() else {
+                return false;
+            };
+            metadata.kind == *kind
+                || metadata
+                    .flags
+                    .wrapped
+                    .as_deref()
+                    .is_some_and(|ty| needs_widening(ty, kind))
+        }
+
+        let Some(metadata) = self.toplevel_func_metadata_mut() else {
+            return false;
+        };
+        // Repeated source identities can represent either a cycle on one object or
+        // arbitrarily many instances of the same wrapper created in a loop.
+        let wrapped = if needs_widening(&wrapped, &metadata.kind) {
+            Type::any_explicit()
+        } else {
+            wrapped
+        };
+        metadata.flags.wrapped = Some(Box::new(wrapped));
+        true
+    }
+
     pub fn has_toplevel_func_metadata(&self) -> bool {
         self.toplevel_func_metadata().is_some()
     }
@@ -2008,7 +2082,7 @@ impl Type {
 
     pub fn function_deprecation(&self) -> Option<&Deprecation> {
         self.toplevel_func_metadata()
-            .and_then(|meta| meta.flags.deprecation.as_ref())
+            .and_then(|meta| meta.flags.deprecation.as_deref())
     }
 
     pub fn has_final_decoration(&self) -> bool {
@@ -2160,6 +2234,18 @@ impl Type {
 
     pub fn any_error() -> Self {
         Type::Any(AnyStyle::Error)
+    }
+
+    /// The result of an operation on `lhs` and `rhs` when either operand is `Any`. Such an
+    /// operation can return anything, so the result is `Any`, keeping the operand's style. When
+    /// both operands are `Any` their styles are merged, so that an error or implicit `Any` is not
+    /// reported as a use of the explicit `Any` the user wrote.
+    pub fn merge_any_operands(lhs: &Type, rhs: &Type) -> Option<Type> {
+        match (lhs, rhs) {
+            (Type::Any(lstyle), Type::Any(rstyle)) => Some(lstyle.merge(*rstyle)),
+            (Type::Any(style), _) | (_, Type::Any(style)) => Some(Type::Any(*style)),
+            _ => None,
+        }
     }
 
     /// Canonicalize a dimension expression to a unique normal form.
@@ -2569,6 +2655,7 @@ mod tests {
     use crate::type_level_dsl::TypeLevelDslCall;
     use crate::type_var::PreInferenceVariance;
     use crate::type_var::Restriction;
+    use crate::types::AnyStyle;
     use crate::types::BoundMethod;
     use crate::types::BoundMethodType;
     use crate::types::Forall;
@@ -2796,5 +2883,18 @@ mod tests {
                 .truncate_class_nesting(3, 3, &Type::any_implicit()),
             wide_union,
         );
+    }
+
+    #[test]
+    fn test_any_style_ord_matches_merge() {
+        // `simplify::flatten_and_dedup` keeps the `max()` of a union's `Any` member styles and
+        // relies on that matching `AnyStyle::merge`. These agree only because the variants are
+        // declared weakest-first; this guards the coupling so reordering them fails here rather
+        // than silently changing which `Any` a union keeps.
+        for a in [AnyStyle::Explicit, AnyStyle::Implicit, AnyStyle::Error] {
+            for b in [AnyStyle::Explicit, AnyStyle::Implicit, AnyStyle::Error] {
+                assert_eq!(Type::Any(a.max(b)), a.merge(b));
+            }
+        }
     }
 }

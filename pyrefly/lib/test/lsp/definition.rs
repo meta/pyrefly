@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::slice;
+use std::sync::Arc;
 
 use itertools::Itertools as _;
 use pretty_assertions::assert_eq;
@@ -23,6 +24,7 @@ use tempfile::TempDir;
 
 use crate::config::config::ConfigFile;
 use crate::config::finder::ConfigFinder;
+use crate::state::load::FileContents;
 use crate::state::lsp::FindPreference;
 use crate::state::require::Require;
 use crate::state::state::State;
@@ -75,6 +77,89 @@ fn get_test_report_do_not_jump_through_renamed_import(
     } else {
         "Definition Result: None".to_owned()
     }
+}
+
+fn get_declaration_report(state: &State, handle: &Handle, position: TextSize) -> String {
+    let defs = state
+        .transaction()
+        .goto_declaration(handle, position)
+        .unwrap_or_default();
+    if !defs.is_empty() {
+        defs.into_iter()
+            .map(
+                |TextRangeWithModule {
+                     module: module_info,
+                     range,
+                 }| {
+                    format!(
+                        "Declaration Result:\n{}",
+                        code_frame_of_source_at_range(module_info.contents(), range)
+                    )
+                },
+            )
+            .join("\n")
+    } else {
+        "Declaration Result: None".to_owned()
+    }
+}
+
+#[test]
+fn endpoint_definition_from_client_literal() {
+    let code = r#"
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+app = FastAPI()
+
+@app.get("/users")
+def list_users():
+    return {"ok": True}
+
+client = TestClient(app)
+client.get("/users")
+#           ^
+"#;
+    let report = super::fastapi_endpoint_support::report_with_framework(code, get_test_report);
+    let def_start = code
+        .find("list_users")
+        .expect("expected list_users definition");
+    let def_end = def_start + "list_users".len();
+    let expected = format!(
+        "Definition Result:\n{}",
+        code_frame_of_source_at_range(
+            code,
+            TextRange::new(
+                TextSize::from(def_start as u32),
+                TextSize::from(def_end as u32)
+            )
+        )
+    );
+    assert!(
+        report.contains(&expected),
+        "missing endpoint definition in report:\n{report}"
+    );
+}
+
+#[test]
+fn endpoint_definition_ignores_non_http_get_calls() {
+    let code = r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/users")
+def list_users():
+    return {"ok": True}
+
+data = {}
+data.get("/users")
+#          ^
+"#;
+    let report = super::fastapi_endpoint_support::report_with_framework(code, get_test_report);
+    assert!(
+        report.contains("Definition Result: None"),
+        "expected no endpoint definition for dict.get(), got:\n{report}"
+    );
 }
 
 #[test]
@@ -174,7 +259,7 @@ Definition Result:
 4 | def f(x: list[int], y: str, z: Literal[42]):
                                     ^
 Definition Result:
-255 | Literal: _SpecialForm
+254 | Literal: _SpecialForm
       ^^^^^^^
 
 8 | yyy = f([1, 2, 3], "test", 42)
@@ -274,6 +359,48 @@ Definition Result: None
 14 | functional["missing"]
                  ^
 Definition Result: None
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn definition_of_imported_annotated_metadata_in_parameter_annotation() {
+    let pkg = r#"
+import utils
+"#;
+    let utils = r#"
+class ValueRange:
+    pass
+
+class Unit:
+    pass
+"#;
+    let code = r#"
+from typing import Annotated
+import pkg
+
+def takes(x: Annotated[int, pkg.utils.ValueRange, pkg.utils.Unit]) -> None: ...
+#                                      ^
+"#;
+    let report = get_batched_lsp_operations_report(
+        &[("main", code), ("pkg", pkg), ("utils", utils)],
+        get_test_report,
+    );
+    assert_eq!(
+        r#"
+# main.py
+5 | def takes(x: Annotated[int, pkg.utils.ValueRange, pkg.utils.Unit]) -> None: ...
+                                           ^
+Definition Result:
+2 | class ValueRange:
+          ^^^^^^^^^^
+
+
+# pkg.py
+
+# utils.py
 "#
         .trim(),
         report.trim(),
@@ -424,6 +551,142 @@ Definition Result:
 "#
         .trim(),
         report.trim(),
+    );
+}
+
+#[test]
+fn overriding_method_declaration_stays_at_definition_test() {
+    let code = r#"
+class Base:
+    def f(self) -> int:
+        return 1
+
+class Child(Base):
+    def f(self) -> int:
+#       ^
+        return 2
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_declaration_report);
+    assert_eq!(
+        r#"
+# main.py
+7 |     def f(self) -> int:
+            ^
+Declaration Result:
+7 |     def f(self) -> int:
+            ^
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn overriding_class_attribute_declaration_stays_at_definition_test() {
+    let code = r#"
+class Base:
+    value = 1
+
+class Child(Base):
+    value = 2
+#   ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_declaration_report);
+    assert_eq!(
+        r#"
+# main.py
+6 |     value = 2
+        ^
+Declaration Result:
+6 |     value = 2
+        ^^^^^
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn parent_declarations_include_special_methods_and_libraries() {
+    let code = r#"
+from collections.abc import Sized
+
+class Base:
+    def __init__(self): pass
+
+class Child(Base, Sized):
+    def __init__(self): pass
+    def __len__(self) -> int: return 0
+"#;
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    let (state, handle) = env.to_state();
+    let transaction = state.transaction();
+    for name in ["__init__", "__len__"] {
+        let start = code.rfind(name).unwrap() as u32;
+        let range = TextRange::new(
+            TextSize::new(start),
+            TextSize::new(start + name.len() as u32),
+        );
+        let parents = transaction.parent_declarations(&handle("main"), range);
+        assert!(!parents.is_empty(), "Missing parent for {name}");
+        assert!(
+            parents
+                .iter()
+                .all(|parent| parent.module.code_at(parent.range) == name)
+        );
+        if name == "__init__" {
+            assert_eq!(
+                parents[0].range.start(),
+                TextSize::new(code.find(name).unwrap() as u32)
+            );
+        } else {
+            assert_eq!(parents[0].module.name().as_str(), "typing");
+        }
+    }
+}
+
+#[test]
+fn parent_declarations_keep_the_declaring_snapshot() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("base.py");
+    let disk = "class Base:\r\n    def f(self): pass\r\n";
+    let memory = disk.replace("\r\n", "\n");
+    fs::write(&path, disk).unwrap();
+    let code = "from base import Base\nclass Child(Base):\n    def f(self): pass\n";
+    let mut env = TestEnv::new();
+    env.add_real_path("base", path.clone());
+    env.add("main", code);
+    let (state, handle) = env.to_state();
+    let disk_handle = handle("base");
+    let memory_handle = Handle::new(
+        disk_handle.module(),
+        ModulePath::memory(path.clone()),
+        *disk_handle.sys_info(),
+    );
+    let mut transaction = state.new_committable_transaction(Require::Everything, None);
+    transaction.as_mut().set_memory(vec![(
+        path,
+        Some(Arc::new(FileContents::from_source(memory))),
+    )]);
+    transaction
+        .as_mut()
+        .run(&[memory_handle], Require::Everything, None);
+    state.commit_transaction(transaction, None);
+    let start = code.rfind("f(self)").unwrap() as u32;
+    let range = TextRange::new(TextSize::new(start), TextSize::new(start + 1));
+    let parents = state
+        .transaction()
+        .parent_declarations(&handle("main"), range);
+    assert_eq!(parents.len(), 1);
+    assert_eq!(parents[0].module.code_at(parents[0].range), "f");
+    assert_eq!(
+        parents[0]
+            .module
+            .to_lsp_range(parents[0].range)
+            .start
+            .character,
+        8
     );
 }
 
@@ -958,7 +1221,7 @@ Definition Result:
 6 | foo: Literal[1] = 1
              ^
 Definition Result:
-255 | Literal: _SpecialForm
+254 | Literal: _SpecialForm
       ^^^^^^^
 
 8 | bar = f([1], "", 42)
@@ -1607,7 +1870,7 @@ Definition Result:
 10 | def f(x: A[B, Path]) -> None:
                    ^
 Definition Result:
-185 | class Path(PurePath):
+184 | class Path(PurePath):
             ^^^^
 "#
         .trim(),
@@ -1849,13 +2112,13 @@ Definition Result:
 25 | dict["foo"]
             ^
 Definition Result:
-3744 |     def __getitem__(self, key: _KT, /) -> _VT:
+3756 |     def __getitem__(self, key: _KT, /) -> _VT:
                ^^^^^^^^^^^
 
 27 | dict["bar"]
             ^
 Definition Result:
-3744 |     def __getitem__(self, key: _KT, /) -> _VT:
+3756 |     def __getitem__(self, key: _KT, /) -> _VT:
                ^^^^^^^^^^^
 "#
         .trim(),
@@ -2164,6 +2427,30 @@ Definition Result:
 
 
 # pkg.bar.py
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+// BUG: A __slots__ entry has no definition target. It should resolve to self.foo (issue #4344).
+#[test]
+fn dunder_slots_entry_definition_test() {
+    let code = r#"
+class C:
+    __slots__ = ("foo",)
+#                  ^
+
+    def __init__(self) -> None:
+        self.foo = 1
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+3 |     __slots__ = ("foo",)
+                       ^
+Definition Result: None
 "#
         .trim(),
         report.trim(),

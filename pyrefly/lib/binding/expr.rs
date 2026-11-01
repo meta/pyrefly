@@ -420,6 +420,9 @@ impl<'a> BindingsBuilder<'a> {
                 is_module_scope,
                 is_outer_class_type_parameter,
             } => {
+                if self.track_classmethod_uses {
+                    self.record_classmethod_use(value_idx.unwrap_or(lookup_result_idx));
+                }
                 if is_outer_class_type_parameter {
                     return self.insert_binding(
                         key,
@@ -700,6 +703,7 @@ impl<'a> BindingsBuilder<'a> {
                 members,
                 false,
                 None,
+                &mut call.arguments.keywords,
             ),
             _ => unreachable!("caller only passes CollectionsNamedTuple or TypingNamedTuple"),
         };
@@ -782,8 +786,8 @@ impl<'a> BindingsBuilder<'a> {
 
         match x {
             Expr::Attribute(attr) => {
-                self.check_private_attribute_usage(attr);
                 self.ensure_expr(&mut attr.value, usage);
+                self.check_private_attribute_usage(attr);
             }
             Expr::Subscript(ExprSubscript { value, slice, .. }) => {
                 // Some subscripts are (or contain) type expressions even when they appear in a
@@ -985,6 +989,17 @@ impl<'a> BindingsBuilder<'a> {
                 // binding-variant choice — it drives a demand edge to
                 // `target::Exports`.
                 let special = self.as_special_export(&call.func);
+                // Factory creation (`wraps(f)`, including `@wraps(f)`) does not mutate a function.
+                // Applying the factory or calling `update_wrapper` may mutate aliased objects;
+                // argument splats and invalid calls are conservatively included in the summary.
+                if !self.has_functools_wrapper_mutation
+                    && (special == Some(SpecialExport::FunctoolsUpdateWrapper)
+                        || matches!(call.func.as_ref(), Expr::Call(factory)
+                            if self.as_special_export(&factory.func)
+                                == Some(SpecialExport::FunctoolsWraps)))
+                {
+                    self.has_functools_wrapper_mutation = true;
+                }
                 let call_range = call.range();
                 match special {
                     Some(
@@ -1183,11 +1198,7 @@ impl<'a> BindingsBuilder<'a> {
                     && let Expr::Name(name) = &*x.target
                     && let Some(idx) = self.scopes.get_current_flow_idx(&name.id)
                 {
-                    self.scopes.define_in_enclosing_non_comprehension_scope(
-                        Hashed::new(&name.id),
-                        idx,
-                        FlowStyle::Other,
-                    );
+                    self.bind_name_in_enclosing_non_comprehension_scope(&name.id, idx);
                 }
             }
             Expr::Lambda(x) => {
@@ -1258,17 +1269,17 @@ impl<'a> BindingsBuilder<'a> {
     }
 
     fn check_private_attribute_usage(&mut self, attr: &ExprAttribute) {
-        if !Ast::is_mangled_attr(&attr.attr.id) {
+        if !Ast::is_mangled_attr(&attr.attr.id) && !Ast::is_protected_attr(&attr.attr.id) {
             return;
         }
         let expect = PrivateAttributeAccessCheck {
             value: (*attr.value).clone(),
             attr: attr.attr.clone(),
-            class_idx: self.scopes.current_method_context(),
+            class_idxs: self.scopes.enclosing_class_keys(),
         };
         self.insert_binding(
             KeyExpect::PrivateAttributeAccess(attr.attr.range()),
-            BindingExpect::PrivateAttributeAccess(expect),
+            BindingExpect::PrivateAttributeAccess(Box::new(expect)),
         );
     }
 
@@ -1297,18 +1308,21 @@ impl<'a> BindingsBuilder<'a> {
     pub fn ensure_class_member_type(
         &mut self,
         x: &mut Expr,
-        tparams_builder: Option<&mut LegacyTParamCollector>,
+        mut tparams_builder: Option<&mut LegacyTParamCollector>,
     ) {
+        let written_range = x.range();
+        let mut usage = Usage::StaticTypeInformation {
+            is_annotation: true,
+        };
         self.ensure_type_impl(
             x,
-            tparams_builder,
+            tparams_builder.as_deref_mut(),
             false,
             false,
-            &mut Usage::StaticTypeInformation {
-                is_annotation: true,
-            },
+            &mut usage,
             true,
         );
+        self.bind_shape_comment(x, written_range, tparams_builder, &mut usage);
     }
 
     /// Like `ensure_type`, but with a specific usage context. Used by type alias
@@ -1316,10 +1330,19 @@ impl<'a> BindingsBuilder<'a> {
     pub fn ensure_type_with_usage(
         &mut self,
         x: &mut Expr,
-        tparams_builder: Option<&mut LegacyTParamCollector>,
+        mut tparams_builder: Option<&mut LegacyTParamCollector>,
         usage: &mut Usage,
     ) {
-        self.ensure_type_impl(x, tparams_builder, false, false, usage, false);
+        let written_range = x.range();
+        self.ensure_type_impl(
+            x,
+            tparams_builder.as_deref_mut(),
+            false,
+            false,
+            usage,
+            false,
+        );
+        self.bind_shape_comment(x, written_range, tparams_builder, usage);
     }
 
     pub(super) fn ensure_type_impl(

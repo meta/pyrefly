@@ -92,7 +92,7 @@ jobs:
             arch: x64
             rust_target: x86_64-apple-darwin
             github_env: $GITHUB_ENV
-          - os: macos-14
+          - os: macos-15
             platform: darwin
             arch: arm64
             github_env: $GITHUB_ENV

@@ -15,7 +15,6 @@ use itertools::Itertools;
 use itertools::izip;
 use pyrefly_python::dunder;
 use pyrefly_types::callable::Callable;
-use pyrefly_types::data_frame::DataFrameKind;
 use pyrefly_types::dimension::Int;
 use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::dimension::contains_var_in_type;
@@ -1409,6 +1408,9 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
         let want_fields = self.type_order.typed_dict_fields(want);
         let got_extra_items = self.type_order.typed_dict_extra_items(got);
         let want_extra_items = self.type_order.typed_dict_extra_items(want);
+        // An `OpenTypedDict` error is returned only if every other check passes. Callers treat it
+        // as a soft error, so it must not hide an incompatible field.
+        let mut open_error = None;
         all(want_fields.iter(), |(k, want_v)| {
             let got_field_ty = got_fields.get(k).map(|got_v| &got_v.ty);
             let got_ty = match (got_field_ty, &got_extra_items) {
@@ -1420,13 +1422,16 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 }
                 (None, ExtraItems::Default) => {
                     // A subclass of `got` could have this item with an incompatible type.
-                    return Err(SubsetError::OpenTypedDict(Box::new(
-                        OpenTypedDictSubsetError::MissingField {
-                            got: got.name().clone(),
-                            want: want.name().clone(),
-                            field: k.clone(),
-                        },
-                    )));
+                    open_error.get_or_insert_with(|| {
+                        SubsetError::OpenTypedDict(Box::new(
+                            OpenTypedDictSubsetError::MissingField {
+                                got: got.name().clone(),
+                                want: want.name().clone(),
+                                field: k.clone(),
+                            },
+                        ))
+                    });
+                    return Ok(());
                 }
             };
             self.is_subset_partial_typed_dict_field(got_ty, want_v)
@@ -1457,7 +1462,8 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 &got_extra_items.extra_item(self.type_order.stdlib()).ty,
                 &want_extra_items.extra_item(self.type_order.stdlib()).ty,
             ),
-        }
+        }?;
+        open_error.map_or(Ok(()), Err)
     }
 
     /// Check an anonymous TypedDict (inferred from a dict literal) against a regular TypedDict.
@@ -2062,13 +2068,21 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 // Gradual-size fast path. This catches existing gradual leaves
                 // without allocating canonical copies on the common success path.
                 //
-                // Short-circuiting here before solving a fresh symbolic `want`
-                // (e.g. `Int[N]` for an unconstrained `IntVar` N) is safe and
-                // does not leak an unsolved `Var`: an unconstrained `IntVar`
-                // defaults to the gradual size `Int[int]`, so a gradual `got`
-                // (like bare `Int`) flowing into `Int[N]` still resolves to
-                // `Int[int]`. We therefore need not bind N before accepting.
+                // Record bounds on the original variable even when its current
+                // bounds expand to a gradual size. Precise arguments can still
+                // constrain it before the call finishes.
                 if type_is_gradual_fast(&got_expanded) || type_is_gradual_fast(&want_expanded) {
+                    if let Int::Symbolic(inner) = s2
+                        && let Type::Var(v) = inner.as_ref()
+                        && self.solver.var_is_quantified(*v)
+                    {
+                        let bound = if type_is_gradual_fast(&got_expanded) {
+                            gradual_size()
+                        } else {
+                            got_expanded
+                        };
+                        return self.is_subset_eq(&bound, inner);
+                    }
                     return Ok(());
                 }
 
@@ -2147,6 +2161,12 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                     Type::Int(Int::Symbolic(Box::new(Type::Quantified(q.clone())))).canonicalize();
                 let want_canonical = want_expanded.canonicalize();
                 if is_gradual_size(&got_canonical) || is_gradual_size(&want_canonical) {
+                    if let Int::Symbolic(inner) = s
+                        && let Type::Var(v) = inner.as_ref()
+                        && self.solver.var_is_quantified(*v)
+                    {
+                        return self.is_subset_eq(got, inner);
+                    }
                     return Ok(());
                 }
                 if got_canonical == want_canonical {
@@ -2410,16 +2430,14 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                     &got_schema.underlying_type(),
                     &want_schema.underlying_type(),
                 )?;
-                if want_schema.kind == DataFrameKind::Polars && want_schema.is_contract() {
+                if want_schema.kind.is_polars_api() && want_schema.is_contract() {
                     ok_or(got_schema.satisfies(want_schema), SubsetError::Other)
                 } else {
                     Ok(())
                 }
             }
             (Type::DataFrame(schema), _) => self.is_subset_eq(&schema.underlying_type(), want),
-            (_, Type::DataFrame(schema))
-                if schema.kind == DataFrameKind::Polars && schema.is_contract() =>
-            {
+            (_, Type::DataFrame(schema)) if schema.kind.is_polars_api() && schema.is_contract() => {
                 Err(SubsetError::Other)
             }
             (_, Type::DataFrame(schema)) => self.is_subset_eq(got, &schema.underlying_type()),
@@ -2441,6 +2459,11 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 if cls.is_builtin("int")
                     && matches!(inner.as_ref(), Type::Var(_) | Type::Quantified(_)) =>
             {
+                if let Type::Var(v) = inner.as_ref()
+                    && self.solver.var_is_quantified(*v)
+                {
+                    return self.is_subset_eq(&gradual_size(), inner);
+                }
                 let mut inner_expanded = (**inner).clone();
                 self.solver.expand_with_bounds(&mut inner_expanded);
                 // `inner` is invariantly an `IntVar` dimension variable (or its
@@ -2449,23 +2472,11 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 // no `QuantifiedKind` gate, unlike the sibling `Int`/`Quantified`
                 // arms above. Once expanded, an `int` argument is compatible when
                 // the dimension resolved to a concrete `int` or a gradual size; a
-                // still-fresh var is pinned gradual (see below); anything else is a
+                // still-fresh partial var is pinned gradual; anything else is a
                 // genuine mismatch.
                 match &inner_expanded {
                     Type::ClassType(inner_cls) if inner_cls.is_builtin("int") => Ok(()),
                     expanded if is_gradual_size(expanded) => Ok(()),
-                    // An `int` argument eagerly pins a still-fresh `IntVar` to
-                    // the gradual size. This is order-dependent when the `IntVar`
-                    // is repeated (e.g. `f[N: IntVar](x: Int[N], y: Int[N])`):
-                    // `f(i, s3)` pins N gradual from the `int` first, so a later
-                    // concrete `Int[3]` is accepted, whereas `f(s3, i)` pins
-                    // N=3 first and correctly rejects the `int`. This eager pin
-                    // mirrors how Pyrefly's ordinary `TypeVar` inference behaved
-                    // circa end of 2025, before it switched to bounds
-                    // accumulation. The fix is likewise to accumulate a gradual
-                    // lower bound on N instead of pinning it, so a concrete
-                    // sibling occurrence can still constrain N regardless of
-                    // argument order.
                     Type::Var(_) | Type::Quantified(_) | Type::Any(_) => {
                         self.is_subset_eq(&gradual_size(), inner)
                     }

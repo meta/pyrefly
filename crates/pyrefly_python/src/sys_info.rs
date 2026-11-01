@@ -25,6 +25,7 @@ use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
 use ruff_python_ast::ExprBooleanLiteral;
 use ruff_python_ast::ExprCall;
+use ruff_python_ast::ExprIf;
 use ruff_python_ast::ExprList;
 use ruff_python_ast::ExprNumberLiteral;
 use ruff_python_ast::ExprSet;
@@ -33,6 +34,7 @@ use ruff_python_ast::ExprSubscript;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtIf;
 use ruff_python_ast::UnaryOp;
+use ruff_text_size::TextRange;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de;
@@ -1133,23 +1135,35 @@ impl SysInfo {
         }
     }
 
-    /// Like `Ast::if_branches`, but skips branch that statically evaluate to `false`,
-    /// and stops if any branch evaluates to `true`.
+    /// The branches of a ternary that the configured environment does not rule out.
+    /// Like the binder, this only decides a test that consults the environment.
+    pub fn pruned_ternary_branches<'a>(&self, x: &'a ExprIf) -> impl Iterator<Item = &'a Expr> {
+        let (body, orelse) = match self.evaluate_bool_with_sys_info(&x.test) {
+            Some(true) => (Some(&*x.body), None),
+            Some(false) => (None, Some(&*x.orelse)),
+            None => (Some(&*x.body), Some(&*x.orelse)),
+        };
+        body.into_iter().chain(orelse)
+    }
+
+    /// Like `Ast::if_branches`, but skips clauses whose tests statically evaluate to `false`, and
+    /// stops after the first clause whose test evaluates to `true`, yielding that clause with no
+    /// test. Each clause keeps its own range, even when earlier clauses were skipped.
     pub fn pruned_if_branches<'a, 'b: 'a>(
         &'a self,
         x: &'b StmtIf,
-    ) -> impl Iterator<Item = (Option<&'b Expr>, &'b [Stmt])> + 'a {
+    ) -> impl Iterator<Item = (TextRange, Option<&'b Expr>, &'b [Stmt])> + 'a {
         Ast::if_branches(x)
-            .map(|(test, body)| {
+            .map(|(range, test, body)| {
                 let b = match test {
                     None => Some(true),
                     Some(x) => self.evaluate_bool(x),
                 };
-                (b, if b == Some(true) { None } else { test }, body)
+                (b, range, if b == Some(true) { None } else { test }, body)
             })
             .filter(|x| x.0 != Some(false))
-            .map(|x| (x.1, x.2))
-            .take_while_inclusive(|x| x.0.is_some())
+            .map(|x| (x.1, x.2, x.3))
+            .take_while_inclusive(|x| x.1.is_some())
     }
 }
 

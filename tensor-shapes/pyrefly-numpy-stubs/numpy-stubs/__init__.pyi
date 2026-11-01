@@ -6,7 +6,17 @@
 from builtins import bool as py_bool
 from collections.abc import Iterator, Sequence
 from types import EllipsisType
-from typing import Any, Final, Generic, Literal, Never, overload, SupportsIndex, TypeVar
+from typing import (
+    Any,
+    Final,
+    Generic,
+    Literal,
+    Never,
+    overload,
+    Self,
+    SupportsIndex,
+    TypeVar,
+)
 
 import shape_extensions
 from numpy.__config__ import (
@@ -50,7 +60,6 @@ from numpy._core.fromnumeric import (
     amax as amax,
     amin as amin,
     any as any,
-    argmax as argmax,
     argpartition as argpartition,
     argsort as argsort,
     around as around,
@@ -206,7 +215,7 @@ from numpy._shapes import (
     vecdot_shape,
     vecmat_shape,
 )
-from numpy._typing import _ArrayLikeInt_co, ArrayLike
+from numpy._typing import _ArrayLikeInt_co, ArrayLike, DTypeLike
 from numpy._typing._extended_precision import (
     complex256 as complex256,
     float128 as float128,
@@ -429,28 +438,165 @@ _ShapeT_co = TypeVar("_ShapeT_co", bound=_Shape, default=_Shape, covariant=True)
 type _Axis = int | tuple[int, ...] | None
 type _SingleAxis = int | None
 type _BasicIndex = int | slice | list[int] | None | EllipsisType
+type _NumberScalar = number | bool_ | int | float | complex
 
 class generic:
+    @property
+    def shape(self) -> tuple[()]: ...
+    def __bool__(self, /) -> py_bool: ...
+    @overload
+    def __array__(self, dtype: None = None, /) -> ndarray[[], _dtype[Self]]: ...
+    @overload
+    def __array__[DType: _dtype](self, dtype: DType, /) -> ndarray[[], DType]: ...
     def astype(self, dtype: Any, **kwargs: Any) -> Any: ...
 
-class number(generic): ...
-class integer(number): ...
+class number(generic):
+    def __neg__(self) -> Self: ...
+    def __pos__(self) -> Self: ...
+    def __abs__(self) -> number: ...
+    # The result dtype depends on both operands.
+    def __add__(self, other: _NumberScalar, /) -> number: ...
+    def __radd__(self, other: _NumberScalar, /) -> number | complex: ...
+    def __sub__(self, other: _NumberScalar, /) -> number: ...
+    def __rsub__(self, other: _NumberScalar, /) -> number | complex: ...
+    def __mul__(self, other: _NumberScalar, /) -> number: ...
+    def __rmul__(self, other: _NumberScalar, /) -> number | complex: ...
+    def __truediv__(self, other: _NumberScalar, /) -> number: ...
+    def __rtruediv__(self, other: _NumberScalar, /) -> number | complex: ...
+    def __pow__(self, other: _NumberScalar, mod: None = None, /) -> number: ...
+    def __rpow__(
+        self, other: _NumberScalar, mod: None = None, /
+    ) -> number | complex: ...
+    def __lt__(self, other: _NumberScalar, /) -> bool_: ...
+    def __le__(self, other: _NumberScalar, /) -> bool_: ...
+    def __gt__(self, other: _NumberScalar, /) -> bool_: ...
+    def __ge__(self, other: _NumberScalar, /) -> bool_: ...
+    def __int__(self, /) -> int: ...
+    def __float__(self, /) -> float: ...
 
-class signedinteger(integer):
-    # TODO(stroxler): Sequence inputs to scalar constructors can produce arrays.
+class integer(number):
+    def __index__(self, /) -> int: ...
+    @overload
+    def __new__[Shape: _Shape](
+        cls: type[Self], value: ndarray[Shape, Any]
+    ) -> ndarray[Shape, _dtype[Self]]: ...
+    @overload
+    def __new__[Shape: _Shape](
+        cls: type[Self], value: RegularNestedList[Shape, _ArrayScalar]
+    ) -> ndarray[Shape, _dtype[Self]]: ...
+    @overload
+    def __new__(cls: type[Self], value: _ArrayScalar = ...) -> Self: ...
+    @overload
+    def __new__(
+        cls: type[Self], value: Sequence[Any]
+    ) -> ndarray[IntTuple, _dtype[Self]]: ...
+    @overload
+    def __new__(cls: type[Self], value: object = ...) -> Self: ...
     def __init__(self, value: object = ...) -> None: ...
 
+class signedinteger(integer): ...
 class unsignedinteger(integer): ...
 class inexact(number): ...
 
 class floating(inexact):
-    def __float__(self, /) -> float: ...
+    @overload
+    def __new__[Shape: _Shape](
+        cls: type[Self], value: ndarray[Shape, Any]
+    ) -> ndarray[Shape, _dtype[Self]]: ...
+    @overload
+    def __new__[Shape: _Shape](
+        cls: type[Self], value: RegularNestedList[Shape, _ArrayScalar]
+    ) -> ndarray[Shape, _dtype[Self]]: ...
+    @overload
+    def __new__(
+        cls: type[Self], value: number | bool_ | int | float | str | bytes = ...
+    ) -> Self: ...
+    @overload
+    def __new__(
+        cls: type[Self], value: Sequence[Any]
+    ) -> ndarray[IntTuple, _dtype[Self]]: ...
+    def __init__(
+        self, value: number | bool_ | int | float | str | bytes = ...
+    ) -> None: ...
 
-class complexfloating(inexact): ...
-class bool_(generic): ...
+class complexfloating(inexact):
+    @overload
+    def __new__[Shape: _Shape](
+        cls: type[Self], value: ndarray[Shape, Any]
+    ) -> ndarray[Shape, _dtype[Self]]: ...
+    @overload
+    def __new__[Shape: _Shape](
+        cls: type[Self], value: RegularNestedList[Shape, _ArrayScalar]
+    ) -> ndarray[Shape, _dtype[Self]]: ...
+    @overload
+    def __new__(cls: type[Self], value: _NumberScalar | str | bytes = ...) -> Self: ...
+    @overload
+    def __new__(
+        cls: type[Self], value: Sequence[Any]
+    ) -> ndarray[IntTuple, _dtype[Self]]: ...
+    def __init__(self, value: _NumberScalar | str | bytes = ...) -> None: ...
+    def __complex__(self, /) -> complex: ...
+
+class bool_(generic):
+    @overload
+    def __new__[Shape: _Shape](
+        cls: type[Self], value: ndarray[Shape, Any]
+    ) -> ndarray[Shape, _dtype[Self]]: ...
+    @overload
+    def __new__[Shape: _Shape](
+        cls: type[Self], value: RegularNestedList[Shape, _ArrayScalar]
+    ) -> ndarray[Shape, _dtype[Self]]: ...
+    @overload
+    def __new__(cls: type[Self], value: _NumberScalar | str | bytes = ...) -> Self: ...
+    @overload
+    def __new__(
+        cls: type[Self], value: Sequence[Any]
+    ) -> ndarray[IntTuple, _dtype[Self]]: ...
+    def __init__(self, value: _NumberScalar | str | bytes = ...) -> None: ...
+    def __int__(self, /) -> int: ...
+    def __float__(self, /) -> float: ...
+    def __add__(self, other: _NumberScalar, /) -> number | bool_: ...
+    def __radd__(self, other: _NumberScalar, /) -> number | bool_: ...
+    def __sub__(self, other: number | int | float | complex, /) -> number: ...
+    def __rsub__(self, other: number | int | float | complex, /) -> number: ...
+    def __mul__(self, other: _NumberScalar, /) -> number | bool_: ...
+    def __rmul__(self, other: _NumberScalar, /) -> number | bool_: ...
+    def __truediv__(self, other: _NumberScalar, /) -> number: ...
+    def __rtruediv__(self, other: _NumberScalar, /) -> number: ...
+    def __pow__(self, other: _NumberScalar, mod: None = None, /) -> number: ...
+    def __rpow__(self, other: _NumberScalar, mod: None = None, /) -> number: ...
+
 class float16(floating): ...
 class float32(floating): ...
-class float64(floating): ...
+
+class float64(floating):
+    # Narrow builtin-float support without inheriting float (which
+    # rewrites reflected ops like ``1j * float64`` via complex*float).
+    @overload
+    def __sub__(self, other: float, /) -> float64: ...
+    @overload
+    def __sub__(self, other: _NumberScalar, /) -> number: ...
+    @overload
+    def __rsub__(self, other: float, /) -> float64: ...
+    @overload
+    def __rsub__(self, other: _NumberScalar, /) -> number | complex: ...
+    @overload
+    def __gt__(self, other: float, /) -> bool_: ...
+    @overload
+    def __gt__(self, other: _NumberScalar, /) -> bool_: ...
+    @overload
+    def __ge__(self, other: float, /) -> bool_: ...
+    @overload
+    def __ge__(self, other: _NumberScalar, /) -> bool_: ...
+    @overload
+    def __lt__(self, other: float, /) -> bool_: ...
+    @overload
+    def __lt__(self, other: _NumberScalar, /) -> bool_: ...
+    @overload
+    def __le__(self, other: float, /) -> bool_: ...
+    @overload
+    def __le__(self, other: _NumberScalar, /) -> bool_: ...
+
 class longdouble(floating): ...
 class complex64(complexfloating): ...
 class complex128(complexfloating): ...
@@ -557,6 +703,21 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
     def __len__[N: IntVar, Rest: _Shape = []](
         self: ndarray[[N, *Rest]],
     ) -> Int[N]: ...
+    # A gradual rank can match these fixed ranks; scalar-only returns would be unsafe.
+    @overload
+    def __getitem__[N: IntVar, ScalarT: generic](
+        self: ndarray[[N], _dtype[ScalarT]], key: int, /
+    ) -> Any: ...
+    @overload
+    def __getitem__(self: ndarray[[], _DTypeT_co], key: tuple[()], /) -> Any: ...
+    @overload
+    def __getitem__[N: IntVar](
+        self: ndarray[[N], _DTypeT_co], key: tuple[int], /
+    ) -> Any: ...
+    @overload
+    def __getitem__[N: IntVar, M: IntVar](
+        self: ndarray[[N, M], _DTypeT_co], key: tuple[int, int], /
+    ) -> Any: ...
     @overload
     def __getitem__[
         N: IntVar,
@@ -584,14 +745,15 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
     ) -> ndarray[IntTuple, _DTypeT_co]: ...
     # Assignment preserves the receiver's shape; value broadcasting is gradual.
     def __setitem__(self, key: _ArrayIndex, value: ArrayLike, /) -> None: ...
+    # Unknown-rank arrays may yield scalars, so prefer the gradual overload.
+    @overload
+    def __iter__[N: IntVar](self: ndarray[[N], _DTypeT_co], /) -> Iterator[Any]: ...
     @overload
     def __iter__[N: IntVar, M: IntVar, Rest: _Shape = []](
         self: ndarray[[N, M, *Rest], _DTypeT_co], /
     ) -> Iterator[ndarray[[M, *Rest], _DTypeT_co]]: ...
-    # Iteration over one-dimensional arrays yields NumPy scalars.
-    @overload
-    def __iter__[N: IntVar](self: ndarray[[N], _DTypeT_co], /) -> Iterator[Any]: ...
     def __int__(self: ndarray[[]], /) -> int: ...
+    def __index__(self: ndarray[[], _dtype[integer]], /) -> int: ...
     def __float__(self: ndarray[[]], /) -> float: ...
     def __complex__(self: ndarray[[]], /) -> complex: ...
     # Only 2-D transpose is modeled for the NumPy shape-stub MVP.
@@ -600,30 +762,54 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
         self: ndarray[[N, P], _DTypeT_co],
     ) -> ndarray[[P, N], _DTypeT_co]: ...
     # Unpacking preserves gradual array shapes instead of using the scalar default.
+    @overload
     def __add__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __add__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
+    @overload
     def __radd__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __radd__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
+    @overload
     def __sub__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __sub__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
+    @overload
     def __rsub__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __rsub__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
+    @overload
     def __truediv__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __truediv__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
+    @overload
     def __rtruediv__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __rtruediv__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
+    @overload
     def __mul__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __mul__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
+    @overload
     def __rmul__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __rmul__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     def __floordiv__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
@@ -639,12 +825,18 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
     def __neg__(self) -> ndarray[_ShapeT_co, _DTypeT_co]: ...
     def __pos__(self) -> ndarray[_ShapeT_co, _DTypeT_co]: ...
     def __abs__(self, /) -> ndarray[_ShapeT_co]: ...
+    @overload
     def __pow__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __pow__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
+    @overload
     def __rpow__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __rpow__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     # Scalar results also satisfy Python's truth-valued comparison protocols.
     @overload
     def __lt__(self: ndarray[[]], other: Any, /) -> Any: ...
@@ -745,12 +937,14 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
         axis: Axis = None,
         *,
         keepdims: KeepDims = False,
+        initial: _ArrayScalar = ...,
     ) -> ndarray[reduce_shape(_ShapeT_co, Axis, KeepDims), _DTypeT_co]: ...
     def max[Axis: Flag[_Axis], KeepDims: Flag[py_bool]](
         self,
         axis: Axis = None,
         *,
         keepdims: KeepDims = False,
+        initial: _ArrayScalar = ...,
     ) -> ndarray[reduce_shape(_ShapeT_co, Axis, KeepDims), _DTypeT_co]: ...
     def all[Axis: Flag[_Axis], KeepDims: Flag[py_bool]](
         self,
@@ -768,6 +962,11 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
         *,
         where: Any = True,
     ) -> ndarray[reduce_shape(_ShapeT_co, Axis, KeepDims), _dtype[bool_]]: ...
+    @overload
+    def argmax(
+        self, axis: None = None, out: None = None, *, keepdims: Literal[False] = False
+    ) -> intp: ...
+    @overload
     def argmax[Axis: Flag[_SingleAxis], KeepDims: Flag[py_bool]](
         self,
         axis: Axis = None,
@@ -775,6 +974,11 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
         *,
         keepdims: KeepDims = False,
     ) -> ndarray[reduce_shape(_ShapeT_co, Axis, KeepDims), _dtype[intp]]: ...
+    @overload
+    def argmin(
+        self, axis: None = None, out: None = None, *, keepdims: Literal[False] = False
+    ) -> intp: ...
+    @overload
     def argmin[Axis: Flag[_SingleAxis], KeepDims: Flag[py_bool]](
         self,
         axis: Axis = None,
@@ -1277,6 +1481,14 @@ class _UnaryUFunc(ufunc):
     def __call__[Shape: _Shape](
         self, x: ndarray[Shape], /, out: Any = None, **kwargs: Any
     ) -> ndarray[Shape]: ...
+    # Scalars stay gradual so comparisons like `np.log(0.9) < 0` keep typing.
+    @overload
+    def __call__(self, x: _ArrayScalar, /, out: Any = None, **kwargs: Any) -> Any: ...
+    # Non-scalar array-likes should not fall through to the generic Any ufunc overload.
+    @overload
+    def __call__(
+        self, x: ArrayLike, /, out: Any = None, **kwargs: Any
+    ) -> ndarray | generic: ...
     @overload
     def __call__(self, x: Any, /, out: Any = None, **kwargs: Any) -> Any: ...
 
@@ -1626,7 +1838,7 @@ def asarray(
     copy: py_bool | None = ...,
     like: Any,
 ) -> Any: ...
-def round[Shape: _Shape](x: ndarray[Shape]) -> ndarray[Shape]: ...
+def round[Shape: _Shape](a: ndarray[Shape], decimals: int = 0) -> ndarray[Shape]: ...
 
 # Interpolation tracks query shapes and leaves the result dtype gradual.
 @overload
@@ -1676,7 +1888,25 @@ def diag[M: IntVar, N: IntVar, DType, K: Flag[int] = 0](
 def diag[S: _Shape, DType](
     v: ndarray[S, DType], k: int = 0
 ) -> ndarray[IntTuple, DType]: ...
-def arange[N: IntVar](stop: Int[N], /) -> ndarray[[N], dtype[intp]]: ...
+@overload
+def arange[N: IntVar](
+    stop: Int[N],
+    /,
+    *,
+    dtype: None = None,
+    device: Literal["cpu"] | None = None,
+    like: None = None,
+) -> ndarray[[N], dtype[intp]]: ...
+@overload
+def arange(
+    start: float | integer | floating,
+    stop: float | integer | floating | None = None,
+    step: float | integer | floating = 1,
+    dtype: DTypeLike | None = None,
+    *,
+    device: Literal["cpu"] | None = None,
+    like: None = None,
+) -> ndarray[[int]]: ...
 def expand_dims[Shape: _Shape, DType, Axis: Flag[int]](
     a: ndarray[Shape, DType], axis: Axis
 ) -> ndarray[expand_dims_shape(Shape, Axis), DType]: ...
@@ -1705,11 +1935,19 @@ def min[
     Axis: Flag[_Axis],
     KeepDims: Flag[py_bool],
 ](
-    a: ndarray[Shape, DType], axis: Axis = None, *, keepdims: KeepDims = False
+    a: ndarray[Shape, DType],
+    axis: Axis = None,
+    *,
+    keepdims: KeepDims = False,
+    initial: _ArrayScalar = ...,
 ) -> ndarray[reduce_shape(Shape, Axis, KeepDims), Any]: ...
 @overload
 def min(
-    a: Sequence[ArrayLike], axis: _Axis = None, *, keepdims: py_bool = False
+    a: Sequence[ArrayLike],
+    axis: _Axis = None,
+    *,
+    keepdims: py_bool = False,
+    initial: _ArrayScalar = ...,
 ) -> Any: ...
 @overload
 def max[
@@ -1718,12 +1956,36 @@ def max[
     Axis: Flag[_Axis],
     KeepDims: Flag[py_bool],
 ](
-    a: ndarray[Shape, DType], axis: Axis = None, *, keepdims: KeepDims = False
+    a: ndarray[Shape, DType],
+    axis: Axis = None,
+    *,
+    keepdims: KeepDims = False,
+    initial: _ArrayScalar = ...,
 ) -> ndarray[reduce_shape(Shape, Axis, KeepDims), Any]: ...
 @overload
 def max(
-    a: Sequence[ArrayLike], axis: _Axis = None, *, keepdims: py_bool = False
+    a: Sequence[ArrayLike],
+    axis: _Axis = None,
+    *,
+    keepdims: py_bool = False,
+    initial: _ArrayScalar = ...,
 ) -> Any: ...
+@overload
+def argmin[Out: ndarray, Axis: Flag[_SingleAxis], KeepDims: Flag[py_bool]](
+    a: ArrayLike, axis: Axis, out: Out, *, keepdims: KeepDims = False
+) -> Out: ...
+@overload
+def argmin[Out: ndarray, Axis: Flag[_SingleAxis], KeepDims: Flag[py_bool]](
+    a: ArrayLike, axis: Axis = None, *, out: Out, keepdims: KeepDims = False
+) -> Out: ...
+@overload
+def argmin(
+    a: ArrayLike,
+    axis: None = None,
+    out: None = None,
+    *,
+    keepdims: Literal[False] = False,
+) -> intp: ...
 @overload
 def argmin[
     Shape: _Shape,
@@ -1731,11 +1993,56 @@ def argmin[
     Axis: Flag[_SingleAxis],
     KeepDims: Flag[py_bool],
 ](
-    a: ndarray[Shape, DType], axis: Axis = None, *, keepdims: KeepDims = False
+    a: ndarray[Shape, DType],
+    axis: Axis = None,
+    out: None = None,
+    *,
+    keepdims: KeepDims = False,
 ) -> ndarray[reduce_shape(Shape, Axis, KeepDims), dtype[intp]]: ...
 @overload
-def argmin(
-    a: Sequence[ArrayLike], axis: _SingleAxis = None, *, keepdims: py_bool = False
+def argmin[Axis: Flag[_SingleAxis], KeepDims: Flag[py_bool]](
+    a: Sequence[ArrayLike] | _ArrayScalar,
+    axis: Axis = None,
+    out: None = None,
+    *,
+    keepdims: KeepDims = False,
+) -> Any: ...
+@overload
+def argmax[Out: ndarray, Axis: Flag[_SingleAxis], KeepDims: Flag[py_bool]](
+    a: ArrayLike, axis: Axis, out: Out, *, keepdims: KeepDims = False
+) -> Out: ...
+@overload
+def argmax[Out: ndarray, Axis: Flag[_SingleAxis], KeepDims: Flag[py_bool]](
+    a: ArrayLike, axis: Axis = None, *, out: Out, keepdims: KeepDims = False
+) -> Out: ...
+@overload
+def argmax(
+    a: ArrayLike,
+    axis: None = None,
+    out: None = None,
+    *,
+    keepdims: Literal[False] = False,
+) -> intp: ...
+@overload
+def argmax[
+    Shape: _Shape,
+    DType,
+    Axis: Flag[_SingleAxis],
+    KeepDims: Flag[py_bool],
+](
+    a: ndarray[Shape, DType],
+    axis: Axis = None,
+    out: None = None,
+    *,
+    keepdims: KeepDims = False,
+) -> ndarray[reduce_shape(Shape, Axis, KeepDims), dtype[intp]]: ...
+@overload
+def argmax[Axis: Flag[_SingleAxis], KeepDims: Flag[py_bool]](
+    a: Sequence[ArrayLike] | _ArrayScalar,
+    axis: Axis = None,
+    out: None = None,
+    *,
+    keepdims: KeepDims = False,
 ) -> Any: ...
 @overload
 def zeros[N: IntVar, ScalarT: generic](

@@ -22,6 +22,7 @@ use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_types::function::BodyKind;
+use pyrefly_types::function::Deprecation;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
 use pyrefly_types::special_form::SpecialForm;
@@ -76,6 +77,7 @@ use crate::binding::base_class::BaseClassGeneric;
 use crate::binding::bindings::BindingEntry;
 use crate::binding::bindings::BindingTable;
 use crate::binding::bindings::Bindings;
+use crate::binding::classmethod::MethodReceiverKind;
 use crate::binding::django::DjangoFieldInfo;
 use crate::binding::narrow::NarrowOp;
 use crate::binding::narrow::NarrowingSubject;
@@ -127,10 +129,10 @@ assert_words!(KeyDecoratedFunction, 1);
 assert_words!(KeyUndecoratedFunction, 1);
 
 assert_words!(Binding, 4);
-assert_words!(BindingExpect, 12);
+assert_words!(BindingExpect, 8);
 assert_words!(BindingTypeAlias, 6);
 assert_words!(BindingAnnotation, 11);
-assert_words!(BindingClass, 10);
+assert_words!(BindingClass, 11);
 assert_words!(BindingTParams, 9);
 assert_words!(BindingClassBaseType, 3);
 assert_words!(BindingClassMetadata, 14);
@@ -146,7 +148,7 @@ assert_bytes!(BindingLegacyTypeParam, 16);
 assert_words!(BindingYield, 4);
 assert_words!(BindingYieldFrom, 4);
 assert_words!(BindingDecorator, 9);
-assert_bytes!(BindingDecoratedFunction, 20);
+assert_bytes!(BindingDecoratedFunction, 24);
 assert_words!(BindingUndecoratedFunction, 18);
 
 #[derive(Clone, Dupe, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -917,6 +919,9 @@ pub enum Key {
     /// Used for `import foo.x` (the `foo` might not be literally present with `.` modules),
     /// and `from foo import *` (the names are injected from the exports)
     Import(Box<(Name, TextRange)>),
+    /// I am `x` from `import foo as x`, rebound by the `import foo.bar` at this location,
+    /// which makes `x.bar` available.
+    ModuleAlias(Box<(Name, TextRange)>),
     /// I am an implicit module-level global variable like `__file__` or `__doc__`.
     ImplicitGlobal(Box<Name>),
     /// I am defined in this module at this location.
@@ -985,15 +990,25 @@ pub enum Key {
     Exhaustive(ExhaustivenessKind, TextRange),
     /// A `with` statement whose body terminated, which needs type-based reachability checking
     SuppressedException(TextRange),
+    /// A suppression-only query for a narrow view, separate from normal with completion.
+    SuppressionNarrow(TextRange),
     /// One syntactic exception-class expression from an `except` clause. A clause
     /// listing a tuple of classes has one of these per element.
     ExceptionClass(TextRange),
+    /// The test of one `if` or `elif` clause, keyed by the test's range.
+    BranchTest(TextRange),
+    /// The end of one suite in an `if`/`elif`/`else` chain, keyed by the clause's range. The
+    /// fall-through of a chain with no `else` is keyed by the empty range at the chain's start.
+    BranchEnd(TextRange),
+    /// A module-wide boolean summary of calls that may mutate function wrapping state.
+    FunctoolsWrapperMutation(TextRange),
 }
 
 impl Ranged for Key {
     fn range(&self) -> TextRange {
         match self {
             Self::Import(x) => x.1,
+            Self::ModuleAlias(x) => x.1,
             // ImplicitGlobals (e.g. __file__, __name__) are synthesized and have no
             // source text. TextRange::default() (0..0) points to the start of the
             // file, which is a valid byte position and can be targeted by suppression
@@ -1024,8 +1039,10 @@ impl Ranged for Key {
             Self::PossibleLegacyTParam(r) => *r,
             Self::PatternNarrow(r) => *r,
             Self::Exhaustive(_, r) => *r,
-            Self::SuppressedException(r) => *r,
+            Self::SuppressedException(r) | Self::SuppressionNarrow(r) => *r,
             Self::ExceptionClass(r) => *r,
+            Self::BranchTest(r) => *r,
+            Self::BranchEnd(r) | Self::FunctoolsWrapperMutation(r) => *r,
         }
     }
 }
@@ -1036,6 +1053,7 @@ impl DisplayWith<ModuleInfo> for Key {
 
         match self {
             Self::Import(x) => write!(f, "Key::Import({} {})", x.0, ctx.display(&x.1)),
+            Self::ModuleAlias(x) => write!(f, "Key::ModuleAlias({} {})", x.0, ctx.display(&x.1)),
             Self::ImplicitGlobal(n) => write!(f, "Key::Global({n})"),
             Self::Definition(x) => write!(f, "Key::Definition({})", short(x)),
             Self::MutableCapture(x) => write!(f, "Key::MutableCapture({})", short(x)),
@@ -1076,7 +1094,13 @@ impl DisplayWith<ModuleInfo> for Key {
             Self::SuppressedException(r) => {
                 write!(f, "Key::SuppressedException({})", ctx.display(r))
             }
+            Self::SuppressionNarrow(r) => write!(f, "Key::SuppressionNarrow({})", ctx.display(r)),
             Self::ExceptionClass(r) => write!(f, "Key::ExceptionClass({})", ctx.display(r)),
+            Self::BranchTest(r) => write!(f, "Key::BranchTest({})", ctx.display(r)),
+            Self::BranchEnd(r) => write!(f, "Key::BranchEnd({})", ctx.display(r)),
+            Self::FunctoolsWrapperMutation(r) => {
+                write!(f, "Key::FunctoolsWrapperMutation({})", ctx.display(r))
+            }
         }
     }
 }
@@ -1115,6 +1139,8 @@ pub enum KeyExpect {
     PrivateAttributeAccess(TextRange),
     /// Deferred uninitialized variable check.
     UninitializedCheck(TextRange),
+    /// Check that an attribute declaration is initialized on every control-flow path.
+    UninitializedAttributeCheck(TextRange),
     /// Forward reference string literal in union type check.
     ForwardRefUnion(TextRange),
     /// A name used in annotation position that may be an invalid implicit alias.
@@ -1141,6 +1167,7 @@ impl Ranged for KeyExpect {
             | KeyExpect::ExceptClauseReachability(range)
             | KeyExpect::PrivateAttributeAccess(range)
             | KeyExpect::UninitializedCheck(range)
+            | KeyExpect::UninitializedAttributeCheck(range)
             | KeyExpect::ForwardRefUnion(range)
             | KeyExpect::ImplicitAliasCheck(range)
             | KeyExpect::ValidateImplicitReturn(range)
@@ -1164,6 +1191,7 @@ impl DisplayWith<ModuleInfo> for KeyExpect {
             KeyExpect::ExceptClauseReachability(r) => ("ExceptClauseReachability", r),
             KeyExpect::PrivateAttributeAccess(r) => ("PrivateAttributeAccess", r),
             KeyExpect::UninitializedCheck(r) => ("UninitializedCheck", r),
+            KeyExpect::UninitializedAttributeCheck(r) => ("UninitializedAttributeCheck", r),
             KeyExpect::ForwardRefUnion(r) => ("ForwardRefUnion", r),
             KeyExpect::ImplicitAliasCheck(r) => ("ImplicitAliasCheck", r),
             KeyExpect::ValidateImplicitReturn(r) => ("ValidateImplicitReturn", r),
@@ -1193,18 +1221,40 @@ pub enum ExprOrBinding {
 pub struct PrivateAttributeAccessCheck {
     pub value: Expr,
     pub attr: Identifier,
-    pub class_idx: Option<Idx<KeyClass>>,
+    /// Enclosing classes, from innermost to outermost.
+    pub class_idxs: Vec<Idx<KeyClass>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct BranchSuite {
-    /// This suite's test. An `else` has none.
-    pub test: Option<Expr>,
+    /// This suite's [`Binding::BranchTest`]. An `else` has none.
+    pub test: Option<Idx<Key>>,
     /// The suite's reportable body, if it has one.
     pub range: Option<TextRange>,
+}
+
+/// The test of one `if` or `elif` clause.
+#[derive(Clone, Debug)]
+pub struct BranchTest {
+    pub test: Expr,
+    /// The [`Binding::BranchTest`] of the closest earlier clause in the same chain, if any.
+    pub previous: Option<Idx<Key>>,
     /// Whether the test's value holds in every environment, so that a false test kills this
     /// suite and a true one kills the suites below it.
-    pub test_is_environment_independent: bool,
+    pub is_environment_independent: bool,
+}
+
+/// The end of one suite in an `if`/`elif`/`else` chain, or of the chain's fall-through.
+#[derive(Clone, Debug)]
+pub struct BranchEnd {
+    /// The [`Binding::BranchTest`] that decides whether the suite runs.
+    pub test: Idx<Key>,
+    /// The test value under which the suite runs: `true` for an `if` or `elif` suite, and
+    /// `false` for an `else` suite or a fall-through, which run when the last test fails.
+    pub runs_when: bool,
+    /// The suite's termination key, if any: usually its last expression statement, and for a
+    /// fall-through, the chain's exhaustiveness check.
+    pub last: Option<Idx<Key>>,
 }
 
 impl DisplayWith<Bindings> for ExprOrBinding {
@@ -1282,14 +1332,14 @@ pub enum BindingExpect {
         /// End of the region. Any definitely-dead tail is excluded, being reported on its own.
         end: TextSize,
     },
-    /// Suites in one `if`/`elif`/`else` chain. A suite runs only when every earlier
-    /// environment-independent test is false and its own test is true. The tests' types can
-    /// settle either half, but only once solved, so binding leaves the flow reachable and defers
-    /// the diagnostics here.
+    /// Suites in one `if`/`elif`/`else` chain. A suite is dead when control never evaluates its
+    /// test, because an earlier environment-independent test is always true, or when declarations
+    /// settle its test against it. Both are known only once the tests are solved, so binding
+    /// leaves the flow reachable and defers the diagnostics here.
     ///
-    /// Only the tests' own values are consulted, never the narrowing they perform. `if x is None:`
-    /// on a `str` narrows to `Never` too, but reporting that would condemn a defensive check that
-    /// a wrong annotation makes real, and such checks are everywhere.
+    /// Narrowing never makes a suite dead. `if x is None:` on a `str` narrows to `Never` too, but
+    /// reporting that would condemn a defensive check that a wrong annotation makes real, and such
+    /// checks are everywhere.
     BranchSuiteReachability(Box<[BranchSuite]>),
     /// An `except` clause that earlier clauses in the same `try` statement may already
     /// catch everything for. Only emitted when there is at least one earlier clause.
@@ -1302,7 +1352,7 @@ pub enum BindingExpect {
         range: TextRange,
     },
     /// Track private attribute accesses that need semantic validation.
-    PrivateAttributeAccess(PrivateAttributeAccessCheck),
+    PrivateAttributeAccess(Box<PrivateAttributeAccessCheck>),
     /// Deferred check for uninitialized variables. This is a "dangling" binding
     /// that doesn't affect any other types - it only exists to emit an error at
     /// solve time if any of the termination keys don't have Never type.
@@ -1315,6 +1365,14 @@ pub enum BindingExpect {
         /// At solve time, we check if ALL of these have Never type.
         /// If any don't, the variable may be uninitialized.
         termination_keys: Vec<Idx<Key>>,
+    },
+    /// Check whether a class-body attribute is initialized on every completing path.
+    UninitializedAttributeCheck {
+        name: Name,
+        range: TextRange,
+        class: Idx<KeyClass>,
+        /// All missing paths must terminate. None means a path lacks termination evidence.
+        termination_keys: Option<Vec<Idx<Key>>>,
     },
     /// Check for forward reference string literal in union type.
     /// At runtime, `type.__or__` cannot handle string literals, so expressions
@@ -1405,11 +1463,10 @@ impl DisplayWith<Bindings> for BindingExpect {
                 "PrivateAttributeAccess({}, {}, {})",
                 m.display(&expectation.value),
                 expectation.attr.id,
-                if let Some(class_idx) = expectation.class_idx {
-                    format!("{}", ctx.display(class_idx))
-                } else {
-                    "None".to_owned()
-                }
+                intersperse_iter(", ", || expectation
+                    .class_idxs
+                    .iter()
+                    .map(|idx| ctx.display(*idx)))
             ),
             Self::MatchExhaustiveness {
                 subject_idx,
@@ -1485,6 +1542,21 @@ impl DisplayWith<Bindings> for BindingExpect {
                     "UninitializedCheck({}, {}, {:?})",
                     name,
                     ctx.module().display(range),
+                    termination_keys
+                )
+            }
+            Self::UninitializedAttributeCheck {
+                name,
+                range,
+                class,
+                termination_keys,
+            } => {
+                write!(
+                    f,
+                    "UninitializedAttributeCheck({}, {}, {:?}, {:?})",
+                    name,
+                    ctx.module().display(range),
+                    class,
                     termination_keys
                 )
             }
@@ -2010,6 +2082,7 @@ pub struct FunctionDefData {
     pub parameters: Box<Parameters>,
     pub type_params: Option<Box<TypeParams>>,
     pub is_async: bool,
+    pub(crate) method_receiver: MethodReceiverKind,
     pub range: TextRange,
 }
 
@@ -2020,6 +2093,7 @@ impl FunctionDefData {
             parameters: def.parameters,
             type_params: def.type_params,
             is_async: def.is_async,
+            method_receiver: MethodReceiverKind::None,
             range: def.range,
         }
     }
@@ -2048,6 +2122,10 @@ pub struct BindingDecoratedFunction {
     pub undecorated_idx: Idx<KeyUndecoratedFunction>,
     pub successor: Option<Idx<KeyDecoratedFunction>>,
     pub docstring_range: Option<TextRange>,
+    /// Whether this function definition is contiguous with its predecessor.
+    /// Used to enforce that `@overload` signatures are immediately followed by
+    /// another `@overload` or the implementation.
+    pub is_contiguous: bool,
 }
 
 impl DisplayWith<Bindings> for BindingDecoratedFunction {
@@ -2098,6 +2176,7 @@ pub struct ClassBinding {
     pub def_index: ClassDefIndex,
     pub parent: NestingContext,
     pub is_protocol: bool,
+    pub deprecation: Option<Box<Deprecation>>,
     /// Were we able to determine, using only syntactic analysis at bindings time,
     /// that there can be no legacy tparams? If no, we need a `BindingTParams`, if yes
     /// we can directly compute the `TParams` from the class def.
@@ -2175,19 +2254,37 @@ pub enum LastStmt {
     /// The last statement is a `with`, with the following context,
     /// which might (if exit is true) catch an exception
     With(IsAsync),
-    /// The last statement is a match or if/elif chain that may be type-exhaustive.
+    /// The last statement is a `match` that may be type-exhaustive.
     /// Contains the statement range to look up exhaustiveness at solve time.
-    Exhaustive(ExhaustivenessKind, TextRange),
+    Exhaustive(TextRange),
+    /// The last statement is an `if` chain, and one of its suites, or its fall-through, may
+    /// reach the end. Contains the range that keys the suite's `Binding::BranchEnd`.
+    BranchEnd(TextRange),
 }
 
 #[derive(Clone, Debug)]
 pub struct ReturnImplicit {
-    /// Terminal statements in the function control flow, used to determine whether the
-    /// function has an implicit `None` return.
-    /// When `None`, the function always has an implicit `None` return. When `Some(xs)`,
-    /// the function has an implicit `None` return if there exists a non-`Never` in this
-    /// list.
-    pub last_exprs: Option<Box<[(LastStmt, Idx<Key>)]>>,
+    /// Terminal path sets for whether the function has an implicit `None` return.
+    ///
+    /// - `None`: every path falls off the end, so the implicit return is `None`.
+    /// - `Some(clauses)`: DNF over path endings. The implicit return is `Never` if any
+    ///   clause fully diverges (each clause is an AND of endings; an empty clause means
+    ///   that alternative never falls through). A single flat list of endings is one
+    ///   clause. `try`/`finally` uses two clauses because fall-through requires both the
+    ///   `try` path and the `finally` path to fall through. An ending diverges if it ends in
+    ///   `Never` or lies inside a suite that its test makes dead.
+    pub last_exprs: Option<Box<[Box<[LastPath]>]>>,
+}
+
+/// A path that may fall off the end of a body.
+#[derive(Clone, Debug)]
+pub struct LastPath {
+    pub last: LastStmt,
+    /// The binding that `last` describes.
+    pub key: Idx<Key>,
+    /// The `Binding::BranchEnd`s of the `if` suites enclosing the path. The path never reaches
+    /// the end if any of those suites is dead by its test.
+    pub guards: Box<[Idx<Key>]>,
 }
 
 #[derive(Clone, Debug)]
@@ -2248,8 +2345,8 @@ pub enum FirstUse {
 pub struct BranchInfo {
     /// The type key from this branch.
     pub value_key: Idx<Key>,
-    /// The last `Binding::StmtExpr` in this branch, if any.
-    /// Used to check for type-based termination (NoReturn/Never) at solve time.
+    /// The branch's termination key, if any: it solves to `Never` when control cannot leave
+    /// the branch normally, in which case the branch is left out of the join.
     pub termination_key: Option<Idx<Key>>,
 }
 
@@ -2285,8 +2382,8 @@ pub struct NameAssign {
     pub expr: Box<Expr>,
     pub legacy_tparams: Option<Box<[Idx<KeyLegacyTypeParam>]>>,
     pub is_in_function_scope: bool,
-    /// True if this assignment is directly in a class body.
-    pub is_class_body_assignment: bool,
+    /// The class whose body directly contains this assignment, if any.
+    pub class_key: Option<Idx<KeyClass>>,
     pub first_use: FirstUse,
     /// The Definition idx for this NameAssign, if infer_with_first_use is enabled.
     /// Used at solve time for inline first-use pinning and partial answer storage.
@@ -2404,13 +2501,10 @@ pub enum GateCondition {
     /// An expression statement. Control continues past it only if evaluating it returned, so
     /// the code after is dead when its type is `Never`.
     ExpressionReturns { result: Idx<Key> },
-    /// A compound statement, every path through which ends in one of these expressions. Control
-    /// continues past it only if one of them returns, so the code after is dead when they all
-    /// diverge. This is the same judgement `Binding::ReturnImplicit` makes for a whole function
-    /// body, applied to a single statement.
-    SomePathReturns {
-        last_exprs: Box<[(LastStmt, Idx<Key>)]>,
-    },
+    /// A compound statement whose fall-through is a DNF of path endings (same shape as
+    /// `ReturnImplicit`). Control continues past it only if every clause can fall through, so
+    /// the code after is dead when any clause fully diverges.
+    SomePathReturns { last_exprs: Box<[Box<[LastPath]>]> },
 }
 
 /// Data for the reachability of the code following a `with` statement whose body
@@ -2480,12 +2574,13 @@ pub struct ImportBinding {
 /// [`ImportBinding::fallback`].
 #[derive(Clone, Debug)]
 pub struct ImportFallback {
-    /// Per-name range (the `Alias` range, e.g. just `Y` or `Y as Z`).
-    /// Used to anchor a `MissingModuleAttribute` error if the imported
-    /// name can't be resolved inside an existing module. The
-    /// missing-module error itself is handled by a separate
+    /// Diagnostic context for the imported name. Its range is the per-name
+    /// range (the `Alias` range, e.g. just `Y` or `Y as Z`), which anchors a
+    /// `MissingModuleAttribute` error if the name can't be resolved inside an
+    /// existing module, or a find error for the submodule the name refers to.
+    /// The missing-module error for the module itself is handled by a separate
     /// per-statement `Binding::Module`.
-    pub stmt_range: TextRange,
+    pub diagnostic: ModuleDiagnostic,
     /// If true, the import site is dead code (statically unreachable).
     /// Suppress the missing-attribute error in that case — the bind-time
     /// logic did the same via `is_unreachable_from_static_test`.
@@ -2499,6 +2594,18 @@ pub struct ClassBodyUnknownName {
     pub name: Identifier,
     pub suggestion: Option<Name>,
     pub allow_class_body_forward_reference: bool,
+}
+
+/// Where and how to report a `FindError` for the module of a `Binding::Module`.
+#[derive(Clone, Debug)]
+pub struct ModuleDiagnostic {
+    pub range: TextRange,
+    /// The names bound by the import have a fallback in an `except` clause, so only a module
+    /// found without type information is reported.
+    pub is_optional_import: bool,
+    /// The import is inside an `if TYPE_CHECKING:` block and never runs, so a module found
+    /// without its source is not reported.
+    pub is_in_type_checking_block: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2628,21 +2735,19 @@ pub enum Binding {
     /// An import of a module.
     /// Also contains the path along the module to bind, optionally a key
     /// with the previous import to this binding (in which case merge the
-    /// modules), and optionally a `TextRange` at which to emit a
-    /// missing-module diagnostic if `module_exists` returns a `FindError`
-    /// at solve time. The range is `Some` for top-level `import X`
+    /// modules), and optionally a `ModuleDiagnostic` describing where and
+    /// whether to emit a missing-module diagnostic if `module_exists` returns
+    /// a `FindError` at solve time. It is `Some` for top-level `import X`
     /// statements and `None` when the binding is constructed
     /// internally — for example by `solve_import`'s submodule fallback,
     /// where the cascade is responsible for any missing-module
-    /// diagnostic. The `bool` next to the range records whether the import is an optional
-    /// import, whose bound names all have a fallback in an `except` clause, in which case
-    /// only a module found without type information is reported.
+    /// diagnostic.
     Module(
         Box<(
             ModuleName,
             Box<[Name]>,
             Option<Idx<Key>>,
-            Option<(TextRange, bool)>,
+            Option<ModuleDiagnostic>,
         )>,
     ),
     /// A name that might be a legacy type parameter. Solving this gives the Quantified type if so.
@@ -2722,6 +2827,13 @@ pub enum Binding {
     /// control flow resumes after the `with`.
     /// Resolves to `Never` if the body terminates and no context manager suppresses.
     SuppressedException(Box<SuppressedException>),
+    /// Resolves to `Never` when control never evaluates the test, because an earlier test in
+    /// the chain is always true. Otherwise resolves to `Literal[True]` or `Literal[False]` when
+    /// declarations settle the test's value in every environment, and to `bool` when they don't.
+    BranchTest(Box<BranchTest>),
+    /// Resolves to `Never` when control cannot leave the suite normally: either its test makes
+    /// it dead, or its `last` termination key is `Never`. Resolves to `None` otherwise.
+    BranchEnd(Box<BranchEnd>),
     Sentinel(
         Box<(
             Option<Idx<KeyAnnotation>>,
@@ -3080,6 +3192,20 @@ impl DisplayWith<Bindings> for Binding {
                     None => write!(f, "terminated)"),
                 }
             }
+            Self::BranchTest(x) => {
+                write!(f, "BranchTest({}, ", m.display(&x.test))?;
+                match x.previous {
+                    Some(previous) => write!(f, "{})", ctx.display(previous)),
+                    None => write!(f, "first)"),
+                }
+            }
+            Self::BranchEnd(x) => {
+                write!(f, "BranchEnd({}, {}, ", ctx.display(x.test), x.runs_when)?;
+                match x.last {
+                    Some(last) => write!(f, "{})", ctx.display(last)),
+                    None => write!(f, "none)"),
+                }
+            }
         }
     }
 }
@@ -3174,7 +3300,9 @@ impl Binding {
             | Binding::ClassBodyUnknownName(_)
             | Binding::Exhaustive(_)
             | Binding::ExceptionClass(_, _)
-            | Binding::SuppressedException(_) => None,
+            | Binding::SuppressedException(_)
+            | Binding::BranchTest(_)
+            | Binding::BranchEnd(_) => None,
         }
     }
 }
@@ -3420,9 +3548,12 @@ pub enum ClassFieldDefinition {
     /// `initialized_in_recognized_method` is true if the field is assigned in a recognized
     /// instance attribute-defining method (e.g., `__init__`), meaning a Final field
     /// declared here is legally initialized even without a class-body value.
+    /// `initialized_on_new_instance` is true if `__new__` assigns the field on the instance
+    /// it creates. Only the `uninitialized-instance-variable` check reads it.
     DeclaredByAnnotation {
         annotation: Idx<KeyAnnotation>,
         initialized_in_recognized_method: bool,
+        initialized_on_new_instance: bool,
     },
     /// Declared with no annotation or assignment (this is impossible
     /// in a normal class, but can happen with some synthesized classes).
@@ -3461,6 +3592,10 @@ pub enum ClassFieldDefinition {
         // assigns to it via `cls.`). We track this separately from `method` to avoid mutating
         // the method descriptor's own metadata (e.g. keeping `__init__` as an instance method).
         receiver_kind: MethodSelfKind,
+        // Whether any method assigns this attribute through an instance receiver (`self.x = ...`).
+        // `__slots__` only limits instance attributes, so a field written only through `cls`
+        // is not checked against it.
+        has_instance_write: bool,
     },
 }
 
@@ -3470,12 +3605,14 @@ impl DisplayWith<Bindings> for ClassFieldDefinition {
             Self::DeclaredByAnnotation {
                 annotation,
                 initialized_in_recognized_method,
+                initialized_on_new_instance,
             } => {
                 write!(
                     f,
-                    "ClassFieldDefinition::DeclaredByAnnotation({}, initialized_in_recognized_method={})",
+                    "ClassFieldDefinition::DeclaredByAnnotation({}, initialized_in_recognized_method={}, initialized_on_new_instance={})",
                     ctx.display(*annotation),
                     initialized_in_recognized_method,
+                    initialized_on_new_instance,
                 )
             }
             Self::DeclaredWithoutAnnotation => {

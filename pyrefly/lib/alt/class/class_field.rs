@@ -862,6 +862,35 @@ impl ClassField {
         }
     }
 
+    pub fn is_staticmethod(&self) -> bool {
+        match &self.0 {
+            ClassFieldInner::ClassAttribute {
+                is_staticmethod: true,
+                ..
+            } => true,
+            ClassFieldInner::ClassAttribute { ty, .. } | ClassFieldInner::Method { ty, .. } => {
+                is_staticmethod_type(ty)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_classmethod(&self) -> bool {
+        match &self.0 {
+            ClassFieldInner::Method { ty, .. } | ClassFieldInner::ClassAttribute { ty, .. } => {
+                is_classmethod_type(ty)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_ordinary_instance_method(&self) -> bool {
+        match &self.0 {
+            ClassFieldInner::Method { ty, .. } => is_ordinary_instance_method_type(ty),
+            _ => false,
+        }
+    }
+
     pub fn is_abstract(&self) -> bool {
         match &self.0 {
             ClassFieldInner::Property { is_abstract, .. } => *is_abstract,
@@ -1187,6 +1216,27 @@ impl ClassField {
         }
     }
 
+    /// Whether the field's type is declared rather than inferred: an annotated attribute, or a
+    /// property whose getter has an annotated return type.
+    pub fn has_declared_type(&self) -> bool {
+        match &self.0 {
+            ClassFieldInner::Property { ty, .. } => ty
+                .toplevel_func_metadata()
+                .is_some_and(|meta| !meta.flags.is_return_inferred),
+            _ => self.has_explicit_annotation(),
+        }
+    }
+
+    /// The descriptor class whose `__get__` a read of this field calls, if there is one.
+    pub fn descriptor_getter_class(&self) -> Option<&ClassType> {
+        match &self.0 {
+            ClassFieldInner::Descriptor { descriptor, .. } if descriptor.getter => {
+                Some(&descriptor.cls)
+            }
+            _ => None,
+        }
+    }
+
     fn is_function_without_return_annotation(&self) -> bool {
         match &self.0 {
             ClassFieldInner::Property { .. } => false,
@@ -1386,6 +1436,35 @@ fn has_any_method_type(ty: &Type) -> bool {
     }
 }
 
+fn is_staticmethod_type(ty: &Type) -> bool {
+    match ty {
+        Type::Union(union) => union.members.iter().all(is_staticmethod_type),
+        _ => ty
+            .toplevel_func_metadata()
+            .is_some_and(|m| m.flags.is_staticmethod),
+    }
+}
+
+fn is_classmethod_type(ty: &Type) -> bool {
+    match ty {
+        Type::Union(union) => union.members.iter().all(is_classmethod_type),
+        _ => ty
+            .toplevel_func_metadata()
+            .is_some_and(|m| m.flags.is_classmethod),
+    }
+}
+
+fn is_ordinary_instance_method_type(ty: &Type) -> bool {
+    match ty {
+        Type::Union(union) => union.members.iter().all(is_ordinary_instance_method_type),
+        _ => ty.toplevel_func_metadata().is_some_and(|m| {
+            !m.flags.is_staticmethod
+                && !m.flags.is_classmethod
+                && m.flags.property_metadata.is_none()
+        }),
+    }
+}
+
 fn has_any_abstract(ty: &Type) -> bool {
     match ty {
         Type::Union(union) => union.members.iter().any(|item| item.is_abstract_method()),
@@ -1505,10 +1584,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // container defaults.
         if !has_keyword_conflict
             && let Some(default) = mutable_default
-            && function_id.is_some_and(|id| {
-                id.has_toplevel_qname("sqlalchemy.orm", "mapped_column")
-                    || id.has_toplevel_qname("sqlalchemy.orm._orm_constructors", "mapped_column")
-            })
+            && matches!(
+                callee_kind,
+                Some(CalleeKind::Function(FunctionKind::SqlAlchemyMappedColumn(
+                    _
+                )))
+            )
         {
             self.error(
                 errors,
@@ -1596,6 +1677,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ClassFieldDefinition::DeclaredByAnnotation {
                 annotation: annot,
                 initialized_in_recognized_method,
+                initialized_on_new_instance,
             } => {
                 let direct_annotation = Some(self.get_idx(*annot).annotation.clone());
 
@@ -1669,10 +1751,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     );
                 }
                 // An annotated instance attribute declared in the class body must be
-                // initialized there or in a recognized method such as `__init__`. Final
-                // fields are already reported by the check above, so skip them here to
-                // avoid a duplicate diagnostic.
+                // initialized there, in a recognized method such as `__init__`, or by
+                // `__new__` on the instance it creates. Final fields are already reported
+                // by the check above, so skip them here to avoid a duplicate diagnostic.
                 let is_uninit_instance_var = !initialized_in_recognized_method
+                    && !initialized_on_new_instance
                     && !direct_annotation.as_ref().is_some_and(|a| a.is_final())
                     && matches!(initialization, ClassFieldInitialization::Uninitialized);
                 // A dataclass normally initializes every annotated field through its
@@ -1680,12 +1763,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // a plain `@dataclass(init=False)`, which synthesizes no `__init__` and so
                 // leaves annotation-only fields uninitialized at runtime. attrs and pydantic
                 // manage initialization in ways we do not model here, so they stay excluded.
+                // Metaclass attributes are typically filled by subclass class bodies via
+                // `type.__new__`, so annotation-only declarations on a metaclass are not
+                // uninitialized instance vars in the ordinary sense (see #5278).
+                // Enum sets `_value_` and `_name_` on every member it creates, so annotating
+                // them in the enum body only declares their types.
                 // Reuse `is_special_class` so new special classes are excluded here too, then
                 // carve out the plain `@dataclass(init=False)` case, which it over-excludes.
-                let excluded_from_uninit_check = is_special_class
-                    && metadata.dataclass_metadata().is_none_or(|dc| {
-                        !matches!(dc.kind, DataclassKind::Dataclass { .. }) || dc.kws.init
-                    });
+                let excluded_from_uninit_check = metadata.is_metaclass()
+                    || (metadata.is_enum() && matches!(name.as_str(), "_value_" | "_name_"))
+                    || (is_special_class
+                        && metadata.dataclass_metadata().is_none_or(|dc| {
+                            !matches!(dc.kind, DataclassKind::Dataclass { .. }) || dc.kws.init
+                        }));
                 if is_uninit_instance_var && !excluded_from_uninit_check {
                     self.error(
                         errors,
@@ -1724,11 +1814,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .and_then(|annot| {
                         self.extract_pydantic_field_from_annotation(annot, name, metadata)
                     })
-                    .and_then(|flags| flags.strict)
-                    .map(|strict| {
-                        let mut flags = DataclassFieldKeywords::new();
-                        flags.strict = Some(strict);
-                        flags
+                    .map(|flags| DataclassFieldKeywords {
+                        default: flags.default,
+                        strict: flags.strict,
+                        pydantic_unknown_validation_alias: flags.pydantic_unknown_validation_alias,
+                        pydantic_unchecked_metadata: flags.pydantic_unchecked_metadata
+                            || flags.init_by_alias.is_some(),
+                        pydantic_has_custom_schema: flags.pydantic_has_custom_schema,
+                        ..DataclassFieldKeywords::new()
                     });
                 if metadata.is_protocol()
                     && direct_annotation.is_none()
@@ -1786,9 +1879,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     );
                     if let Some(f) = &mut flags
                         && let Some(annotation_flags) = annotation_flags.as_ref()
-                        && f.strict.is_none()
                     {
-                        f.strict = annotation_flags.strict;
+                        // An assigned Field() preserves annotation defaults unless it supplies a default.
+                        f.default = f
+                            .default
+                            .take()
+                            .or_else(|| annotation_flags.default.clone());
+                        f.strict = f.strict.or(annotation_flags.strict);
+                        f.pydantic_unknown_validation_alias |=
+                            annotation_flags.pydantic_unknown_validation_alias;
+                        f.pydantic_unchecked_metadata |=
+                            annotation_flags.pydantic_unchecked_metadata;
+                        f.pydantic_has_custom_schema |= annotation_flags.pydantic_has_custom_schema;
                     }
                     if flags.is_some() {
                         // A field specifier with no type annotation is a definition-time error,
@@ -1907,6 +2009,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 method: _,
                 annotation: annot,
                 receiver_kind,
+                has_instance_write: _,
             } => {
                 let direct_annotation = annot.map(|a| self.get_idx(a).annotation.clone());
                 // Check if there's an inherited property or descriptor field from a parent class.
@@ -2049,10 +2152,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.analyze_class_field_value(value, class, name, None, false, range, errors);
                 // A class-body name bound by unpacking, a `for` loop or `with` is a class
                 // attribute, so an unknown type is reported like a plain class-body assignment: an
-                // implicit `Any` at the binding that produced it, and an error `Any` at the value it
-                // came from, like other targets. Imports, walrus targets and match captures
-                // also end up here and are not reported, as at other scopes. So is a name whose
-                // final value merges several bindings, which is only checked as a whole here.
+                // implicit or explicit `Any` at the binding that produced it, and an error `Any` at
+                // the value it came from, like other targets. Imports, walrus targets and match
+                // captures also end up here and are not reported, as at other scopes. So is a name
+                // whose final value merges several bindings, which is only checked as a whole here.
                 let binding = self.bindings().get(*definition);
                 let is_reported_target = matches!(
                     binding,
@@ -2076,6 +2179,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             self.target_value_range(binding).unwrap_or(range),
                             "The type of this attribute",
                         ),
+                        Type::Any(AnyStyle::Explicit) => {
+                            self.error_explicit_any_use(errors, range, "The type of this attribute")
+                        }
+                        _ if value_ty.contains_implicit_any() => {
+                            self.error(
+                                errors,
+                                range,
+                                ErrorKind::PartiallyUnknownType,
+                                "This expression's type is partially unknown; it contains an implicit `Any`. Please provide an explicit type annotation.".to_owned(),
+                            );
+                        }
                         _ => {}
                     }
                 }
@@ -2543,10 +2657,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             );
         }
 
-        if matches!(
-            field_definition,
-            ClassFieldDefinition::DefinedInMethod { .. }
-        ) && name != &dunder::SLOTS
+        if let ClassFieldDefinition::DefinedInMethod {
+            has_instance_write: true,
+            ..
+        } = field_definition
+            && name != &dunder::SLOTS
             && let Some(allowed_slots) = self.effective_slots_for_instance_write(class)
             && !allowed_slots.contains::<Name>(name)
         {
@@ -2599,8 +2714,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             (None, _) => self.expr_infer(x, errors),
         };
         self.expand_mut(&mut ty);
-        // An unannotated attribute whose value has a bare implicit or error `Any` type (e.g. from
-        // an untyped call) is reported separately from the `None`/empty-tuple sentinel cases above.
+        // An unannotated attribute whose value has a bare `Any` type is reported separately from
+        // the `None`/empty-tuple sentinel cases above, under the kind for the style of that `Any`:
+        // an untyped call gives an implicit `Any`, a failed import an error `Any`, and a library
+        // function annotated `-> Any` an explicit `Any`.
         if annotation.is_none() {
             match &ty {
                 Type::Any(AnyStyle::Implicit) => {
@@ -2613,6 +2730,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 Type::Any(AnyStyle::Error) => {
                     self.error_unknown_from_error(errors, x.range(), "The type of this attribute")
+                }
+                Type::Any(AnyStyle::Explicit) => {
+                    self.error_explicit_any_use(errors, x.range(), "The type of this attribute")
+                }
+                _ if ty.contains_implicit_any() => {
+                    self.error(
+                        errors,
+                        x.range(),
+                        ErrorKind::PartiallyUnknownType,
+                        "This expression's type is partially unknown; it contains an implicit `Any`. Please provide an explicit type annotation.".to_owned(),
+                    );
                 }
                 _ => {}
             }
@@ -2819,7 +2947,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     fn is_ordinary_instance_method_type(ty: &Type) -> bool {
         ty.toplevel_func_metadata()
-            .is_some_and(&|metadata: &FuncMetadata| {
+            .is_some_and(|metadata: &FuncMetadata| {
                 !metadata.flags.is_staticmethod
                     && !metadata.flags.is_classmethod
                     && metadata.flags.property_metadata.is_none()
@@ -3014,7 +3142,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ///   class C(B):
     ///     x = 1
     /// `get_inherited_type_and_annotation(C, 'x')` will get the type from `B` and the annotation from `A`.
-    fn get_inherited_type_and_annotation(
+    pub(crate) fn get_inherited_type_and_annotation(
         &self,
         class: &Class,
         name: &Name,
@@ -4100,6 +4228,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if cls.module_path().is_interface() {
             return;
         }
+        if class_field
+            .ty()
+            .toplevel_func_metadata()
+            .is_some_and(|meta| meta.flags.is_in_type_checking_block)
+        {
+            return;
+        }
         // If any base derives from `Any`, we can't reliably tell whether the method
         // overrides a concrete parent method, so suppress the check. Gather this
         // across all bases first so the decision is independent of base order.
@@ -4117,6 +4252,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 continue;
             };
             if want_field.defining_class.is_builtin("object") {
+                continue;
+            }
+            if self.super_method_needs_impl_reason(&want_field).is_some() {
                 continue;
             }
             self.error(
@@ -4273,6 +4411,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         );
                     continue;
                 }
+            }
+            let want_is_static = want_class_field.is_staticmethod();
+            let want_is_class = want_class_field.is_classmethod();
+            if (want_is_static || want_is_class) && class_field.is_ordinary_instance_method() {
+                let parent_method_kind = if want_is_static { "static" } else { "class" };
+                self.error(
+                    errors,
+                    range,
+                    ErrorKind::BadOverride,
+                    format!(
+                        "Instance method `{}.{}` overrides {} method of the same name in parent class `{}`",
+                        cls.name(),
+                        field_name,
+                        parent_method_kind,
+                        parent.name(),
+                    ),
+                );
+                continue;
             }
             if is_typed_dict_field != self.is_typed_dict_field(parent_metadata, field_name) {
                 // TypedDict fields are actually dict keys, so we want to check them against other
@@ -4842,6 +4998,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self.get_non_synthesized_field_from_current_class_only(cls, name)
                 .filter(|field| !field.is_init_var())
         })
+    }
+
+    /// Look up a member while ignoring fields synthesized on `cls` itself, but not those
+    /// synthesized on its ancestors. Use this while computing `cls`'s own synthesized fields.
+    pub fn get_class_member_ignoring_own_synthesized(
+        &self,
+        cls: &Class,
+        name: &Name,
+    ) -> Option<WithDefiningClass<Cow<'_, ClassField>>> {
+        self.get_field_from_mro(cls, name, &|c, name| {
+            if c == cls {
+                self.get_non_synthesized_field_from_current_class_only(c, name)
+            } else {
+                self.get_field_from_current_class_only(c, name)
+            }
+        })
+        .filter(|field| !field.value.is_init_var())
     }
 
     pub(crate) fn get_synthesized_field_from_current_class_only(
