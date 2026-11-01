@@ -12,8 +12,10 @@ use std::fmt::Display;
 use std::slice;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use dupe::Dupe;
+use fxhash::FxHashMap;
 use itertools::Itertools;
 use pyrefly_graph::index::Idx;
 use pyrefly_graph::index::Index;
@@ -33,8 +35,10 @@ use pyrefly_util::display::DisplayWithCtx;
 use pyrefly_util::gas::Gas;
 use pyrefly_util::suggest::Candidate;
 use pyrefly_util::suggest::Search;
+use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
+use ruff_python_ast::ExprBooleanLiteral;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Parameter;
@@ -68,6 +72,7 @@ use crate::binding::binding::BindingExport;
 use crate::binding::binding::BindingLegacyTypeParam;
 use crate::binding::binding::BranchInfo;
 use crate::binding::binding::DjangoRelationClass;
+use crate::binding::binding::ExhaustivenessKind;
 use crate::binding::binding::FirstUse;
 use crate::binding::binding::FunctionParameter;
 use crate::binding::binding::GateCondition;
@@ -89,6 +94,7 @@ use crate::binding::binding::KeyYieldFrom;
 use crate::binding::binding::Keyed;
 use crate::binding::binding::LambdaKind;
 use crate::binding::binding::LambdaParamId;
+use crate::binding::binding::LastPath;
 use crate::binding::binding::LastStmt;
 use crate::binding::binding::LegacyTypeParamModule;
 use crate::binding::binding::NarrowUseLocation;
@@ -98,6 +104,7 @@ use crate::binding::binding::TypeAliasRefBinding;
 use crate::binding::binding::TypeLevelLambdaParameter;
 use crate::binding::binding::TypeParameter;
 use crate::binding::expr::Usage;
+use crate::binding::function::LastPathExpr;
 use crate::binding::function::function_last_expressions;
 use crate::binding::metadata::BindingsMetadata;
 use crate::binding::narrow::NarrowOp;
@@ -228,17 +235,20 @@ pub struct Bindings {
     scope_trace: Option<ScopeTrace>,
     /// Names `del`eted at module scope; retained outside the LSP `scope_trace`.
     module_deletes: SmallSet<Name>,
-    unused_parameters: Vec<UnusedParameter>,
     unused_imports: Vec<UnusedImport>,
     unused_variables: Vec<UnusedVariable>,
     pytest_info: Option<PytestBindingInfo>,
     promote_ranges: SmallSet<TextRange>,
+    /// Immutable module-wide wrapping uncertainty, read as a solver dependency by `inspect.unwrap`.
+    functools_wrapper_mutation: Idx<Key>,
     /// Yield and yield-from indices for each lambda that contains yields,
     /// keyed by the lambda's TextRange. Populated at binding time so the
     /// solver can look up yield info without re-walking the AST.
     lambda_yield_keys: Vec<(TextRange, Box<[Idx<KeyYield>]>, Box<[Idx<KeyYieldFrom>]>)>,
     /// For each binding that owns lambdas, the parameters of those lambdas.
     owned_lambda_params: SmallMap<Idx<Key>, Vec<LambdaParamId>>,
+    /// Context-dependent parameter reads reached through forwards and narrowing joins.
+    lambda_parameter_derived: OnceLock<FxHashMap<Idx<Key>, LambdaParamId>>,
     /// Class body ranges paired with class indices. Used by the solver to
     /// recover the enclosing class for an expression that resolves to
     /// `typing.Self`, without needing a per-`Self`-use bind-time key.
@@ -246,6 +256,11 @@ pub struct Bindings {
     /// so a reverse iteration with "first containing range" yields the
     /// innermost enclosing class.
     class_scopes: Vec<(TextRange, Idx<KeyClass>)>,
+    /// Call expressions in the base class lists of `class` statements, paired with the classes
+    /// they belong to. Call bases never nest, so at most one entry contains a given range.
+    call_base_classes: Vec<(TextRange, ClassDefIndex)>,
+    /// Class-body definitions and their owning fields. Other scopes have no entries.
+    class_field_definitions: SmallMap<Idx<Key>, KeyClassField>,
     pub(crate) shape_declarations: ShapeDeclarations,
     /// Annotation-only declarations (`x: Final[int]`) that are subsequently
     /// initialized by an assignment that cannot be syntactically merged with
@@ -319,7 +334,6 @@ pub struct BindingsBuilder<'a> {
     pub analyze_unannotated_for_ide: bool,
     pub infer_return_types: InferReturnTypes,
     pub treat_all_caps_as_final: bool,
-    unused_parameters: Vec<UnusedParameter>,
     unused_imports: Vec<UnusedImport>,
     unused_variables: Vec<UnusedVariable>,
     django_relation_classes: Vec<DjangoRelationClass>,
@@ -338,6 +352,9 @@ pub struct BindingsBuilder<'a> {
     /// recover the enclosing class for a given expression range without
     /// needing a per-`Self`-use bind-time key.
     pub class_scopes: Vec<(TextRange, Idx<KeyClass>)>,
+    /// Call bases of `class` statements, paired with their classes' definition indices.
+    pub(crate) call_base_classes: Vec<(TextRange, ClassDefIndex)>,
+    class_field_definitions: SmallMap<Idx<Key>, KeyClassField>,
     pub shape_declarations: ShapeDeclarations,
     pub(super) shape_comments: ShapeComments,
     /// The annotation whose `Shaped` string or comment payload is being bound.
@@ -348,6 +365,8 @@ pub struct BindingsBuilder<'a> {
     /// set by `stmts()` and consumed by namedtuple synthesis in `stmt()`.
     pub adjacent_namedtuple_defaults: Option<Vec<Expr>>,
     pub promote_ranges: SmallSet<TextRange>,
+    /// Lexical may-mutation summary: branches, loops, and nested bodies cannot clear it.
+    pub(super) has_functools_wrapper_mutation: bool,
     pub type_checking_depth: usize,
     /// True while binding the outermost known-unreachable suite. The call that sets this flag
     /// owns resetting it after nested `stmts()` calls, suppressing duplicate diagnostics.
@@ -385,6 +404,25 @@ fn merge_ranges(mut ranges: Vec<TextRange>) -> Vec<TextRange> {
     merged
 }
 
+/// Bind a constant summary so adding or removing a mutator invalidates dependent unwrap answers.
+fn bind_functools_wrapper_mutation(
+    table: &mut BindingTable,
+    range: TextRange,
+    has_mutation: bool,
+) -> Idx<Key> {
+    table.insert(
+        Key::FunctoolsWrapperMutation(range),
+        Binding::Expr(
+            None,
+            Box::new(Expr::BooleanLiteral(ExprBooleanLiteral {
+                node_index: AtomicNodeIndex::default(),
+                range,
+                value: has_mutation,
+            })),
+        ),
+    )
+}
+
 impl Bindings {
     #[expect(dead_code)] // Useful API
     fn len(&self) -> usize {
@@ -395,7 +433,7 @@ impl Bindings {
 
     /// Create a minimal Bindings for testing purposes.
     ///
-    /// This creates a fake module with the given name and no actual bindings,
+    /// This creates a fake module with the given name and a mutation-free wrapper summary,
     /// which is useful for creating distinguishable CalcIds in tests.
     #[cfg(test)]
     pub fn for_test(name: &str) -> Self {
@@ -408,10 +446,13 @@ impl Bindings {
         let module_path = ModulePath::filesystem(PathBuf::from(format!("/test/{}.py", name)));
         let contents = Arc::new(String::new());
         let module_info = Module::new(module_name, module_path, contents);
+        let mut table = BindingTable::default();
+        let functools_wrapper_mutation =
+            bind_functools_wrapper_mutation(&mut table, TextRange::default(), false);
         Self {
             module_info,
             sys_info: SysInfo::default(),
-            table: Default::default(),
+            table,
             metadata: Arc::new(BindingsMetadata::new()),
             module_ranges: Arc::new(ModuleRanges {
                 multi_line: Vec::new(),
@@ -421,16 +462,19 @@ impl Bindings {
             annotated_metadata_ranges: Vec::new(),
             scope_trace: None,
             module_deletes: SmallSet::new(),
-            unused_parameters: Vec::new(),
             unused_imports: Vec::new(),
             unused_variables: Vec::new(),
             pytest_info: None,
             lambda_yield_keys: Vec::new(),
             owned_lambda_params: SmallMap::new(),
+            lambda_parameter_derived: OnceLock::new(),
             class_scopes: Vec::new(),
+            call_base_classes: Vec::new(),
+            class_field_definitions: SmallMap::new(),
             shape_declarations: ShapeDeclarations::default(),
             subsequently_initialized: SmallSet::new(),
             promote_ranges: SmallSet::new(),
+            functools_wrapper_mutation,
         }
     }
 
@@ -443,6 +487,13 @@ impl Bindings {
 
     pub fn module(&self) -> &ModuleInfo {
         &self.module_info
+    }
+
+    /// The summary covers the whole module, including calls before a mutator and unrelated functions.
+    /// Without object alias tracking, captured wrapped targets cannot be trusted in such a module.
+    /// Stored factory applications, arbitrary attribute writes, and cross-module effects are not tracked.
+    pub fn functools_wrapper_mutation(&self) -> Idx<Key> {
+        self.functools_wrapper_mutation
     }
 
     pub fn sys_info(&self) -> &SysInfo {
@@ -475,6 +526,11 @@ impl Bindings {
         Some(&self.metadata.get_class_checked(idx)?.fields)
     }
 
+    /// The class field owned by a class-body definition, excluding captures from other scopes.
+    pub(crate) fn class_field_for_definition(&self, idx: Idx<Key>) -> Option<&KeyClassField> {
+        self.class_field_definitions.get(&idx)
+    }
+
     /// Per-module class index for a class definition statement (`ClassDefIndex`),
     /// used for `KeyClassField` / `ClassFields` lookups.
     pub fn class_def_index(&self, class_def: &StmtClassDef) -> Option<ClassDefIndex> {
@@ -493,10 +549,6 @@ impl Bindings {
         let key = KeyUndecoratedFunctionRange(def_index);
         let idx = self.key_to_idx_hashed_opt(Hashed::new(&key))?;
         Some(KeyUndecoratedFunctionRange::range_with(idx, self))
-    }
-
-    pub fn unused_parameters(&self) -> &[UnusedParameter] {
-        &self.unused_parameters
     }
 
     pub fn unused_imports(&self) -> &[UnusedImport] {
@@ -526,6 +578,49 @@ impl Bindings {
             .map_or(&[], |params| params.as_slice())
     }
 
+    /// The ordinary lambda parameter reached by a binding's forward/narrowing source chain.
+    pub(crate) fn lambda_parameter_origin(&self, idx: Idx<Key>) -> Option<LambdaParamId> {
+        // Every ordinary LambdaParameter is registered with its enclosing expression's owner.
+        if self.owned_lambda_params.is_empty() {
+            return None;
+        }
+        self.lambda_parameter_derived
+            .get_or_init(|| {
+                let mut derived = FxHashMap::default();
+                let mut path = Vec::new();
+                for (idx, _) in self.table.types.1.iter() {
+                    let mut source = idx;
+                    let parameter = loop {
+                        if let Some(parameter) = derived.get(&source) {
+                            break *parameter;
+                        }
+                        // A source chain has one outgoing edge. Marking it before following
+                        // that edge makes a cycle terminate without an arbitrary depth cutoff.
+                        derived.insert(source, None);
+                        path.push(source);
+                        match self.table.types.1.get(source) {
+                            Some(Binding::LambdaParameter(id, _)) => break Some(*id),
+                            Some(
+                                Binding::Forward(parent)
+                                | Binding::Narrow(parent, ..)
+                                | Binding::Phi(JoinStyle::NarrowOf(parent), _),
+                            ) => source = *parent,
+                            _ => break None,
+                        }
+                    };
+                    for source in path.drain(..) {
+                        derived.insert(source, parameter);
+                    }
+                }
+                derived
+                    .into_iter()
+                    .filter_map(|(idx, parameter)| parameter.map(|parameter| (idx, parameter)))
+                    .collect()
+            })
+            .get(&idx)
+            .copied()
+    }
+
     /// Returns the innermost class whose body range contains `range`, or
     /// `None` if `range` is not inside any class body. Used by the solver
     /// to anchor `typing.Self` references to the enclosing class.
@@ -536,6 +631,19 @@ impl Bindings {
         self.class_scopes
             .iter()
             .rev()
+            .find(|(r, _)| r.contains_range(range))
+            .map(|(_, idx)| *idx)
+    }
+
+    /// Whether this module contains any ordinary call-expression bases.
+    pub(crate) fn has_call_bases(&self) -> bool {
+        !self.call_base_classes.is_empty()
+    }
+
+    /// Returns the class whose base class list holds the call expression containing `range`.
+    pub(crate) fn call_base_class(&self, range: TextRange) -> Option<ClassDefIndex> {
+        self.call_base_classes
+            .iter()
             .find(|(r, _)| r.contains_range(range))
             .map(|(_, idx)| *idx)
     }
@@ -720,6 +828,7 @@ impl Bindings {
         infer_return_types: InferReturnTypes,
         treat_all_caps_as_final: bool,
     ) -> Self {
+        let module_range = x.range;
         let pytest_info = PytestBindingInfo::from_module(&x);
         // Compute module ranges from the AST before consuming it. These are
         // needed later for error collection, which runs after the AST may
@@ -743,7 +852,6 @@ impl Bindings {
             analyze_unannotated_for_ide,
             infer_return_types,
             treat_all_caps_as_final,
-            unused_parameters: Vec::new(),
             unused_imports: Vec::new(),
             unused_variables: Vec::new(),
             django_relation_classes: Vec::new(),
@@ -755,12 +863,15 @@ impl Bindings {
             owned_lambda_params: SmallMap::new(),
             next_lambda_param_id: 0,
             class_scopes: Vec::new(),
+            call_base_classes: Vec::new(),
+            class_field_definitions: SmallMap::new(),
             shape_declarations: ShapeDeclarations::default(),
             shape_comments: ShapeComments::new(&x, &module_info, errors),
             shape_string_annotation: None,
             subsequently_initialized: SmallSet::new(),
             adjacent_namedtuple_defaults: None,
             promote_ranges: SmallSet::new(),
+            has_functools_wrapper_mutation: false,
             type_checking_depth: 0,
             in_unreachable_suite: false,
             pending_gate: None,
@@ -874,6 +985,11 @@ impl Bindings {
             }
         }
         let module_deletes = scope_trace.module_deletes().clone();
+        let functools_wrapper_mutation = bind_functools_wrapper_mutation(
+            &mut builder.table,
+            module_range,
+            builder.has_functools_wrapper_mutation,
+        );
         builder.table.insert(
             KeyDjangoRelations,
             BindingDjangoRelations {
@@ -893,16 +1009,19 @@ impl Bindings {
                 None
             },
             module_deletes,
-            unused_parameters: builder.unused_parameters,
             unused_imports: builder.unused_imports,
             unused_variables: builder.unused_variables,
             pytest_info: builder.pytest_info,
             lambda_yield_keys: builder.lambda_yield_keys,
             owned_lambda_params: builder.owned_lambda_params,
+            lambda_parameter_derived: OnceLock::new(),
             class_scopes: builder.class_scopes,
+            call_base_classes: builder.call_base_classes,
+            class_field_definitions: builder.class_field_definitions,
             shape_declarations: builder.shape_declarations.finish(),
             subsequently_initialized: builder.subsequently_initialized,
             promote_ranges: builder.promote_ranges,
+            functools_wrapper_mutation,
         }
     }
 
@@ -1176,15 +1295,37 @@ impl<'a> BindingsBuilder<'a> {
         self.table.insert_idx(idx, value)
     }
 
-    pub fn record_unused_parameters(&mut self, unused: Vec<UnusedParameter>) {
-        self.unused_parameters.extend(unused);
+    pub fn record_unused_parameters(&self, unused: Vec<UnusedParameter>) {
+        for parameter in unused {
+            self.error(
+                parameter.range,
+                ErrorKind::UnusedParameter,
+                format!("Parameter `{}` is unused", parameter.name),
+            );
+        }
     }
 
     pub fn record_unused_imports(&mut self, unused: Vec<UnusedImport>) {
+        for import in &unused {
+            self.error(
+                import.range,
+                ErrorKind::UnusedImport,
+                format!("Import `{}` may be unused", import.name),
+            );
+        }
         self.unused_imports.extend(unused);
     }
 
     pub fn record_unused_variables(&mut self, unused: Vec<UnusedVariable>) {
+        for variable in &unused {
+            if !Ast::is_intentionally_unused(variable.name.as_str()) {
+                self.error(
+                    variable.range,
+                    ErrorKind::UnusedVariable,
+                    format!("Variable `{}` is unused", variable.name),
+                );
+            }
+        }
         self.unused_variables.extend(unused);
     }
 
@@ -1317,16 +1458,27 @@ impl<'a> BindingsBuilder<'a> {
         self.subsequently_initialized.insert(ann_idx);
     }
 
-    /// Allow access to an `Idx<Key>` given a `LastStmt` coming from a scan of a function body.
-    /// This index will not be dangling under two assumptions:
+    /// Allow access to the keys of a path coming from a scan of a function body or of a statement.
+    /// These indices will not be dangling under two assumptions:
     /// - we bind the function body (note that this isn't true for, e.g. a `@no_type_check` function!)
     /// - our scan of the function body is consistent with our traversal when binding
-    pub fn last_statement_idx_for_implicit_return(&mut self, last: LastStmt, x: &Expr) -> Idx<Key> {
-        self.idx_for_promise(match last {
-            LastStmt::Expr => Key::StmtExpr(x.range()),
-            LastStmt::With(_) => Key::ContextExpr(x.range()),
-            LastStmt::Exhaustive(kind, range) => Key::Exhaustive(kind, range),
-        })
+    pub(crate) fn last_path(&mut self, path: LastPathExpr) -> LastPath {
+        let key = self.idx_for_promise(match path.last {
+            LastStmt::Expr => Key::StmtExpr(path.expr.range()),
+            LastStmt::With(_) => Key::ContextExpr(path.expr.range()),
+            LastStmt::Exhaustive(range) => Key::Exhaustive(ExhaustivenessKind::Match, range),
+            LastStmt::BranchEnd(range) => Key::BranchEnd(range),
+        });
+        let guards = path
+            .guards
+            .iter()
+            .map(|range| self.idx_for_promise(Key::BranchEnd(*range)))
+            .collect();
+        LastPath {
+            last: path.last,
+            key,
+            guards,
+        }
     }
 
     /// Given the name of a function def, return a new `Idx<KeyDecoratedFunction>` at which
@@ -1491,24 +1643,30 @@ impl<'a> BindingsBuilder<'a> {
                 .then(|| function_last_expressions(slice::from_ref(&x), self.sys_info))
                 .flatten()
                 // An answer the environment decided holds for this configuration only, and a
-                // suite dead under one configuration is live under another. An exhaustive path
-                // is refused for a different reason: its deadness comes from narrowing, which
-                // `assert_never` deliberately relies on, so reporting it condemns the idiom.
+                // suite dead under one configuration is live under another. An exhaustive `match`
+                // path is refused for a different reason: its deadness comes from narrowing, which
+                // `assert_never` deliberately relies on, so reporting it condemns the idiom. An
+                // `if` chain's fall-through is kept, because its `BranchEnd` counts as dead code
+                // only when its test settles it.
                 .filter(|paths| {
                     !paths.decided_by_environment
-                        && !paths.exprs.is_empty()
-                        && !paths
-                            .exprs
-                            .iter()
-                            .any(|(last, _)| matches!(last, LastStmt::Exhaustive(..)))
+                        && !paths.clauses.is_empty()
+                        && paths.clauses.iter().any(|c| !c.is_empty())
+                        && !paths.clauses.iter().any(|clause| {
+                            clause
+                                .iter()
+                                .any(|path| matches!(path.last, LastStmt::Exhaustive(..)))
+                        })
                 })
                 .map(|paths| {
                     paths
-                        .exprs
+                        .clauses
                         .into_iter()
-                        .map(|(last, e)| {
-                            let idx = self.last_statement_idx_for_implicit_return(last.clone(), e);
-                            (last, idx)
+                        .map(|clause| {
+                            clause
+                                .into_iter()
+                                .map(|path| self.last_path(path))
+                                .collect::<Box<[_]>>()
                         })
                         .collect::<Box<[_]>>()
                 });
@@ -2253,6 +2411,12 @@ impl<'a> BindingsBuilder<'a> {
         if name.is_empty() {
             return None;
         }
+        if let Some(class_index) = self.scopes.current_class_field_owner(name)
+            && matches!(self.idx_to_key(idx), Key::Definition(_))
+        {
+            self.class_field_definitions
+                .insert(idx, KeyClassField(class_index, name.clone()));
+        }
         // Suppress the ALL_CAPS check when a more specific check already reported
         // on this reassignment, to avoid emitting two overlapping errors. Both
         // checks are always run so their own diagnostics are unaffected.
@@ -2538,7 +2702,8 @@ impl<'a> BindingsBuilder<'a> {
         use_location: NarrowUseLocation,
         usage: &Usage,
     ) {
-        for (name, (op, op_range)) in narrow_ops.0.iter_hashed() {
+        let implied = self.scopes.implied_none_narrows(narrow_ops);
+        for (name, (op, op_range)) in narrow_ops.0.iter_hashed().chain(implied.0.iter_hashed()) {
             // Narrowing operations should not pin partial types, but they also
             // should not permanently block pinning. Leave the first-use state
             // as Undetermined so a subsequent non-narrowing read can still pin.

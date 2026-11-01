@@ -108,8 +108,8 @@ pub(crate) const UNUSED_SUPPRESSION_TEST_CASES: &[UnusedSuppressionTestCase] = &
     },
     UnusedSuppressionTestCase {
         name: "indented own-line",
-        code: "def f():\n    # pyrefly: ignore\n    x = 1\n",
-        expected: "def f():\n    x = 1\n",
+        code: "def f():\n    # pyrefly: ignore\n    return 1\n",
+        expected: "def f():\n    return 1\n",
     },
     UnusedSuppressionTestCase {
         name: "last line without newline",
@@ -258,6 +258,7 @@ pub struct TestEnv {
     site_package_path: Vec<PathBuf>,
     implicitly_defined_attribute_error: bool,
     uninitialized_instance_variable_error: bool,
+    possibly_uninitialized_attribute_error: bool,
     explicit_any_error: bool,
     explicit_any_use_error: bool,
     implicit_any_error: bool,
@@ -306,6 +307,7 @@ pub struct TestEnv {
     unknown_attribute_access_error: bool,
     implicit_reexport_error: bool,
     potential_bad_keyword_argument_error: bool,
+    protected_access_error: bool,
     default_require_level: Require,
     extra_file_extensions: Vec<String>,
     replace_imports_with_any: Vec<String>,
@@ -332,6 +334,7 @@ impl TestEnv {
             site_package_path: Vec::new(),
             implicitly_defined_attribute_error: false,
             uninitialized_instance_variable_error: false,
+            possibly_uninitialized_attribute_error: false,
             explicit_any_error: false,
             explicit_any_use_error: false,
             implicit_any_error: false,
@@ -380,6 +383,7 @@ impl TestEnv {
             unknown_attribute_access_error: false,
             implicit_reexport_error: false,
             potential_bad_keyword_argument_error: false,
+            protected_access_error: false,
             default_require_level: Require::Exports,
             extra_file_extensions: Vec::new(),
             replace_imports_with_any: Vec::new(),
@@ -486,6 +490,11 @@ impl TestEnv {
 
     pub fn enable_uninitialized_instance_variable_error(mut self) -> Self {
         self.uninitialized_instance_variable_error = true;
+        self
+    }
+
+    pub fn enable_possibly_uninitialized_attribute_error(mut self) -> Self {
+        self.possibly_uninitialized_attribute_error = true;
         self
     }
 
@@ -732,6 +741,11 @@ impl TestEnv {
         self
     }
 
+    pub fn enable_protected_access_error(mut self) -> Self {
+        self.protected_access_error = true;
+        self
+    }
+
     pub fn enable_potential_bad_keyword_argument_error(mut self) -> Self {
         self.potential_bad_keyword_argument_error = true;
         self
@@ -867,11 +881,17 @@ impl TestEnv {
             config.root.errors = Some(ErrorDisplayConfig::new(HashMap::new()));
         };
         let errors = config.root.errors.as_mut().unwrap();
+        if self.protected_access_error {
+            errors.set_error_severity(ErrorKind::ProtectedAccess, Severity::Error);
+        }
         if self.implicitly_defined_attribute_error {
             errors.set_error_severity(ErrorKind::ImplicitlyDefinedAttribute, Severity::Error);
         }
         if self.uninitialized_instance_variable_error {
             errors.set_error_severity(ErrorKind::UninitializedInstanceVariable, Severity::Error);
+        }
+        if self.possibly_uninitialized_attribute_error {
+            errors.set_error_severity(ErrorKind::PossiblyUninitializedAttribute, Severity::Error);
         }
         if self.explicit_any_error {
             errors.set_error_severity(ErrorKind::ExplicitAny, Severity::Error);

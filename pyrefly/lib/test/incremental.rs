@@ -190,6 +190,42 @@ impl Incremental {
 }
 
 #[test]
+fn test_functools_wrapping_mutation_invalidates_unwrap() {
+    let mut i = Incremental::new();
+    let module = |mutation: &str| {
+        format!(
+            r#"
+from functools import update_wrapper, wraps
+from inspect import unwrap
+
+def source() -> str:
+    return "source"
+
+@wraps(source)
+def wrapper() -> int:
+    return 1
+
+result = unwrap(wrapper)()
+
+def unrelated() -> bool:
+    return False
+
+{mutation}
+"#
+        )
+    };
+    for mutation in ["", "update_wrapper(unrelated, source)", ""] {
+        i.set("main", &module(mutation));
+        let expected = if mutation.is_empty() { "str" } else { "Any" };
+        i.set(
+            "foo",
+            &format!("from main import result\nfrom typing import Any, assert_type\nassert_type(result, {expected})\n"),
+        );
+        i.unchecked(&["main", "foo"]).check_errors();
+    }
+}
+
+#[test]
 fn test_static_jaxtyping_declaration_rename_invalidates_consumer() {
     let mut i = Incremental::with_files(vec![
         "main".to_owned(),

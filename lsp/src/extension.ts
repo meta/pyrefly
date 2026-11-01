@@ -37,11 +37,17 @@ import {registerCodeLensCommands} from './code-lens';
 import {registerHoverProvider} from './hover';
 import {PythonEnvironment} from './python-environment';
 import {
+  OverrideCodeLensProvider,
+  navigateToOverrideTarget,
+  showOverrideTargets,
+} from './overrideCodeLens';
+import {
   triggerMsPythonRefreshLanguageServersIfInstalled,
 } from './extension-interop';
 import {describeError, resolveExecutable} from './lsp-path';
 
 let client: LanguageClient;
+let overrideCodeLensProvider: OverrideCodeLensProvider;
 let outputChannel: vscode.OutputChannel;
 let traceOutputChannel: vscode.OutputChannel;
 let inferOutputChannel: vscode.OutputChannel;
@@ -96,6 +102,7 @@ async function replaceClient(): Promise<void> {
     launchSpec,
     clientOptions,
   );
+  overrideCodeLensProvider.connectClient(client);
   try {
     await client.start();
     logServerVersion();
@@ -252,6 +259,9 @@ export async function activate(
   }
 
   pythonEnv = new PythonEnvironment(context);
+  overrideCodeLensProvider = new OverrideCodeLensProvider(() => client);
+  context.subscriptions.push(overrideCodeLensProvider);
+  const scheduleCodeLensRefresh = () => overrideCodeLensProvider.refresh();
 
   launchSpec = await resolveExecutable(
     context.extensionUri,
@@ -285,6 +295,7 @@ export async function activate(
       ...((rawInitialisationOptions as any).pyrefly ?? {}),
       typeErrorDisplayStatusVersion: TYPE_ERROR_DISPLAY_STATUS_VERSION,
       customHoverProvider: supportsHoverVerbosity,
+      findFileUsages: true,
       pushTypeErrorDisplayStatus: true,
     },
   };
@@ -343,12 +354,26 @@ export async function activate(
     serverOptions,
     clientOptions,
   );
+  overrideCodeLensProvider.connectClient(client);
   if (supportsHoverVerbosity) {
     registerHoverProvider(context, () => client);
   }
 
   context.subscriptions.push(
+    vscode.languages.registerCodeLensProvider(
+      [
+        {scheme: 'file', language: 'python'},
+        {scheme: 'untitled', language: 'python'},
+        {scheme: 'vscode-notebook-cell', language: 'python'},
+        {scheme: 'inmemory', language: 'python'},
+      ],
+      overrideCodeLensProvider,
+    ),
+  );
+
+  context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(async () => {
+      scheduleCodeLensRefresh();
       await updateStatusBar(client);
     }),
   );
@@ -386,6 +411,7 @@ export async function activate(
         client.sendNotification(DidChangeConfigurationNotification.type, {
           settings: {},
         });
+        scheduleCodeLensRefresh();
       }
       if (
         event.affectsConfiguration('pyrefly.lspPath') ||
@@ -398,6 +424,14 @@ export async function activate(
         );
       }
       await updateStatusBar(client);
+    }),
+  );
+
+  context.subscriptions.push(
+    workspace.onDidChangeTextDocument(event => {
+      if (event.document.languageId === 'python') {
+        scheduleCodeLensRefresh();
+      }
     }),
   );
 
@@ -435,6 +469,7 @@ export async function activate(
           );
         }
       });
+      scheduleCodeLensRefresh();
     }),
   );
 
@@ -510,6 +545,71 @@ export async function activate(
   );
   registerCodeLensCommands(context, pythonEnv);
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'pyrefly.findFileUsages',
+      async (...args: unknown[]) => {
+        const payload = args[0] as
+          | {
+              uri?: string;
+              locations?: Array<{
+                uri: string;
+                range: {
+                  start: {line: number; character: number};
+                  end: {line: number; character: number};
+                };
+              }>;
+            }
+          | undefined;
+        if (payload == null || typeof payload.uri !== 'string') {
+          return;
+        }
+        if (!Array.isArray(payload.locations)) {
+          return;
+        }
+
+        const targetUri = vscode.Uri.parse(payload.uri);
+        const locations = payload.locations
+          .map(location => {
+            if (
+              location == null ||
+              typeof location.uri !== 'string' ||
+              location.range == null
+            ) {
+              return null;
+            }
+            const range = new vscode.Range(
+              location.range.start.line,
+              location.range.start.character,
+              location.range.end.line,
+              location.range.end.character,
+            );
+            return new vscode.Location(vscode.Uri.parse(location.uri), range);
+          })
+          .filter(
+            (location): location is vscode.Location => location != null,
+          );
+        if (locations.length === 0) {
+          return;
+        }
+        await vscode.commands.executeCommand(
+          'editor.action.showReferences',
+          targetUri,
+          new vscode.Position(0, 0),
+          locations,
+        );
+      },
+    ),
+    vscode.commands.registerCommand(
+      'pyrefly.navigateToOverrideTarget',
+      navigateToOverrideTarget,
+    ),
+    vscode.commands.registerCommand(
+      'pyrefly.showOverrideTargets',
+      showOverrideTargets,
+    ),
+  );
+
   // When our extension is activated, make sure ms-python knows
   // TODO(kylei): remove this hack once ms-python has this behavior
   await triggerMsPythonRefreshLanguageServersIfInstalled();
@@ -537,6 +637,7 @@ export async function activate(
     }
   });
   logServerVersion();
+  scheduleCodeLensRefresh();
 
   await updateStatusBar(client);
   const statusBarItem = getStatusBarItem();

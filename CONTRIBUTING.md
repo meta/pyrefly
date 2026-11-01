@@ -54,6 +54,19 @@ How it works:
 
 **Please note:** Claiming issues helps other contributors and maintainers see what is being worked on. If you do not claim an issue you're working on, multiple people may work on the same issue at the same time. This can lead to multiple PRs for the same task and increased review burden on maintainers. In cases where multiple PRs are opened for the same task, maintainers will prioritise reviewing the PR from the author who #claim-ed the issue. For issues marked with the `good first issue` tag, please only claim and work on one issue at a time to allow other newcomers to also work on issues.
 
+### PR readiness checks
+
+Automated readiness checks run on newly opened PRs, checking items from our [PR checklist](#making-a-pull-request). If an "⚠️ **Action needed**" comment is posted on your PR, please follow the required steps in the comment to ensure the PR is ready for review. The comment may also include optional recommendations, which don't block review. The check automatically reruns when the PR is updated, with a lag of up to half an hour.
+
+### PR turn tracking
+
+PRs opened by non-maintainers are automatically labeled with who should act next:
+* "waiting-for-author" means the PR is waiting for action by the author, usually to sign the CLA, address failed [readiness checks](#pr-readiness-checks), or respond to review feedback.
+* "waiting-for-reviewer" means the PR is waiting for action by the reviewer, usually to leave a code review.
+* "waiting-for-merge" means the PR has been approved and is waiting to be merged by a maintainer.
+
+Labels update within half an hour of a waited-for action. If a label fails to update on a PR that you are the author or reviewer on, double-check that you've actually taken the action it's waiting for. As author, make sure to [explicitly re-request review](#responding-to-review-feedback). As reviewer, make sure to use the "Submit review" mechanism; a comment in the main conversation thread does not count as a review. If the label is still incorrect, you can update it manually if you have write permissions, or ping a maintainer if not.
+
 ## Developing Pyrefly
 
 Development docs are WIP. Please reach out if you are working on an issue and
@@ -195,7 +208,7 @@ Contributing a pull request (PR) is the main way to propose changes to Pyrefly. 
 - [ ] **IMPORTANT** [Claim the issue](#repository-automation) before starting work on it.
 - [ ] Update or add new tests to cover your changes (see testing section for details).
 - [ ] Limit your PR to a single purpose or issue. Avoid mixing unrelated changes, as this makes review harder. If the PR is large, consider [splitting it](#splitting-a-pull-request) for faster reviews.
-- [ ] Write a clear PR description following the [template](.github/pull_request_template.md).
+- [ ] Write a clear PR description following the [template](.github/pull_request_template.md), including checking the "I am a human" box to attest that you've followed our [AI policy](AI_POLICY.md).
 - [ ] Make sure all continuous integration (CI) checks pass. Fix any errors or warnings, or ask us about any CI results you don't understand. If the contributor license agreement (CLA) check fails, look for a comment from the meta-cla bot with instructions on how to sign the CLA.
 
 We aim to respond to all PRs in a timely manner, but please note we prioritise reviews for work that is highest priority (e.g. critical bug fixes, upcoming milestones). If you're waiting on a review for more than a week, feel free to `@` one of the [maintainers](https://github.com/facebook/pyrefly/blob/main/.github/owners.json) in a comment on your PR or ask for a review in the `#dev` channel of our Discord server.

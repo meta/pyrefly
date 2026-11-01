@@ -1186,7 +1186,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 true
             }
             SpecialDecorator::Deprecated(deprecation) => {
-                flags.deprecation = Some((**deprecation).clone());
+                flags.deprecation = Some(Box::new((**deprecation).clone()));
                 true
             }
             SpecialDecorator::PropertySetter(decorator) => {
@@ -2022,6 +2022,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             return decoratee;
         }
+        let wrapped = if let Type::KwCall(call) = &decorator
+            && call.has_function_kind(FunctionKind::FunctoolsWraps)
+        {
+            call.keywords
+                .0
+                .get(&Name::new_static("__wrapped__"))
+                .cloned()
+        } else {
+            None
+        };
         let application = self.prepare_decorator_application(decorator, decoratee, range, errors);
         // Run a decorator call, buffering errors so we can decide between the primary
         // and Self-rewritten fallback without double-reporting.
@@ -2058,8 +2068,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             errors.extend(primary_errors);
             primary_return
         };
-        let decorated_value =
+        let mut decorated_value =
             self.decorate_returned_callable(raw_return, metadata, &application.original_decoratee);
+        if let Some(wrapped) = wrapped {
+            decorated_value.set_wrapped(wrapped);
+        }
         // Given the raw `decorated_value`, which may include `Type::Quantified` type variables
         // coming from a `Forall` in the original decoratee, we need to create the proper output
         // type:

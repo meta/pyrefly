@@ -1216,6 +1216,27 @@ impl ClassField {
         }
     }
 
+    /// Whether the field's type is declared rather than inferred: an annotated attribute, or a
+    /// property whose getter has an annotated return type.
+    pub fn has_declared_type(&self) -> bool {
+        match &self.0 {
+            ClassFieldInner::Property { ty, .. } => ty
+                .toplevel_func_metadata()
+                .is_some_and(|meta| !meta.flags.is_return_inferred),
+            _ => self.has_explicit_annotation(),
+        }
+    }
+
+    /// The descriptor class whose `__get__` a read of this field calls, if there is one.
+    pub fn descriptor_getter_class(&self) -> Option<&ClassType> {
+        match &self.0 {
+            ClassFieldInner::Descriptor { descriptor, .. } if descriptor.getter => {
+                Some(&descriptor.cls)
+            }
+            _ => None,
+        }
+    }
+
     fn is_function_without_return_annotation(&self) -> bool {
         match &self.0 {
             ClassFieldInner::Property { .. } => false,
@@ -1740,12 +1761,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // a plain `@dataclass(init=False)`, which synthesizes no `__init__` and so
                 // leaves annotation-only fields uninitialized at runtime. attrs and pydantic
                 // manage initialization in ways we do not model here, so they stay excluded.
+                // Metaclass attributes are typically filled by subclass class bodies via
+                // `type.__new__`, so annotation-only declarations on a metaclass are not
+                // uninitialized instance vars in the ordinary sense (see #5278).
+                // Enum sets `_value_` and `_name_` on every member it creates, so annotating
+                // them in the enum body only declares their types.
                 // Reuse `is_special_class` so new special classes are excluded here too, then
                 // carve out the plain `@dataclass(init=False)` case, which it over-excludes.
-                let excluded_from_uninit_check = is_special_class
-                    && metadata.dataclass_metadata().is_none_or(|dc| {
-                        !matches!(dc.kind, DataclassKind::Dataclass { .. }) || dc.kws.init
-                    });
+                let excluded_from_uninit_check = metadata.is_metaclass()
+                    || (metadata.is_enum() && matches!(name.as_str(), "_value_" | "_name_"))
+                    || (is_special_class
+                        && metadata.dataclass_metadata().is_none_or(|dc| {
+                            !matches!(dc.kind, DataclassKind::Dataclass { .. }) || dc.kws.init
+                        }));
                 if is_uninit_instance_var && !excluded_from_uninit_check {
                     self.error(
                         errors,
@@ -1784,11 +1812,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .and_then(|annot| {
                         self.extract_pydantic_field_from_annotation(annot, name, metadata)
                     })
-                    .and_then(|flags| flags.strict)
-                    .map(|strict| {
-                        let mut flags = DataclassFieldKeywords::new();
-                        flags.strict = Some(strict);
-                        flags
+                    .map(|flags| DataclassFieldKeywords {
+                        default: flags.default,
+                        strict: flags.strict,
+                        pydantic_unknown_validation_alias: flags.pydantic_unknown_validation_alias,
+                        pydantic_unchecked_metadata: flags.pydantic_unchecked_metadata
+                            || flags.init_by_alias.is_some(),
+                        pydantic_has_custom_schema: flags.pydantic_has_custom_schema,
+                        ..DataclassFieldKeywords::new()
                     });
                 if metadata.is_protocol()
                     && direct_annotation.is_none()
@@ -1846,9 +1877,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     );
                     if let Some(f) = &mut flags
                         && let Some(annotation_flags) = annotation_flags.as_ref()
-                        && f.strict.is_none()
                     {
-                        f.strict = annotation_flags.strict;
+                        // An assigned Field() preserves annotation defaults unless it supplies a default.
+                        f.default = f
+                            .default
+                            .take()
+                            .or_else(|| annotation_flags.default.clone());
+                        f.strict = f.strict.or(annotation_flags.strict);
+                        f.pydantic_unknown_validation_alias |=
+                            annotation_flags.pydantic_unknown_validation_alias;
+                        f.pydantic_unchecked_metadata |=
+                            annotation_flags.pydantic_unchecked_metadata;
+                        f.pydantic_has_custom_schema |= annotation_flags.pydantic_has_custom_schema;
                     }
                     if flags.is_some() {
                         // A field specifier with no type annotation is a definition-time error,
@@ -4210,6 +4250,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 continue;
             };
             if want_field.defining_class.is_builtin("object") {
+                continue;
+            }
+            if self.super_method_needs_impl_reason(&want_field).is_some() {
                 continue;
             }
             self.error(

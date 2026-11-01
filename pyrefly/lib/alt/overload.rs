@@ -44,6 +44,8 @@ use crate::alt::unwrap::HintRef;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorContext;
+use crate::error::error::ContextManagerKind;
+use crate::error::error::ErrorQuickFix;
 use crate::solver::solver::ArgumentKey;
 use crate::solver::solver::OverloadTable;
 use crate::solver::solver::TypeVarSpecializationError;
@@ -51,6 +53,7 @@ use crate::types::callable::Callable;
 use crate::types::callable::Params;
 use crate::types::function::FuncMetadata;
 use crate::types::function::Function;
+use crate::types::function::FunctionKind;
 use crate::types::literal::Lit;
 use crate::types::quantified::Quantified;
 use crate::types::type_var::Restriction;
@@ -311,6 +314,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         keywords: &[CallKeyword],
         arguments_range: TextRange,
         errors: &ErrorCollector,
+        call_errors: &ErrorCollector,
         return_errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
@@ -515,17 +519,31 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if let Some(detail) = detail {
                     error_builder = error_builder.with_detail(detail);
                 }
+                if let FunctionKind::Def(id) = &closest_overload.func.1.metadata.kind {
+                    let replacement = if id.has_toplevel_qname("contextlib", "contextmanager") {
+                        Some(ContextManagerKind::Sync)
+                    } else if id.has_toplevel_qname("contextlib", "asynccontextmanager") {
+                        Some(ContextManagerKind::Async)
+                    } else {
+                        None
+                    };
+                    if let Some(kind) = replacement {
+                        error_builder = error_builder.with_quick_fix(
+                            ErrorQuickFix::ReplaceDeprecatedContextManagerReturn(kind),
+                        );
+                    }
+                }
                 error_builder.with_context(context).emit();
             }
             errors.extend(closest_overload.arg_errors);
-            errors.extend(closest_overload.call_errors);
+            call_errors.extend(closest_overload.call_errors);
             if let Ok(specialization_errors) =
                 Vec1::try_from_vec(closest_overload.specialization_errors)
             {
                 self.add_specialization_errors(
                     specialization_errors,
                     arguments_range,
-                    errors,
+                    call_errors,
                     None,
                 );
             }
@@ -558,7 +576,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 &args,
                 &keywords,
                 arguments_range,
-                errors,
+                call_errors,
                 context,
                 &closest_overload.func.1.signature,
                 closest_overload.call_errors,

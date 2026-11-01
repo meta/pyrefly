@@ -12,3 +12,4 @@ mod partial_generics;
 mod singledispatch;
 mod singledispatch_register;
 mod util;
+mod wrapping;
