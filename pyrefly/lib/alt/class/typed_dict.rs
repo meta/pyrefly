@@ -182,7 +182,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     Some(HintRef::soft(&partial_td_ty)),
                     item_errors,
                 );
-                if let Type::TypedDict(unpacked) = &item_ty {
+                if let Type::TypedDict(unpacked @ TypedDict::TypedDict(_)) = &item_ty {
                     let unpacked_fields = self.typed_dict_fields(unpacked);
                     for (key, field) in &unpacked_fields {
                         if field.required {
