@@ -1037,6 +1037,115 @@ def f[T](x: T) -> T:
 );
 
 testcase!(
+    test_overloaded_async_iterator_impl,
+    r#"
+from collections.abc import AsyncIterator
+from typing import Literal, assert_type, overload
+
+class Patch:
+    pass
+
+class FullState(Patch):
+    pass
+
+@overload
+def astream(*, diff: Literal[True] = ...) -> AsyncIterator[Patch]: ...
+@overload
+def astream(*, diff: Literal[False]) -> AsyncIterator[FullState]: ...
+async def astream(*, diff: bool = True) -> AsyncIterator[Patch] | AsyncIterator[FullState]:
+    if diff:
+        yield Patch()
+    else:
+        yield FullState()
+
+assert_type(astream(), AsyncIterator[Patch])
+assert_type(astream(diff=True), AsyncIterator[Patch])
+assert_type(astream(diff=False), AsyncIterator[FullState])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_coroutine_factory,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, assert_type, overload
+
+async def stream[T](value: T) -> AsyncIterator[T]:
+    yield value
+
+async def make_stream[T](value: T) -> AsyncIterator[T]:
+    return stream(value)
+
+@overload
+async def factory(value: int) -> AsyncIterator[int]: ...
+@overload
+async def factory(value: str) -> AsyncIterator[str]: ...
+def factory(value: int | str) -> Any:
+    return make_stream(value)
+
+async def check() -> None:
+    result = assert_type(factory(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await factory("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_explicit_coroutine,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, assert_type, overload
+
+async def stream[T](value: T) -> AsyncIterator[T]:
+    yield value
+
+async def make_stream[T](value: T) -> AsyncIterator[T]:
+    return stream(value)
+
+@overload
+def factory(value: int) -> Coroutine[Any, Any, AsyncIterator[int]]: ...
+@overload
+def factory(value: str) -> Coroutine[Any, Any, AsyncIterator[str]]: ...
+def factory(value: int | str) -> Any:
+    return make_stream(value)
+
+async def check() -> None:
+    result = assert_type(factory(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await factory("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_inconsistent_impl,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, Protocol, assert_type, overload
+
+class StreamFactory(Protocol):
+    @overload
+    async def stream(self, value: int) -> AsyncIterator[int]: ...
+    @overload
+    async def stream(self, value: str) -> AsyncIterator[str]: ...
+
+@overload
+async def stream(value: int) -> AsyncIterator[int]: ...  # E: is not assignable to implementation return type
+@overload
+async def stream(value: str) -> AsyncIterator[str]: ...  # E: is not assignable to implementation return type
+async def stream(value: int | str) -> AsyncIterator[int] | AsyncIterator[str]:
+    yield value
+
+async def check(factory: StreamFactory) -> None:
+    result = assert_type(stream(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await stream("value"), AsyncIterator[str])
+    result_from_protocol = assert_type(factory.stream(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result_from_protocol, AsyncIterator[int])
+    assert_type(await factory.stream("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
     test_param_consistency,
     r#"
 from typing import overload
