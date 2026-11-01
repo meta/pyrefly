@@ -468,8 +468,12 @@ impl<'a> BindingsBuilder<'a> {
             body,
             &NestingContext::class(ShortIdentifier::new(&x.name), parent.dupe()),
         );
-        let (field_definitions, nn_module_registrations, uninitialized_fields, mut instance_attribute_annotations) =
-            self.scopes.finish_class_and_get_field_definitions();
+        let (
+            field_definitions,
+            nn_module_registrations,
+            uninitialized_fields,
+            mut instance_attribute_annotations,
+        ) = self.scopes.finish_class_and_get_field_definitions();
         instance_attribute_annotations
             .sort_by_key(|(_, annotation)| self.idx_to_key(*annotation).range().start());
         let mut seen_annotations = SmallSet::new();
