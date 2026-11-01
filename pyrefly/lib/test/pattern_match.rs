@@ -885,6 +885,32 @@ def test_str_not_sequence(x: str | Sequence[int]) -> None:
 );
 
 testcase!(
+    test_sequence_pattern_string_and_bytes_literals_excluded,
+    r#"
+from typing import Literal, assert_type
+
+type Text = Literal["", "1", "12", "closed", b"", b"1", b"12", b"closed"]
+
+def fixed(x: Text | tuple[int, int]) -> None:
+    match x:
+        case [first, second]:
+            assert_type(x, tuple[int, int])
+            assert_type(first, int)
+            assert_type(second, int)
+        case _:
+            assert_type(x, Text)
+
+def starred(x: Text | tuple[int, int]) -> None:
+    match x:
+        case [*values]:
+            assert_type(x, tuple[int, int])
+            assert_type(values, list[int])
+        case _:
+            assert_type(x, Text)
+"#,
+);
+
+testcase!(
     test_sequence_pattern_list,
     r#"
 from typing import assert_type

@@ -11,6 +11,39 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_parenthesized_generic_arguments,
+    r#"
+from __future__ import annotations
+from typing import TypeVar, assert_type
+
+class Box[T]:
+    def __init__(self, value: T) -> None: ...
+
+type Mapping[K, V] = dict[K, V]
+type Wrapped[T] = Box[T]
+
+K = TypeVar("K")
+V = TypeVar("V")
+T = TypeVar("T")
+LegacyMapping = dict[K, V]
+LegacyWrapped = Box[T]
+
+def f(d: dict[(str, int)], b: Box[(int,)], m: Mapping[(str, int)], w: Wrapped[(int,)]):
+    assert_type(d, dict[str, int])
+    assert_type(b, Box[int])
+    assert_type(m, dict[str, int])
+    assert_type(w, Box[int])
+
+assert_type(dict[(str, int)](), dict[str, int])
+assert_type(Box[(int,)](1), Box[int])
+assert_type(LegacyMapping[(str, int)](), dict[str, int])
+assert_type(LegacyWrapped[(int,)](1), Box[int])
+
+x: list[(str, str)] = []  # E: Expected 1 type argument for `list`, got 2
+"#,
+);
+
+testcase!(
     test_tyvar_constructor,
     r#"
 def test[T](cls: type[T]) -> T:
