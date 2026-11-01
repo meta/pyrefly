@@ -3103,7 +3103,7 @@ class PartialSource(TypedDict):
 
 def from_dict_literal() -> Target:
     source = {"x": 1}
-        return {**source}
+    return {**source}
 
 def from_not_required(s: PartialSource) -> Target:
     return {**s} # E: Missing required key `x` for TypedDict `Target`
