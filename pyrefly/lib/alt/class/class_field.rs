@@ -4448,6 +4448,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             else {
                 continue;
             };
+            // Django gives a model without its own primary key a synthesized `id: int`,
+            // including abstract bases like `AbstractBaseUser` (stubs omit `Meta.abstract`,
+            // so we can't tell them apart). Django only adds that field to the concrete model
+            // when no pk is declared, so a child declaring `id` as its primary key replaces it
+            // rather than overriding it. An explicitly declared parent `id` is still checked.
+            if field_name.as_str() == "id"
+                && metadata
+                    .django_model_metadata()
+                    .and_then(|dm| dm.custom_primary_key_field.as_ref())
+                    == Some(field_name)
+                && self
+                    .get_non_synthesized_class_member(parent_cls, field_name)
+                    .is_none()
+            {
+                continue;
+            }
             // `__call__` is checked against a Protocol parent only, unless the user
             // opts in with `@override`. Implementing a callable interface is
             // ubiquitous - argparse actions, auth handlers, metaclasses - and
