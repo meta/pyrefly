@@ -895,7 +895,7 @@ fn pytest_fixture_override_requests_parent_definition() {
         let code = format!(
             "import pytest\n{decorator}\ndef {function_name}(answer): return answer + 1\ndef test_value(answer): pass\n"
         );
-        let (_root, state, handle) = state_with_conftest(
+        let (root, state, handle) = state_with_conftest(
             &[(
                 "tests/conftest.py",
                 "import pytest\n@pytest.fixture\ndef answer(): return 41\n",
@@ -927,11 +927,13 @@ fn pytest_fixture_override_requests_parent_definition() {
             transaction.goto_definition(&handle, position).unwrap(),
             transaction.goto_declaration(&handle, position).unwrap(),
         ] {
-            // BUG: pytest requests the overridden parent fixture, not this enclosing fixture.
-            assert_eq!(definitions[0].module.path(), handle.path());
+            assert_eq!(
+                definitions[0].module.path().as_path(),
+                root.path().join("tests/conftest.py"),
+            );
             assert_eq!(
                 definitions[0].module.code_at(definitions[0].range),
-                function_name,
+                "answer"
             );
         }
         let consumer_position =
@@ -961,8 +963,9 @@ fn pytest_fixture_class_override_requests_module_definition() {
         TextSize::try_from(code.rfind("def answer").unwrap() + "def ".len()).unwrap();
     let transaction = state.transaction();
     let definition = transaction.goto_definition(&handle, position).unwrap();
-    // BUG: the class fixture requests the module fixture it overrides.
-    assert_eq!(definition[0].range.start(), class_fixture_position);
+    let module_fixture_position =
+        TextSize::try_from(code.find("def answer").unwrap() + "def ".len()).unwrap();
+    assert_eq!(definition[0].range.start(), module_fixture_position);
     let consumer_position = TextSize::try_from(
         code.find("test_value(self, answer)").unwrap() + "test_value(self, ".len(),
     )
@@ -1011,11 +1014,13 @@ fn pytest_conftest_override_requests_parent_definition() {
             transaction.goto_definition(&handle, position).unwrap(),
             transaction.goto_declaration(&handle, position).unwrap(),
         ] {
-            // BUG: the conftest fixture requests the ancestor fixture it overrides.
-            assert_eq!(definitions[0].module.path(), handle.path());
+            assert_eq!(
+                definitions[0].module.path().as_path(),
+                root.path().join("conftest.py"),
+            );
             assert_eq!(
                 definitions[0].module.code_at(definitions[0].range),
-                function_name,
+                "answer"
             );
         }
     }

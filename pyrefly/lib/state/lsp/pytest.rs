@@ -104,6 +104,13 @@ impl<'a> Transaction<'a> {
         {
             return None;
         }
+        let enclosing_function_range = covering_nodes
+            .iter()
+            .find_map(|node| match node {
+                AnyNodeRef::StmtFunctionDef(function) => Some(function.name.range),
+                _ => None,
+            })
+            .expect("pytest parameter context requires an enclosing function");
         let matches = find_pytest_fixture_definitions_for_parameter(
             mod_module.as_ref(),
             bindings,
@@ -113,6 +120,9 @@ impl<'a> Transaction<'a> {
         let module_info = self.get_module_info(handle)?;
         let mut definitions: Vec<_> = matches
             .into_iter()
+            .filter(|fixture| {
+                !preference.follow_pytest_conftest || fixture.range != enclosing_function_range
+            })
             .map(|fixture| FindDefinitionItemWithDocstring {
                 metadata: DefinitionMetadata::Variable(Some(SymbolKind::Function)),
                 definition_range: fixture.range,
@@ -133,6 +143,11 @@ impl<'a> Transaction<'a> {
                 while seen.insert((target_handle.clone(), target_name.clone())) {
                     let exports = self.get_exports_data(&target_handle);
                     if let Some(fixture) = exports.pytest_fixtures().iter().find(|fixture| {
+                        if fixture.range == enclosing_function_range
+                            && target_handle.path().as_path() == handle.path().as_path()
+                        {
+                            return false;
+                        }
                         if imported {
                             fixture.name == target_name
                                 && fixture
