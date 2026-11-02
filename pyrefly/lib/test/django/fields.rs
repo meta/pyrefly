@@ -564,3 +564,44 @@ grandchild = GrandChild()
 grandchild.objects = GrandChild.objects  # E: Cannot set field `objects`
 "#,
 );
+
+django_testcase!(
+    bug = "Annotated manager rebinding reports an inconsistent mutable override",
+    test_queryset_manager_annotated_inherited_qualifiers,
+    r#"
+from typing import Annotated, ClassVar, Final, assert_type
+from django.db import models
+
+class Q(models.QuerySet["Base"]):
+    def active(self) -> int:
+        return 1
+
+class Base(models.Model):
+    records: Annotated[models.Manager["Base"], "doc"] = models.Manager()
+    objects: ClassVar[Annotated[models.Manager["Base"], "doc"]] = models.Manager()
+    locked: Final[Annotated[models.Manager["Base"], "doc"]] = models.Manager()
+
+class Child(Base):
+    records = Q.as_manager()  # E: overrides parent class `Base` in an inconsistent manner
+    objects = Q.as_manager()
+    locked = Q.as_manager()  # E: `locked` is declared as final in parent class `Base`
+
+assert_type(Child.records.get(), Child)
+assert_type(Child.records.active(), int)
+assert_type(Child.objects.get(), Child)
+assert_type(Child.locked.get(), Child)
+child = Child()
+child.objects = Child.objects  # E: Cannot set field `objects`
+Child.locked = Child.locked  # E: Cannot set field `locked`
+
+class GrandChild(Child):
+    records = Q.as_manager()
+    objects = Q.as_manager()
+    locked = Q.as_manager()  # E: `locked` is declared as final in parent class `Child`
+
+assert_type(GrandChild.records.get(), GrandChild)
+assert_type(GrandChild.objects.get(), GrandChild)
+grandchild = GrandChild()
+grandchild.objects = GrandChild.objects  # E: Cannot set field `objects`
+"#,
+);
