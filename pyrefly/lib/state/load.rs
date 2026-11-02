@@ -95,7 +95,15 @@ impl Load {
         timing: Option<&TransactionTimingCounters>,
     ) -> (FileContents, Option<anyhow::Error>) {
         let res = match path.details() {
-            ModulePathDetails::FileSystem(path) => Self::load_from_filesystem(path, timing),
+            ModulePathDetails::FileSystem(path) => {
+                if memory_lookup.filesystem_overlays()
+                    && let Some(contents) = memory_lookup.get(path)
+                {
+                    Ok(contents.as_ref().dupe())
+                } else {
+                    Self::load_from_filesystem(path, timing)
+                }
+            }
             ModulePathDetails::Namespace(_) => Ok(FileContents::from_source("".to_owned())),
             ModulePathDetails::Memory(path) => memory_lookup
                 .get(path)

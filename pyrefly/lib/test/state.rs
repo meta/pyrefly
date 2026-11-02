@@ -59,6 +59,183 @@ use crate::state::require::RequireLevels;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
 
+mod filesystem_overlay_tests {
+    use super::*;
+    use crate::state::state::Transaction;
+
+    const SAVED: &str = "value: int = 1\n";
+    const UNSAVED: &str = "value: str = 'unsaved'\n";
+
+    fn setup(root: &Path, overlays: bool) -> (State, [Handle; 2]) {
+        fs::write(root.join("helper.py"), SAVED).unwrap();
+        fs::write(
+            root.join("main.py"),
+            "from helper import value\ncheck: int = value\n",
+        )
+        .unwrap();
+        let mut config = ConfigFile {
+            search_path_from_args: vec![root.to_owned()],
+            disable_search_path_heuristics: true,
+            ..Default::default()
+        };
+        config.python_environment.set_empty_to_default();
+        config.interpreters.skip_interpreter_query = true;
+        assert!(config.configure().is_empty());
+        let sys_info = config.get_sys_info();
+        let finder = ConfigFinder::new_constant(ArcId::new(config));
+        let state = if overlays {
+            State::new_with_filesystem_overlays(finder, TEST_THREAD_COUNT)
+        } else {
+            State::new(finder, TEST_THREAD_COUNT)
+        };
+        let handles = ["main", "helper"].map(|name| {
+            Handle::new(
+                ModuleName::from_str(name),
+                ModulePath::filesystem(root.join(format!("{name}.py"))),
+                sys_info.dupe(),
+            )
+        });
+        (state, handles)
+    }
+
+    fn check(transaction: &mut Transaction, handles: &[Handle; 2], source: &str, errors: usize) {
+        transaction.run(&[handles[0].dupe()], Require::Everything, None);
+        assert_eq!(
+            transaction
+                .get_module_info(&handles[1])
+                .unwrap()
+                .contents()
+                .as_str(),
+            source
+        );
+        assert_eq!(
+            transaction
+                .import_handle(&handles[0], ModuleName::from_str("helper"), None)
+                .finding()
+                .unwrap()
+                .path(),
+            handles[1].path()
+        );
+        let actual = transaction.get_errors([&handles[0]]).collect_errors();
+        assert_eq!(actual.ordinary.len(), errors, "{actual:?}");
+    }
+
+    #[test]
+    fn filesystem_overlays_are_opt_in_and_keep_memory_handles_working() {
+        for enabled in [false, true] {
+            let directory = TempDir::new().unwrap();
+            let (state, handles) = setup(directory.path(), enabled);
+            let path = directory.path().join("helper.py");
+            let memory = Handle::new(
+                ModuleName::from_str("helper"),
+                ModulePath::memory(path.clone()),
+                handles[1].sys_info().dupe(),
+            );
+            let mut transaction = state.new_transaction(Require::Everything, None);
+            transaction.set_memory(vec![(
+                path.clone(),
+                Some(Arc::new(FileContents::from_source(UNSAVED.to_owned()))),
+            )]);
+            check(
+                &mut transaction,
+                &handles,
+                if enabled { UNSAVED } else { SAVED },
+                usize::from(enabled),
+            );
+            transaction.run(&[memory.dupe()], Require::Everything, None);
+            assert_eq!(
+                transaction
+                    .get_module_info(&memory)
+                    .unwrap()
+                    .contents()
+                    .as_str(),
+                UNSAVED
+            );
+            transaction.set_memory(vec![(
+                path.clone(),
+                Some(Arc::new(FileContents::from_source(SAVED.to_owned()))),
+            )]);
+            check(&mut transaction, &handles, SAVED, 0);
+            transaction.run(&[memory.dupe()], Require::Everything, None);
+            assert_eq!(
+                transaction
+                    .get_module_info(&memory)
+                    .unwrap()
+                    .contents()
+                    .as_str(),
+                SAVED
+            );
+            assert_eq!(fs::read_to_string(path).unwrap(), SAVED);
+        }
+    }
+
+    #[test]
+    fn filesystem_overlays_invalidate_importers_and_return_to_disk_on_close() {
+        let directory = TempDir::new().unwrap();
+        let (state, handles) = setup(directory.path(), true);
+        let path = directory.path().join("helper.py");
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        check(transaction.as_mut(), &handles, SAVED, 0);
+        state.commit_transaction(transaction, None);
+
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction.as_mut().set_memory(vec![(
+            path.clone(),
+            Some(Arc::new(FileContents::from_source(UNSAVED.to_owned()))),
+        )]);
+        check(transaction.as_mut(), &handles, UNSAVED, 1);
+        state.commit_transaction(transaction, None);
+
+        const DISK_UPDATE: &str = "value: float = 1.5\n";
+        fs::write(&path, DISK_UPDATE).unwrap();
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction
+            .as_mut()
+            .invalidate_disk(std::slice::from_ref(&path));
+        check(transaction.as_mut(), &handles, UNSAVED, 1);
+        state.commit_transaction(transaction, None);
+
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction.as_mut().set_memory(vec![(path.clone(), None)]);
+        check(transaction.as_mut(), &handles, DISK_UPDATE, 1);
+        state.commit_transaction(transaction, None);
+
+        fs::write(&path, SAVED).unwrap();
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction
+            .as_mut()
+            .invalidate_disk(std::slice::from_ref(&path));
+        check(transaction.as_mut(), &handles, SAVED, 0);
+    }
+
+    #[test]
+    fn filesystem_overlay_pending_removal_shadows_committed_memory_without_committing() {
+        let directory = TempDir::new().unwrap();
+        let (state, handles) = setup(directory.path(), true);
+        let path = directory.path().join("helper.py");
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction.as_mut().set_memory(vec![(
+            path.clone(),
+            Some(Arc::new(FileContents::from_source(UNSAVED.to_owned()))),
+        )]);
+        check(transaction.as_mut(), &handles, UNSAVED, 1);
+        state.commit_transaction(transaction, None);
+
+        {
+            let mut transaction = state.new_transaction(Require::Everything, None);
+            transaction.set_memory(vec![(path.clone(), None)]);
+            check(&mut transaction, &handles, SAVED, 0);
+            transaction.set_memory(vec![(
+                path,
+                Some(Arc::new(FileContents::from_source(SAVED.to_owned()))),
+            )]);
+            check(&mut transaction, &handles, SAVED, 0);
+        }
+        let mut transaction = state.new_transaction(Require::Everything, None);
+        check(&mut transaction, &handles, UNSAVED, 1);
+    }
+}
+
 #[test]
 fn test_fallback_search_path_relative_import_emits_dedicated_diagnostic() {
     let tdir = TempDir::new().unwrap();

@@ -46,6 +46,7 @@ use pyrefly_util::demand_tree::DemandEdge;
 use pyrefly_util::demand_tree::DemandSpan;
 use pyrefly_util::events::CategorizedEvents;
 use pyrefly_util::fs_anyhow;
+use pyrefly_util::interned_path::InternedPath;
 use pyrefly_util::lock::Mutex;
 use pyrefly_util::lock::RwLock;
 use pyrefly_util::locked_map::LockedMap;
@@ -2016,6 +2017,7 @@ impl<'a> Transaction<'a> {
 
     fn memory_lookup<'b>(&'b self) -> MemoryFilesLookup<'b> {
         MemoryFilesLookup::new(&self.readable.memory, &self.data.memory_overlay)
+            .with_filesystem_overlays(self.data.state.filesystem_overlays)
     }
 
     fn get_cached_loader(&self, loader: &ArcId<ConfigFile>) -> Arc<LoaderFindCache> {
@@ -2578,22 +2580,31 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    /// Called if the `load_from_memory` portion of loading might have changed.
-    /// Specify which in-memory files might have changed, use None to say they don't exist anymore.
+    /// Update in-memory sources, using the same paths as their module handles.
+    /// None removes a source; with filesystem overlays enabled, the corresponding
+    /// filesystem-backed module returns to disk instead of losing its source.
     pub fn set_memory(&mut self, files: Vec<(PathBuf, Option<Arc<FileContents>>)>) {
         let mut changed = SmallSet::new();
         for (path, contents) in files {
             if self.memory_lookup().get(&path) != contents.as_ref() {
                 self.data.memory_overlay.set(path.clone(), contents);
-                changed.insert(ModulePath::memory(path));
+                changed.insert(InternedPath::new(path));
             }
         }
         self.stats.lock().set_memory_dirty = changed.len();
         if changed.is_empty() {
             return;
         }
+        let filesystem_overlays = self.data.state.filesystem_overlays;
         self.invalidate(
-            |handle| changed.contains(handle.path()),
+            |handle| {
+                let path = match handle.path().details() {
+                    ModulePathDetails::Memory(path) => path,
+                    ModulePathDetails::FileSystem(path) if filesystem_overlays => path,
+                    _ => return false,
+                };
+                changed.contains(path)
+            },
             |state| state.set_dirty_load(),
         );
     }
@@ -3521,6 +3532,7 @@ impl<'a> AsMut<Transaction<'a>> for CancellableTransaction<'a> {
 ///        but they will block committing.
 ///     2. During the committing of `Transaction`, all reads will be blocked.
 pub struct State {
+    filesystem_overlays: bool,
     threads: ThreadPool,
     uniques: UniqueFactory,
     config_finder: ConfigFinder,
@@ -3557,6 +3569,7 @@ impl StateReader<'_> {
 impl State {
     pub fn new(config_finder: ConfigFinder, thread_count: ThreadCount) -> Self {
         Self {
+            filesystem_overlays: false,
             threads: ThreadPool::new(thread_count),
             uniques: UniqueFactory::new(),
             config_finder,
@@ -3565,6 +3578,17 @@ impl State {
             run_count: AtomicUsize::new(0),
             committing_transaction_lock: Mutex::new(()),
         }
+    }
+
+    /// Create a state where memory contents override filesystem-backed modules.
+    /// Overlay paths must match resolved file paths; imports still use the filesystem.
+    pub fn new_with_filesystem_overlays(
+        config_finder: ConfigFinder,
+        thread_count: ThreadCount,
+    ) -> Self {
+        let mut state = Self::new(config_finder, thread_count);
+        state.filesystem_overlays = true;
+        state
     }
 
     pub fn config_finder(&self) -> &ConfigFinder {
