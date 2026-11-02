@@ -2313,7 +2313,12 @@ impl<'a> BindingsBuilder<'a> {
                 // `object.__setattr__(self, "attr", value)` and `setattr(self, "attr", value)`
                 // initialize instance attributes the same way `self.attr = value` does.
                 // Frozen dataclasses commonly use this pattern in `__init__`.
-                if let Expr::Call(call) = x.value.as_ref() {
+                if let Expr::Call(call) = x.value.as_ref()
+                    && call.arguments.keywords.is_empty()
+                    && let [receiver, Expr::StringLiteral(attr_name), value] = &*call.arguments.args
+                    && !receiver.is_starred_expr()
+                    && !value.is_starred_expr()
+                {
                     let is_object_setattr = matches!(
                         call.func.as_ref(),
                         Expr::Attribute(func)
@@ -2323,13 +2328,7 @@ impl<'a> BindingsBuilder<'a> {
                     );
                     let is_builtin_setattr =
                         self.as_special_export(&call.func) == Some(SpecialExport::SetAttr);
-                    if (is_object_setattr || is_builtin_setattr)
-                        && call.arguments.keywords.is_empty()
-                        && let [receiver, Expr::StringLiteral(attr_name), value] =
-                            &*call.arguments.args
-                        && !receiver.is_starred_expr()
-                        && !value.is_starred_expr()
-                    {
+                    if is_object_setattr || is_builtin_setattr {
                         let name = Name::new(attr_name.value.to_str());
                         if !Ast::is_mangled_attr(&name) {
                             self.scopes.record_self_attr_assign_named(
@@ -2338,6 +2337,7 @@ impl<'a> BindingsBuilder<'a> {
                                 attr_name.range,
                                 ExprOrBinding::Expr(value.clone()),
                                 None,
+                                true,
                             );
                         }
                     }

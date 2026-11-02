@@ -2352,11 +2352,19 @@ impl Scopes {
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
     ) -> bool {
-        self.record_self_attr_assign_named(&x.value, &x.attr.id, x.attr.range(), value, annotation)
+        self.record_self_attr_assign_named(
+            &x.value,
+            &x.attr.id,
+            x.attr.range(),
+            value,
+            annotation,
+            false,
+        )
     }
 
     /// Like `record_self_attr_assign`, but for initialization via `object.__setattr__`
     /// / `setattr(self, "attr", value)` where the attribute name is a string literal.
+    /// When `instance_only` is true, classmethod receivers (e.g. `cls`) are ignored.
     pub fn record_self_attr_assign_named(
         &mut self,
         receiver: &Expr,
@@ -2364,9 +2372,11 @@ impl Scopes {
         attr_range: TextRange,
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
+        instance_only: bool,
     ) -> bool {
         for scope in self.iter_rev_mut() {
             if let ScopeKind::Method(method_scope) = &mut scope.kind
+                && (!instance_only || method_scope.receiver_kind == MethodSelfKind::Instance)
                 && let Some(self_name) = &method_scope.self_name
                 && matches!(receiver, Expr::Name(name) if name.id == self_name.id)
             {

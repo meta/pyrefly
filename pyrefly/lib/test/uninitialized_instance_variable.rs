@@ -236,6 +236,12 @@ class StarredName:
     def __init__(self) -> None:
         object.__setattr__(self, *["x", 1])
 @dataclass(frozen=True, init=False)
+class ClassmethodReceiver:
+    x: int  # E: Instance attribute `x` is declared but never initialized
+    @classmethod
+    def init_class(cls) -> None:
+        setattr(cls, "x", 1)
+@dataclass(frozen=True, init=False)
 class MangledPrivate:
     __x: int  # E: Instance attribute `__x` is declared but never initialized
     __y: int  # E: Instance attribute `__y` is declared but never initialized
@@ -268,5 +274,19 @@ class ShadowedObject:
     y: int  # E: Instance attribute `y` is declared but never initialized
     def __init__(self) -> None:
         object.__setattr__(self, "y", 1)
+"#,
+);
+
+testcase!(
+    test_setattr_on_classmethod_receiver_ignored,
+    TestEnv::new().enable_implicitly_defined_attribute_error(),
+    r#"
+class ClsSetattr:
+    @classmethod
+    def setup(cls) -> None:
+        setattr(cls, "x", 1)
+
+def check(c: ClsSetattr) -> None:
+    _ = c.x  # E: Object of class `ClsSetattr` has no attribute `x`
 "#,
 );
