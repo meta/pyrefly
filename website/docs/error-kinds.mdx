@@ -1018,7 +1018,9 @@ Only class-body-declared, annotated, non-`ClassVar` attributes are flagged.
 Unannotated assignments and `ClassVar` declarations are class variables and may be
 assigned via the class; inherited fields are also covered. Standard class metadata
 (`__module__`, `__doc__`, and `__annotations__`) is usable on both classes and
-instances and is not flagged. Assignments via `setattr` and `del` are out of scope.
+instances and is not flagged. Writes intercepted by metaclass data descriptors
+are also exempt from this diagnostic. Assignments via `setattr` and `del` are out
+of scope.
 
 ## internal-error
 

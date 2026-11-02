@@ -4927,7 +4927,7 @@ Direct.x = 2  # E: Cannot set instance variable `x` from the class
 );
 
 testcase!(
-    bug = "Metaclass data descriptors must take precedence over ordinary class fields",
+    bug = "Metaclass descriptor reads still use class-MRO lookup",
     test_instance_var_assign_metaclass_descriptor_collision,
     TestEnv::new().enable_instance_var_assign_error(),
     r#"
@@ -4944,13 +4944,13 @@ class Meta(type):
 class C(metaclass=Meta):
     x: int = 0
 
-C.x = 1  # E: Cannot set instance variable `x` from the class
+C.x = 1
 assert_type(C.x, Literal[1])
 
 class Child(C):
     pass
 
-Child.x = 2  # E: Cannot set instance variable `x` from the class
+Child.x = 2
 assert_type(Child.x, Literal[2])
 "#,
 );
@@ -4995,7 +4995,7 @@ def f() -> int:
 );
 
 testcase!(
-    bug = "Metaclass data descriptors cannot be shadowed by ordinary class fields",
+    bug = "Metaclass data descriptor reads still use class fields",
     test_metaclass_descriptor_kinds_precedence,
     TestEnv::new().enable_instance_var_assign_error(),
     r#"
@@ -5040,10 +5040,10 @@ assert_type(C.data, int)
 assert_type(C.non_data, int)
 assert_type(C.delete_only, int)
 assert_type(C.readonly, int)
-C.data = 1  # E: Cannot set instance variable `data` from the class
+C.data = 1
 C.non_data = 1  # E: Cannot set instance variable `non_data` from the class
-C.delete_only = 1  # E: Cannot set instance variable `delete_only` from the class
-C.readonly = 1  # E: Cannot set instance variable `readonly` from the class
+C.delete_only = 1
+C.readonly = 1
 assert_type(C.cached, int)
 C.cached = 1  # E: Cannot set instance variable `cached` from the class
 assert_type(C.cached, Literal[1])

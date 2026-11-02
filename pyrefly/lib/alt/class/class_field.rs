@@ -5759,18 +5759,40 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // misuses it (it should be assigned on instances). The diagnostic is
                 // purely additive: it never affects the returned setter, so narrowing
                 // and type checking are unchanged when the kind is disabled or suppressed.
-                if is_instance_var && instance_class.is_none() && class_base.is_some() {
-                    errors
-                        .error_builder(
-                            range,
-                            ErrorKind::InstanceVarAssign,
-                            format!("Cannot set instance variable `{attr_name}` from the class"),
-                        )
-                        .with_detail(
-                            "instance variables declared in a class body (without ClassVar) should be assigned on instances"
-                                .to_owned(),
-                        )
-                        .emit();
+                if is_instance_var
+                    && instance_class.is_none()
+                    && let Some(class_base) = class_base
+                {
+                    // A metaclass data descriptor intercepts the write, even when lookup
+                    // found a class-MRO field. `cached_property` is a non-data descriptor.
+                    let metaclass_write = self
+                        .get_metadata_for_class(class_base.class_object())
+                        .custom_metaclass()
+                        .and_then(|metaclass| {
+                            self.get_class_member(metaclass.class_object(), attr_name)
+                        })
+                        .is_some_and(|field| match &field.0 {
+                            ClassFieldInner::Property { ty, .. } => ty
+                                .toplevel_func_metadata()
+                                .is_none_or(|meta| !meta.flags.is_cached_property),
+                            ClassFieldInner::Descriptor { descriptor, .. } => {
+                                descriptor.setter || descriptor.deleter
+                            }
+                            _ => false,
+                        });
+                    if !metaclass_write {
+                        errors
+                            .error_builder(
+                                range,
+                                ErrorKind::InstanceVarAssign,
+                                format!("Cannot set instance variable `{attr_name}` from the class"),
+                            )
+                            .with_detail(
+                                "instance variables declared in a class body (without ClassVar) should be assigned on instances"
+                                    .to_owned(),
+                            )
+                            .emit();
+                    }
                 }
                 // If the attribute has a converter, then `want` should be the type expected by the converter.
                 let attr_ty = match instance_class {
