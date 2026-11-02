@@ -50,7 +50,6 @@ use crate::state::lsp::ImportFormat;
 use crate::state::lsp::LocalRefactorCodeAction;
 use crate::state::lsp::Transaction;
 
-#[derive(Clone)]
 struct AbstractMemberInfo {
     name: Name,
     ty: Type,
@@ -88,7 +87,7 @@ pub(crate) fn implement_abstract_members_code_actions(
         .filter(|unit| !unit.is_empty())
         .unwrap_or(DEFAULT_INDENT);
 
-    let members = transaction
+    let mut members = transaction
         .ad_hoc_solve(
             handle,
             "implement_abstract_members",
@@ -143,7 +142,6 @@ pub(crate) fn implement_abstract_members_code_actions(
         return None;
     }
 
-    let mut members = members;
     members.sort_by(|left, right| left.name.cmp(&right.name));
     let stdlib = transaction.get_stdlib(handle);
     let mut renderer = MemberRenderer {
@@ -258,10 +256,15 @@ impl MemberRenderer<'_> {
         let property = member.ty.property_metadata();
         let getter = property.map(|p| &p.getter);
         let setter = property.and_then(|p| p.setter.as_ref());
-        let is_cached = metadata.flags.is_cached_property;
         let is_static = metadata.flags.is_staticmethod;
         let is_class = metadata.flags.is_classmethod;
-        let is_async = member.is_coroutine;
+        let receiver_decorator = if is_class {
+            Some("classmethod")
+        } else if is_static {
+            Some("staticmethod")
+        } else {
+            None
+        };
         let overloaded = member.ty.toplevel_callable_signatures().count() > 1;
         for (index, (callable, tparams)) in getter
             .unwrap_or(&member.ty)
@@ -272,77 +275,66 @@ impl MemberRenderer<'_> {
                 self.text("\n\n");
             }
             if overloaded {
-                self.text(indent);
-                self.text("@");
+                self.text(&format!("{indent}@"));
                 self.reference("typing", "overload");
                 self.text("\n");
             }
-            if getter.is_some() || is_cached {
-                self.text(indent);
-                self.text("@");
-                if is_cached {
-                    self.reference("functools", "cached_property");
-                } else {
-                    self.text("property");
-                }
+            if metadata.flags.is_cached_property {
+                self.text(&format!("{indent}@"));
+                self.reference("functools", "cached_property");
                 self.text("\n");
-            } else if is_class || is_static {
-                self.text(indent);
-                self.text(if is_class {
-                    "@classmethod\n"
-                } else {
-                    "@staticmethod\n"
-                });
+                self.def_line(member, indent, None);
+            } else if getter.is_some() {
+                self.def_line(member, indent, Some("property"));
+            } else {
+                self.def_line(member, indent, receiver_decorator);
             }
-            self.text(indent);
-            self.text(if is_async { "async def " } else { "def " });
-            self.text(member.name.as_str());
             self.signature(callable, tparams.map(|p| p.as_ref()), !is_static)?;
             self.text(":\n");
-            if !overloaded {
-                self.body(member, indent, indent_unit);
-            } else {
+            if overloaded {
                 self.text(&format!("{indent}{indent_unit}..."));
+            } else {
+                self.body(member, indent, indent_unit);
             }
         }
         if overloaded {
             // The overloads define the contract. The implementation accepts every overload.
             self.text("\n\n");
-            if is_class || is_static {
-                self.text(&format!(
-                    "{indent}@{}\n",
-                    if is_class {
-                        "classmethod"
-                    } else {
-                        "staticmethod"
-                    }
-                ));
-            }
-            self.text(&format!(
-                "{indent}{}def {}(",
-                if is_async { "async " } else { "" },
-                member.name
-            ));
-            if !is_static {
-                self.text(if is_class { "cls, " } else { "self, " });
-            }
-            self.text("*args, **kwargs) -> ");
+            self.def_line(member, indent, receiver_decorator);
+            self.text(if is_class {
+                "(cls, *args, **kwargs) -> "
+            } else if is_static {
+                "(*args, **kwargs) -> "
+            } else {
+                "(self, *args, **kwargs) -> "
+            });
             self.reference("typing", "Any");
             self.text(":\n");
             self.body(member, indent, indent_unit);
         }
         if let Some(setter) = setter {
             let (callable, tparams) = setter.toplevel_callable_signatures().next()?;
-            self.text(&format!(
-                "\n\n{indent}@{}.setter\n{indent}def {}",
-                member.name, member.name
-            ));
+            self.text("\n\n");
+            self.def_line(member, indent, Some(&format!("{}.setter", member.name)));
             self.signature(callable, tparams.map(|p| p.as_ref()), true)?;
             self.text(&format!(
                 ":\n{indent}{indent_unit}raise NotImplementedError"
             ));
         }
         Some(())
+    }
+
+    /// Writes an optional decorator line, then `def` or `async def` and the member's name.
+    fn def_line(&mut self, member: &AbstractMemberInfo, indent: &str, decorator: Option<&str>) {
+        if let Some(decorator) = decorator {
+            self.text(&format!("{indent}@{decorator}\n"));
+        }
+        let keyword = if member.is_coroutine {
+            "async def"
+        } else {
+            "def"
+        };
+        self.text(&format!("{indent}{keyword} {}", member.name));
     }
 
     fn body(&mut self, member: &AbstractMemberInfo, indent: &str, indent_unit: &str) {

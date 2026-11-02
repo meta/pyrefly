@@ -658,34 +658,14 @@ fn compute_extract_superclass_actions(
 
 fn compute_implement_abstract_actions(
     code: &str,
+    assert_zero_errors: bool,
 ) -> (
     ModuleInfo,
     Vec<Vec<(Module, TextRange, String)>>,
     Vec<String>,
 ) {
     let (handles, state) =
-        mk_multi_file_state_assert_no_errors(&[("main", code)], Require::Everything);
-    let handle = handles.get("main").unwrap();
-    let transaction = state.transaction();
-    let module_info = transaction.get_module_info(handle).unwrap();
-    let selection = find_marked_range_with(code, "# ACTION-START", "# ACTION-END");
-    let actions = transaction
-        .implement_abstract_members_code_actions(handle, selection, ImportFormat::Absolute)
-        .unwrap_or_default();
-    let edit_sets: Vec<Vec<(Module, TextRange, String)>> =
-        actions.iter().map(|action| action.edits.clone()).collect();
-    let titles = actions.iter().map(|action| action.title.clone()).collect();
-    (module_info, edit_sets, titles)
-}
-
-fn compute_implement_abstract_actions_allow_errors(
-    code: &str,
-) -> (
-    ModuleInfo,
-    Vec<Vec<(Module, TextRange, String)>>,
-    Vec<String>,
-) {
-    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Everything, false);
+        mk_multi_file_state(&[("main", code)], Require::Everything, assert_zero_errors);
     let handle = handles.get("main").unwrap();
     let transaction = state.transaction();
     let module_info = transaction.get_module_info(handle).unwrap();
@@ -4543,29 +4523,25 @@ class Sub(Super):
 #[test]
 fn push_member_down_basic() {
     let code = r#"
-from abc import ABC
-
 class Base:
     # MOVE-START
     def foo(self):
         pass
     # MOVE-END
 
-class Child(Base, ABC):
+class Child(Base):
     pass
 "#;
     let (module_info, actions, titles) = compute_push_down_actions(code);
     assert_eq!(vec!["Push `foo` down to `Child`"], titles);
     let updated = apply_refactor_edits_for_module(&module_info, &actions[0]);
     let expected = r#"
-from abc import ABC
-
 class Base:
     # MOVE-START
     pass
     # MOVE-END
 
-class Child(Base, ABC):
+class Child(Base):
     def foo(self):
         pass
 "#;
@@ -5251,7 +5227,7 @@ class Outer:
 "#
     .replace("    ", "\t")
     .replace('\n', "\r\n");
-    let (info, actions, _) = compute_implement_abstract_actions_allow_errors(&code);
+    let (info, actions, _) = compute_implement_abstract_actions(&code, false);
     let after = apply_refactor_edits_for_module(&info, &actions[0]);
     let normalized = after.replace("\r\n", "\n");
     for expected in [
@@ -5464,7 +5440,7 @@ class Child(Proto):
     pass
 # ACTION-END
 "#;
-    let (info, actions, _) = compute_implement_abstract_actions_allow_errors(code);
+    let (info, actions, _) = compute_implement_abstract_actions(code, false);
     let after = apply_refactor_edits_for_module(&info, &actions[0]);
     assert!(
         after.contains("class Child(Proto):\n    count: ClassVar[int]\n"),
@@ -5495,7 +5471,7 @@ class Child(Base):
     pass
 # ACTION-END
 "#;
-    let (module_info, actions, titles) = compute_implement_abstract_actions(code);
+    let (module_info, actions, titles) = compute_implement_abstract_actions(code, true);
     assert_eq!(vec!["Implement abstract members"], titles);
     let edits = actions.first().expect("missing abstract member edits");
     let after = apply_refactor_edits_for_module(&module_info, edits);
@@ -5551,7 +5527,7 @@ class Impl(Proto):
     pass
 # ACTION-END
 "#;
-    let (module_info, actions, titles) = compute_implement_abstract_actions_allow_errors(code);
+    let (module_info, actions, titles) = compute_implement_abstract_actions(code, false);
     assert_eq!(vec!["Implement abstract members"], titles);
     let edits = actions.first().expect("missing protocol member edits");
     let after = apply_refactor_edits_for_module(&module_info, edits);
