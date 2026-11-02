@@ -795,30 +795,6 @@ impl Solver {
         )
     }
 
-    /// Replace unresolved empty-container element types with `fallback` in a copy of `ty`.
-    pub(crate) fn replace_unresolved_partials(&self, mut ty: Type, fallback: &Type) -> Type {
-        self.expand_mut(&mut ty);
-        let partials: SmallSet<_> = {
-            let variables = self.variables.lock();
-            ty.collect_maybe_placeholder_vars()
-                .into_iter()
-                .filter(|var| {
-                    matches!(
-                        &*variables.get(*var),
-                        Variable::PartialQuantified(_) | Variable::PartialContained(_)
-                    )
-                })
-                .collect()
-        };
-        ty.transform_mut(&mut |ty| {
-            if matches!(ty, Type::Var(var) if partials.contains(var)) {
-                *ty = fallback.clone();
-            }
-        });
-        self.simplify_mut(&mut ty);
-        ty
-    }
-
     /// Returns true if the given type is a Var that points to a partial variable.
     pub fn is_partial(&self, ty: &Type) -> bool {
         if let Type::Var(v) = ty {
@@ -833,6 +809,33 @@ impl Solver {
     pub(crate) fn var_is_quantified(&self, var: Var) -> bool {
         let variables = self.variables.lock();
         matches!(&*variables.get(var), Variable::Quantified { .. })
+    }
+
+    /// The bound of the type variable that `var` stands for, if inference has not yet given it a
+    /// solution or bounds of its own.
+    pub(crate) fn unconstrained_typevar_bound(&self, var: Var) -> Option<Type> {
+        let variables = self.variables.lock();
+        match &*variables.get(var) {
+            Variable::Quantified { quantified, bounds } if bounds.is_empty() => {
+                match quantified.restriction() {
+                    Restriction::Bound(bound) => Some(bound.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Replace a type variable's declared bound during speculative hint decomposition.
+    pub(crate) fn set_typevar_bound(&self, var: Var, bound: Type) {
+        let variables = self.variables.lock();
+        let mut variable = variables.get_mut(var);
+        let Variable::Quantified { quantified, .. } = &mut *variable else {
+            unreachable!("only an unconstrained type variable has its bound replaced")
+        };
+        *quantified = quantified
+            .clone()
+            .with_restriction(Restriction::Bound(bound));
     }
 
     /// The vars an argument could fill in that are still waiting for an answer.

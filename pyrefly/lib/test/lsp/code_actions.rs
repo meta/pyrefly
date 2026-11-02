@@ -11,6 +11,7 @@ use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::module::Module;
+use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::sys_info::PythonVersion;
 use ruff_python_ast::PySourceType;
 use ruff_text_size::Ranged;
@@ -20,7 +21,8 @@ use ruff_text_size::TextSize;
 use crate::config::error_kind::ErrorKind;
 use crate::module::module_info::ModuleInfo;
 use crate::state::ide::import_regular_import_edit;
-use crate::state::ide::insert_import_edit_with_forced_import_format;
+use crate::state::ide::insert_from_import_edit;
+use crate::state::ide::insert_import_edit;
 use crate::state::lsp::ImportFormat;
 use crate::state::lsp::LocalRefactorCodeAction;
 use crate::state::require::Require;
@@ -654,6 +656,49 @@ fn compute_extract_superclass_actions(
     })
 }
 
+fn compute_implement_abstract_actions(
+    code: &str,
+) -> (
+    ModuleInfo,
+    Vec<Vec<(Module, TextRange, String)>>,
+    Vec<String>,
+) {
+    let (handles, state) =
+        mk_multi_file_state_assert_no_errors(&[("main", code)], Require::Everything);
+    let handle = handles.get("main").unwrap();
+    let transaction = state.transaction();
+    let module_info = transaction.get_module_info(handle).unwrap();
+    let selection = find_marked_range_with(code, "# ACTION-START", "# ACTION-END");
+    let actions = transaction
+        .implement_abstract_members_code_actions(handle, selection)
+        .unwrap_or_default();
+    let edit_sets: Vec<Vec<(Module, TextRange, String)>> =
+        actions.iter().map(|action| action.edits.clone()).collect();
+    let titles = actions.iter().map(|action| action.title.clone()).collect();
+    (module_info, edit_sets, titles)
+}
+
+fn compute_implement_abstract_actions_allow_errors(
+    code: &str,
+) -> (
+    ModuleInfo,
+    Vec<Vec<(Module, TextRange, String)>>,
+    Vec<String>,
+) {
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Everything, false);
+    let handle = handles.get("main").unwrap();
+    let transaction = state.transaction();
+    let module_info = transaction.get_module_info(handle).unwrap();
+    let selection = find_marked_range_with(code, "# ACTION-START", "# ACTION-END");
+    let actions = transaction
+        .implement_abstract_members_code_actions(handle, selection)
+        .unwrap_or_default();
+    let edit_sets: Vec<Vec<(Module, TextRange, String)>> =
+        actions.iter().map(|action| action.edits.clone()).collect();
+    let titles = actions.iter().map(|action| action.title.clone()).collect();
+    (module_info, edit_sets, titles)
+}
+
 #[test]
 fn basic_test() {
     let report = get_batched_lsp_operations_report_allow_error(
@@ -847,13 +892,7 @@ fn import_edits_with_non_future_imports() {
         let (ast, errors, _) = Ast::parse(&source, PySourceType::Python);
         assert!(errors.is_empty(), "{source}: {errors:?}");
         let (position, _, _) = import_regular_import_edit(&ast, handles["my_module"].clone(), None);
-        let from_edit = insert_import_edit_with_forced_import_format(
-            &ast,
-            handles["main"].clone(),
-            handles["my_module"].clone(),
-            "x",
-            true,
-        );
+        let from_edit = insert_from_import_edit(&ast, handles["my_module"].module(), "x");
         assert_eq!(position.to_usize(), docstring.len());
         assert_eq!(from_edit.range.start().to_usize(), docstring.len());
     }
@@ -895,13 +934,7 @@ fn import_edits_with_future_imports() {
             import_regular_import_edit(&ast, handles["my_module"].clone(), None);
         let (alias_position, alias_text, _) =
             import_regular_import_edit(&ast, handles["my_module"].clone(), Some("m"));
-        let from_edit = insert_import_edit_with_forced_import_format(
-            &ast,
-            handles["main"].clone(),
-            handles["my_module"].clone(),
-            "x",
-            true,
-        );
+        let from_edit = insert_from_import_edit(&ast, handles["my_module"].module(), "x");
         for (position, text) in [
             (position, text),
             (alias_position, alias_text),
@@ -1175,6 +1208,26 @@ fn insertion_test_implicit_import() {
                 .any(|(title, _)| title.starts_with("Insert import:"))
         );
     }
+}
+#[test]
+fn insertion_test_module_import_after_future_import() {
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[
+            ("my_module", "my_export = 3\n"),
+            ("b", "from __future__ import annotations\nmy_module\n# ^"),
+        ],
+        get_test_report,
+    );
+    assert!(
+        report.contains(
+            r#"## After:
+from __future__ import annotations
+import my_module
+my_module
+# ^"#
+        ),
+        "{report}",
+    );
 }
 
 #[test]
@@ -2211,6 +2264,27 @@ x: int = "hello"  # pyrefly: ignore[bad-assignment, bad-return]
 }
 
 #[test]
+fn insertion_test_named_import_after_future_import() {
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[
+            ("a", "my_export = 3\n"),
+            ("b", "from __future__ import annotations\nmy_export\n# ^"),
+        ],
+        get_test_report,
+    );
+    assert!(
+        report.contains(
+            r#"## After:
+from __future__ import annotations
+from a import my_export
+my_export
+# ^"#
+        ),
+        "{report}",
+    );
+}
+
+#[test]
 fn quickfix_merge_pyrefly_ignore_codes_comment_line_above() {
     let report = get_batched_lsp_operations_report_allow_error(
         &[(
@@ -2446,6 +2520,109 @@ my_export
 }
 
 #[test]
+fn insertion_test_preserves_distinct_merge_choices() {
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[
+            ("a", "marker = 1\nclass Thing: pass\n"),
+            ("b", "marker = 2\nclass Thing: pass\n"),
+            (
+                "main",
+                "from a import marker\nfrom b import marker\nThing()\n# ^",
+            ),
+        ],
+        get_test_report,
+    );
+    for module in ["a", "b"] {
+        assert!(
+            report.contains(&format!(
+                "# Title: Insert import: `from {module} import Thing`"
+            )),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!("from {module} import marker, Thing\n")),
+            "{report}"
+        );
+    }
+}
+
+#[test]
+fn insertion_test_import_merge_styles() {
+    for (input, expected) in [
+        (
+            "from a import marker as m\n",
+            "from a import marker as m, Foo\n",
+        ),
+        (
+            "from a import (\n    marker,\n)\n",
+            "from a import (\n    marker, Foo,\n)\n",
+        ),
+        (
+            "from a import Foo as Alias\n",
+            "from a import Foo as Alias, Foo\n",
+        ),
+        (
+            "from a import marker as Foo\n",
+            "from a import Foo\nfrom a import marker as Foo\n",
+        ),
+        (
+            "from a import marker\nfrom a import Foo\n",
+            "from a import marker\nfrom a import Foo\n",
+        ),
+        ("from a import Foo as Foo\n", "from a import Foo as Foo\n"),
+        ("from a import *\n", "from a import Foo\nfrom a import *\n"),
+        ("from a import marker\r\n", "from a import marker, Foo\r\n"),
+    ] {
+        let (handles, state) = mk_multi_file_state_assert_no_errors(
+            &[("a", "marker = 1\nclass Foo: pass\n"), ("b", input)],
+            Require::Exports,
+        );
+        let transaction = state.transaction();
+        let target = handles.get("b").unwrap();
+        let ast = transaction.get_ast(target).unwrap();
+        let edit = insert_import_edit(
+            &ast,
+            state.config_finder(),
+            target.clone(),
+            handles.get("a").unwrap().clone(),
+            "Foo",
+            ImportFormat::Absolute,
+        );
+        let mut actual = input.to_owned();
+        actual.replace_range(
+            edit.range.start().to_usize()..edit.range.end().to_usize(),
+            &edit.insert_text,
+        );
+        assert_eq!(actual, expected, "input: {input:?}");
+    }
+}
+
+#[test]
+fn import_merge_binding_order() {
+    for prefix in [
+        "from a import marker as Foo\n",
+        "from other import Foo\n",
+        "import other as Foo\n",
+        "import Foo.bar\n",
+        "from other import *\n",
+    ] {
+        let source = format!("{prefix}from a import make\n");
+        let (ast, errors, _) = Ast::parse(&source, PySourceType::Python);
+        assert!(errors.is_empty(), "{errors:?}");
+        let edit = insert_from_import_edit(&ast, ModuleName::from_str("a"), "Foo");
+        let mut actual = source;
+        actual.replace_range(
+            edit.range.start().to_usize()..edit.range.end().to_usize(),
+            &edit.insert_text,
+        );
+        assert_eq!(
+            actual,
+            format!("from a import Foo\n{prefix}from a import make\n")
+        );
+    }
+}
+
+#[test]
 fn insertion_test_duplicate_imports() {
     let report = get_batched_lsp_operations_report_allow_error(
         &[
@@ -2454,8 +2631,7 @@ fn insertion_test_duplicate_imports() {
         ],
         get_test_report,
     );
-    // The insertion won't attempt to merge imports from the same module.
-    // It's not illegal, but it would be nice if we do merge.
+    // Merge with existing imports from the same module when possible.
     assert_eq!(
         r#"
 # a.py
@@ -2471,8 +2647,7 @@ from a import another_thing
 my_export
 # ^
 ## After:
-from a import my_export
-from a import another_thing
+from a import another_thing, my_export
 my_export
 # ^
 # Title: Generate variable `my_export`
@@ -4368,6 +4543,38 @@ class Sub(Super):
 #[test]
 fn push_member_down_basic() {
     let code = r#"
+from abc import ABC
+
+class Base:
+    # MOVE-START
+    def foo(self):
+        pass
+    # MOVE-END
+
+class Child(Base, ABC):
+    pass
+"#;
+    let (module_info, actions, titles) = compute_push_down_actions(code);
+    assert_eq!(vec!["Push `foo` down to `Child`"], titles);
+    let updated = apply_refactor_edits_for_module(&module_info, &actions[0]);
+    let expected = r#"
+from abc import ABC
+
+class Base:
+    # MOVE-START
+    pass
+    # MOVE-END
+
+class Child(Base, ABC):
+    def foo(self):
+        pass
+"#;
+    assert_eq!(expected.trim(), updated.trim());
+}
+
+#[test]
+fn push_member_down_into_pass_sharing_a_line() {
+    let code = r#"
 class Base:
     # MOVE-START
     def foo(self):
@@ -4375,10 +4582,9 @@ class Base:
     # MOVE-END
 
 class Child(Base):
-    pass
+    """Child doc."""; pass
 "#;
-    let (module_info, actions, titles) = compute_push_down_actions(code);
-    assert_eq!(vec!["Push `foo` down to `Child`"], titles);
+    let (module_info, actions, _) = compute_push_down_actions(code);
     let updated = apply_refactor_edits_for_module(&module_info, &actions[0]);
     let expected = r#"
 class Base:
@@ -4387,10 +4593,11 @@ class Base:
     # MOVE-END
 
 class Child(Base):
+    """Child doc."""; pass
     def foo(self):
         pass
 "#;
-    assert_eq!(expected.trim(), updated.trim());
+    assert_eq!(expected, updated);
 }
 
 #[test]
@@ -4978,6 +5185,661 @@ x = foo()
     assert_eq!(expected_a.trim(), updated_a.trim());
     assert_eq!(expected_b.trim(), updated_b.trim());
     assert_eq!(expected_c.trim(), updated_c.trim());
+}
+
+#[test]
+fn implement_abstract_members_preserves_class_body() {
+    for (body, expected) in [
+        ("pass", ""),
+        ("pass;", ""),
+        ("\"\"\"Child doc.\"\"\"", "    \"\"\"Child doc.\"\"\"\n"),
+        (
+            "\n    \"\"\"Child doc.\"\"\"",
+            "    \"\"\"Child doc.\"\"\"\n",
+        ),
+        ("pass; value = 1", "    pass; value = 1\n"),
+        (
+            "\n    \"\"\"Child doc.\"\"\"; pass",
+            "    \"\"\"Child doc.\"\"\"; pass\n",
+        ),
+    ] {
+        let separator = if body.starts_with('\n') { "" } else { " " };
+        let code = format!(
+            "from abc import ABC, abstractmethod\nclass Base(ABC):\n    @abstractmethod\n    def foo(self) -> int: ...\n# ACTION-START\nclass Child(Base):{separator}{body}"
+        );
+        let (handles, state) = mk_multi_file_state(&[("main", &code)], Require::Everything, false);
+        let handle = &handles["main"];
+        let transaction = state.transaction();
+        let info = transaction.get_module_info(handle).unwrap();
+        let start = TextSize::try_from(code.find("class Child").unwrap()).unwrap();
+        let actions = transaction
+            .implement_abstract_members_code_actions(handle, TextRange::empty(start))
+            .unwrap();
+        let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
+        assert!(after.contains(&format!(
+            "class Child(Base):\n{expected}    def foo(self) -> int:\n        raise NotImplementedError\n"
+        )), "{after}");
+        mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
+    }
+}
+
+#[test]
+fn implement_abstract_members_indentation_and_decorators() {
+    let code = r#"
+from abc import ABC, abstractmethod
+class Base(ABC):
+    @classmethod
+    @abstractmethod
+    def create(cls, /, value: int = 0, *, flag: bool = False) -> int: ...
+    @staticmethod
+    @abstractmethod
+    def parse(value: str, scale: float = 1.5) -> int: ...
+class Outer:
+    # ACTION-START
+    class Child(Base):
+        @staticmethod
+        def existing() -> None: pass
+    # ACTION-END
+"#
+    .replace("    ", "\t")
+    .replace('\n', "\r\n");
+    let (info, actions, _) = compute_implement_abstract_actions_allow_errors(&code);
+    let after = apply_refactor_edits_for_module(&info, &actions[0]);
+    let normalized = after.replace("\r\n", "\n");
+    for expected in [
+        "\t\t@classmethod\n\t\tdef create(cls, /, value: int = 0, *, flag: bool = False) -> int:",
+        "\t\t@staticmethod\n\t\tdef parse(value: str, scale: float = 1.5) -> int:",
+        "\t\t@staticmethod\n\t\tdef existing() -> None: pass",
+    ] {
+        assert!(normalized.contains(expected), "{after}");
+    }
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_preserves_contracts_and_imports() {
+    let base = r#"
+from abc import ABC, abstractmethod
+from typing import Callable, Protocol, Self, overload
+
+class Payload: pass
+
+class Callback(Protocol):
+    def __call__(self, value: int, *, flag: bool) -> str: ...
+
+class Base[T](ABC):
+    @abstractmethod
+    def callback(self, cb: Callable[[int], str], *args: int, flag: bool) -> Self: ...
+
+    @abstractmethod
+    def callback_protocol(self, cb: Callback) -> None: ...
+
+    @abstractmethod
+    def unknown(self, value = object()): ...
+
+    @abstractmethod
+    async def fetch(self, value: Payload) -> T: ...
+
+    @abstractmethod
+    def identity[U: Payload](self, value: U) -> U: ...
+
+    @overload
+    @abstractmethod
+    def convert(self, value: int) -> str: ...
+    @overload
+    @abstractmethod
+    def convert(self, value: str) -> int: ...
+
+    @property
+    @abstractmethod
+    def value(self) -> int: ...
+    @value.setter
+    @abstractmethod
+    def value(self, value: int) -> None: ...
+"#;
+    let code = "from __future__ import annotations\nfrom base import Base\n# ACTION-START\nclass Child(Base[int]):\n    pass\n# ACTION-END\n";
+    let (handles, state) = mk_multi_file_state(
+        &[("base", base), ("main", code)],
+        Require::Everything,
+        false,
+    );
+    let transaction = state.transaction();
+    let handle = &handles["main"];
+    let info = transaction.get_module_info(handle).unwrap();
+    let actions = transaction
+        .implement_abstract_members_code_actions(
+            handle,
+            find_marked_range_with(code, "# ACTION-START", "# ACTION-END"),
+        )
+        .unwrap();
+    let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
+    for expected in [
+        "cb: Callable[[int], str], *args: int, flag: bool) -> Self",
+        "def callback_protocol(self, cb: Callback) -> None:",
+        "async def fetch(self, value: Payload) -> int:",
+        "def identity[U: Payload](self, value: U) -> U:",
+        "def convert(self, value: int) -> str:",
+        "def convert(self, value: str) -> int:",
+        "@value.setter\n    def value(self, value: int) -> None:",
+        "from base import Base, Callback, Payload",
+    ] {
+        assert!(after.contains(expected), "Missing {expected:?}:\n{after}");
+    }
+    assert!(!after.contains("Unknown"), "{after}");
+    assert!(!after.contains("Self@"), "{after}");
+    mk_multi_file_state_assert_no_errors(&[("base", base), ("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_preserves_import_edit_positions() {
+    let base = r#"
+from abc import ABC, abstractmethod
+from typing import Callable
+class Input: pass
+class Output: pass
+class Base(ABC):
+    @abstractmethod
+    def foo(self, cb: Callable[[Input], Output]) -> Output: ...
+"#;
+    let header = "\"\"\"Child module.\"\"\"\nfrom __future__ import annotations\n";
+    for (imports, expected) in [
+        (
+            "from base import Base # Base comment\n",
+            "from typing import Callable\nfrom base import Base, Input, Output # Base comment\n",
+        ),
+        (
+            "from typing import Any # typing comment\nfrom base import Base # Base comment\n",
+            "from typing import Any, Callable # typing comment\nfrom base import Base, Input, Output # Base comment\n",
+        ),
+        (
+            "from typing import (\n    Any, # typing comment\n)\nfrom base import (\n    Base, # Base comment\n)\n",
+            "from typing import (\n    Any, Callable, # typing comment\n)\nfrom base import (\n    Base, Input, Output, # Base comment\n)\n",
+        ),
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let code = format!(
+                "{header}{imports}# ACTION-START\nclass Child(Base):\n    pass\n# ACTION-END\n"
+            )
+            .replace('\n', newline);
+            let (handles, state) = mk_multi_file_state(
+                &[("base", base), ("main", &code)],
+                Require::Everything,
+                false,
+            );
+            let transaction = state.transaction();
+            let handle = &handles["main"];
+            let info = transaction.get_module_info(handle).unwrap();
+            let actions = transaction
+                .implement_abstract_members_code_actions(
+                    handle,
+                    find_marked_range_with(&code, "# ACTION-START", "# ACTION-END"),
+                )
+                .unwrap();
+            let edits = &actions[0].edits;
+            for (index, (_, range, _)) in edits.iter().enumerate() {
+                assert!(
+                    edits[index + 1..]
+                        .iter()
+                        .all(|(_, other, _)| range != other),
+                    "Edits at the same range must be combined: {edits:?}"
+                );
+            }
+            let after = apply_refactor_edits_for_module(&info, edits);
+            let normalized = after.replace("\r\n", "\n");
+            assert!(
+                normalized.starts_with(&format!("{header}{expected}# ACTION-START\n")),
+                "{after}"
+            );
+            assert!(
+                normalized.contains("def foo(self, cb: Callable[[Input], Output]) -> Output:"),
+                "{after}"
+            );
+            mk_multi_file_state_assert_no_errors(
+                &[("base", base), ("main", &after)],
+                Require::Everything,
+            );
+        }
+    }
+}
+
+#[test]
+fn implement_abstract_members_resolves_import_aliases_and_collisions() {
+    let base = "from abc import ABC, abstractmethod\nclass Payload: pass\nclass Base(ABC):\n    @abstractmethod\n    def foo(self, value: Payload) -> Payload: ...\n";
+    for (imports, annotation) in [
+        ("from base import Payload as P\n", "P"),
+        ("import base as b\n", "b.Payload"),
+        ("class Payload: pass\n", "base.Payload"),
+    ] {
+        let code = format!(
+            "from base import Base\n{imports}# ACTION-START\nclass Child(Base):\n    pass\n# ACTION-END\n"
+        );
+        let (handles, state) = mk_multi_file_state(
+            &[("base", base), ("main", &code)],
+            Require::Everything,
+            false,
+        );
+        let transaction = state.transaction();
+        let handle = &handles["main"];
+        let info = transaction.get_module_info(handle).unwrap();
+        let actions = transaction
+            .implement_abstract_members_code_actions(
+                handle,
+                find_marked_range_with(&code, "# ACTION-START", "# ACTION-END"),
+            )
+            .unwrap();
+        let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
+        assert!(
+            after.contains(&format!(
+                "def foo(self, value: {annotation}) -> {annotation}:"
+            )),
+            "{after}"
+        );
+        mk_multi_file_state_assert_no_errors(
+            &[("base", base), ("main", &after)],
+            Require::Everything,
+        );
+    }
+}
+
+#[test]
+fn implement_abstract_members_preserves_protocol_attributes() {
+    let code = r#"
+from typing import ClassVar, Protocol
+class Proto(Protocol):
+    count: ClassVar[int]
+    name: str
+# ACTION-START
+class Child(Proto):
+    pass
+# ACTION-END
+"#;
+    let (info, actions, _) = compute_implement_abstract_actions_allow_errors(code);
+    let after = apply_refactor_edits_for_module(&info, &actions[0]);
+    assert!(
+        after.contains("class Child(Proto):\n    count: ClassVar[int]\n"),
+        "{after}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_inserts_stubs() {
+    let code = r#"
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    @abstractmethod
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        ...
+
+    @property
+    @abstractmethod
+    def bar(self) -> int:
+        """Bar doc."""
+        ...
+
+class Child(Base):
+    # ACTION-START
+    pass
+    # ACTION-END
+"#;
+    let (module_info, actions, titles) = compute_implement_abstract_actions(code);
+    assert_eq!(vec!["Implement abstract members"], titles);
+    let edits = actions.first().expect("missing abstract member edits");
+    let after = apply_refactor_edits_for_module(&module_info, edits);
+    assert_eq!(
+        r#"
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    @abstractmethod
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        ...
+
+    @property
+    @abstractmethod
+    def bar(self) -> int:
+        """Bar doc."""
+        ...
+
+class Child(Base):
+    # ACTION-START
+    @property
+    def bar(self) -> int:
+        """Bar doc."""
+        raise NotImplementedError
+
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        raise NotImplementedError
+    # ACTION-END
+"#,
+        after
+    );
+}
+
+#[test]
+fn implement_protocol_members_inserts_stubs() {
+    let code = r#"
+from typing import Protocol
+
+class Proto(Protocol):
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        ...
+
+    @property
+    def bar(self) -> int:
+        """Bar doc."""
+        ...
+
+class Impl(Proto):
+    # ACTION-START
+    pass
+    # ACTION-END
+"#;
+    let (module_info, actions, titles) = compute_implement_abstract_actions_allow_errors(code);
+    assert_eq!(vec!["Implement abstract members"], titles);
+    let edits = actions.first().expect("missing protocol member edits");
+    let after = apply_refactor_edits_for_module(&module_info, edits);
+    assert_eq!(
+        r#"
+from typing import Protocol
+
+class Proto(Protocol):
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        ...
+
+    @property
+    def bar(self) -> int:
+        """Bar doc."""
+        ...
+
+class Impl(Proto):
+    # ACTION-START
+    @property
+    def bar(self) -> int:
+        """Bar doc."""
+        raise NotImplementedError
+
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        raise NotImplementedError
+    # ACTION-END
+"#,
+        after
+    );
+}
+
+/// Applies "Implement abstract members" with the cursor at the start of `cursor` in
+/// `main`, or returns `None` when the action is not offered.
+fn implement_abstract_members_at(
+    env: TestEnv,
+    files: &[(&'static str, &str)],
+    cursor: &str,
+) -> Option<String> {
+    let (handles, state) = mk_multi_file_state_with_env(env, files, Require::Everything, false);
+    let handle = &handles["main"];
+    let (_, code) = files.iter().find(|(name, _)| *name == "main").unwrap();
+    let position = TextSize::try_from(code.find(cursor).unwrap()).unwrap();
+    let transaction = state.transaction();
+    let info = transaction.get_module_info(handle).unwrap();
+    let actions =
+        transaction.implement_abstract_members_code_actions(handle, TextRange::empty(position))?;
+    Some(apply_refactor_edits_for_module(&info, &actions[0].edits))
+}
+
+#[test]
+fn implement_abstract_members_param_spec_signature() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import Callable
+class Base(ABC):
+    @abstractmethod
+    def run[**P, R](self, fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R: ...
+    @abstractmethod
+    def named[**P](self, args: int, *rest: P.args, **kw: P.kwargs) -> None: ...
+    @abstractmethod
+    def other(self) -> int: ...
+class Child(Base):
+    pass
+"#;
+    let after = implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child");
+    // BUG: the `*args: P.args, **kwargs: P.kwargs` signature removes the whole action.
+    assert_eq!(after, None);
+}
+
+#[test]
+fn implement_abstract_members_specialized_param_spec() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import Callable, Concatenate, Generic, ParamSpec
+P = ParamSpec("P")
+class Base(ABC, Generic[P]):
+    @abstractmethod
+    def run(self, *args: P.args, **kwargs: P.kwargs) -> None: ...
+    @abstractmethod
+    def wrap(self, fn: Callable[Concatenate[int, P], None]) -> None: ...
+    @abstractmethod
+    def wrap_named(self, arg2: int, *args: P.args, **kwargs: P.kwargs) -> None: ...
+class Child(Base[[int, str]]):
+    pass
+class Child2(Base[...]):
+    pass
+"#;
+    // BUG: a specialized `ParamSpec` signature removes the whole action.
+    assert_eq!(
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child("),
+        None
+    );
+    assert_eq!(
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child2"),
+        None
+    );
+}
+
+#[test]
+fn implement_abstract_members_specialized_param_spec_after_default() {
+    let code = r#"
+from abc import ABC, abstractmethod
+class Base[**P](ABC):
+    @abstractmethod
+    def f(self, x: int = 0, *args: P.args, **kwargs: P.kwargs) -> None: ...
+class Child(Base[[str]]):
+    pass
+"#;
+    // BUG: a specialized `ParamSpec` signature removes the whole action.
+    assert_eq!(
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child"),
+        None
+    );
+}
+
+#[test]
+fn implement_abstract_members_legacy_type_var_before_python_3_12() {
+    let base = r#"
+from abc import ABC, abstractmethod
+from typing import TypeVar
+T = TypeVar("T")
+class Base(ABC):
+    @abstractmethod
+    def f(self, x: T) -> T: ...
+"#;
+    let code = "from base import Base\nclass Child(Base):\n    pass\n";
+    let after = implement_abstract_members_at(
+        TestEnv::new_with_version(PythonVersion::new(3, 11, 0)),
+        &[("base", base), ("main", code)],
+        "class Child",
+    )
+    .unwrap();
+    // BUG: PEP 695 syntax is a syntax error before Python 3.12.
+    assert_eq!(
+        after,
+        "from base import Base\nclass Child(Base):\n    def f[T](self, x: T) -> T:\n        raise NotImplementedError\n"
+    );
+}
+
+#[test]
+fn implement_abstract_members_async_generator() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import AsyncIterator
+class Base(ABC):
+    @abstractmethod
+    async def items(self) -> AsyncIterator[int]:
+        yield 1
+class Child(Base):
+    pass
+"#;
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    // BUG: without a `yield`, the generated `async def` is a coroutine, not an async generator.
+    assert!(
+        after.ends_with(
+            "class Child(Base):\n    async def items(self) -> AsyncIterator[int]:\n        raise NotImplementedError\n"
+        ),
+        "{after}"
+    );
+}
+
+#[test]
+fn implement_abstract_members_type_params_only_in_return() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import Callable
+class Base(ABC):
+    @abstractmethod
+    def factory[T](self) -> Callable[[T], T]: ...
+    @abstractmethod
+    def mixed[T, U = int](self, value: U) -> Callable[[T], T]: ...
+    @abstractmethod
+    def nested[T](self) -> Callable[[], Callable[[T], T]]: ...
+class Child(Base):
+    pass
+"#;
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    // BUG: `T` is no longer declared by the generated methods.
+    assert!(
+        after.ends_with(
+            "class Child(Base):\n    def factory(self) -> Callable[[T], T]:\n        raise NotImplementedError\n\n    def mixed[U = int](self, value: U) -> Callable[[T], T]:\n        raise NotImplementedError\n\n    def nested(self) -> Callable[[], Callable[[T], T]]:\n        raise NotImplementedError\n"
+        ),
+        "{after}"
+    );
+}
+
+#[test]
+fn implement_abstract_members_module_name_bound_locally() {
+    let base = r#"
+from abc import ABC, abstractmethod
+class Payload: pass
+class Base(ABC):
+    @abstractmethod
+    def foo(self, value: Payload) -> None: ...
+    @abstractmethod
+    def bar(self) -> int: ...
+"#;
+    let code =
+        "from base import Base\nclass Payload: pass\nbase = 42\nclass Child(Base):\n    pass\n";
+    let after = implement_abstract_members_at(
+        TestEnv::new(),
+        &[("base", base), ("main", code)],
+        "class Child",
+    )
+    .unwrap();
+    // BUG: `base = 42` rebinds the imported module before `base.Payload` is evaluated.
+    assert_eq!(
+        after,
+        "import base\nfrom base import Base\nclass Payload: pass\nbase = 42\nclass Child(Base):\n    def bar(self) -> int:\n        raise NotImplementedError\n\n    def foo(self, value: base.Payload) -> None:\n        raise NotImplementedError\n"
+    );
+}
+
+#[test]
+fn implement_abstract_members_layout() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import overload
+class Base(ABC):
+    @overload
+    @classmethod
+    @abstractmethod
+    def make(cls, x: int) -> int: ...
+    @overload
+    @classmethod
+    @abstractmethod
+    def make(cls, x: str) -> str: ...
+    @property
+    @abstractmethod
+    def value(self) -> int:
+        """Value doc."""
+    @value.setter
+    @abstractmethod
+    def value(self, value: int) -> None: ...
+class Child(Base):
+    existing = 1
+"#;
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    let child = &after[after.find("class Child").unwrap()..];
+    // BUG: the overload implementation follows two blank lines, the setter repeats the
+    // getter's docstring, and no blank line separates the stubs from `existing`.
+    assert_eq!(
+        child,
+        r#"class Child(Base):
+    @overload
+    @classmethod
+    def make(cls, x: int) -> int:
+        ...
+
+    @overload
+    @classmethod
+    def make(cls, x: str) -> str:
+        ...
+
+
+    @classmethod
+    def make(cls, *args, **kwargs) -> Any:
+        raise NotImplementedError
+
+    @property
+    def value(self) -> int:
+        """Value doc."""
+        raise NotImplementedError
+
+    @value.setter
+    def value(self, value: int) -> None:
+        """Value doc."""
+        raise NotImplementedError
+    existing = 1
+"#
+    );
+}
+
+#[test]
+fn implement_abstract_members_cursor_scope() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import Protocol
+class Base(ABC):
+    @abstractmethod
+    def foo(self) -> int: ...
+class Child(Base):
+    value = 1
+class Proto(Protocol):
+    def bar(self) -> int: ...
+class SubProto(Proto, Protocol):
+    pass
+"#;
+    let offered =
+        |cursor| implement_abstract_members_at(TestEnv::new(), &[("main", code)], cursor).is_some();
+    assert!(offered("class Child"));
+    // BUG: the action is also offered in the class body, where it runs on every cursor move.
+    assert!(offered("value = 1"));
+    // BUG: implementing members turns a protocol's members into concrete defaults.
+    assert!(offered("class SubProto"));
 }
 
 #[test]
@@ -6726,6 +7588,42 @@ class Child(Base):
         return 2
 "#;
     assert!(apply_first_safe_delete_action(code).is_none());
+}
+
+#[test]
+fn pytest_fixture_annotation_import_binding_order() {
+    let dependency = "class Foo: pass\nmarker = 17\ndef make() -> Foo:\n    return Foo()\n";
+    let code = "import pytest\nfrom file_two import marker as Foo\nfrom file_two import make\n\n@pytest.fixture\ndef item():\n    return make()\n\nassert Foo == 17\n";
+    let (handles, state) = mk_multi_file_state_assert_no_errors(
+        &[
+            ("main", code),
+            ("file_two", dependency),
+            ("pytest", "def fixture(f):\n    return f\n"),
+        ],
+        Require::Everything,
+    );
+    let handle = handles.get("main").unwrap();
+    let transaction = state.transaction();
+    let module_info = transaction.get_module_info(handle).unwrap();
+    let cursor = TextSize::try_from(code.find("def item").unwrap()).unwrap();
+    let actions = transaction
+        .pytest_fixture_type_annotation_code_actions(
+            handle,
+            TextRange::empty(cursor),
+            ImportFormat::Absolute,
+        )
+        .unwrap_or_default();
+    let action = actions
+        .iter()
+        .find(|action| action.title == "Add pytest fixture type annotation")
+        .expect("missing fixture annotation action");
+    let actual = apply_refactor_edits_for_module(&module_info, &action.edits);
+    // BUG: The annotation still refers to `marker`; only import binding order is preserved.
+    let expected = format!(
+        "from file_two import Foo\n{}",
+        code.replace("def item():", "def item() -> Foo:")
+    );
+    assert_eq!(actual, expected);
 }
 
 #[test]

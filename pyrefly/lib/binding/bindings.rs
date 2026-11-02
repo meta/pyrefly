@@ -325,6 +325,8 @@ pub struct BindingsBuilder<'a> {
     solver: &'a Solver,
     pub has_docstring: bool,
     pub scopes: Scopes,
+    /// Active only in candidate class bodies, including their parameter-default scopes.
+    pub(super) track_classmethod_uses: bool,
     table: BindingTable,
     pub check_unannotated_defs: bool,
     /// When true, unannotated function bodies are still analyzed (creating
@@ -847,6 +849,7 @@ impl Bindings {
             await_context: AwaitContext::General,
             has_docstring: Ast::has_docstring(&x),
             scopes: Scopes::module(x.range, enable_trace, module_info.path().is_interface()),
+            track_classmethod_uses: false,
             table: Default::default(),
             check_unannotated_defs,
             analyze_unannotated_for_ide,
@@ -1259,7 +1262,7 @@ impl<'a> BindingsBuilder<'a> {
         matches!(self.idx_to_binding(idx), Some(Binding::ClassDef(..)))
     }
 
-    fn idx_to_binding_mut<K>(&mut self, idx: Idx<K>) -> Option<&mut K::Value>
+    pub(super) fn idx_to_binding_mut<K>(&mut self, idx: Idx<K>) -> Option<&mut K::Value>
     where
         K: Keyed,
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,

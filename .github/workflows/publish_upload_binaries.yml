@@ -62,7 +62,7 @@ jobs:
             target: x86_64-apple-darwin
             artifact_name: pyrefly-macos-x86_64
             github_env: $GITHUB_ENV
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             artifact_name: pyrefly-macos-arm64
             github_env: $GITHUB_ENV
