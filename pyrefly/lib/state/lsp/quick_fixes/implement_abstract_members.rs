@@ -30,7 +30,6 @@ use pyrefly_types::type_output::AnnotationPart;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_types::types::TParams;
 use pyrefly_types::types::Type;
-use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
 use ruff_python_ast::helpers::is_docstring_stmt;
@@ -72,7 +71,7 @@ pub(crate) fn implement_abstract_members_code_actions(
     let ast = transaction.get_ast(handle)?;
     let source = module_info.contents();
     let selection_point = selection_anchor(source, selection);
-    let class_def = find_class_context(ast.as_ref(), selection_point)?;
+    let class_def = find_class_header(&ast.body, selection_point)?;
     let (method_indent, insert_range, prefix) = insertion_point(class_def, source)?;
     let indent_unit = class_indent_unit(source, class_def, &method_indent);
 
@@ -84,6 +83,10 @@ pub(crate) fn implement_abstract_members_code_actions(
                 let key = KeyClass(ShortIdentifier::new(&class_def.name));
                 let class_idx = solver.bindings().key_to_idx_hashed_opt(Hashed::new(&key))?;
                 let class = solver.get_idx(class_idx).0.clone()?;
+                // A protocol's members are its interface, so they stay unimplemented.
+                if solver.get_metadata_for_class(&class).is_protocol() {
+                    return None;
+                }
                 let abstract_members = solver.get_abstract_members_for_class(&class);
                 let mut infos = Vec::new();
                 for name in abstract_members.unimplemented_abstract_methods() {
@@ -160,32 +163,27 @@ pub(crate) fn implement_abstract_members_code_actions(
     }])
 }
 
-fn find_class_context<'a>(ast: &'a ModModule, selection: TextSize) -> Option<&'a StmtClassDef> {
-    for stmt in &ast.body {
-        if let Stmt::ClassDef(class_def) = stmt
-            && class_def.range().contains(selection)
-        {
-            if let Some(inner) = find_class_in_body(&class_def.body, selection) {
-                return Some(inner);
-            }
-            return Some(class_def);
+/// Finds the class whose header, from its first decorator through its bases, contains
+/// `position`. Offering the action only there keeps it out of automatic code action
+/// requests elsewhere in a class body.
+fn find_class_header(body: &[Stmt], position: TextSize) -> Option<&StmtClassDef> {
+    body.iter().find_map(|stmt| {
+        let Stmt::ClassDef(class_def) = stmt else {
+            return None;
+        };
+        if !class_def.range().contains_inclusive(position) {
+            return None;
         }
-    }
-    None
-}
-
-fn find_class_in_body<'a>(body: &'a [Stmt], selection: TextSize) -> Option<&'a StmtClassDef> {
-    for stmt in body {
-        if let Stmt::ClassDef(class_def) = stmt
-            && class_def.range().contains(selection)
-        {
-            if let Some(inner) = find_class_in_body(&class_def.body, selection) {
-                return Some(inner);
-            }
-            return Some(class_def);
+        let header_end = class_def
+            .arguments
+            .as_ref()
+            .map_or(class_def.name.end(), |arguments| arguments.end());
+        if position <= header_end {
+            Some(class_def)
+        } else {
+            find_class_header(&class_def.body, position)
         }
-    }
-    None
+    })
 }
 
 fn insertion_point(class_def: &StmtClassDef, source: &str) -> Option<(String, TextRange, String)> {

@@ -5486,10 +5486,10 @@ class Base(ABC):
         """Bar doc."""
         ...
 
+# ACTION-START
 class Child(Base):
-    # ACTION-START
     pass
-    # ACTION-END
+# ACTION-END
 "#;
     let (module_info, actions, titles) = compute_implement_abstract_actions(code);
     assert_eq!(vec!["Implement abstract members"], titles);
@@ -5511,8 +5511,8 @@ class Base(ABC):
         """Bar doc."""
         ...
 
+# ACTION-START
 class Child(Base):
-    # ACTION-START
     @property
     def bar(self) -> int:
         """Bar doc."""
@@ -5521,7 +5521,7 @@ class Child(Base):
     def foo(self, x: int) -> str:
         """Foo doc."""
         raise NotImplementedError
-    # ACTION-END
+# ACTION-END
 "#,
         after
     );
@@ -5542,10 +5542,10 @@ class Proto(Protocol):
         """Bar doc."""
         ...
 
+# ACTION-START
 class Impl(Proto):
-    # ACTION-START
     pass
-    # ACTION-END
+# ACTION-END
 "#;
     let (module_info, actions, titles) = compute_implement_abstract_actions_allow_errors(code);
     assert_eq!(vec!["Implement abstract members"], titles);
@@ -5565,8 +5565,8 @@ class Proto(Protocol):
         """Bar doc."""
         ...
 
+# ACTION-START
 class Impl(Proto):
-    # ACTION-START
     @property
     def bar(self) -> int:
         """Bar doc."""
@@ -5575,7 +5575,7 @@ class Impl(Proto):
     def foo(self, x: int) -> str:
         """Foo doc."""
         raise NotImplementedError
-    # ACTION-END
+# ACTION-END
 "#,
         after
     );
@@ -5887,10 +5887,9 @@ class SubProto(Proto, Protocol):
     let offered =
         |cursor| implement_abstract_members_at(TestEnv::new(), &[("main", code)], cursor).is_some();
     assert!(offered("class Child"));
-    // BUG: the action is also offered in the class body, where it runs on every cursor move.
-    assert!(offered("value = 1"));
-    // BUG: implementing members turns a protocol's members into concrete defaults.
-    assert!(offered("class SubProto"));
+    assert!(offered("(Base)"));
+    assert!(!offered("value = 1"));
+    assert!(!offered("class SubProto"));
 }
 
 #[test]
