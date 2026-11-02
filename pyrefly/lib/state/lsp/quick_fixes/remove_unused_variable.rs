@@ -12,6 +12,7 @@ use ruff_python_ast::ExceptHandler;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
+use ruff_python_ast::helpers::is_docstring_stmt;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::visitor::walk_expr;
 use ruff_python_ast::visitor::walk_stmt;
@@ -72,9 +73,16 @@ pub(crate) fn remove_unused_variable_code_action(
     {
         return None;
     }
-    let replacement = if needs_pass_after_removal(context.parent_body, context.stmt.range()) {
-        let (indent, _) =
-            line_indent_and_start(module_info.contents(), context.stmt.range().start())?;
+    // A formerly non-leading string must not become the function's docstring.
+    let exposes_docstring = function
+        .body
+        .first()
+        .is_some_and(|stmt| stmt.range() == context.stmt.range())
+        && function.body.get(1).is_some_and(is_docstring_stmt);
+    let replacement = if needs_pass_after_removal(context.parent_body, context.stmt.range())
+        || exposes_docstring
+    {
+        let (indent, _) = line_indent_and_start(source, context.stmt.range().start())?;
         format!("{indent}pass\n")
     } else {
         String::new()

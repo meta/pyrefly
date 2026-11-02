@@ -3214,25 +3214,24 @@ fn remove_unused_variable_uses_innermost_function_parameters() {
     );
 }
 
-// Bug: deletion can promote a following string expression into a docstring.
 #[test]
 fn remove_unused_variable_docstring_position() {
     for (code, expected) in [
         (
             "def f():\n    unused = 1\n    'not a docstring'\n    return 2\n",
-            "def f():\n    'not a docstring'\n    return 2\n",
+            "def f():\n    pass\n    'not a docstring'\n    return 2\n",
         ),
         (
             "def f():\r\n    unused = 1\r\n    'not a docstring'\r\n    return 2\r\n",
-            "def f():\r\n    'not a docstring'\r\n    return 2\r\n",
+            "def f():\r\n    pass\r\n    'not a docstring'\r\n    return 2\r\n",
         ),
         (
             "class C:\n    def f(self):\n        unused = 1\n        'not a docstring'\n        return 2\n",
-            "class C:\n    def f(self):\n        'not a docstring'\n        return 2\n",
+            "class C:\n    def f(self):\n        pass\n        'not a docstring'\n        return 2\n",
         ),
         (
             "def outer():\n    def inner():\n        unused = 1\n        'not a docstring'\n        return 2\n    return inner\n",
-            "def outer():\n    def inner():\n        'not a docstring'\n        return 2\n    return inner\n",
+            "def outer():\n    def inner():\n        pass\n        'not a docstring'\n        return 2\n    return inner\n",
         ),
     ] {
         let (_, after) =
