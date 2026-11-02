@@ -122,6 +122,7 @@ impl<'a> Transaction<'a> {
             })
             .collect();
         if definitions.is_empty() && preference.follow_pytest_conftest {
+            // Module fixtures take precedence; discover conftests only after a local miss.
             let candidates = once(handle.clone())
                 .chain(once_with(|| pytest_conftest_handles(self, handle, preference)).flatten());
             'fixtures: for fixture_handle in candidates {

@@ -482,7 +482,7 @@ def test_thing(answer):
     let mut transaction = state.new_committable_transaction(Require::Indexing, None);
     transaction
         .as_mut()
-        .run(&[conftest_handle.clone()], Require::Indexing, None);
+        .run(slice::from_ref(&conftest_handle), Require::Indexing, None);
     state.commit_transaction(transaction, None);
     let transaction = state.transaction();
     assert!(transaction.get_ast(&conftest_handle).is_none());
