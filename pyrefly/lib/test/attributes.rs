@@ -4641,6 +4641,45 @@ class DeletedThenDefined:
 "#,
 );
 
+testcase!(
+    test_instance_var_assign_protocol_policy_default,
+    r#"
+from typing import Protocol
+
+class P(Protocol):
+    x: int
+
+class C:
+    x: int = 0
+
+def f(p: P) -> None:
+    pass
+
+f(C)  # E: Argument `type[C]` is not assignable to parameter `p` with type `P`
+f(C())
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_protocol_policy_enabled,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import Protocol
+
+class P(Protocol):
+    x: int
+
+class C:
+    x: int = 0
+
+def f(p: P) -> None:
+    pass
+
+f(C)  # E: Argument `type[C]` is not assignable to parameter `p` with type `P`
+f(C())
+"#,
+);
+
 // `instance-var-assign` (issue #3750): assigning to a class-body-declared
 // instance variable (annotated, not `ClassVar`) via the class object is flagged
 // when the kind is enabled. Inherited fields and fields annotated with a default
@@ -4808,4 +4847,151 @@ class C:
 C.x = 1  # E: Cannot set instance variable `x` from the class
 C().x = 2
     "#,
+);
+
+testcase!(
+    bug = "Class metadata inherited from object is not an instance-only declaration",
+    test_instance_var_assign_class_metadata,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+class C:
+    pass
+
+C.__module__ = "renamed"  # E: Cannot set instance variable `__module__` from the class
+C.__doc__ = "Documentation"  # E: Cannot set instance variable `__doc__` from the class
+C.__annotations__ = {}  # E: Cannot set instance variable `__annotations__` from the class
+C.__name__ = "Renamed"
+C.__qualname__ = "Renamed"
+
+class Meta(type):
+    pass
+
+class Custom(metaclass=Meta):
+    pass
+
+Custom.__module__ = "renamed"  # E: Cannot set instance variable `__module__` from the class
+Custom.__doc__ = "Documentation"  # E: Cannot set instance variable `__doc__` from the class
+Custom.__annotations__ = {}  # E: Cannot set instance variable `__annotations__` from the class
+
+class Explicit:
+    __module__: str = "original"
+    __doc__: str | None = "Original documentation"
+    __annotations__: dict[str, object] = {}
+    ordinary: int = 0
+
+Explicit.__module__ = "renamed"  # E: Cannot set instance variable `__module__` from the class
+Explicit.__doc__ = "Documentation"  # E: Cannot set instance variable `__doc__` from the class
+Explicit.__annotations__ = {}  # E: Cannot set instance variable `__annotations__` from the class
+Explicit.ordinary = 1  # E: Cannot set instance variable `ordinary` from the class
+"#,
+);
+
+testcase!(
+    bug = "Classmethod assignments erase inherited instance-variable provenance",
+    test_instance_var_assign_inherited_classmethod,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import ClassVar
+
+class Base:
+    x: int = 0
+    cv: ClassVar[int] = 0
+
+class Child(Base):
+    @classmethod
+    def make(cls) -> None:
+        cls.x = 1
+        cls.cv = 1
+        cls.fresh: int = 1
+
+Child.x = 2
+Child.cv = 2
+Child.fresh = 2
+Base.x = 3  # E: Cannot set instance variable `x` from the class
+
+class Grandchild(Child):
+    @classmethod
+    def make_again(cls) -> None:
+        cls.x = 3
+        cls.fresh = 3
+
+Grandchild.x = 4
+Grandchild.fresh = 4
+
+class Direct(Base):
+    x: int = 0
+    @classmethod
+    def make(cls) -> None:
+        cls.x = 1  # E: Cannot set instance variable `x` from the class
+
+Direct.x = 2  # E: Cannot set instance variable `x` from the class
+"#,
+);
+
+testcase!(
+    bug = "Metaclass data descriptors must take precedence over ordinary class fields",
+    test_instance_var_assign_metaclass_descriptor_collision,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import Literal, assert_type
+
+class Meta(type):
+    @property
+    def x(cls) -> int:
+        return 0
+    @x.setter
+    def x(cls, value: int) -> None:
+        pass
+
+class C(metaclass=Meta):
+    x: int = 0
+
+C.x = 1  # E: Cannot set instance variable `x` from the class
+assert_type(C.x, Literal[1])
+
+class Child(C):
+    pass
+
+Child.x = 2  # E: Cannot set instance variable `x` from the class
+assert_type(Child.x, Literal[2])
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_narrowing_default,
+    r#"
+from typing import Literal, assert_type
+
+class C:
+    x: int | None = None
+
+C.x = 1
+assert_type(C.x, Literal[1])
+
+def f() -> int:
+    if C.x is None:
+        C.x = 2
+    return C.x
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_narrowing_enabled,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import Literal, assert_type
+
+class C:
+    x: int | None = None
+
+C.x = 1  # E: Cannot set instance variable `x` from the class
+assert_type(C.x, Literal[1])
+C.x = 2  # pyrefly: ignore[instance-var-assign]
+assert_type(C.x, Literal[2])
+
+def f() -> int:
+    if C.x is None:
+        C.x = 3  # pyrefly: ignore[instance-var-assign]
+    return C.x
+"#,
 );
