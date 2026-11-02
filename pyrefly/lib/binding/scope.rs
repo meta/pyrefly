@@ -2352,10 +2352,20 @@ impl Scopes {
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
     ) -> bool {
+        let Expr::Name(receiver) = &*x.value else {
+            return false;
+        };
         for scope in self.iter_rev_mut() {
+            if !matches!(scope.kind, ScopeKind::Method(_))
+                && scope.stat.0.contains_key(&receiver.id)
+            {
+                // A nested scope rebinds the receiver name (e.g. an inner `def f(self): ...`),
+                // so this is not an assignment to the enclosing method's receiver.
+                return false;
+            }
             if let ScopeKind::Method(method_scope) = &mut scope.kind
                 && let Some(self_name) = &method_scope.self_name
-                && matches!(&*x.value, Expr::Name(name) if name.id == self_name.id)
+                && receiver.id == self_name.id
             {
                 if let Some(attr) = method_scope.instance_attributes.get_mut(&x.attr.id) {
                     // Accumulate subsequent assignments in the method.

@@ -4651,3 +4651,37 @@ class DeletedThenDefined:
         def value(self) -> int: ...
 "#,
 );
+
+testcase!(
+    test_self_attribute_repeated_compatible_annotation,
+    r#"
+class A:
+    x: int
+    def __init__(self) -> None:
+        self.x: int = 0
+    def reset(self) -> None:
+        self.x: int = 1
+class B:
+    def __init__(self) -> None:
+        self.y: int = 0
+    def reset(self) -> None:
+        self.y: int = 1
+    "#,
+);
+
+testcase!(
+    test_self_attribute_redefinition_ignores_other_receivers,
+    r#"
+class Other:
+    x: str
+class A:
+    def __init__(self) -> None:
+        self.x: int = 0
+    @staticmethod
+    def build(other: Other) -> None:
+        other.x: str = ""  # E: Cannot annotate non-self attribute `other.x`
+    def nested(self) -> None:
+        def inner(self: Other) -> None:
+            self.x: str = ""  # E: Cannot annotate non-self attribute `self.x`
+    "#,
+);

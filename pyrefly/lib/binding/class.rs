@@ -27,11 +27,11 @@ use ruff_python_ast::Identifier;
 use ruff_python_ast::Keyword;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
+use ruff_python_ast::comparable::ComparableExpr;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
-use starlark_map::small_set::SmallSet;
 
 use crate::binding::attrs::AttrsDecoratorMethods;
 use crate::binding::attrs::collect_attrs_decorator_methods;
@@ -478,9 +478,26 @@ impl<'a> BindingsBuilder<'a> {
         ) = self.scopes.finish_class_and_get_field_definitions();
         instance_attribute_annotations
             .sort_by_key(|(_, annotation)| self.idx_to_key(*annotation).range().start());
-        let mut seen_annotations = SmallSet::new();
+        // A field declared in the class body is checked against that declaration elsewhere.
+        // Among method annotations, repeating the same annotation is fine; only a different
+        // one is reported as a redefinition.
+        let mut seen_annotations: SmallMap<Name, Idx<KeyAnnotation>> = SmallMap::new();
         for (name, annotation) in instance_attribute_annotations {
-            if !seen_annotations.insert(name.clone()) {
+            if matches!(
+                field_definitions.get(&name),
+                Some((
+                    ClassFieldDefinition::DeclaredByAnnotation { .. }
+                        | ClassFieldDefinition::AssignedInBody { .. },
+                    _
+                ))
+            ) {
+                continue;
+            }
+            let Some(previous) = seen_annotations.get(&name).copied() else {
+                seen_annotations.insert(name, annotation);
+                continue;
+            };
+            if !self.same_annotation_expr(previous, annotation) {
                 self.error(
                     self.idx_to_key(annotation).range(),
                     ErrorKind::Redefinition,
@@ -1672,6 +1689,18 @@ impl<'a> BindingsBuilder<'a> {
                 error_kind,
                 format!("Expected string literal \"{name}\""),
             );
+        }
+    }
+}
+
+impl<'a> BindingsBuilder<'a> {
+    fn same_annotation_expr(&self, a: Idx<KeyAnnotation>, b: Idx<KeyAnnotation>) -> bool {
+        match (self.idx_to_binding(a), self.idx_to_binding(b)) {
+            (
+                Some(BindingAnnotation::AnnotateExpr(_, a, _)),
+                Some(BindingAnnotation::AnnotateExpr(_, b, _)),
+            ) => ComparableExpr::from(a) == ComparableExpr::from(b),
+            _ => false,
         }
     }
 }
