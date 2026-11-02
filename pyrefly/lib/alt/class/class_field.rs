@@ -3332,12 +3332,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Standard manager interfaces allow model rebinding. Explicit custom interfaces
             // retain their declared type and use ordinary assignment checking below.
             self.attribute_expr_infer(e, None, name, errors);
-            let annotation = inherited_annotation
-                .filter(|ann| !ann.qualifiers.is_empty())
-                .map(|ann| Annotation {
-                    ty: None,
-                    qualifiers: ann.qualifiers,
-                });
+            let annotation = inherited_annotation.and_then(|mut ann| {
+                ann.ty = None;
+                ann.qualifiers
+                    .retain(|q| matches!(q, Qualifier::ClassVar | Qualifier::Final));
+                (!ann.qualifiers.is_empty()).then_some(ann)
+            });
             return (manager, annotation, IsInherited::Maybe);
         }
         let mut is_inherited = if inherited_ty.is_none() {

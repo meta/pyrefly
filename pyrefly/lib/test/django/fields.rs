@@ -566,7 +566,6 @@ grandchild.objects = GrandChild.objects  # E: Cannot set field `objects`
 );
 
 django_testcase!(
-    bug = "Annotated manager rebinding reports an inconsistent mutable override",
     test_queryset_manager_annotated_inherited_qualifiers,
     r#"
 from typing import Annotated, ClassVar, Final, assert_type
@@ -582,7 +581,7 @@ class Base(models.Model):
     locked: Final[Annotated[models.Manager["Base"], "doc"]] = models.Manager()
 
 class Child(Base):
-    records = Q.as_manager()  # E: overrides parent class `Base` in an inconsistent manner
+    records = Q.as_manager()
     objects = Q.as_manager()
     locked = Q.as_manager()  # E: `locked` is declared as final in parent class `Base`
 
