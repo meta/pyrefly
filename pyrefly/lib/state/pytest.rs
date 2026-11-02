@@ -385,19 +385,11 @@ pub(crate) fn is_directly_parametrized(
             if !aliases.is_parametrize(&call.func) {
                 return false;
             }
-            let argnames = call.arguments.args.first().or_else(|| {
-                call.arguments
-                    .find_keyword("argnames")
-                    .map(|keyword| &keyword.value)
-            });
+            let argnames = call.arguments.find_argument_value("argnames", 0);
             if !argnames.is_some_and(|argnames| parametrize_names_contain(argnames, name)) {
                 return false;
             }
-            match call
-                .arguments
-                .find_keyword("indirect")
-                .map(|keyword| &keyword.value)
-            {
+            match call.arguments.find_argument_value("indirect", 2) {
                 None => true,
                 Some(Expr::BooleanLiteral(value)) => !value.value,
                 Some(expr @ (Expr::List(_) | Expr::Tuple(_))) => {

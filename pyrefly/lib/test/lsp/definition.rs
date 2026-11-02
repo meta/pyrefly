@@ -832,11 +832,11 @@ fn pytest_conftest_defaulted_parameters_keep_parameter_definition() {
 
 #[test]
 fn pytest_conftest_positional_indirect_arguments() {
-    for indirect in ["True", "['answer']", "False"] {
+    for (indirect, is_indirect) in [("True", true), ("['answer']", true), ("False", false)] {
         let code = format!(
             "import pytest\n@pytest.mark.parametrize('answer', [42], {indirect})\ndef test_value(answer): pass\n"
         );
-        let (_root, state, handle) = state_with_conftest(
+        let (root, state, handle) = state_with_conftest(
             &[(
                 "tests/conftest.py",
                 "import pytest\n@pytest.fixture\ndef answer(request): return request.param\n",
@@ -848,8 +848,12 @@ fn pytest_conftest_positional_indirect_arguments() {
             .transaction()
             .goto_definition(&handle, position)
             .unwrap();
-        // BUG: pytest 8 accepts positional indirect=True or indirect=['answer'].
-        assert_eq!(definitions[0].module.path(), handle.path());
+        let expected = if is_indirect {
+            root.path().join("tests/conftest.py")
+        } else {
+            handle.path().as_path().to_path_buf()
+        };
+        assert_eq!(definitions[0].module.path().as_path(), expected);
     }
 }
 
