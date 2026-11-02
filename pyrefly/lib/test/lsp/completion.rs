@@ -3088,6 +3088,92 @@ A.
 }
 
 #[test]
+fn typed_dict_attribute_completion_keeps_parentheses_around_the_base() {
+    let code = r#"
+from typing import TypedDict
+
+class A(TypedDict):
+    field: int
+
+a: A
+(a).fi
+#     ^
+"#;
+    let completions = completions_at_cursor(code);
+    let field = completions
+        .iter()
+        .find(|item| item.label == "field")
+        .expect("missing completion for TypedDict key `field`");
+    assert_eq!(field.filter_text.as_deref(), Some(".field"));
+    assert_eq!(
+        field.text_edit,
+        Some(CompletionItemTextEdit::TextEdit(TextEdit {
+            range: Range::new(Position::new(7, 3), Position::new(7, 6)),
+            new_text: r#"["field"]"#.to_owned(),
+        }))
+    );
+}
+
+#[test]
+fn typed_dict_attribute_completion_avoids_enclosing_f_string_quotes() {
+    let code = r#"
+from typing import TypedDict
+
+Keys = TypedDict("Keys", {"field": int, "fi'eld": int, 'fi"eld': int})
+
+k: Keys
+f"{k.fi}"
+#      ^
+f'{k.fi}'
+#      ^
+f"{f'{k.fi}'}"
+#         ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let new_texts: Vec<Vec<String>> = extract_cursors_for_test(code)
+        .into_iter()
+        .map(|position| {
+            state
+                .transaction()
+                .completion(
+                    &handles["main"],
+                    position,
+                    ImportFormat::Absolute,
+                    true,
+                    None,
+                )
+                .into_iter()
+                .filter_map(|item| match item.text_edit {
+                    Some(CompletionItemTextEdit::TextEdit(edit)) => Some(edit.new_text),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        new_texts,
+        vec![vec!["['field']"], vec![r#"["field"]"#], Vec::<&str>::new()]
+    );
+}
+
+#[test]
+fn typed_dict_attribute_completion_skips_value_patterns() {
+    let code = r#"
+from typing import TypedDict
+
+class A(TypedDict):
+    field: int
+
+a: A
+match 0:
+    case a.fi:
+#            ^
+        pass
+"#;
+    assert!(subscript_rewrite_labels(code).is_empty());
+}
+
+#[test]
 fn builtins_doesnt_autoimport() {
     let code = r#"
 isins
