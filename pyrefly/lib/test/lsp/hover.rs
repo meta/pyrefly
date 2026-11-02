@@ -1537,7 +1537,6 @@ c[idx_var]
     );
 }
 
-// BUG: Nested operator hovers use the enclosing subscript's signature.
 #[test]
 fn hover_over_operators_in_subscript() {
     let code = r#"
@@ -1568,17 +1567,23 @@ c[-1]
         None,
         None,
     ];
+    let expected_contents = ["__add__", "Literal[0]", "__invert__", "bool", "__neg__"];
     let positions = extract_cursors_for_test(code);
     assert_eq!(positions.len(), expected_ranges.len());
-    for (position, expected_range) in positions.into_iter().zip(expected_ranges) {
+    assert_eq!(positions.len(), expected_contents.len());
+    for ((position, expected_range), expected) in positions
+        .into_iter()
+        .zip(expected_ranges)
+        .zip(expected_contents)
+    {
         let hover = get_hover(&state.transaction(), &handle, position, false)
             .expect("Expected hover on nested operator");
         let Contents::MarkupContent(contents) = hover.contents else {
             panic!("Expected markdown hover contents");
         };
         assert!(
-            contents.value.contains("idx: int") && contents.value.contains(") -> str"),
-            "Expected the enclosing subscript signature, got: {}",
+            contents.value.contains(expected) && !contents.value.contains("idx: int"),
+            "Expected nested operator hover containing {expected}, got: {}",
             contents.value,
         );
         assert_eq!(hover.range, expected_range);
