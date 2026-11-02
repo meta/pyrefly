@@ -1453,9 +1453,8 @@ def f(x: int | str) -> int | str:
 g = f
 "#,
     )]);
-    // BUG: the annotation keeps only the first overload.
-    assert_eq!(annotation, ": Callable[[int], int]");
-    assert_eq!(imports, "from typing import Callable\n");
+    assert_eq!(annotation, ": Callable[..., Any]");
+    assert_eq!(imports, "from typing import Any, Callable\n");
 }
 
 #[test]
@@ -1469,9 +1468,8 @@ def identity[T](x: T) -> T:
 g = identity
 "#,
     )]);
-    // BUG: the annotation cannot declare `T`, so it is undefined where the hint is inserted.
-    assert_eq!(annotation, ": Callable[[T], T]");
-    assert_eq!(imports, "from typing import Callable\n");
+    assert_eq!(annotation, ": Callable[[Any], Any]");
+    assert_eq!(imports, "from typing import Any, Callable\n");
 }
 
 #[test]
@@ -1485,9 +1483,8 @@ def identity[T = int](x: T) -> T:
 g = identity
 "#,
     )]);
-    // BUG: the annotation cannot declare `T`, so it is undefined where the hint is inserted.
-    assert_eq!(annotation, ": Callable[[T], T]");
-    assert_eq!(imports, "from typing import Callable\n");
+    assert_eq!(annotation, ": Callable[[Any], Any]");
+    assert_eq!(imports, "from typing import Any, Callable\n");
 }
 
 #[test]
@@ -1501,9 +1498,8 @@ def f[**P](x: int = 0, *args: P.args, **kwargs: P.kwargs) -> int:
 g = f
 "#,
     )]);
-    // BUG: `P` is undefined where the hint is inserted, and `x` becomes required.
-    assert_eq!(annotation, ": Callable[Concatenate[int, P], int]");
-    assert_eq!(imports, "from typing import Callable, Concatenate\n");
+    assert_eq!(annotation, ": Callable[..., int]");
+    assert_eq!(imports, "from typing import Callable\n");
 }
 
 #[test]
@@ -1517,8 +1513,7 @@ def f(x: int = 0) -> int:
 g = f
 "#,
     )]);
-    // BUG: the annotation requires `x`, so calling `g()` becomes an error.
-    assert_eq!(annotation, ": Callable[[int], int]");
+    assert_eq!(annotation, ": Callable[..., int]");
     assert_eq!(imports, "from typing import Callable\n");
 }
 

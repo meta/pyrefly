@@ -5730,15 +5730,17 @@ class Base(ABC):
 class Child(Base):
     pass
 "#;
+    // A stub cannot declare type parameters that the solver moved onto a returned callable,
+    // so they become `Any`.
     let after =
         implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
-    // BUG: `T` is no longer declared by the generated methods.
     assert!(
         after.ends_with(
-            "class Child(Base):\n    def factory(self) -> Callable[[T], T]:\n        raise NotImplementedError\n\n    def mixed[U = int](self, value: U) -> Callable[[T], T]:\n        raise NotImplementedError\n\n    def nested(self) -> Callable[[], Callable[[T], T]]:\n        raise NotImplementedError\n"
+            "class Child(Base):\n    def factory(self) -> Callable[[Any], Any]:\n        raise NotImplementedError\n\n    def mixed[U = int](self, value: U) -> Callable[[Any], Any]:\n        raise NotImplementedError\n\n    def nested(self) -> Callable[[], Callable[[Any], Any]]:\n        raise NotImplementedError\n"
         ),
         "{after}"
     );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
 }
 
 #[test]
