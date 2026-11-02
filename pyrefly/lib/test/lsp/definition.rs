@@ -811,6 +811,122 @@ fn pytest_conftest_class_parametrize_keeps_parameter_definition() {
 }
 
 #[test]
+fn pytest_conftest_defaulted_parameters_keep_parameter_definition() {
+    for parameters in ["answer=0", "*, answer=None"] {
+        let code = format!("def test_value({parameters}): pass\n");
+        let (root, state, handle) = state_with_conftest(
+            &[(
+                "tests/conftest.py",
+                "import pytest\n@pytest.fixture\ndef answer(): return 42\n",
+            )],
+            &code,
+        );
+        let position = TextSize::try_from(code.find("answer").unwrap()).unwrap();
+        let definitions = state
+            .transaction()
+            .goto_definition(&handle, position)
+            .unwrap();
+        // BUG: pytest does not request parameters that have defaults.
+        assert_eq!(
+            definitions[0].module.path().as_path(),
+            root.path().join("tests/conftest.py"),
+        );
+    }
+}
+
+#[test]
+fn pytest_conftest_positional_indirect_arguments() {
+    for indirect in ["True", "['answer']", "False"] {
+        let code = format!(
+            "import pytest\n@pytest.mark.parametrize('answer', [42], {indirect})\ndef test_value(answer): pass\n"
+        );
+        let (_root, state, handle) = state_with_conftest(
+            &[(
+                "tests/conftest.py",
+                "import pytest\n@pytest.fixture\ndef answer(request): return request.param\n",
+            )],
+            &code,
+        );
+        let position = TextSize::try_from(code.rfind("answer").unwrap()).unwrap();
+        let definitions = state
+            .transaction()
+            .goto_definition(&handle, position)
+            .unwrap();
+        // BUG: pytest 8 accepts positional indirect=True or indirect=['answer'].
+        assert_eq!(definitions[0].module.path(), handle.path());
+    }
+}
+
+#[test]
+fn pytest_conftest_local_named_fixture_overrides_conftest() {
+    let code = "import pytest\n@pytest.fixture(name='answer')\ndef local_answer(): return 42\ndef test_value(answer): pass\n";
+    let (root, state, handle) = state_with_conftest(
+        &[(
+            "tests/conftest.py",
+            "import pytest\n@pytest.fixture\ndef answer(): return 1\n",
+        )],
+        code,
+    );
+    let position = TextSize::try_from(code.rfind("answer").unwrap()).unwrap();
+    let definitions = state
+        .transaction()
+        .goto_definition(&handle, position)
+        .unwrap();
+    // BUG: the test module's fixture overrides conftest even with an explicit name.
+    assert_eq!(
+        definitions[0].module.path().as_path(),
+        root.path().join("tests/conftest.py"),
+    );
+}
+
+#[test]
+fn pytest_fixture_defaulted_parameter_references() {
+    let code = "import pytest\n@pytest.fixture\ndef answer(): return 42\ndef test_value(answer=0): assert answer == 0\n";
+    let (_root, state, handle) = state_with_conftest(&[], code);
+    let ranges: Vec<_> = code
+        .match_indices("answer")
+        .map(|(start, name)| TextRange::at(TextSize::try_from(start).unwrap(), TextSize::of(name)))
+        .collect();
+    let transaction = state.transaction();
+    let mut references = transaction.find_local_occurrences(&handle, ranges[0].start());
+    references.sort_by_key(|range| range.start());
+    // BUG: fixture references include the defaulted parameter, which does not request it.
+    assert_eq!(references, ranges[..2]);
+}
+
+#[test]
+fn pytest_conftest_imported_named_fixture_uses_ancestor() {
+    let code = "def test_value(answer): pass\n";
+    let (root, state, handle) = state_with_conftest(
+        &[
+            (
+                "conftest.py",
+                "import pytest\n@pytest.fixture\ndef answer(): return 1\n",
+            ),
+            (
+                "tests/conftest.py",
+                "from shared_fixtures import child_answer\n",
+            ),
+            (
+                "shared_fixtures.py",
+                "import pytest\n@pytest.fixture(name='answer')\ndef child_answer(): return 42\n",
+            ),
+        ],
+        code,
+    );
+    let position = TextSize::try_from(code.find("answer").unwrap()).unwrap();
+    let definitions = state
+        .transaction()
+        .goto_definition(&handle, position)
+        .unwrap();
+    // BUG: pytest selects shared_fixtures.child_answer by its literal name; we select the ancestor.
+    assert_eq!(
+        definitions[0].module.path().as_path(),
+        root.path().join("conftest.py"),
+    );
+}
+
+#[test]
 fn pytest_fixture_parameter_without_fixture_definition_uses_parameter_definition() {
     let code = r#"
 def test_thing(missing_fixture):
