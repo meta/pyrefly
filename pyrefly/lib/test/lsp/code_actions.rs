@@ -3189,21 +3189,18 @@ fn remove_unused_variable_standalone_lines() {
     }
 }
 
-// Bug: deleting a parameter overwrite can delay release of its previous value.
 #[test]
 fn remove_unused_variable_parameter_overwrites() {
     for parameters in ["unused, /", "unused", "*unused", "*, unused", "**unused"] {
         let code = format!("def f({parameters}):\n    unused = None\n    yield 'tick'\n");
-        let (_, after) =
-            remove_unused_variable_action(&code, code.find("unused =").unwrap()).unwrap();
-        assert_eq!(format!("def f({parameters}):\n    yield 'tick'\n"), after);
+        assert!(remove_unused_variable_action(&code, code.find("unused =").unwrap()).is_none());
     }
     for code in [
         "def f(unused):\n    if True:\n        unused = None\n    yield 'tick'\n",
         "class C:\n    def f(self, unused):\n        unused: object = None\n        yield 'tick'\n",
         "def outer():\n    def inner(unused):\n        unused = None\n        yield 'tick'\n    return inner\n",
     ] {
-        assert!(remove_unused_variable_action(code, code.rfind("unused").unwrap()).is_some());
+        assert!(remove_unused_variable_action(code, code.rfind("unused").unwrap()).is_none());
     }
 }
 

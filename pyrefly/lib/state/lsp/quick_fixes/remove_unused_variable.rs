@@ -19,6 +19,7 @@ use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 
 use crate::ModuleInfo;
+use crate::state::lsp::quick_fixes::extract_shared::find_enclosing_function;
 use crate::state::lsp::quick_fixes::extract_shared::line_indent_and_start;
 use crate::state::lsp::quick_fixes::extract_shared::needs_pass_after_removal;
 use crate::state::lsp::quick_fixes::extract_shared::statement_removal_range;
@@ -31,6 +32,15 @@ pub(crate) fn remove_unused_variable_code_action(
     unused_range: TextRange,
 ) -> Option<(String, Module, TextRange, String)> {
     if Ast::is_intentionally_unused(unused_name) {
+        return None;
+    }
+    let function = find_enclosing_function(ast, unused_range)?;
+    // Replacing a parameter releases its previous value even when the initializer is pure.
+    if function
+        .parameters
+        .iter()
+        .any(|parameter| parameter.name().id().as_str() == unused_name)
+    {
         return None;
     }
     let context = find_unused_assignment_context(&ast.body, unused_range)?;
