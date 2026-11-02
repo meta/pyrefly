@@ -540,6 +540,64 @@ assert_type(C.class_method(1), str | Awaitable[str])
 );
 
 testcase!(
+    bug = "Direct aggregate calls repeat reference deprecation warnings",
+    test_deprecated_aggregate_callee,
+    r#"
+from collections.abc import Callable
+from typing import assert_type
+from warnings import deprecated
+
+@deprecated("Use new instead")
+def old(value: int) -> int: ...
+
+def new(value: int) -> int: ...
+
+def select(flag: bool, cb: Callable[[int], int] | None) -> None:
+    assert_type((old if flag else new)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
+    assert_type((old or new)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
+    assert_type((old if flag else old)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated  # E: `old` is deprecated
+    assert_type((cb or old)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
+    assert_type((cb or (old if flag else new))(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
+    assert_type((chosen := old if flag else new)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
+    (old if flag else 0)(1)  # E: `old` is deprecated  # E: `old` is deprecated  # E: Expected a callable
+    "#,
+);
+
+testcase!(
+    test_deprecated_aggregate_call_only_metadata,
+    r#"
+from collections.abc import Callable
+from typing import Protocol, assert_type, overload
+from warnings import deprecated
+
+class P(Protocol):
+    @deprecated("Deprecated callback")
+    def __call__(self, value: int) -> int: ...
+
+def dec(fn: Callable[[int], int]) -> P: ...
+
+@dec
+def wrapped(value: int) -> int: ...
+
+@overload
+@deprecated("Deprecated int overload")
+def overloaded(value: int) -> int: ...
+@overload
+def overloaded(value: str) -> str: ...
+def overloaded(value: int | str) -> int | str: ...
+
+def invoke(flag: bool, p: P, q: P) -> None:
+    assert_type((p if flag else q)(1), int)  # E: Deprecated callback
+    assert_type((p or q)(1), int)  # E: Deprecated callback
+    assert_type((wrapped if flag else p)(1), int)  # E: Deprecated callback
+    assert_type((wrapped or p)(1), int)  # E: Deprecated callback
+    assert_type((overloaded if flag else overloaded)(1), int)  # E: Deprecated int overload
+    assert_type((overloaded or overloaded)(1), int)  # E: Deprecated int overload
+    assert_type((overloaded if flag else overloaded)(""), str)
+    "#,
+);
+
+testcase!(
     test_deprecated_call_3_12,
     test_env_3_12(),
     r#"
