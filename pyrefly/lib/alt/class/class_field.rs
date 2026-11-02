@@ -79,7 +79,6 @@ use crate::error::context::ErrorContext;
 use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
 use crate::error::signature_diff::render_signature_diff;
-use crate::error::style::ErrorStyle;
 use crate::solver::solver::SubsetError;
 use crate::types::annotation::Annotation;
 use crate::types::annotation::Qualifier;
@@ -5968,7 +5967,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .is_some_and(|meta| meta.flags.is_cached_property) =>
             {
                 // An invalid getter's recovery type is not evidence of compatibility.
-                let errors = ErrorCollector::new(self.module().dupe(), ErrorStyle::Delayed);
+                let errors = self.error_collector();
                 let value =
                     self.call_property_getter(getter.clone(), TextRange::default(), &errors, None);
                 if errors.has_hard() {

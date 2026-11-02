@@ -1067,7 +1067,7 @@ class Compatible(Base):
 
 class Incompatible(Base):
     @cached_property
-    def x(self) -> str:  # pyrefly: ignore[bad-override-mutable-attribute]  # E: Class member `Incompatible.x` overrides parent class `Base` in an inconsistent manner
+    def x(self) -> str:  # E: Class member `Incompatible.x` overrides parent class `Base` in an inconsistent manner
         return "wrong"
     "#,
 );
