@@ -841,3 +841,18 @@ class Foo(ABC):
     def elided(self) -> None: ...
 "#,
 );
+
+testcase!(
+    test_abstract_method_with_implementation_no_type_check,
+    TestEnv::new().enable_abstract_method_with_implementation_error(),
+    r#"
+from abc import ABC, abstractmethod
+from typing import no_type_check
+
+class Foo(ABC):
+    @no_type_check
+    @abstractmethod
+    def implemented(self) -> int:
+        return 1
+"#,
+);

@@ -810,6 +810,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if def.defining_cls.is_some()
             && def.metadata.flags.is_abstract_method
             && def.metadata.flags.body_kind == BodyKind::Other
+            && !def.metadata.flags.has_no_type_check
         {
             self.error(
                 errors,
