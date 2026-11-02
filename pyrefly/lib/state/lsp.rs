@@ -3692,7 +3692,9 @@ impl<'a> Transaction<'a> {
         // Actions such as missing-`@override` and context-manager annotations
         // carry multiple edits that must apply together.
         let mut multi_actions: Vec<(String, Vec<(Module, TextRange, String)>)> = Vec::new();
-        if let Some(actions) = self.implement_abstract_members_code_actions(handle, range) {
+        if let Some(actions) =
+            self.implement_abstract_members_code_actions(handle, range, import_format)
+        {
             multi_actions.extend(
                 actions
                     .into_iter()
@@ -4208,9 +4210,13 @@ impl<'a> Transaction<'a> {
         &self,
         handle: &Handle,
         selection: TextRange,
+        import_format: ImportFormat,
     ) -> Option<Vec<LocalRefactorCodeAction>> {
         quick_fixes::implement_abstract_members::implement_abstract_members_code_actions(
-            self, handle, selection,
+            self,
+            handle,
+            selection,
+            import_format,
         )
     }
 

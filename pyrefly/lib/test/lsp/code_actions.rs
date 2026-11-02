@@ -658,40 +658,20 @@ fn compute_extract_superclass_actions(
 
 fn compute_implement_abstract_actions(
     code: &str,
+    assert_zero_errors: bool,
 ) -> (
     ModuleInfo,
     Vec<Vec<(Module, TextRange, String)>>,
     Vec<String>,
 ) {
     let (handles, state) =
-        mk_multi_file_state_assert_no_errors(&[("main", code)], Require::Everything);
+        mk_multi_file_state(&[("main", code)], Require::Everything, assert_zero_errors);
     let handle = handles.get("main").unwrap();
     let transaction = state.transaction();
     let module_info = transaction.get_module_info(handle).unwrap();
     let selection = find_marked_range_with(code, "# ACTION-START", "# ACTION-END");
     let actions = transaction
-        .implement_abstract_members_code_actions(handle, selection)
-        .unwrap_or_default();
-    let edit_sets: Vec<Vec<(Module, TextRange, String)>> =
-        actions.iter().map(|action| action.edits.clone()).collect();
-    let titles = actions.iter().map(|action| action.title.clone()).collect();
-    (module_info, edit_sets, titles)
-}
-
-fn compute_implement_abstract_actions_allow_errors(
-    code: &str,
-) -> (
-    ModuleInfo,
-    Vec<Vec<(Module, TextRange, String)>>,
-    Vec<String>,
-) {
-    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Everything, false);
-    let handle = handles.get("main").unwrap();
-    let transaction = state.transaction();
-    let module_info = transaction.get_module_info(handle).unwrap();
-    let selection = find_marked_range_with(code, "# ACTION-START", "# ACTION-END");
-    let actions = transaction
-        .implement_abstract_members_code_actions(handle, selection)
+        .implement_abstract_members_code_actions(handle, selection, ImportFormat::Absolute)
         .unwrap_or_default();
     let edit_sets: Vec<Vec<(Module, TextRange, String)>> =
         actions.iter().map(|action| action.edits.clone()).collect();
@@ -4543,29 +4523,25 @@ class Sub(Super):
 #[test]
 fn push_member_down_basic() {
     let code = r#"
-from abc import ABC
-
 class Base:
     # MOVE-START
     def foo(self):
         pass
     # MOVE-END
 
-class Child(Base, ABC):
+class Child(Base):
     pass
 "#;
     let (module_info, actions, titles) = compute_push_down_actions(code);
     assert_eq!(vec!["Push `foo` down to `Child`"], titles);
     let updated = apply_refactor_edits_for_module(&module_info, &actions[0]);
     let expected = r#"
-from abc import ABC
-
 class Base:
     # MOVE-START
     pass
     # MOVE-END
 
-class Child(Base, ABC):
+class Child(Base):
     def foo(self):
         pass
 "#;
@@ -5189,36 +5165,44 @@ x = foo()
 
 #[test]
 fn implement_abstract_members_preserves_class_body() {
+    let base = "from abc import ABC, abstractmethod\nclass Base(ABC):\n    @abstractmethod\n    def foo(self) -> int: ...\n";
+    // A suite on the header line has no line to insert into.
+    for child in [
+        "class Child(Base): pass",
+        "class Child(Base): pass;",
+        "class Child(Base): \"\"\"Child doc.\"\"\"",
+        "class Child(Base): pass; value = 1",
+        "class Child(\n    Base,\n): pass",
+    ] {
+        let code = format!("{base}{child}\n");
+        let after =
+            implement_abstract_members_at(TestEnv::new(), &[("main", &code)], "class Child");
+        assert_eq!(after, None, "{code}");
+    }
     for (body, expected) in [
-        ("pass", ""),
-        ("pass;", ""),
-        ("\"\"\"Child doc.\"\"\"", "    \"\"\"Child doc.\"\"\"\n"),
         (
-            "\n    \"\"\"Child doc.\"\"\"",
+            "    \"\"\"Child doc.\"\"\"",
+            "    \"\"\"Child doc.\"\"\"\n\n",
+        ),
+        (
+            "    \"\"\"Child doc.\"\"\"\n    pass",
             "    \"\"\"Child doc.\"\"\"\n",
         ),
-        ("pass; value = 1", "    pass; value = 1\n"),
         (
-            "\n    \"\"\"Child doc.\"\"\"; pass",
-            "    \"\"\"Child doc.\"\"\"; pass\n",
+            "    \"\"\"Child doc.\"\"\"; pass",
+            "    \"\"\"Child doc.\"\"\"; pass\n\n",
         ),
     ] {
-        let separator = if body.starts_with('\n') { "" } else { " " };
-        let code = format!(
-            "from abc import ABC, abstractmethod\nclass Base(ABC):\n    @abstractmethod\n    def foo(self) -> int: ...\n# ACTION-START\nclass Child(Base):{separator}{body}"
+        let code = format!("{base}class Child(Base):\n{body}");
+        let after =
+            implement_abstract_members_at(TestEnv::new(), &[("main", &code)], "class Child")
+                .unwrap();
+        assert!(
+            after.ends_with(&format!(
+                "class Child(Base):\n{expected}    def foo(self) -> int:\n        raise NotImplementedError\n"
+            )),
+            "{after}"
         );
-        let (handles, state) = mk_multi_file_state(&[("main", &code)], Require::Everything, false);
-        let handle = &handles["main"];
-        let transaction = state.transaction();
-        let info = transaction.get_module_info(handle).unwrap();
-        let start = TextSize::try_from(code.find("class Child").unwrap()).unwrap();
-        let actions = transaction
-            .implement_abstract_members_code_actions(handle, TextRange::empty(start))
-            .unwrap();
-        let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
-        assert!(after.contains(&format!(
-            "class Child(Base):\n{expected}    def foo(self) -> int:\n        raise NotImplementedError\n"
-        )), "{after}");
         mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
     }
 }
@@ -5243,7 +5227,7 @@ class Outer:
 "#
     .replace("    ", "\t")
     .replace('\n', "\r\n");
-    let (info, actions, _) = compute_implement_abstract_actions_allow_errors(&code);
+    let (info, actions, _) = compute_implement_abstract_actions(&code, false);
     let after = apply_refactor_edits_for_module(&info, &actions[0]);
     let normalized = after.replace("\r\n", "\n");
     for expected in [
@@ -5310,6 +5294,7 @@ class Base[T](ABC):
         .implement_abstract_members_code_actions(
             handle,
             find_marked_range_with(code, "# ACTION-START", "# ACTION-END"),
+            ImportFormat::Absolute,
         )
         .unwrap();
     let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
@@ -5373,6 +5358,7 @@ class Base(ABC):
                 .implement_abstract_members_code_actions(
                     handle,
                     find_marked_range_with(&code, "# ACTION-START", "# ACTION-END"),
+                    ImportFormat::Absolute,
                 )
                 .unwrap();
             let edits = &actions[0].edits;
@@ -5425,6 +5411,7 @@ fn implement_abstract_members_resolves_import_aliases_and_collisions() {
             .implement_abstract_members_code_actions(
                 handle,
                 find_marked_range_with(&code, "# ACTION-START", "# ACTION-END"),
+                ImportFormat::Absolute,
             )
             .unwrap();
         let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
@@ -5453,7 +5440,7 @@ class Child(Proto):
     pass
 # ACTION-END
 "#;
-    let (info, actions, _) = compute_implement_abstract_actions_allow_errors(code);
+    let (info, actions, _) = compute_implement_abstract_actions(code, false);
     let after = apply_refactor_edits_for_module(&info, &actions[0]);
     assert!(
         after.contains("class Child(Proto):\n    count: ClassVar[int]\n"),
@@ -5479,12 +5466,12 @@ class Base(ABC):
         """Bar doc."""
         ...
 
+# ACTION-START
 class Child(Base):
-    # ACTION-START
     pass
-    # ACTION-END
+# ACTION-END
 "#;
-    let (module_info, actions, titles) = compute_implement_abstract_actions(code);
+    let (module_info, actions, titles) = compute_implement_abstract_actions(code, true);
     assert_eq!(vec!["Implement abstract members"], titles);
     let edits = actions.first().expect("missing abstract member edits");
     let after = apply_refactor_edits_for_module(&module_info, edits);
@@ -5504,8 +5491,8 @@ class Base(ABC):
         """Bar doc."""
         ...
 
+# ACTION-START
 class Child(Base):
-    # ACTION-START
     @property
     def bar(self) -> int:
         """Bar doc."""
@@ -5514,7 +5501,7 @@ class Child(Base):
     def foo(self, x: int) -> str:
         """Foo doc."""
         raise NotImplementedError
-    # ACTION-END
+# ACTION-END
 "#,
         after
     );
@@ -5535,12 +5522,12 @@ class Proto(Protocol):
         """Bar doc."""
         ...
 
+# ACTION-START
 class Impl(Proto):
-    # ACTION-START
     pass
-    # ACTION-END
+# ACTION-END
 "#;
-    let (module_info, actions, titles) = compute_implement_abstract_actions_allow_errors(code);
+    let (module_info, actions, titles) = compute_implement_abstract_actions(code, false);
     assert_eq!(vec!["Implement abstract members"], titles);
     let edits = actions.first().expect("missing protocol member edits");
     let after = apply_refactor_edits_for_module(&module_info, edits);
@@ -5558,8 +5545,8 @@ class Proto(Protocol):
         """Bar doc."""
         ...
 
+# ACTION-START
 class Impl(Proto):
-    # ACTION-START
     @property
     def bar(self) -> int:
         """Bar doc."""
@@ -5568,7 +5555,7 @@ class Impl(Proto):
     def foo(self, x: int) -> str:
         """Foo doc."""
         raise NotImplementedError
-    # ACTION-END
+# ACTION-END
 "#,
         after
     );
@@ -5587,8 +5574,11 @@ fn implement_abstract_members_at(
     let position = TextSize::try_from(code.find(cursor).unwrap()).unwrap();
     let transaction = state.transaction();
     let info = transaction.get_module_info(handle).unwrap();
-    let actions =
-        transaction.implement_abstract_members_code_actions(handle, TextRange::empty(position))?;
+    let actions = transaction.implement_abstract_members_code_actions(
+        handle,
+        TextRange::empty(position),
+        ImportFormat::Absolute,
+    )?;
     Some(apply_refactor_edits_for_module(&info, &actions[0].edits))
 }
 
@@ -5607,9 +5597,15 @@ class Base(ABC):
 class Child(Base):
     pass
 "#;
-    let after = implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child");
-    // BUG: the `*args: P.args, **kwargs: P.kwargs` signature removes the whole action.
-    assert_eq!(after, None);
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    assert!(
+        after.ends_with(
+            "class Child(Base):\n    def named[**P](self, args: int, *args_1: P.args, **kwargs: P.kwargs) -> None:\n        raise NotImplementedError\n\n    def other(self) -> int:\n        raise NotImplementedError\n\n    def run[**P, R](self, fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:\n        raise NotImplementedError\n"
+        ),
+        "{after}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
 }
 
 #[test]
@@ -5630,15 +5626,28 @@ class Child(Base[[int, str]]):
 class Child2(Base[...]):
     pass
 "#;
-    // BUG: a specialized `ParamSpec` signature removes the whole action.
-    assert_eq!(
-        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child("),
-        None
+    let child =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child(").unwrap();
+    assert!(
+        child.contains(
+            "class Child(Base[[int, str]]):\n    def run(self, *args: Any, **kwargs: Any) -> None:\n        raise NotImplementedError\n\n    def wrap(self, fn: Callable[..., None]) -> None:\n"
+        ),
+        "{child}"
     );
-    assert_eq!(
-        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child2"),
-        None
+    assert!(
+        child.contains("    def wrap_named(self, arg2: int, *args: Any, **kwargs: Any) -> None:\n"),
+        "{child}"
     );
+    let child2 =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child2").unwrap();
+    assert!(
+        child2.contains(
+            "class Child2(Base[...]):\n    def run(self, *args: Any, **kwargs: Any) -> None:\n        raise NotImplementedError\n\n    def wrap(self, fn: Callable[Concatenate[int, ...], None]) -> None:\n"
+        ),
+        "{child2}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &child)], Require::Everything);
+    mk_multi_file_state_assert_no_errors(&[("main", &child2)], Require::Everything);
 }
 
 #[test]
@@ -5651,22 +5660,28 @@ class Base[**P](ABC):
 class Child(Base[[str]]):
     pass
 "#;
-    // BUG: a specialized `ParamSpec` signature removes the whole action.
-    assert_eq!(
-        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child"),
-        None
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    // Python cannot write the required `str` parameter after the optional `x`.
+    assert!(
+        after.contains("    def f(self, x: int = 0, *args: Any, **kwargs: Any) -> None:\n"),
+        "{after}"
     );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
 }
 
 #[test]
 fn implement_abstract_members_legacy_type_var_before_python_3_12() {
     let base = r#"
 from abc import ABC, abstractmethod
-from typing import TypeVar
+from typing import Callable, ParamSpec, TypeVar
+P = ParamSpec("P")
 T = TypeVar("T")
 class Base(ABC):
     @abstractmethod
     def f(self, x: T) -> T: ...
+    @abstractmethod
+    def g(self, fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T: ...
 "#;
     let code = "from base import Base\nclass Child(Base):\n    pass\n";
     let after = implement_abstract_members_at(
@@ -5675,10 +5690,28 @@ class Base(ABC):
         "class Child",
     )
     .unwrap();
-    // BUG: PEP 695 syntax is a syntax error before Python 3.12.
     assert_eq!(
         after,
-        "from base import Base\nclass Child(Base):\n    def f[T](self, x: T) -> T:\n        raise NotImplementedError\n"
+        "from typing import Any\nfrom typing import Callable\nfrom base import Base\nclass Child(Base):\n    def f(self, x: Any) -> Any:\n        raise NotImplementedError\n\n    def g(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:\n        raise NotImplementedError\n"
+    );
+    mk_multi_file_state_with_env(
+        TestEnv::new_with_version(PythonVersion::new(3, 11, 0)),
+        &[("base", base), ("main", &after)],
+        Require::Everything,
+        true,
+    );
+    // Python 3.12 and later can declare the type parameters.
+    let after = implement_abstract_members_at(
+        TestEnv::new_with_version(PythonVersion::new(3, 12, 0)),
+        &[("base", base), ("main", code)],
+        "class Child",
+    )
+    .unwrap();
+    assert!(
+        after.ends_with(
+            "class Child(Base):\n    def f[T](self, x: T) -> T:\n        raise NotImplementedError\n\n    def g[**P, T](self, fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:\n        raise NotImplementedError\n"
+        ),
+        "{after}"
     );
 }
 
@@ -5696,13 +5729,13 @@ class Child(Base):
 "#;
     let after =
         implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
-    // BUG: without a `yield`, the generated `async def` is a coroutine, not an async generator.
     assert!(
         after.ends_with(
-            "class Child(Base):\n    async def items(self) -> AsyncIterator[int]:\n        raise NotImplementedError\n"
+            "class Child(Base):\n    def items(self) -> AsyncIterator[int]:\n        raise NotImplementedError\n"
         ),
         "{after}"
     );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
 }
 
 #[test]
@@ -5720,15 +5753,17 @@ class Base(ABC):
 class Child(Base):
     pass
 "#;
+    // A stub cannot declare type parameters that the solver moved onto a returned callable,
+    // so they become `Any`.
     let after =
         implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
-    // BUG: `T` is no longer declared by the generated methods.
     assert!(
         after.ends_with(
-            "class Child(Base):\n    def factory(self) -> Callable[[T], T]:\n        raise NotImplementedError\n\n    def mixed[U = int](self, value: U) -> Callable[[T], T]:\n        raise NotImplementedError\n\n    def nested(self) -> Callable[[], Callable[[T], T]]:\n        raise NotImplementedError\n"
+            "class Child(Base):\n    def factory(self) -> Callable[[Any], Any]:\n        raise NotImplementedError\n\n    def mixed(self, value: Any) -> Callable[[Any], Any]:\n        raise NotImplementedError\n\n    def nested(self) -> Callable[[], Callable[[Any], Any]]:\n        raise NotImplementedError\n"
         ),
         "{after}"
     );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
 }
 
 #[test]
@@ -5748,13 +5783,9 @@ class Base(ABC):
         TestEnv::new(),
         &[("base", base), ("main", code)],
         "class Child",
-    )
-    .unwrap();
-    // BUG: `base = 42` rebinds the imported module before `base.Payload` is evaluated.
-    assert_eq!(
-        after,
-        "import base\nfrom base import Base\nclass Payload: pass\nbase = 42\nclass Child(Base):\n    def bar(self) -> int:\n        raise NotImplementedError\n\n    def foo(self, value: base.Payload) -> None:\n        raise NotImplementedError\n"
     );
+    // The fallback `import base` would be shadowed by `base = 42`, and `Payload` is bound locally.
+    assert_eq!(after, None);
 }
 
 #[test]
@@ -5784,11 +5815,11 @@ class Child(Base):
     let after =
         implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
     let child = &after[after.find("class Child").unwrap()..];
-    // BUG: the overload implementation follows two blank lines, the setter repeats the
-    // getter's docstring, and no blank line separates the stubs from `existing`.
     assert_eq!(
         child,
         r#"class Child(Base):
+    existing = 1
+
     @overload
     @classmethod
     def make(cls, x: int) -> int:
@@ -5798,7 +5829,6 @@ class Child(Base):
     @classmethod
     def make(cls, x: str) -> str:
         ...
-
 
     @classmethod
     def make(cls, *args, **kwargs) -> Any:
@@ -5811,9 +5841,7 @@ class Child(Base):
 
     @value.setter
     def value(self, value: int) -> None:
-        """Value doc."""
         raise NotImplementedError
-    existing = 1
 "#
     );
 }
@@ -5836,10 +5864,9 @@ class SubProto(Proto, Protocol):
     let offered =
         |cursor| implement_abstract_members_at(TestEnv::new(), &[("main", code)], cursor).is_some();
     assert!(offered("class Child"));
-    // BUG: the action is also offered in the class body, where it runs on every cursor move.
-    assert!(offered("value = 1"));
-    // BUG: implementing members turns a protocol's members into concrete defaults.
-    assert!(offered("class SubProto"));
+    assert!(offered("(Base)"));
+    assert!(!offered("value = 1"));
+    assert!(!offered("class SubProto"));
 }
 
 #[test]

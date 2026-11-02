@@ -21,7 +21,7 @@ use crate::test::lsp::lsp_interaction::util::get_test_files_root;
 fn test_implement_abstract_members_action_filter() {
     let root = get_test_files_root();
     let path = root.path().join("abstract_members.py");
-    fs::write(&path, "from abc import ABC, abstractmethod\nclass Base(ABC):\n    @abstractmethod\n    def foo(self) -> int: ...\nclass Child(Base): pass\n").unwrap();
+    fs::write(&path, "from abc import ABC, abstractmethod\nclass Base(ABC):\n    @abstractmethod\n    def foo(self) -> int: ...\nclass Child(Base):\n    pass\n").unwrap();
     let uri = Uri::from_file_path(&path).unwrap();
     let mut interaction = LspInteraction::new();
     interaction.set_root(root.path().to_path_buf());

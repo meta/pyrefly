@@ -803,6 +803,124 @@ class Combined(Mixin[int], Left):
 "#,
 );
 
+// Diamond base specializations that differ only in a contravariant position are
+// consistent: `Base[wide]` is a subtype of `Base[narrow]` there, so inheriting
+// through both paths is legal (pyright accepts this too).
+testcase!(
+    test_diamond_inconsistent_targs_allowed_by_contravariance,
+    r#"
+from typing import Generic, TypeVar
+
+ValueTContra = TypeVar("ValueTContra", contravariant=True)
+ValueTCo = TypeVar("ValueTCo", covariant=True)
+
+class Base(Generic[ValueTContra, ValueTCo]): ...
+
+class RangeBase(Base[ValueTContra, ValueTCo], Generic[ValueTContra, ValueTCo]): ...
+
+class WideParam(Base[int | str, int]): ...
+
+class NarrowRange(RangeBase[int, int], WideParam): ...
+"#,
+);
+
+testcase!(
+    test_diamond_inconsistent_targs_contravariant_still_conflicts,
+    r#"
+from typing import Generic, TypeVar
+
+ValueTContra = TypeVar("ValueTContra", contravariant=True)
+
+class Base(Generic[ValueTContra]): ...
+
+class IntBase(Base[int]): ...
+
+class StrBase(Base[str]): ...
+
+class Both(IntBase, StrBase): ...  # E: Class `Both` has inconsistent type arguments for base class `Base`: `Base[int]` and `Base[str]`
+"#,
+);
+
+// Later specializations are checked for assignability to the first one seen in
+// walk order, so a covariant diamond is legal only when the later (wider) base
+// is assignable to the first (narrower) one — and not the reverse.
+testcase!(
+    test_diamond_covariant_targs_wider_must_follow_narrower,
+    r#"
+from typing import Generic, TypeVar
+
+ValueTCo = TypeVar("ValueTCo", covariant=True)
+
+class Base(Generic[ValueTCo]): ...
+
+class NarrowBase(Base[int]): ...
+
+class WideBase(Base[int | str]): ...
+
+class WideFirst(WideBase, NarrowBase): ...
+
+class NarrowFirst(NarrowBase, WideBase): ...  # E: Class `NarrowFirst` has inconsistent type arguments for base class `Base`: `Base[int]` and `Base[int | str]`
+"#,
+);
+
+// Incompatible specializations cannot slip through by being compatible
+// position-by-position: each later specialization must be assignable to the
+// first as a whole.
+testcase!(
+    test_diamond_incompatible_specializations_conflict,
+    r#"
+from typing import Generic, TypeVar
+
+ValueTCo = TypeVar("ValueTCo", covariant=True)
+OtherTCo = TypeVar("OtherTCo", covariant=True)
+
+class Base(Generic[ValueTCo, OtherTCo]): ...
+
+class A(Base[int, object]): ...
+
+class B(Base[object, int]): ...
+
+class C(A, B): ...  # E: Class `C` has inconsistent type arguments for base class `Base`: `Base[int, object]` and `Base[object, int]`
+"#,
+);
+
+// Each specialization is checked against the first one seen, not the previous
+// one, so an incompatible later base is caught regardless of what came between.
+testcase!(
+    test_diamond_checked_against_first_specialization,
+    r#"
+from typing import Generic, TypeVar
+
+ValueTCo = TypeVar("ValueTCo", covariant=True)
+
+class Base(Generic[ValueTCo]): ...
+
+class A(Base[int]): ...
+
+class B(Base[object]): ...
+
+class X(Base[str]): ...
+
+class C(A, B, X): ...  # E: Class `C` has inconsistent type arguments for base class `Base`: `Base[int]` and `Base[object]`  # E: Class `C` has inconsistent type arguments for base class `Base`: `Base[int]` and `Base[str]`
+
+class D(B, A, X): ...
+"#,
+);
+
+testcase!(
+    test_diamond_inconsistent_targs_any_is_gradual,
+    r#"
+from typing import Any, Generic, TypeVar
+
+T = TypeVar("T")
+
+class A(Generic[T]): ...
+class B(A[int]): ...
+class C(A[Any]): ...
+class D(B, C): ...
+"#,
+);
+
 testcase!(
     test_typevar_union_with_type_of_typevar,
     r#"
