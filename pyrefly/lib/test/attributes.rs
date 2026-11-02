@@ -4713,6 +4713,60 @@ C.instance_var = 7  # pyrefly: ignore[instance-var-assign]
     "#,
 );
 
+testcase!(
+    bug = "TypedDict fields lose instance-variable assignment diagnostics",
+    test_instance_var_assign_typed_dict,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import NotRequired, TypedDict, assert_type
+
+class TD(TypedDict):
+    x: int
+    optional: NotRequired[int]
+
+class Child(TD):
+    y: str
+
+class Grandchild(Child):
+    pass
+
+assert_type(TD.x, int)
+TD.x = 1
+Child.x = 2
+Grandchild.x = 3
+Child.y = "value"
+TD.optional = 4
+TD.x = "oops"  # E: `Literal['oops']` is not assignable to attribute `x` with type `int`
+TD.x = 5  # pyrefly: ignore[instance-var-assign]
+
+class Partial(TypedDict, total=False):
+    x: int
+
+Partial.x = 6
+
+# Reads and dictionary-item writes are unaffected.
+td: TD = {"x": 1}
+assert_type(td["x"], int)
+td["x"] = 2
+
+class Metadata(TypedDict):
+    __module__: str
+    __doc__: str | None
+    __annotations__: dict[str, object]
+
+Metadata.__module__ = "renamed"
+Metadata.__doc__ = "Documentation"
+Metadata.__annotations__ = {}
+
+class MetadataChild(Metadata):
+    pass
+
+MetadataChild.__module__ = "renamed"
+MetadataChild.__doc__ = None
+MetadataChild.__annotations__ = {}
+"#,
+);
+
 // Non-instance-variable fields must NOT trigger the new kind even when it is
 // enabled: unannotated assignments and ClassVars are class variables,
 // staticmethods become unannotated ClassAttributes, instance-only attributes
@@ -4772,9 +4826,22 @@ E().read_only_use = 2
 testcase!(
     test_instance_var_assign_off_by_default,
     r#"
+from typing import Literal, TypedDict, assert_type
+
 class C:
     instance_var: int
 C.instance_var = 3
+
+class TD(TypedDict):
+    x: int
+
+class Child(TD):
+    pass
+
+TD.x = 1
+Child.x = 2
+assert_type(TD.x, Literal[1])
+assert_type(Child.x, Literal[2])
     "#,
 );
 
