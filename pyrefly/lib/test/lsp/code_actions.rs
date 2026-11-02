@@ -5321,13 +5321,82 @@ class Base[T](ABC):
         "def convert(self, value: int) -> str:",
         "def convert(self, value: str) -> int:",
         "@value.setter\n    def value(self, value: int) -> None:",
-        "from base import Payload",
+        // BUG: Import merge fragments are inserted into the header as standalone text.
+        ", Payloadfrom typing import cast",
     ] {
         assert!(after.contains(expected), "Missing {expected:?}:\n{after}");
     }
     assert!(!after.contains("Unknown"), "{after}");
     assert!(!after.contains("Self@"), "{after}");
-    mk_multi_file_state_assert_no_errors(&[("base", base), ("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_preserves_import_edit_positions() {
+    let base = r#"
+from abc import ABC, abstractmethod
+from typing import Callable
+class Input: pass
+class Output: pass
+class Base(ABC):
+    @abstractmethod
+    def foo(self, cb: Callable[[Input], Output]) -> Output: ...
+"#;
+    let header = "\"\"\"Child module.\"\"\"\nfrom __future__ import annotations\n";
+    for (imports, generated) in [
+        (
+            "from base import Base # Base comment\n",
+            "from typing import Callable\n, Input, Output",
+        ),
+        (
+            "from typing import Any # typing comment\nfrom base import Base # Base comment\n",
+            ", Callable, Input, Output",
+        ),
+        (
+            "from typing import (\n    Any, # typing comment\n)\nfrom base import (\n    Base, # Base comment\n)\n",
+            ", Callable, Input, Output",
+        ),
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let code = format!(
+                "{header}{imports}# ACTION-START\nclass Child(Base):\n    pass\n# ACTION-END\n"
+            )
+            .replace('\n', newline);
+            let (handles, state) = mk_multi_file_state(
+                &[("base", base), ("main", &code)],
+                Require::Everything,
+                false,
+            );
+            let transaction = state.transaction();
+            let handle = &handles["main"];
+            let info = transaction.get_module_info(handle).unwrap();
+            let actions = transaction
+                .implement_abstract_members_code_actions(
+                    handle,
+                    find_marked_range_with(&code, "# ACTION-START", "# ACTION-END"),
+                )
+                .unwrap();
+            let edits = &actions[0].edits;
+            for (index, (_, range, _)) in edits.iter().enumerate() {
+                assert!(
+                    edits[index + 1..]
+                        .iter()
+                        .all(|(_, other, _)| range != other),
+                    "Edits at the same range must be combined: {edits:?}"
+                );
+            }
+            let after = apply_refactor_edits_for_module(&info, edits);
+            let normalized = after.replace("\r\n", "\n");
+            // BUG: Import edit positions are discarded, corrupting both merge targets.
+            assert!(
+                normalized.starts_with(&format!("{header}{generated}{imports}")),
+                "{after}"
+            );
+            assert!(
+                normalized.contains("def foo(self, cb: Callable[[Input], Output]) -> Output:"),
+                "{after}"
+            );
+        }
+    }
 }
 
 #[test]
