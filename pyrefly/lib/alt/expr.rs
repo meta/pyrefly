@@ -903,8 +903,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         type_form_context: Option<TypeFormContext<'_>>,
     ) -> TypeInfo {
-        // The value of an assignment expression is checked separately.
-        let mut check_deprecation = !matches!(x, Expr::Named(..));
+        // Assignment values and branches of conditional and boolean expressions are checked separately.
+        let mut check_deprecation = !matches!(x, Expr::Named(..) | Expr::If(..) | Expr::BoolOp(..));
         let res = match x {
             Expr::Name(x) => {
                 if Ast::is_synthesized_empty_name(x) {
@@ -1637,6 +1637,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Report references to deprecated classes, functions, and methods.
     fn check_for_deprecated_call(&self, ty: &Type, range: TextRange, errors: &ErrorCollector) {
+        if let Type::Union(union) = ty {
+            for member in &union.members {
+                self.check_for_deprecated_call(member, range, errors);
+            }
+            return;
+        }
         if ty.property_metadata().is_some() {
             // This prevents misfiring deprecation warnings on property setters and deleters.
             return;

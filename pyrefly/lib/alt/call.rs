@@ -945,8 +945,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
     ) {
-        if let Some(metadata) = target.function_metadata()
-            && let Some(deprecation) = &metadata.flags.deprecation
+        let Some(metadata) = target.function_metadata() else {
+            return;
+        };
+        // A callback's deprecated `__call__` applies to calls, not references to the callback.
+        let callback = if metadata.flags.deprecation.is_none()
+            && let FunctionKind::CallbackProtocol(cls) = &metadata.kind
+        {
+            self.instance_as_dunder_call(cls)
+        } else {
+            None
+        };
+        if let Some(deprecation) = metadata
+            .flags
+            .deprecation
+            .as_deref()
+            .or_else(|| callback.as_ref().and_then(Type::function_deprecation))
         {
             let header = format!(
                 "`{}` is deprecated",
