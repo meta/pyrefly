@@ -13,12 +13,45 @@ fn sqlalchemy_env() -> TestEnv {
     env.add_with_path(
         "sqlalchemy",
         "sqlalchemy/__init__.py",
-        "from . import orm\n",
+        r#"
+from . import orm
+from .sql.dml import Update as Update
+from .sql.elements import ColumnElement as ColumnElement
+from .sql.selectable import Select as Select
+def select(*entities: object) -> Select: ...
+def update(table: object) -> Update: ...
+"#,
     );
     env.add_with_path(
         "sqlalchemy.sql",
         "sqlalchemy/sql/__init__.py",
         "from . import sqltypes\nfrom . import type_api\n",
+    );
+    env.add_with_path(
+        "sqlalchemy.sql.elements",
+        "sqlalchemy/sql/elements.py",
+        r#"
+class ColumnElement[T]: ...
+"#,
+    );
+    env.add_with_path(
+        "sqlalchemy.sql.dml",
+        "sqlalchemy/sql/dml.py",
+        r#"
+class Update:
+    def where(self, *criteria: object) -> Update: ...
+    def values(self, **kwargs: object) -> Update: ...
+"#,
+    );
+    env.add_with_path(
+        "sqlalchemy.sql.selectable",
+        "sqlalchemy/sql/selectable.py",
+        r#"
+class Select:
+    def where(self, *criteria: object) -> Select: ...
+    def filter_by(self, **kwargs: object) -> Select: ...
+    def join(self, target: object) -> Select: ...
+"#,
     );
     env.add_with_path(
         "sqlalchemy.sql.type_api",
@@ -129,12 +162,30 @@ def mapped_column(
 "#,
     );
     env.add_with_path(
+        "sqlalchemy.orm.decl_api",
+        "sqlalchemy/orm/decl_api.py",
+        r#"
+from typing import dataclass_transform
+
+from ._orm_constructors import mapped_column
+
+class DeclarativeBase: ...
+
+@dataclass_transform(field_specifiers=(mapped_column,))
+class DCTransformDeclarative(type): ...
+
+class MappedAsDataclass(metaclass=DCTransformDeclarative): ...
+"#,
+    );
+    env.add_with_path(
         "sqlalchemy.orm",
         "sqlalchemy/orm/__init__.py",
         r#"
 from ._orm_constructors import mapped_column as mapped_column
 from .attributes import InstrumentedAttribute as InstrumentedAttribute
 from .base import Mapped as Mapped
+from .decl_api import DeclarativeBase as DeclarativeBase
+from .decl_api import MappedAsDataclass as MappedAsDataclass
 from .properties import MappedColumn as MappedColumn
 "#,
     );
@@ -350,91 +401,9 @@ assert_type(mapped_column(3), bytes)
 "#,
 );
 
-fn sqlalchemy_mapped_env() -> TestEnv {
-    let mut env = TestEnv::new();
-    env.add(
-        "sqlalchemy.orm._orm_constructors",
-        r#"
-from typing import Any
-
-def mapped_column(*args: Any, **kw: Any) -> Any: ...
-    "#,
-    );
-    env.add(
-        "sqlalchemy.orm.base",
-        r#"
-class Mapped[T]:
-    def __get__(self, instance, owner) -> T: ...
-    def __set__(self, instance, value: T) -> None: ...
-    def __delete__(self, instance) -> None: ...
-    "#,
-    );
-    env.add(
-        "sqlalchemy.sql.elements",
-        r#"
-class ColumnElement[T]: ...
-    "#,
-    );
-    env.add(
-        "sqlalchemy.sql.dml",
-        r#"
-class Update:
-    def where(self, *criteria: object) -> Update: ...
-    def values(self, **kwargs: object) -> Update: ...
-    "#,
-    );
-    env.add(
-        "sqlalchemy.sql.selectable",
-        r#"
-class Select:
-    def where(self, *criteria: object) -> Select: ...
-    def filter_by(self, **kwargs: object) -> Select: ...
-    def join(self, target: object) -> Select: ...
-    "#,
-    );
-    env.add_with_path(
-        "sqlalchemy.orm.decl_api",
-        "sqlalchemy/orm/decl_api.py",
-        r#"
-from typing import dataclass_transform
-
-from ._orm_constructors import mapped_column
-
-class DeclarativeBase: ...
-
-@dataclass_transform(field_specifiers=(mapped_column,))
-class DCTransformDeclarative(type): ...
-
-class MappedAsDataclass(metaclass=DCTransformDeclarative): ...
-        "#,
-    );
-    env.add_with_path(
-        "sqlalchemy.orm",
-        "sqlalchemy/orm/__init__.py",
-        r#"
-from .base import Mapped as Mapped
-from .decl_api import DeclarativeBase as DeclarativeBase
-from .decl_api import MappedAsDataclass as MappedAsDataclass
-from ._orm_constructors import mapped_column as mapped_column
-    "#,
-    );
-    env.add_with_path(
-        "sqlalchemy",
-        "sqlalchemy/__init__.py",
-        r#"
-from .sql.dml import Update as Update
-from .sql.elements import ColumnElement as ColumnElement
-from .sql.selectable import Select as Select
-def select(*entities: object) -> Select: ...
-def update(table: object) -> Update: ...
-    "#,
-    );
-    env
-}
-
 testcase!(
     test_sqlalchemy_mapped_is_always_descriptor,
-    sqlalchemy_mapped_env(),
+    sqlalchemy_env(),
     r#"
 from sqlalchemy.orm import DeclarativeBase, Mapped
 class Base(DeclarativeBase):
@@ -449,7 +418,7 @@ class User(Base):
 // Regression test for https://github.com/facebook/pyrefly/issues/1610
 testcase!(
     test_sqlalchemy_mapped_dataclass_mutable_default,
-    sqlalchemy_mapped_env(),
+    sqlalchemy_env(),
     r#"
 from sqlalchemy.orm import DeclarativeBase, Mapped, MappedAsDataclass, mapped_column
 
@@ -464,7 +433,7 @@ class Model(Base):
 
 testcase!(
     test_sqlalchemy_update_values_checks_mapped_fields,
-    sqlalchemy_mapped_env(),
+    sqlalchemy_env(),
     r#"
 import sqlalchemy as sa
 from sqlalchemy.orm import DeclarativeBase, Mapped
@@ -496,7 +465,7 @@ update(User).values(nam="alice")
 
 testcase!(
     test_sqlalchemy_update_values_checks_inherited_mapped_fields,
-    sqlalchemy_mapped_env(),
+    sqlalchemy_env(),
     r#"
 import sqlalchemy as sa
 from sqlalchemy.orm import DeclarativeBase, Mapped
@@ -524,7 +493,7 @@ sa.update(AdminUser).where(AdminUser.id == 1).values(deleted=False)  # E: Unexpe
 // Regression test for https://github.com/facebook/pyrefly/issues/1072
 testcase!(
     test_sqlalchemy_select_filter_by_checks_mapped_fields,
-    sqlalchemy_mapped_env(),
+    sqlalchemy_env(),
     r#"
 import sqlalchemy as sa
 from sqlalchemy import select
@@ -563,7 +532,7 @@ select_custom(User).filter_by(nam="alice")
 );
 
 fn sqlmodel_env() -> TestEnv {
-    let mut env = sqlalchemy_mapped_env();
+    let mut env = sqlalchemy_env();
     env.add_with_path(
         "sqlmodel",
         "sqlmodel/__init__.py",
