@@ -5,191 +5,14 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::env;
+
 use crate::test::util::TestEnv;
 use crate::testcase;
 
 fn sqlalchemy_env() -> TestEnv {
-    let mut env = TestEnv::new();
-    env.add_with_path(
-        "sqlalchemy",
-        "sqlalchemy/__init__.py",
-        r#"
-from . import orm
-from .sql.dml import Update as Update
-from .sql.elements import ColumnElement as ColumnElement
-from .sql.selectable import Select as Select
-def select(*entities: object) -> Select: ...
-def update(table: object) -> Update: ...
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.sql",
-        "sqlalchemy/sql/__init__.py",
-        "from . import sqltypes\nfrom . import type_api\n",
-    );
-    env.add_with_path(
-        "sqlalchemy.sql.elements",
-        "sqlalchemy/sql/elements.py",
-        r#"
-class ColumnElement[T]: ...
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.sql.dml",
-        "sqlalchemy/sql/dml.py",
-        r#"
-class Update:
-    def where(self, *criteria: object) -> Update: ...
-    def values(self, **kwargs: object) -> Update: ...
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.sql.selectable",
-        "sqlalchemy/sql/selectable.py",
-        r#"
-class Select:
-    def where(self, *criteria: object) -> Select: ...
-    def filter_by(self, **kwargs: object) -> Select: ...
-    def join(self, target: object) -> Select: ...
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.sql.type_api",
-        "sqlalchemy/sql/type_api.py",
-        r#"
-from typing import Generic, TypeVar
-
-_T = TypeVar("_T")
-
-class TypeEngine(Generic[_T]):
-    ...
-
-class TypeDecorator(TypeEngine[_T], Generic[_T]):
-    ...
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.sql.sqltypes",
-        "sqlalchemy/sql/sqltypes.py",
-        r#"
-from enum import Enum as PythonEnum
-from typing import Generic, TypeVar
-from .type_api import TypeEngine
-
-_T = TypeVar("_T")
-
-class String(TypeEngine[str]):
-    ...
-
-class Integer(TypeEngine[int]):
-    ...
-
-class Float(TypeEngine[float]):
-    ...
-
-class GenericType(TypeEngine[_T], Generic[_T]):
-    ...
-
-# SQLAlchemy itself inherits these conflicting TypeEngine arguments.
-class Enum(String, TypeEngine[str | PythonEnum]):  # E: Class `Enum` has inconsistent type arguments
-    def __init__(self, *enums: str | type[PythonEnum]) -> None:
-        ...
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.orm.attributes",
-        "sqlalchemy/orm/attributes.py",
-        r#"
-class InstrumentedAttribute[T]: ...
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.orm.base",
-        "sqlalchemy/orm/base.py",
-        r#"
-from typing import Any, Generic, TypeVar, overload
-from .attributes import InstrumentedAttribute
-
-_T = TypeVar("_T")
-
-class _MappedAnnotationBase(Generic[_T]): ...
-
-class Mapped(_MappedAnnotationBase[_T]):
-    @overload
-    def __get__(self, instance: None, owner: Any) -> InstrumentedAttribute[_T]: ...
-    @overload
-    def __get__(self, instance: object, owner: Any) -> _T: ...
-    def __get__(self, instance: object | None, owner: Any) -> InstrumentedAttribute[_T] | _T: ...
-    def __set__(self, instance: object, value: _T) -> None: ...
-
-class _DeclarativeMapped(Mapped[_T]): ...
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.orm.properties",
-        "sqlalchemy/orm/properties.py",
-        r#"
-from typing import Generic, TypeVar
-from .base import _DeclarativeMapped
-
-_T = TypeVar("_T")
-
-class MappedColumn(_DeclarativeMapped[_T]):
-    column: object
-
-    def __init__(self) -> None:
-        ...
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.orm._orm_constructors",
-        "sqlalchemy/orm/_orm_constructors.py",
-        r#"
-from typing import Any
-from sqlalchemy.sql.type_api import TypeEngine
-from .properties import MappedColumn
-
-def mapped_column(
-    __name_pos: str | TypeEngine[Any] | type[TypeEngine[Any]] | None = None,
-    __type_pos: TypeEngine[Any] | type[TypeEngine[Any]] | None = None,
-    *args: Any,
-    type_: TypeEngine[Any] | type[TypeEngine[Any]] | None = None,
-    nullable: bool | None = None,
-    primary_key: bool | None = False,
-    **kw: Any,
-) -> MappedColumn[Any]:
-    return MappedColumn()
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.orm.decl_api",
-        "sqlalchemy/orm/decl_api.py",
-        r#"
-from typing import dataclass_transform
-
-from ._orm_constructors import mapped_column
-
-class DeclarativeBase: ...
-
-@dataclass_transform(field_specifiers=(mapped_column,))
-class DCTransformDeclarative(type): ...
-
-class MappedAsDataclass(metaclass=DCTransformDeclarative): ...
-"#,
-    );
-    env.add_with_path(
-        "sqlalchemy.orm",
-        "sqlalchemy/orm/__init__.py",
-        r#"
-from ._orm_constructors import mapped_column as mapped_column
-from .attributes import InstrumentedAttribute as InstrumentedAttribute
-from .base import Mapped as Mapped
-from .decl_api import DeclarativeBase as DeclarativeBase
-from .decl_api import MappedAsDataclass as MappedAsDataclass
-from .properties import MappedColumn as MappedColumn
-"#,
-    );
-    env
+    let path = env::var("SQLALCHEMY_TEST_PATH").expect("SQLALCHEMY_TEST_PATH must be set");
+    TestEnv::new_with_site_package_paths(&[&path])
 }
 
 testcase!(
@@ -531,30 +354,9 @@ select_custom(User).filter_by(nam="alice")
     "#,
 );
 
-fn sqlmodel_env() -> TestEnv {
-    let mut env = sqlalchemy_env();
-    env.add_with_path(
-        "sqlmodel",
-        "sqlmodel/__init__.py",
-        r#"
-from typing import Any
-
-class SQLModel:
-    ...
-
-def Field(*args, **kwargs) -> Any:
-    ...
-
-def Relationship(*args, **kwargs) -> Any:
-    ...
-"#,
-    );
-    env
-}
-
 testcase!(
     test_sqlalchemy_update_values_checks_sqlmodel_fields,
-    sqlmodel_env(),
+    sqlalchemy_env(),
     r#"
 from uuid import UUID
 
@@ -576,7 +378,7 @@ update(Node).values(nope="a")  # E: Unexpected SQLAlchemy update field `nope`
 
 testcase!(
     test_sqlalchemy_update_values_checks_sqlmodel_fields_no_mapped,
-    sqlmodel_env(),
+    sqlalchemy_env(),
     r#"
 from sqlalchemy import update
 from sqlmodel import Field, SQLModel
@@ -596,7 +398,7 @@ update(Hero).values(nope="a")  # E: Unexpected SQLAlchemy update field `nope`
 
 testcase!(
     test_sqlalchemy_update_values_checks_sqlmodel_fields_without_mapped,
-    sqlmodel_env(),
+    sqlalchemy_env(),
     r#"
 from uuid import UUID
 
@@ -614,7 +416,7 @@ update(Node).values(nope="a")  # E: Unexpected SQLAlchemy update field `nope`
 
 testcase!(
     test_sqlalchemy_update_values_checks_sqlmodel_fields_inherited_fields,
-    sqlmodel_env(),
+    sqlalchemy_env(),
     r#"
 from sqlalchemy import update
 from sqlmodel import Field, SQLModel
@@ -634,7 +436,7 @@ update(Hero).values(nope="a")  # E: Unexpected SQLAlchemy update field `nope`
 
 testcase!(
     test_sqlalchemy_update_values_checks_sqlmodel_ignores_fields_past_table,
-    sqlmodel_env(),
+    sqlalchemy_env(),
     r#"
 from sqlalchemy import update
 from sqlmodel import Field, SQLModel
