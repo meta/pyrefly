@@ -201,7 +201,9 @@ impl Exports {
         &self.pytest_fixtures
     }
 
-    /// Look up a named fixture import without resolving unrelated wildcard imports.
+    /// Look up a fixture import by its Python name without resolving unrelated imports.
+    /// An explicit fixture name on a differently named imported function is not discoverable
+    /// from this module's metadata; discovering it would require inspecting other imports.
     pub(crate) fn pytest_fixture_import(&self, name: &Name) -> Option<(ModuleName, Name)> {
         match &self.definitions.definitions.get(name)?.style {
             DefinitionStyle::ImportAs(module, original) => Some((*module, original.clone())),

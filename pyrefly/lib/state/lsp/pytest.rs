@@ -6,6 +6,8 @@
  */
 
 use std::collections::HashSet;
+use std::iter::once;
+use std::iter::once_with;
 
 use pyrefly_build::handle::Handle;
 use pyrefly_python::module_name::ModuleName;
@@ -120,8 +122,10 @@ impl<'a> Transaction<'a> {
             })
             .collect();
         if definitions.is_empty() && preference.follow_pytest_conftest {
-            'conftests: for conftest_handle in pytest_conftest_handles(self, handle, preference) {
-                let mut target_handle = conftest_handle;
+            let candidates = once(handle.clone())
+                .chain(once_with(|| pytest_conftest_handles(self, handle, preference)).flatten());
+            'fixtures: for fixture_handle in candidates {
+                let mut target_handle = fixture_handle;
                 let mut target_name = identifier.id.clone();
                 let mut imported = false;
                 let mut seen = HashSet::new();
@@ -149,7 +153,7 @@ impl<'a> Transaction<'a> {
                             docstring_range: fixture.docstring_range,
                             display_name: Some(fixture.name.as_str().to_owned()),
                         });
-                        break 'conftests;
+                        break 'fixtures;
                     }
                     let Some((module, name)) = exports.pytest_fixture_import(&target_name) else {
                         break;

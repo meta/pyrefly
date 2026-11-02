@@ -860,7 +860,7 @@ fn pytest_conftest_positional_indirect_arguments() {
 #[test]
 fn pytest_conftest_local_named_fixture_overrides_conftest() {
     let code = "import pytest\n@pytest.fixture(name='answer')\ndef local_answer(): return 42\ndef test_value(answer): pass\n";
-    let (root, state, handle) = state_with_conftest(
+    let (_root, state, handle) = state_with_conftest(
         &[(
             "tests/conftest.py",
             "import pytest\n@pytest.fixture\ndef answer(): return 1\n",
@@ -868,15 +868,22 @@ fn pytest_conftest_local_named_fixture_overrides_conftest() {
         code,
     );
     let position = TextSize::try_from(code.rfind("answer").unwrap()).unwrap();
-    let definitions = state
-        .transaction()
-        .goto_definition(&handle, position)
+    let transaction = state.transaction();
+    for definitions in [
+        transaction.goto_definition(&handle, position).unwrap(),
+        transaction.goto_declaration(&handle, position).unwrap(),
+    ] {
+        assert_eq!(definitions[0].module.path(), handle.path());
+        assert_eq!(
+            definitions[0].module.code_at(definitions[0].range),
+            "local_answer",
+        );
+    }
+    let reference_definition = transaction
+        .find_definition(&handle, position, FindPreference::default())
         .unwrap();
-    // BUG: the test module's fixture overrides conftest even with an explicit name.
-    assert_eq!(
-        definitions[0].module.path().as_path(),
-        root.path().join("tests/conftest.py"),
-    );
+    assert_eq!(reference_definition[0].module.path(), handle.path());
+    assert_eq!(reference_definition[0].definition_range.start(), position);
 }
 
 #[test]
