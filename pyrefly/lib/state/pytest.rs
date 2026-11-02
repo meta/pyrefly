@@ -9,6 +9,7 @@ use pyrefly_graph::index::Idx;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use ruff_python_ast::AnyNodeRef;
+use ruff_python_ast::Expr;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Parameters;
@@ -22,11 +23,15 @@ use starlark_map::Hashed;
 
 use crate::binding::binding::KeyClass;
 use crate::binding::bindings::Bindings;
+use crate::binding::pytest::PytestAliases;
 use crate::binding::pytest::PytestBindingInfo;
+use crate::binding::pytest::is_pytest_fixture_decorator;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct PytestFixtureDefinition {
     pub(crate) name: Name,
+    /// An explicit fixture name overrides the Python function name.
+    pub(crate) fixture_name: Option<Name>,
     pub(crate) range: TextRange,
     pub(crate) docstring_range: Option<TextRange>,
 }
@@ -160,6 +165,7 @@ fn collect_pytest_fixture_definitions_for_name(
             {
                 out.push(PytestFixtureDefinition {
                     name: function_def.name.id.clone(),
+                    fixture_name: None,
                     range: function_def.name.range,
                     docstring_range: Docstring::range_from_stmts(&function_def.body),
                 });
@@ -223,15 +229,36 @@ pub(crate) fn find_pytest_fixture_definitions_for_parameter(
     identifier: &Identifier,
     covering_nodes: &[AnyNodeRef],
 ) -> Vec<PytestFixtureDefinition> {
+    if !is_pytest_fixture_parameter_context(bindings, covering_nodes) {
+        return Vec::new();
+    }
     let Some(pytest_info) = bindings.pytest_info() else {
         return Vec::new();
     };
+    let class_def = covering_nodes.iter().find_map(|node| match node {
+        AnyNodeRef::StmtClassDef(stmt) => Some(stmt),
+        _ => None,
+    });
+    let class_key = class_def.and_then(|def| class_key_for_definition(bindings, def));
+    let Some(fixture_class_key) =
+        pytest_info.visible_fixture_class_key(identifier.id(), class_key.as_ref())
+    else {
+        return Vec::new();
+    };
+
+    find_pytest_fixture_definitions_in_module(module, bindings, identifier.id(), fixture_class_key)
+}
+
+pub(crate) fn is_pytest_fixture_parameter_context(
+    bindings: &Bindings,
+    covering_nodes: &[AnyNodeRef],
+) -> bool {
     let function_def = covering_nodes.iter().find_map(|node| match node {
         AnyNodeRef::StmtFunctionDef(stmt) => Some(stmt),
         _ => None,
     });
     let Some(function_def) = function_def else {
-        return Vec::new();
+        return false;
     };
     let class_def = covering_nodes.iter().find_map(|node| match node {
         AnyNodeRef::StmtClassDef(stmt) => Some(stmt),
@@ -240,28 +267,130 @@ pub(crate) fn find_pytest_fixture_definitions_for_parameter(
     let class_is_test = class_def.map(|def| is_pytest_test_class(def));
     let class_key = class_def.and_then(|def| class_key_for_definition(bindings, def));
 
-    if !is_pytest_fixture_function(function_def, class_key, pytest_info)
-        && !is_pytest_test_function(function_def, class_is_test)
-    {
-        return Vec::new();
-    }
-    let Some(fixture_class_key) =
-        pytest_info.visible_fixture_class_key(identifier.id(), class_key.as_ref())
-    else {
+    bindings
+        .pytest_info()
+        .is_some_and(|pytest_info| is_pytest_fixture_function(function_def, class_key, pytest_info))
+        || is_pytest_test_function(function_def, class_is_test)
+}
+
+pub(crate) fn find_pytest_fixture_definitions_in_module(
+    module: &ModModule,
+    bindings: &Bindings,
+    fixture_name: &Name,
+    fixture_class_key: Option<Idx<KeyClass>>,
+) -> Vec<PytestFixtureDefinition> {
+    let Some(pytest_info) = bindings.pytest_info() else {
         return Vec::new();
     };
-
     let mut matches = Vec::new();
     collect_pytest_fixture_definitions_for_name(
         &module.body,
         bindings,
         pytest_info,
-        identifier.id(),
+        fixture_name,
         fixture_class_key,
         &mut matches,
         None,
     );
     matches
+}
+
+/// Extract fixture names and source ranges while the module AST is available.
+pub(crate) fn collect_pytest_fixture_definitions(stmts: &[Stmt]) -> Vec<PytestFixtureDefinition> {
+    let aliases = PytestAliases::from_stmts(stmts);
+    if aliases.is_empty() {
+        return Vec::new();
+    }
+    stmts
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::FunctionDef(function_def) => {
+                let decorator = function_def.decorator_list.iter().find(|decorator| {
+                    is_pytest_fixture_decorator(&decorator.expression, &aliases)
+                })?;
+                let fixture_name = if let Expr::Call(call) = &decorator.expression
+                    && let Some(keyword) = call.arguments.find_keyword("name")
+                {
+                    let Expr::StringLiteral(name) = &keyword.value else {
+                        return None;
+                    };
+                    Some(Name::new(name.value.to_str()))
+                } else {
+                    None
+                };
+                Some(PytestFixtureDefinition {
+                    name: function_def.name.id.clone(),
+                    fixture_name,
+                    range: function_def.name.range,
+                    docstring_range: Docstring::range_from_stmts(&function_def.body),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn parametrize_names_contain(expr: &Expr, name: &Name) -> bool {
+    let values = match expr {
+        Expr::StringLiteral(value) => {
+            return value
+                .value
+                .to_str()
+                .split(',')
+                .any(|part| part.trim() == name.as_str());
+        }
+        Expr::List(list) => &list.elts,
+        Expr::Tuple(tuple) => &tuple.elts,
+        _ => return false,
+    };
+    values.iter().any(|value| {
+        matches!(value, Expr::StringLiteral(value) if value.value.to_str() == name.as_str())
+    })
+}
+
+/// Direct parametrization supplies values instead of requesting a fixture.
+pub(crate) fn is_directly_parametrized(
+    module: &ModModule,
+    covering_nodes: &[AnyNodeRef],
+    name: &Name,
+) -> bool {
+    let aliases = PytestAliases::from_module(module);
+    covering_nodes
+        .iter()
+        .filter_map(|node| match node {
+            AnyNodeRef::StmtFunctionDef(function) => Some(&function.decorator_list),
+            AnyNodeRef::StmtClassDef(class) => Some(&class.decorator_list),
+            _ => None,
+        })
+        .flatten()
+        .any(|decorator| {
+            let Expr::Call(call) = &decorator.expression else {
+                return false;
+            };
+            if !aliases.is_parametrize(&call.func) {
+                return false;
+            }
+            let argnames = call.arguments.args.first().or_else(|| {
+                call.arguments
+                    .find_keyword("argnames")
+                    .map(|keyword| &keyword.value)
+            });
+            if !argnames.is_some_and(|argnames| parametrize_names_contain(argnames, name)) {
+                return false;
+            }
+            match call
+                .arguments
+                .find_keyword("indirect")
+                .map(|keyword| &keyword.value)
+            {
+                None => true,
+                Some(Expr::BooleanLiteral(value)) => !value.value,
+                Some(expr @ (Expr::List(_) | Expr::Tuple(_))) => {
+                    !parametrize_names_contain(expr, name)
+                }
+                _ => false,
+            }
+        })
 }
 
 /// Returns all parameter ranges that reference the fixture definition in this module.
