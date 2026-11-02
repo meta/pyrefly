@@ -7629,6 +7629,7 @@ impl Server {
                 none_type: stdlib.none_type(),
                 bool_type: stdlib.bool(),
                 int_type: stdlib.int(),
+                tuple_class: stdlib.tuple_object(),
             },
         )
     }
