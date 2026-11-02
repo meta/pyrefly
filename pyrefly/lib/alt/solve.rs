@@ -718,6 +718,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     annotation: ann,
                 }
             }
+            BindingAnnotation::DocstringParam(name, x) => {
+                let silent = ErrorCollector::new(errors.module().dupe(), ErrorStyle::Delayed);
+                let annotation =
+                    self.expr_annotation(x, TypeFormContext::ParameterAnnotation, &silent);
+                AnnotationWithTarget {
+                    target: AnnotationTarget::Param(name.clone()),
+                    annotation: if silent.has_hard() {
+                        Annotation::default()
+                    } else {
+                        annotation
+                    },
+                }
+            }
             BindingAnnotation::SpecialForm(target, sf) => AnnotationWithTarget {
                 target: target.clone(),
                 annotation: Annotation::new_type(sf.to_type(self.heap)),
@@ -4417,7 +4430,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Returns `None` for special forms which don't have a source expression.
     pub(crate) fn annotation_range(&self, key: Idx<KeyAnnotation>) -> Option<TextRange> {
         match self.bindings().get(key) {
-            BindingAnnotation::AnnotateExpr(_, expr, _) => Some(expr.range()),
+            BindingAnnotation::AnnotateExpr(_, expr, _)
+            | BindingAnnotation::DocstringParam(_, expr) => Some(expr.range()),
             BindingAnnotation::SpecialForm(..) => None,
         }
     }
@@ -5885,7 +5899,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         finalize(&annotation.target, self.heap.mk_any_implicit())
                     })
             }
-            FunctionParameter::Unannotated(function_idx, target, param_name) => {
+            FunctionParameter::Unannotated(function_idx, target, param_name, _) => {
                 // Get the resolved UndecoratedFunction - this ensures the function has been solved
                 // and resolved_param_types has been populated.
                 let undecorated = self.get_idx(*function_idx);

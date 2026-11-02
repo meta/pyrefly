@@ -2773,11 +2773,23 @@ impl<'a> BindingsBuilder<'a> {
                 )
             })
         };
+        // `bind_docstring_param_types` binds the docstring type under the key that an explicit
+        // annotation would use, so only an unannotated parameter can find one here.
+        let docstring_annot = if annot.is_none() && !ignore_annotation {
+            self.promised_idx(&KeyAnnotation::Annotation(ShortIdentifier::new(name)))
+        } else {
+            None
+        };
         let key = self.insert_binding(
             Key::Definition(ShortIdentifier::new(name)),
             Binding::FunctionParameter(Box::new(match annot {
                 Some(annot) => FunctionParameter::Annotated(annot),
-                None => FunctionParameter::Unannotated(undecorated_idx, target, name.id.clone()),
+                None => FunctionParameter::Unannotated(
+                    undecorated_idx,
+                    target,
+                    name.id.clone(),
+                    docstring_annot,
+                ),
             })),
         );
         self.scopes.add_parameter_to_current_static(name, annot);

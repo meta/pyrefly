@@ -452,6 +452,7 @@ impl<'a> BindingsBuilder<'a> {
             class_indices.clone(),
             x.name.clone(),
             has_protocol_base,
+            docstring_range,
         ));
         let previous_tracking = self.begin_classmethod_receivers(&body);
         // Record the class body range for solve-time `typing.Self` resolution.

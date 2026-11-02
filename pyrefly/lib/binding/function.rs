@@ -13,6 +13,7 @@ use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::AssignmentTargetKind;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
+use pyrefly_python::docstring::parse_sphinx_param_types;
 use pyrefly_python::dunder;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
@@ -26,6 +27,7 @@ use ruff_python_ast::ExceptHandler;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
 use ruff_python_ast::Identifier;
+use ruff_python_ast::Operator;
 use ruff_python_ast::Parameters;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtExpr;
@@ -38,6 +40,8 @@ use ruff_python_ast::visitor::source_order::walk_expr;
 use ruff_python_ast::visitor::source_order::walk_stmt;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
+use ruff_text_size::TextSize;
+use starlark_map::Hashed;
 use starlark_map::small_map::SmallMap;
 use thin_vec::ThinVec;
 
@@ -75,6 +79,7 @@ use crate::binding::expr::Usage;
 use crate::binding::pattern::match_case_always_matches;
 use crate::binding::scope::FlowStyle;
 use crate::binding::scope::InstanceAttribute;
+use crate::binding::scope::NameReadInfo;
 use crate::binding::scope::Scope;
 use crate::binding::scope::UnusedParameter;
 use crate::binding::scope::UnusedVariable;
@@ -175,6 +180,32 @@ pub struct SelfAssignments {
     pub method_name: Name,
     pub instance_attributes: SmallMap<Name, InstanceAttribute>,
     pub nn_module_registrations: NNModuleRegistrations,
+}
+
+/// Whether `x` only uses the type syntax that docstrings commonly contain: names, attribute
+/// accesses, `None`, `...`, `|` unions, and subscripts of those. Appends each name that `x`
+/// reads to `names`.
+fn is_simple_type_expr<'a>(x: &'a Expr, names: &mut Vec<&'a Name>) -> bool {
+    match x {
+        Expr::Name(x) => {
+            names.push(&x.id);
+            true
+        }
+        Expr::NoneLiteral(_) | Expr::EllipsisLiteral(_) => true,
+        Expr::Attribute(x) => is_simple_type_expr(&x.value, names),
+        Expr::BinOp(x) => {
+            x.op == Operator::BitOr
+                && is_simple_type_expr(&x.left, names)
+                && is_simple_type_expr(&x.right, names)
+        }
+        Expr::Subscript(x) => {
+            is_simple_type_expr(&x.value, names)
+                && Ast::unpack_slice(&x.slice)
+                    .iter()
+                    .all(|x| is_simple_type_expr(x, names))
+        }
+        _ => false,
+    }
 }
 
 /// Determine whether a function definition is annotated.
@@ -328,6 +359,82 @@ impl<'a> BindingsBuilder<'a> {
         }
         self.scopes
             .set_self_name_if_applicable(self_name, method_self_kind);
+    }
+
+    /// Binds the types that the docstring declares, with Sphinx `:param <type> <name>:` and
+    /// `:type <name>: <type>` fields, for parameters that have no annotation. This must run
+    /// in the scope of the annotations, before the parameter names are bound.
+    ///
+    /// The docstring of the class is also consulted for `__init__`, because that is where
+    /// Sphinx documents the constructor parameters. The docstring of the method itself wins.
+    ///
+    /// A declared type is only a hint for the parameter, so a docstring type that cannot be
+    /// understood is skipped instead of reported.
+    fn bind_docstring_param_types(
+        &mut self,
+        x: &StmtFunctionDef,
+        class_docstring_range: Option<TextRange>,
+    ) {
+        if !self.infer_param_types_from_docstring {
+            return;
+        }
+        let docstring_ranges = Docstring::range_from_stmts(&x.body)
+            .into_iter()
+            .chain(class_docstring_range.filter(|_| x.name.id == dunder::INIT))
+            .collect::<Vec<_>>();
+        let docstrings = docstring_ranges
+            .iter()
+            .map(|range| self.module_info.code_at(*range).to_owned())
+            .collect::<Vec<_>>();
+        let declared_types = docstrings
+            .iter()
+            .map(|docstring| parse_sphinx_param_types(docstring))
+            .collect::<Vec<_>>();
+        let mut bound_types: SmallMap<TextSize, Expr> = SmallMap::new();
+        for param in x.parameters.iter_non_variadic_params() {
+            let name = &param.parameter.name;
+            if param.parameter.annotation.is_some() {
+                continue;
+            }
+            let Some((range, declared)) = docstring_ranges
+                .iter()
+                .zip(&declared_types)
+                .find_map(|(range, types)| Some((range, types.get(name.id.as_str())?)))
+            else {
+                continue;
+            };
+            let start = range.start() + TextSize::new(declared.offset as u32);
+            // Parameters can share one declaration, as in NumPy's `x, y : int`. The type is
+            // bound once, because binding an expression creates keys that are unique to it.
+            let expr = if let Some(expr) = bound_types.get(&start) {
+                expr.clone()
+            } else {
+                let Ok(mut expr) = Ast::parse_expr(declared.type_text, start) else {
+                    continue;
+                };
+                let mut names = Vec::new();
+                let usage = Usage::StaticTypeInformation {
+                    is_annotation: true,
+                };
+                if !is_simple_type_expr(&expr, &mut names)
+                    || names.into_iter().any(|x| {
+                        matches!(
+                            self.look_up_name_for_read(Hashed::new(x), &usage),
+                            NameReadInfo::NotFound
+                        )
+                    })
+                {
+                    continue;
+                }
+                self.ensure_type(&mut expr, None);
+                bound_types.insert(start, expr.clone());
+                expr
+            };
+            self.insert_binding(
+                KeyAnnotation::Annotation(ShortIdentifier::new(name)),
+                BindingAnnotation::DocstringParam(name.id.clone(), expr),
+            );
+        }
     }
 
     fn to_return_annotation_with_range(
@@ -913,6 +1020,7 @@ impl<'a> BindingsBuilder<'a> {
         let (function_idx, pred_idx, is_contiguous) = self.create_function_index(&func_name);
 
         let class_key = self.scopes.current_class_key();
+        let class_docstring_range = self.scopes.current_class_docstring_range();
         let enclosing_class = class_key.or_else(|| self.scopes.current_method_context());
         let shape_metadata = self.record_shape_function_metadata(
             &x,
@@ -929,6 +1037,7 @@ impl<'a> BindingsBuilder<'a> {
         let (return_ann_with_range, legacy_tparams) =
             self.function_header(&mut x, &func_name, class_key, def_idx.usage(), parent);
 
+        self.bind_docstring_param_types(&x, class_docstring_range);
         let docstring_range = Docstring::range_from_stmts(x.body.as_slice());
         let calls_super_method = SuperMethodCallFinder::find(&func_name.id, &x.body);
         let previous_tracking = mem::replace(&mut self.track_classmethod_uses, false);

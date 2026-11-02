@@ -1075,6 +1075,34 @@ set `infer-return-types` to `"never"` in your config or pass it as a flag.
 - Default: `"checked"`
 - Flag equivalent: `--infer-return-types`
 
+### `infer-param-types-from-docstring`
+
+Whether to use the parameter types that a Sphinx style docstring declares for parameters
+that have no annotation.
+
+```python
+def f(x, y=None):
+    """
+    :param int x: The x.
+    :type y: str
+    """
+```
+
+Here `x` is an `int` and `y` is a `str | None`. A parameter that defaults to `None` is
+treated as optional even when the docstring does not say so. For `__init__`, the docstring
+of the class is used as well, because that is where the constructor parameters are usually
+documented. The docstring of the method itself takes priority.
+
+A type from a docstring is only a hint for callers and for the body of the function. It is
+never used instead of an annotation, it does not make assignments to the parameter an
+error, and it is not checked against the default value. A type that Pyrefly cannot make
+sense of, such as `list of str` written as prose, an unknown name, or a type that is not
+valid for a parameter, is ignored without an error.
+
+- Type: `bool`
+- Default: `false`
+- Flag equivalent: `--infer-param-types-from-docstring`
+
 ### `strict-callable-subtyping`
 
 Controls whether Pyrefly enforces strict parameter compatibility when checking

@@ -2060,7 +2060,13 @@ impl IsAsync {
 #[derive(Clone, Debug)]
 pub enum FunctionParameter {
     Annotated(Idx<KeyAnnotation>),
-    Unannotated(Idx<KeyUndecoratedFunction>, AnnotationTarget, Name),
+    /// The final field is the type that the docstring declares for the parameter, if any.
+    Unannotated(
+        Idx<KeyUndecoratedFunction>,
+        AnnotationTarget,
+        Name,
+        Option<Idx<KeyAnnotation>>,
+    ),
 }
 
 #[derive(Clone, Debug)]
@@ -3096,7 +3102,7 @@ impl DisplayWith<Bindings> for Binding {
                 "FunctionParameter({})",
                 match x.as_ref() {
                     FunctionParameter::Annotated(k) => ctx.display(*k).to_string(),
-                    FunctionParameter::Unannotated(k, _, _) => ctx.display(*k).to_string(),
+                    FunctionParameter::Unannotated(k, _, _, _) => ctx.display(*k).to_string(),
                 }
             ),
             Self::SuperInstance(x) => match &x.0 {
@@ -3470,6 +3476,9 @@ pub enum BindingAnnotation {
     /// The type is annotated to be this key, will have the outer type removed.
     /// Optionally occurring within a class, in which case Self refers to this class.
     AnnotateExpr(AnnotationTarget, Expr, Option<Idx<KeyClass>>),
+    /// The type that a docstring declares for the unannotated parameter with this name.
+    /// Docstrings are informal, so a type that does not check is dropped without an error.
+    DocstringParam(Name, Expr),
     /// A special form declaration like `Literal: _SpecialForm`.
     SpecialForm(AnnotationTarget, SpecialForm),
 }
@@ -3486,6 +3495,9 @@ impl DisplayWith<Bindings> for BindingAnnotation {
                     Some(t) => ctx.display(*t).to_string(),
                 }
             ),
+            Self::DocstringParam(name, x) => {
+                write!(f, "DocstringParam({name}, {})", ctx.module().display(x))
+            }
             Self::SpecialForm(target, sf) => write!(f, "SpecialForm({target}, {sf})"),
         }
     }

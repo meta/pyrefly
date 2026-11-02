@@ -1387,7 +1387,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let required = self.get_requiredness(default, check, is_stub, errors);
                 (param_ty, required, false)
             }
-            FunctionParameter::Unannotated(_, _, _) => {
+            FunctionParameter::Unannotated(_, _, _, docstring_annotation) => {
                 let required = self.get_requiredness(default, None, is_stub, errors);
                 // If this is the first parameter and there is a self type, resolve to `Self`.
                 // We only try to resolve the first param for now. Other unannotated params
@@ -1397,6 +1397,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ty.clone()
                 } else if let Some(hint) = hint {
                     hint.clone()
+                } else if let Some(ty) =
+                    docstring_annotation.and_then(|idx| self.get_idx(idx).annotation.ty.clone())
+                {
+                    // Docstrings rarely say that a parameter defaulting to `None` is optional.
+                    match &required {
+                        Required::Optional(Some(default_val)) if default_val.ty.is_none() => {
+                            self.union(ty, self.heap.mk_none())
+                        }
+                        _ => ty,
+                    }
                 } else if let Required::Optional(Some(default_val)) = &required {
                     self.union(
                         self.heap.mk_any_implicit(),
