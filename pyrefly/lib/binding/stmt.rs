@@ -2318,26 +2318,28 @@ impl<'a> BindingsBuilder<'a> {
                         call.func.as_ref(),
                         Expr::Attribute(func)
                             if func.attr.id.as_str() == "__setattr__"
-                                && matches!(
-                                    func.value.as_ref(),
-                                    Expr::Name(base) if base.id.as_str() == "object"
-                                )
+                                && self.as_special_export(&func.value)
+                                    == Some(SpecialExport::BuiltinsObject)
                     );
-                    let is_builtin_setattr = matches!(
-                        call.func.as_ref(),
-                        Expr::Name(name) if name.id.as_str() == "setattr"
-                    );
+                    let is_builtin_setattr =
+                        self.as_special_export(&call.func) == Some(SpecialExport::SetAttr);
                     if (is_object_setattr || is_builtin_setattr)
-                        && call.arguments.args.len() >= 3
-                        && let Expr::StringLiteral(attr_name) = &call.arguments.args[1]
+                        && call.arguments.keywords.is_empty()
+                        && let [receiver, Expr::StringLiteral(attr_name), value] =
+                            &*call.arguments.args
+                        && !receiver.is_starred_expr()
+                        && !value.is_starred_expr()
                     {
-                        self.scopes.record_self_attr_assign_named(
-                            &call.arguments.args[0],
-                            &Name::new(attr_name.value.to_str()),
-                            attr_name.range,
-                            ExprOrBinding::Expr(call.arguments.args[2].clone()),
-                            None,
-                        );
+                        let name = Name::new(attr_name.value.to_str());
+                        if !Ast::is_mangled_attr(&name) {
+                            self.scopes.record_self_attr_assign_named(
+                                receiver,
+                                &name,
+                                attr_name.range,
+                                ExprOrBinding::Expr(value.clone()),
+                                None,
+                            );
+                        }
                     }
                 }
                 let special_export = if let Expr::Call(ExprCall { func, .. }) = &*x.value {

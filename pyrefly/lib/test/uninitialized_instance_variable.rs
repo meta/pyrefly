@@ -194,6 +194,7 @@ testcase!(
     test_uninitialized_instance_variable_frozen_dataclass_setattr,
     TestEnv::new().enable_uninitialized_instance_variable_error(),
     r#"
+import builtins
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 @dataclass(frozen=True, slots=True, init=False)
@@ -204,12 +205,68 @@ class File:
 @dataclass(frozen=True, init=False)
 class ViaBuiltin:
     x: int
+    _protected: int
     def __init__(self, x: int) -> None:
         setattr(self, "x", x)
+        object.__setattr__(self, "_protected", 1)
+@dataclass(frozen=True, init=False)
+class ViaImportedBuiltins:
+    x: int
+    y: int
+    def __init__(self) -> None:
+        builtins.object.__setattr__(self, "x", 1)
+        builtins.setattr(self, "y", 2)
 @dataclass(frozen=True, init=False)
 class StillUninit:
     y: int  # E: Instance attribute `y` is declared but never initialized
     def __init__(self) -> None:
         pass
+@dataclass(frozen=True, init=False)
+class StarredArg:
+    x: int  # E: Instance attribute `x` is declared but never initialized
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", *[1])
+class PlainStarred:
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", *[1])
+        setattr(self, "x", *[1])
+@dataclass(frozen=True, init=False)
+class StarredName:
+    x: int  # E: Instance attribute `x` is declared but never initialized
+    def __init__(self) -> None:
+        object.__setattr__(self, *["x", 1])
+@dataclass(frozen=True, init=False)
+class MangledPrivate:
+    __x: int  # E: Instance attribute `__x` is declared but never initialized
+    __y: int  # E: Instance attribute `__y` is declared but never initialized
+    def __init__(self) -> None:
+        object.__setattr__(self, "__x", 1)
+        setattr(self, "__y", 1)
+"#,
+);
+
+testcase!(
+    test_uninitialized_instance_variable_setattr_shadowed,
+    TestEnv::new().enable_uninitialized_instance_variable_error(),
+    r#"
+from dataclasses import dataclass
+from typing import Any
+
+def setattr(obj: object, name: str, value: object) -> None:
+    pass
+
+@dataclass(frozen=True, init=False)
+class ShadowedSetattr:
+    x: int  # E: Instance attribute `x` is declared but never initialized
+    def __init__(self) -> None:
+        setattr(self, "x", 1)
+
+object: Any = None
+
+@dataclass(frozen=True, init=False)
+class ShadowedObject:
+    y: int  # E: Instance attribute `y` is declared but never initialized
+    def __init__(self) -> None:
+        object.__setattr__(self, "y", 1)
 "#,
 );
