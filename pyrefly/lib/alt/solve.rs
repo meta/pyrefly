@@ -2780,16 +2780,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .is_some_and(|meta| meta.flags.is_return_inferred),
             }
         };
-        // A definition under a test of the environment settles nothing outside its suite, since
-        // another configuration defines the name differently. Nor does a name that a suite the
-        // configuration rules out defines.
-        let chosen_by_environment = |name: &ExprName, idx: Idx<Key>| {
-            self.bindings()
-                .environment_definitions()
-                .get(&idx)
-                .is_some_and(|suite| !suite.contains_range(name.range))
-                || self.bindings().environment_names().contains(&name.id)
-        };
         let value_of_type = |ty: &Type| {
             let value = self.check_bool_type_and_get_value(x, ty, &swallow)?;
             // Each member of a union has its own `__bool__`, and one inferred return leaves the
@@ -2829,7 +2819,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // type, but the name always holds the assigned value, so that value's declaration
                 // settles it.
                 let idx = self.binding_before_narrowing(name);
-                if chosen_by_environment(name, idx) {
+                if self.name_chosen_by_environment(name, idx) {
                     return None;
                 }
                 match self.bindings().get(idx) {
@@ -2851,6 +2841,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     | Binding::ClassDef(..)
                     | Binding::TypeAlias(_)
                     | Binding::AnnotatedType(..) => {}
+                    // Another module can reassign its variables, and tests patch them, so only a
+                    // `Final` with a declared type settles. Nothing reports rebinding the imported
+                    // name through `global`, so it also must not be declared `global`.
+                    Binding::Import(import)
+                        if !self.bindings().global_declarations().contains(&name.id)
+                            && self.export_settles(import.module, &import.name) => {}
                     // An unannotated assignment, a merge of several definitions, a capture, and
                     // the like all carry an inferred type.
                     _ => return None,
@@ -2859,10 +2855,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             Expr::Attribute(attr) => {
                 let base = self.expr_infer(&attr.value, &swallow);
-                // Only a class or instance attribute can be looked up as a declaration. A module
-                // attribute is an unannotated global more often than not. A read through a
-                // descriptor returns what its `__get__` returns. An enum member's `value` is the
-                // type of the expression assigned to the member, which is inferred.
+                // A module attribute settles only if it is a `Final` with a declared type, as for
+                // an imported name, read from a module that the environment does not choose.
+                if let Type::Module(module) = &base {
+                    return (!self.module_chosen_by_environment(&attr.value)
+                        && self.export_settles(
+                            ModuleName::from_parts(module.parts()),
+                            &attr.attr.id,
+                        ))
+                    .then(|| {
+                        value_of_type(&self.attr_infer_for_type(
+                            &base,
+                            &attr.attr.id,
+                            attr.range,
+                            &swallow,
+                            None,
+                        ))
+                    })
+                    .flatten();
+                }
+                // Only a class or instance attribute can be looked up as a declaration. A read
+                // through a descriptor returns what its `__get__` returns. An enum member's
+                // `value` is the type of the expression assigned to the member, which is
+                // inferred.
                 let classes = self.attribute_lookup_classes(&base)?;
                 if matches!(attr.attr.id.as_str(), "value" | "_value_")
                     && classes
@@ -2893,7 +2908,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             Expr::Call(call) => {
                 if let Expr::Name(name) = &*call.func
-                    && chosen_by_environment(name, self.binding_before_narrowing(name))
+                    && self.name_chosen_by_environment(name, self.binding_before_narrowing(name))
                 {
                     return None;
                 }
@@ -5163,6 +5178,63 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 },
             }
         })
+    }
+
+    /// Whether another configuration may give the name, read through the definition `idx`, a
+    /// different value: the definition is in a suite of an `if` with a test of the environment and
+    /// the read is outside that suite, or a suite such a test rules out also defines the name.
+    fn name_chosen_by_environment(&self, name: &ExprName, idx: Idx<Key>) -> bool {
+        self.bindings()
+            .environment_definitions()
+            .get(&idx)
+            .is_some_and(|suite| !suite.contains_range(name.range))
+            || self.bindings().environment_names().contains(&name.id)
+    }
+
+    /// Whether a name another module exports can settle a branch test: it is `Final` with a
+    /// declared type, and no module on the way to it defines or imports it under a test of the
+    /// environment.
+    fn export_settles(&self, module: ModuleName, name: &Name) -> bool {
+        let origin = self.exports.export_origin(module, name);
+        origin.final_has_declared_type && !origin.defined_under_environment
+    }
+
+    /// Whether the expression that names a module may name another module under another
+    /// configuration: it is, or reads through, a name that a test of the environment defines or
+    /// imports, here or in the module it comes from, or a variable here or in another module. An
+    /// expression other than a name or a chain of attributes counts as chosen, since nothing
+    /// records how it was chosen.
+    fn module_chosen_by_environment(&self, x: &Expr) -> bool {
+        // An export that ends at a definition may hold whichever module an earlier test of the
+        // environment chose.
+        let export_chosen = |module: ModuleName, name: &Name| {
+            let origin = self.exports.export_origin(module, name);
+            origin.defined_under_environment || origin.ends_at_definition
+        };
+        match x {
+            Expr::Name(name) => {
+                let idx = self.binding_before_narrowing(name);
+                self.name_chosen_by_environment(name, idx)
+                    || self.bindings().global_declarations().contains(&name.id)
+                    || match self.bindings().get(idx) {
+                        Binding::Module(..) => false,
+                        Binding::Import(import) => export_chosen(import.module, &import.name),
+                        // An assignment or any other binding may hold whichever module an
+                        // earlier test of the environment chose.
+                        _ => true,
+                    }
+            }
+            Expr::Attribute(attr) => {
+                self.module_chosen_by_environment(&attr.value)
+                    || match self.expr_infer(&attr.value, &self.error_swallower()) {
+                        Type::Module(module) => {
+                            export_chosen(ModuleName::from_parts(module.parts()), &attr.attr.id)
+                        }
+                        _ => true,
+                    }
+            }
+            _ => true,
+        }
     }
 
     /// Whether some path on which a name is unset continues past every merge it passes through,

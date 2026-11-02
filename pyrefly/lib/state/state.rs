@@ -3041,8 +3041,7 @@ impl Drop for TransactionHandle<'_> {
 
 /// One step of a walk along a chain of re-exports, as seen from a single module.
 enum ExportStep<T> {
-    /// The chain ends at a definition in this module, carrying the value read
-    /// off its `Export`.
+    /// The chain ends in this module, carrying the value read off it.
     Resolved(T),
     /// The name is re-exported from another module, under the given name if the
     /// re-export renamed it.
@@ -3063,6 +3062,14 @@ impl<'a> LookupExport for TransactionHandle<'a> {
         self.with_exports(
             module,
             |exports, lookup| exports.wildcard(lookup),
+            ModuleDep::Wildcard,
+        )
+    }
+
+    fn get_environment_wildcard(&self, module: ModuleName) -> Option<Arc<SmallSet<Name>>> {
+        self.with_exports(
+            module,
+            |exports, lookup| exports.environment_wildcard(lookup),
             ModuleDep::Wildcard,
         )
     }
@@ -3220,32 +3227,45 @@ impl<'a> LookupExport for TransactionHandle<'a> {
     fn export_origin(&self, mut module: ModuleName, name: &Name) -> ExportOrigin {
         let mut seen = HashSet::new();
         let mut name = name.clone();
+        let mut under_environment = false;
 
-        let is_final = loop {
+        // The finality of the definition the chain ends at, if it ends at one.
+        let definition = loop {
             // A chain may pass through a module more than once under different
             // names, so only a repeated (module, name) pair is a real cycle.
             if !seen.insert((module, name.clone())) {
-                break false;
+                break None;
             }
 
-            let next = self
+            let (next, defined_under_environment) = self
                 .with_exports(
                     module,
-                    |exports, lookup| match exports.exports(lookup).get(&name) {
-                        Some(ExportLocation::ThisModule(Export { is_final, .. })) => {
-                            ExportStep::Resolved(*is_final)
-                        }
-                        Some(ExportLocation::OtherModule(other_module, original_name)) => {
-                            ExportStep::Redirect(*other_module, original_name.clone())
-                        }
-                        None => ExportStep::Resolved(false),
+                    |exports, lookup| {
+                        let under_environment =
+                            exports.environment_wildcard(lookup).contains(&name);
+                        let step = match exports.exports(lookup).get(&name) {
+                            // The name is the imported module itself, not a name inside it.
+                            _ if exports.imports_module(&name) => ExportStep::Resolved(None),
+                            Some(ExportLocation::ThisModule(Export { is_final, .. })) => {
+                                ExportStep::Resolved(Some((
+                                    *is_final,
+                                    exports.final_has_declared_type(&name),
+                                )))
+                            }
+                            Some(ExportLocation::OtherModule(other_module, original_name)) => {
+                                ExportStep::Redirect(*other_module, original_name.clone())
+                            }
+                            None => ExportStep::Resolved(None),
+                        };
+                        (step, under_environment)
                     },
                     ModuleDep::ExportOrigin(name.clone()),
                 )
-                .unwrap_or(ExportStep::Resolved(false));
+                .unwrap_or((ExportStep::Resolved(None), false));
+            under_environment |= defined_under_environment;
 
             match next {
-                ExportStep::Resolved(is_final) => break is_final,
+                ExportStep::Resolved(definition) => break definition,
                 ExportStep::Redirect(other_module, original_name) => {
                     if let Some(original_name) = original_name {
                         name = original_name;
@@ -3257,7 +3277,10 @@ impl<'a> LookupExport for TransactionHandle<'a> {
 
         ExportOrigin {
             origin: (module, name),
-            is_final,
+            is_final: definition.is_some_and(|(is_final, _)| is_final),
+            final_has_declared_type: definition.is_some_and(|(_, declared)| declared),
+            ends_at_definition: definition.is_some(),
+            defined_under_environment: under_environment,
         }
     }
 }

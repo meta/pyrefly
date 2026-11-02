@@ -3077,3 +3077,95 @@ def first(shapes: IntTuple) -> IntTuple:
     changed.check_recompute(&["consumer", "helpers", "main"]);
     changed.check_errors();
 }
+
+/// Whether an imported `Final` settles a test depends on whether a module on the way to it defines
+/// or star-imports it under a test of the environment, which can change without changing its type.
+#[test]
+fn test_final_moved_under_environment_test_rechecks_importer() {
+    let mut i = Incremental::new();
+    let errors = |i: &mut Incremental| {
+        i.unchecked(&["main"])
+            .errors
+            .collect_display_errors()
+            .map(|error| error.msg().to_owned())
+    };
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("foo", "from bar import DEBUG as DEBUG");
+    i.set(
+        "main",
+        "from foo import DEBUG\nif DEBUG:\n    x = 1\nelse:\n    x = ''\nobserved: str = x",
+    );
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "bar",
+        "import sys\nfrom typing import Final\nif sys.platform != 'win32':\n    DEBUG: Final = False",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("foo", "from bar import *");
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "foo",
+        "import sys\nfrom bar import *\nif sys.platform == 'win32':\n    DEBUG = True",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+
+    i.set("foo", "from bar import *");
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "foo",
+        "import sys\nif sys.platform != 'win32':\n    from bar import *",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+}
+
+/// A star import in a suite this configuration rules out brings in whatever the other module
+/// defines, so defining the constant there must recheck the importer.
+#[test]
+fn test_constant_defined_behind_skipped_star_import_rechecks_importer() {
+    let mut i = Incremental::new();
+    let errors = |i: &mut Incremental| {
+        i.unchecked(&["main"])
+            .errors
+            .collect_display_errors()
+            .map(|error| error.msg().to_owned())
+    };
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("baz", "");
+    i.set(
+        "foo",
+        "import sys\nfrom bar import DEBUG as DEBUG\nif sys.platform == 'win32':\n    from baz import *",
+    );
+    i.set(
+        "main",
+        "from foo import DEBUG\nif DEBUG:\n    x = 1\nelse:\n    x = ''\nobserved: str = x",
+    );
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set("baz", "from typing import Final\nDEBUG: Final = True");
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+}

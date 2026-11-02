@@ -5244,6 +5244,314 @@ def reads(c: C, u: Cfg | OtherCfg, h: Holder, pick: bool) -> None:
 "#,
 );
 
+fn env_imported_constants() -> TestEnv {
+    let mut env = TestEnv::new();
+    env.add(
+        "cfg",
+        r#"
+from typing import Final, Literal
+
+def enabled():
+    return False
+
+DEBUG: Final = False
+ON: Final[Literal[True]] = True
+TYPED: Final[bool] = False
+INFERRED: Final = enabled()
+PLAIN = False
+ANNOTATED: Literal[False] = False
+"#,
+    );
+    env.add("reexport", "from cfg import DEBUG as DEBUG");
+    env.add("pkg", "");
+    env.add("pkg.sub", "from typing import Final\nOFF: Final = False");
+    env.add(
+        "plat",
+        r#"
+import sys
+from typing import Final
+
+if sys.platform == "win32":
+    IS_WIN: Final = True
+    from cfg import ON as CHOSEN
+    import cfg as config
+    from cfg import *
+else:
+    IS_WIN: Final = False
+    from cfg import DEBUG as CHOSEN
+    import pkg.sub as config
+    from pkg.sub import *
+"#,
+    );
+    env.add(
+        "holder",
+        r#"
+import pkg.sub as sub_alias
+import plat
+import settings
+from chooser import chooser as conf
+held = plat.config
+"#,
+    );
+    env.add(
+        "chooser",
+        r#"
+import sys
+
+if sys.platform == "win32":
+    import cfg as chooser
+else:
+    import pkg.sub as chooser
+"#,
+    );
+    env.add(
+        "early",
+        r#"
+import sys
+from typing import Final
+
+def flag() -> bool: ...
+
+if flag():
+    EARLY: Final = False
+    LATE: Final = False
+elif sys.platform == "win32":
+    LATE: Final = True
+else:
+    raise ImportError()
+"#,
+    );
+    env.add(
+        "star_defaults",
+        "from typing import Final\nOVERRIDE: Final = False\nfrom win_override import *",
+    );
+    env.add(
+        "win_override",
+        "import sys\nif sys.platform == \"win32\":\n    OVERRIDE = True",
+    );
+    env.add(
+        "settings",
+        "from typing import Final\nOFF: Final = False\nsettings = 1",
+    );
+    env.add_with_path("rpkg", "rpkg/__init__.py", "from . import sub");
+    env.add("rpkg.sub", "from typing import Final\nOFF: Final = False");
+    env.add("win_sub", "from typing import Final\nOFF: Final = True");
+    env.add(
+        "nested_win",
+        r#"
+import sys
+from typing import Final
+
+G: Final = False
+DEEP: Final = False
+if sys.platform == "win32":
+    if sys.version_info < (3, 10):
+        G: Final = True
+        from win_deep import *
+"#,
+    );
+    env.add("win_deep", "from typing import Final\nDEEP: Final = True");
+    env.add(
+        "defaults_then_win",
+        r#"
+import sys
+from pkg.sub import *
+
+if sys.platform == "win32":
+    from win_sub import *
+"#,
+    );
+    env.add(
+        "rebinder",
+        r#"
+from cfg import DEBUG
+
+def enable() -> None:
+    global DEBUG
+    DEBUG = True
+"#,
+    );
+    env
+}
+
+// Another module can reassign its variables, and tests patch them, so a name from another module
+// settles a test only if it is `Final` with a declared type: `Final[T]`, or a bare `Final` assigned
+// a literal. A name, or a module, defined or imported under a test of the environment has another
+// value elsewhere.
+testcase!(
+    test_final_from_another_module_settles_tests,
+    env_imported_constants(),
+    r#"
+import cfg
+import cfg as cfg_alias
+import defaults_then_win
+import holder
+import plat
+import rpkg
+import star_defaults
+import sys
+from cfg import ANNOTATED, DEBUG, INFERRED, ON, PLAIN, TYPED
+from early import EARLY, LATE
+from holder import held
+from pkg import sub
+from star_defaults import OVERRIDE
+from pkg.sub import OFF as LOCAL_OFF
+from plat import IS_WIN
+from reexport import DEBUG as REEXPORTED
+from typing import Literal, assert_type
+
+if sys.platform == "win32":
+    import cfg as chosen
+    from win_sub import OFF as LOCAL_OFF
+else:
+    import pkg.sub as chosen
+aliased = chosen
+
+def settled() -> None:
+    if DEBUG:
+        print(1)  # E: This code is unreachable
+    if ON:
+        x = 1
+    else:
+        x = 2  # E: This code is unreachable
+    assert_type(x, Literal[1])
+    if cfg.DEBUG:
+        print(2)  # E: This code is unreachable
+    if REEXPORTED:
+        print(3)  # E: This code is unreachable
+    if cfg_alias.DEBUG:
+        print(31)  # E: This code is unreachable
+    if sub.OFF:
+        print(32)  # E: This code is unreachable
+    if holder.sub_alias.OFF:
+        print(33)  # E: This code is unreachable
+    if rpkg.sub.OFF:
+        print(34)  # E: This code is unreachable
+    if holder.settings.OFF:
+        print(35)  # E: This code is unreachable
+    if EARLY:
+        print(37)  # E: This code is unreachable
+
+def not_settled() -> None:
+    if TYPED:
+        print(4)
+    if INFERRED:
+        print(5)
+    if PLAIN:
+        print(6)
+    if ANNOTATED:
+        print(7)
+    if cfg.PLAIN:
+        print(8)
+    if IS_WIN:
+        print(9)
+    if plat.CHOSEN:
+        print(10)
+    if plat.OFF:
+        print(11)
+    if chosen.OFF:
+        print(12)
+    if plat.config.OFF:
+        print(13)
+    if defaults_then_win.OFF:
+        print(14)
+    if LOCAL_OFF:
+        print(15)
+    if aliased.OFF:
+        print(16)
+    if holder.held.OFF:
+        print(17)
+    if held.OFF:
+        print(18)
+    if LATE:
+        print(19)
+    if holder.conf.OFF:
+        print(20)
+    if OVERRIDE:
+        print(21)
+    if star_defaults.OVERRIDE:
+        print(22)
+"#,
+);
+
+// The imported name is not itself `Final`, so a module that rebinds or deletes it settles nothing
+// through it, while a submodule attribute still settles.
+testcase!(
+    test_final_from_another_module_rebound_by_importer,
+    env_imported_constants(),
+    r#"
+import pkg.sub
+from cfg import DEBUG, ON
+
+def enable() -> None:
+    global DEBUG
+    DEBUG = True
+
+del ON
+
+def reads() -> None:
+    if DEBUG:
+        print(1)
+    if pkg.sub.OFF:
+        print(2)  # E: This code is unreachable
+    if ON:
+        print(3)
+"#,
+);
+
+// Another configuration may run a definition that this one rules out two tests deep, or one that
+// a star import in a suite this configuration rules out brings in.
+testcase!(
+    test_override_in_skipped_suite_settles_nothing,
+    env_imported_constants(),
+    r#"
+import nested_win
+import sys
+from typing import Final
+
+G: Final = False
+if sys.platform == "win32":
+    if sys.version_info < (3, 10):
+        G: Final = True
+if G:
+    print(1)
+
+OFF: Final = False
+if sys.platform == "win32":
+    from win_sub import *
+if OFF:
+    print(2)
+
+if nested_win.G:
+    print(3)
+
+DEEP: Final = False
+if sys.platform == "win32":
+    if sys.version_info < (3, 10):
+        from win_deep import *
+if DEEP:
+    print(4)
+
+if nested_win.DEEP:
+    print(5)
+"#,
+);
+
+// Only the importing module's own `global` declarations are checked, not those of a module the
+// name is re-exported through.
+testcase!(
+    bug = "A re-exporting module that rebinds a `Final` through `global` still settles it",
+    test_final_reexported_by_rebinding_module,
+    env_imported_constants(),
+    r#"
+import rebinder
+
+rebinder.enable()
+if rebinder.DEBUG:
+    print(1)  # E: This code is unreachable
+"#,
+);
+
 // A test of the environment chooses which definition the configuration sees, and another
 // configuration chooses another, so the definition settles nothing.
 testcase!(

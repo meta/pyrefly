@@ -602,7 +602,7 @@ impl Static {
         let final_string_values = d
             .final_names
             .into_iter()
-            .filter_map(|(name, value)| value.map(|v| (name, v)))
+            .filter_map(|(name, final_name)| final_name.string_value.map(|v| (name, v)))
             .collect();
         (
             implicit_captures,

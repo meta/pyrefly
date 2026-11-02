@@ -291,6 +291,8 @@ pub struct Bindings {
     /// The merges that paths on which a name is unset pass through, read by deferred
     /// initialization checks.
     unset_nodes: UnsetNodes,
+    /// Names that a function or class body declares `global`, and so may rebind or delete.
+    global_declarations: SmallSet<Name>,
     /// See `Bindings::environment_definitions`.
     environment_definitions: SmallMap<Idx<Key>, TextRange>,
     /// See `Bindings::environment_names`.
@@ -402,6 +404,8 @@ pub struct BindingsBuilder<'a> {
     semantic_checker: SemanticSyntaxChecker,
     semantic_syntax_errors: RefCell<Vec<SemanticSyntaxError>>,
     pytest_info: Option<crate::binding::pytest::PytestBindingInfo>,
+    /// Names that a function or class body declares `global`.
+    global_declarations: SmallSet<Name>,
     /// See `Bindings::environment_definitions`.
     environment_definitions: SmallMap<Idx<Key>, TextRange>,
     /// See `Bindings::environment_names`.
@@ -532,6 +536,7 @@ impl Bindings {
             scope_trace: None,
             module_deletes: SmallSet::new(),
             unset_nodes: UnsetNodes::default(),
+            global_declarations: SmallSet::new(),
             environment_definitions: SmallMap::new(),
             environment_names: SmallSet::new(),
             unused_imports: Vec::new(),
@@ -733,6 +738,11 @@ impl Bindings {
 
     pub fn unset_nodes(&self) -> &UnsetNodes {
         &self.unset_nodes
+    }
+
+    /// Names that a function or class body declares `global`, and so may rebind or delete.
+    pub fn global_declarations(&self) -> &SmallSet<Name> {
+        &self.global_declarations
     }
 
     /// Definitions in the suites of an `if` from its first test of the environment onward, each
@@ -949,6 +959,7 @@ impl Bindings {
             semantic_checker: SemanticSyntaxChecker::new(),
             semantic_syntax_errors: RefCell::new(Vec::new()),
             pytest_info,
+            global_declarations: SmallSet::new(),
             environment_definitions: SmallMap::new(),
             environment_names: SmallSet::new(),
             deferred_bound_names: SmallMap::new(),
@@ -1104,6 +1115,7 @@ impl Bindings {
             },
             module_deletes,
             unset_nodes,
+            global_declarations: builder.global_declarations,
             environment_definitions: builder.environment_definitions,
             environment_names: builder.environment_names,
             unused_imports: builder.unused_imports,
@@ -1561,9 +1573,18 @@ impl<'a> BindingsBuilder<'a> {
             self.module_info.path().is_init(),
             self.sys_info.dupe(),
         );
-        self.environment_names
-            .extend(definitions.definitions.into_keys());
-        for module in definitions.import_all.into_keys() {
+        // The scan rules out nested suites by the configuration too, and records what they define.
+        self.environment_names.extend(
+            definitions
+                .definitions
+                .into_keys()
+                .chain(definitions.environment_names),
+        );
+        for module in definitions
+            .import_all
+            .into_keys()
+            .chain(definitions.environment_import_all)
+        {
             if let Some(wildcard) = self.lookup.get_wildcard(module) {
                 self.environment_names.extend(wildcard.iter().cloned());
             }
@@ -2035,6 +2056,12 @@ impl<'a> BindingsBuilder<'a> {
     }
 
     pub fn declare_mutable_capture(&mut self, name: &Identifier, kind: MutableCaptureKind) {
+        // At module scope, `global` changes nothing.
+        if matches!(kind, MutableCaptureKind::Global)
+            && (self.scopes.in_class_body() || !self.scopes.in_module_or_class_top_level())
+        {
+            self.global_declarations.insert(name.id.clone());
+        }
         // Record any errors finding the identity of the mutable capture, and get a binding
         // that provides the type coming from the parent scope.
         let binding = match self
