@@ -1285,14 +1285,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
-    /// Removes `None` from every element of concrete tuples; other types are unchanged.
+    /// Removes `None` from every element of concrete tuples. A tuple with an element that is
+    /// always `None` cannot satisfy the condition, so it becomes `Never`.
     fn narrow_tuple_elements_not_none(&self, ty: &Type) -> Type {
         self.distribute_over_union(ty, |t| match t {
-            Type::Tuple(Tuple::Concrete(elts)) => self.heap.mk_tuple(Tuple::Concrete(
-                elts.iter()
-                    .map(|elt| self.narrow_is_not(elt, &Type::None))
-                    .collect(),
-            )),
+            Type::Tuple(Tuple::Concrete(elts)) => {
+                let narrowed = elts.map(|elt| self.narrow_is_not(elt, &Type::None));
+                if narrowed.iter().any(Type::is_never) {
+                    self.heap.mk_never()
+                } else {
+                    self.heap.mk_tuple(Tuple::Concrete(narrowed))
+                }
+            }
             _ => t.clone(),
         })
     }

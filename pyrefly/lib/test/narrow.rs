@@ -5164,3 +5164,65 @@ def h(a: int | None, b: str | None):
     assert_type(values, tuple[int | None, str | None])
     "#,
 );
+
+testcase!(
+    test_narrow_tuple_elements_none_check_drops_impossible_members,
+    r#"
+from typing import assert_type
+
+def f(values: tuple[None, str] | tuple[int, int] | tuple[int | None]):
+    if any(v is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[int, int] | tuple[int])
+
+def g(values: tuple[None, str] | tuple[int, int] | tuple[int | None]):
+    if all(v is not None for v in values):
+        assert_type(values, tuple[int, int] | tuple[int])
+    "#,
+);
+
+testcase!(
+    test_narrow_tuple_elements_none_check_alias_and_shadowing,
+    r#"
+from typing import Iterable, assert_type
+
+def mixed_any(values: tuple[int | None, str | None], use_builtin: bool):
+    if use_builtin:
+        check = any
+    else:
+        def check(it: Iterable[bool]) -> bool:
+            return False
+    if check(v is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[int | None, str | None])
+
+def mixed_all(values: tuple[int | None, str | None], use_builtin: bool):
+    if use_builtin:
+        check = all
+    else:
+        def check(it: Iterable[bool]) -> bool:
+            return True
+    if check(v is not None for v in values):
+        assert_type(values, tuple[int | None, str | None])
+
+def shadowed(values: tuple[int | None, str | None]):
+    def any(it: Iterable[bool]) -> bool:
+        return False
+    if any(v is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[int | None, str | None])
+    "#,
+);
+
+testcase!(
+    test_narrow_tuple_elements_none_check_through_variable,
+    r#"
+from typing import assert_type
+
+def f(a: int | None, b: str | None):
+    values = (a, b)
+    ok = all(v is not None for v in values)
+    if ok:
+        assert_type(values, tuple[int, str])
+    "#,
+);

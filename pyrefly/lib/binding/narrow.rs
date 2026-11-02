@@ -1257,14 +1257,8 @@ impl NarrowOps {
                     func,
                     arguments,
                 },
-            ) if let Some(op) = builder
-                .as_special_export(func)
-                .and_then(|export| Self::element_none_check_op(export, arguments)) =>
-            {
-                let [Expr::Generator(generator)] = &*arguments.args else {
-                    unreachable!("`element_none_check_op` only matches a single generator")
-                };
-                Self::from_single_narrow_op(&generator.generators[0].iter, op, test.range())
+            ) if let Some((iterable, op)) = Self::element_none_check(builder, func, arguments) => {
+                Self::from_single_narrow_op(iterable, op, test.range())
             }
             Expr::Call(
                 test @ ExprCall {
@@ -1385,12 +1379,14 @@ impl NarrowOps {
         }
     }
 
-    /// For `any(x is None for x in ...)` or `all(x is not None for x in ...)`, returns the op
-    /// describing the call being true. Requires a single unconditional, synchronous generator.
-    fn element_none_check_op(
-        export: SpecialExport,
-        arguments: &Arguments,
-    ) -> Option<AtomicNarrowOp> {
+    /// Matches `any(x is None for x in S)` and `all(x is not None for x in S)`, where the
+    /// callee is the builtin and the generator is single, unconditional and synchronous.
+    /// Returns `S` and the op describing the call being true.
+    fn element_none_check<'a>(
+        builder: &BindingsBuilder,
+        func: &Expr,
+        arguments: &'a Arguments,
+    ) -> Option<(&'a Expr, AtomicNarrowOp)> {
         let [Expr::Generator(generator)] = &*arguments.args else {
             return None;
         };
@@ -1400,22 +1396,20 @@ impl NarrowOps {
         let Expr::Compare(ExprCompare { ops, operands, .. }) = &*generator.elt else {
             return None;
         };
-        let (Expr::Name(elt), [op], Expr::Name(target)) =
-            (&operands[0], &**ops, &comprehension.target)
+        let (Expr::Name(elt), [op], [_, Expr::NoneLiteral(_)], Expr::Name(target)) =
+            (&operands[0], &**ops, &**operands, &comprehension.target)
         else {
             return None;
         };
-        if !matches!(&operands[1..], [Expr::NoneLiteral(_)]) {
-            return None;
-        }
         if elt.id != target.id || !comprehension.ifs.is_empty() || comprehension.is_async {
             return None;
         }
-        match (export, op) {
-            (SpecialExport::Any, CmpOp::Is) => Some(AtomicNarrowOp::AnyElementIsNone),
-            (SpecialExport::All, CmpOp::IsNot) => Some(AtomicNarrowOp::NoElementIsNone),
-            _ => None,
-        }
+        let op = match (builder.as_special_export(func)?, op) {
+            (SpecialExport::Any, CmpOp::Is) => AtomicNarrowOp::AnyElementIsNone,
+            (SpecialExport::All, CmpOp::IsNot) => AtomicNarrowOp::NoElementIsNone,
+            _ => return None,
+        };
+        Some((&comprehension.iter, op))
     }
 
     fn get_original_binding<'a>(
@@ -1460,6 +1454,9 @@ impl NarrowOps {
                 | AtomicNarrowOp::LenGte(..)
                 | AtomicNarrowOp::LenLt(..)
                 | AtomicNarrowOp::LenLte(..)
+                // These ops are only applied to concrete tuples, which are immutable.
+                | AtomicNarrowOp::AnyElementIsNone
+                | AtomicNarrowOp::NoElementIsNone
                 // This is technically unsafe, because it marks arbitrary TypeGuard/TypeIs results
                 // as still valid, but we need to allow this for `isinstance` and friends to work.
                 | AtomicNarrowOp::Call(..)
