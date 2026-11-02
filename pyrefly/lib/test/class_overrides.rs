@@ -1069,6 +1069,124 @@ class Incompatible(Base):
 );
 
 testcase!(
+    bug = "Writable property protocol conformance is not supported",
+    test_property_protocol_write_consistency,
+    r#"
+from functools import cached_property
+from typing import Protocol
+
+class Writable(Protocol):
+    x: int
+
+class ReadOnly(Protocol):
+    @property
+    def x(self) -> int: ...
+
+class Property:
+    @property
+    def x(self) -> int:
+        return 1
+
+    @x.setter
+    def x(self, value: int) -> None:
+        pass
+
+class Cached:
+    @cached_property
+    def x(self) -> int:
+        return 1
+
+def write(value: Writable) -> None:
+    value.x = 2
+
+def read(value: ReadOnly) -> int:
+    return value.x
+
+def check(ordinary: Property, cached: Cached) -> None:
+    write(ordinary)  # E: Argument `Property` is not assignable
+    write(cached)
+    read(ordinary)
+    read(cached)
+    "#,
+);
+
+testcase!(
+    bug = "Writable property protocol conformance is not supported",
+    test_cached_property_generic_self_protocol,
+    r#"
+from functools import cached_property
+from typing import Protocol
+
+class P[T](Protocol):
+    x: T
+
+class Property:
+    @property
+    def x[T](self: P[T]) -> int:
+        return 1
+
+class Cached:
+    @cached_property
+    def x[T](self: P[T]) -> int:
+        return 1
+
+class Concrete:
+    @cached_property
+    def x(self: P[int]) -> int:
+        return 1
+
+class Base:
+    x: int = 0
+
+class GenericOverride(Base):
+    @property
+    def x[T](self: P[T]) -> int:  # E: Class member `GenericOverride.x` overrides parent class `Base` in an inconsistent manner
+        return 1
+
+def consume(value: P[int]) -> None: ...
+
+def check(ordinary: Property, concrete: Concrete) -> None:
+    consume(ordinary)  # E: Argument `Property` is not assignable
+    consume(concrete)
+    "#,
+);
+
+testcase!(
+    test_cached_property_override_invalid_getter,
+    r#"
+from functools import cached_property
+from typing import Any, overload
+
+class Base:
+    x: Any = None
+
+class MissingArgument(Base):
+    @cached_property
+    def x(  # E: Class member `MissingArgument.x` overrides parent class `Base` in an inconsistent manner
+        self,
+        required: int,  # E: Property getter cannot take extra required parameter `required`
+    ) -> Any:
+        return required
+
+class NoApplicableOverload[T](Base):
+    @cached_property
+    @overload
+    def x(self: NoApplicableOverload[int]) -> Any: ...  # E: Class member `NoApplicableOverload.x` overrides parent class `Base` in an inconsistent manner
+    @cached_property
+    @overload
+    def x(self: NoApplicableOverload[str]) -> Any: ...
+    @cached_property
+    def x(self) -> Any:
+        return None
+
+class ExplicitAny(Base):
+    @cached_property
+    def x(self) -> Any:
+        return None
+    "#,
+);
+
+testcase!(
     test_inherit_type_attribute,
     r#"
 class ParentAttr: ...
