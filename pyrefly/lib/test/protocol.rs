@@ -1279,6 +1279,67 @@ f(C())
     "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/4656
+testcase!(
+    test_self_type_explicit_protocol_subclass,
+    r#"
+from typing import Protocol, Self
+
+class P(Protocol):
+    def method(self) -> list[Self]: ...
+
+class Q[T](Protocol):
+    def method(self, x: T) -> list[Self]: ...
+
+def f(x: P) -> None: ...
+def g(x: Q[int]) -> None: ...
+def h(x: Q[str]) -> None: ...
+
+class C(P):
+    def method(self) -> list[C]:
+        return []
+
+    def foo(self) -> P:
+        f(self)
+        return self
+
+class D(Q[int]):
+    def method(self, x: int) -> list[D]:
+        return []
+
+    def foo(self) -> None:
+        g(self)
+        h(self)  # E: Argument `Self@D` is not assignable to parameter `x` with type `Q[str]`
+    "#,
+);
+
+testcase!(
+    test_self_type_against_protocol_with_self,
+    r#"
+from typing import Protocol, Self
+
+class P(Protocol):
+    def clone(self) -> list[Self]: ...
+    def merge(self, other: Self) -> None: ...
+
+def f(x: P) -> None: ...
+
+class Explicit(P):
+    def clone(self) -> list[Self]: ...
+    def merge(self, other: Self) -> None: ...
+
+    def foo(self) -> None:
+        f(self)
+
+class Structural:
+    def clone(self) -> list[Self]: ...
+    def merge(self, other: Self) -> None: ...
+
+    def foo(self) -> None:
+        f(self)
+    "#,
+);
+
 testcase!(
     test_call_protocol_with_other_attr,
     r#"

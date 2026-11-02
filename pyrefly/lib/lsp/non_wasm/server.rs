@@ -235,9 +235,11 @@ use pyrefly_python::module::TextRangeWithModule;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_name::ModuleNameWithKind;
 use pyrefly_python::module_path::ModulePath;
+use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::events::CategorizedEvents;
+use pyrefly_util::fs_anyhow;
 use pyrefly_util::globs::FilteredGlobs;
 use pyrefly_util::globs::HiddenDirFilter;
 use pyrefly_util::includes::Includes as _;
@@ -2463,7 +2465,7 @@ impl Server {
                             params, &x.id,
                         )
                     {
-                        let response = match self.goto_definition(&transaction, params) {
+                        let response = match self.goto_definition(&mut transaction, params) {
                             Ok(response) => response,
                             Err(reason) => {
                                 telemetry_event.set_empty_response_reason(reason);
@@ -5034,7 +5036,7 @@ impl Server {
 
     fn goto_definition(
         &self,
-        transaction: &Transaction<'_>,
+        transaction: &mut Transaction<'_>,
         params: DefinitionParams,
     ) -> Result<Option<DefinitionResponse>, EmptyResponseReason> {
         let uri = &params.text_document_position_params.text_document.uri;
@@ -5044,7 +5046,35 @@ impl Server {
             .ok_or(EmptyResponseReason::ModuleInfoNotFound)?;
         let range =
             self.from_lsp_position(uri, &info, params.text_document_position_params.position);
-        let targets = transaction.goto_definition(&handle, range)?;
+        let mut targets = transaction.goto_definition(&handle, range)?;
+
+        // Filesystem modules are independent of editor buffers. Keep the request
+        // module unchanged because `range` refers to its current contents.
+        let mut changed = SmallSet::new();
+        for target in &targets {
+            if let ModulePathDetails::FileSystem(path) = target.module.path().details()
+                && target.module.path() != handle.path()
+                && !target.module.is_notebook()
+                && let Ok(contents) = fs_anyhow::read_to_string(path)
+                && contents.as_str() != target.module.contents().as_str()
+            {
+                changed.insert(path.to_path_buf());
+            }
+        }
+        if !changed.is_empty() {
+            let changed = changed.into_iter().collect::<Vec<_>>();
+            transaction.invalidate_disk(&changed);
+            transaction.run(
+                std::slice::from_ref(&handle),
+                Require::Everything,
+                Some(&self.lsp_thread_pool),
+            );
+            // The query transaction cannot commit its refreshed disk modules.
+            self.invalidate(TelemetryEventKind::InvalidateDisk, None, false, move |t| {
+                t.invalidate_disk(&changed)
+            });
+            targets = transaction.goto_definition(&handle, range)?;
+        }
         let mut lsp_targets = targets
             .iter()
             .filter_map(|x| self.to_lsp_location(x))

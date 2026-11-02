@@ -420,6 +420,9 @@ impl<'a> BindingsBuilder<'a> {
                 is_module_scope,
                 is_outer_class_type_parameter,
             } => {
+                if self.track_classmethod_uses {
+                    self.record_classmethod_use(value_idx.unwrap_or(lookup_result_idx));
+                }
                 if is_outer_class_type_parameter {
                     return self.insert_binding(
                         key,

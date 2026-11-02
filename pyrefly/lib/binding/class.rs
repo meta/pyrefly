@@ -453,6 +453,7 @@ impl<'a> BindingsBuilder<'a> {
             x.name.clone(),
             has_protocol_base,
         ));
+        let previous_tracking = self.begin_classmethod_receivers(&body);
         // Record the class body range for solve-time `typing.Self` resolution.
         // We use the body extent (first..last stmt) — not `x.range` — so
         // bases, decorators, and type params (which are evaluated in the
@@ -467,8 +468,10 @@ impl<'a> BindingsBuilder<'a> {
             body,
             &NestingContext::class(ShortIdentifier::new(&x.name), parent.dupe()),
         );
+        self.finish_classmethod_receivers();
         let (field_definitions, nn_module_registrations, uninitialized_fields) =
             self.scopes.finish_class_and_get_field_definitions();
+        self.track_classmethod_uses = previous_tracking;
         self.insert_binding_idx(
             class_indices.synthesized_fields_idx,
             BindingClassSynthesizedFields {

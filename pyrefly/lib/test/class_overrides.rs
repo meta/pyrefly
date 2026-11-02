@@ -783,6 +783,415 @@ class B(A):
     "#,
 );
 
+// Regression test for https://github.com/facebook/pyrefly/issues/3062
+testcase!(
+    test_cached_property_overrides_unannotated_class_variable,
+    r#"
+from functools import cached_property
+
+class BaseDatabaseFeatures:
+    can_introspect_fk = True
+    update_can_self_select = True
+
+class MySQLFeatures(BaseDatabaseFeatures):
+    @cached_property
+    def can_introspect_fk(self):
+        return self._check()
+
+    @cached_property
+    def update_can_self_select(self):
+        return True
+
+    def _check(self) -> bool:
+        return False
+    "#,
+);
+
+testcase!(
+    bug = "Writable property protocol conformance is not supported",
+    test_cached_property_protocol_write,
+    r#"
+from functools import cached_property
+from typing import Literal, Protocol, assert_type
+
+class Writable(Protocol):
+    x: bool
+
+class Cached:
+    @cached_property
+    def x(self):
+        return True
+
+def write(value: Writable) -> None:
+    value.x = False
+
+def require_true(value: Literal[True]) -> None: ...
+
+def check(value: Cached) -> None:
+    assert_type(value.x, bool)
+    write(value)  # E: Argument `Cached` is not assignable
+    assert_type(value.x, bool)
+    require_true(value.x)  # E: Argument `bool` is not assignable
+    value.x = False
+    assert_type(value.x, bool)
+    "#,
+);
+
+testcase!(
+    test_cached_property_inherited_write,
+    r#"
+from functools import cached_property
+from typing import Literal, assert_type
+
+class Base:
+    x = True
+
+class Child(Base):
+    @cached_property
+    def x(self):
+        return True
+
+def write(value: Base) -> None:
+    value.x = False
+
+def require_true(value: Literal[True]) -> None: ...
+
+def check(value: Child) -> None:
+    assert_type(value.x, bool)
+    write(value)
+    require_true(value.x)  # E: Argument `bool` is not assignable
+    value.x = False
+    assert_type(value.x, bool)
+    "#,
+);
+
+testcase!(
+    bug = "Writable property protocol conformance is not supported",
+    test_cached_property_overload_protocol_write,
+    r#"
+from functools import cached_property
+from typing import Protocol, assert_type, overload
+
+class Broad(Protocol):
+    x: int | str
+
+class Narrow(Protocol):
+    x: int
+
+class NarrowString(Protocol):
+    x: str
+
+class ReadOnly(Protocol):
+    @property
+    def x(self) -> int | str: ...
+
+class C[T: (int, str)]:
+    def __init__(self, value: T) -> None:
+        self.value = value
+
+    @cached_property
+    @overload
+    def x(self: C[int]) -> int: ...
+    @cached_property
+    @overload
+    def x(self: C[str]) -> str: ...
+    @cached_property
+    def x(self) -> int | str:
+        return self.value
+
+def broad_write(value: Broad) -> None:
+    value.x = "unsafe"
+
+def narrow_write(value: Narrow) -> None:
+    value.x = 42
+
+def narrow_string_write(value: NarrowString) -> None:
+    value.x = "safe"
+
+def read(value: ReadOnly) -> int | str:
+    return value.x
+
+def check(value: C[int]) -> None:
+    assert_type(value.x, int)
+    broad_write(value)  # E: Argument `C[int]` is not assignable
+    narrow_write(value)  # E: Argument `C[int]` is not assignable
+    read(value)
+    value.x = "unsafe"  # E: `Literal['unsafe']` is not assignable to attribute `x` with type `int`
+    value.x = 42
+    assert_type(value.x, int)
+
+def check_string(value: C[str]) -> None:
+    assert_type(value.x, str)
+    broad_write(value)  # E: Argument `C[str]` is not assignable
+    narrow_string_write(value)  # E: Argument `C[str]` is not assignable
+    read(value)
+    value.x = 42  # E: `Literal[42]` is not assignable to attribute `x` with type `str`
+    value.x = "safe"
+    assert_type(value.x, str)
+    "#,
+);
+
+testcase!(
+    bug = "Writable property protocol conformance is not supported",
+    test_cached_property_recursive_self_protocol,
+    r#"
+from functools import cached_property
+from typing import Protocol
+
+class P(Protocol):
+    x: str
+    marker: int
+
+class WrongValue:
+    marker: int = 0
+
+    @cached_property
+    def x(self: P) -> int:
+        return 1
+
+class Compatible:
+    marker: int = 0
+
+    @cached_property
+    def x(self: P) -> str:
+        return "value"
+
+class WrongMarker:
+    marker: str = "wrong"
+
+    @cached_property
+    def x(self: P) -> str:
+        return "value"
+
+def consume(value: P) -> None:
+    value.x = "replacement"
+
+def check(good: Compatible, bad: WrongValue, wrong: WrongMarker) -> None:
+    consume(good)  # E: Argument `Compatible` is not assignable
+    consume(bad)  # E: Argument `WrongValue` is not assignable
+    consume(wrong)  # E: Argument `WrongMarker` is not assignable
+    consume(good)  # E: Argument `Compatible` is not assignable
+    consume(bad)  # E: Argument `WrongValue` is not assignable
+    "#,
+);
+
+testcase!(
+    bug = "Writable property protocol conformance is not supported",
+    test_cached_property_no_applicable_overload,
+    r#"
+from functools import cached_property
+from typing import Any, Protocol, overload
+
+class Writable(Protocol):
+    x: bytes
+
+class ReadOnly(Protocol):
+    @property
+    def x(self) -> bytes: ...
+
+class C[T]:
+    @cached_property
+    @overload
+    def x(self: C[int]) -> int: ...
+    @cached_property
+    @overload
+    def x(self: C[str]) -> str: ...
+    @cached_property
+    def x(self) -> int | str:
+        return 1
+
+class Dynamic:
+    @cached_property
+    def x(self) -> Any:
+        return b"value"
+
+def write(value: Writable) -> None:
+    value.x = b"replacement"
+
+def read(value: ReadOnly) -> bytes:
+    return value.x
+
+def check(invalid: C[float], dynamic: Dynamic) -> None:
+    write(invalid)  # E: Argument `C[float]` is not assignable
+    read(invalid)  # E: Argument `C[float]` is not assignable
+    write(dynamic)  # E: Argument `Dynamic` is not assignable
+    read(dynamic)
+    "#,
+);
+
+testcase!(
+    test_cached_property_literal_override,
+    r#"
+from functools import cached_property
+from typing import Literal, assert_type
+
+class Base:
+    @cached_property
+    def x(self):
+        return True
+
+class Child(Base):
+    @cached_property
+    def x(self):
+        return False
+
+class LiteralParent:
+    @property
+    def x(self) -> Literal[True]:
+        return True
+
+class Incompatible(LiteralParent):
+    @cached_property
+    def x(self):  # E: Class member `Incompatible.x` overrides parent class `LiteralParent` in an inconsistent manner
+        return True
+
+def check(value: Child) -> None:
+    assert_type(value.x, bool)
+    "#,
+);
+
+testcase!(
+    test_cached_property_read_only_parent,
+    r#"
+from dataclasses import dataclass
+from functools import cached_property
+
+@dataclass(frozen=True)
+class Base:
+    x: int
+
+class Compatible(Base):
+    @cached_property
+    def x(self) -> bool:
+        return True
+
+class Incompatible(Base):
+    @cached_property
+    def x(self) -> str:  # E: Class member `Incompatible.x` overrides parent class `Base` in an inconsistent manner
+        return "wrong"
+    "#,
+);
+
+testcase!(
+    bug = "Writable property protocol conformance is not supported",
+    test_property_protocol_write_consistency,
+    r#"
+from functools import cached_property
+from typing import Protocol
+
+class Writable(Protocol):
+    x: int
+
+class ReadOnly(Protocol):
+    @property
+    def x(self) -> int: ...
+
+class Property:
+    @property
+    def x(self) -> int:
+        return 1
+
+    @x.setter
+    def x(self, value: int) -> None:
+        pass
+
+class Cached:
+    @cached_property
+    def x(self) -> int:
+        return 1
+
+def write(value: Writable) -> None:
+    value.x = 2
+
+def read(value: ReadOnly) -> int:
+    return value.x
+
+def check(ordinary: Property, cached: Cached) -> None:
+    write(ordinary)  # E: Argument `Property` is not assignable
+    write(cached)  # E: Argument `Cached` is not assignable
+    read(ordinary)
+    read(cached)
+    "#,
+);
+
+testcase!(
+    bug = "Writable property protocol conformance is not supported",
+    test_cached_property_generic_self_protocol,
+    r#"
+from functools import cached_property
+from typing import Protocol
+
+class P[T](Protocol):
+    x: T
+
+class Property:
+    @property
+    def x[T](self: P[T]) -> int:
+        return 1
+
+class Cached:
+    @cached_property
+    def x[T](self: P[T]) -> int:
+        return 1
+
+class Concrete:
+    @cached_property
+    def x(self: P[int]) -> int:
+        return 1
+
+class Base:
+    x: int = 0
+
+class GenericOverride(Base):
+    @cached_property
+    def x[T](self: P[T]) -> int:  # E: Class member `GenericOverride.x` overrides parent class `Base` in an inconsistent manner
+        return 1
+
+def consume(value: P[int]) -> None: ...
+
+def check(ordinary: Property, concrete: Concrete, cached: Cached) -> None:
+    consume(ordinary)  # E: Argument `Property` is not assignable
+    consume(concrete)  # E: Argument `Concrete` is not assignable
+    consume(cached)  # E: Argument `Cached` is not assignable
+    consume(cached)  # E: Argument `Cached` is not assignable
+    "#,
+);
+
+testcase!(
+    test_cached_property_override_invalid_getter,
+    r#"
+from functools import cached_property
+from typing import Any, overload
+
+class Base:
+    x: Any = None
+
+class MissingArgument(Base):
+    @cached_property
+    def x(  # E: Class member `MissingArgument.x` overrides parent class `Base` in an inconsistent manner
+        self,
+        required: int,  # E: Property getter cannot take extra required parameter `required`
+    ) -> Any:
+        return required
+
+class NoApplicableOverload[T](Base):
+    @cached_property
+    @overload
+    def x(self: NoApplicableOverload[int]) -> Any: ...  # E: Class member `NoApplicableOverload.x` overrides parent class `Base` in an inconsistent manner
+    @cached_property
+    @overload
+    def x(self: NoApplicableOverload[str]) -> Any: ...
+    @cached_property
+    def x(self) -> Any:
+        return None
+
+class ExplicitAny(Base):
+    @cached_property
+    def x(self) -> Any:
+        return None
+    "#,
+);
+
 testcase!(
     test_inherit_type_attribute,
     r#"
@@ -2446,6 +2855,79 @@ class ConcreteBase:
 class MultipleInheritance(AbstractBase, ConcreteBase):
     def __init__(self, x: int) -> None:  # E: Method `MultipleInheritance.__init__` does not call the method of the same name in a parent class
         self.x = x
+    "#,
+);
+
+testcase!(
+    test_missing_super_call_abstract_or_protocol_child,
+    TestEnv::new().enable_missing_super_call_error(),
+    r#"
+from abc import ABC, abstractmethod
+from typing import Protocol
+
+class Base:
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+class AbstractChildEllipsis(Base, ABC):
+    @abstractmethod
+    def __init__(self, x: int, y: int) -> None:
+        ...
+
+class AbstractChildPass(Base, ABC):
+    @abstractmethod
+    def __init__(self, x: int, y: int) -> None:
+        pass
+
+class AbstractChildRaise(Base, ABC):
+    @abstractmethod
+    def __init__(self, x: int, y: int) -> None:
+        raise NotImplementedError
+
+class ParentProto(Protocol):
+    x: int
+    def __init__(self, x: int) -> None:
+        self.x = x
+
+class SubProto(ParentProto, Protocol):
+    def __init__(self, x: int, y: int) -> None:
+        ...
+
+registry: list[type] = []
+
+class Registered(Protocol):
+    def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
+        registry.append(cls)
+
+class SubProtoInitSubclass(Registered, Protocol):
+    def __init_subclass__(cls) -> None:  # E: Method `SubProtoInitSubclass.__init_subclass__` does not call the method of the same name in a parent class
+        ...
+
+class Impl(SubProtoInitSubclass):
+    pass
+    "#,
+);
+
+testcase!(
+    test_missing_super_call_abstract_new_child,
+    TestEnv::new().enable_missing_super_call_error(),
+    r#"
+from abc import ABC, abstractmethod
+from typing import Self
+
+class Base:
+    def __new__(cls) -> Self:
+        return super().__new__(cls)
+
+class AbstractChild(Base, ABC):
+    @abstractmethod
+    def __new__(cls) -> Self:
+        ...
+
+class ConcreteChild(Base):
+    def __new__(cls) -> Self:  # E: Method `ConcreteChild.__new__` does not call the method of the same name in a parent class
+        ...
     "#,
 );
 
