@@ -11,18 +11,18 @@ _ = [x for x in "should be local 0"]
 #    ^ reference local 0
 #          ^ definition local 0
 _ = [something(x) for x in "should be local 1"]
-# definition  snapshot-util 0.1 comp/_.
+# reference  snapshot-util 0.1 comp/_.
 #    ^^^^^^^^^ reference  snapshot-util 0.1 comp/something().
 #              ^ reference local 1
 #                     ^ definition local 1
 _ = [something(x) for x in "should be local 2" if x == "s"]
-# definition  snapshot-util 0.1 comp/_.
+# reference  snapshot-util 0.1 comp/_.
 #    ^^^^^^^^^ reference  snapshot-util 0.1 comp/something().
 #              ^ reference local 2
 #                     ^ definition local 2
 #                                                 ^ reference local 2
 _ = {k: x for (k, x) in enumerate(range(10))}
-# definition  snapshot-util 0.1 comp/_.
+# reference  snapshot-util 0.1 comp/_.
 #    ^ reference local 3
 #       ^ reference local 4
 #              ^ definition local 3

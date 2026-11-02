@@ -1778,10 +1778,10 @@ impl CheckArgs {
         let retain = self.output.report_binding_memory.is_some()
             || self.output.debug_info.is_some()
             || self.output.report_trace.is_some()
-            || self.output.report_glean.is_some()
-            || self.output.report_scip.is_some();
+            || self.output.report_glean.is_some();
         RequireLevels {
-            specified: if retain {
+            // SCIP solves the dependencies it refers to once the indexed files are written.
+            specified: if retain || self.output.report_scip.is_some() {
                 Require::Everything
             } else {
                 Require::Errors
