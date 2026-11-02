@@ -5242,11 +5242,15 @@ class A:
     def __init__(self) -> None:
         self.x = 0
         def helper() -> None:
-            self.x = 1  # E: Cannot set field `x`
+            self.x = 1
         def helper_nonlocal() -> None:
             nonlocal self
-            self.x = 2  # E: Cannot set field `x`
+            self.x = 2
         class Inner:
+            def method(inner_self) -> None:
+                def f() -> None:
+                    self.x = 4  # E: Cannot set field `x`
+                f()
             @staticmethod
             def static_fn(self: A) -> None:
                 self.x = 3  # E: Cannot set field `x`

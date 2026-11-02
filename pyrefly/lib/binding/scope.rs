@@ -2346,7 +2346,8 @@ impl Scopes {
     /// Finds the method scope in `self.scopes` that owns `receiver` as its receiver parameter.
     /// Returns `Some((method_index, is_nested))` where:
     /// - `method_index` is the index in `self.scopes` of the `ScopeKind::Method`
-    /// - `is_nested` is true if the receiver was reached across a nested function/method boundary.
+    /// - `is_nested` is true if the receiver was reached across a nested method boundary
+    ///   (plain closures do not count).
     ///
     /// Returns `None` if `receiver` is not attributed to any method's receiver (including when
     /// shadowed by a local variable or non-receiver parameter in an inner scope).
@@ -2369,15 +2370,16 @@ impl Scopes {
                             })
                         ) {
                             // Genuine `nonlocal receiver` capture: continues to outer scope.
-                            crossed_nested = true;
+                            // Plain closures keep the enclosing method's permissions.
                         } else {
                             // The name is bound locally in this function/comprehension (as a parameter
                             // or local variable), so it shadows the enclosing receiver.
                             return None;
                         }
-                    } else {
-                        crossed_nested = true;
                     }
+                    // A plain closure is not a method boundary: it keeps the enclosing
+                    // method's permissions (e.g. assigning `Final` fields from a helper
+                    // defined inside `__init__`, which mypy also allows).
                 }
                 ScopeKind::Method(method_scope) => {
                     if let Some(static_info) = scope.stat.0.get(receiver) {
