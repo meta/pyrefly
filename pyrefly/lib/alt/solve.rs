@@ -2780,6 +2780,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .is_some_and(|meta| meta.flags.is_return_inferred),
             }
         };
+        // A definition under a test of the environment settles nothing outside its suite, since
+        // another configuration defines the name differently. Nor does a name that a suite the
+        // configuration rules out defines.
+        let chosen_by_environment = |name: &ExprName, idx: Idx<Key>| {
+            self.bindings()
+                .environment_definitions()
+                .get(&idx)
+                .is_some_and(|suite| !suite.contains_range(name.range))
+                || self.bindings().environment_names().contains(&name.id)
+        };
         let value_of_type = |ty: &Type| {
             let value = self.check_bool_type_and_get_value(x, ty, &swallow)?;
             // Each member of a union has its own `__bool__`, and one inferred return leaves the
@@ -2819,6 +2829,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // type, but the name always holds the assigned value, so that value's declaration
                 // settles it.
                 let idx = self.binding_before_narrowing(name);
+                if chosen_by_environment(name, idx) {
+                    return None;
+                }
                 match self.bindings().get(idx) {
                     Binding::FunctionParameter(param)
                         if matches!(**param, FunctionParameter::Annotated(_)) => {}
@@ -2879,6 +2892,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ))
             }
             Expr::Call(call) => {
+                if let Expr::Name(name) = &*call.func
+                    && chosen_by_environment(name, self.binding_before_narrowing(name))
+                {
+                    return None;
+                }
                 // Each member of a union is called separately, and an instance, including one
                 // whose type is a type variable, is called through its `__call__` method.
                 let mut callees = Vec::new();

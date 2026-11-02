@@ -5244,6 +5244,111 @@ def reads(c: C, u: Cfg | OtherCfg, h: Holder, pick: bool) -> None:
 "#,
 );
 
+// A test of the environment chooses which definition the configuration sees, and another
+// configuration chooses another, so the definition settles nothing.
+testcase!(
+    test_definition_under_environment_test_settles_nothing,
+    r#"
+import sys
+from typing import Final, Literal
+
+def flag() -> bool: ...
+
+if sys.platform == "win32":
+    IS_WIN: Final = True
+    def native() -> Literal[True]: ...
+else:
+    IS_WIN: Final = False
+    def native() -> Literal[False]: ...
+
+if IS_WIN:
+    print(1)
+if native():
+    print(2)
+
+def f() -> None:
+    if IS_WIN:
+        print(3)
+
+# The test chooses whether a function or class exists, but not what its body defines.
+if sys.version_info >= (3, 8):
+    def g(flag: Literal[False]) -> None:
+        if flag:
+            print(4)  # E: This code is unreachable
+
+    class C:
+        OFF: Final = False
+        if OFF:
+            print(5)  # E: This code is unreachable
+
+    # A read inside the same suite exists exactly when the definition does.
+    SAME: Final = False
+    if SAME:
+        print(6)  # E: This code is unreachable
+    if flag():
+        pass
+    AFTER_NESTED: Final = False
+OUTSIDE: Final = False
+if OUTSIDE:
+    print(7)  # E: This code is unreachable
+if SAME:
+    print(8)
+if AFTER_NESTED:
+    print(11)
+
+# Another configuration sees the definition in the suite this one rules out.
+OVERRIDDEN: Final = False
+if sys.platform == "win32":
+    OVERRIDDEN: Final = True
+if OVERRIDDEN:
+    print(9)
+
+# A definition before the first test of the environment is the same in every configuration, but
+# a suite after it may override it.
+if flag():
+    CHAINED: Final = False
+elif sys.platform == "win32":
+    CHAINED: Final = True
+else:
+    raise ValueError()
+if CHAINED:
+    print(10)
+if flag():
+    EARLIER: Final = False
+elif sys.platform == "win32":
+    raise ValueError()
+else:
+    raise ValueError()
+if EARLIER:
+    print(17)  # E: This code is unreachable
+
+# An override nested in the same suite may run before a read there.
+if sys.platform == "linux":
+    NESTED: Final = False
+    if sys.version_info < (3, 10):
+        NESTED: Final = True
+    if NESTED:
+        print(12)
+
+# Another configuration may choose a suite after the one this configuration chooses.
+LATER: Final = False
+if sys.platform == "linux":
+    pass
+else:
+    LATER: Final = True
+if LATER:
+    print(13)
+
+# A suite that runs is followed by the code after it, so an override nested in it reaches there.
+CHOSEN_OUTER: Final = False
+if sys.platform == "linux":
+    if sys.version_info < (3, 10):
+        CHOSEN_OUTER: Final = True
+if CHOSEN_OUTER:
+    print(15)
+"#,
+);
+
 // The paths inside a suite that declarations settle as dead never reach the end, whether the
 // suite ends in an expression or in a nested `if`.
 testcase!(

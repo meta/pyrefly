@@ -129,6 +129,7 @@ use crate::binding::table::TableKeyed;
 use crate::config::base::InferReturnTypes;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
+use crate::export::definitions::Definitions;
 use crate::export::definitions::MutableCaptureKind;
 use crate::export::exports::Exports;
 use crate::export::exports::LookupExport;
@@ -290,6 +291,10 @@ pub struct Bindings {
     /// The merges that paths on which a name is unset pass through, read by deferred
     /// initialization checks.
     unset_nodes: UnsetNodes,
+    /// See `Bindings::environment_definitions`.
+    environment_definitions: SmallMap<Idx<Key>, TextRange>,
+    /// See `Bindings::environment_names`.
+    environment_names: SmallSet<Name>,
     unused_imports: Vec<UnusedImport>,
     unused_variables: Vec<UnusedVariable>,
     pytest_info: Option<PytestBindingInfo>,
@@ -397,6 +402,10 @@ pub struct BindingsBuilder<'a> {
     semantic_checker: SemanticSyntaxChecker,
     semantic_syntax_errors: RefCell<Vec<SemanticSyntaxError>>,
     pytest_info: Option<crate::binding::pytest::PytestBindingInfo>,
+    /// See `Bindings::environment_definitions`.
+    environment_definitions: SmallMap<Idx<Key>, TextRange>,
+    /// See `Bindings::environment_names`.
+    environment_names: SmallSet<Name>,
     /// BoundName lookups keyed by source occurrence and finalized in insertion order.
     deferred_bound_names: SmallMap<ShortIdentifier, DeferredBoundName>,
     /// Yield and yield-from indices for lambdas that contain yields.
@@ -425,6 +434,9 @@ pub struct BindingsBuilder<'a> {
     /// Lexical may-mutation summary: branches, loops, and nested bodies cannot clear it.
     pub(super) has_functools_wrapper_mutation: bool,
     pub type_checking_depth: usize,
+    /// The range of the innermost clause being bound that is at or after the first test of the
+    /// environment in its `if`. See `Bindings::environment_definitions`.
+    pub(super) environment_suite: Option<TextRange>,
     /// True while binding the outermost known-unreachable suite. The call that sets this flag
     /// owns resetting it after nested `stmts()` calls, suppressing duplicate diagnostics.
     pub(super) in_unreachable_suite: bool,
@@ -520,6 +532,8 @@ impl Bindings {
             scope_trace: None,
             module_deletes: SmallSet::new(),
             unset_nodes: UnsetNodes::default(),
+            environment_definitions: SmallMap::new(),
+            environment_names: SmallSet::new(),
             unused_imports: Vec::new(),
             unused_variables: Vec::new(),
             pytest_info: None,
@@ -719,6 +733,20 @@ impl Bindings {
 
     pub fn unset_nodes(&self) -> &UnsetNodes {
         &self.unset_nodes
+    }
+
+    /// Definitions in the suites of an `if` from its first test of the environment onward, each
+    /// with the range of the innermost such clause, which for an `if` clause is the whole
+    /// statement. Another configuration would replace the definitions with another definition or
+    /// none, except for a read inside the same clause, which exists exactly when they do.
+    pub fn environment_definitions(&self) -> &SmallMap<Idx<Key>, TextRange> {
+        &self.environment_definitions
+    }
+
+    /// Names that a suite defines when the configuration rules it out by a test of the
+    /// environment. Another configuration may see that definition instead of the bound one.
+    pub fn environment_names(&self) -> &SmallSet<Name> {
+        &self.environment_names
     }
 
     pub fn available_definitions(&self, position: TextSize) -> SmallSet<Idx<Key>> {
@@ -921,6 +949,8 @@ impl Bindings {
             semantic_checker: SemanticSyntaxChecker::new(),
             semantic_syntax_errors: RefCell::new(Vec::new()),
             pytest_info,
+            environment_definitions: SmallMap::new(),
+            environment_names: SmallSet::new(),
             deferred_bound_names: SmallMap::new(),
             lambda_yield_keys: Vec::new(),
             owned_lambda_params: SmallMap::new(),
@@ -936,6 +966,7 @@ impl Bindings {
             promote_ranges: SmallSet::new(),
             has_functools_wrapper_mutation: false,
             type_checking_depth: 0,
+            environment_suite: None,
             in_unreachable_suite: false,
             pending_gate: None,
         };
@@ -1073,6 +1104,8 @@ impl Bindings {
             },
             module_deletes,
             unset_nodes,
+            environment_definitions: builder.environment_definitions,
+            environment_names: builder.environment_names,
             unused_imports: builder.unused_imports,
             unused_variables: builder.unused_variables,
             pytest_info: builder.pytest_info,
@@ -1515,6 +1548,26 @@ impl<'a> BindingsBuilder<'a> {
     /// Insert a binding into the bindings table using the current idx from a `CurrentIdx` wrapper.
     pub fn insert_binding_current(&mut self, current: CurrentIdx, value: Binding) -> Idx<Key> {
         self.insert_binding_idx(current.into_idx(), value)
+    }
+
+    /// Record the names that a suite defines, or star-imports, when the configuration rules the
+    /// suite out by a test of the environment, without binding the suite. Names are recorded for
+    /// the whole module, whatever scope the suite is in, which can only keep more tests from
+    /// settling.
+    pub fn record_environment_names(&mut self, body: &[Stmt]) {
+        let definitions = Definitions::new(
+            body,
+            self.module_info.name(),
+            self.module_info.path().is_init(),
+            self.sys_info.dupe(),
+        );
+        self.environment_names
+            .extend(definitions.definitions.into_keys());
+        for module in definitions.import_all.into_keys() {
+            if let Some(wildcard) = self.lookup.get_wildcard(module) {
+                self.environment_names.extend(wildcard.iter().cloned());
+            }
+        }
     }
 
     /// Record that an annotation-only declaration was subsequently initialized by a non-annotated assignment.
@@ -2488,6 +2541,9 @@ impl<'a> BindingsBuilder<'a> {
         let imported_final_reported = self.check_for_imported_final_reassignment(name, idx);
         if !type_alias_reported && !imported_final_reported {
             self.check_for_all_caps_final_reassignment(name, idx);
+        }
+        if let Some(suite) = self.environment_suite {
+            self.environment_definitions.insert(idx, suite);
         }
         let name = Hashed::new(name);
         let write_info = self
