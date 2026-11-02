@@ -35,6 +35,7 @@ pub mod singledispatch;
 pub mod solve;
 pub mod special_calls;
 pub mod specials;
+pub mod sqlalchemy;
 pub mod subscript;
 pub mod traits;
 pub mod type_level_dsl;

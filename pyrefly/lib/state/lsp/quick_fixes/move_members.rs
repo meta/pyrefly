@@ -335,8 +335,14 @@ fn target_insertion_point(
 ) -> Option<(String, TextRange, bool)> {
     if let Some(pass_stmt) = replaceable_pass_stmt(class_def) {
         let (indent, line_start) = line_indent_and_start(source, pass_stmt.range().start())?;
-        let line_end = line_end_position(source, pass_stmt.range().end());
-        return Some((indent, TextRange::new(line_start, line_end), true));
+        // Replacing the line only removes `pass` when nothing precedes it on the line.
+        if source[line_start.to_usize()..pass_stmt.start().to_usize()]
+            .trim()
+            .is_empty()
+        {
+            let line_end = line_end_position(source, pass_stmt.range().end());
+            return Some((indent, TextRange::new(line_start, line_end), true));
+        }
     }
     if let Some(last_stmt) = class_def.body.last() {
         let (indent, _) = line_indent_and_start(source, last_stmt.range().start())?;
