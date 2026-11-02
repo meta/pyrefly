@@ -887,6 +887,141 @@ fn pytest_conftest_local_named_fixture_overrides_conftest() {
 }
 
 #[test]
+fn pytest_fixture_override_requests_parent_definition() {
+    for (decorator, function_name) in [
+        ("@pytest.fixture(name='answer')", "local_answer"),
+        ("@pytest.fixture", "answer"),
+    ] {
+        let code = format!(
+            "import pytest\n{decorator}\ndef {function_name}(answer): return answer + 1\ndef test_value(answer): pass\n"
+        );
+        let (_root, state, handle) = state_with_conftest(
+            &[(
+                "tests/conftest.py",
+                "import pytest\n@pytest.fixture\ndef answer(): return 41\n",
+            )],
+            &code,
+        );
+        let position = TextSize::try_from(
+            code.find(&format!("{function_name}(answer)")).unwrap() + function_name.len() + 1,
+        )
+        .unwrap();
+        let body_position = TextSize::try_from(code.find("return answer").unwrap() + 7).unwrap();
+        let transaction = state.transaction();
+        if function_name == "local_answer" {
+            let reference_definition = transaction
+                .find_definition(&handle, position, FindPreference::default())
+                .unwrap();
+            assert_eq!(reference_definition[0].definition_range.start(), position);
+            let mut highlights = transaction.find_local_occurrences(&handle, position);
+            highlights.sort_by_key(|range| range.start());
+            assert_eq!(
+                highlights,
+                vec![
+                    TextRange::at(position, TextSize::of("answer")),
+                    TextRange::at(body_position, TextSize::of("answer")),
+                ],
+            );
+        }
+        for definitions in [
+            transaction.goto_definition(&handle, position).unwrap(),
+            transaction.goto_declaration(&handle, position).unwrap(),
+        ] {
+            // BUG: pytest requests the overridden parent fixture, not this enclosing fixture.
+            assert_eq!(definitions[0].module.path(), handle.path());
+            assert_eq!(
+                definitions[0].module.code_at(definitions[0].range),
+                function_name,
+            );
+        }
+        let consumer_position =
+            TextSize::try_from(code.find("test_value(answer)").unwrap() + "test_value(".len())
+                .unwrap();
+        let consumer_definition = transaction
+            .goto_definition(&handle, consumer_position)
+            .unwrap();
+        assert_eq!(consumer_definition[0].module.path(), handle.path());
+        assert_eq!(
+            consumer_definition[0]
+                .module
+                .code_at(consumer_definition[0].range),
+            function_name,
+        );
+    }
+}
+
+#[test]
+fn pytest_fixture_class_override_requests_module_definition() {
+    let code = "import pytest\n@pytest.fixture\ndef answer(): return 41\nclass TestValues:\n    @pytest.fixture\n    def answer(self, answer): return answer + 1\n    def test_value(self, answer): pass\n";
+    let (_root, state, handle) = state_with_conftest(&[], code);
+    let position =
+        TextSize::try_from(code.find("answer(self, answer)").unwrap() + "answer(self, ".len())
+            .unwrap();
+    let class_fixture_position =
+        TextSize::try_from(code.rfind("def answer").unwrap() + "def ".len()).unwrap();
+    let transaction = state.transaction();
+    let definition = transaction.goto_definition(&handle, position).unwrap();
+    // BUG: the class fixture requests the module fixture it overrides.
+    assert_eq!(definition[0].range.start(), class_fixture_position);
+    let consumer_position = TextSize::try_from(
+        code.find("test_value(self, answer)").unwrap() + "test_value(self, ".len(),
+    )
+    .unwrap();
+    let consumer_definition = transaction
+        .goto_definition(&handle, consumer_position)
+        .unwrap();
+    assert_eq!(consumer_definition[0].range.start(), class_fixture_position);
+}
+
+#[test]
+fn pytest_conftest_override_requests_parent_definition() {
+    for (decorator, function_name) in [
+        ("@pytest.fixture(name='answer')", "local_answer"),
+        ("@pytest.fixture", "answer"),
+    ] {
+        let code =
+            format!("import pytest\n{decorator}\ndef {function_name}(answer): return answer + 1\n");
+        let (root, state, _) = state_with_conftest(
+            &[
+                (
+                    "conftest.py",
+                    "import pytest\n@pytest.fixture\ndef answer(): return 41\n",
+                ),
+                ("tests/conftest.py", &code),
+            ],
+            "def test_value(): pass\n",
+        );
+        let module_path = ModulePath::filesystem(root.path().join("tests/conftest.py"));
+        let config = state.config_finder().python_file(
+            ModuleNameWithKind::guaranteed(ModuleName::unknown()),
+            &module_path,
+        );
+        let handle = config.handle_from_module_path(module_path);
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction
+            .as_mut()
+            .run(slice::from_ref(&handle), Require::Everything, None);
+        state.commit_transaction(transaction, None);
+        let position = TextSize::try_from(
+            code.find(&format!("{function_name}(answer)")).unwrap() + function_name.len() + 1,
+        )
+        .unwrap();
+        let transaction = state.transaction();
+        for definitions in [
+            transaction.goto_definition(&handle, position).unwrap(),
+            transaction.goto_declaration(&handle, position).unwrap(),
+        ] {
+            // BUG: the conftest fixture requests the ancestor fixture it overrides.
+            assert_eq!(definitions[0].module.path(), handle.path());
+            assert_eq!(
+                definitions[0].module.code_at(definitions[0].range),
+                function_name,
+            );
+        }
+    }
+}
+
+#[test]
 fn pytest_fixture_defaulted_parameter_references() {
     let code = "import pytest\n@pytest.fixture\ndef answer(): return 42\ndef test_value(answer=0): assert answer == 0\n";
     let (_root, state, handle) = state_with_conftest(&[], code);
