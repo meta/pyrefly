@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::HashSet;
 use std::iter::once;
 
 use dupe::Dupe;
@@ -14,13 +15,16 @@ use pyrefly_python::docstring::dedent_block_preserving_layout;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::short_identifier::ShortIdentifier;
+use pyrefly_python::sys_info::PythonVersion;
 use pyrefly_types::callable::Callable;
 use pyrefly_types::callable::DefaultValue;
 use pyrefly_types::callable::Param;
 use pyrefly_types::callable::ParamList;
 use pyrefly_types::callable::Params;
+use pyrefly_types::callable::PrefixParam;
 use pyrefly_types::callable::Required;
 use pyrefly_types::literal::Lit;
+use pyrefly_types::quantified::QuantifiedOrigin;
 use pyrefly_types::stdlib::Stdlib;
 use pyrefly_types::type_output::AnnotationPart;
 use pyrefly_types::type_var::Restriction;
@@ -38,6 +42,7 @@ use starlark_map::Hashed;
 
 use super::extract_shared::line_indent_and_start;
 use super::extract_shared::selection_anchor;
+use super::extract_shared::unique_name;
 use crate::binding::binding::KeyClass;
 use crate::state::annotation_renderer::AnnotationRenderer;
 use crate::state::lsp::ImportFormat;
@@ -120,6 +125,7 @@ pub(crate) fn implement_abstract_members_code_actions(
     let stdlib = transaction.get_stdlib(handle);
     let mut renderer = MemberRenderer {
         stdlib: &stdlib,
+        python_version: handle.sys_info().version(),
         parts: vec![AnnotationPart::Text(prefix)],
     };
     for (i, member) in members.iter().enumerate() {
@@ -289,6 +295,7 @@ fn line_end_position(source: &str, position: TextSize) -> TextSize {
 /// Builds source text while retaining the module references used by annotations.
 struct MemberRenderer<'a> {
     stdlib: &'a Stdlib,
+    python_version: PythonVersion,
     parts: Vec<AnnotationPart>,
 }
 
@@ -448,9 +455,31 @@ impl MemberRenderer<'_> {
         tparams: Option<&TParams>,
         strip_receiver: bool,
     ) -> Option<()> {
-        if let Some(tparams) = tparams.filter(|p| !p.is_empty()) {
+        let tparams = tparams
+            .into_iter()
+            .flat_map(|tparams| tparams.iter())
+            .collect::<Vec<_>>();
+        // Type parameters are declared with PEP 695 syntax only on Python 3.12+, when none has a
+        // default and all were written in source. Otherwise every type parameter becomes its
+        // gradual form, which keeps the stub a compatible override.
+        let declare = self.python_version >= PythonVersion::new(3, 12, 0)
+            && tparams.iter().all(|param| {
+                param.default().is_none()
+                    && matches!(
+                        param.identity().origin,
+                        QuantifiedOrigin::Pep695 | QuantifiedOrigin::ScopedLegacy
+                    )
+            });
+        let erased;
+        let callable = if declare || tparams.is_empty() {
+            callable
+        } else {
+            erased = callable.with_gradual_tparams(tparams.iter().copied());
+            &erased
+        };
+        if declare && !tparams.is_empty() {
             self.text("[");
-            for (i, param) in tparams.iter().enumerate() {
+            for (i, param) in tparams.into_iter().enumerate() {
                 if i > 0 {
                     self.text(", ");
                 }
@@ -473,16 +502,31 @@ impl MemberRenderer<'_> {
                     Restriction::Unrestricted => {}
                     Restriction::ShapeExtension(_) => return None,
                 }
-                if let Some(default) = param.default() {
-                    self.text(" = ");
-                    self.annotation(default);
-                }
             }
             self.text("]");
         }
         self.text("(");
-        let Params::List(params) = &callable.params else {
-            return None;
+        let param_spec_params;
+        let params = match &callable.params {
+            Params::List(params) => params,
+            Params::ParamSpec(prefix, param_spec) => {
+                // Types do not record the names of the `*args, **kwargs` pair, so `params`
+                // names it. Anything but an unsolved `P` becomes the gradual
+                // `*args: Any, **kwargs: Any`, which accepts every call.
+                let (args, kwargs) = match param_spec {
+                    Type::Quantified(q) => (Type::Args(q.clone()), Type::Kwargs(q.clone())),
+                    _ => (Type::any_explicit(), Type::any_explicit()),
+                };
+                param_spec_params = ParamList::new(
+                    prefix
+                        .iter()
+                        .map(PrefixParam::to_param_preserve_name)
+                        .chain([Param::Varargs(None, args), Param::Kwargs(None, kwargs)])
+                        .collect(),
+                );
+                &param_spec_params
+            }
+            _ => return None,
         };
         self.params(params, strip_receiver);
         self.text(") -> ");
@@ -491,6 +535,11 @@ impl MemberRenderer<'_> {
     }
 
     fn params(&mut self, params: &ParamList, strip_receiver: bool) {
+        let mut names = params
+            .items()
+            .iter()
+            .filter_map(|param| Some(param.name()?.as_str().to_owned()))
+            .collect::<HashSet<_>>();
         let mut posonly = false;
         let mut kwonly = false;
         for (i, param) in params.items().iter().enumerate() {
@@ -515,7 +564,15 @@ impl MemberRenderer<'_> {
             if let Some(name) = param.name() {
                 self.text(name.as_str());
             } else {
-                self.text(&format!("arg{i}"));
+                // An unnamed parameter gets a conventional name that no other parameter uses.
+                let base = match param {
+                    Param::Varargs(..) => "args".to_owned(),
+                    Param::Kwargs(..) => "kwargs".to_owned(),
+                    _ => format!("arg{i}"),
+                };
+                let name = unique_name(&base, |name| names.contains(name));
+                self.text(&name);
+                names.insert(name);
             }
             if !(strip_receiver && i == 0 && matches!(param, Param::PosOnly(..) | Param::Pos(..))) {
                 self.text(": ");

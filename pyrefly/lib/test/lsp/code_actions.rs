@@ -5617,9 +5617,15 @@ class Base(ABC):
 class Child(Base):
     pass
 "#;
-    let after = implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child");
-    // BUG: the `*args: P.args, **kwargs: P.kwargs` signature removes the whole action.
-    assert_eq!(after, None);
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    assert!(
+        after.ends_with(
+            "class Child(Base):\n    def named[**P](self, args: int, *args_1: P.args, **kwargs: P.kwargs) -> None:\n        raise NotImplementedError\n\n    def other(self) -> int:\n        raise NotImplementedError\n\n    def run[**P, R](self, fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:\n        raise NotImplementedError\n"
+        ),
+        "{after}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
 }
 
 #[test]
@@ -5640,15 +5646,28 @@ class Child(Base[[int, str]]):
 class Child2(Base[...]):
     pass
 "#;
-    // BUG: a specialized `ParamSpec` signature removes the whole action.
-    assert_eq!(
-        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child("),
-        None
+    let child =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child(").unwrap();
+    assert!(
+        child.contains(
+            "class Child(Base[[int, str]]):\n    def run(self, *args: Any, **kwargs: Any) -> None:\n        raise NotImplementedError\n\n    def wrap(self, fn: Callable[..., None]) -> None:\n"
+        ),
+        "{child}"
     );
-    assert_eq!(
-        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child2"),
-        None
+    assert!(
+        child.contains("    def wrap_named(self, arg2: int, *args: Any, **kwargs: Any) -> None:\n"),
+        "{child}"
     );
+    let child2 =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child2").unwrap();
+    assert!(
+        child2.contains(
+            "class Child2(Base[...]):\n    def run(self, *args: Any, **kwargs: Any) -> None:\n        raise NotImplementedError\n\n    def wrap(self, fn: Callable[Concatenate[int, ...], None]) -> None:\n"
+        ),
+        "{child2}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &child)], Require::Everything);
+    mk_multi_file_state_assert_no_errors(&[("main", &child2)], Require::Everything);
 }
 
 #[test]
@@ -5661,22 +5680,28 @@ class Base[**P](ABC):
 class Child(Base[[str]]):
     pass
 "#;
-    // BUG: a specialized `ParamSpec` signature removes the whole action.
-    assert_eq!(
-        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child"),
-        None
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    // Python cannot write the required `str` parameter after the optional `x`.
+    assert!(
+        after.contains("    def f(self, x: int = 0, *args: Any, **kwargs: Any) -> None:\n"),
+        "{after}"
     );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
 }
 
 #[test]
 fn implement_abstract_members_legacy_type_var_before_python_3_12() {
     let base = r#"
 from abc import ABC, abstractmethod
-from typing import TypeVar
+from typing import Callable, ParamSpec, TypeVar
+P = ParamSpec("P")
 T = TypeVar("T")
 class Base(ABC):
     @abstractmethod
     def f(self, x: T) -> T: ...
+    @abstractmethod
+    def g(self, fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T: ...
 "#;
     let code = "from base import Base\nclass Child(Base):\n    pass\n";
     let after = implement_abstract_members_at(
@@ -5685,10 +5710,28 @@ class Base(ABC):
         "class Child",
     )
     .unwrap();
-    // BUG: PEP 695 syntax is a syntax error before Python 3.12.
     assert_eq!(
         after,
-        "from base import Base\nclass Child(Base):\n    def f[T](self, x: T) -> T:\n        raise NotImplementedError\n"
+        "from typing import Any\nfrom typing import Callable\nfrom base import Base\nclass Child(Base):\n    def f(self, x: Any) -> Any:\n        raise NotImplementedError\n\n    def g(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:\n        raise NotImplementedError\n"
+    );
+    mk_multi_file_state_with_env(
+        TestEnv::new_with_version(PythonVersion::new(3, 11, 0)),
+        &[("base", base), ("main", &after)],
+        Require::Everything,
+        true,
+    );
+    // Python 3.12 and later can declare the type parameters.
+    let after = implement_abstract_members_at(
+        TestEnv::new_with_version(PythonVersion::new(3, 12, 0)),
+        &[("base", base), ("main", code)],
+        "class Child",
+    )
+    .unwrap();
+    assert!(
+        after.ends_with(
+            "class Child(Base):\n    def f[T](self, x: T) -> T:\n        raise NotImplementedError\n\n    def g[**P, T](self, fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:\n        raise NotImplementedError\n"
+        ),
+        "{after}"
     );
 }
 
@@ -5736,7 +5779,7 @@ class Child(Base):
         implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
     assert!(
         after.ends_with(
-            "class Child(Base):\n    def factory(self) -> Callable[[Any], Any]:\n        raise NotImplementedError\n\n    def mixed[U = int](self, value: U) -> Callable[[Any], Any]:\n        raise NotImplementedError\n\n    def nested(self) -> Callable[[], Callable[[Any], Any]]:\n        raise NotImplementedError\n"
+            "class Child(Base):\n    def factory(self) -> Callable[[Any], Any]:\n        raise NotImplementedError\n\n    def mixed(self, value: Any) -> Callable[[Any], Any]:\n        raise NotImplementedError\n\n    def nested(self) -> Callable[[], Callable[[Any], Any]]:\n        raise NotImplementedError\n"
         ),
         "{after}"
     );
