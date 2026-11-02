@@ -1166,8 +1166,6 @@ def f(x: None) -> None:
     }
 
     // https://github.com/facebook/pyrefly/issues/5113
-    // bug: at their default severity, `deprecated` and `unreachable` are LSP
-    // warnings; the team agreed on 2026-10-29 that they should be hints.
     #[test]
     fn test_deprecated_and_unreachable_in_lsp() {
         let module_info = Module::new(
@@ -1190,7 +1188,7 @@ def f(x: None) -> None:
         assert_eq!(deprecated.severity, Some(DiagnosticSeverity::Warning));
         assert_eq!(deprecated.tags, Some(vec![DiagnosticTag::Deprecated]));
         let unreachable = diagnostic(ErrorKind::Unreachable);
-        assert_eq!(unreachable.severity, Some(DiagnosticSeverity::Warning));
+        assert_eq!(unreachable.severity, Some(DiagnosticSeverity::Hint));
         assert_eq!(unreachable.tags, Some(vec![DiagnosticTag::Unnecessary]));
     }
 }

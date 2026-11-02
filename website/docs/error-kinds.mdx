@@ -2456,12 +2456,13 @@ def f(x: str) -> None:
 
 ## unreachable
 
-Default severity: `warn`
+Default severity: `hint`
 
-This error is raised when code can never execute because it comes after a statement that
+This diagnostic is reported when code can never execute because it comes after a statement that
 always exits the current flow, such as `return`, `raise`, `break`, or `continue`. One
 diagnostic is reported per block, covering everything from the first dead statement to the
-end of the block.
+end of the block. The [`all`](../configuration#preset-all) preset
+reports it as an error.
 
 ```python
 def example():

@@ -707,7 +707,7 @@ impl ErrorKind {
             ErrorKind::PartiallyUnknownType => Severity::Ignore,
             ErrorKind::UnnecessaryComparison => Severity::Warn,
             ErrorKind::UnnecessaryTypeConversion => Severity::Warn,
-            ErrorKind::Unreachable => Severity::Warn,
+            ErrorKind::Unreachable => Severity::Hint,
             ErrorKind::UnreachableExceptClause => Severity::Warn,
             ErrorKind::UnreachableMatchCase => Severity::Warn,
             ErrorKind::UnresolvableDunderAll => Severity::Warn,

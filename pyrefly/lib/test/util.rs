@@ -891,6 +891,7 @@ impl TestEnv {
         if self.protected_access_error {
             errors.set_error_severity(ErrorKind::ProtectedAccess, Severity::Error);
         }
+        report_unreachable_at_warn(errors);
         if self.implicitly_defined_attribute_error {
             errors.set_error_severity(ErrorKind::ImplicitlyDefinedAttribute, Severity::Error);
         }
@@ -1284,6 +1285,12 @@ fn get_batched_lsp_operations_report_no_cursor_helper(
     }
 
     report
+}
+
+/// `unreachable` defaults to `hint`, and `# E:` expectations only see diagnostics above
+/// `hint`, so tests report it at `warn`.
+pub fn report_unreachable_at_warn(errors: &mut ErrorDisplayConfig) {
+    errors.set_default_severity(ErrorKind::Unreachable, Severity::Warn);
 }
 
 pub fn init_test() {

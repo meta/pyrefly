@@ -24,6 +24,7 @@ use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
 use starlark_map::small_map::SmallMap;
 
 use crate::config::config::ConfigFile;
+use crate::config::error::ErrorDisplayConfig;
 use crate::config::finder::ConfigFinder;
 use crate::error::error::print_errors;
 use crate::state::errors::Errors;
@@ -32,6 +33,7 @@ use crate::state::require::Require;
 use crate::state::state::State;
 use crate::state::subscriber::TestSubscriber;
 use crate::test::util::init_test;
+use crate::test::util::report_unreachable_at_warn;
 
 #[derive(Default, Clone, Dupe, Debug)]
 struct IncrementalData(Arc<Mutex<SmallMap<ModuleName, Arc<String>>>>);
@@ -92,6 +94,12 @@ impl Incremental {
             );
         }
         config.source_db = Some(ArcId::new(Box::new(sourcedb)));
+        report_unreachable_at_warn(
+            config
+                .root
+                .errors
+                .get_or_insert_with(ErrorDisplayConfig::default),
+        );
         config.configure();
         let config = ArcId::new(config);
 

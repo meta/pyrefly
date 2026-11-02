@@ -987,7 +987,7 @@ fn test_unreachable_branch_diagnostic() {
                         "end": {"character": 12, "line": 6},
                         "start": {"character": 4, "line": 6}
                     },
-                    "severity": 2,
+                    "severity": 4,
                     "source": "Pyrefly",
                     "tags": [1]
                 }
