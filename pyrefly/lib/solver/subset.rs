@@ -2567,6 +2567,14 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 // https://github.com/python/typeshed/blob/5c8b7fcbbeb4af2d7e9f33e745a7863e401c2578/stdlib/typing.pyi#L638
                 Ok(())
             }
+            // `Self@C` is a subtype of `C`, so a protocol that `C` explicitly inherits is satisfied
+            // nominally, as it is for `C` itself.
+            (Type::SelfType(got), Type::ClassType(want))
+                if self.type_order.is_protocol(want.class_object())
+                    && let Some(got) = self.type_order.as_superclass(got, want.class_object()) =>
+            {
+                self.check_targs(&got, want)
+            }
             (_, Type::ClassType(want)) if self.type_order.is_protocol(want.class_object()) => {
                 self.is_subset_protocol(got.clone(), want.clone())
             }

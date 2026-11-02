@@ -15,6 +15,7 @@ use ruff_python_ast::name::Name;
 #[derive(Debug, Clone, Dupe, Copy, PartialEq, Eq)]
 pub enum SpecialExport {
     ClassMethod,
+    StaticMethod,
     AbstractClassMethod,
     TypeAlias,
     TypeAliasType,
@@ -105,6 +106,7 @@ impl SpecialExport {
         match name.as_str() {
             "TypeAlias" => Some(Self::TypeAlias),
             "classmethod" => Some(Self::ClassMethod),
+            "staticmethod" => Some(Self::StaticMethod),
             "abstractclassmethod" => Some(Self::AbstractClassMethod),
             "TypeVar" => Some(Self::TypeVar),
             "IntVar" => Some(Self::IntVar),
@@ -242,6 +244,7 @@ impl SpecialExport {
             | Self::HasAttr
             | Self::GetAttr
             | Self::ClassMethod
+            | Self::StaticMethod
             | Self::BuiltinsDict
             | Self::BuiltinsList
             | Self::NotImplemented

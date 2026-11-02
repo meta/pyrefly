@@ -16,7 +16,6 @@ use ruff_text_size::TextRange;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::error::collector::ErrorCollector;
-use crate::solver::solver::SubsetError;
 use crate::types::callable::Param;
 use crate::types::callable::Required;
 use crate::types::class::ClassType;
@@ -333,19 +332,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    pub fn decompose_dict(&self, hint: &Type) -> (Option<Type>, Option<Type>) {
+    /// Decompose a dict hint into key and value hints. Returns `None` if `hint` is not a dict
+    /// type, or if it is one but contributes neither a key nor a value hint. A hint containing
+    /// placeholder vars (e.g. `dict[K, V]` from a generic signature) is still a match even when
+    /// neither var is resolved: inferring against it is what pins those vars.
+    pub fn decompose_dict(&self, hint: &Type) -> Option<(Option<Type>, Option<Type>)> {
         let key = self.fresh_var();
         let value = self.fresh_var();
         let dict_type = self.heap.mk_class_type(
             self.stdlib
                 .dict(key.to_type(self.heap), value.to_type(self.heap)),
         );
-        if self.is_subset_eq(&dict_type, hint) {
-            let key = self.resolve_var_opt(hint, key);
-            let value = self.resolve_var_opt(hint, value);
-            (key, value)
+        if !self.is_subset_eq(&dict_type, hint) {
+            return None;
+        }
+        let key = self.resolve_var_opt(hint, key);
+        let value = self.resolve_var_opt(hint, value);
+        if key.is_none() && value.is_none() && !hint.may_contain_placeholder_var() {
+            None
         } else {
-            (None, None)
+            Some((key, value))
         }
     }
 
@@ -545,16 +551,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Vec<D> {
         hint.types()
             .iter()
-            .filter_map(|hint| {
-                // Decomposing a hint should not have any side effects.
-                let snapshot = self
-                    .solver()
-                    .snapshot_exact_vars(&hint.collect_maybe_placeholder_vars());
-                let ret = decompose(hint);
-                self.solver().restore_vars(snapshot);
-                ret
-            })
+            .filter_map(|hint| self.decompose_one_hint(hint, &decompose))
             .collect()
+    }
+
+    fn decompose_one_hint<'b, D>(
+        &self,
+        hint: &'b Type,
+        decompose: impl FnOnce(&'b Type) -> Option<D>,
+    ) -> Option<D> {
+        // Decomposing a hint should not have any side effects.
+        let snapshot = self
+            .solver()
+            .snapshot_exact_vars(&hint.collect_maybe_placeholder_vars());
+        let ret = decompose(hint);
+        self.solver().restore_vars(snapshot);
+        ret
     }
 
     pub fn infer_with_decomposed_hint<D>(
@@ -612,14 +624,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             None => return ret,
                         }
                     } else {
+                        let Some(d) = self.decompose_one_hint(branch_hint, &decompose) else {
+                            continue;
+                        };
                         // Pinning vars mutates solver state, so infer under a snapshot that
                         // rolls back when the inferred type doesn't match the hint. Emitting
                         // errors from possibly-partial var answers is unsafe, so pass none.
                         let mut ret = None;
                         let matched = self.solver().with_snapshot(&vs, || {
-                            let Some(d) = decompose(branch_hint) else {
-                                return Err(SubsetError::Other);
-                            };
                             let ty = infer(Some(d), Some(HintRef(hint.types(), None)));
                             let result = self.is_subset_eq_with_reason(&ty, branch_hint);
                             ret = Some(ty);

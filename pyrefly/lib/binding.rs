@@ -10,6 +10,7 @@ pub mod base_class;
 pub mod binding;
 pub mod bindings;
 pub mod class;
+pub(crate) mod classmethod;
 pub mod django;
 pub mod expr;
 pub mod function;
