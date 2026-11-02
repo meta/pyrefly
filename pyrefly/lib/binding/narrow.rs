@@ -101,6 +101,10 @@ pub enum AtomicNarrowOp {
     LenLte(Expr),
     /// Narrowing for sequence pattern matching - confirms the subject is a sequence type
     IsSequence,
+    /// `any(x is None for x in <subject>)`. Does not narrow when true.
+    AnyElementIsNone,
+    /// `not any(x is None for x in <subject>)`: no element of the tuple subject is `None`.
+    NoElementIsNone,
     /// Negation of IsSequence - confirms the subject is NOT a sequence type
     IsNotSequence,
     /// Used to narrow to mapping types (types that extend typing.Mapping)
@@ -237,6 +241,8 @@ impl DisplayWith<ModuleInfo> for AtomicNarrowOp {
             AtomicNarrowOp::LenLt(expr) => write!(f, "LenLt({})", expr.display_with(ctx)),
             AtomicNarrowOp::LenLte(expr) => write!(f, "LenLte({})", expr.display_with(ctx)),
             AtomicNarrowOp::IsSequence => write!(f, "IsSequence"),
+            AtomicNarrowOp::AnyElementIsNone => write!(f, "AnyElementIsNone"),
+            AtomicNarrowOp::NoElementIsNone => write!(f, "NoElementIsNone"),
             AtomicNarrowOp::IsNotSequence => write!(f, "IsNotSequence"),
             AtomicNarrowOp::IsMapping => write!(f, "IsMapping"),
             AtomicNarrowOp::IsNotMapping => write!(f, "IsNotMapping"),
@@ -348,6 +354,8 @@ impl AtomicNarrowOp {
             Self::LenGte(expr) => Some(format!("len({subject}) >= {}", snippet(expr.range())?)),
             Self::LenLt(expr) => Some(format!("len({subject}) < {}", snippet(expr.range())?)),
             Self::LenLte(expr) => Some(format!("len({subject}) <= {}", snippet(expr.range())?)),
+            Self::AnyElementIsNone => Some(format!("any(x is None for x in {subject})")),
+            Self::NoElementIsNone => Some(format!("not any(x is None for x in {subject})")),
             Self::IsSequence => Some(format!("isinstance({subject}, Sequence)")),
             Self::IsNotSequence => Some(format!("not isinstance({subject}, Sequence)")),
             Self::IsMapping => Some(format!("isinstance({subject}, Mapping)")),
@@ -410,6 +418,8 @@ impl AtomicNarrowOp {
             Self::LenLte(v) => Self::LenGt(v.clone()),
             Self::LenLt(v) => Self::LenGte(v.clone()),
             Self::LenNotEq(v) => Self::LenEq(v.clone()),
+            Self::AnyElementIsNone => Self::NoElementIsNone,
+            Self::NoElementIsNone => Self::AnyElementIsNone,
             Self::IsSequence => Self::IsNotSequence,
             Self::IsNotSequence => Self::IsSequence,
             Self::IsMapping => Self::IsNotMapping,
@@ -1247,6 +1257,22 @@ impl NarrowOps {
                     func,
                     arguments,
                 },
+            ) if let Some(op) = builder
+                .as_special_export(func)
+                .and_then(|export| Self::element_none_check_op(export, arguments)) =>
+            {
+                let [Expr::Generator(generator)] = &*arguments.args else {
+                    unreachable!("`element_none_check_op` only matches a single generator")
+                };
+                Self::from_single_narrow_op(&generator.generators[0].iter, op, test.range())
+            }
+            Expr::Call(
+                test @ ExprCall {
+                    node_index: _,
+                    range_start: _,
+                    func,
+                    arguments,
+                },
             ) if builder.as_special_export(func) == Some(SpecialExport::HasAttr)
                 && arguments.args.len() == 2
                 && arguments.keywords.is_empty()
@@ -1356,6 +1382,39 @@ impl NarrowOps {
                 }
             }
             e => Self::from_single_narrow_op(e, AtomicNarrowOp::IsTruthy, e.range()),
+        }
+    }
+
+    /// For `any(x is None for x in ...)` or `all(x is not None for x in ...)`, returns the op
+    /// describing the call being true. Requires a single unconditional, synchronous generator.
+    fn element_none_check_op(
+        export: SpecialExport,
+        arguments: &Arguments,
+    ) -> Option<AtomicNarrowOp> {
+        let [Expr::Generator(generator)] = &*arguments.args else {
+            return None;
+        };
+        let [comprehension] = &*generator.generators else {
+            return None;
+        };
+        let Expr::Compare(ExprCompare { ops, operands, .. }) = &*generator.elt else {
+            return None;
+        };
+        let (Expr::Name(elt), [op], Expr::Name(target)) =
+            (&operands[0], &**ops, &comprehension.target)
+        else {
+            return None;
+        };
+        if !matches!(&operands[1..], [Expr::NoneLiteral(_)]) {
+            return None;
+        }
+        if elt.id != target.id || !comprehension.ifs.is_empty() || comprehension.is_async {
+            return None;
+        }
+        match (export, op) {
+            (SpecialExport::Any, CmpOp::Is) => Some(AtomicNarrowOp::AnyElementIsNone),
+            (SpecialExport::All, CmpOp::IsNot) => Some(AtomicNarrowOp::NoElementIsNone),
+            _ => None,
         }
     }
 

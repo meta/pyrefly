@@ -5137,3 +5137,30 @@ def f(a: Fraction | str, b: UserString | int) -> None:
         assert_type(b, UserString)
     "#,
 );
+
+testcase!(
+    test_narrow_tuple_elements_any_is_none,
+    r#"
+from typing import assert_type
+
+def f(a: int | None, b: str | None):
+    values = (a, b)
+    if any(v is None for v in values):
+        assert_type(values, tuple[int | None, str | None])
+        raise ValueError()
+    assert_type(values, tuple[int, str])
+
+def g(a: int | None, b: str | None):
+    values = (a, b)
+    if all(v is not None for v in values):
+        assert_type(values, tuple[int, str])
+    else:
+        assert_type(values, tuple[int | None, str | None])
+
+def h(a: int | None, b: str | None):
+    values = (a, b)
+    if any(v is None for v in values if v != 0):
+        raise ValueError()
+    assert_type(values, tuple[int | None, str | None])
+    "#,
+);
