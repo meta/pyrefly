@@ -1488,8 +1488,8 @@ pub fn get_hover_with_verbosity(
         return keyword_hover;
     };
 
-    // Operators highlight their enclosing expression. `a and b and c` is a single flat
-    // BoolOp, so hovering any operator in the chain highlights the whole expression.
+    // Binary operators, boolean operators, and `not` highlight their enclosing expression.
+    // `a and b and c` is a single flat BoolOp, so any operator highlights the whole chain.
     let range = ast
         .as_deref()
         .zip(module_info.as_ref())
