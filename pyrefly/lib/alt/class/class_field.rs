@@ -1584,10 +1584,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // container defaults.
         if !has_keyword_conflict
             && let Some(default) = mutable_default
-            && function_id.is_some_and(|id| {
-                id.has_toplevel_qname("sqlalchemy.orm", "mapped_column")
-                    || id.has_toplevel_qname("sqlalchemy.orm._orm_constructors", "mapped_column")
-            })
+            && matches!(
+                callee_kind,
+                Some(CalleeKind::Function(FunctionKind::SqlAlchemyMappedColumn(
+                    _
+                )))
+            )
         {
             self.error(
                 errors,
@@ -4233,6 +4235,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             return;
         }
+        // `__init_subclass__` runs during class creation, so even placeholder
+        // overrides must preserve the parent hook chain.
+        if field_name != &dunder::INIT_SUBCLASS
+            && (class_field.is_abstract() || self.get_metadata_for_class(cls).is_protocol())
+            && class_field
+                .ty()
+                .toplevel_func_metadata()
+                .is_some_and(|meta| {
+                    matches!(
+                        meta.flags.body_kind,
+                        BodyKind::Ellipsis | BodyKind::Trivial | BodyKind::RaiseNotImplementedError
+                    )
+                })
+        {
+            return;
+        }
         // If any base derives from `Any`, we can't reliably tell whether the method
         // overrides a concrete parent method, so suppress the check. Gather this
         // across all bases first so the decision is independent of base order.
@@ -5955,6 +5973,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         subset_error,
                     })
                 })
+            }
+            (
+                ClassAttribute::Property(getter, None, _),
+                ClassAttribute::ReadWrite(..) | ClassAttribute::ReadOnly(..),
+            ) if allow_property_override
+                && getter
+                    .toplevel_func_metadata()
+                    .is_some_and(|meta| meta.flags.is_cached_property) =>
+            {
+                // An invalid getter's recovery type is not evidence of compatibility.
+                let errors = self.error_collector();
+                let value =
+                    self.call_property_getter(getter.clone(), TextRange::default(), &errors, None);
+                if errors.has_hard() {
+                    return Err(Box::new(AttrSubsetError::NoAccess));
+                }
+                self.is_class_attribute_subset(
+                    &ClassAttribute::read_write(value),
+                    want,
+                    allow_property_override,
+                    is_subset,
+                )
             }
             (
                 ClassAttribute::Property(_, _, _),

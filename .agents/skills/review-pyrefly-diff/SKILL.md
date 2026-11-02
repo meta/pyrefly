@@ -65,9 +65,8 @@ You are reviewing a Phabricator Diff for Pyrefly, a fast language server and typ
 - Modifications to error messages should be clear and actionable
 - Performance is critical for the language server
 - A diff that changes which errors pyrefly reports should include a mypy_primer
-  differential analysis in its Summary. Verify it classifies the added/fixed errors
-  as true vs false positives and lands no regressions — see the
-  `interpret-mypy-primer` skill.
+  differential analysis in its Summary. Verify it classifies the added/removed
+  errors and lands no regressions — see the `interpret-mypy-primer` skill.
 
 ### Code Style
 - Keep It Simple Stupid (KISS) - minimize concept count
