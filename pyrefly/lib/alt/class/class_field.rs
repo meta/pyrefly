@@ -79,6 +79,7 @@ use crate::error::context::ErrorContext;
 use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
 use crate::error::signature_diff::render_signature_diff;
+use crate::error::style::ErrorStyle;
 use crate::solver::solver::SubsetError;
 use crate::types::annotation::Annotation;
 use crate::types::annotation::Qualifier;
@@ -5957,6 +5958,27 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         subset_error,
                     })
                 })
+            }
+            (
+                ClassAttribute::Property(getter, None, _),
+                ClassAttribute::ReadWrite(..) | ClassAttribute::ReadOnly(..),
+            ) if getter
+                .toplevel_func_metadata()
+                .is_some_and(|meta| meta.flags.is_cached_property) =>
+            {
+                // An invalid getter's recovery type is not evidence of compatibility.
+                let errors = ErrorCollector::new(self.module().dupe(), ErrorStyle::Delayed);
+                let value =
+                    self.call_property_getter(getter.clone(), TextRange::default(), &errors, None);
+                if errors.has_hard() {
+                    return Err(Box::new(AttrSubsetError::NoAccess));
+                }
+                self.is_class_attribute_subset(
+                    &ClassAttribute::read_write(value),
+                    want,
+                    allow_property_override,
+                    is_subset,
+                )
             }
             (
                 ClassAttribute::Property(_, _, _),
