@@ -186,14 +186,66 @@ impl NameLookupResult {
     }
 }
 
+/// Identifies an `UnsetNode` in the module's table of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UnsetNodeId(u32);
+
+/// A merge that paths on which a name is unset pass through. The nodes form a graph rather than a
+/// list of paths, so that paths which share their earlier merges share their nodes, and the graph
+/// grows by at most one node per value at each merge.
+#[derive(Debug, Clone)]
+pub struct UnsetNode {
+    /// The termination keys of the branches that carry the paths through this merge. A path
+    /// continues past the merge only if one of these keys does not have `Never` type.
+    pub keys: Box<[Idx<Key>]>,
+    /// The nodes of the merges the paths passed through before this one, each created before
+    /// this node. Empty for the merge at which the name became unset.
+    pub previous: Box<[UnsetNodeId]>,
+}
+
+/// The table of `UnsetNode`s for a module, which only grows while binding.
+#[derive(Debug, Clone, Default)]
+pub struct UnsetNodes(Vec<UnsetNode>);
+
+impl UnsetNodes {
+    /// Add the node for the merge at which a name became unset.
+    pub fn push_start(&mut self, keys: Vec<Idx<Key>>) -> UnsetNodeId {
+        self.push(keys, Vec::new())
+    }
+
+    /// Add the node for a later merge on paths that already passed through `previous`, which must
+    /// be non-empty, since an empty `previous` marks the merge at which the name became unset.
+    pub fn push_merge(&mut self, keys: Vec<Idx<Key>>, previous: Vec<UnsetNodeId>) -> UnsetNodeId {
+        assert!(
+            !previous.is_empty(),
+            "a later merge must follow earlier nodes"
+        );
+        self.push(keys, previous)
+    }
+
+    fn push(&mut self, keys: Vec<Idx<Key>>, previous: Vec<UnsetNodeId>) -> UnsetNodeId {
+        let id = UnsetNodeId(self.0.len() as u32);
+        self.0.push(UnsetNode {
+            keys: keys.into_boxed_slice(),
+            previous: previous.into_boxed_slice(),
+        });
+        id
+    }
+
+    pub fn get(&self, id: UnsetNodeId) -> &UnsetNode {
+        &self.0[id.0 as usize]
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum InitializedInFlow {
     Yes,
     Conditionally,
     No,
-    /// Initialization depends on whether these termination keys have Never type.
-    /// If ALL termination keys are Never, the variable is initialized; otherwise it may be uninitialized.
-    DeferredCheck(Vec<Idx<Key>>),
+    /// Initialization depends on whether termination keys have Never type. The nodes are the
+    /// latest merges on the paths on which the variable is unset. If none of those paths reaches
+    /// the use, the variable is initialized; otherwise it may be uninitialized.
+    DeferredCheck(Vec<UnsetNodeId>),
 }
 
 impl InitializedInFlow {
@@ -206,9 +258,9 @@ impl InitializedInFlow {
         }
     }
 
-    pub fn deferred_termination_keys(&self) -> Option<&[Idx<Key>]> {
+    pub fn deferred_unset_nodes(&self) -> Option<&[UnsetNodeId]> {
         match self {
-            InitializedInFlow::DeferredCheck(keys) => Some(keys),
+            InitializedInFlow::DeferredCheck(nodes) => Some(nodes),
             _ => None,
         }
     }
@@ -235,6 +287,9 @@ pub struct Bindings {
     scope_trace: Option<ScopeTrace>,
     /// Names `del`eted at module scope; retained outside the LSP `scope_trace`.
     module_deletes: SmallSet<Name>,
+    /// The merges that paths on which a name is unset pass through, read by deferred
+    /// initialization checks.
+    unset_nodes: UnsetNodes,
     unused_imports: Vec<UnusedImport>,
     unused_variables: Vec<UnusedVariable>,
     pytest_info: Option<PytestBindingInfo>,
@@ -464,6 +519,7 @@ impl Bindings {
             annotated_metadata_ranges: Vec::new(),
             scope_trace: None,
             module_deletes: SmallSet::new(),
+            unset_nodes: UnsetNodes::default(),
             unused_imports: Vec::new(),
             unused_variables: Vec::new(),
             pytest_info: None,
@@ -659,6 +715,10 @@ impl Bindings {
     /// Names `del`eted at module scope.
     pub fn module_deletes(&self) -> &SmallSet<Name> {
         &self.module_deletes
+    }
+
+    pub fn unset_nodes(&self) -> &UnsetNodes {
+        &self.unset_nodes
     }
 
     pub fn available_definitions(&self, position: TextSize) -> SmallSet<Idx<Key>> {
@@ -929,7 +989,7 @@ impl Bindings {
 
         let unused_imports = builder.scopes.collect_module_unused_imports();
         builder.record_unused_imports(unused_imports);
-        let scope_trace = builder.scopes.finish();
+        let (scope_trace, unset_nodes) = builder.scopes.finish();
 
         let semantic_errors = builder.semantic_syntax_errors.into_inner();
         for error in semantic_errors {
@@ -1012,6 +1072,7 @@ impl Bindings {
                 None
             },
             module_deletes,
+            unset_nodes,
             unused_imports: builder.unused_imports,
             unused_variables: builder.unused_variables,
             pytest_info: builder.pytest_info,

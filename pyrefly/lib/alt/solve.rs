@@ -141,6 +141,7 @@ use crate::binding::binding::SuperStyle;
 use crate::binding::binding::TypeAliasParams;
 use crate::binding::binding::TypeParameter;
 use crate::binding::binding::UnpackedPosition;
+use crate::binding::bindings::UnsetNodeId;
 use crate::binding::narrow::FacetSubject;
 use crate::binding::narrow::NarrowOp;
 use crate::binding::narrow::identifier_and_chain_for_expr;
@@ -3211,15 +3212,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             BindingExpect::UninitializedCheck {
                 name,
                 range,
-                termination_keys,
+                unset_nodes,
             } => {
-                // Check if all branches that appeared uninitialized at binding time
-                // actually terminate due to Never/NoReturn. If any don't terminate,
-                // the variable may be uninitialized at this use.
-                let all_terminate = termination_keys
-                    .iter()
-                    .all(|key| self.get_idx(*key).ty().is_never());
-                if !all_terminate {
+                if self.some_unset_path_continues(unset_nodes) {
                     errors
                         .error_builder(
                             *range,
@@ -3233,11 +3228,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 name,
                 range,
                 class,
-                termination_keys,
+                unset_nodes,
             } => {
-                let initialized = termination_keys
+                let initialized = unset_nodes
                     .as_ref()
-                    .is_some_and(|keys| keys.iter().all(|key| self.get_idx(*key).ty().is_never()));
+                    .is_some_and(|nodes| !self.some_unset_path_continues(nodes));
                 let inherited = !initialized
                     && self.get_idx(*class).0.as_ref().is_some_and(|cls| {
                         self.get_mro_for_class(cls)
@@ -5150,6 +5145,42 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 },
             }
         })
+    }
+
+    /// Whether some path on which a name is unset continues past every merge it passes through,
+    /// through a branch that does not terminate due to Never/NoReturn. The nodes are the latest
+    /// merges on those paths.
+    fn some_unset_path_continues(&self, latest: &[UnsetNodeId]) -> bool {
+        let nodes = self.bindings().unset_nodes();
+        let mut reachable = SmallSet::new();
+        let mut stack = latest.to_vec();
+        while let Some(id) = stack.pop() {
+            if reachable.insert(id) {
+                stack.extend(nodes.get(id).previous.iter().copied());
+            }
+        }
+        // A path continues past a node if one of the node's keys is not `Never` and the path
+        // continued past one of the earlier nodes, unless the name became unset at this node.
+        // Earlier nodes have smaller ids, so visiting in id order decides them first.
+        let mut ids = reachable.into_iter().collect::<Vec<_>>();
+        ids.sort_unstable();
+        let mut continuing = SmallSet::new();
+        for id in ids {
+            let node = nodes.get(id);
+            if (node.previous.is_empty()
+                || node
+                    .previous
+                    .iter()
+                    .any(|previous| continuing.contains(previous)))
+                && node
+                    .keys
+                    .iter()
+                    .any(|key| !self.get_idx(*key).ty().is_never())
+            {
+                continuing.insert(id);
+            }
+        }
+        latest.iter().any(|id| continuing.contains(id))
     }
 
     /// Handle `Binding::ReturnImplicit` - compute the implicit return type.

@@ -72,6 +72,8 @@ use crate::binding::bindings::BindingTable;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::InitializedInFlow;
+use crate::binding::bindings::UnsetNodeId;
+use crate::binding::bindings::UnsetNodes;
 use crate::binding::classmethod::ClassmethodReceiverState;
 use crate::binding::expr::Usage;
 use crate::binding::function::SelfAssignments;
@@ -858,8 +860,8 @@ impl FlowInfo {
     fn initialized(&self) -> InitializedInFlow {
         self.value()
             .map_or(InitializedInFlow::Yes, |v| match &v.style {
-                FlowStyle::MaybeInitialized(termination_keys) => {
-                    InitializedInFlow::DeferredCheck(termination_keys.clone())
+                FlowStyle::MaybeInitialized(nodes) => {
+                    InitializedInFlow::DeferredCheck(nodes.clone())
                 }
                 FlowStyle::Uninitialized
                 | FlowStyle::ClassField {
@@ -920,10 +922,11 @@ pub enum FlowStyle {
     /// The name is possibly uninitialized (perhaps due to merging branches)
     PossiblyUninitialized,
     /// The name may or may not be initialized depending on whether certain branches
-    /// terminate (have `Never` type). The termination keys are checked at solve time;
-    /// if all of them have `Never` type, the name is considered initialized.
-    /// This is used when some branches don't define a variable but end with a NoReturn call.
-    MaybeInitialized(Vec<Idx<Key>>),
+    /// terminate (have `Never` type). The nodes are the latest merges on the paths on which the
+    /// name is unset, in increasing order. Their keys are checked at solve time, and if no path
+    /// reaches here, the name is considered initialized. This is used when some branches don't
+    /// define a variable but end with a NoReturn call.
+    MaybeInitialized(Vec<UnsetNodeId>),
     /// The name was in an annotated declaration like `x: int` but not initialized
     Uninitialized,
     /// I'm a speculative binding for a name that was narrowed but not assigned above
@@ -966,11 +969,11 @@ impl FlowStyle {
                         _ => return FlowStyle::PossiblyUninitialized,
                     }
                 }
-                // Two MaybeInitialized: combine termination keys from both branches.
-                // Each branch independently needs its keys to be Never for that path
-                // to be initialized, so we collect all keys.
-                (FlowStyle::MaybeInitialized(keys), FlowStyle::MaybeInitialized(other_keys)) => {
-                    keys.extend(other_keys);
+                // Two MaybeInitialized: the name is unset on the paths of either branch.
+                (FlowStyle::MaybeInitialized(nodes), FlowStyle::MaybeInitialized(other_nodes)) => {
+                    nodes.extend(other_nodes);
+                    nodes.sort_unstable();
+                    nodes.dedup();
                 }
                 // Class-bearing styles stay sticky only when their canonical
                 // class identity matches. The `pristine` bit AND-merges: if
@@ -991,12 +994,12 @@ impl FlowStyle {
                     *l_pristine = *l_pristine && r_pristine;
                 }
                 // MaybeInitialized + a fully initialized style: keep the MaybeInitialized
-                // keys since those paths still need verification at solve time.
-                (FlowStyle::MaybeInitialized(keys), _) => {
-                    merged = FlowStyle::MaybeInitialized(keys.clone());
+                // nodes since they still need verification at solve time.
+                (FlowStyle::MaybeInitialized(nodes), _) => {
+                    merged = FlowStyle::MaybeInitialized(nodes.clone());
                 }
-                (_, FlowStyle::MaybeInitialized(keys)) => {
-                    merged = FlowStyle::MaybeInitialized(keys);
+                (_, FlowStyle::MaybeInitialized(nodes)) => {
+                    merged = FlowStyle::MaybeInitialized(nodes);
                 }
                 // Unclear how to merge, default to None
                 _ => {
@@ -1674,6 +1677,7 @@ pub struct Scopes {
     keep_scope_tree: bool,
     /// True when the module is a stub (`.pyi`).
     is_interface: bool,
+    unset_nodes: UnsetNodes,
 }
 
 impl Scopes {
@@ -1686,6 +1690,7 @@ impl Scopes {
             }),
             keep_scope_tree,
             is_interface,
+            unset_nodes: UnsetNodes::default(),
         }
     }
 
@@ -2119,10 +2124,10 @@ impl Scopes {
     }
 
     /// There is only one scope remaining, return it.
-    pub fn finish(self) -> ScopeTrace {
+    pub fn finish(self) -> (ScopeTrace, UnsetNodes) {
         let (a, b) = self.scopes.split_off_last();
         assert_eq!(a.len(), 0);
-        ScopeTrace(b)
+        (ScopeTrace(b), self.unset_nodes)
     }
 
     pub fn has_import_name(&self, name: &Name) -> bool {
@@ -3369,13 +3374,13 @@ impl Scopes {
     /// - Panics if the current scope is not a class body.
     ///
     /// The final map contains possibly uninitialized class-body fields. Its optional
-    /// keys can prove that every path without an assignment terminates.
+    /// `UnsetNode`s can prove that every path without an assignment terminates.
     pub fn finish_class_and_get_field_definitions(
         &mut self,
     ) -> (
         SmallMap<Name, (ClassFieldDefinition, TextRange)>,
         NNModuleRegistrations,
-        SmallMap<Name, Option<Vec<Idx<Key>>>>,
+        SmallMap<Name, Option<Vec<UnsetNodeId>>>,
     ) {
         let mut field_definitions = SmallMap::new();
         let mut uninitialized_fields = SmallMap::new();
@@ -3493,8 +3498,8 @@ impl Scopes {
                         FlowStyle::PossiblyUninitialized => {
                             uninitialized_fields.insert_hashed(name.owned(), None);
                         }
-                        FlowStyle::MaybeInitialized(keys) => {
-                            uninitialized_fields.insert_hashed(name.owned(), Some(keys.clone()));
+                        FlowStyle::MaybeInitialized(nodes) => {
+                            uninitialized_fields.insert_hashed(name.owned(), Some(nodes.clone()));
                         }
                         _ => {}
                     }
@@ -4115,8 +4120,8 @@ enum DefinitionStatus {
     /// Variable is defined in all non-terminating branches.
     Defined,
     /// Variable may be defined if branches with these keys terminate (have `Never` type).
-    /// The keys are checked at solve time; if all have `Never` type, the variable is
-    /// considered initialized.
+    /// The keys start a path on which the variable is unset, which is decided at solve time
+    /// together with the later merges the path passes through.
     DeferredCheck(Vec<Idx<Key>>),
     /// Variable is not defined in some branches that may not terminate.
     NotDefined,
@@ -4379,7 +4384,11 @@ impl<'a> BindingsBuilder<'a> {
         let mut branch_idxs = SmallSet::with_capacity(merge_branches.len());
         let mut branch_infos = Vec::with_capacity(merge_branches.len());
         let mut styles = Vec::with_capacity(merge_branches.len());
-        let mut styled_idxs = SmallSet::with_capacity(merge_branches.len());
+        // For each value, the position of its style, and the termination keys of the branches
+        // that carry it, or `None` once one of them has no key.
+        let mut styled_values: SmallMap<Idx<Key>, (usize, Option<Vec<Idx<Key>>>)> =
+            SmallMap::with_capacity(merge_branches.len());
+        let n_merge_branches = merge_branches.len();
         let mut n_values = 0;
         let mut n_possibly_set_branches = 0;
         // Collect termination keys from branches that don't define the variable.
@@ -4445,11 +4454,41 @@ impl<'a> BindingsBuilder<'a> {
                 value_idxs.insert(v.idx);
                 // An invariant in Pyrefly is that we only set style when we
                 // set a value, so duplicate value_idxs always have the same style.
-                if !unset_unless_terminated && styled_idxs.insert(v.idx) {
-                    styles.push(v.style);
+                if !unset_unless_terminated {
+                    if let Some((_, keys)) = styled_values.get_mut(&v.idx) {
+                        *keys =
+                            keys.take()
+                                .zip(merge_branch.termination_key)
+                                .map(|(mut keys, key)| {
+                                    keys.push(key);
+                                    keys
+                                });
+                    } else {
+                        styled_values.insert(
+                            v.idx,
+                            (
+                                styles.len(),
+                                merge_branch.termination_key.map(|key| vec![key]),
+                            ),
+                        );
+                        styles.push(v.style);
+                    }
                 }
             }
             branch_idxs.insert(branch_idx);
+        }
+
+        // A path on which the name is unset reaches this merge only through the branches that
+        // carry its value, so it continues only if one of their termination keys is not `Never`.
+        // Those branches share one node for the merge. When every branch carries the value,
+        // reaching the merge is enough, so the paths need no new node.
+        for (position, keys) in styled_values.into_values() {
+            if let FlowStyle::MaybeInitialized(nodes) = &mut styles[position]
+                && let Some(keys) = keys
+                && keys.len() < n_merge_branches
+            {
+                *nodes = vec![self.scopes.unset_nodes.push_merge(keys, mem::take(nodes))];
+            }
         }
 
         let definition_status = determine_definition_status(
@@ -4461,18 +4500,25 @@ impl<'a> BindingsBuilder<'a> {
             n_unterminated_missing_branches,
             missing_branch_termination_keys,
         );
+        // The branches that leave the name unset start a path at this merge.
+        let unset_here = match &definition_status {
+            DefinitionStatus::DeferredCheck(keys) => {
+                Some(self.scopes.unset_nodes.push_start(keys.clone()))
+            }
+            DefinitionStatus::Defined | DefinitionStatus::NotDefined => None,
+        };
 
         // Helper to compute the final FlowStyle based on definition status.
         let compute_final_style = |styles: Vec<FlowStyle>| -> FlowStyle {
             match &definition_status {
                 // Every branch that leaves the name unset has a key, so the keys decide those
                 // branches. A branch that may hold the name without a key keeps its doubt.
-                DefinitionStatus::DeferredCheck(keys) => FlowStyle::merged(
+                DefinitionStatus::DeferredCheck(_) => FlowStyle::merged(
                     true,
                     styles
                         .into_iter()
                         .filter(|style| !matches!(style, FlowStyle::Uninitialized))
-                        .chain([FlowStyle::MaybeInitialized(keys.clone())]),
+                        .chain(unset_here.map(|node| FlowStyle::MaybeInitialized(vec![node]))),
                     merge_style,
                 ),
                 DefinitionStatus::Defined => {

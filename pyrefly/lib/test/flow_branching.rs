@@ -4574,18 +4574,16 @@ def after_environment_clause() -> None:
 "#,
 );
 
-// The first `if` leaves `x` set or unset depending on keys of its own suites. The second `if`'s
-// `else` never reaches the merge, but a branch whose state depends on keys is not decided by its
-// own termination key, so its doubt carries through.
+// The first `if` leaves `x` unset on the path through its `else`. That path reaches the read only
+// through the second `if`'s `else`, so it needs both suites to reach their ends.
 testcase!(
-    bug = "A branch that never reaches the merge keeps doubt it carries from an earlier `if`",
-    test_doubt_from_earlier_if_survives_branch_that_never_returns,
+    test_unset_path_from_earlier_if_needs_every_branch_on_it,
     r#"
 from typing import NoReturn
 
 def stop() -> NoReturn: ...
 
-def f(c: bool, d: bool) -> None:
+def cut_off_later(c: bool, d: bool) -> None:
     if c:
         x = 1
     else:
@@ -4594,7 +4592,242 @@ def f(c: bool, d: bool) -> None:
         x = 2
     else:
         stop()
+    print(x)
+
+def cut_off_earlier(c: bool, d: bool) -> None:
+    if c:
+        x = 1
+    else:
+        stop()
+    if d:
+        x = 2
+    else:
+        print(0)
+    print(x)
+
+def not_cut_off(c: bool, d: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    if d:
+        x = 2
+    else:
+        print(0)
     print(x)  # E: `x` may be uninitialized
+
+def cut_off_two_merges_later(c: bool, d: bool, e: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    if d:
+        print(0)
+    else:
+        print(1)
+    if e:
+        x = 2
+    else:
+        stop()
+    print(x)
+
+# Branches that carry the same unset paths share one node, and a merge in which every branch
+# carries them adds no node at all.
+def many_later_merges(c: bool, e: list[bool]) -> None:
+    if c:
+        x = 1
+    if e[0]: print(0)
+    if e[1]: print(1)
+    if e[2]: print(2)
+    if e[3]: print(3)
+    if e[4]: print(4)
+    if e[5]: print(5)
+    if e[6]: print(6)
+    if e[7]: print(7)
+    if e[8]: print(8)
+    if e[9]: print(9)
+    if e[10]: print(10)
+    if e[11]: print(11)
+    if e[12]: print(12)
+    if e[13]: print(13)
+    if e[14]: print(14)
+    if e[15]: print(15)
+    if e[16]: print(16)
+    if e[17]: print(17)
+    if e[18]: print(18)
+    if e[19]: print(19)
+    if e[20]: print(20)
+    if e[21]: print(21)
+    if e[22]: print(22)
+    if e[23]: print(23)
+    if e[24]: print(24)
+    if e[25]: print(25)
+    if e[26]: print(26)
+    if e[27]: print(27)
+    if e[28]: print(28)
+    if e[29]: print(29)
+    print(x)  # E: `x` may be uninitialized
+
+# A value assigned inside nested `if`s carries the unset paths to the outer merge beside the earlier
+# value. The two share their earlier nodes, so the graph grows by a few nodes per `if` instead of
+# doubling.
+def nested_later_merges(c: bool, d: list[bool], e: list[bool]) -> None:
+    if c:
+        x = 0
+    if d[0]:
+        if e[0]: x = 1
+    if d[1]:
+        if e[1]: x = 2
+    if d[2]:
+        if e[2]: x = 3
+    if d[3]:
+        if e[3]: x = 4
+    if d[4]:
+        if e[4]: x = 5
+    if d[5]:
+        if e[5]: x = 6
+    if d[6]:
+        if e[6]: x = 7
+    if d[7]:
+        if e[7]: x = 8
+    if d[8]:
+        if e[8]: x = 9
+    if d[9]:
+        if e[9]: x = 10
+    if d[10]:
+        if e[10]: x = 11
+    if d[11]:
+        if e[11]: x = 12
+    if d[12]:
+        if e[12]: x = 13
+    if d[13]:
+        if e[13]: x = 14
+    if d[14]:
+        if e[14]: x = 15
+    if d[15]:
+        if e[15]: x = 16
+    if d[16]:
+        if e[16]: x = 17
+    if d[17]:
+        if e[17]: x = 18
+    if d[18]:
+        if e[18]: x = 19
+    if d[19]:
+        if e[19]: x = 20
+    if d[20]:
+        if e[20]: x = 21
+    if d[21]:
+        if e[21]: x = 22
+    if d[22]:
+        if e[22]: x = 23
+    if d[23]:
+        if e[23]: x = 24
+    if d[24]:
+        if e[24]: x = 25
+    if d[25]:
+        if e[25]: x = 26
+    if d[26]:
+        if e[26]: x = 27
+    if d[27]:
+        if e[27]: x = 28
+    if d[28]:
+        if e[28]: x = 29
+    if d[29]:
+        if e[29]: x = 30
+    print(x)  # E: `x` may be uninitialized
+
+# The same nesting stays exact: a later branch that never returns cuts off every path.
+def nested_then_cut_off(c: bool, d: list[bool], e: list[bool]) -> None:
+    if c:
+        x = 0
+    if d[0]:
+        if e[0]: x = 1
+    if d[1]:
+        if e[1]: x = 2
+    if d[2]:
+        if e[2]: x = 3
+    if d[3]:
+        if e[3]: x = 4
+    if d[4]:
+        if e[4]: x = 5
+    if d[5]:
+        x = 6
+    else:
+        stop()
+    print(x)
+
+# Two branches carry the unset paths through one merge, and only one of them never returns.
+def shared_merge(c: bool, d: bool, e: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    if d:
+        x = 2
+    elif e:
+        stop()
+    else:
+        pass
+    print(x)  # E: `x` may be uninitialized
+"#,
+);
+
+// A `match`, a `try`, and a loop's `else` are merges too, and a branch of one that never returns
+// cuts off the paths that pass through it.
+testcase!(
+    test_unset_path_from_earlier_if_cut_off_by_other_merges,
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+
+def through_match(c: bool, v: int) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    match v:
+        case 0:
+            x = 2
+        case _:
+            stop()
+    print(x)
+
+def through_try(c: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    try:
+        x = 2
+    except ValueError:
+        stop()
+    print(x)
+
+def through_for_else(c: bool, d: bool, r: list[int]) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    for i in r:
+        if d:
+            x = 2
+            break
+    else:
+        stop()
+    print(x)
+
+def through_while_else(c: bool, d: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    while d:
+        x = 2
+        break
+    else:
+        stop()
+    print(x)
 "#,
 );
 
