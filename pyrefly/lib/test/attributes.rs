@@ -4850,16 +4850,15 @@ C().x = 2
 );
 
 testcase!(
-    bug = "Class metadata inherited from object is not an instance-only declaration",
     test_instance_var_assign_class_metadata,
     TestEnv::new().enable_instance_var_assign_error(),
     r#"
 class C:
     pass
 
-C.__module__ = "renamed"  # E: Cannot set instance variable `__module__` from the class
-C.__doc__ = "Documentation"  # E: Cannot set instance variable `__doc__` from the class
-C.__annotations__ = {}  # E: Cannot set instance variable `__annotations__` from the class
+C.__module__ = "renamed"
+C.__doc__ = "Documentation"
+C.__annotations__ = {}
 C.__name__ = "Renamed"
 C.__qualname__ = "Renamed"
 
@@ -4869,9 +4868,9 @@ class Meta(type):
 class Custom(metaclass=Meta):
     pass
 
-Custom.__module__ = "renamed"  # E: Cannot set instance variable `__module__` from the class
-Custom.__doc__ = "Documentation"  # E: Cannot set instance variable `__doc__` from the class
-Custom.__annotations__ = {}  # E: Cannot set instance variable `__annotations__` from the class
+Custom.__module__ = "renamed"
+Custom.__doc__ = "Documentation"
+Custom.__annotations__ = {}
 
 class Explicit:
     __module__: str = "original"
@@ -4879,9 +4878,9 @@ class Explicit:
     __annotations__: dict[str, object] = {}
     ordinary: int = 0
 
-Explicit.__module__ = "renamed"  # E: Cannot set instance variable `__module__` from the class
-Explicit.__doc__ = "Documentation"  # E: Cannot set instance variable `__doc__` from the class
-Explicit.__annotations__ = {}  # E: Cannot set instance variable `__annotations__` from the class
+Explicit.__module__ = "renamed"
+Explicit.__doc__ = "Documentation"
+Explicit.__annotations__ = {}
 Explicit.ordinary = 1  # E: Cannot set instance variable `ordinary` from the class
 "#,
 );

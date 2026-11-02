@@ -3986,7 +3986,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // variables declared by the class body.
                 let is_instance_var = annotation.is_some()
                     && !is_classvar
-                    && initialization != ClassFieldInitialization::ClassMethod;
+                    && initialization != ClassFieldInitialization::ClassMethod
+                    // Python exposes these metadata attributes on both classes and instances.
+                    && !matches!(field_name.as_str(), "__module__" | "__doc__" | "__annotations__");
                 if ambiguous && !matches!(cls, ClassBase::SelfType(_)) {
                     ClassAttribute::no_access(NoAccessReason::ClassAttributeIsGeneric(
                         cls.class_object().dupe(),
