@@ -2811,6 +2811,10 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             (Type::ClassType(got_cls), Type::Literal(lit))
                 if let Lit::Enum(enum_lit) = &lit.value
                     && got_cls.class_object() == enum_lit.class.class_object()
+                    && !self.type_order.has_superclass(
+                        got_cls.class_object(),
+                        self.type_order.stdlib().enum_flag().class_object(),
+                    )
                     && self
                         .type_order
                         .get_enum_member_count(got_cls.class_object())
