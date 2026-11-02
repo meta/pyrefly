@@ -479,7 +479,7 @@ impl<'a> BindingsBuilder<'a> {
         );
         self.scopes.pop();
         // If we are in a class, use a simple visitor to find `self.<attr>` assignments.
-        if class_key.is_some() {
+        if class_key.is_some() && !is_staticmethod {
             SelfAttrNames::find(func_name, parameters, body)
         } else {
             None

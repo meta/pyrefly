@@ -1269,7 +1269,7 @@ class A:
     def __init__(self) -> None:
         self.foo: int | None = None
     def calc_foo(self) -> None:
-        self.foo: int = 1  # E: Attribute `foo` already defined
+        self.foo: int = 1  # E: `foo` cannot be annotated with `int`, it is already defined with type `int | None`
     "#,
 );
 
@@ -5157,3 +5157,117 @@ class A:
     "#,
 );
 
+testcase!(
+    test_self_attribute_redefinition_constructor_ordering,
+    r#"
+class A:
+    def reset(self) -> None:
+        self.x: int = 1  # E: `x` cannot be annotated with `int`, it is already defined with type `int | None`
+    def __init__(self) -> None:
+        self.x: int | None = None
+"#,
+);
+
+testcase!(
+    test_self_attribute_compatible_unions_and_aliases,
+    r#"
+type AliasInt = int
+class A:
+    def __init__(self) -> None:
+        self.x: int | str = 0
+        self.y: AliasInt = 0
+    def reset(self) -> None:
+        self.x: str | int = ""
+        self.y: int = 1
+"#,
+);
+
+testcase!(
+    test_self_attribute_scoped_type_alias_redefinition,
+    r#"
+class T1: ...
+class T2: ...
+class A:
+    def __init__(self) -> None:
+        T = T1
+        self.x: T
+    def reset(self) -> None:
+        T = T2
+        self.x: T  # E: `x` cannot be annotated with `T2`, it is already defined with type `T1`
+"#,
+);
+
+testcase!(
+    test_self_attribute_class_body_reannotation_and_literal_narrowing,
+    r#"
+from typing import Literal
+class A:
+    x: int
+    y: Literal[0] | Literal[1]
+    def __init__(self) -> None:
+        self.x: int = 0
+        self.y: Literal[1] = 1
+    def reset(self) -> None:
+        self.x: int = 1
+        self.y: Literal[0] = 0
+"#,
+);
+
+testcase!(
+    test_nested_method_receiver_ownership,
+    r#"
+class Outer:
+    def __init__(self) -> None:
+        self.x: int = 0
+        class Inner:
+            @staticmethod
+            def static_helper(self: str) -> None:
+                self.x = ""  # E: Object of class `str` has no attribute `x`
+            def second_param(other, self: str) -> None:
+                self.x = ""  # E: Object of class `str` has no attribute `x`
+            def captured(other) -> None:
+                self.x = 1
+        def local_capture() -> None:
+            nonlocal self
+            self.x = 2
+"#,
+);
+
+testcase!(
+    test_final_attribute_nested_permissions,
+    r#"
+from typing import Final
+class A:
+    x: Final[int]
+    def __init__(self) -> None:
+        self.x = 0
+        def helper() -> None:
+            self.x = 1  # E: Cannot set field `x`
+        def helper_nonlocal() -> None:
+            nonlocal self
+            self.x = 2  # E: Cannot set field `x`
+        class Inner:
+            @staticmethod
+            def static_fn(self: A) -> None:
+                self.x = 3  # E: Cannot set field `x`
+"#,
+);
+
+testcase!(
+    test_no_type_check_staticmethod_skipped_body,
+    r#"
+from typing import no_type_check
+class A:
+    @no_type_check
+    @staticmethod
+    def static_func(self) -> None:
+        self.phantom = 1
+    @no_type_check
+    def normal_func(self) -> None:
+        self.real = 2
+
+a = A()
+_ = a.phantom  # E: Object of class `A` has no attribute `phantom`
+_ = a.real
+"#,
+);
