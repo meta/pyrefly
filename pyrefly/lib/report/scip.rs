@@ -23,7 +23,6 @@ use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_name::ModuleName;
-use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_python::sys_info::SysInfo;
@@ -70,6 +69,7 @@ use crate::report::scip::symbols::definitions;
 use crate::report::scip::symbols::descriptor;
 use crate::state::lsp::FindDefinitionItemWithDocstring;
 use crate::state::lsp::FindPreference;
+use crate::state::require::Require;
 use crate::state::state::Transaction;
 use crate::types::globals::ImplicitGlobal;
 
@@ -121,7 +121,7 @@ impl Package {
 /// external symbols.
 pub fn write_scip(
     writer: &mut (impl Write + Send),
-    transaction: &Transaction,
+    transaction: &mut Transaction,
     handles: &[Handle],
     project_root: &Path,
     project: &Package,
@@ -129,7 +129,7 @@ pub fn write_scip(
 ) -> anyhow::Result<()> {
     let project_root = project_root.absolutize();
     let indexer = Indexer {
-        transaction,
+        transaction: &*transaction,
         project_root: &project_root,
         project,
         definitions: Mutex::new(HashMap::new()),
@@ -169,6 +169,29 @@ pub fn write_scip(
             Ok(())
         })
     })?;
+    let Indexer {
+        definitions,
+        distributions,
+        external_symbols,
+        ..
+    } = indexer;
+    // A keyword argument is documented with its parameter's type, which comes from the defining
+    // module's answers. Those are only kept for modules solved to `Require::Everything`.
+    let dependencies: Vec<Handle> = definitions
+        .lock()
+        .keys()
+        .filter(|x| transaction.get_ast(x).is_none())
+        .cloned()
+        .collect();
+    transaction.run(&dependencies, Require::Everything, None);
+    let indexer = Indexer {
+        transaction: &*transaction,
+        project_root: &project_root,
+        project,
+        definitions,
+        distributions,
+        external_symbols,
+    };
     let first_uses: Vec<_> = mem::take(&mut *indexer.external_symbols.lock())
         .into_iter()
         .collect();
@@ -207,7 +230,7 @@ struct Indexer<'a> {
     project_root: &'a Path,
     project: &'a Package,
     /// The definitions of every module seen so far, keyed by the range of the defining identifier.
-    definitions: Mutex<HashMap<(ModuleName, ModulePath), Arc<SmallMap<TextRange, ScipSymbol>>>>,
+    definitions: Mutex<HashMap<Handle, Arc<SmallMap<TextRange, ScipSymbol>>>>,
     /// The installed distributions of every site-packages directory seen so far.
     distributions: Mutex<HashMap<PathBuf, Arc<HashMap<Name, Package>>>>,
     /// The first use, in path and position order, of every symbol defined outside the project and
@@ -541,12 +564,14 @@ impl Indexer<'_> {
         module: &Module,
         sys_info: SysInfo,
     ) -> Option<Arc<SmallMap<TextRange, ScipSymbol>>> {
-        let key = (module.name(), module.path().dupe());
-        if let Some(definitions) = self.definitions.lock().get(&key) {
+        let handle = Handle::new(module.name(), module.path().dupe(), sys_info);
+        if let Some(definitions) = self.definitions.lock().get(&handle) {
             return Some(definitions.dupe());
         }
-        let handle = Handle::new(module.name(), module.path().dupe(), sys_info);
-        let ast = self.transaction.get_ast(&handle)?;
+        // Only the indexed files keep their AST, so a dependency is parsed again.
+        let ast = self.transaction.get_ast(&handle).unwrap_or_else(|| {
+            Arc::new(Ast::parse(module.contents(), module.source_type()).0)
+        });
         let mut table: SmallMap<_, _> = definitions(module.name(), &ast).into_iter().collect();
         for (module_name, name, suffix) in SPECIAL_FORMS {
             if module.name().as_str() != *module_name {
@@ -562,7 +587,7 @@ impl Indexer<'_> {
             }
         }
         let table = Arc::new(table);
-        self.definitions.lock().insert(key, table.dupe());
+        self.definitions.lock().insert(handle, table.dupe());
         Some(table)
     }
 
@@ -825,9 +850,10 @@ fn module_symbol(package: &Package, module: ModuleName) -> String {
 
 #[cfg(test)]
 mod tests {
+    use pyrefly_python::module_path::ModulePath;
+
     use super::*;
     use crate::report::scip::snapshot::format_snapshot;
-    use crate::state::require::Require;
     use crate::test::util::TestEnv;
 
     fn snapshots_dir() -> PathBuf {
@@ -874,12 +900,11 @@ mod tests {
         }
         let (state, _) = env
             .with_site_package_paths(vec![snapshots.join("site-packages")])
-            .with_default_require_level(Require::Everything)
             .to_state();
         let mut bytes = Vec::new();
         write_scip(
             &mut bytes,
-            &state.transaction(),
+            &mut state.transaction(),
             &handles,
             &input_dir,
             &project_package(&snapshots, case),
