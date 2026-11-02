@@ -3189,6 +3189,99 @@ fn remove_unused_variable_standalone_lines() {
     }
 }
 
+// Bug: deleting a parameter overwrite can delay release of its previous value.
+#[test]
+fn remove_unused_variable_parameter_overwrites() {
+    for parameters in ["unused, /", "unused", "*unused", "*, unused", "**unused"] {
+        let code = format!("def f({parameters}):\n    unused = None\n    yield 'tick'\n");
+        let (_, after) =
+            remove_unused_variable_action(&code, code.find("unused =").unwrap()).unwrap();
+        assert_eq!(format!("def f({parameters}):\n    yield 'tick'\n"), after);
+    }
+    for code in [
+        "def f(unused):\n    if True:\n        unused = None\n    yield 'tick'\n",
+        "class C:\n    def f(self, unused):\n        unused: object = None\n        yield 'tick'\n",
+        "def outer():\n    def inner(unused):\n        unused = None\n        yield 'tick'\n    return inner\n",
+    ] {
+        assert!(remove_unused_variable_action(code, code.rfind("unused").unwrap()).is_some());
+    }
+}
+
+#[test]
+fn remove_unused_variable_uses_innermost_function_parameters() {
+    let code = "def outer(unused):\n    def inner():\n        unused = 1\n        return 2\n    return inner\n";
+    let (_, after) = remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+    assert_eq!(
+        "def outer(unused):\n    def inner():\n        return 2\n    return inner\n",
+        after,
+    );
+}
+
+// Bug: deletion can promote a following string expression into a docstring.
+#[test]
+fn remove_unused_variable_docstring_position() {
+    for (code, expected) in [
+        (
+            "def f():\n    unused = 1\n    'not a docstring'\n    return 2\n",
+            "def f():\n    'not a docstring'\n    return 2\n",
+        ),
+        (
+            "def f():\r\n    unused = 1\r\n    'not a docstring'\r\n    return 2\r\n",
+            "def f():\r\n    'not a docstring'\r\n    return 2\r\n",
+        ),
+        (
+            "class C:\n    def f(self):\n        unused = 1\n        'not a docstring'\n        return 2\n",
+            "class C:\n    def f(self):\n        'not a docstring'\n        return 2\n",
+        ),
+        (
+            "def outer():\n    def inner():\n        unused = 1\n        'not a docstring'\n        return 2\n    return inner\n",
+            "def outer():\n    def inner():\n        'not a docstring'\n        return 2\n    return inner\n",
+        ),
+    ] {
+        let (_, after) =
+            remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+        assert_eq!(expected, after);
+    }
+}
+
+#[test]
+fn remove_unused_variable_preserves_existing_docstring_and_nested_suites() {
+    for (code, expected) in [
+        (
+            "def f():\n    'existing docstring'\n    unused = 1\n    return 2\n",
+            "def f():\n    'existing docstring'\n    return 2\n",
+        ),
+        (
+            "def f(flag):\n    if flag:\n        unused = 1\n        'ordinary expression'\n        return 2\n",
+            "def f(flag):\n    if flag:\n        'ordinary expression'\n        return 2\n",
+        ),
+        (
+            "def f(flag):\n    if flag:\n        unused = 1\n",
+            "def f(flag):\n    if flag:\n        pass\n",
+        ),
+        (
+            "def f():\n    try:\n        unused = 1\n    finally:\n        pass\n",
+            "def f():\n    try:\n        pass\n    finally:\n        pass\n",
+        ),
+    ] {
+        let (_, after) =
+            remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+        assert_eq!(expected, after);
+    }
+}
+
+// Bug: unrelated same-spelling names suppress the action.
+#[test]
+fn remove_unused_variable_unrelated_scopes() {
+    for code in [
+        "def f():\n    unused = 1\n    return 2\ndef g():\n    unused = 2\n    return 3\n",
+        "def outer(unused):\n    def inner():\n        unused = 1\n        return 2\n    print(unused)\n    return inner\n",
+        "class C:\n    def f(self):\n        unused = 1\n        return 2\n    def g(self):\n        unused = 2\n        return 3\n",
+    ] {
+        assert!(remove_unused_variable_action(code, code.find("unused =").unwrap()).is_none());
+    }
+}
+
 #[test]
 fn redundant_cast_parenthesized_expr() {
     let code = "from typing import cast\na: int = 1\nb: int = 2\ncast(int, a + b)\n";
