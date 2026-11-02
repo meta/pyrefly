@@ -1414,7 +1414,7 @@ value = make()
 
 #[test]
 fn test_insertable_hint_module_name_bound_at_module_scope() {
-    let (annotation, imports) = insertable_hint(&[
+    let files = [
         LIB,
         (
             "main",
@@ -1426,10 +1426,14 @@ lib = 1
 value = make()
 "#,
         ),
-    ]);
-    // BUG: `lib = 1` rebinds the imported module before the annotation is evaluated.
-    assert_eq!(annotation, ": lib.Value");
-    assert_eq!(imports, "import lib\n");
+    ];
+    let (handles, state) = mk_multi_file_state_assert_no_errors(&files, Require::Exports);
+    let hints = state
+        .transaction()
+        .inlay_hints(&handles["main"], Default::default(), Default::default())
+        .unwrap();
+    // `lib = 1` would shadow a generated `import lib`, and `Value` is bound locally.
+    assert!(hints.iter().all(|hint| hint.edits.is_none()));
 }
 
 #[test]
@@ -1449,9 +1453,8 @@ def f(x: int | str) -> int | str:
 g = f
 "#,
     )]);
-    // BUG: the annotation keeps only the first overload.
-    assert_eq!(annotation, ": Callable[[int], int]");
-    assert_eq!(imports, "from typing import Callable\n");
+    assert_eq!(annotation, ": Callable[..., Any]");
+    assert_eq!(imports, "from typing import Any, Callable\n");
 }
 
 #[test]
@@ -1465,9 +1468,8 @@ def identity[T](x: T) -> T:
 g = identity
 "#,
     )]);
-    // BUG: the annotation cannot declare `T`, so it is undefined where the hint is inserted.
-    assert_eq!(annotation, ": Callable[[T], T]");
-    assert_eq!(imports, "from typing import Callable\n");
+    assert_eq!(annotation, ": Callable[[Any], Any]");
+    assert_eq!(imports, "from typing import Any, Callable\n");
 }
 
 #[test]
@@ -1481,9 +1483,8 @@ def identity[T = int](x: T) -> T:
 g = identity
 "#,
     )]);
-    // BUG: the annotation cannot declare `T`, so it is undefined where the hint is inserted.
-    assert_eq!(annotation, ": Callable[[T], T]");
-    assert_eq!(imports, "from typing import Callable\n");
+    assert_eq!(annotation, ": Callable[[Any], Any]");
+    assert_eq!(imports, "from typing import Any, Callable\n");
 }
 
 #[test]
@@ -1497,9 +1498,8 @@ def f[**P](x: int = 0, *args: P.args, **kwargs: P.kwargs) -> int:
 g = f
 "#,
     )]);
-    // BUG: `P` is undefined where the hint is inserted, and `x` becomes required.
-    assert_eq!(annotation, ": Callable[Concatenate[int, P], int]");
-    assert_eq!(imports, "from typing import Callable, Concatenate\n");
+    assert_eq!(annotation, ": Callable[..., int]");
+    assert_eq!(imports, "from typing import Callable\n");
 }
 
 #[test]
@@ -1513,8 +1513,7 @@ def f(x: int = 0) -> int:
 g = f
 "#,
     )]);
-    // BUG: the annotation requires `x`, so calling `g()` becomes an error.
-    assert_eq!(annotation, ": Callable[[int], int]");
+    assert_eq!(annotation, ": Callable[..., int]");
     assert_eq!(imports, "from typing import Callable\n");
 }
 

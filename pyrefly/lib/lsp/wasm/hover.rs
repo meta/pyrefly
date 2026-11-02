@@ -1516,6 +1516,7 @@ pub fn get_hover_with_verbosity(
             position,
             FindPreference {
                 prefer_pyi: false,
+                follow_pytest_conftest: true,
                 include_interpreter_stdlib: true,
                 ..Default::default()
             },
@@ -1538,7 +1539,14 @@ pub fn get_hover_with_verbosity(
         // Only borrow documentation from the same public symbol. Preferences may otherwise
         // redirect a factory function to an unrelated stub constructor.
         transaction
-            .find_definition(handle, position, FindPreference::default())
+            .find_definition(
+                handle,
+                position,
+                FindPreference {
+                    follow_pytest_conftest: true,
+                    ..Default::default()
+                },
+            )
             .ok()
             .and_then(|items| items.into_vec().into_iter().next())
             .filter(|interface| {

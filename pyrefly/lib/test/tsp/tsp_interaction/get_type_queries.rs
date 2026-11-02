@@ -10,6 +10,9 @@
 
 use lsp_types::Uri;
 use tempfile::TempDir;
+use tsp_types::DeclarationCategory;
+use tsp_types::DeclarationKind;
+use tsp_types::TypeFlags;
 use tsp_types::TypeKind;
 
 use crate::module::bundled::BundledStub;
@@ -590,13 +593,44 @@ fn test_all_three_methods_return_same_kind_for_simple_var() {
 // Tests for declaration-based type conversions
 // =======================================================================
 
+/// Tuple instances reference the real builtins declaration, including its source range.
+fn assert_tuple_declaration(result: &serde_json::Value) {
+    assert_kind(result, TypeKind::Class);
+    assert_eq!(result["flags"], TypeFlags::INSTANCE.0);
+    let declaration = &result["declaration"];
+    assert_eq!(declaration["kind"], DeclarationKind::Regular as i32);
+    assert_eq!(declaration["category"], DeclarationCategory::Class as i32);
+    assert_eq!(declaration["name"], "tuple");
+    let node = &declaration["node"];
+    let uri = Uri::parse(node["uri"].as_str().expect("Expected declaration URI"))
+        .expect("Expected valid declaration URI");
+    assert!(
+        uri.as_str().ends_with("builtins.pyi"),
+        "Expected builtins declaration, got: {result}"
+    );
+    let range = &node["range"];
+    assert!(
+        range["start"]["line"].as_u64().unwrap() > 0,
+        "Expected nonzero declaration range, got: {result}"
+    );
+    assert_eq!(range["start"]["line"], range["end"]["line"]);
+    assert!(
+        range["end"]["character"].as_u64().unwrap() > range["start"]["character"].as_u64().unwrap(),
+        "Expected nonempty declaration range, got: {result}"
+    );
+}
+
 #[test]
 fn test_get_computed_type_tuple_is_class() {
     // `t = (1, "a")` infers tuple[int, str], which should be a ClassType
     let (mut tsp, file_uri, snapshot) = setup_project("t = (1, \"a\")\n");
 
     let result = get_computed_type_ok(&mut tsp, &file_uri, 0, 0, snapshot);
-    assert_kind(&result, TypeKind::Class);
+    assert_tuple_declaration(&result);
+    let args = result["typeArgs"].as_array().unwrap();
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0]["declaration"]["name"], "int");
+    assert_eq!(args[1]["declaration"]["name"], "str");
 
     tsp.shutdown();
 }
@@ -607,7 +641,49 @@ fn test_get_computed_type_tuple_with_type_args() {
     let (mut tsp, file_uri, snapshot) = setup_project("t: tuple[int, str] = (1, \"a\")\n");
 
     let result = get_computed_type_ok(&mut tsp, &file_uri, 0, 0, snapshot);
-    assert_kind(&result, TypeKind::Class);
+    assert_tuple_declaration(&result);
+    let args = result["typeArgs"].as_array().unwrap();
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0]["declaration"]["name"], "int");
+    assert_eq!(args[1]["declaration"]["name"], "str");
+
+    tsp.shutdown();
+}
+
+#[test]
+fn test_get_computed_type_tuple_empty_and_unbounded() {
+    let (mut tsp, file_uri, snapshot) = setup_project(
+        "empty = ()\ndef make_tuple() -> tuple[int, ...]:\n    return (1, 2)\nunbounded = make_tuple()\n",
+    );
+    let empty = get_computed_type_ok(&mut tsp, &file_uri, 0, 0, snapshot);
+    assert_tuple_declaration(&empty);
+    assert_eq!(empty["typeArgs"], serde_json::json!([]));
+
+    let unbounded = get_computed_type_ok(&mut tsp, &file_uri, 3, 0, snapshot);
+    assert_tuple_declaration(&unbounded);
+    let args = unbounded["typeArgs"].as_array().unwrap();
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0]["declaration"]["name"], "int");
+    assert_eq!(args[1]["kind"], TypeKind::Builtin as i32);
+    assert_eq!(args[1]["name"], "ellipsis");
+
+    tsp.shutdown();
+}
+
+#[test]
+fn test_get_computed_type_tuple_unpacked() {
+    let (mut tsp, file_uri, snapshot) = setup_project(
+        "def identity[*Ts](value: tuple[int, *Ts, str]) -> tuple[int, *Ts, str]:\n    return value\n",
+    );
+    let result = get_computed_type_ok(&mut tsp, &file_uri, 1, 11, snapshot);
+    assert_tuple_declaration(&result);
+    let args = result["typeArgs"].as_array().unwrap();
+    assert_eq!(args.len(), 3);
+    assert_eq!(args[0]["declaration"]["name"], "int");
+    assert_eq!(args[1]["kind"], TypeKind::Typevar as i32);
+    assert_eq!(args[1]["declaration"]["name"], "Ts");
+    assert_eq!(args[1]["flags"], TypeFlags::UNPACKED.0);
+    assert_eq!(args[2]["declaration"]["name"], "str");
 
     tsp.shutdown();
 }

@@ -26,6 +26,7 @@ use starlark_map::small_set::SmallSet;
 use crate::display::TypeDisplayContext;
 use crate::equality::TypeEq;
 use crate::equality::TypeEqCtx;
+use crate::quantified::Quantified;
 use crate::type_output::DisplayOutput;
 use crate::type_output::TypeOutput;
 use crate::types::AnyStyle;
@@ -665,6 +666,24 @@ impl Callable {
             params: Params::ParamSpec(args, param_spec),
             ret,
         }
+    }
+
+    /// Replaces each of `tparams` with its broadest gradual form, ignoring any default. This
+    /// writes the signature for a context that cannot declare the type parameters.
+    pub fn with_gradual_tparams<'a>(
+        &self,
+        tparams: impl IntoIterator<Item = &'a Quantified>,
+    ) -> Self {
+        let tparams = tparams.into_iter().collect::<Vec<_>>();
+        let mut callable = self.clone();
+        callable.visit_mut(&mut |ty: &mut Type| {
+            ty.subst_mut_fn(&mut |param| {
+                tparams
+                    .contains(&param)
+                    .then(|| Quantified::as_gradual_type_helper(param.kind(), None))
+            })
+        });
+        callable
     }
 
     /// Return a new Callable with the first parameter removed (the `self` param for bound methods).

@@ -33,9 +33,7 @@ use crate::binding::binding::Key;
 use crate::binding::binding::KeyClassField;
 use crate::binding::binding::UnpackedPosition;
 use crate::binding::bindings::Bindings;
-use crate::state::ide::import_module_name;
-use crate::state::ide::prepare_import_insertion;
-use crate::state::import_tracker::ImportTracker;
+use crate::state::annotation_renderer::AnnotationRenderer;
 use crate::state::lsp::AllOffPartial;
 use crate::state::lsp::AnnotationKind;
 use crate::state::lsp::DefinitionMetadata;
@@ -45,7 +43,6 @@ use crate::state::lsp::ReferenceOptions;
 use crate::state::state::CancellableTransaction;
 use crate::state::state::Transaction;
 use crate::types::callable::Param;
-use crate::types::stdlib::Stdlib;
 use crate::types::types::Type;
 
 pub struct InlayHintData {
@@ -59,121 +56,6 @@ pub struct InlayHintData {
 pub struct InlayHintEdits {
     pub annotation: String,
     pub imports: Vec<(TextSize, String)>,
-}
-
-struct DirectImport {
-    handle: Handle,
-    heads: Vec<String>,
-}
-
-struct TypeHintRenderer<'a, 'state> {
-    transaction: &'a Transaction<'state>,
-    handle: &'a Handle,
-    tracker: ImportTracker,
-    ast: Arc<ModModule>,
-    stdlib: &'a Stdlib,
-    import_format: ImportFormat,
-}
-
-impl TypeHintRenderer<'_, '_> {
-    fn render(&self, prefix: &str, ty: &Type) -> InlayHintEdits {
-        let parts = ty.get_annotation_parts(Some(self.stdlib));
-
-        let mut direct = Vec::<DirectImport>::new();
-        for (module, head) in self
-            .tracker
-            .direct_import_candidates(&parts, self.handle.module())
-        {
-            let Some(module_handle) = self
-                .transaction
-                .import_handle(self.handle, module, None)
-                .finding()
-            else {
-                continue;
-            };
-            let name = Name::new(&head);
-            if !self
-                .transaction
-                .get_exports(&module_handle)
-                .contains_key(&name)
-                || self
-                    .transaction
-                    .builtin_module_for_name(self.handle, &name)
-                    .is_some()
-            {
-                continue;
-            }
-            match direct
-                .iter_mut()
-                .find(|import| import.handle.module() == module)
-            {
-                Some(import) => import.heads.push(head),
-                None => direct.push(DirectImport {
-                    handle: module_handle,
-                    heads: vec![head],
-                }),
-            }
-        }
-        direct.sort_by(|left, right| {
-            left.handle
-                .module()
-                .as_str()
-                .cmp(right.handle.module().as_str())
-        });
-        for import in &mut direct {
-            import.heads.sort();
-        }
-
-        let direct_imports = direct
-            .iter()
-            .flat_map(|import| {
-                import
-                    .heads
-                    .iter()
-                    .map(|head| (import.handle.module(), head.as_str()))
-            })
-            .collect::<Vec<_>>();
-        let (text, missing) =
-            self.tracker
-                .resolve_annotation(&parts, self.handle.module(), &direct_imports);
-
-        let mut missing = missing.into_iter().collect::<Vec<_>>();
-        missing.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        // Inlay hints apply all imports as one edit, so every import must be a
-        // complete line at the same legal insertion point rather than a merge suffix.
-        let mut import_text = String::new();
-        for module in missing {
-            if self
-                .transaction
-                .import_handle(self.handle, module, None)
-                .finding()
-                .is_some()
-            {
-                import_text.push_str(&format!("import {module}\n"));
-            }
-        }
-        for import in direct {
-            let module = import_module_name(
-                self.transaction.config_finder(),
-                self.handle,
-                &import.handle,
-                self.import_format,
-            );
-            import_text.push_str(&format!(
-                "from {module} import {}\n",
-                import.heads.join(", ")
-            ));
-        }
-        let imports = if import_text.is_empty() {
-            Vec::new()
-        } else {
-            vec![prepare_import_insertion(self.ast.as_ref(), import_text)]
-        };
-        InlayHintEdits {
-            annotation: format!("{prefix}{text}"),
-            imports,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -280,27 +162,21 @@ impl<'a> Transaction<'a> {
         let answers = self.get_answers(handle)?;
         let bindings = answers.bindings();
         let stdlib = self.get_stdlib(handle);
-        let renderer = self.get_ast(handle).map(|ast| TypeHintRenderer {
-            transaction: self,
-            handle,
-            tracker: ImportTracker::from_ast(
-                ast.as_ref(),
-                handle.module(),
-                handle.path().is_init(),
-                *handle.sys_info(),
-            ),
-            ast,
-            stdlib: &stdlib,
-            import_format,
-        });
+        let renderer = self
+            .get_ast(handle)
+            .map(|ast| AnnotationRenderer::new(self, handle, ast, &stdlib, import_format));
         let make_type_hint =
             |prefix: &str, position: TextSize, ty: &Type, insertable: bool| -> InlayHintData {
                 let type_parts = ty.get_types_with_locations(Some(&stdlib));
                 let label_parts = once((prefix.to_owned(), None)).chain(type_parts).collect();
                 let edits = if insertable {
-                    renderer
-                        .as_ref()
-                        .map(|renderer| renderer.render(prefix, ty))
+                    renderer.as_ref().and_then(|renderer| {
+                        let rendered = renderer.render(ty)?;
+                        Some(InlayHintEdits {
+                            annotation: format!("{prefix}{}", rendered.text),
+                            imports: renderer.import_lines(&rendered).into_iter().collect(),
+                        })
+                    })
                 } else {
                     None
                 };
