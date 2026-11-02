@@ -369,8 +369,7 @@ pub(crate) fn is_directly_parametrized(
     covering_nodes: &[AnyNodeRef],
     name: &Name,
 ) -> bool {
-    let aliases = PytestAliases::from_module(module);
-    covering_nodes
+    let mut decorators = covering_nodes
         .iter()
         .filter_map(|node| match node {
             AnyNodeRef::StmtFunctionDef(function) => Some(&function.decorator_list),
@@ -378,26 +377,29 @@ pub(crate) fn is_directly_parametrized(
             _ => None,
         })
         .flatten()
-        .any(|decorator| {
-            let Expr::Call(call) = &decorator.expression else {
-                return false;
-            };
-            if !aliases.is_parametrize(&call.func) {
-                return false;
-            }
-            let argnames = call.arguments.find_argument_value("argnames", 0);
-            if !argnames.is_some_and(|argnames| parametrize_names_contain(argnames, name)) {
-                return false;
-            }
-            match call.arguments.find_argument_value("indirect", 2) {
-                None => true,
-                Some(Expr::BooleanLiteral(value)) => !value.value,
-                Some(expr @ (Expr::List(_) | Expr::Tuple(_))) => {
-                    !parametrize_names_contain(expr, name)
-                }
-                _ => false,
-            }
-        })
+        .peekable();
+    if decorators.peek().is_none() {
+        return false;
+    }
+    let aliases = PytestAliases::from_module(module);
+    decorators.any(|decorator| {
+        let Expr::Call(call) = &decorator.expression else {
+            return false;
+        };
+        if !aliases.is_parametrize(&call.func) {
+            return false;
+        }
+        let argnames = call.arguments.find_argument_value("argnames", 0);
+        if !argnames.is_some_and(|argnames| parametrize_names_contain(argnames, name)) {
+            return false;
+        }
+        match call.arguments.find_argument_value("indirect", 2) {
+            None => true,
+            Some(Expr::BooleanLiteral(value)) => !value.value,
+            Some(expr @ (Expr::List(_) | Expr::Tuple(_))) => !parametrize_names_contain(expr, name),
+            _ => false,
+        }
+    })
 }
 
 /// Returns all parameter ranges that reference the fixture definition in this module.
