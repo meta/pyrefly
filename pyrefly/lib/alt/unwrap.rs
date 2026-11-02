@@ -16,7 +16,6 @@ use ruff_text_size::TextRange;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::error::collector::ErrorCollector;
-use crate::solver::solver::SubsetError;
 use crate::types::callable::Param;
 use crate::types::callable::Required;
 use crate::types::class::ClassType;
@@ -552,16 +551,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Vec<D> {
         hint.types()
             .iter()
-            .filter_map(|hint| {
-                // Decomposing a hint should not have any side effects.
-                let snapshot = self
-                    .solver()
-                    .snapshot_exact_vars(&hint.collect_maybe_placeholder_vars());
-                let ret = decompose(hint);
-                self.solver().restore_vars(snapshot);
-                ret
-            })
+            .filter_map(|hint| self.decompose_one_hint(hint, &decompose))
             .collect()
+    }
+
+    fn decompose_one_hint<'b, D>(
+        &self,
+        hint: &'b Type,
+        decompose: impl FnOnce(&'b Type) -> Option<D>,
+    ) -> Option<D> {
+        // Decomposing a hint should not have any side effects.
+        let snapshot = self
+            .solver()
+            .snapshot_exact_vars(&hint.collect_maybe_placeholder_vars());
+        let ret = decompose(hint);
+        self.solver().restore_vars(snapshot);
+        ret
     }
 
     pub fn infer_with_decomposed_hint<D>(
@@ -619,20 +624,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             None => return ret,
                         }
                     } else {
+                        let Some(d) = self.decompose_one_hint(branch_hint, &decompose) else {
+                            continue;
+                        };
                         // Pinning vars mutates solver state, so infer under a snapshot that
                         // rolls back when the inferred type doesn't match the hint. Emitting
                         // errors from possibly-partial var answers is unsafe, so pass none.
                         let mut ret = None;
                         let matched = self.solver().with_snapshot(&vs, || {
-                            // Decomposing unifies the hint's vars with fresh unwrap vars, which
-                            // discards their bounds and restrictions. Undo that before inferring,
-                            // so pinning the vars below still checks them.
-                            let decompose_snapshot = self.solver().snapshot_exact_vars(&vs);
-                            let decomposed = decompose(branch_hint);
-                            self.solver().restore_vars(decompose_snapshot);
-                            let Some(d) = decomposed else {
-                                return Err(SubsetError::Other);
-                            };
                             let ty = infer(Some(d), Some(HintRef(hint.types(), None)));
                             let result = self.is_subset_eq_with_reason(&ty, branch_hint);
                             ret = Some(ty);
