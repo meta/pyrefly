@@ -128,9 +128,8 @@ pub enum IsMethod {
 #[derive(Debug, Clone)]
 pub enum ClassAttribute {
     /// A read-write attribute with a closed form type for both get and set actions.
-    /// The `IsMethod` flag marks methods, which cannot be assigned through the class.
-    /// The flag is `true` when the attribute is a class-body-declared instance
-    /// variable (annotated, not `ClassVar`), used to flag writes via the class.
+    /// The `IsMethod` flag enables the `method-assign` diagnostic.
+    /// The boolean marks annotated instance-variable declarations for `instance-var-assign`.
     ReadWrite(Type, IsMethod, bool),
     /// A read-only attribute with a closed form type for get actions.
     ReadOnly(Type, ReadOnlyReason),
@@ -412,7 +411,7 @@ enum ClassFieldInner {
         descriptor_range: Option<TextRange>,
         /// ClassVar: can read from instance, but cannot write/shadow from instance
         is_classvar: bool,
-        /// An instance-variable declaration, preserved across inherited method assignments.
+        /// Whether this declaration is eligible for the `instance-var-assign` diagnostic.
         is_instance_var: bool,
         is_staticmethod: bool,
         /// Django ForeignKey - triggers synthesis of _id field
@@ -2610,12 +2609,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 _ => {
                     let is_staticmethod =
                         matches!(&ty, Type::ClassType(cls) if cls.is_builtin("staticmethod"));
-                    // Classmethod writes inherit a declaration; only fresh attributes lack one.
+                    // Classmethod-created fields are exempt unless they inherit an instance declaration.
+                    // Python's metadata attributes are writable on both classes and instances.
                     let is_instance_var = annotation.is_some()
                         && !is_class_var
                         && (initialization != ClassFieldInitialization::ClassMethod
                             || inherited_instance_var)
-                        // Python exposes these metadata attributes on both classes and instances.
                         && !matches!(name.as_str(), "__module__" | "__doc__" | "__annotations__");
                     ClassField(
                         ClassFieldInner::ClassAttribute {
@@ -5244,6 +5243,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         None
     }
 
+    /// Test raw metaclass fields without binding methods or applying descriptors.
+    fn metaclass_intercepts_write(&self, cls: &ClassBase, name: &Name) -> bool {
+        self.get_metadata_for_class(cls.class_object())
+            .custom_metaclass()
+            .and_then(|metaclass| self.get_class_member(metaclass.class_object(), name))
+            .is_some_and(|field| match &field.0 {
+                // Unlike `class_attribute_is_data_descriptor`, writes must exclude
+                // cached properties, which are non-data descriptors at runtime.
+                ClassFieldInner::Property { ty, .. } => ty
+                    .toplevel_func_metadata()
+                    .is_none_or(|meta| !meta.flags.is_cached_property),
+                ClassFieldInner::Descriptor { descriptor, .. } => {
+                    descriptor.setter || descriptor.deleter
+                }
+                _ => false,
+            })
+    }
+
     pub fn get_metaclass_attribute(
         &self,
         cls: &ClassBase,
@@ -5762,37 +5779,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if is_instance_var
                     && instance_class.is_none()
                     && let Some(class_base) = class_base
+                    && !self.metaclass_intercepts_write(class_base, attr_name)
                 {
-                    // A metaclass data descriptor intercepts the write, even when lookup
-                    // found a class-MRO field. `cached_property` is a non-data descriptor.
-                    let metaclass_write = self
-                        .get_metadata_for_class(class_base.class_object())
-                        .custom_metaclass()
-                        .and_then(|metaclass| {
-                            self.get_class_member(metaclass.class_object(), attr_name)
-                        })
-                        .is_some_and(|field| match &field.0 {
-                            ClassFieldInner::Property { ty, .. } => ty
-                                .toplevel_func_metadata()
-                                .is_none_or(|meta| !meta.flags.is_cached_property),
-                            ClassFieldInner::Descriptor { descriptor, .. } => {
-                                descriptor.setter || descriptor.deleter
-                            }
-                            _ => false,
-                        });
-                    if !metaclass_write {
-                        errors
-                            .error_builder(
-                                range,
-                                ErrorKind::InstanceVarAssign,
-                                format!("Cannot set instance variable `{attr_name}` from the class"),
-                            )
-                            .with_detail(
-                                "instance variables declared in a class body (without ClassVar) should be assigned on instances"
-                                    .to_owned(),
-                            )
-                            .emit();
-                    }
+                    errors
+                        .error_builder(
+                            range,
+                            ErrorKind::InstanceVarAssign,
+                            format!("Cannot set instance variable `{attr_name}` from the class"),
+                        )
+                        .with_detail(
+                            "Assign it on an instance, or declare it as `ClassVar` if it is a class variable."
+                                .to_owned(),
+                        )
+                        .emit();
                 }
                 // If the attribute has a converter, then `want` should be the type expected by the converter.
                 let attr_ty = match instance_class {

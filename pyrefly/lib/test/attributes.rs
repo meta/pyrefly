@@ -4748,9 +4748,6 @@ C.stat = f
 # Writing a ClassVar via an instance keeps firing the pre-existing mirror rule.
 C().cv = 7  # E: Cannot set field `cv`
 
-# Generic-class attribute access already has its own error; our rule must not
-# stack another one on top.
-
 # Instance-only attributes keep their pre-existing error on class access.
 class D:
     def __init__(self) -> None:
@@ -4761,8 +4758,7 @@ D().only = 57
 # Generic fields are unreachable via the class object (pre-existing no-access).
 G.item = 6  # E: Generic attribute `item` of class `G` is not visible on the class
 
-# Reads are never flagged, and writes via an INSTANCE are unaffected even when
-# the kind is enabled (the flag is set but emission requires a class base).
+# Reads and instance writes never trigger this diagnostic.
 class E:
     read_only_use: int = 1
 print(E.read_only_use)
@@ -4927,7 +4923,7 @@ Direct.x = 2  # E: Cannot set instance variable `x` from the class
 );
 
 testcase!(
-    bug = "Metaclass descriptor reads still use class-MRO lookup",
+    bug = "Metaclass data descriptor reads still use class fields",
     test_instance_var_assign_metaclass_descriptor_collision,
     TestEnv::new().enable_instance_var_assign_error(),
     r#"
