@@ -293,6 +293,7 @@ pub struct TestEnv {
     spec_compliant_overloads: bool,
     legacy_overload_expansion: bool,
     treat_all_caps_as_final: bool,
+    infer_param_types_from_docstring: bool,
     type_ignore_unknown_tag_behavior: TypeIgnoreUnknownTagBehavior,
     no_any_return_error: bool,
     no_any_return_explicit_error: bool,
@@ -369,6 +370,7 @@ impl TestEnv {
             spec_compliant_overloads: false,
             legacy_overload_expansion: false,
             treat_all_caps_as_final: false,
+            infer_param_types_from_docstring: false,
             type_ignore_unknown_tag_behavior: TypeIgnoreUnknownTagBehavior::Suppress,
             no_any_return_error: false,
             no_any_return_explicit_error: false,
@@ -673,6 +675,11 @@ impl TestEnv {
         self
     }
 
+    pub fn enable_infer_param_types_from_docstring(mut self) -> Self {
+        self.infer_param_types_from_docstring = true;
+        self
+    }
+
     pub fn with_type_ignore_unknown_tag_behavior(
         mut self,
         behavior: TypeIgnoreUnknownTagBehavior,
@@ -857,6 +864,7 @@ impl TestEnv {
         config.root.spec_compliant_overloads = Some(self.spec_compliant_overloads);
         config.root.legacy_overload_expansion = Some(self.legacy_overload_expansion);
         config.root.treat_all_caps_as_final = Some(self.treat_all_caps_as_final);
+        config.root.infer_param_types_from_docstring = Some(self.infer_param_types_from_docstring);
         if !self.replace_imports_with_any.is_empty() {
             let modules = self
                 .replace_imports_with_any

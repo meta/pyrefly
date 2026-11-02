@@ -336,6 +336,7 @@ pub struct BindingsBuilder<'a> {
     pub analyze_unannotated_for_ide: bool,
     pub infer_return_types: InferReturnTypes,
     pub treat_all_caps_as_final: bool,
+    pub infer_param_types_from_docstring: bool,
     unused_imports: Vec<UnusedImport>,
     unused_variables: Vec<UnusedVariable>,
     django_relation_classes: Vec<DjangoRelationClass>,
@@ -829,6 +830,7 @@ impl Bindings {
         analyze_unannotated_for_ide: bool,
         infer_return_types: InferReturnTypes,
         treat_all_caps_as_final: bool,
+        infer_param_types_from_docstring: bool,
     ) -> Self {
         let module_range = x.range;
         let pytest_info = PytestBindingInfo::from_module(&x);
@@ -855,6 +857,7 @@ impl Bindings {
             analyze_unannotated_for_ide,
             infer_return_types,
             treat_all_caps_as_final,
+            infer_param_types_from_docstring,
             unused_imports: Vec::new(),
             unused_variables: Vec::new(),
             django_relation_classes: Vec::new(),

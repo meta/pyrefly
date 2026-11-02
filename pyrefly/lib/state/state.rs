@@ -1576,6 +1576,8 @@ impl<'a> Transaction<'a> {
                 legacy_overload_expansion: config
                     .legacy_overload_expansion(module_data.handle.path()),
                 treat_all_caps_as_final: config.treat_all_caps_as_final(module_data.handle.path()),
+                infer_param_types_from_docstring: config
+                    .infer_param_types_from_docstring(module_data.handle.path()),
                 recursion_limit_config: config.recursion_limit_config(),
                 pysa_context,
                 cinderx_enabled: self.data.cinderx_reporter.is_some(),
@@ -2670,6 +2672,8 @@ impl<'a> Transaction<'a> {
                 spec_compliant_overloads: config.spec_compliant_overloads(m.handle.path()),
                 legacy_overload_expansion: config.legacy_overload_expansion(m.handle.path()),
                 treat_all_caps_as_final: config.treat_all_caps_as_final(m.handle.path()),
+                infer_param_types_from_docstring: config
+                    .infer_param_types_from_docstring(m.handle.path()),
                 recursion_limit_config: config.recursion_limit_config(),
                 pysa_context: None,
                 cinderx_enabled: false,
