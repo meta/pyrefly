@@ -1224,13 +1224,21 @@ impl Transaction<'_> {
                             }
                         }
                     }
-                    self.add_typed_dict_attribute_key_completions(
-                        handle,
-                        &base_type,
-                        base_range,
-                        &identifier,
-                        &mut result,
-                    );
+                    // Value patterns only allow dotted names, so a subscript would be invalid.
+                    if let Some(nodes) = covering_nodes.as_deref()
+                        && !nodes
+                            .iter()
+                            .any(|node| matches!(node, AnyNodeRef::PatternMatchValue(_)))
+                    {
+                        self.add_typed_dict_attribute_key_completions(
+                            handle,
+                            &base_type,
+                            base_range,
+                            &identifier,
+                            nodes,
+                            &mut result,
+                        );
+                    }
                     self.add_attribute_completions_for_type(
                         handle,
                         base_type,

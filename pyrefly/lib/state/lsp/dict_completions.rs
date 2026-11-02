@@ -26,6 +26,8 @@ use ruff_python_ast::ExprStringLiteral;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::Keyword;
 use ruff_python_ast::ModModule;
+use ruff_python_ast::StringFlags;
+use ruff_python_ast::str::Quote;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -1101,6 +1103,7 @@ impl<'a> Transaction<'a> {
         base_type: &Type,
         base_range: TextRange,
         attribute: &Identifier,
+        covering_nodes: &[AnyNodeRef],
         completions: &mut Vec<RankedCompletion>,
     ) {
         if !Self::type_contains_typed_dict(base_type) {
@@ -1109,19 +1112,47 @@ impl<'a> Transaction<'a> {
         let Some(module_info) = self.get_module_info(handle) else {
             return;
         };
-        let edit_range =
-            module_info.to_lsp_range(TextRange::new(base_range.end(), attribute.range().end()));
+        // The base range excludes grouping parentheses, so `(a).f` has a `)` before the dot.
+        let before_attribute = TextRange::new(base_range.end(), attribute.start());
+        let dot_offset = module_info
+            .code_at(before_attribute)
+            .rfind('.')
+            .expect("An attribute access has a dot before its name");
+        let dot = before_attribute.start() + TextSize::new(dot_offset as u32);
+        let edit_range = module_info.to_lsp_range(TextRange::new(dot, attribute.end()));
         // LSP requires a completion's text edit to be on a single line.
         if edit_range.start.line != edit_range.end.line {
             return;
         }
+        // Before Python 3.12 (PEP 701), an f-string replacement field cannot contain a
+        // backslash or the quote of any enclosing f-string.
+        let f_string_quotes: Vec<Quote> = covering_nodes
+            .iter()
+            .filter_map(|node| match node {
+                AnyNodeRef::FString(f_string) => Some(f_string.flags.quote_style()),
+                _ => None,
+            })
+            .collect();
+        let Some(quote) = [Quote::Double, Quote::Single]
+            .into_iter()
+            .find(|quote| !f_string_quotes.contains(quote))
+            .map(Quote::as_char)
+        else {
+            return;
+        };
         let Some(keys) = self.collect_typed_dict_keys(handle, base_type.clone()) else {
             return;
         };
         // Clients filter on the text from the start of the edit, which includes the dot.
-        let accessor = module_info.code_at(TextRange::new(base_range.end(), attribute.start()));
+        let accessor = module_info.code_at(TextRange::new(dot, attribute.start()));
         for (key, ty) in keys {
-            let quoted_key = to_string(&key).expect("Serializing a string cannot fail");
+            let quoted_key = if f_string_quotes.is_empty() {
+                to_string(&key).expect("Serializing a string cannot fail")
+            } else if key.contains(['"', '\'', '\\']) || key.chars().any(char::is_control) {
+                continue;
+            } else {
+                format!("{quote}{key}{quote}")
+            };
             completions.push(RankedCompletion::new(CompletionItem {
                 filter_text: Some(format!("{accessor}{key}")),
                 label: key,
