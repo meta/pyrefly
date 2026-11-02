@@ -989,11 +989,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
     ) -> CallTarget {
+        let target = self.resolve_call_target_or_error(ty, call_style, range, errors, context);
+        self.report_call_deprecation(&target, range, errors, context);
+        target
+    }
+
+    fn resolve_call_target_or_error(
+        &self,
+        ty: Type,
+        call_style: CallStyle,
+        range: TextRange,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+    ) -> CallTarget {
         match self.as_call_target(ty) {
-            CallTargetLookup::Ok(target) => {
-                self.report_call_deprecation(&target, range, errors, context);
-                *target
-            }
+            CallTargetLookup::Ok(target) => *target,
             CallTargetLookup::Error(ty, ..) => {
                 // Re-query `__call__` only on the error path so ordinary calls don't pay for
                 // preserving the original access error through call target resolution.
@@ -3379,7 +3389,36 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     while let Expr::Named(named) = callee {
                         callee = &named.value;
                     }
-                    self.freeform_call_infer(ty.clone(), &args, &kws, callee.range(), x.arguments.range(), hint, errors).ty
+                    let target = self.resolve_call_target_or_error(
+                        ty.clone(),
+                        CallStyle::FreeForm,
+                        callee.range(),
+                        errors,
+                        None,
+                    );
+                    // Match check_for_deprecated_call's function reference check: each
+                    // branch reports it at its own range. Property and `__call__`
+                    // deprecations still need call-site checks, and call inference
+                    // separately reports deprecated overloads.
+                    let reference_already_checked = matches!(callee, Expr::If(..) | Expr::BoolOp(..))
+                        && ty.function_deprecation().is_some()
+                        && ty.property_metadata().is_none();
+                    if !reference_already_checked {
+                        self.report_call_deprecation(&target, callee.range(), errors, None);
+                    }
+                    self.call_infer_with_callee_range(
+                        target,
+                        &args,
+                        &kws,
+                        x.arguments.range(),
+                        Some(callee.range()),
+                        errors,
+                        errors,
+                        errors,
+                        None,
+                        hint,
+                        None,
+                    ).ty
                 }
             }});
             // TypeIs and TypeGuard functions return bool at runtime

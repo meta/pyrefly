@@ -540,7 +540,6 @@ assert_type(C.class_method(1), str | Awaitable[str])
 );
 
 testcase!(
-    bug = "Direct aggregate calls repeat reference deprecation warnings",
     test_deprecated_aggregate_callee,
     r#"
 from collections.abc import Callable
@@ -553,13 +552,13 @@ def old(value: int) -> int: ...
 def new(value: int) -> int: ...
 
 def select(flag: bool, cb: Callable[[int], int] | None) -> None:
-    assert_type((old if flag else new)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
-    assert_type((old or new)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
-    assert_type((old if flag else old)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated  # E: `old` is deprecated
-    assert_type((cb or old)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
-    assert_type((cb or (old if flag else new))(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
-    assert_type((chosen := old if flag else new)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
-    (old if flag else 0)(1)  # E: `old` is deprecated  # E: `old` is deprecated  # E: Expected a callable
+    assert_type((old if flag else new)(1), int)  # E: `old` is deprecated
+    assert_type((old or new)(1), int)  # E: `old` is deprecated
+    assert_type((old if flag else old)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
+    assert_type((cb or old)(1), int)  # E: `old` is deprecated
+    assert_type((cb or (old if flag else new))(1), int)  # E: `old` is deprecated
+    assert_type((chosen := old if flag else new)(1), int)  # E: `old` is deprecated
+    (old if flag else 0)(1)  # E: `old` is deprecated  # E: Expected a callable
     "#,
 );
 
