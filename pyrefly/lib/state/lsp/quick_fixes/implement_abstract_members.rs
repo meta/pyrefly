@@ -32,23 +32,23 @@ use pyrefly_types::types::TParams;
 use pyrefly_types::types::Type;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
-use ruff_python_ast::helpers::is_docstring_stmt;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 use starlark_map::Hashed;
 
+use super::extract_shared::DEFAULT_INDENT;
 use super::extract_shared::line_indent_and_start;
+use super::extract_shared::prepare_insertion_text;
 use super::extract_shared::selection_anchor;
+use super::extract_shared::target_insertion_point;
 use super::extract_shared::unique_name;
 use crate::binding::binding::KeyClass;
 use crate::state::annotation_renderer::AnnotationRenderer;
 use crate::state::lsp::ImportFormat;
 use crate::state::lsp::LocalRefactorCodeAction;
 use crate::state::lsp::Transaction;
-
-const DEFAULT_INDENT: &str = "    ";
 
 #[derive(Clone)]
 struct AbstractMemberInfo {
@@ -72,8 +72,21 @@ pub(crate) fn implement_abstract_members_code_actions(
     let source = module_info.contents();
     let selection_point = selection_anchor(source, selection);
     let class_def = find_class_header(&ast.body, selection_point)?;
-    let (method_indent, insert_range, prefix) = insertion_point(class_def, source)?;
-    let indent_unit = class_indent_unit(source, class_def, &method_indent);
+    let (class_indent, _) = line_indent_and_start(source, class_def.start())?;
+    // A suite on the header line, as in `class C(Base): pass`, has no line to insert into.
+    let first = class_def.body.first()?;
+    let (_, body_line_start) = line_indent_and_start(source, first.start())?;
+    if !source[body_line_start.to_usize()..first.start().to_usize()]
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    let (indent, insert_range, replaces_pass) = target_insertion_point(class_def, source)?;
+    let indent_unit = indent
+        .strip_prefix(&class_indent)
+        .filter(|unit| !unit.is_empty())
+        .unwrap_or(DEFAULT_INDENT);
 
     let members = transaction
         .ad_hoc_solve(
@@ -136,13 +149,17 @@ pub(crate) fn implement_abstract_members_code_actions(
     let mut renderer = MemberRenderer {
         stdlib: &stdlib,
         python_version: handle.sys_info().version(),
-        parts: vec![AnnotationPart::Text(prefix)],
+        parts: Vec::new(),
     };
+    if !replaces_pass {
+        // A blank line separates the stubs from the existing body.
+        renderer.text(&prepare_insertion_text(source, insert_range.start(), "\n"));
+    }
     for (i, member) in members.iter().enumerate() {
         if i > 0 {
             renderer.text("\n\n");
         }
-        renderer.member(member, &method_indent, &indent_unit)?;
+        renderer.member(member, &indent, indent_unit)?;
     }
     renderer.text("\n");
     let annotations = AnnotationRenderer::new(transaction, handle, ast, &stdlib, import_format);
@@ -184,117 +201,6 @@ fn find_class_header(body: &[Stmt], position: TextSize) -> Option<&StmtClassDef>
             find_class_header(&class_def.body, position)
         }
     })
-}
-
-fn insertion_point(class_def: &StmtClassDef, source: &str) -> Option<(String, TextRange, String)> {
-    let first = class_def.body.first()?;
-    let (class_indent, _) = line_indent_and_start(source, class_def.range().start())?;
-    let (_, body_line_start) = line_indent_and_start(source, first.start())?;
-    if !source[body_line_start.to_usize()..first.start().to_usize()]
-        .trim()
-        .is_empty()
-    {
-        let start = source[..first.start().to_usize()].rfind(':')? + 1;
-        let end = line_end_position(source, class_def.end());
-        let indent = format!("{class_indent}{DEFAULT_INDENT}");
-        let mut prefix = "\n".to_owned();
-        if replaceable_pass_stmt(class_def).is_none() || class_def.body.len() > 1 {
-            prefix.push_str(&indent);
-            prefix.push_str(
-                &source[first.start().to_usize()..end.to_usize()]
-                    .trim_end_matches(['\r', '\n'])
-                    .replace("\r\n", "\n"),
-            );
-            prefix.push('\n');
-        }
-        return Some((
-            indent,
-            TextRange::new(TextSize::try_from(start).ok()?, end),
-            prefix,
-        ));
-    }
-    if let Some(pass_stmt) = replaceable_pass_stmt(class_def) {
-        let (indent, line_start) = line_indent_and_start(source, pass_stmt.range().start())?;
-        if source[line_start.to_usize()..pass_stmt.start().to_usize()]
-            .trim()
-            .is_empty()
-        {
-            let line_end = line_end_position(source, pass_stmt.range().end());
-            return Some((indent, TextRange::new(line_start, line_end), String::new()));
-        }
-    }
-    for stmt in &class_def.body {
-        if is_docstring_stmt(stmt) {
-            continue;
-        }
-        let anchor = match stmt {
-            Stmt::FunctionDef(function) => function
-                .decorator_list
-                .first()
-                .map_or(stmt.start(), |d| d.start()),
-            Stmt::ClassDef(class) => class
-                .decorator_list
-                .first()
-                .map_or(stmt.start(), |d| d.start()),
-            _ => stmt.start(),
-        };
-        let (indent, line_start) = line_indent_and_start(source, anchor)?;
-        if !source[line_start.to_usize()..anchor.to_usize()]
-            .trim()
-            .is_empty()
-        {
-            continue;
-        }
-        return Some((indent, TextRange::empty(line_start), String::new()));
-    }
-    let (indent, _) = line_indent_and_start(source, first.start())?;
-    let line_end = line_end_position(source, class_def.end());
-    let prefix = if source[..line_end.to_usize()].ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    Some((indent, TextRange::empty(line_end), prefix.to_owned()))
-}
-
-fn replaceable_pass_stmt(class_def: &StmtClassDef) -> Option<&Stmt> {
-    let mut non_docstring = class_def
-        .body
-        .iter()
-        .filter(|stmt| !is_docstring_stmt(stmt));
-    let only_stmt = non_docstring.next()?;
-    if non_docstring.next().is_some() {
-        return None;
-    }
-    match only_stmt {
-        Stmt::Pass(_) => Some(only_stmt),
-        _ => None,
-    }
-}
-
-fn class_indent_unit(source: &str, class_def: &StmtClassDef, method_indent: &str) -> String {
-    let (class_indent, _) = match line_indent_and_start(source, class_def.range().start()) {
-        Some(value) => value,
-        None => return DEFAULT_INDENT.to_owned(),
-    };
-    if let Some(unit) = method_indent.strip_prefix(&class_indent)
-        && !unit.is_empty()
-    {
-        return unit.to_owned();
-    }
-    DEFAULT_INDENT.to_owned()
-}
-
-fn line_end_position(source: &str, position: TextSize) -> TextSize {
-    let mut idx = position.to_usize().min(source.len());
-    let bytes = source.as_bytes();
-    while idx < bytes.len() && bytes[idx] != b'\n' {
-        idx += 1;
-    }
-    if idx < bytes.len() {
-        idx += 1;
-    }
-    TextSize::try_from(idx).expect("The source length fits in TextSize.")
 }
 
 /// Builds source text while retaining the module references used by annotations.
@@ -401,10 +307,10 @@ impl MemberRenderer<'_> {
         }
         if overloaded {
             // The overloads define the contract. The implementation accepts every overload.
-            self.text("\n");
+            self.text("\n\n");
             if is_class || is_static {
                 self.text(&format!(
-                    "\n\n{indent}@{}",
+                    "{indent}@{}\n",
                     if is_class {
                         "classmethod"
                     } else {
@@ -413,7 +319,7 @@ impl MemberRenderer<'_> {
                 ));
             }
             self.text(&format!(
-                "\n{indent}{}def {}(",
+                "{indent}{}def {}(",
                 if is_async { "async " } else { "" },
                 member.name
             ));
@@ -432,8 +338,9 @@ impl MemberRenderer<'_> {
                 member.name, member.name
             ));
             self.signature(callable, tparams.map(|p| p.as_ref()), true)?;
-            self.text(":\n");
-            self.body(member, indent, indent_unit);
+            self.text(&format!(
+                ":\n{indent}{indent_unit}raise NotImplementedError"
+            ));
         }
         Some(())
     }

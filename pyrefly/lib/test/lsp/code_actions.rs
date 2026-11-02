@@ -5189,40 +5189,44 @@ x = foo()
 
 #[test]
 fn implement_abstract_members_preserves_class_body() {
+    let base = "from abc import ABC, abstractmethod\nclass Base(ABC):\n    @abstractmethod\n    def foo(self) -> int: ...\n";
+    // A suite on the header line has no line to insert into.
+    for child in [
+        "class Child(Base): pass",
+        "class Child(Base): pass;",
+        "class Child(Base): \"\"\"Child doc.\"\"\"",
+        "class Child(Base): pass; value = 1",
+        "class Child(\n    Base,\n): pass",
+    ] {
+        let code = format!("{base}{child}\n");
+        let after =
+            implement_abstract_members_at(TestEnv::new(), &[("main", &code)], "class Child");
+        assert_eq!(after, None, "{code}");
+    }
     for (body, expected) in [
-        ("pass", ""),
-        ("pass;", ""),
-        ("\"\"\"Child doc.\"\"\"", "    \"\"\"Child doc.\"\"\"\n"),
         (
-            "\n    \"\"\"Child doc.\"\"\"",
+            "    \"\"\"Child doc.\"\"\"",
+            "    \"\"\"Child doc.\"\"\"\n\n",
+        ),
+        (
+            "    \"\"\"Child doc.\"\"\"\n    pass",
             "    \"\"\"Child doc.\"\"\"\n",
         ),
-        ("pass; value = 1", "    pass; value = 1\n"),
         (
-            "\n    \"\"\"Child doc.\"\"\"; pass",
-            "    \"\"\"Child doc.\"\"\"; pass\n",
+            "    \"\"\"Child doc.\"\"\"; pass",
+            "    \"\"\"Child doc.\"\"\"; pass\n\n",
         ),
     ] {
-        let separator = if body.starts_with('\n') { "" } else { " " };
-        let code = format!(
-            "from abc import ABC, abstractmethod\nclass Base(ABC):\n    @abstractmethod\n    def foo(self) -> int: ...\n# ACTION-START\nclass Child(Base):{separator}{body}"
+        let code = format!("{base}class Child(Base):\n{body}");
+        let after =
+            implement_abstract_members_at(TestEnv::new(), &[("main", &code)], "class Child")
+                .unwrap();
+        assert!(
+            after.ends_with(&format!(
+                "class Child(Base):\n{expected}    def foo(self) -> int:\n        raise NotImplementedError\n"
+            )),
+            "{after}"
         );
-        let (handles, state) = mk_multi_file_state(&[("main", &code)], Require::Everything, false);
-        let handle = &handles["main"];
-        let transaction = state.transaction();
-        let info = transaction.get_module_info(handle).unwrap();
-        let start = TextSize::try_from(code.find("class Child").unwrap()).unwrap();
-        let actions = transaction
-            .implement_abstract_members_code_actions(
-                handle,
-                TextRange::empty(start),
-                ImportFormat::Absolute,
-            )
-            .unwrap();
-        let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
-        assert!(after.contains(&format!(
-            "class Child(Base):\n{expected}    def foo(self) -> int:\n        raise NotImplementedError\n"
-        )), "{after}");
         mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
     }
 }
@@ -5835,11 +5839,11 @@ class Child(Base):
     let after =
         implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
     let child = &after[after.find("class Child").unwrap()..];
-    // BUG: the overload implementation follows two blank lines, the setter repeats the
-    // getter's docstring, and no blank line separates the stubs from `existing`.
     assert_eq!(
         child,
         r#"class Child(Base):
+    existing = 1
+
     @overload
     @classmethod
     def make(cls, x: int) -> int:
@@ -5849,7 +5853,6 @@ class Child(Base):
     @classmethod
     def make(cls, x: str) -> str:
         ...
-
 
     @classmethod
     def make(cls, *args, **kwargs) -> Any:
@@ -5862,9 +5865,7 @@ class Child(Base):
 
     @value.setter
     def value(self, value: int) -> None:
-        """Value doc."""
         raise NotImplementedError
-    existing = 1
 "#
     );
 }
