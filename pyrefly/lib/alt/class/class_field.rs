@@ -463,15 +463,23 @@ impl Display for ClassField {
 }
 
 impl ClassField {
-    fn new(
+    /// Python's metadata attributes are writable on both classes and instances.
+    fn is_class_metadata_attribute(name: &Name) -> bool {
+        matches!(name.as_str(), "__module__" | "__doc__" | "__annotations__")
+    }
+
+    fn new_typed_dict_field(
+        name: &Name,
         ty: Type,
         annotation: Option<Annotation>,
-        initialization: ClassFieldInitialization,
         read_only_reason: Option<ReadOnlyReason>,
-        is_foreign_key: bool,
-        has_choices: bool,
-        is_inherited: IsInherited,
     ) -> Self {
+        let is_instance_var = annotation.is_some() && !Self::is_class_metadata_attribute(name);
+        let initialization = if annotation.is_some() {
+            ClassFieldInitialization::Uninitialized
+        } else {
+            ClassFieldInitialization::Magic
+        };
         Self(
             ClassFieldInner::ClassAttribute {
                 ty,
@@ -480,41 +488,26 @@ impl ClassField {
                 read_only_reason,
                 descriptor_range: None,
                 is_classvar: false,
-                is_instance_var: false,
+                is_instance_var,
                 is_staticmethod: false,
-                is_foreign_key,
-                has_choices,
+                is_foreign_key: false,
+                has_choices: false,
             },
-            is_inherited,
-        )
-    }
-
-    pub fn invalid_typed_dict_field(heap: &TypeHeap) -> Self {
-        ClassField::new(
-            heap.mk_any_error(),
-            None,
-            ClassFieldInitialization::Magic,
-            None,
-            false,
-            false,
             IsInherited::Maybe,
         )
     }
 
+    pub fn invalid_typed_dict_field(name: &Name, heap: &TypeHeap) -> Self {
+        Self::new_typed_dict_field(name, heap.mk_any_error(), None, None)
+    }
+
     pub fn typed_dict_field(
+        name: &Name,
         ty: Type,
         annotation: Annotation,
         read_only_reason: Option<ReadOnlyReason>,
     ) -> Self {
-        Self::new(
-            ty,
-            Some(annotation),
-            ClassFieldInitialization::Uninitialized,
-            read_only_reason,
-            false,
-            false,
-            IsInherited::Maybe,
-        )
+        Self::new_typed_dict_field(name, ty, Some(annotation), read_only_reason)
     }
 
     pub fn for_variance_inference(&self) -> (&Type, Option<&Annotation>, bool) {
@@ -2610,12 +2603,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     let is_staticmethod =
                         matches!(&ty, Type::ClassType(cls) if cls.is_builtin("staticmethod"));
                     // Classmethod-created fields are exempt unless they inherit an instance declaration.
-                    // Python's metadata attributes are writable on both classes and instances.
                     let is_instance_var = annotation.is_some()
                         && !is_class_var
                         && (initialization != ClassFieldInitialization::ClassMethod
                             || inherited_instance_var)
-                        && !matches!(name.as_str(), "__module__" | "__doc__" | "__annotations__");
+                        && !ClassField::is_class_metadata_attribute(name);
                     ClassField(
                         ClassFieldInner::ClassAttribute {
                             ty,

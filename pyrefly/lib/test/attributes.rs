@@ -4714,7 +4714,6 @@ C.instance_var = 7  # pyrefly: ignore[instance-var-assign]
 );
 
 testcase!(
-    bug = "TypedDict fields lose instance-variable assignment diagnostics",
     test_instance_var_assign_typed_dict,
     TestEnv::new().enable_instance_var_assign_error(),
     r#"
@@ -4731,18 +4730,18 @@ class Grandchild(Child):
     pass
 
 assert_type(TD.x, int)
-TD.x = 1
-Child.x = 2
-Grandchild.x = 3
-Child.y = "value"
-TD.optional = 4
-TD.x = "oops"  # E: `Literal['oops']` is not assignable to attribute `x` with type `int`
+TD.x = 1  # E: Cannot set instance variable `x` from the class
+Child.x = 2  # E: Cannot set instance variable `x` from the class
+Grandchild.x = 3  # E: Cannot set instance variable `x` from the class
+Child.y = "value"  # E: Cannot set instance variable `y` from the class
+TD.optional = 4  # E: Cannot set instance variable `optional` from the class
+TD.x = "oops"  # E: Cannot set instance variable `x` from the class  # E: `Literal['oops']` is not assignable to attribute `x` with type `int`
 TD.x = 5  # pyrefly: ignore[instance-var-assign]
 
 class Partial(TypedDict, total=False):
     x: int
 
-Partial.x = 6
+Partial.x = 6  # E: Cannot set instance variable `x` from the class
 
 # Reads and dictionary-item writes are unaffected.
 td: TD = {"x": 1}
