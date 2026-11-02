@@ -5749,13 +5749,13 @@ class Child(Base):
 "#;
     let after =
         implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
-    // BUG: without a `yield`, the generated `async def` is a coroutine, not an async generator.
     assert!(
         after.ends_with(
-            "class Child(Base):\n    async def items(self) -> AsyncIterator[int]:\n        raise NotImplementedError\n"
+            "class Child(Base):\n    def items(self) -> AsyncIterator[int]:\n        raise NotImplementedError\n"
         ),
         "{after}"
     );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
 }
 
 #[test]

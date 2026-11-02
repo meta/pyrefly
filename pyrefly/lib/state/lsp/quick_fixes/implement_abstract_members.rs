@@ -58,6 +58,7 @@ struct AbstractMemberInfo {
     defining_module: Module,
     docstring_range: Option<TextRange>,
     is_class_var: bool,
+    is_coroutine: bool,
 }
 
 /// Builds a quick fix that implements all inherited abstract members in a class.
@@ -91,6 +92,10 @@ pub(crate) fn implement_abstract_members_code_actions(
                         continue;
                     }
                     let mut ty = member.value.ty();
+                    // An `async def` without `yield` returns a coroutine. An async generator
+                    // returns its async iterator directly, so it is rendered as a plain `def`,
+                    // which keeps its call contract without needing a `yield`.
+                    let mut is_coroutine = false;
                     if ty
                         .toplevel_func_metadata()
                         .is_some_and(|m| m.flags.is_async)
@@ -98,12 +103,14 @@ pub(crate) fn implement_abstract_members_code_actions(
                         ty.transform_toplevel_callable_signatures(|callable, _| {
                             if let Some((_, _, ret)) = solver.unwrap_coroutine(&callable.ret) {
                                 callable.ret = ret;
+                                is_coroutine = true;
                             }
                         });
                     }
                     infos.push(AbstractMemberInfo {
                         name: name.clone(),
                         ty,
+                        is_coroutine,
                         is_class_var: member.value.is_class_var(),
                         defining_module: member.defining_class.module().dupe(),
                         docstring_range: solver
@@ -350,7 +357,7 @@ impl MemberRenderer<'_> {
         let is_cached = metadata.flags.is_cached_property;
         let is_static = metadata.flags.is_staticmethod;
         let is_class = metadata.flags.is_classmethod;
-        let is_async = metadata.flags.is_async;
+        let is_async = member.is_coroutine;
         let overloaded = member.ty.toplevel_callable_signatures().count() > 1;
         for (index, (callable, tparams)) in getter
             .unwrap_or(&member.ty)
