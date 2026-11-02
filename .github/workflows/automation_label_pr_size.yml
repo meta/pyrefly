@@ -46,9 +46,10 @@ jobs:
           l_max_size: '300'
           xl_label: 'size/xl'
           fail_if_xl: 'false'
+          # The labeler matches these as bash glob patterns.
           files_to_ignore: |
-            ^test/
-            ^website/
-            ^pyrefly/lib/test/
+            test/*
+            website/*
+            pyrefly/lib/test/*
           ignore_line_deletions: 'true'
           ignore_file_deletions: 'true'

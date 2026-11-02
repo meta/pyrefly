@@ -128,7 +128,9 @@ pub enum IsMethod {
 #[derive(Debug, Clone)]
 pub enum ClassAttribute {
     /// A read-write attribute with a closed form type for both get and set actions.
-    ReadWrite(Type, IsMethod),
+    /// The `IsMethod` flag enables the `method-assign` diagnostic.
+    /// The boolean marks annotated instance-variable declarations for `instance-var-assign`.
+    ReadWrite(Type, IsMethod, bool),
     /// A read-only attribute with a closed form type for get actions.
     ReadOnly(Type, ReadOnlyReason),
     /// A `NoAccess` attribute indicates that the attribute is well-defined, but does
@@ -142,18 +144,26 @@ pub enum ClassAttribute {
     Descriptor(Descriptor, DescriptorBase),
     /// An attribute whose declared type contains descriptor members. After attribute lookup,
     /// reads apply `__get__` to descriptor members. Lookup precedence, writes, deletes, and
-    /// override checks use the raw declared union.
+    /// override checks use the raw declared union. Like `ReadWrite`, the flag marks
+    /// class-body-declared instance variables so writes via the class are flagged.
     DescriptorRead {
         union: Box<Union>,
         range: TextRange,
         base: DescriptorBase,
         read_only_reason: Option<ReadOnlyReason>,
+        is_instance_var: bool,
     },
 }
 
 impl ClassAttribute {
     pub fn read_write(ty: Type) -> Self {
-        Self::ReadWrite(ty, IsMethod::No)
+        Self::ReadWrite(ty, IsMethod::No, false)
+    }
+
+    /// Like [`read_write`](Self::read_write) but marks the attribute as a
+    /// class-body-declared instance variable (annotated, not `ClassVar`).
+    pub fn read_write_instance_var(ty: Type) -> Self {
+        Self::ReadWrite(ty, IsMethod::No, true)
     }
 
     pub fn read_only(ty: Type, reason: ReadOnlyReason) -> Self {
@@ -173,16 +183,20 @@ impl ClassAttribute {
     }
 
     /// Drops descriptor-read behavior so writes and deletes use the declared union.
+    /// The instance-variable provenance is preserved so writes via the class stay flagged.
     fn into_declared(self) -> Self {
         match self {
             Self::DescriptorRead {
                 union,
                 read_only_reason,
+                is_instance_var,
                 ..
             } => {
                 let ty = Type::Union(union);
                 if let Some(reason) = read_only_reason {
                     Self::read_only(ty, reason)
+                } else if is_instance_var {
+                    Self::read_write_instance_var(ty)
                 } else {
                     Self::read_write(ty)
                 }
@@ -193,7 +207,7 @@ impl ClassAttribute {
 
     pub fn read_only_equivalent(self, reason: ReadOnlyReason) -> Self {
         match self {
-            Self::ReadWrite(ty, _) => Self::ReadOnly(ty, reason),
+            Self::ReadWrite(ty, ..) => Self::ReadOnly(ty, reason),
             Self::Property(getter, _, cls) => Self::Property(getter, None, cls),
             Self::Descriptor(descriptor, base) => Self::Descriptor(
                 Descriptor {
@@ -207,11 +221,13 @@ impl ClassAttribute {
                 range,
                 base,
                 read_only_reason,
+                is_instance_var,
             } => Self::DescriptorRead {
                 union,
                 range,
                 base,
                 read_only_reason: read_only_reason.or(Some(reason)),
+                is_instance_var,
             },
             attr @ (Self::NoAccess(..) | Self::ReadOnly(..)) => attr,
         }
@@ -225,7 +241,7 @@ impl ClassAttribute {
         match self {
             // TODO(stroxler): ReadWrite attributes are not actually methods but limiting access to
             // ReadOnly breaks unit tests; we should investigate callsites to understand this better.
-            ClassAttribute::ReadWrite(ty, _) | ClassAttribute::ReadOnly(ty, _) => Some(ty),
+            ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => Some(ty),
             ClassAttribute::NoAccess(..)
             | ClassAttribute::Property(..)
             | ClassAttribute::Descriptor(..)
@@ -395,6 +411,8 @@ enum ClassFieldInner {
         descriptor_range: Option<TextRange>,
         /// ClassVar: can read from instance, but cannot write/shadow from instance
         is_classvar: bool,
+        /// Whether this declaration is eligible for the `instance-var-assign` diagnostic.
+        is_instance_var: bool,
         is_staticmethod: bool,
         /// Django ForeignKey - triggers synthesis of _id field
         is_foreign_key: bool,
@@ -462,6 +480,7 @@ impl ClassField {
                 read_only_reason,
                 descriptor_range: None,
                 is_classvar: false,
+                is_instance_var: false,
                 is_staticmethod: false,
                 is_foreign_key,
                 has_choices,
@@ -589,6 +608,7 @@ impl ClassField {
                     read_only_reason: None,
                     descriptor_range: None,
                     is_classvar,
+                    is_instance_var: false,
                     is_staticmethod: false,
                     is_foreign_key: false,
                     has_choices: false,
@@ -607,6 +627,7 @@ impl ClassField {
                 read_only_reason: None,
                 descriptor_range: None,
                 is_classvar: false,
+                is_instance_var: false,
                 is_staticmethod: false,
                 is_foreign_key: false,
                 has_choices: false,
@@ -700,6 +721,7 @@ impl ClassField {
                 read_only_reason,
                 descriptor_range,
                 is_classvar,
+                is_instance_var,
                 is_staticmethod,
                 is_foreign_key,
                 has_choices,
@@ -714,6 +736,7 @@ impl ClassField {
                         read_only_reason: read_only_reason.clone(),
                         descriptor_range: *descriptor_range,
                         is_classvar: *is_classvar,
+                        is_instance_var: *is_instance_var,
                         is_staticmethod: *is_staticmethod,
                         is_foreign_key: *is_foreign_key,
                         has_choices: *has_choices,
@@ -1307,10 +1330,13 @@ fn bind_class_attribute(
     cls: &ClassBase,
     attr: Type,
     read_only_reason: Option<ReadOnlyReason>,
+    is_instance_var: bool,
 ) -> ClassAttribute {
     let ty = make_bound_classmethod(heap, cls, attr).into_inner();
     if let Some(reason) = read_only_reason {
         ClassAttribute::read_only(ty, reason)
+    } else if is_instance_var {
+        ClassAttribute::read_write_instance_var(ty)
     } else {
         ClassAttribute::read_write(ty)
     }
@@ -1665,6 +1691,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // decorator turns the function into a `ClassType`. Recover it here so the override
         // consistency check can see it.
         let mut descriptor_is_override = false;
+        let mut inherited_instance_var = false;
 
         let (
             initialization,
@@ -2034,6 +2061,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 let ClassField(inner, _) = parent_field.value.into_owned();
                                 return ClassField(inner, IsInherited::No);
                             }
+                            ClassField(
+                                ClassFieldInner::ClassAttribute {
+                                    is_instance_var, ..
+                                },
+                                _,
+                            ) => inherited_instance_var = *is_instance_var,
                             _ => {
                                 // For non-property fields, continue with normal processing
                             }
@@ -2576,6 +2609,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 _ => {
                     let is_staticmethod =
                         matches!(&ty, Type::ClassType(cls) if cls.is_builtin("staticmethod"));
+                    // Classmethod-created fields are exempt unless they inherit an instance declaration.
+                    // Python's metadata attributes are writable on both classes and instances.
+                    let is_instance_var = annotation.is_some()
+                        && !is_class_var
+                        && (initialization != ClassFieldInitialization::ClassMethod
+                            || inherited_instance_var)
+                        && !matches!(name.as_str(), "__module__" | "__doc__" | "__annotations__");
                     ClassField(
                         ClassFieldInner::ClassAttribute {
                             ty,
@@ -2584,6 +2624,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             read_only_reason,
                             descriptor_range,
                             is_classvar: is_class_var,
+                            is_instance_var,
                             is_staticmethod,
                             is_foreign_key,
                             has_choices,
@@ -3791,7 +3832,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if is_classvar {
                     ClassAttribute::read_only(ty, ReadOnlyReason::ClassVar)
                 } else {
-                    ClassAttribute::ReadWrite(ty, IsMethod::Yes)
+                    ClassAttribute::ReadWrite(ty, IsMethod::Yes, false)
                 }
             }
             ClassFieldInner::ProxyMethod { target, .. } => {
@@ -3817,6 +3858,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ..
             } => {
                 ty = self.normalize_attr_ty(ty);
+                // The instance-variable provenance flag is only meaningful on the
+                // class-attribute path: an instance access (including a class read as
+                // an instance of its metaclass) is always a valid target for writes,
+                // so no flag is recorded here.
                 let read_only_reason = if is_classvar {
                     Some(ReadOnlyReason::ClassVar)
                 } else {
@@ -3836,6 +3881,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             range,
                             base,
                             read_only_reason,
+                            is_instance_var: false,
                         }
                     }
                     (_, ty) => {
@@ -3896,7 +3942,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ClassFieldInner::Property { mut ty, .. } => {
                 // When accessing a property on a class (not instance), you get the property object itself
                 ty = self.normalize_attr_ty(ty);
-                bind_class_attribute(self.heap, cls, ty, None)
+                bind_class_attribute(self.heap, cls, ty, None, false)
             }
             ClassFieldInner::Descriptor { descriptor, .. } => {
                 ClassAttribute::descriptor(descriptor, DescriptorBase::ClassDef(cls.clone()))
@@ -3921,6 +3967,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ClassAttribute::ReadWrite(
                     make_bound_classmethod(self.heap, cls, ty).into_inner(),
                     IsMethod::Yes,
+                    false,
                 )
             }
             ClassFieldInner::ProxyMethod { .. } => ClassAttribute::no_access(
@@ -3934,6 +3981,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     cls,
                     ty,
                     Some(ReadOnlyReason::ClassObjectInitializedOnBody),
+                    false,
                 )
             }
             ClassFieldInner::ClassAttribute {
@@ -3944,6 +3992,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             )),
             ClassFieldInner::ClassAttribute {
                 mut ty,
+                is_instance_var,
                 read_only_reason,
                 descriptor_range,
                 ..
@@ -3962,8 +4011,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             range,
                             base: DescriptorBase::ClassDef(cls.clone()),
                             read_only_reason,
+                            is_instance_var,
                         },
-                        (_, ty) => bind_class_attribute(self.heap, cls, ty, read_only_reason),
+                        (_, ty) => bind_class_attribute(
+                            self.heap,
+                            cls,
+                            ty,
+                            read_only_reason,
+                            is_instance_var,
+                        ),
                     }
                 }
             }
@@ -4538,7 +4594,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     });
                 };
                 match &mut attr {
-                    ClassAttribute::ReadOnly(ty, _) | ClassAttribute::ReadWrite(ty, _)
+                    ClassAttribute::ReadOnly(ty, _) | ClassAttribute::ReadWrite(ty, ..)
                         if ty.has_toplevel_func_metadata() =>
                     {
                         relax_ty(ty);
@@ -5187,6 +5243,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         None
     }
 
+    /// Test raw metaclass fields without binding methods or applying descriptors.
+    fn metaclass_intercepts_write(&self, cls: &ClassBase, name: &Name) -> bool {
+        self.get_metadata_for_class(cls.class_object())
+            .custom_metaclass()
+            .and_then(|metaclass| self.get_class_member(metaclass.class_object(), name))
+            .is_some_and(|field| match &field.0 {
+                // Unlike `class_attribute_is_data_descriptor`, writes must exclude
+                // cached properties, which are non-data descriptors at runtime.
+                ClassFieldInner::Property { ty, .. } => ty
+                    .toplevel_func_metadata()
+                    .is_none_or(|meta| !meta.flags.is_cached_property),
+                ClassFieldInner::Descriptor { descriptor, .. } => {
+                    descriptor.setter || descriptor.deleter
+                }
+                _ => false,
+            })
+    }
+
     pub fn get_metaclass_attribute(
         &self,
         cls: &ClassBase,
@@ -5688,7 +5762,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     None
                 }
             }
-            ClassAttribute::ReadWrite(attr_ty, is_method) => {
+            ClassAttribute::ReadWrite(attr_ty, is_method, is_instance_var) => {
                 if is_method == IsMethod::Yes {
                     self.error_with_context(
                         errors,
@@ -5697,6 +5771,27 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         format!("Cannot assign to method `{attr_name}`"),
                         context,
                     );
+                }
+                // Writing a class-body-declared instance variable via the class object
+                // misuses it (it should be assigned on instances). The diagnostic is
+                // purely additive: it never affects the returned setter, so narrowing
+                // and type checking are unchanged when the kind is disabled or suppressed.
+                if is_instance_var
+                    && instance_class.is_none()
+                    && let Some(class_base) = class_base
+                    && !self.metaclass_intercepts_write(class_base, attr_name)
+                {
+                    errors
+                        .error_builder(
+                            range,
+                            ErrorKind::InstanceVarAssign,
+                            format!("Cannot set instance variable `{attr_name}` from the class"),
+                        )
+                        .with_detail(
+                            "Assign it on an instance, or declare it as `ClassVar` if it is a class variable."
+                                .to_owned(),
+                        )
+                        .emit();
                 }
                 // If the attribute has a converter, then `want` should be the type expected by the converter.
                 let attr_ty = match instance_class {
@@ -5881,9 +5976,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         };
         match attr {
-            ClassAttribute::ReadWrite(ty, is_method) => {
-                Some(ClassAttribute::ReadWrite(filter_type(ty)?, is_method))
-            }
+            ClassAttribute::ReadWrite(ty, is_method, is_instance_var) => Some(
+                ClassAttribute::ReadWrite(filter_type(ty)?, is_method, is_instance_var),
+            ),
             ClassAttribute::ReadOnly(ty, reason) => {
                 Some(ClassAttribute::ReadOnly(filter_type(ty)?, reason))
             }
@@ -5934,7 +6029,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Property(got_getter, Some(got_setter), _),
-                ClassAttribute::ReadWrite(want, _),
+                ClassAttribute::ReadWrite(want, ..),
             ) if allow_property_override => {
                 is_subset(
                     got_getter,
@@ -6007,8 +6102,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             (
                 // TODO(stroxler): Investigate this case more: methods should be ReadOnly, but
                 // in some cases for unknown reasons they wind up being ReadWrite.
-                ClassAttribute::ReadWrite(got, _),
-                ClassAttribute::ReadWrite(want, _),
+                ClassAttribute::ReadWrite(got, ..),
+                ClassAttribute::ReadWrite(want, ..),
             ) if got.has_toplevel_func_metadata() && want.has_toplevel_func_metadata() => {
                 is_subset(got, want).map_err(|subset_error| {
                     Box::new(AttrSubsetError::Covariant {
@@ -6020,7 +6115,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     })
                 })
             }
-            (ClassAttribute::ReadWrite(got, _), ClassAttribute::ReadWrite(want, _)) => {
+            (ClassAttribute::ReadWrite(got, ..), ClassAttribute::ReadWrite(want, ..)) => {
                 // A value matching any branch of an `Overloaded` attribute can be assigned to it.
                 let assignable = match want {
                     Type::Overloaded(branches) => branches
@@ -6043,7 +6138,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             (
-                ClassAttribute::ReadWrite(got, _) | ClassAttribute::ReadOnly(got, ..),
+                ClassAttribute::ReadWrite(got, ..) | ClassAttribute::ReadOnly(got, ..),
                 ClassAttribute::ReadOnly(want, _),
             ) => is_subset(got, want).map_err(|subset_error| {
                 Box::new(AttrSubsetError::Covariant {
@@ -6070,7 +6165,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     })
                 })
             }
-            (ClassAttribute::ReadWrite(got, _), ClassAttribute::Property(want, want_setter, _)) => {
+            (
+                ClassAttribute::ReadWrite(got, ..),
+                ClassAttribute::Property(want, want_setter, _),
+            ) => {
                 is_subset(
                     // Synthesize a getter method
                     &self.heap.mk_callable_ellipsis(got.clone()),
@@ -6266,7 +6364,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Descriptor(got_d, got_base),
-                ClassAttribute::ReadWrite(want_ty, _) | ClassAttribute::ReadOnly(want_ty, _),
+                ClassAttribute::ReadWrite(want_ty, ..) | ClassAttribute::ReadOnly(want_ty, _),
             ) if want_ty.has_toplevel_func_metadata() => {
                 let (got_read_ty, _) = self.resolve_descriptor_types(got_d, got_base);
                 is_subset(&got_read_ty, want_ty).map_err(|subset_error| {
@@ -6280,7 +6378,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 })
             }
             (
-                ClassAttribute::ReadWrite(got_ty, _) | ClassAttribute::ReadOnly(got_ty, _),
+                ClassAttribute::ReadWrite(got_ty, ..) | ClassAttribute::ReadOnly(got_ty, _),
                 ClassAttribute::Descriptor(want_d, want_base),
             ) if got_ty.has_toplevel_func_metadata() => {
                 let (want_read_ty, want_setter) = self.resolve_descriptor_types(want_d, want_base);
@@ -6313,7 +6411,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Result<Type, NoAccessReason> {
         match class_attr {
             ClassAttribute::NoAccess(reason) => Err(reason),
-            ClassAttribute::ReadWrite(ty, _) | ClassAttribute::ReadOnly(ty, _) => Ok(ty),
+            ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => Ok(ty),
             ClassAttribute::Property(getter, ..) => {
                 self.record_property_getter(range, &getter);
                 Ok(self.call_property_getter(getter, range, errors, context))

@@ -12,13 +12,11 @@ use ruff_python_ast::Expr;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
-use ruff_python_ast::helpers::is_docstring_stmt;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
 use super::extract_shared::is_member_stmt;
-use super::extract_shared::line_end_position;
 use super::extract_shared::line_indent_and_start;
 use super::extract_shared::member_name_from_stmt;
 use super::extract_shared::needs_pass_after_removal;
@@ -26,10 +24,9 @@ use super::extract_shared::prepare_insertion_text;
 use super::extract_shared::reindent_statement;
 use super::extract_shared::selection_anchor;
 use super::extract_shared::statement_removal_range;
+use super::extract_shared::target_insertion_point;
 use super::types::LocalRefactorCodeAction;
 use crate::state::lsp::Transaction;
-
-const DEFAULT_INDENT: &str = "    ";
 
 /// Builds pull-members-up refactor actions for the supplied selection.
 pub(crate) fn pull_members_up_code_actions(
@@ -325,55 +322,4 @@ fn build_removal_edit(
         String::new()
     };
     Some((module_info.dupe(), removal_range, removal_text))
-}
-
-/// Determine target insertion indentation and range.
-/// Returns `(indent, insert_range, replaces_pass)`.
-fn target_insertion_point(
-    class_def: &StmtClassDef,
-    source: &str,
-) -> Option<(String, TextRange, bool)> {
-    if let Some(pass_stmt) = replaceable_pass_stmt(class_def) {
-        let (indent, line_start) = line_indent_and_start(source, pass_stmt.range().start())?;
-        // Replacing the line only removes `pass` when nothing precedes it on the line.
-        if source[line_start.to_usize()..pass_stmt.start().to_usize()]
-            .trim()
-            .is_empty()
-        {
-            let line_end = line_end_position(source, pass_stmt.range().end());
-            return Some((indent, TextRange::new(line_start, line_end), true));
-        }
-    }
-    if let Some(last_stmt) = class_def.body.last() {
-        let (indent, _) = line_indent_and_start(source, last_stmt.range().start())?;
-        let insert_position = line_end_position(source, last_stmt.range().end());
-        return Some((
-            indent,
-            TextRange::at(insert_position, TextSize::new(0)),
-            false,
-        ));
-    }
-    let (class_indent, _) = line_indent_and_start(source, class_def.range().start())?;
-    let insert_position = line_end_position(source, class_def.range().end());
-    Some((
-        format!("{class_indent}{DEFAULT_INDENT}"),
-        TextRange::at(insert_position, TextSize::new(0)),
-        false,
-    ))
-}
-
-/// Return the `pass` statement if the class body contains only a docstring and a single `pass`.
-fn replaceable_pass_stmt(class_def: &StmtClassDef) -> Option<&Stmt> {
-    let mut non_docstring = class_def
-        .body
-        .iter()
-        .filter(|stmt| !is_docstring_stmt(stmt));
-    let only_stmt = non_docstring.next()?;
-    if non_docstring.next().is_some() {
-        return None;
-    }
-    match only_stmt {
-        Stmt::Pass(_) => Some(only_stmt),
-        _ => None,
-    }
 }

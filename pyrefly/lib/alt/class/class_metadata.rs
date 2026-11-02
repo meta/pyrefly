@@ -2147,7 +2147,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 (base, mro)
             })
             .collect();
-        ClassMro::new(cls, bases_with_mros, errors)
+        // Two specializations of the same ancestor reached through different base
+        // paths conflict unless the later one is assignable to the first, which is
+        // the specialization the MRO keeps. Assignability of the whole specialized
+        // class respects the ancestor's variance, so specializations that differ
+        // only in a contravariant position stay consistent (see issue #4842).
+        let targs_consistent = |prev: &ClassType, cur: &ClassType| -> bool {
+            self.is_subset_eq(&cur.clone().to_type(), &prev.clone().to_type())
+        };
+        ClassMro::new(cls, bases_with_mros, errors, &targs_consistent)
     }
 
     /// Resolve `cls`'s disjoint-base representative.
