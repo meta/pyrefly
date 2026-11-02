@@ -1324,10 +1324,7 @@ mod tests {
         ));
         let args = tuple["typeArgs"].as_array().unwrap();
         assert_eq!(args.len(), 3);
-        assert_eq!(
-            args[1]["flags"].as_i64().unwrap() & i64::from(TypeFlags::UNPACKED.0),
-            i64::from(TypeFlags::UNPACKED.0)
-        );
+        assert_eq!(args[1]["flags"], TypeFlags::INSTANCE.with_unpacked().0);
         assert_eq!(args[1]["declaration"]["name"], "tuple");
         assert_eq!(args[1]["typeArgs"][0]["name"], "any");
         assert_eq!(args[1]["typeArgs"][1]["name"], "ellipsis");
