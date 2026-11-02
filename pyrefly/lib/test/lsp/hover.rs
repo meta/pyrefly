@@ -1537,6 +1537,101 @@ c[idx_var]
     );
 }
 
+// BUG: Nested operator hovers use the enclosing subscript's signature.
+#[test]
+fn hover_over_operators_in_subscript() {
+    let code = r#"
+class Container:
+    def __getitem__(self, idx: int) -> str: ...
+
+c = Container()
+i = 0
+c[i + 1]
+#   ^
+c[i and 1]
+#   ^
+c[~i]
+# ^
+c[i < 1]
+#   ^
+c[-1]
+# ^
+"#;
+    let mut test_env = TestEnv::new();
+    test_env.add("main", code);
+    let (state, handle) = test_env.to_state();
+    let handle = handle("main");
+    let expected_ranges = [
+        Some(Range::new(Position::new(6, 2), Position::new(6, 7))),
+        Some(Range::new(Position::new(8, 2), Position::new(8, 9))),
+        None,
+        None,
+        None,
+    ];
+    let positions = extract_cursors_for_test(code);
+    assert_eq!(positions.len(), expected_ranges.len());
+    for (position, expected_range) in positions.into_iter().zip(expected_ranges) {
+        let hover = get_hover(&state.transaction(), &handle, position, false)
+            .expect("Expected hover on nested operator");
+        let Contents::MarkupContent(contents) = hover.contents else {
+            panic!("Expected markdown hover contents");
+        };
+        assert!(
+            contents.value.contains("idx: int") && contents.value.contains(") -> str"),
+            "Expected the enclosing subscript signature, got: {}",
+            contents.value,
+        );
+        assert_eq!(hover.range, expected_range);
+    }
+}
+
+#[test]
+fn hover_over_subscript_preserves_bracket_literal_and_binding_hovers() {
+    let code = r#"
+class Container:
+    def __getitem__(self, idx: int) -> str: ...
+
+container = Container()
+index = 0
+container[index + 1]
+# ^        ^      ^^
+container[0]
+#         ^
+container[index]
+#           ^
+container[-1]
+#          ^
+"#;
+    let mut test_env = TestEnv::new();
+    test_env.add("main", code);
+    let (state, handle) = test_env.to_state();
+    let handle = handle("main");
+    let expected_contents = [
+        "(variable) container: Container",
+        "(variable) index: Literal[0]",
+        "idx: int",
+        "idx: int",
+        "idx: int",
+        "(variable) index: Literal[0]",
+        "idx: int",
+    ];
+    let positions = extract_cursors_for_test(code);
+    assert_eq!(positions.len(), expected_contents.len());
+    for (position, expected) in positions.into_iter().zip(expected_contents) {
+        let hover = get_hover(&state.transaction(), &handle, position, false)
+            .expect("Expected subscript or binding hover");
+        let Contents::MarkupContent(contents) = hover.contents else {
+            panic!("Expected markdown hover contents");
+        };
+        assert!(
+            contents.value.contains(expected),
+            "Expected {expected}, got: {}",
+            contents.value,
+        );
+        assert_eq!(hover.range, None);
+    }
+}
+
 #[test]
 fn hover_over_code_with_ignore_shows_type() {
     let code = r#"
