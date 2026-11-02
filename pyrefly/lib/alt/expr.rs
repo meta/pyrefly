@@ -1909,11 +1909,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         };
         let (model, statement_name) = match attr_expr.attr.id.as_str() {
             "values" => (
-                self.sqlalchemy_update_model_from_chain(&attr_expr.value),
+                self.sqlalchemy_model_from_chain(&attr_expr.value, "update"),
                 "update",
             ),
             "filter_by" => (
-                self.sqlalchemy_select_model_from_chain(&attr_expr.value),
+                self.sqlalchemy_model_from_chain(&attr_expr.value, "select"),
                 "filter_by",
             ),
             _ => return,
@@ -1964,24 +1964,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    fn sqlalchemy_update_model_from_chain(&self, expr: &Expr) -> Option<Class> {
+    fn sqlalchemy_model_from_chain(&self, expr: &Expr, function_name: &str) -> Option<Class> {
         let Expr::Call(call) = expr else {
             return None;
         };
-        if let Some(model) = self.sqlalchemy_model_from_call(call, "update") {
-            return Some(model);
-        }
-        let Expr::Attribute(attr_expr) = &*call.func else {
-            return None;
-        };
-        self.sqlalchemy_update_model_from_chain(&attr_expr.value)
-    }
-
-    fn sqlalchemy_select_model_from_chain(&self, expr: &Expr) -> Option<Class> {
-        let Expr::Call(call) = expr else {
-            return None;
-        };
-        if let Some(model) = self.sqlalchemy_model_from_call(call, "select") {
+        if let Some(model) = self.sqlalchemy_model_from_call(call, function_name) {
             return Some(model);
         }
         let Expr::Attribute(attr_expr) = &*call.func else {
@@ -1994,7 +1981,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ) {
             return None;
         }
-        self.sqlalchemy_select_model_from_chain(&attr_expr.value)
+        self.sqlalchemy_model_from_chain(&attr_expr.value, function_name)
     }
 
     fn sqlalchemy_model_from_call(&self, call: &ExprCall, function_name: &str) -> Option<Class> {
