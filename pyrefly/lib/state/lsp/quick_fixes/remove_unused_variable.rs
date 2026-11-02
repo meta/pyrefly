@@ -37,14 +37,10 @@ pub(crate) fn remove_unused_variable_code_action(
     }
     let function = find_enclosing_function(ast, unused_range)?;
     // Replacing a parameter releases its previous value even when the initializer is pure.
-    if function
-        .parameters
-        .iter()
-        .any(|parameter| parameter.name().id().as_str() == unused_name)
-    {
+    if function.parameters.includes(unused_name) {
         return None;
     }
-    let context = find_unused_assignment_context(&ast.body, unused_range)?;
+    let context = find_unused_assignment_context(&function.body, unused_range)?;
 
     // The unused-variable detector can miss references before an assignment.
     // Reject other occurrences, including closures and potentially shadowed names.
@@ -53,7 +49,7 @@ pub(crate) fn remove_unused_variable_code_action(
         definition_range: unused_range,
         found: false,
     };
-    references.visit_body(&ast.body);
+    references.visit_body(&function.body);
     if references.found {
         return None;
     }
@@ -137,6 +133,7 @@ impl<'a> Visitor<'a> for ReferenceFinder<'_> {
     }
 }
 
+/// Locates an assignment without crossing into nested function or class scopes.
 fn find_unused_assignment_context(
     body: &[Stmt],
     unused_range: TextRange,
@@ -160,10 +157,6 @@ fn find_unused_assignment_context_in_child_body(
     unused_range: TextRange,
 ) -> Option<UnusedAssignmentContext<'_>> {
     match stmt {
-        Stmt::FunctionDef(function_def) => {
-            find_unused_assignment_context(&function_def.body, unused_range)
-        }
-        Stmt::ClassDef(class_def) => find_unused_assignment_context(&class_def.body, unused_range),
         Stmt::For(for_stmt) => find_unused_assignment_context(&for_stmt.body, unused_range)
             .or_else(|| find_unused_assignment_context(&for_stmt.orelse, unused_range)),
         Stmt::While(while_stmt) => find_unused_assignment_context(&while_stmt.body, unused_range)

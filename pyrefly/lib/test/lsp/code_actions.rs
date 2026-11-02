@@ -3266,15 +3266,25 @@ fn remove_unused_variable_preserves_existing_docstring_and_nested_suites() {
     }
 }
 
-// Bug: unrelated same-spelling names suppress the action.
 #[test]
 fn remove_unused_variable_unrelated_scopes() {
-    for code in [
-        "def f():\n    unused = 1\n    return 2\ndef g():\n    unused = 2\n    return 3\n",
-        "def outer(unused):\n    def inner():\n        unused = 1\n        return 2\n    print(unused)\n    return inner\n",
-        "class C:\n    def f(self):\n        unused = 1\n        return 2\n    def g(self):\n        unused = 2\n        return 3\n",
+    for (code, expected) in [
+        (
+            "def f():\n    unused = 1\n    return 2\ndef g():\n    unused = 2\n    return 3\n",
+            "def f():\n    return 2\ndef g():\n    unused = 2\n    return 3\n",
+        ),
+        (
+            "def outer(unused):\n    def inner():\n        unused = 1\n        return 2\n    print(unused)\n    return inner\n",
+            "def outer(unused):\n    def inner():\n        return 2\n    print(unused)\n    return inner\n",
+        ),
+        (
+            "class C:\n    def f(self):\n        unused = 1\n        return 2\n    def g(self):\n        unused = 2\n        return 3\n",
+            "class C:\n    def f(self):\n        return 2\n    def g(self):\n        unused = 2\n        return 3\n",
+        ),
     ] {
-        assert!(remove_unused_variable_action(code, code.find("unused =").unwrap()).is_none());
+        let (_, after) =
+            remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+        assert_eq!(expected, after);
     }
 }
 
