@@ -5321,13 +5321,13 @@ class Base[T](ABC):
         "def convert(self, value: int) -> str:",
         "def convert(self, value: str) -> int:",
         "@value.setter\n    def value(self, value: int) -> None:",
-        // BUG: Import merge fragments are inserted into the header as standalone text.
-        ", Payloadfrom typing import cast",
+        "from base import Base, Callback, Payload",
     ] {
         assert!(after.contains(expected), "Missing {expected:?}:\n{after}");
     }
     assert!(!after.contains("Unknown"), "{after}");
     assert!(!after.contains("Self@"), "{after}");
+    mk_multi_file_state_assert_no_errors(&[("base", base), ("main", &after)], Require::Everything);
 }
 
 #[test]
@@ -5342,18 +5342,18 @@ class Base(ABC):
     def foo(self, cb: Callable[[Input], Output]) -> Output: ...
 "#;
     let header = "\"\"\"Child module.\"\"\"\nfrom __future__ import annotations\n";
-    for (imports, generated) in [
+    for (imports, expected) in [
         (
             "from base import Base # Base comment\n",
-            "from typing import Callable\n, Input, Output",
+            "from typing import Callable\nfrom base import Base, Input, Output # Base comment\n",
         ),
         (
             "from typing import Any # typing comment\nfrom base import Base # Base comment\n",
-            ", Callable, Input, Output",
+            "from typing import Any, Callable # typing comment\nfrom base import Base, Input, Output # Base comment\n",
         ),
         (
             "from typing import (\n    Any, # typing comment\n)\nfrom base import (\n    Base, # Base comment\n)\n",
-            ", Callable, Input, Output",
+            "from typing import (\n    Any, Callable, # typing comment\n)\nfrom base import (\n    Base, Input, Output, # Base comment\n)\n",
         ),
     ] {
         for newline in ["\n", "\r\n"] {
@@ -5386,14 +5386,17 @@ class Base(ABC):
             }
             let after = apply_refactor_edits_for_module(&info, edits);
             let normalized = after.replace("\r\n", "\n");
-            // BUG: Import edit positions are discarded, corrupting both merge targets.
             assert!(
-                normalized.starts_with(&format!("{header}{generated}{imports}")),
+                normalized.starts_with(&format!("{header}{expected}# ACTION-START\n")),
                 "{after}"
             );
             assert!(
                 normalized.contains("def foo(self, cb: Callable[[Input], Output]) -> Output:"),
                 "{after}"
+            );
+            mk_multi_file_state_assert_no_errors(
+                &[("base", base), ("main", &after)],
+                Require::Everything,
             );
         }
     }

@@ -33,6 +33,7 @@ use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 use starlark_map::Hashed;
+use starlark_map::small_map::SmallMap;
 
 use super::extract_shared::line_indent_and_start;
 use super::extract_shared::selection_anchor;
@@ -142,7 +143,9 @@ pub(crate) fn implement_abstract_members_code_actions(
         .map(|(module, name)| (*module, name.as_str()))
         .collect::<Vec<_>>();
     let (combined, missing) = tracker.resolve_annotation(&parts, handle.module(), &direct_refs);
-    let mut imports = String::new();
+    // Combine imports that share an insertion point so their order is explicit
+    // in the workspace edit.
+    let mut imports = SmallMap::<TextRange, String>::new();
     for (module, name) in direct {
         let import_handle = transaction.import_handle(handle, module, None).finding()?;
         let edit = insert_import_edit(
@@ -153,24 +156,28 @@ pub(crate) fn implement_abstract_members_code_actions(
             &name,
             ImportFormat::Absolute,
         );
-        imports.push_str(&edit.insert_text);
+        imports
+            .entry(edit.range)
+            .or_default()
+            .push_str(&edit.insert_text);
     }
     let mut missing = missing.into_iter().collect::<Vec<_>>();
     missing.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     for module in missing {
         let import_handle = transaction.import_handle(handle, module, None).finding()?;
-        let (_, text, _) = import_regular_import_edit(&ast, import_handle, None);
-        imports.push_str(&text);
+        let (position, text, _) = import_regular_import_edit(&ast, import_handle, None);
+        imports
+            .entry(TextRange::empty(position))
+            .or_default()
+            .push_str(&text);
     }
     let mut edits = vec![(module_info.dupe(), insert_range, combined)];
-    if !imports.is_empty() {
-        // Future imports must precede every generated import.
-        let position = ast.body.iter().find(|stmt| {
-            !is_docstring_stmt(stmt)
-                && !matches!(stmt, Stmt::ImportFrom(import) if import.module.as_ref().is_some_and(|m| m.as_str() == "__future__"))
-        })?.range().start();
-        edits.push((module_info.dupe(), TextRange::empty(position), imports));
-    }
+    edits.extend(
+        imports
+            .into_iter()
+            .filter(|(_, text)| !text.is_empty())
+            .map(|(range, text)| (module_info.dupe(), range, text)),
+    );
 
     Some(vec![LocalRefactorCodeAction {
         title: "Implement abstract members".to_owned(),
