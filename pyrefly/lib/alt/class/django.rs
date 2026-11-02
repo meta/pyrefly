@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::iter;
+
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_name::is_python_identifier;
 use pyrefly_types::callable::Callable;
@@ -199,7 +201,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if queryset.has_qname("django.db.models.query", "QuerySet") {
             queryset = base;
         } else {
-            queryset = queryset.with_django_metadata(DjangoClassMetadata::QuerySet { base });
+            queryset = queryset.with_django_metadata(DjangoClassMetadata::SpecializedBase { base });
         }
         self.heap.mk_class_type(queryset)
     }
@@ -428,7 +430,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let queryset = if queryset.has_qname("django.db.models.query", "QuerySet") {
             base
         } else {
-            queryset.with_django_metadata(DjangoClassMetadata::QuerySet { base })
+            queryset.with_django_metadata(DjangoClassMetadata::SpecializedBase { base })
         };
         let Type::ClassDef(manager) = self.try_get_from_export(
             ModuleName::from_str("django.db.models.manager"),
@@ -450,9 +452,64 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
     }
 
+    /// Bind a constructed manager to its model without changing its nominal class.
+    pub(crate) fn get_django_manager_assignment_type(
+        &self,
+        model: &Class,
+        initial_value_expr: &Expr,
+    ) -> Option<Type> {
+        if let Some(manager) = self.get_django_manager_from_queryset_type(model, initial_value_expr)
+        {
+            return Some(manager);
+        }
+        let call = initial_value_expr.as_call_expr()?;
+        let callee = self.expr_infer(&call.func, &self.error_swallower());
+        let (_, constructor) = self.unwrap_class_object_silently(&callee)?;
+        let Type::ClassType(constructor) = constructor else {
+            return None;
+        };
+        let mut base = iter::once(&constructor)
+            .chain(
+                self.get_mro_for_class(constructor.class_object())
+                    .ancestors(self.stdlib),
+            )
+            .find(|base| {
+                base.has_qname("django.db.models.manager", "Manager")
+                    || base.has_qname("django.db.models.manager", "BaseManager")
+            })?
+            .clone();
+        let Type::ClassType(mut manager) =
+            self.expr_infer(initial_value_expr, &self.error_swallower())
+        else {
+            return None;
+        };
+        if manager.class_object() != constructor.class_object() {
+            return None;
+        }
+        let [original_model] = base.targs().as_slice() else {
+            return None;
+        };
+        let model = self.heap.mk_self_type(self.as_class_type_unchecked(model));
+        // The model parameter can occur at any position in a custom manager's parameters.
+        // Preserve other arguments inferred from the constructor.
+        let parameters = manager.tparams().clone();
+        for (parameter, argument) in parameters.iter().zip(manager.targs_mut().as_mut()) {
+            if matches!(original_model, Type::Quantified(q) if q.as_ref() == parameter) {
+                *argument = model.clone();
+            }
+        }
+        base.targs_mut().as_mut()[0] = model;
+        let manager = if manager.class_object() == base.class_object() {
+            base
+        } else {
+            manager.with_django_metadata(DjangoClassMetadata::SpecializedBase { base })
+        };
+        Some(self.heap.mk_class_type(manager))
+    }
+
     /// Return the effective QuerySet base, including a construction-time specialization.
     fn django_queryset_base(&self, cls: &ClassType) -> Option<ClassType> {
-        if let Some(DjangoClassMetadata::QuerySet { base }) = cls.django_metadata() {
+        if let Some(DjangoClassMetadata::SpecializedBase { base }) = cls.django_metadata() {
             Some(base.clone())
         } else if cls.has_qname("django.db.models.query", "QuerySet") {
             Some(cls.clone())
@@ -537,7 +594,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 self.get_instance_attribute(queryset, name)
             }
-            DjangoClassMetadata::QuerySet { base } => {
+            DjangoClassMetadata::SpecializedBase { base } => {
                 let member = self.get_class_member_with_defining_class(cls.class_object(), name)?;
                 if !self.has_superclass(base.class_object(), &member.defining_class) {
                     return None;

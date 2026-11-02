@@ -467,7 +467,7 @@ pub struct ClassType(Class, TArgs, Option<Arc<DjangoClassMetadata>>);
 
 /// Construction-time Django specializations on nominal class instances.
 ///
-/// The manager resolves generated members against its queryset. A specialized queryset uses
+/// The manager resolves generated members against its queryset. A specialized class uses
 /// its effective base for inherited members and nominal upcasts. Type traversal and substitution
 /// include this data, and instance binding preserves it when replacing `Self`. Explicit method
 /// return types stand alone: neither their model nor their row is rebound to the manager's model.
@@ -475,14 +475,14 @@ pub struct ClassType(Class, TArgs, Option<Arc<DjangoClassMetadata>>);
 #[derive(TypeEq)]
 pub enum DjangoClassMetadata {
     Manager { queryset: ClassType },
-    QuerySet { base: ClassType },
+    SpecializedBase { base: ClassType },
 }
 
 impl Visit<Type> for Arc<DjangoClassMetadata> {
     fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
         match self.as_ref() {
             DjangoClassMetadata::Manager { queryset } => queryset.visit(f),
-            DjangoClassMetadata::QuerySet { base } => base.visit(f),
+            DjangoClassMetadata::SpecializedBase { base } => base.visit(f),
         }
     }
 }
@@ -491,7 +491,7 @@ impl VisitMut<Type> for Arc<DjangoClassMetadata> {
     fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
         match Arc::make_mut(self) {
             DjangoClassMetadata::Manager { queryset } => queryset.visit_mut(f),
-            DjangoClassMetadata::QuerySet { base } => base.visit_mut(f),
+            DjangoClassMetadata::SpecializedBase { base } => base.visit_mut(f),
         }
     }
 }

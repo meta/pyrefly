@@ -3340,7 +3340,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         || cls.has_qname("django.db.models.manager", "BaseManager"))
                 })
             && let ExprOrBinding::Expr(e) = value
-            && let Some(manager) = self.get_django_manager_from_queryset_type(class, e)
+            && let Some(manager) = self.get_django_manager_assignment_type(class, e)
         {
             // Standard manager interfaces allow model rebinding. Explicit custom interfaces
             // retain their declared type and use ordinary assignment checking below.
@@ -4514,13 +4514,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             if metadata.is_django_model()
-                && !class_field.has_explicit_annotation()
+                && !cls_fields.is_field_annotated(field_name)
                 && self.is_django_manager_type(&class_field.ty())
-                && matches!(want_class_field.ty(), Type::ClassType(cls) if
+                && self.is_django_manager_type(&want_class_field.ty())
+                && (matches!(want_class_field.ty(), Type::ClassType(cls) if
                     cls.has_qname("django.db.models.manager", "Manager")
                     || cls.has_qname("django.db.models.manager", "BaseManager"))
+                    || self
+                        .get_class_fields(&want_field.defining_class)
+                        .is_some_and(|fields| !fields.is_field_annotated(field_name)))
             {
-                // Standard manager interfaces allow rebinding to the receiving model.
+                // Django permits replacing inferred managers, including sibling manager classes.
+                // Explicit custom interfaces still require ordinary override checks.
                 continue;
             }
             let want_is_static = want_class_field.is_staticmethod();
