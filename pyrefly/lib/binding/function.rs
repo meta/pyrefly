@@ -70,6 +70,7 @@ use crate::binding::binding::ReturnType;
 use crate::binding::binding::ReturnTypeKind;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::LegacyTParamCollector;
+use crate::binding::classmethod::FunctionDecorators;
 use crate::binding::expr::Usage;
 use crate::binding::pattern::match_case_always_matches;
 use crate::binding::scope::FlowStyle;
@@ -89,6 +90,7 @@ struct Decorators {
     is_abstract_method: bool,
     is_override: bool,
     is_classmethod: bool,
+    decorator_kind: FunctionDecorators,
     decorators: Box<[Idx<KeyDecorator>]>,
 }
 
@@ -660,8 +662,21 @@ impl<'a> BindingsBuilder<'a> {
         let mut has_no_type_check = false;
         let mut is_abstract_method = false;
         let mut is_classmethod = false;
+        let mut decorator_kind = FunctionDecorators::Undecorated;
+        let mut all_receiver_overload = true;
         for d in &decorator_list {
             let special_export = self.as_special_export(&d.expression);
+            let receiver_special = if self.track_classmethod_uses {
+                self.as_receiver_special_export(&d.expression)
+            } else {
+                None
+            };
+            all_receiver_overload &= receiver_special == Some(SpecialExport::Overload);
+            decorator_kind = if decorator_list.len() == 1 {
+                FunctionDecorators::single(receiver_special)
+            } else {
+                FunctionDecorators::Other
+            };
             is_overload = is_overload || matches!(special_export, Some(SpecialExport::Overload));
             is_override = is_override || matches!(special_export, Some(SpecialExport::Override));
             is_abstract_method = is_abstract_method
@@ -677,6 +692,13 @@ impl<'a> BindingsBuilder<'a> {
                     Some(SpecialExport::ClassMethod | SpecialExport::AbstractClassMethod)
                 );
         }
+        if is_overload {
+            decorator_kind = if all_receiver_overload {
+                FunctionDecorators::Overload
+            } else {
+                FunctionDecorators::OverloadWithOther
+            };
+        }
         let decorators = self
             .ensure_and_bind_decorators(decorator_list, usage)
             .into_boxed_slice();
@@ -686,6 +708,7 @@ impl<'a> BindingsBuilder<'a> {
             is_abstract_method,
             is_override,
             is_classmethod,
+            decorator_kind,
             decorators,
         }
     }
@@ -899,6 +922,7 @@ impl<'a> BindingsBuilder<'a> {
 
         self.maybe_record_pytest_fixture_definition(&x, class_key);
 
+        let receiver_uses = self.classmethod_receiver_uses(&x);
         let decorators = self.decorators(mem::take(&mut x.decorator_list), def_idx.usage());
 
         self.scopes.push(Scope::annotation(x.range, false));
@@ -907,6 +931,7 @@ impl<'a> BindingsBuilder<'a> {
 
         let docstring_range = Docstring::range_from_stmts(x.body.as_slice());
         let calls_super_method = SuperMethodCallFinder::find(&func_name.id, &x.body);
+        let previous_tracking = mem::replace(&mut self.track_classmethod_uses, false);
         let (body_kind, is_body_bound, is_return_inferred, self_assignments) = self.function_body(
             &mut x.parameters,
             mem::take(&mut x.body),
@@ -920,11 +945,13 @@ impl<'a> BindingsBuilder<'a> {
             class_key,
         );
 
+        self.track_classmethod_uses = previous_tracking;
         // Pop the annotation scope to get back to the parent scope, and handle this
         // case where we need to track assignments to `self` from methods.
         self.scopes.pop();
         self.scopes
             .record_self_assignments_if_applicable(self_assignments);
+        self.record_classmethod_function(undecorated_idx, decorators.decorator_kind, receiver_uses);
         let undecorated_idx = self.insert_binding_idx(
             undecorated_idx,
             BindingUndecoratedFunction {

@@ -209,7 +209,18 @@ impl<'a> BindingsBuilder<'a> {
                     method.recognized_attribute_defining_method
                         && matches!(method.instance_or_class, MethodSelfKind::Instance)
                 });
+        // Updating a function's docstring does not retain its instance-callable view.
+        // Only the direct store base is exempt; assignment RHS captures still count.
+        let metadata_write = self.track_classmethod_uses
+            && attr.attr.id.as_str() == "__doc__"
+            && matches!(attr.value.as_ref(), Expr::Name(_));
+        if metadata_write {
+            self.track_classmethod_uses = false;
+        }
         self.ensure_expr(&mut attr.value, user.usage());
+        if metadata_write {
+            self.track_classmethod_uses = true;
+        }
         if ensure_assigned && let Some(assigned) = &mut assigned {
             self.ensure_expr(assigned, user.usage());
         }

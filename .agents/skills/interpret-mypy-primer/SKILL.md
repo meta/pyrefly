@@ -1,89 +1,96 @@
 ---
 name: interpret-mypy-primer
-description: Interpret, analyze, and summarize a pyrefly mypy_primer error differential — the type errors a change ADDS or FIXES across the open-source corpus — classifying the changes as true positives (real bugs caught/fixed) vs false positives (regressions), and recording the result in the change's summary. Use when a pyrefly change alters which errors are reported (a new or retyped diagnostic, a new error kind, or an inference change).
+description: Interprets a pyrefly mypy_primer error differential. Use when a pyrefly change alters which errors are reported (a new or retyped diagnostic, a new error kind, or an inference change). Classifies added and removed errors as true positives or negatives (improvements) vs false positives or negatives (regressions) and summarizes the result.
 ---
 
 # Interpreting a pyrefly mypy_primer differential
 
 [mypy_primer](https://github.com/hauntsaninja/mypy_primer) runs a type checker over a
 large corpus of real open-source projects and reports a **differential** between two
-revisions: the errors a change newly **adds** (`+`) and the errors it **fixes** (`-`),
+revisions: the errors a change newly adds (`+`) and the errors it removes (`-`),
 per project. Pyrefly's CI runs this on pull requests and posts the differential as a
 comment.
 
-The counts alone do not tell you whether a change found real bugs or broke valid code.
-This skill turns a raw differential into a verdict and a short write-up you put in the
-change's summary. Use it whenever a change alters which errors pyrefly reports; a pure
-refactor with no diagnostic change does not need it.
+This skill turns a raw differential into a verdict and a short write-up.
 
-Core principle: **do not assert, verify.** Sample the added/removed errors, reproduce
-them minimally, and let reference checkers and the Python runtime decide true-positive
-vs false-positive — do not eyeball the message and guess.
+Core principle: **do not assert, verify.** Counts alone are insufficient to interpret a
+differential. Sample added/removed errors, reproduce them minimally, and use reference
+checkers and the Python runtime to determine correct behavior — do not eyeball the
+message and guess.
 
 ## 1. Get the differential
 
-- **From CI:** read the mypy_primer comment on the pull request.
-- **Locally:** run `mypy_primer` comparing your branch against its base, or build pyrefly
-  at both revisions with `cargo build --release` and run each on the **same fixed
-  checkout** of a few corpus projects (`pyrefly check --preset <p> <project>`), then diff
-  the error lists. Measuring on fixed code is essential — see noise, below.
+- From CI: read the mypy_primer comment on the pull request.
+- Locally: run `mypy_primer` comparing your branch against its base, or build pyrefly
+  at both revisions with `cargo build --release` and run each on the same fixed
+  checkout of a few corpus projects (`pyrefly check --preset <p> <project>`), then diff
+  the error lists. Measuring on fixed code is essential — totals are not comparable when
+  a corpus project's HEAD moves between runs.
 
 ## 2. Interpret by preset
 
 Report the differential as `+added / -removed`, broken down by the preset(s) you ran.
 
-- The **shipping presets** (`default`, `strict`) matter most: a change should ideally be
-  `+0/-0` there, or add/remove only true positives. New errors in `default` are seen by
-  every user, so they carry the highest bar.
-- A large volume under the `all` preset is expected and acceptable for a new **opt-in**
+- The shipping presets (`default`, `strict`) matter most: a change should ideally be
+  `+0/-0` there, or add/remove only true positives/negatives. New errors in `default` are
+  seen by every user, so they carry the highest bar.
+- A large volume under the `all` preset is expected and acceptable for a new opt-in
   error kind (one that defaults to `ignore` and only reports under `all`). Say so rather
   than treating the number as alarming.
-- Confirm the additions are the **kind you intended**. If a change meant to add
+- Confirm the additions are the kind you intended. If a change meant to add
   `foo-error` also moves counts for unrelated kinds, investigate.
 
 ## 3. Discount noise
 
-- A `+N / -N` pair that is **byte-identical at the same location** is churn from the
-  corpus project's own HEAD moving between runs, not your change. Discount it and say so.
-- **Totals are not comparable across days:** each run uses every project's current HEAD,
-  so upstream churn moves counts by hundreds. Only a before/after measurement on the
-  *same* code is attributable to your change.
+- If the same error, with identical message and location, appears as both added and
+  removed, this is noise from errors being emitted in a different order. Discount it and
+  say so.
+- If the same error appears as added and removed at the same location with different
+  messages, this is an error message change. Review message quality separately, discount
+  the error from correctness verification, and say so.
 
-## 4. Verify correctness (true positive vs false positive)
+## 4. Verify correctness
 
 Sample the differential — at least the largest clusters, and a spread of kinds. For each
 sampled entry:
 
-1. Build a **minimal reproducer** that triggers the same error, without copying the
+1. Build a minimal reproducer that triggers the same error, without copying the
    change's intended behavior into it.
-2. Run it through **pyrefly at your change**, a **reference checker** (mypy and/or
+2. Run it through pyrefly at your change, a reference checker (mypy and/or
    pyright — install via `uv run --with mypy python -m mypy <file>` /
    `uv run --with pyright pyright <file>`), and, where the behavior is observable, the
-   **CPython runtime**.
+   CPython runtime.
 
-Classify:
+Classify errors:
+- An added error that is correct is a **true positive** (improvement); an incorrect one
+  is a **false positive** (regression).
+- A removed error that was incorrect leaves a **true negative** (improvement); one that
+  was correct leaves a **false negative** (regression).
 
-- **Added error → true positive** if a reference checker reports the same error at the
-  same place, or CPython fails at that exact operation for the same reason. The change
-  correctly caught something; leave it.
-- **Added error, reference checkers clean, runtime fine → `unclear`, not automatically a
-  false positive.** mypy and pyright are not the specification, and pyrefly sometimes
-  intentionally differs; a program that merely runs is not proof it is type-correct. Flag
-  it for maintainer/spec review.
-- **Attribute a confirmed regression by before/after build**, not by editing the program:
-  run the same reproducer through pyrefly built at the base revision and at your change.
-  An error only on your build is caused by the change (a false positive to fix); an error
-  on both pre-exists.
+Weigh the evidence:
+- The typing specification (https://typing.python.org/en/latest/spec/) decides what a
+  type checker should report. When it covers a scenario unambiguously, it overrides
+  everything below.
+- CPython failing at an operation for the reason that an error states shows that the code
+  is wrong, providing strong evidence for a true positive. CPython succeeding is weak
+  evidence: a program that merely runs is not proof it is type-correct.
+- A reference checker agreeing with pyrefly is strong evidence for an improvement.
+  Disagreement does not prove a regression, as pyrefly sometimes intentionally differs.
+- Flag errors with weak or contradictory evidence for maintainer review.
+
+Attribute errors by before/after build, not by editing the program: run the same
+reproducer through pyrefly built at the base revision and at your change. An error only
+on your build and not on the base revision or vice versa is caused by the change; an
+error on both pre-exists.
 
 Patterns worth knowing: a single root cause often explains a whole cluster of per-project
 errors — fix the cause, not each symptom, and re-run. Framework classes
 (`dataclass_transform`, metaclasses, `Annotated`) are a common false-positive source and
 need the real framework in the reproducer, not a plain stand-in.
 
-## 5. Record the result in the change's summary
+## 5. Summarize the result
 
-Put a short paragraph in the **pull request description** (not buried in a comment),
-stating:
+Summarize the result in a short paragraph stating:
 
 - the per-preset deltas (`+X / -Y`), and that the additions are `<kind>`;
 - the shipping-preset (`default`/`strict`) impact specifically;
@@ -97,15 +104,9 @@ anything.
 
 ## Inside Meta (internal checkout)
 
-The interpretation, noise handling, and verification above are identical; only the
-plumbing differs.
+The interpretation, noise handling, and verification above are identical; only the plumbing differs.
 
-- **Get the differential** from CI with the `ci-signals` skill: the `pyrefly-mypy-primer`
+- Get the differential from CI with the `ci-signals` skill: the `pyrefly-mypy-primer`
   signal (plus the `instagram-server` and `pytorch` signals) carries it. Build before/after
   with `buck2 build @fbcode//mode/opt fbcode//pyrefly:pyrefly` (copy the binary out
   immediately — the output path is reused across builds) rather than cargo.
-- **For a large or land-blocking differential, use the `triage-pyrefly-ci` skill**, which
-  fans out one agent per entry to produce per-error verdicts with evidence.
-- **Record the paragraph in the Phabricator diff Summary** (`meta phabricator.diff update
-  --number=D<n> --summary=...` then `jf sync -r D<n>`), not just the Test Plan — the
-  Summary is where reviewers and future readers look for real-world impact.
