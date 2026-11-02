@@ -39,8 +39,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/2.0.0/clipboard.min.js"></script>
 <script src="/js/code-block-buttons.js"></script>
 <script src="/js/gtag-fragment-tracking.js"></script><link rel="stylesheet" href="/assets/css/styles.8e9df58b.css">
-<script src="/assets/js/runtime~main.04aeb3c7.js" defer="defer"></script>
-<script src="/assets/js/main.c776c810.js" defer="defer"></script>
+<script src="/assets/js/runtime~main.8c84d110.js" defer="defer"></script>
+<script src="/assets/js/main.1362aaf7.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
 <script>!function(){function t(t){document.documentElement.setAttribute("data-theme",t)}var e=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();t(null!==e?e:"dark")}(),function(){try{const n=new URLSearchParams(window.location.search).entries();for(var[t,e]of n)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script>
@@ -825,7 +825,7 @@ for more stability and an opt-in experience for new errors.</p></div></div>
 <p>Configure the severity for each kind of error that Pyrefly emits: <code>error</code>, <code>warn</code>, <code>info</code>, <code>hint</code>, or <code>ignore</code>.</p>
 <div class="theme-admonition theme-admonition-info admonition_xJq3 alert alert--info"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 14 16"><path fill-rule="evenodd" d="M7 2.3c3.14 0 5.7 2.56 5.7 5.7s-2.56 5.7-5.7 5.7A5.71 5.71 0 0 1 1.3 8c0-3.14 2.56-5.7 5.7-5.7zM7 1C3.14 1 0 4.14 0 8s3.14 7 7 7 7-3.14 7-7-3.14-7-7-7zm1 3H6v5h2V4zm0 6H6v2h2v-2z"></path></svg></span>info</div><div class="admonitionContent_BuS1"><p>Want full type-check squiggles in your editor? Run <code>pyrefly init</code> to create a <code>pyrefly.toml</code> (or update <code>pyproject.toml</code>).</p></div></div>
 <ul>
-<li>Type: Table of <a href="/en/docs/error-kinds/">error code</a> to boolean representing enabled status</li>
+<li>Type: Table of <a href="/en/docs/error-kinds/">error code</a> to a severity (<code>&quot;error&quot;</code>, <code>&quot;warn&quot;</code>, <code>&quot;info&quot;</code>, <code>&quot;hint&quot;</code>, or <code>&quot;ignore&quot;</code>) or a boolean</li>
 <li>Default: <code>errors = {}</code>/<code>[errors]</code></li>
 <li>Flag equivalent: <code>--error</code>, <code>--warn</code>, <code>--ignore</code></li>
 <li>Equivalent configs:
@@ -837,6 +837,8 @@ in Pyright,
 in mypy</li>
 <li>Notes:<!-- -->
 <ul>
+<li>Setting <code>&lt;error-code&gt; = &quot;&lt;severity&gt;&quot;</code> (for example, <code>bad-return = &quot;warn&quot;</code>) sets the
+diagnostic&#x27;s severity.</li>
 <li>Setting <code>&lt;error-code&gt; = true</code> means the error will be shown at default
 severity (or severity <code>ERROR</code> if the error is off by default). Setting
 <code>&lt;error-code&gt; = false</code> will disable the error for type checking.</li>
