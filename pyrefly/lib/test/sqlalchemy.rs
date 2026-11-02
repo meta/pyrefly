@@ -349,3 +349,339 @@ def mapped_column(value: int) -> bytes:
 assert_type(mapped_column(3), bytes)
 "#,
 );
+
+fn sqlalchemy_mapped_env() -> TestEnv {
+    let mut env = TestEnv::new();
+    env.add(
+        "sqlalchemy.orm._orm_constructors",
+        r#"
+from typing import Any
+
+def mapped_column(*args: Any, **kw: Any) -> Any: ...
+    "#,
+    );
+    env.add(
+        "sqlalchemy.orm.base",
+        r#"
+class Mapped[T]:
+    def __get__(self, instance, owner) -> T: ...
+    def __set__(self, instance, value: T) -> None: ...
+    def __delete__(self, instance) -> None: ...
+    "#,
+    );
+    env.add(
+        "sqlalchemy.sql.elements",
+        r#"
+class ColumnElement[T]: ...
+    "#,
+    );
+    env.add(
+        "sqlalchemy.sql.dml",
+        r#"
+class Update:
+    def where(self, *criteria: object) -> Update: ...
+    def values(self, **kwargs: object) -> Update: ...
+    "#,
+    );
+    env.add(
+        "sqlalchemy.sql.selectable",
+        r#"
+class Select:
+    def where(self, *criteria: object) -> Select: ...
+    def filter_by(self, **kwargs: object) -> Select: ...
+    def join(self, target: object) -> Select: ...
+    "#,
+    );
+    env.add_with_path(
+        "sqlalchemy.orm.decl_api",
+        "sqlalchemy/orm/decl_api.py",
+        r#"
+from typing import dataclass_transform
+
+from ._orm_constructors import mapped_column
+
+class DeclarativeBase: ...
+
+@dataclass_transform(field_specifiers=(mapped_column,))
+class DCTransformDeclarative(type): ...
+
+class MappedAsDataclass(metaclass=DCTransformDeclarative): ...
+        "#,
+    );
+    env.add_with_path(
+        "sqlalchemy.orm",
+        "sqlalchemy/orm/__init__.py",
+        r#"
+from .base import Mapped as Mapped
+from .decl_api import DeclarativeBase as DeclarativeBase
+from .decl_api import MappedAsDataclass as MappedAsDataclass
+from ._orm_constructors import mapped_column as mapped_column
+    "#,
+    );
+    env.add_with_path(
+        "sqlalchemy",
+        "sqlalchemy/__init__.py",
+        r#"
+from .sql.dml import Update as Update
+from .sql.elements import ColumnElement as ColumnElement
+from .sql.selectable import Select as Select
+def select(*entities: object) -> Select: ...
+def update(table: object) -> Update: ...
+    "#,
+    );
+    env
+}
+
+testcase!(
+    test_sqlalchemy_mapped_is_always_descriptor,
+    sqlalchemy_mapped_env(),
+    r#"
+from sqlalchemy.orm import DeclarativeBase, Mapped
+class Base(DeclarativeBase):
+    pass
+class User(Base):
+    name: Mapped[str]
+    def __init__(self, name: str):
+        self.name = name
+    "#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/1610
+testcase!(
+    test_sqlalchemy_mapped_dataclass_mutable_default,
+    sqlalchemy_mapped_env(),
+    r#"
+from sqlalchemy.orm import DeclarativeBase, Mapped, MappedAsDataclass, mapped_column
+
+class Base(MappedAsDataclass, DeclarativeBase):
+    pass
+
+class Model(Base):
+    client_params: Mapped[dict] = mapped_column(default={})  # E: Mutable default for field `client_params` is not allowed; use `default_factory`
+    labels: Mapped[list[str]] = mapped_column(default_factory=list)
+    "#,
+);
+
+testcase!(
+    test_sqlalchemy_update_values_checks_mapped_fields,
+    sqlalchemy_mapped_env(),
+    r#"
+import sqlalchemy as sa
+from sqlalchemy.orm import DeclarativeBase, Mapped
+
+class Base(DeclarativeBase):
+    pass
+
+class User(Base):
+    id: Mapped[int]
+    name: Mapped[str]
+
+sa.update(User).where(User.id == 1).values(name="alice", id=1)
+sa.update(User).where(User.id == 1).values(name=0)  # E: `Literal[0]` is not assignable to field `name` with type `str`
+sa.update(User).where(User.id == 1).values(nam="alice")  # E: Unexpected SQLAlchemy update field `nam`
+
+# SQLAlchemy accepts a SQL expression wherever a column value is expected.
+def sql_expr() -> sa.ColumnElement[int]: ...
+sa.update(User).values(name=sql_expr())
+
+class CustomUpdate:
+    def values(self, **kwargs: object) -> CustomUpdate: ...
+
+def update(table: object) -> CustomUpdate: ...
+
+# A same-named function outside SQLAlchemy must not trigger the special-case check.
+update(User).values(nam="alice")
+    "#,
+);
+
+testcase!(
+    test_sqlalchemy_update_values_checks_inherited_mapped_fields,
+    sqlalchemy_mapped_env(),
+    r#"
+import sqlalchemy as sa
+from sqlalchemy.orm import DeclarativeBase, Mapped
+
+class Base(DeclarativeBase):
+    pass
+
+class SoftDeleteMixin:
+    deleted: Mapped[bool]
+
+class User(Base, SoftDeleteMixin):
+    id: Mapped[int]
+    name: Mapped[str]
+
+class AdminUser(User):
+    role: Mapped[str]
+    deleted: bool  # type: ignore
+
+sa.update(AdminUser).where(AdminUser.id == 1).values(name="alice")
+sa.update(User).where(User.id == 1).values(name="alice", deleted=False)
+sa.update(AdminUser).where(AdminUser.id == 1).values(deleted=False)  # E: Unexpected SQLAlchemy update field `deleted`
+    "#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/1072
+testcase!(
+    test_sqlalchemy_select_filter_by_checks_mapped_fields,
+    sqlalchemy_mapped_env(),
+    r#"
+import sqlalchemy as sa
+from sqlalchemy import select
+from sqlalchemy.orm import DeclarativeBase, Mapped
+
+class Base(DeclarativeBase):
+    pass
+
+class User(Base):
+    id: Mapped[int]
+    name: Mapped[str]
+
+select(User).filter_by(name="alice", id=1)
+sa.select(User).where(User.id == 1).filter_by(name=0)  # E: `Literal[0]` is not assignable to field `name` with type `str`
+select(User).filter_by(nam="alice")  # E: Unexpected SQLAlchemy filter_by field `nam`
+select(User).filter_by(id=1).filter_by(name="alice")
+
+# SQLAlchemy accepts a SQL expression wherever a column value is expected.
+def sql_expr() -> sa.ColumnElement[int]: ...
+select(User).filter_by(name=sql_expr())
+
+class Address(Base):
+    email: Mapped[str]
+
+# A join changes the namespace that filter_by uses, so defer to SQLAlchemy's typing.
+select(User).join(Address).filter_by(email="alice@example.com")
+
+class CustomSelect:
+    def filter_by(self, **kwargs: object) -> CustomSelect: ...
+
+def select_custom(entity: object) -> CustomSelect: ...
+
+# A same-named method outside SQLAlchemy must not trigger the special-case check.
+select_custom(User).filter_by(nam="alice")
+    "#,
+);
+
+fn sqlmodel_env() -> TestEnv {
+    let mut env = sqlalchemy_mapped_env();
+    env.add_with_path(
+        "sqlmodel",
+        "sqlmodel/__init__.py",
+        r#"
+from typing import Any
+
+class SQLModel:
+    ...
+
+def Field(*args, **kwargs) -> Any:
+    ...
+
+def Relationship(*args, **kwargs) -> Any:
+    ...
+"#,
+    );
+    env
+}
+
+testcase!(
+    test_sqlalchemy_update_values_checks_sqlmodel_fields,
+    sqlmodel_env(),
+    r#"
+from uuid import UUID
+
+from sqlalchemy import update
+from sqlalchemy.orm import Mapped
+from sqlmodel import Field, Relationship, SQLModel
+
+class Node(SQLModel, table=True):
+    id: UUID = Field(primary_key=True)
+    name: str = Field(description="x")
+    parent_id: UUID | None = Field(default=None, foreign_key="node.id")
+    parent: Mapped["Node | None"] = Relationship()
+
+update(Node).values(name="a")
+update(Node).values(parent_id=None)
+update(Node).values(nope="a")  # E: Unexpected SQLAlchemy update field `nope`
+    "#,
+);
+
+testcase!(
+    test_sqlalchemy_update_values_checks_sqlmodel_fields_no_mapped,
+    sqlmodel_env(),
+    r#"
+from sqlalchemy import update
+from sqlmodel import Field, SQLModel
+
+class HeroBase(SQLModel):
+    name: str = Field(index=True)
+    secret_name: str
+    age: int | None = Field(default=None, index=True)
+
+class Hero(HeroBase, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+
+update(Hero).values(name="a")
+update(Hero).values(nope="a")  # E: Unexpected SQLAlchemy update field `nope`
+    "#,
+);
+
+testcase!(
+    test_sqlalchemy_update_values_checks_sqlmodel_fields_without_mapped,
+    sqlmodel_env(),
+    r#"
+from uuid import UUID
+
+from sqlalchemy import update
+from sqlmodel import Field, SQLModel
+
+class Node(SQLModel, table=True):
+    id: UUID = Field(primary_key=True)
+    name: str = Field(description="x")
+
+update(Node).values(name="a")
+update(Node).values(nope="a")  # E: Unexpected SQLAlchemy update field `nope`
+    "#,
+);
+
+testcase!(
+    test_sqlalchemy_update_values_checks_sqlmodel_fields_inherited_fields,
+    sqlmodel_env(),
+    r#"
+from sqlalchemy import update
+from sqlmodel import Field, SQLModel
+
+class HeroBase(SQLModel):
+    name: str = Field(index=True)
+    secret_name: str
+    age: int | None = Field(default=None, index=True)
+
+class Hero(HeroBase, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+
+update(Hero).values(secret_name="a")
+update(Hero).values(nope="a")  # E: Unexpected SQLAlchemy update field `nope`
+    "#,
+);
+
+testcase!(
+    test_sqlalchemy_update_values_checks_sqlmodel_ignores_fields_past_table,
+    sqlmodel_env(),
+    r#"
+from sqlalchemy import update
+from sqlmodel import Field, SQLModel
+
+class HeroBase(SQLModel):
+    name: str = Field(index=True)
+    secret_name: str
+    age: int | None = Field(default=None, index=True)
+
+class Hero(HeroBase, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+
+class EvilHero(Hero):
+    evil_amount: bool
+
+update(EvilHero).values(secret_name="a")
+update(EvilHero).values(evil_amount="a")  # E: Unexpected SQLAlchemy update field `evil_amount`
+    "#,
+);
