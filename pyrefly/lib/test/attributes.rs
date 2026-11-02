@@ -4886,7 +4886,6 @@ Explicit.ordinary = 1  # E: Cannot set instance variable `ordinary` from the cla
 );
 
 testcase!(
-    bug = "Classmethod assignments erase inherited instance-variable provenance",
     test_instance_var_assign_inherited_classmethod,
     TestEnv::new().enable_instance_var_assign_error(),
     r#"
@@ -4899,11 +4898,11 @@ class Base:
 class Child(Base):
     @classmethod
     def make(cls) -> None:
-        cls.x = 1
+        cls.x = 1  # E: Cannot set instance variable `x` from the class
         cls.cv = 1
         cls.fresh: int = 1
 
-Child.x = 2
+Child.x = 2  # E: Cannot set instance variable `x` from the class
 Child.cv = 2
 Child.fresh = 2
 Base.x = 3  # E: Cannot set instance variable `x` from the class
@@ -4911,10 +4910,10 @@ Base.x = 3  # E: Cannot set instance variable `x` from the class
 class Grandchild(Child):
     @classmethod
     def make_again(cls) -> None:
-        cls.x = 3
+        cls.x = 3  # E: Cannot set instance variable `x` from the class
         cls.fresh = 3
 
-Grandchild.x = 4
+Grandchild.x = 4  # E: Cannot set instance variable `x` from the class
 Grandchild.fresh = 4
 
 class Direct(Base):

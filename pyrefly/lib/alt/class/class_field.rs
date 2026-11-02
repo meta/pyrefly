@@ -412,6 +412,8 @@ enum ClassFieldInner {
         descriptor_range: Option<TextRange>,
         /// ClassVar: can read from instance, but cannot write/shadow from instance
         is_classvar: bool,
+        /// An instance-variable declaration, preserved across inherited method assignments.
+        is_instance_var: bool,
         is_staticmethod: bool,
         /// Django ForeignKey - triggers synthesis of _id field
         is_foreign_key: bool,
@@ -479,6 +481,7 @@ impl ClassField {
                 read_only_reason,
                 descriptor_range: None,
                 is_classvar: false,
+                is_instance_var: false,
                 is_staticmethod: false,
                 is_foreign_key,
                 has_choices,
@@ -606,6 +609,7 @@ impl ClassField {
                     read_only_reason: None,
                     descriptor_range: None,
                     is_classvar,
+                    is_instance_var: false,
                     is_staticmethod: false,
                     is_foreign_key: false,
                     has_choices: false,
@@ -624,6 +628,7 @@ impl ClassField {
                 read_only_reason: None,
                 descriptor_range: None,
                 is_classvar: false,
+                is_instance_var: false,
                 is_staticmethod: false,
                 is_foreign_key: false,
                 has_choices: false,
@@ -717,6 +722,7 @@ impl ClassField {
                 read_only_reason,
                 descriptor_range,
                 is_classvar,
+                is_instance_var,
                 is_staticmethod,
                 is_foreign_key,
                 has_choices,
@@ -731,6 +737,7 @@ impl ClassField {
                         read_only_reason: read_only_reason.clone(),
                         descriptor_range: *descriptor_range,
                         is_classvar: *is_classvar,
+                        is_instance_var: *is_instance_var,
                         is_staticmethod: *is_staticmethod,
                         is_foreign_key: *is_foreign_key,
                         has_choices: *has_choices,
@@ -1685,6 +1692,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // decorator turns the function into a `ClassType`. Recover it here so the override
         // consistency check can see it.
         let mut descriptor_is_override = false;
+        let mut inherited_instance_var = false;
 
         let (
             initialization,
@@ -2054,6 +2062,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 let ClassField(inner, _) = parent_field.value.into_owned();
                                 return ClassField(inner, IsInherited::No);
                             }
+                            ClassField(
+                                ClassFieldInner::ClassAttribute {
+                                    is_instance_var, ..
+                                },
+                                _,
+                            ) => inherited_instance_var = *is_instance_var,
                             _ => {
                                 // For non-property fields, continue with normal processing
                             }
@@ -2596,6 +2610,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 _ => {
                     let is_staticmethod =
                         matches!(&ty, Type::ClassType(cls) if cls.is_builtin("staticmethod"));
+                    // Classmethod writes inherit a declaration; only fresh attributes lack one.
+                    let is_instance_var = annotation.is_some()
+                        && !is_class_var
+                        && (initialization != ClassFieldInitialization::ClassMethod
+                            || inherited_instance_var)
+                        // Python exposes these metadata attributes on both classes and instances.
+                        && !matches!(name.as_str(), "__module__" | "__doc__" | "__annotations__");
                     ClassField(
                         ClassFieldInner::ClassAttribute {
                             ty,
@@ -2604,6 +2625,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             read_only_reason,
                             descriptor_range,
                             is_classvar: is_class_var,
+                            is_instance_var,
                             is_staticmethod,
                             is_foreign_key,
                             has_choices,
@@ -3971,24 +3993,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             )),
             ClassFieldInner::ClassAttribute {
                 mut ty,
-                annotation,
-                initialization,
-                is_classvar,
+                is_instance_var,
                 read_only_reason,
                 descriptor_range,
                 ..
             } => {
                 ty = self.normalize_attr_ty(ty);
-                // A class-body-declared instance variable (annotated, not `ClassVar`);
-                // writing it via the class object is flagged at the set chokepoint.
-                // Attributes created by assigning through `cls` in a method are set
-                // on the class itself, so they are class attributes, not instance
-                // variables declared by the class body.
-                let is_instance_var = annotation.is_some()
-                    && !is_classvar
-                    && initialization != ClassFieldInitialization::ClassMethod
-                    // Python exposes these metadata attributes on both classes and instances.
-                    && !matches!(field_name.as_str(), "__module__" | "__doc__" | "__annotations__");
                 if ambiguous && !matches!(cls, ClassBase::SelfType(_)) {
                     ClassAttribute::no_access(NoAccessReason::ClassAttributeIsGeneric(
                         cls.class_object().dupe(),
