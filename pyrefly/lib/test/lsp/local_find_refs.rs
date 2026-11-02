@@ -8,8 +8,10 @@
 use itertools::Itertools;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
+use pyrefly_python::module::TextRangeWithModule;
 use ruff_text_size::TextSize;
 
+use crate::state::lsp::FindPreference;
 use crate::state::lsp::ReferenceOptions;
 use crate::state::state::State;
 use crate::test::util::code_frame_of_source_at_range;
@@ -751,5 +753,100 @@ References:
 "#
         .trim(),
         without_declaration.trim(),
+    );
+}
+
+fn get_global_test_report(state: &State, handle: &Handle, position: TextSize) -> String {
+    let mut transaction = state.transaction();
+    let definition = transaction
+        .find_definition(handle, position, FindPreference::default())
+        .unwrap()
+        .into_vec()
+        .remove(0);
+    let references = transaction
+        .find_global_references_from_definition(
+            *handle.sys_info(),
+            definition.metadata,
+            TextRangeWithModule::new(definition.module, definition.definition_range),
+            ReferenceOptions::all(false),
+        )
+        .unwrap();
+    format!(
+        "References:\n{}",
+        references
+            .into_iter()
+            .flat_map(|(module, ranges)| {
+                ranges
+                    .into_iter()
+                    .map(|range| code_frame_of_source_at_range(module.contents(), range))
+                    .collect::<Vec<_>>()
+            })
+            .join("\n")
+    )
+}
+
+// A call through an overridden method may dispatch to the override, so it is a reference.
+#[test]
+fn overridden_method_calls() {
+    let code = r#"
+class Base:
+    def f(self) -> None: ...
+
+class Child(Base):
+    def f(self) -> None: ...
+    #   ^
+
+def base_call(x: Base) -> None:
+    x.f()
+
+def child_call(x: Child) -> None:
+    x.f()
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+        get_global_test_report(state, handle, position)
+    });
+    assert_eq!(
+        r#"
+# main.py
+6 |     def f(self) -> None: ...
+            ^
+References:
+10 |     x.f()
+           ^
+13 |     x.f()
+           ^
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn overridden_attribute_reads() {
+    let code = r#"
+class Base:
+    x: int = 0
+
+class Child(Base):
+    x: int = 1
+#   ^
+
+def read(b: Base) -> int:
+    return b.x
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+        get_global_test_report(state, handle, position)
+    });
+    assert_eq!(
+        r#"
+# main.py
+6 |     x: int = 1
+        ^
+References:
+10 |     return b.x
+                  ^
+"#
+        .trim(),
+        report.trim(),
     );
 }

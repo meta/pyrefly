@@ -264,6 +264,28 @@ def call_class():
     assert!(report.contains("Caller: main.call_class"));
 }
 
+// A call through an overridden method may dispatch to the override, so its caller counts.
+#[test]
+fn find_callers_of_override_include_calls_through_base_test() {
+    let code = r#"
+class Base:
+    def f(self) -> None: ...
+
+class Child(Base):
+    def f(self) -> None: ...
+#       ^
+
+def base_call(x: Base) -> None:
+    x.f()
+
+def child_call(x: Child) -> None:
+    x.f()
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_callers_report);
+    assert!(report.contains("Caller: main.base_call"));
+    assert!(report.contains("Caller: main.child_call"));
+}
+
 #[test]
 fn find_callers_method_at_call_site_test() {
     let code = r#"
