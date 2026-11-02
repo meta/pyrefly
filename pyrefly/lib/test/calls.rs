@@ -510,6 +510,36 @@ def select(flag: bool, cb: Callable[[int], int] | None) -> None:
 );
 
 testcase!(
+    test_union_decorator_method_binding,
+    r#"
+from collections.abc import Awaitable, Callable
+from typing import assert_type
+
+def maybe_async[**P, T](fn: Callable[P, T]) -> Callable[P, T] | Callable[P, Awaitable[T]]: ...
+
+class C:
+    @maybe_async
+    def instance(self, value: int) -> str: ...
+
+    @staticmethod
+    @maybe_async
+    def static(value: int) -> str: ...
+
+    @classmethod
+    @maybe_async
+    def class_method(cls, value: int) -> str: ...
+
+c = C()
+assert_type(c.instance(1), str | Awaitable[str])
+assert_type(C.instance(c, 1), str | Awaitable[str])
+assert_type(c.static(1), str | Awaitable[str])
+assert_type(C.static(1), str | Awaitable[str])
+assert_type(c.class_method(1), str | Awaitable[str])
+assert_type(C.class_method(1), str | Awaitable[str])
+    "#,
+);
+
+testcase!(
     test_deprecated_call_3_12,
     test_env_3_12(),
     r#"
