@@ -1553,16 +1553,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             attr_name.clone(),
                         ));
                     }
-                    let is_cached_property = matches!(
-                        got_attr,
-                        Attribute::ClassAttribute(ClassAttribute::Property(getter, None, _))
-                            if getter
-                                .toplevel_func_metadata()
-                                .is_some_and(|meta| meta.flags.is_cached_property)
-                    );
-                    // A cached getter can check a protocol-typed receiver through a fresh
-                    // subtype check, so it needs the same guard as dynamic fallback.
-                    if matches!(got_attr, Attribute::GetAttr(..)) || is_cached_property {
+                    if matches!(got_attr, Attribute::GetAttr(..)) {
                         let guard_key = (got.clone(), protocol.clone(), attr_name.clone());
                         if self.enter_protocol_member_check(guard_key.clone()) {
                             continue;

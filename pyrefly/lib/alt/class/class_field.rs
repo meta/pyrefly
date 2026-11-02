@@ -5962,9 +5962,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             (
                 ClassAttribute::Property(getter, None, _),
                 ClassAttribute::ReadWrite(..) | ClassAttribute::ReadOnly(..),
-            ) if getter
-                .toplevel_func_metadata()
-                .is_some_and(|meta| meta.flags.is_cached_property) =>
+            ) if allow_property_override
+                && getter
+                    .toplevel_func_metadata()
+                    .is_some_and(|meta| meta.flags.is_cached_property) =>
             {
                 // An invalid getter's recovery type is not evidence of compatibility.
                 let errors = ErrorCollector::new(self.module().dupe(), ErrorStyle::Delayed);
