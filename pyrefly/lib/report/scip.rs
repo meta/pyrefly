@@ -813,10 +813,15 @@ mod tests {
     fn index(case: &str) -> Index {
         let snapshots = snapshots_dir();
         let input_dir = snapshots.join("input").join(case);
+        // Case-local dependencies model a virtual environment inside the project root.
+        let site_packages = input_dir.join("site-packages");
         let mut env = TestEnv::new();
         let mut handles = Vec::new();
         for path in glob::glob(&format!("{}/**/*.py", input_dir.display())).unwrap() {
             let path = path.unwrap();
+            if path.starts_with(&site_packages) {
+                continue;
+            }
             // As with an import root, modules under `src/` are named without the prefix.
             let relative = path
                 .strip_prefix(input_dir.join("src"))
@@ -831,7 +836,7 @@ mod tests {
             ));
         }
         let (state, _) = env
-            .with_site_package_paths(vec![snapshots.join("site-packages")])
+            .with_site_package_paths(vec![site_packages, snapshots.join("site-packages")])
             .with_default_require_level(Require::Everything)
             .to_state();
         let mut bytes = Vec::new();
@@ -844,7 +849,13 @@ mod tests {
             "test",
         )
         .unwrap();
-        Index::parse_from_bytes(&bytes).unwrap()
+        let index = Index::parse_from_bytes(&bytes).unwrap();
+        assert_eq!(
+            index.documents.len(),
+            handles.len(),
+            "missing snapshot documents"
+        );
+        index
     }
 
     fn assert_snapshot(case: &str) {
@@ -917,14 +928,18 @@ mod tests {
         f_string,
         file_from_module_import,
         graph_1278,
+        lambda_walrus,
         nameparts_import,
         nested_items,
+        nonlocal_skips_scope,
         odd_pkg_name_1,
+        project_site_packages,
         pyproject_1,
         relative_import,
         request_goofiness,
         single_class,
         single_function,
+        type_parameters,
         unique,
         unresolved_import,
     );
