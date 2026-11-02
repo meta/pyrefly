@@ -1414,7 +1414,7 @@ value = make()
 
 #[test]
 fn test_insertable_hint_module_name_bound_at_module_scope() {
-    let (annotation, imports) = insertable_hint(&[
+    let files = [
         LIB,
         (
             "main",
@@ -1426,10 +1426,14 @@ lib = 1
 value = make()
 "#,
         ),
-    ]);
-    // BUG: `lib = 1` rebinds the imported module before the annotation is evaluated.
-    assert_eq!(annotation, ": lib.Value");
-    assert_eq!(imports, "import lib\n");
+    ];
+    let (handles, state) = mk_multi_file_state_assert_no_errors(&files, Require::Exports);
+    let hints = state
+        .transaction()
+        .inlay_hints(&handles["main"], Default::default(), Default::default())
+        .unwrap();
+    // `lib = 1` would shadow a generated `import lib`, and `Value` is bound locally.
+    assert!(hints.iter().all(|hint| hint.edits.is_none()));
 }
 
 #[test]

@@ -670,7 +670,7 @@ fn compute_implement_abstract_actions(
     let module_info = transaction.get_module_info(handle).unwrap();
     let selection = find_marked_range_with(code, "# ACTION-START", "# ACTION-END");
     let actions = transaction
-        .implement_abstract_members_code_actions(handle, selection)
+        .implement_abstract_members_code_actions(handle, selection, ImportFormat::Absolute)
         .unwrap_or_default();
     let edit_sets: Vec<Vec<(Module, TextRange, String)>> =
         actions.iter().map(|action| action.edits.clone()).collect();
@@ -691,7 +691,7 @@ fn compute_implement_abstract_actions_allow_errors(
     let module_info = transaction.get_module_info(handle).unwrap();
     let selection = find_marked_range_with(code, "# ACTION-START", "# ACTION-END");
     let actions = transaction
-        .implement_abstract_members_code_actions(handle, selection)
+        .implement_abstract_members_code_actions(handle, selection, ImportFormat::Absolute)
         .unwrap_or_default();
     let edit_sets: Vec<Vec<(Module, TextRange, String)>> =
         actions.iter().map(|action| action.edits.clone()).collect();
@@ -5213,7 +5213,11 @@ fn implement_abstract_members_preserves_class_body() {
         let info = transaction.get_module_info(handle).unwrap();
         let start = TextSize::try_from(code.find("class Child").unwrap()).unwrap();
         let actions = transaction
-            .implement_abstract_members_code_actions(handle, TextRange::empty(start))
+            .implement_abstract_members_code_actions(
+                handle,
+                TextRange::empty(start),
+                ImportFormat::Absolute,
+            )
             .unwrap();
         let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
         assert!(after.contains(&format!(
@@ -5310,6 +5314,7 @@ class Base[T](ABC):
         .implement_abstract_members_code_actions(
             handle,
             find_marked_range_with(code, "# ACTION-START", "# ACTION-END"),
+            ImportFormat::Absolute,
         )
         .unwrap();
     let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
@@ -5373,6 +5378,7 @@ class Base(ABC):
                 .implement_abstract_members_code_actions(
                     handle,
                     find_marked_range_with(&code, "# ACTION-START", "# ACTION-END"),
+                    ImportFormat::Absolute,
                 )
                 .unwrap();
             let edits = &actions[0].edits;
@@ -5425,6 +5431,7 @@ fn implement_abstract_members_resolves_import_aliases_and_collisions() {
             .implement_abstract_members_code_actions(
                 handle,
                 find_marked_range_with(&code, "# ACTION-START", "# ACTION-END"),
+                ImportFormat::Absolute,
             )
             .unwrap();
         let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
@@ -5587,8 +5594,11 @@ fn implement_abstract_members_at(
     let position = TextSize::try_from(code.find(cursor).unwrap()).unwrap();
     let transaction = state.transaction();
     let info = transaction.get_module_info(handle).unwrap();
-    let actions =
-        transaction.implement_abstract_members_code_actions(handle, TextRange::empty(position))?;
+    let actions = transaction.implement_abstract_members_code_actions(
+        handle,
+        TextRange::empty(position),
+        ImportFormat::Absolute,
+    )?;
     Some(apply_refactor_edits_for_module(&info, &actions[0].edits))
 }
 
@@ -5748,13 +5758,9 @@ class Base(ABC):
         TestEnv::new(),
         &[("base", base), ("main", code)],
         "class Child",
-    )
-    .unwrap();
-    // BUG: `base = 42` rebinds the imported module before `base.Payload` is evaluated.
-    assert_eq!(
-        after,
-        "import base\nfrom base import Base\nclass Payload: pass\nbase = 42\nclass Child(Base):\n    def bar(self) -> int:\n        raise NotImplementedError\n\n    def foo(self, value: base.Payload) -> None:\n        raise NotImplementedError\n"
     );
+    // The fallback `import base` would be shadowed by `base = 42`, and `Payload` is bound locally.
+    assert_eq!(after, None);
 }
 
 #[test]

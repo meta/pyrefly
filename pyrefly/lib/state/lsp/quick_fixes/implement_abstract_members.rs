@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::iter::once;
+
 use dupe::Dupe;
 use lsp_types::CodeActionKind;
 use pyrefly_build::handle::Handle;
@@ -33,14 +35,11 @@ use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 use starlark_map::Hashed;
-use starlark_map::small_map::SmallMap;
 
 use super::extract_shared::line_indent_and_start;
 use super::extract_shared::selection_anchor;
 use crate::binding::binding::KeyClass;
-use crate::state::ide::import_regular_import_edit;
-use crate::state::ide::insert_import_edit;
-use crate::state::import_tracker::ImportTracker;
+use crate::state::annotation_renderer::AnnotationRenderer;
 use crate::state::lsp::ImportFormat;
 use crate::state::lsp::LocalRefactorCodeAction;
 use crate::state::lsp::Transaction;
@@ -61,6 +60,7 @@ pub(crate) fn implement_abstract_members_code_actions(
     transaction: &Transaction<'_>,
     handle: &Handle,
     selection: TextRange,
+    import_format: ImportFormat,
 ) -> Option<Vec<LocalRefactorCodeAction>> {
     let module_info = transaction.get_module_info(handle)?;
     let ast = transaction.get_ast(handle)?;
@@ -129,55 +129,16 @@ pub(crate) fn implement_abstract_members_code_actions(
         renderer.member(member, &method_indent, &indent_unit)?;
     }
     renderer.text("\n");
-    let parts = renderer.parts;
-
-    let tracker = ImportTracker::from_ast(
-        &ast,
-        handle.module(),
-        handle.path().is_init(),
-        handle.sys_info().dupe(),
-    );
-    let direct = tracker.direct_import_candidates(&parts, handle.module());
-    let direct_refs = direct
-        .iter()
-        .map(|(module, name)| (*module, name.as_str()))
-        .collect::<Vec<_>>();
-    let (combined, missing) = tracker.resolve_annotation(&parts, handle.module(), &direct_refs);
-    // Combine imports that share an insertion point so their order is explicit
-    // in the workspace edit.
-    let mut imports = SmallMap::<TextRange, String>::new();
-    for (module, name) in direct {
-        let import_handle = transaction.import_handle(handle, module, None).finding()?;
-        let edit = insert_import_edit(
-            &ast,
-            transaction.config_finder(),
-            handle.dupe(),
-            import_handle,
-            &name,
-            ImportFormat::Absolute,
-        );
-        imports
-            .entry(edit.range)
-            .or_default()
-            .push_str(&edit.insert_text);
-    }
-    let mut missing = missing.into_iter().collect::<Vec<_>>();
-    missing.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    for module in missing {
-        let import_handle = transaction.import_handle(handle, module, None).finding()?;
-        let (position, text, _) = import_regular_import_edit(&ast, import_handle, None);
-        imports
-            .entry(TextRange::empty(position))
-            .or_default()
-            .push_str(&text);
-    }
-    let mut edits = vec![(module_info.dupe(), insert_range, combined)];
-    edits.extend(
-        imports
-            .into_iter()
-            .filter(|(_, text)| !text.is_empty())
-            .map(|(range, text)| (module_info.dupe(), range, text)),
-    );
+    let annotations = AnnotationRenderer::new(transaction, handle, ast, &stdlib, import_format);
+    let rendered = annotations.render_parts(&renderer.parts)?;
+    let imports = annotations.import_edits(&rendered);
+    let edits = once((module_info.dupe(), insert_range, rendered.text))
+        .chain(
+            imports
+                .into_iter()
+                .map(|(range, text)| (module_info.dupe(), range, text)),
+        )
+        .collect();
 
     Some(vec![LocalRefactorCodeAction {
         title: "Implement abstract members".to_owned(),
