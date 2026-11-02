@@ -29,9 +29,12 @@ use pyrefly_types::literal::LitStyle;
 use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
 use pyrefly_types::meta_shape_dsl::ShapeTransform;
 use pyrefly_types::meta_shape_dsl::validate_shape_dsl_functions;
+use pyrefly_types::quantified::AnchorIndex;
 use pyrefly_types::quantified::Quantified;
+use pyrefly_types::quantified::QuantifiedIdentity;
 use pyrefly_types::quantified::QuantifiedOrigin;
 use pyrefly_types::type_level_dsl::ParsedTypeShapeDslFunction;
+use pyrefly_types::type_var::PreInferenceVariance;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_types::types::AnyStyle;
 use pyrefly_types::types::BoundMethod;
@@ -70,6 +73,7 @@ use crate::binding::binding::KeyClass;
 use crate::binding::binding::KeyDecoratedFunction;
 use crate::binding::binding::KeyDecorator;
 use crate::binding::binding::KeyLegacyTypeParam;
+use crate::binding::classmethod::MethodReceiverKind;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::TypeCheckContext;
@@ -600,10 +604,65 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Look for a @classmethod or @staticmethod decorator and change the "self" type
         // accordingly. This is not totally correct, since it doesn't account for chaining
         // decorators, or weird cases like both decorators existing at the same time.
-        if flags.is_classmethod || found_class_property || is_dunder_new {
+        let mut receiver_tparam = None;
+        if def.method_receiver == MethodReceiverKind::Shared
+            && def
+                .parameters
+                .iter()
+                .next()
+                .is_some_and(|p| !p.is_variadic() && p.annotation().is_none())
+        {
+            if let Some(cls) = &defining_cls {
+                // An earlier alias can bind an instance while classmethod binds a class.
+                // Quantify the receiver so each call retains its own return type.
+                let mut instance = self.heap.mk_class_type(self.as_class_type_unchecked(cls));
+                // The bound accepts every specialization of the defining class.
+                instance.subst_mut_fn(&mut |q| {
+                    Some(Quantified::as_gradual_type_helper(q.kind(), None))
+                });
+                let class = self.heap.mk_type_of(instance.clone());
+                let receiver = Quantified::type_var(
+                    Name::new_static("Receiver"),
+                    QuantifiedIdentity::new(
+                        self.module().name(),
+                        AnchorIndex::first(def.name.range),
+                        QuantifiedOrigin::MethodReceiver,
+                    ),
+                    None,
+                    Restriction::Bound(self.unions(vec![instance, class])),
+                    PreInferenceVariance::Undefined,
+                );
+                self_type = Some(self.heap.mk_quantified(receiver.clone()));
+                receiver_tparam = Some(receiver);
+            }
+        } else if flags.is_classmethod
+            || found_class_property
+            || is_dunder_new
+            || def.method_receiver != MethodReceiverKind::None
+        {
             self_type = self_type.map(|t| self.heap.mk_type_of(t));
         } else if flags.is_staticmethod {
             self_type = None;
+        }
+
+        if defining_cls.is_some()
+            && flags.is_classmethod
+            && !flags.is_staticmethod
+            && flags.property_metadata.is_none()
+            && decorators.is_empty()
+            && def.parameters.posonlyargs.is_empty()
+            && def.parameters.args.is_empty()
+            && def.parameters.vararg.is_none()
+        {
+            self.error(
+                errors,
+                def.name.range(),
+                ErrorKind::BadFunctionDefinition,
+                format!(
+                    "Class method `{}` must accept the class as its first positional parameter",
+                    def.name
+                ),
+            );
         }
 
         // The `self`/`cls` receiver of a method is supplied implicitly at call time, so a
@@ -698,9 +757,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .iter()
             .filter_map(|key| self.get_idx(*key).parameter().cloned());
         tparams.extend(legacy_tparams);
-        // Validate written parameters before declaration-scoped dimensions are appended below.
-        let tparams =
-            Arc::new(self.validated_tparams(def.range, tparams, TParamsSource::Function, errors));
+        // Only written parameters are subject to default ordering constraints.
+        let mut tparams =
+            self.validated_tparams(def.range, tparams, TParamsSource::Function, errors);
+        if let Some(receiver) = receiver_tparam {
+            tparams.extend(&TParams::new(vec![receiver]));
+        }
+        let tparams = Arc::new(tparams);
         let func_id = Arc::new(FuncDefId {
             qname: QName::new(def.name.clone(), parent.dupe(), self.module().dupe()),
             cls: defining_cls.clone(),
@@ -891,6 +954,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // For classmethods, the annotation is `type[TFoo]`, so we also unwrap `Type::Type(...)`.
         if has_implicit_self_or_cls_param
             && !def.metadata.flags.is_staticmethod
+            && stmt
+                .parameters
+                .iter()
+                .next()
+                .is_some_and(|p| p.annotation().is_some())
             && let Some(first_param) = def.params.first()
             && {
                 let ty = first_param.as_type();
@@ -1029,6 +1097,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 );
             }
         }
+        if def.metadata.flags.is_cached_property && def.metadata.flags.is_return_inferred {
+            // Inner decorators see the original return type. The completed getter describes
+            // the writable cached value, so inferred literals must be widened.
+            ty.transform_toplevel_callable_signatures(|callable, _| {
+                callable.ret = callable.ret.clone().promote_implicit_literals(self.stdlib);
+            });
+        }
         self.validate_singledispatch_dispatcher_signature(
             &ty,
             DispatcherDef {
@@ -1160,7 +1235,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 true
             }
             SpecialDecorator::Deprecated(deprecation) => {
-                flags.deprecation = Some((**deprecation).clone());
+                flags.deprecation = Some(Box::new((**deprecation).clone()));
                 true
             }
             SpecialDecorator::PropertySetter(decorator) => {
@@ -1996,6 +2071,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             return decoratee;
         }
+        let wrapped = if let Type::KwCall(call) = &decorator
+            && call.has_function_kind(FunctionKind::FunctoolsWraps)
+        {
+            call.keywords
+                .0
+                .get(&Name::new_static("__wrapped__"))
+                .cloned()
+        } else {
+            None
+        };
         let application = self.prepare_decorator_application(decorator, decoratee, range, errors);
         // Run a decorator call, buffering errors so we can decide between the primary
         // and Self-rewritten fallback without double-reporting.
@@ -2032,8 +2117,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             errors.extend(primary_errors);
             primary_return
         };
-        let decorated_value =
+        let mut decorated_value =
             self.decorate_returned_callable(raw_return, metadata, &application.original_decoratee);
+        if let Some(wrapped) = wrapped {
+            decorated_value.set_wrapped(wrapped);
+        }
         // Given the raw `decorated_value`, which may include `Type::Quantified` type variables
         // coming from a `Forall` in the original decoratee, we need to create the proper output
         // type:

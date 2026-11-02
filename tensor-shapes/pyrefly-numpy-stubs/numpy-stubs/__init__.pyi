@@ -703,6 +703,21 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
     def __len__[N: IntVar, Rest: _Shape = []](
         self: ndarray[[N, *Rest]],
     ) -> Int[N]: ...
+    # A gradual rank can match these fixed ranks; scalar-only returns would be unsafe.
+    @overload
+    def __getitem__[N: IntVar, ScalarT: generic](
+        self: ndarray[[N], _dtype[ScalarT]], key: int, /
+    ) -> Any: ...
+    @overload
+    def __getitem__(self: ndarray[[], _DTypeT_co], key: tuple[()], /) -> Any: ...
+    @overload
+    def __getitem__[N: IntVar](
+        self: ndarray[[N], _DTypeT_co], key: tuple[int], /
+    ) -> Any: ...
+    @overload
+    def __getitem__[N: IntVar, M: IntVar](
+        self: ndarray[[N, M], _DTypeT_co], key: tuple[int, int], /
+    ) -> Any: ...
     @overload
     def __getitem__[
         N: IntVar,

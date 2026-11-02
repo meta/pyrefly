@@ -1037,6 +1037,115 @@ def f[T](x: T) -> T:
 );
 
 testcase!(
+    test_overloaded_async_iterator_impl,
+    r#"
+from collections.abc import AsyncIterator
+from typing import Literal, assert_type, overload
+
+class Patch:
+    pass
+
+class FullState(Patch):
+    pass
+
+@overload
+def astream(*, diff: Literal[True] = ...) -> AsyncIterator[Patch]: ...
+@overload
+def astream(*, diff: Literal[False]) -> AsyncIterator[FullState]: ...
+async def astream(*, diff: bool = True) -> AsyncIterator[Patch] | AsyncIterator[FullState]:
+    if diff:
+        yield Patch()
+    else:
+        yield FullState()
+
+assert_type(astream(), AsyncIterator[Patch])
+assert_type(astream(diff=True), AsyncIterator[Patch])
+assert_type(astream(diff=False), AsyncIterator[FullState])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_coroutine_factory,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, assert_type, overload
+
+async def stream[T](value: T) -> AsyncIterator[T]:
+    yield value
+
+async def make_stream[T](value: T) -> AsyncIterator[T]:
+    return stream(value)
+
+@overload
+async def factory(value: int) -> AsyncIterator[int]: ...
+@overload
+async def factory(value: str) -> AsyncIterator[str]: ...
+def factory(value: int | str) -> Any:
+    return make_stream(value)
+
+async def check() -> None:
+    result = assert_type(factory(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await factory("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_explicit_coroutine,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, assert_type, overload
+
+async def stream[T](value: T) -> AsyncIterator[T]:
+    yield value
+
+async def make_stream[T](value: T) -> AsyncIterator[T]:
+    return stream(value)
+
+@overload
+def factory(value: int) -> Coroutine[Any, Any, AsyncIterator[int]]: ...
+@overload
+def factory(value: str) -> Coroutine[Any, Any, AsyncIterator[str]]: ...
+def factory(value: int | str) -> Any:
+    return make_stream(value)
+
+async def check() -> None:
+    result = assert_type(factory(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await factory("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_inconsistent_impl,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, Protocol, assert_type, overload
+
+class StreamFactory(Protocol):
+    @overload
+    async def stream(self, value: int) -> AsyncIterator[int]: ...
+    @overload
+    async def stream(self, value: str) -> AsyncIterator[str]: ...
+
+@overload
+async def stream(value: int) -> AsyncIterator[int]: ...  # E: is not assignable to implementation return type
+@overload
+async def stream(value: str) -> AsyncIterator[str]: ...  # E: is not assignable to implementation return type
+async def stream(value: int | str) -> AsyncIterator[int | str]:
+    yield value
+
+async def check(factory: StreamFactory) -> None:
+    result = assert_type(stream(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await stream("value"), AsyncIterator[str])
+    result_from_protocol = assert_type(factory.stream(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result_from_protocol, AsyncIterator[int])
+    assert_type(await factory.stream("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
     test_param_consistency,
     r#"
 from typing import overload
@@ -2827,6 +2936,194 @@ class Box(Generic[T]):
 def f(box: Box[Any]) -> None:
     box.then(lambda r: r.name)
     g = lambda r: r.name  # E: Type of lambda parameter `r` is unknown  # E: The type of attribute `name` is unknown
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/5396
+testcase!(
+    test_overload_lambda_parameter_after_boolop,
+    TestEnv::new().enable_unknown_attribute_access_error(),
+    r#"
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import assert_type
+
+@dataclass
+class D:
+    a: str | None
+    b: str
+
+def apply(f: Callable[[D], object]) -> None: ...
+
+def check(ds: list[D]) -> None:
+    sorted(ds, key=lambda d: (d.a or "", assert_type(d.b, str)))
+    ds.sort(key=lambda d: (d.a or "", assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (d.a, assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (assert_type(d.b, str), d.a or ""))
+    apply(lambda d: (d.a or "", assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (d.a and assert_type(d.a, str), assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (assert_type(d.a, str) if d.a else "", assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (d.a or "", d.a or "", assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (
+        d.a or "",
+        sorted(ds, key=lambda inner: (
+            inner.a or "", assert_type(inner.b, str), assert_type(d.b, str),
+        )),
+    ))
+"#,
+);
+
+testcase!(
+    test_overload_lambda_narrowing_with_different_parameter_hints,
+    r#"
+from typing import Any, Callable, assert_type, overload
+
+@overload
+def choose(f: Callable[[int | None], int]) -> int: ...
+@overload
+def choose(f: Callable[[str | None], str]) -> str: ...
+def choose(f: Any) -> Any: ...
+
+assert_type(choose(lambda x: (x or "", x.upper() if x else "")[1]), str)
+assert_type(choose(lambda x: (x or 0, x + 1 if x else 0)[1]), int)
+"#,
+);
+
+// Sequential boolean expressions form a DAG of narrowed reads of the same parameter.
+testcase!(
+    test_overload_lambda_narrowing_chain,
+    r#"
+from typing import Callable, assert_type
+
+class D:
+    a: str | None
+    b: str
+
+def apply(f: Callable[[D], object]) -> None: ...
+
+def check(ds: list[D]) -> None:
+    apply(lambda d: (
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        assert_type(d.b, str),
+    ))
+"#,
+);
+
+testcase!(
+    test_overload_lambda_nested_parameter_hints,
+    r#"
+from typing import Any, Callable, assert_type, overload
+
+@overload
+def choose(f: Callable[[int | None], int]) -> int: ...
+@overload
+def choose(f: Callable[[str | None], str]) -> str: ...
+def choose(f: Any) -> Any: ...
+
+def apply(f: Callable[[str | None], object]) -> None: ...
+
+assert_type(choose(lambda x: (
+    x or "",
+    apply(lambda y: (y or "", x or "", y.upper() if y else "")),
+    x.upper() if x else "",
+)[2]), str)
+assert_type(choose(lambda x: (
+    x or 0,
+    apply(lambda y: (y or "", x or 0, y.upper() if y else "")),
+    x + 1 if x else 0,
+)[2]), int)
+
+@overload
+def pair(f: Callable[[int | None, str | None], int]) -> int: ...
+@overload
+def pair(f: Callable[[str | None, int | None], str]) -> str: ...
+def pair(f: Any) -> Any: ...
+
+assert_type(pair(lambda x, y: (
+    x or "", y or 0, y + 1 if y else 0, x.upper() if x else "",
+)[3]), str)
+"#,
+);
+
+testcase!(
+    test_overload_lambda_replayed_predicate,
+    r#"
+from typing import Callable, assert_type
+
+def apply(f: Callable[[str | None], object]) -> None: ...
+
+apply(lambda x: (
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    assert_type(x, str | None),
+))
+"#,
+);
+
+testcase!(
+    test_overload_lambda_replayed_unsolved_default,
+    r#"
+from typing import Callable, assert_type
+
+def apply(f: Callable[[list[str] | None], object]) -> None: ...
+
+apply(lambda x: (
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    assert_type(x, list[str] | None),
+))
+"#,
+);
+
+testcase!(
+    test_overload_lambda_replayed_capture,
+    r#"
+from typing import Callable, assert_type
+
+def apply(f: Callable[[str | None], object]) -> None: ...
+
+apply(lambda x: (
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    assert_type(x, str | None),
+))
 "#,
 );
 

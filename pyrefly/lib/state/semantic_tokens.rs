@@ -827,6 +827,13 @@ impl SemanticTokenBuilder {
                 }
                 x.recurse(&mut |x| self.process_stmt(x, false, get_symbol_kind));
             }
+            Stmt::TypeAlias(type_alias) => {
+                self.push_if_in_range(
+                    TextRange::at(type_alias.start(), text_size("type".len())),
+                    SemanticTokenTypes::Keyword,
+                    Vec::new(),
+                );
+            }
             Stmt::Assign(assign) => {
                 if self.is_disabled(assign.range()) {
                     for target in &assign.targets {
@@ -983,7 +990,7 @@ fn collect_disabled_ranges_from_stmt(
     match stmt {
         Stmt::If(if_stmt) => {
             let mut prior_true_branch = false;
-            for (test, body) in Ast::if_branches(if_stmt) {
+            for (_, test, body) in Ast::if_branches(if_stmt) {
                 let eval = test.and_then(|expr| sys_info.evaluate_bool(expr));
                 let branch_reachable = if prior_true_branch {
                     false

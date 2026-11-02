@@ -1822,6 +1822,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     Some(ty) => parse_base_class_type(ty),
                 }
             }
+            BaseClass::Call(x) => {
+                // Call diagnostics are reported by `TypeCheckBaseClassExpr`.
+                let errors = ErrorCollector::new(self.module().dupe(), ErrorStyle::Never);
+                let ty = self.expr_infer(x.as_expr(), &errors);
+                match self.untype_opt(ty.clone(), x.range(), &errors) {
+                    None => BaseClassParseResult::InvalidType(ty, x.range()),
+                    Some(ty) => parse_base_class_type(ty),
+                }
+            }
             BaseClass::NamedTuple(..) => parse_base_class_type(
                 self.heap
                     .mk_class_type(self.stdlib.named_tuple_fallback().clone()),
@@ -2138,7 +2147,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 (base, mro)
             })
             .collect();
-        ClassMro::new(cls, bases_with_mros, errors)
+        // Two specializations of the same ancestor reached through different base
+        // paths conflict unless the later one is assignable to the first, which is
+        // the specialization the MRO keeps. Assignability of the whole specialized
+        // class respects the ancestor's variance, so specializations that differ
+        // only in a contravariant position stay consistent (see issue #4842).
+        let targs_consistent = |prev: &ClassType, cur: &ClassType| -> bool {
+            self.is_subset_eq(&cur.clone().to_type(), &prev.clone().to_type())
+        };
+        ClassMro::new(cls, bases_with_mros, errors, &targs_consistent)
     }
 
     /// Resolve `cls`'s disjoint-base representative.

@@ -1,6 +1,9 @@
 name: "Automation: Label PR size"
 
-on: [pull_request_target]
+# Called from automation_pr_state.yml so that jobs there can read the size
+# label after it is set. Do not add other triggers: a second run would race
+# with this run's removal and re-adding of size labels.
+on: workflow_call
 
 permissions: {}
 
@@ -43,9 +46,10 @@ jobs:
           l_max_size: '300'
           xl_label: 'size/xl'
           fail_if_xl: 'false'
+          # The labeler matches these as bash glob patterns.
           files_to_ignore: |
-            ^test/
-            ^website/
-            ^pyrefly/lib/test/
+            test/*
+            website/*
+            pyrefly/lib/test/*
           ignore_line_deletions: 'true'
           ignore_file_deletions: 'true'

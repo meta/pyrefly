@@ -46,6 +46,25 @@ jobs:
         AR_wasm32_wasip1: ${{ runner.temp }}/wasi-sdk-34.0-x86_64-linux/bin/llvm-ar
       run: cargo check -p pyrefly --lib --target wasm32-wasip1 --locked
 
+  check_wasm_browser:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: stable
+        targets: wasm32-unknown-unknown
+    - name: set up rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: pyrefly-wasm-browser
+    - name: Build browser package
+      working-directory: pyrefly_wasm
+      env:
+        CC_wasm32_unknown_unknown: clang
+        AR_wasm32_unknown_unknown: llvm-ar
+      run: cargo build --lib --target wasm32-unknown-unknown --locked
+
   test:
     runs-on: ${{ matrix.os }}
 

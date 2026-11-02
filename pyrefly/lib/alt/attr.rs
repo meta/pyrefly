@@ -10,12 +10,12 @@ use std::iter;
 use dupe::Dupe;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::literal::LitEnum;
 use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::shaped_array::shape_to_tuple_carrier;
 use pyrefly_types::shaped_array::shape_to_tuple_carrier_arg;
-use pyrefly_types::simplify::intersect;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::typed_dict::TypedDictInner;
 use pyrefly_types::types::Forallable;
@@ -60,6 +60,7 @@ use crate::types::literal::Lit;
 use crate::types::module::ModuleType;
 use crate::types::quantified::Quantified;
 use crate::types::quantified::QuantifiedKind;
+use crate::types::quantified::QuantifiedOrigin;
 use crate::types::read_only::ReadOnlyReason;
 use crate::types::type_info::TypeInfo;
 use crate::types::type_var::Restriction;
@@ -495,6 +496,8 @@ enum AttributeBase1 {
     EnumLiteral(LitEnum),
     LiteralString,
     ClassInstance(ClassType),
+    /// A function with a precise `__wrapped__` attribute and ordinary function behavior.
+    WrappedFunction(ClassType, Type),
     ClassObject(ClassBase),
     Module(ModuleType),
     /// Attribute access on a type parameter in a value position.
@@ -744,6 +747,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         match base {
             AttributeBase1::ClassInstance(class) => {
                 self.add_class_fields(class.class_object(), candidates);
+            }
+            AttributeBase1::WrappedFunction(class, _) => {
+                self.add_class_fields(class.class_object(), candidates);
+                candidates.insert(Name::new_static("__wrapped__"));
             }
             AttributeBase1::ClassObject(class_base) => {
                 self.add_class_fields(class_base.class_object(), candidates);
@@ -1458,7 +1465,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return None;
         };
         let ty = match class_attr {
-            ClassAttribute::ReadWrite(ty, _) | ClassAttribute::ReadOnly(ty, _) => ty,
+            ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => ty,
             _ => return None,
         };
         let Type::BoundMethod(bound_method) = ty else {
@@ -1481,8 +1488,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         new_bound_method.func = BoundMethodType::Overload(filtered_overload);
         let new_method = self.heap.mk_bound_method(new_bound_method);
         Some(Attribute::ClassAttribute(match class_attr {
-            ClassAttribute::ReadWrite(_, is_method) => {
-                ClassAttribute::ReadWrite(new_method, *is_method)
+            ClassAttribute::ReadWrite(_, is_method, is_instance_var) => {
+                ClassAttribute::ReadWrite(new_method, *is_method, *is_instance_var)
             }
             ClassAttribute::ReadOnly(_, reason) => {
                 ClassAttribute::ReadOnly(new_method, reason.clone())
@@ -1531,7 +1538,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 let want_is_dunder_method = attr_name.starts_with("__")
                     && attr_name.ends_with("__")
-                    && matches!(want, ClassAttribute::ReadWrite(_, IsMethod::Yes));
+                    && matches!(want, ClassAttribute::ReadWrite(_, IsMethod::Yes, _));
                 for (got_attr, _) in got_attrs.iter() {
                     // A `__getattr__` fallback is not evidence that the missing member exists
                     // when Python would not consult `__getattr__` for it: `__getattr__` governs
@@ -1647,13 +1654,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             Attribute::Simple(ty) => Ok(ty),
             Attribute::ModuleFallback(_, name, ty) => {
-                self.error_with_context(
-                    errors,
+                errors.error_builder(
                     range,
                     ErrorKind::ImplicitImport,
                     format!("Module `{name}` exists, but was not imported explicitly. You are relying on other modules to load it."),
-                    context,
-                );
+                )
+                .with_context(context)
+                .with_quick_fix(ErrorQuickFix::ImportModule { module: name })
+                .emit();
                 Ok(ty)
             }
             Attribute::GetAttr(_, getattr_attr, name) => self
@@ -1736,17 +1744,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut read_only_reason = None;
         let mut is_class_attribute = false;
         let mut is_method = IsMethod::No;
+        let mut is_instance_var = false;
         for base_results in candidates {
             let [(attribute, _)] = base_results.as_slice() else {
                 return None;
             };
             let ty = match attribute {
                 Attribute::Simple(ty) => ty,
-                Attribute::ClassAttribute(ClassAttribute::ReadWrite(ty, base_is_method)) => {
+                Attribute::ClassAttribute(ClassAttribute::ReadWrite(
+                    ty,
+                    base_is_method,
+                    base_is_instance_var,
+                )) => {
                     is_class_attribute = true;
                     if *base_is_method == IsMethod::Yes {
                         is_method = IsMethod::Yes;
                     }
+                    is_instance_var |= *base_is_instance_var;
                     ty
                 }
                 Attribute::ClassAttribute(ClassAttribute::ReadOnly(ty, reason)) => {
@@ -1761,7 +1775,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             types.push(ty.clone());
         }
         let combined = match combine {
-            Combine::Intersect => intersect(types, Type::any_implicit(), self.heap),
+            Combine::Intersect => self.intersect_guarantees(&types),
             Combine::Overloaded => Type::combine_overload_results(types, self.heap)?,
         };
         let attribute = if is_class_attribute {
@@ -1769,7 +1783,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Some(reason) => {
                     Attribute::class_attribute(ClassAttribute::read_only(combined, reason))
                 }
-                None => Attribute::class_attribute(ClassAttribute::ReadWrite(combined, is_method)),
+                None => Attribute::class_attribute(ClassAttribute::ReadWrite(
+                    combined,
+                    is_method,
+                    is_instance_var,
+                )),
             }
         } else {
             Attribute::simple(combined)
@@ -1940,6 +1958,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     acc.not_found(NotFoundOn::ClassObject(class.class_object().dupe(), base))
                 } else {
                     self.lookup_attr_static1((**protocol_base).clone(), attr_name, acc)
+                }
+            }
+            AttributeBase1::WrappedFunction(class, wrapped) => {
+                if attr_name.as_str() == "__wrapped__" {
+                    acc.found_type(wrapped.clone(), base);
+                } else {
+                    self.lookup_attr_static1(
+                        AttributeBase1::ClassInstance(class.clone()),
+                        attr_name,
+                        acc,
+                    );
                 }
             }
             AttributeBase1::BoundMethod(bound_func) => {
@@ -2294,6 +2323,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             AttributeBase1::ClassInstance(cls)
+            | AttributeBase1::WrappedFunction(cls, _)
             | AttributeBase1::SelfType(cls)
             | AttributeBase1::EnumLiteral(LitEnum { class: cls, .. })
             | AttributeBase1::Quantified(_, cls)
@@ -2530,6 +2560,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         quantified: Quantified,
         bound: AttributeBase1,
     ) -> Option<AttributeBase1> {
+        if quantified.identity().origin == QuantifiedOrigin::MethodReceiver {
+            // Preserve each bound's descriptor binding behavior. Use Self so
+            // classmethod results refer to the class, not type[Receiver].
+            return Some(match bound {
+                AttributeBase1::ClassInstance(cls) => {
+                    AttributeBase1::SelfType(self.as_class_type_unchecked(cls.class_object()))
+                }
+                AttributeBase1::ClassObject(cls) | AttributeBase1::GenericAlias(cls) => {
+                    AttributeBase1::ClassObject(ClassBase::SelfType(
+                        self.as_class_type_unchecked(cls.class_object()),
+                    ))
+                }
+                _ => unreachable!("a method receiver is bounded by its class and instances"),
+            });
+        }
         match bound {
             AttributeBase1::Any(style) => Some(AttributeBase1::Any(style)),
             AttributeBase1::ClassObject(ClassBase::ClassDef(cls) | ClassBase::ClassType(cls)) => {
@@ -2562,6 +2607,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut acc = Vec::new();
         self.as_attribute_base1(ty, &mut acc);
         Vec1::try_from_vec(acc).map(AttributeBase).ok()
+    }
+
+    /// The classes that an attribute lookup on `base` searches, or `None` if the lookup searches
+    /// anything other than classes, such as a module or `Any`.
+    pub(crate) fn attribute_lookup_classes(&self, base: &Type) -> Option<Vec<Class>> {
+        let mut bases = self.as_attribute_base(base.clone())?.0.into_vec();
+        let mut classes = Vec::new();
+        while let Some(base) = bases.pop() {
+            match base {
+                AttributeBase1::ClassInstance(cls)
+                | AttributeBase1::SelfType(cls)
+                | AttributeBase1::Quantified(_, cls) => classes.push(cls.class_object().dupe()),
+                AttributeBase1::EnumLiteral(lit) => classes.push(lit.class.class_object().dupe()),
+                AttributeBase1::ClassObject(cls) => classes.push(cls.class_object().dupe()),
+                AttributeBase1::Composite { bases: more, .. } => bases.extend(more),
+                _ => return None,
+            }
+        }
+        Some(classes)
     }
 
     pub(crate) fn try_reproject_class_type_to_shaped_array(
@@ -2720,6 +2784,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::Callable(c) if matches!(c.params, Params::Partial(_)) => acc.push(
                 AttributeBase1::ClassInstance(self.stdlib.partial(c.ret.clone())),
             ),
+            _ if !matches!(ty, Type::BoundMethod(_))
+                && let Some(metadata) = ty.toplevel_func_metadata()
+                && let Some(wrapped) = &metadata.flags.wrapped =>
+            {
+                let class = if let FunctionKind::CallbackProtocol(cls) = &metadata.kind {
+                    (**cls).clone()
+                } else {
+                    self.stdlib.function_type().clone()
+                };
+                acc.push(AttributeBase1::WrappedFunction(class, (**wrapped).clone()));
+            }
             Type::Callable(_) => acc.push(AttributeBase1::ClassInstance(
                 self.stdlib.function_type().clone(),
             )),
@@ -3440,6 +3515,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         res: &mut Vec<AttrInfo>,
     ) {
         self.completions_class(cls.class_object(), expected_attribute_name, res);
+        if let Some(DjangoClassMetadata::Manager { queryset }) = cls.django_metadata() {
+            let mut forwarded = Vec::new();
+            self.completions_class(
+                queryset.class_object(),
+                expected_attribute_name,
+                &mut forwarded,
+            );
+            for info in forwarded {
+                if !res.iter().any(|existing| existing.name == info.name)
+                    && self
+                        .get_django_instance_attribute(cls, &info.name)
+                        .is_some()
+                {
+                    res.push(info);
+                }
+            }
+        }
     }
 
     fn completions_module(
@@ -3526,7 +3618,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .into_iter()
                     .filter_map(|(attr, _)| {
                         match &attr {
-                            Attribute::ClassAttribute(ClassAttribute::ReadWrite(ty, _))
+                            Attribute::ClassAttribute(ClassAttribute::ReadWrite(ty, ..))
                             | Attribute::ClassAttribute(ClassAttribute::ReadOnly(ty, _))
                             | Attribute::Simple(ty)
                             | Attribute::ClassAttribute(ClassAttribute::Property(ty, _, _))
@@ -3568,6 +3660,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             | AttributeBase1::EnumLiteral(LitEnum { class, .. })
             | AttributeBase1::Quantified(_, class) => {
                 self.completions_class_type(class, expected_attribute_name, res)
+            }
+            AttributeBase1::WrappedFunction(class, _) => {
+                self.completions_class_type(class, expected_attribute_name, res);
+                let name = Name::new_static("__wrapped__");
+                if expected_attribute_name.is_none_or(|expected| *expected == name) {
+                    res.push(AttrInfo {
+                        name,
+                        ty: None,
+                        is_deprecated: false,
+                        definition: AttrDefinition::Synthetic,
+                        is_reexport: false,
+                        is_from_object: false,
+                    });
+                }
             }
             AttributeBase1::ShapedArrayInstance(tensor) => {
                 self.completions_class_type(&tensor.base_class, expected_attribute_name, res)

@@ -151,6 +151,10 @@ pub struct DataclassFieldKeywords {
     pub init_by_name: bool,
     /// If non-None, this field should have a corresponding parameter in `__init__` with the given alias.
     pub init_by_alias: Option<Name>,
+    /// A Pydantic validation alias was supplied but is not a known string.
+    pub pydantic_unknown_validation_alias: bool,
+    /// Unmodeled Pydantic annotation metadata may change how raw input is validated.
+    pub pydantic_unchecked_metadata: bool,
     /// gt and lt specify the range of values that the field can take. None means no constraint
     pub lt: Option<Type>,
     pub gt: Option<Type>,
@@ -165,6 +169,11 @@ pub struct DataclassFieldKeywords {
     /// Per-field attrs `on_setattr`, which overrides the class-level default. `None` = not set,
     /// `Some(true)` = `setters.frozen` (read-only), `Some(false)` = some other hook (writable).
     pub attrs_setattr_frozen: Option<bool>,
+    /// Pydantic only: whether the field's `Annotated` metadata has a custom schema,
+    /// i.e. a `__get_pydantic_core_schema__` hook that is defined outside Pydantic
+    /// (or by Pydantic's `BeforeValidator`, `PlainValidator` or `WrapValidator`). Such a field
+    /// may accept input that is not of its declared type.
+    pub pydantic_has_custom_schema: bool,
 }
 
 impl DataclassFieldKeywords {
@@ -188,6 +197,8 @@ impl DataclassFieldKeywords {
             kw_only: None,
             init_by_name: true,
             init_by_alias: None,
+            pydantic_unknown_validation_alias: false,
+            pydantic_unchecked_metadata: false,
             lt: None,
             gt: None,
             ge: None,
@@ -196,6 +207,7 @@ impl DataclassFieldKeywords {
             strict: None,
             frozen: None,
             attrs_setattr_frozen: None,
+            pydantic_has_custom_schema: false,
         }
     }
 

@@ -1214,6 +1214,316 @@ def f(cond: bool) -> None:
     assert_eq!(polars_column_completion_labels(code), vec!["id".to_owned()]);
 }
 
+fn contextual_dict_completions(body: &str) -> Vec<CompletionItem> {
+    let line = body.lines().last().unwrap();
+    let caret = " ".repeat(line.find('|').unwrap() - 1);
+    let body = body.replace('|', "");
+    let code = format!(
+        r#"
+from typing import TypedDict
+
+class Config(TypedDict):
+    name: str
+    age: int
+
+def take(cfg: Config) -> None: ...
+name = "x"
+options: dict[str, object] = {{}}
+
+{body}
+#{caret}^
+"#,
+    );
+    let (handles, state) = mk_multi_file_state(&[("main", &code)], Require::Exports, false);
+    let position = extract_cursors_for_test(&code)[0];
+    state.transaction().completion(
+        &handles["main"],
+        position,
+        ImportFormat::Absolute,
+        true,
+        None,
+    )
+}
+
+// An unpacked mapping contains call-argument names, not the fields of a parameter's TypedDict.
+#[test]
+fn dict_completion_unpacking_parameter_context() {
+    for body in ["take(**{\"|\"})", "take(**{\"|\": 0})", "take(**dict(|))"] {
+        let labels = contextual_dict_completions(body)
+            .into_iter()
+            .map(|item| item.label)
+            .collect::<Vec<_>>();
+        for field in ["age", "name"] {
+            let label = if body.contains("dict(") {
+                format!("{field}=")
+            } else {
+                field.to_owned()
+            };
+            assert!(!labels.contains(&label), "{body}: {labels:?}");
+        }
+    }
+}
+
+#[test]
+fn dict_completion_string_cursor_window() {
+    for (body, expected) in [
+        ("cfg: Config = {|    \"\"}", vec!["age", "name"]),
+        ("cfg: Config = {|     \"\"}", vec![]),
+        ("cfg: Config = {\"\"|}", vec!["age", "name"]),
+        ("cfg: Config = {\"\" |}", vec![]),
+        ("cfg: Config = {|    \"\": 0}", vec!["age", "name"]),
+        ("cfg: Config = {|     \"\": 0}", vec![]),
+    ] {
+        let mut labels = contextual_dict_completions(body)
+            .into_iter()
+            .filter(|item| item.kind == Some(CompletionItemKind::Field))
+            .map(|item| item.label)
+            .collect::<Vec<_>>();
+        labels.sort();
+        assert_eq!(labels, expected, "{body}");
+    }
+}
+
+#[test]
+fn dict_completion_constructor_keyword_positions() {
+    for (body, expected) in [
+        ("cfg: Config = dict(|)", vec!["age=", "name="]),
+        ("cfg: Config = dict(na|)", vec!["age=", "name="]),
+        ("cfg: Config = dict(name=\"x\", |)", vec!["age="]),
+        ("cfg: Config = dict(name=\"x\", na|)", vec!["age="]),
+        ("cfg: Config = dict(na|=\"x\")", vec!["age=", "name="]),
+        ("cfg: Config = dict(name|=\"x\", age=0)", vec!["name="]),
+        ("cfg: Config = dict(name=na|)", vec![]),
+        ("cfg: Config = dict(name=[na|])", vec![]),
+        ("cfg: Config = dict(name={\"x\": na|})", vec![]),
+        ("cfg: Config = dict(**na|)", vec![]),
+        ("cfg: Config = dict({\"name\": \"x\"}, na|)", vec![]),
+        ("cfg: Config = dict(options, |)", vec![]),
+        ("cfg: Config = dict(name=str(na|))", vec![]),
+        ("cfg: Config = dict(name=dict(na|))", vec![]),
+        ("cfg: Config = dict(**{\"name\": \"x\"}, |)", vec!["age="]),
+        ("cfg: Config = dict(**dict(name=\"x\"), |)", vec!["age="]),
+        ("cfg: Config = dict(**options, |)", vec!["age=", "name="]),
+    ] {
+        let mut labels = contextual_dict_completions(body)
+            .into_iter()
+            .map(|item| item.label)
+            .filter(|label| matches!(label.as_str(), "age=" | "name="))
+            .collect::<Vec<_>>();
+        labels.sort();
+        assert_eq!(labels, expected, "{body}");
+    }
+}
+
+#[test]
+fn dict_completion_large_literal() {
+    let entries = (0..1000)
+        .map(|i| format!("    \"key{i}\": {i},\n"))
+        .collect::<String>();
+    let code = format!("data = {{\n{entries}    \"\": 0,\n#    ^\n}}\n");
+    let (handles, state) = mk_multi_file_state(&[("main", &code)], Require::Exports, false);
+    let handle = handles.get("main").unwrap();
+    let position = extract_cursors_for_test(&code)[0];
+    let txn = state.transaction();
+    let labels = dict_field_labels(&txn, handle, position);
+    assert!(labels.is_empty(), "{labels:?}");
+}
+
+#[test]
+fn dict_completion_preserves_dataframe_sets() {
+    for call in [r#"df.select({""})"#, r#"df.select({"foo", ""})"#] {
+        assert_eq!(
+            polars_column_completion_labels(&dataframe_column_completion_code("polars", call)),
+            vec!["bar".to_owned(), "foo".to_owned()],
+        );
+    }
+    assert_eq!(
+        pandas_column_completion_labels(&dataframe_column_completion_code(
+            "pandas",
+            r#"df.filter(items={""})"#,
+        )),
+        vec!["bar".to_owned(), "foo".to_owned()],
+    );
+}
+
+#[test]
+fn dict_completion_expected_type_belongs_to_construction() {
+    let code = r#"
+from typing import TypedDict
+
+class Config(TypedDict):
+    name: str
+    age: int
+
+def take(cfg: Config) -> None: ...
+
+lookup: dict[str, Config] = {}
+take(lookup[""])
+#            ^
+take({"name": {"": 0}, "age": 0})
+#              ^
+take({"name": {""}, "age": 0})
+#              ^
+take([{""}])
+#       ^
+take([{"": 0}])
+#       ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let handle = handles.get("main").unwrap();
+    let txn = state.transaction();
+    for position in extract_cursors_for_test(code) {
+        let labels = dict_field_labels(&txn, handle, position);
+        assert!(
+            labels.iter().all(|label| label != "name" && label != "age"),
+            "Unexpected Config fields at {position:?}: {labels:?}",
+        );
+    }
+}
+
+#[test]
+fn dict_completion_recovers_direct_and_nested_typed_dict_arguments() {
+    let code = r#"
+from typing import TypedDict
+
+class Config(TypedDict):
+    name: str
+    age: int
+
+class Outer(TypedDict):
+    inner: Config
+
+def take(cfg: Config) -> None: ...
+def take_outer(cfg: Outer) -> None: ...
+
+take(cfg={""})
+#          ^
+take_outer({"inner": {""}})
+#                     ^
+take_outer({"inner": {"": 0}})
+#                     ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let handle = handles.get("main").unwrap();
+    let txn = state.transaction();
+    for position in extract_cursors_for_test(code) {
+        assert_eq!(
+            dict_field_labels(&txn, handle, position),
+            vec!["age".to_owned(), "name".to_owned()],
+        );
+    }
+}
+
+#[test]
+fn dict_completion_constructor_owns_cursor_and_resolves_builtin() {
+    for (body, expected) in [
+        ("cfg: Config = dict(|)", true),
+        ("cfg: Config = dict(name=str(|))", false),
+        ("def dict() -> Config: ...\ncfg: Config = dict(|)", false),
+        (
+            "from builtins import dict as mapping\ncfg: Config = mapping(|)",
+            true,
+        ),
+        ("import builtins\ncfg: Config = builtins.dict(|)", true),
+        ("cfg: Config = dict(name=dict(|))", false),
+        ("take(dict(|))", true),
+        ("take(cfg=dict(|))", true),
+        ("take([dict(|)])", false),
+    ] {
+        let items = contextual_dict_completions(body);
+        for (label, detail) in [("age=", "int"), ("name=", "str")] {
+            assert_eq!(
+                items
+                    .iter()
+                    .any(|item| { item.label == label && item.detail.as_deref() == Some(detail) }),
+                expected,
+                "{body}: {items:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn dict_completion_constructor_skips_unwritable_keys() {
+    let code = r#"
+from typing import TypedDict
+
+Weird = TypedDict("Weird", {"ok": int, "class": str, "two words": bytes, "": float})
+
+cfg: Weird = dict(
+#                 ^
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    let report = strip_ansi(&report);
+    assert!(report.contains("- (Variable) ok=: int"), "{report}");
+    for invalid in ["class=:", "two words=:", "(Variable) =:"] {
+        assert!(!report.contains(invalid), "{report}");
+    }
+}
+
+#[test]
+fn dict_key_completion_from_incomplete_typed_dict_literal() {
+    let code = r#"
+from typing import TypedDict
+
+class Config(TypedDict):
+    name: str
+    age: int
+
+cfg: Config = {""}
+#              ^
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    let report = strip_ansi(&report);
+    assert!(report.contains("- (Field) age: int"), "{report}");
+    assert!(report.contains("- (Field) name: str"), "{report}");
+}
+
+#[test]
+fn kwargs_completion_from_typed_dict_dict_constructor() {
+    let code = r#"
+from typing import TypedDict
+
+class Config(TypedDict):
+    name: str
+    age: int
+
+cfg: Config = dict(
+#                 ^
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    let report = strip_ansi(&report);
+    assert!(report.contains("- (Variable) age=: int"), "{report}");
+    assert!(report.contains("- (Variable) name=: str"), "{report}");
+}
+
+#[test]
+fn dict_key_completion_from_incomplete_typed_dict_call_argument() {
+    let code = r#"
+from typing import TypedDict
+
+class Box(TypedDict):
+    x: float
+    y: float
+    z: float
+
+def take(box: Box):
+    return
+
+take({""})
+#      ^
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    let report = strip_ansi(&report);
+    assert!(report.contains("- (Field) x: float"), "{report}");
+    assert!(report.contains("- (Field) y: float"), "{report}");
+    assert!(report.contains("- (Field) z: float"), "{report}");
+}
+
 #[test]
 fn dot_complete_with_deprecated_method() {
     let code = r#"
@@ -2409,6 +2719,40 @@ for article in Article.objects.annotate(extra_title=models.F("title")):
         completions.iter().any(|item| item.label == "extra_title"),
         "annotate() extra attribute missing from {completions:?}"
     );
+}
+
+#[test]
+fn completion_django_queryset_manager_methods() {
+    let code = r#"
+from django.db import models
+
+class Q(models.QuerySet["M"]):
+    def active(self) -> int:
+        return 1
+
+    def _private(self) -> int:
+        return 1
+
+class M(models.Model):
+    objects = Q.as_manager()
+
+M.objects.
+#         ^
+"#;
+    let mut env = django_env();
+    env.add("main", code);
+    let (state, handle) = env.with_default_require_level(Require::Exports).to_state();
+    let completions = state.transaction().completion(
+        &handle("main"),
+        extract_cursors_for_test(code)[0],
+        ImportFormat::Absolute,
+        true,
+        None,
+    );
+    assert!(completions.iter().any(|item| item.label == "active"));
+    assert!(completions.iter().any(|item| item.label == "db_manager"));
+    assert!(!completions.iter().any(|item| item.label == "_private"));
+    assert!(!completions.iter().any(|item| item.label == "delete"));
 }
 
 #[test]
@@ -4741,6 +5085,65 @@ fn completion_before_comment_with_crlf_line_endings() {
     assert!(
         completions.iter().any(|item| item.label == "x"),
         "Expected attribute completions before a comment, got {completions:?}"
+    );
+}
+
+#[test]
+fn endpoint_completion_from_client() {
+    let code = r#"
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+app = FastAPI()
+
+@app.get("/users")
+def list_users():
+    return {"ok": True}
+
+@app.post("/users")
+def create_user():
+    return {"ok": True}
+
+client = TestClient(app)
+client.get("")
+#           ^
+client.post("")
+#            ^
+"#;
+    let report =
+        super::fastapi_endpoint_support::report_with_framework(code, get_default_test_report());
+    let trimmed = report.trim();
+    for expected in [
+        "- (Value) /users: GET endpoint with text edit:",
+        "- (Value) /users: POST endpoint with text edit:",
+    ] {
+        assert!(
+            trimmed.contains(expected),
+            "missing {expected} in completions:\n{trimmed}"
+        );
+    }
+}
+
+#[test]
+fn endpoint_completion_ignores_non_http_get_calls() {
+    let code = r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/users")
+def list_users():
+    return {"ok": True}
+
+data = {}
+data.get("")
+#         ^
+"#;
+    let report =
+        super::fastapi_endpoint_support::report_with_framework(code, get_default_test_report());
+    assert!(
+        !report.contains("GET endpoint"),
+        "Expected non-HTTP get() call to avoid endpoint completions, got:\n{report}"
     );
 }
 

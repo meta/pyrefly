@@ -397,7 +397,7 @@ fn test_converted_reexports_keep_declarations_and_source_sysinfo() {
     );
     for source_handle in &handles {
         let library_handle = handle("library", source_handle.sys_info());
-        let expected_uri = Uri::from_file_path(&to_real_path(library_handle.path()).unwrap())
+        let expected_uri = Uri::from_file_path(to_real_path(library_handle.path()).unwrap())
             .unwrap()
             .to_string();
         for (variable, name, kind, line, character) in [

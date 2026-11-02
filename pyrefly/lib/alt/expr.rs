@@ -19,7 +19,6 @@ use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
-use pyrefly_types::data_frame::DataFrameKind;
 use pyrefly_types::dimension::Int;
 use pyrefly_types::dimension::canonicalize;
 use pyrefly_types::dimension::gradual_size;
@@ -90,17 +89,17 @@ use crate::alt::answers::AttributeReferenceKind;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::answers_solver::TypeCheckOptions;
+use crate::alt::call::CallStyle;
 use crate::alt::callable::CallArg;
 use crate::alt::class::typed_dict::TypedDictErrorKind;
 use crate::alt::nn_module_specials::is_nn_module_dict;
-use crate::alt::polars_specials::is_polars_series;
+use crate::alt::polars_specials::is_polars_api_series;
 use crate::alt::regex::RegexValidationError;
 use crate::alt::regex::validate_pattern;
 use crate::alt::shape_extension::is_int_tuple_bound;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::solve::UntypeContext;
 use crate::alt::unwrap::HintRef;
-use crate::alt::unwrap::ListElementHint;
 use crate::binding::binding::Binding;
 use crate::binding::binding::BindingClass;
 use crate::binding::binding::Key;
@@ -315,6 +314,8 @@ struct SubscriptTarget<'a> {
     base: &'a Type,
     /// The restricted TypeVar whose bound or constraint `base` is, if any.
     receiver: Option<&'a Type>,
+    /// An index already inferred outside speculative member matching.
+    index_ty: Option<&'a Type>,
 }
 
 impl<'a> SubscriptTarget<'a> {
@@ -322,6 +323,7 @@ impl<'a> SubscriptTarget<'a> {
         Self {
             base,
             receiver: None,
+            index_ty: None,
         }
     }
 
@@ -332,6 +334,7 @@ impl<'a> SubscriptTarget<'a> {
         SubscriptTarget {
             base,
             receiver: self.receiver,
+            index_ty: self.index_ty,
         }
     }
 
@@ -1054,6 +1057,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     errors,
                     errors,
                     |cur_hint, callable_errors, _| {
+                        let _lambda_context = self.enter_lambda_binding_context(
+                            param_ids
+                                .iter()
+                                .map(|(_, id)| *id)
+                                .chain(vararg.map(|(_, id)| id))
+                                .chain(kwarg.map(|(_, id)| id)),
+                        );
                         let implicit_any = |name: &Name, range: TextRange| {
                             self.error(
                                 callable_errors,
@@ -1250,9 +1260,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 hint,
                 |hint| self.decompose_list(hint),
                 |elem_hint, hint| {
-                    let (elem_hint, partial_fallback) = elem_hint
-                        .map(ListElementHint::into_parts)
-                        .unwrap_or_default();
                     self.ifs_infer(&x.generators, errors);
                     let elem_ty = self.expr_infer_with_hint_promote(
                         &x.elt,
@@ -1260,13 +1267,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         errors,
                         HintCoercion::BestEffort,
                     );
-                    let ty = self.heap.mk_class_type(self.stdlib.list(elem_ty));
-                    if let Some(partial_fallback) = partial_fallback {
-                        self.solver()
-                            .replace_unresolved_partials(ty, &partial_fallback)
-                    } else {
-                        ty
-                    }
+                    self.heap.mk_class_type(self.stdlib.list(elem_ty))
                 },
             ),
             Expr::SetComp(x) => self.infer_with_decomposed_hint(
@@ -1285,14 +1286,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ),
             Expr::DictComp(x) => self.infer_with_decomposed_hint(
                 hint,
-                |hint| {
-                    let (key_hint, value_hint) = self.decompose_dict(hint);
-                    if key_hint.is_none() && value_hint.is_none() {
-                        None
-                    } else {
-                        Some((key_hint, value_hint))
-                    }
-                },
+                |hint| self.decompose_dict(hint),
                 |decomposed_hints, hint| {
                     let (key_hint, value_hint) = decomposed_hints.unwrap_or_default();
                     let key_hint = key_hint.as_ref().and_then(|key_hint| {
@@ -1515,6 +1509,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // TypeVar (e.g. `list[T]()` at module scope) is an error: `T` is not bound by any
         // enclosing generic scope. Only subscript callees can introduce such a raw TypeVar.
         if matches!(&*x.func, Expr::Subscript(_)) {
+            self.quantify_call_base_legacy_typevars(&mut callee_ty, x.func.range());
             self.check_legacy_typevar_scoping(&mut callee_ty, x.func.range(), errors);
         }
 
@@ -1522,7 +1517,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.check_pytorch_tensor_cuda_call(x, &callee_ty, errors);
         self.check_pytorch_print_tensor(x, &callee_ty, errors);
         self.check_pytorch_redundant_to_call(x, &callee_ty, errors);
-        self.check_sqlalchemy_update_values_call(x, errors);
+        self.check_sqlalchemy_keyword_call(x, errors);
         if let Some(d) = self.call_to_dict(&callee_ty, &x.arguments) {
             self.dict_infer(&d, hint, x.range(), errors)
         } else if let Some(ty) = self
@@ -1896,185 +1891,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .emit();
     }
 
-    /// Validate `sqlalchemy.update(Model).values(field=...)` keyword arguments against the
-    /// `Mapped[...]` fields declared on `Model`.
-    fn check_sqlalchemy_update_values_call(&self, x: &ExprCall, errors: &ErrorCollector) {
-        let Expr::Attribute(attr_expr) = &*x.func else {
-            return;
-        };
-        if attr_expr.attr.id.as_str() != "values" {
-            return;
-        }
-        let Some(model) = self.sqlalchemy_update_model_from_chain(&attr_expr.value) else {
-            return;
-        };
-        let mapped_fields = self.sqlalchemy_mapped_model_fields(&model);
-        if mapped_fields.is_empty() {
-            return;
-        }
-        for keyword in &x.arguments.keywords {
-            let Some(field_identifier) = keyword.arg.as_ref() else {
-                continue;
-            };
-            let field_name = &field_identifier.id;
-            if mapped_fields.contains(field_name) {
-                let expected_ty = self.sqlalchemy_mapped_field_type(&model, field_name);
-                let got_ty = self.expr_infer(&keyword.value, errors);
-                if !self.is_subset_eq(&got_ty, &expected_ty)
-                    && !Self::is_sqlalchemy_owned_type(&got_ty)
-                {
-                    self.error(
-                        errors,
-                        keyword.value.range(),
-                        ErrorKind::BadArgumentType,
-                        format!(
-                            "`{}` is not assignable to field `{field_name}` with type `{}`",
-                            self.for_display(got_ty),
-                            self.for_display(expected_ty)
-                        ),
-                    );
-                }
-            } else {
-                let mut builder = errors.error_builder(
-                    field_identifier.range(),
-                    ErrorKind::UnexpectedKeyword,
-                    format!("Unexpected SQLAlchemy update field `{field_name}`"),
-                );
-                if let Some(suggestion) = best_suggestion(
-                    field_name,
-                    mapped_fields
-                        .iter()
-                        .map(|candidate| Candidate::measured(candidate, 0)),
-                ) {
-                    builder = builder.with_detail(format!("Did you mean `{suggestion}`?"));
-                }
-                builder.emit();
-            }
-        }
-    }
-
-    fn sqlalchemy_update_model_from_chain(&self, expr: &Expr) -> Option<Class> {
-        let Expr::Call(call) = expr else {
-            return None;
-        };
-        if self.is_sqlalchemy_update_call(call) {
-            return self.sqlalchemy_update_model_from_call(call);
-        }
-        let Expr::Attribute(attr_expr) = &*call.func else {
-            return None;
-        };
-        self.sqlalchemy_update_model_from_chain(&attr_expr.value)
-    }
-
-    fn is_sqlalchemy_update_call(&self, call: &ExprCall) -> bool {
-        let errors = self.error_swallower();
-        let func_ty = self.expr_infer(&call.func, &errors);
-        let Some(FunctionKind::Def(func_id)) = func_ty.to_func_kind() else {
-            return false;
-        };
-        func_id.qname.id().as_str() == "update"
-            && Self::is_sqlalchemy_module(func_id.qname.module_name())
-    }
-
-    fn is_sqlalchemy_module(module: ModuleName) -> bool {
-        let name = module.as_str();
-        // The `.` keeps unrelated distributions such as `sqlalchemy_utils` out.
-        name == "sqlalchemy" || name.starts_with("sqlalchemy.")
-    }
-
-    /// SQLAlchemy accepts a SQL expression anywhere a column value is expected, so
-    /// a value the library itself produced is not checked against the mapped type.
-    fn is_sqlalchemy_owned_type(ty: &Type) -> bool {
-        match ty {
-            Type::ClassType(cls) => Self::is_sqlalchemy_module(cls.qname().module_name()),
-            Type::Annotated(inner, _) => Self::is_sqlalchemy_owned_type(inner),
-            Type::Union(union) => union.members.iter().any(Self::is_sqlalchemy_owned_type),
-            _ => false,
-        }
-    }
-
-    fn sqlalchemy_update_model_from_call(&self, call: &ExprCall) -> Option<Class> {
-        let model_expr = call.arguments.args.first()?;
-        let errors = self.error_swallower();
-        match self.expr_infer(model_expr, &errors) {
-            Type::ClassDef(cls) => Some(cls),
-            Type::Type(boxed) => match *boxed {
-                Type::ClassType(cls) => Some(cls.into_class_object()),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    fn sqlalchemy_mapped_model_fields(&self, model: &Class) -> SmallSet<Name> {
-        // Find the SQLModel table model in the mro if there is one
-        let sqlmodel_table = self
-            .get_mro_for_class(model)
-            .ancestors_no_object()
-            .iter()
-            .rev()
-            .map(|cls| cls.class_object())
-            .chain(std::iter::once(model))
-            .skip_while(|cls| {
-                !(cls.has_toplevel_qname("sqlmodel", "SQLModel")
-                    || cls.has_toplevel_qname("sqlmodel.main", "SQLModel"))
-            })
-            .find(|cls| {
-                self.get_metadata_for_class(cls)
-                    .keywords()
-                    .iter()
-                    .any(|(name, typ)| {
-                        name == "table"
-                            && matches!(typ, Type::Literal(l) if l.value==Lit::Bool(true))
-                    })
-            });
-
-        // If there is a SQLModel table model we want to ignore the fields below it in the mro
-        let find_fields_from = sqlmodel_table.unwrap_or(model);
-
-        let mut seen_fields = SmallSet::new();
-        std::iter::once(find_fields_from)
-            .chain(
-                self.get_mro_for_class(find_fields_from)
-                    .ancestors_no_object()
-                    .iter()
-                    .map(|ancestor| ancestor.class_object()),
-            )
-            .flat_map(|class| self.get_class_field_map(class))
-            .filter_map(|(name, field)| {
-                if !seen_fields.insert(name.clone())
-                    || name.as_str().starts_with('_')
-                    || field.is_class_var()
-                {
-                    return None;
-                }
-                let (_, annotation, _) = field.for_variance_inference();
-                let is_mapped_annotation = annotation.is_some_and(|annotation| {
-                    Self::is_sqlalchemy_mapped_annotation(annotation.get_type())
-                });
-                (is_mapped_annotation || (sqlmodel_table.is_some() && annotation.is_some()))
-                    .then_some(name)
-            })
-            .collect()
-    }
-
-    fn is_sqlalchemy_mapped_annotation(ty: &Type) -> bool {
-        match ty {
-            Type::ClassType(cls) => {
-                cls.has_qname("sqlalchemy.orm", "Mapped")
-                    || cls.has_qname("sqlalchemy.orm.base", "Mapped")
-            }
-            Type::Annotated(inner, _) => Self::is_sqlalchemy_mapped_annotation(inner),
-            _ => false,
-        }
-    }
-
-    fn sqlalchemy_mapped_field_type(&self, model: &Class, field_name: &Name) -> Type {
-        let model_ty = self.instantiate(model);
-        let errors = self.error_swallower();
-        self.attr_infer_for_type(&model_ty, field_name, TextRange::default(), &errors, None)
-    }
-
     fn tuple_infer(&self, x: &ExprTuple, hint: Option<HintRef>, errors: &ErrorCollector) -> Type {
         let owner = Owner::new();
         let (hint_ts, default_hint) = if let Some(hint) = &hint {
@@ -2348,12 +2164,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if self.solver().is_partial(hint) {
                     return None;
                 }
-                let (key_hint, value_hint) = self.decompose_dict(hint);
-                if key_hint.is_none() && value_hint.is_none() {
-                    None
-                } else {
-                    Some((key_hint, value_hint))
-                }
+                self.decompose_dict(hint)
             },
             |decomposed_hints, hint| {
                 let (key_hint, value_hint) = decomposed_hints.unwrap_or_default();
@@ -3700,37 +3511,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn list_literal_infer(
         &self,
         list: &ExprList,
-        elt_hint: Option<ListElementHint>,
+        elt_hint: Option<Type>,
         hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> Type {
         if list.is_empty() {
-            let elem_ty = match elt_hint {
-                Some(ListElementHint::Hint(elem_hint)) => elem_hint,
-                Some(ListElementHint::UninformativeAny(_)) | None => self
-                    .solver()
+            let elem_ty = elt_hint.unwrap_or_else(|| {
+                self.solver()
                     .fresh_partial_contained(self.uniques, list.range)
-                    .to_type(self.heap),
-            };
+                    .to_type(self.heap)
+            });
             self.heap.mk_class_type(self.stdlib.list(elem_ty))
         } else {
-            let (elt_hint, partial_fallback) = elt_hint
-                .map(ListElementHint::into_parts)
-                .unwrap_or_default();
             let elem_tys = self.elts_infer(
                 &list.elts,
                 HintRef::with_ty_opt(hint, elt_hint.as_ref()),
                 errors,
             );
-            let ty = self
-                .heap
-                .mk_class_type(self.stdlib.list(self.unions(elem_tys)));
-            if let Some(partial_fallback) = partial_fallback {
-                self.solver()
-                    .replace_unresolved_partials(ty, &partial_fallback)
-            } else {
-                ty
-            }
+            self.heap
+                .mk_class_type(self.stdlib.list(self.unions(elem_tys)))
         }
     }
 
@@ -3916,7 +3715,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         aliases: &mut SmallSet<TypeAliasData>,
     ) -> Type {
         let xs = Ast::unpack_slice(slice);
-        let slice_ty = LazyCell::new(|| self.expr_infer(slice, errors));
+        let is_builtin_sequence = |base: &Type| match base {
+            Type::Tuple(_) => true,
+            Type::ClassType(cls) | Type::SelfType(cls) => {
+                cls.is_builtin("list")
+                    || (self.as_tuple(cls).is_some() && !self.class_overrides_tuple_getitem(cls))
+            }
+            _ => false,
+        };
+        let slice_ty = LazyCell::new(|| {
+            target
+                .index_ty
+                .cloned()
+                .unwrap_or_else(|| self.expr_infer(slice, errors))
+        });
         // The slice error depends only on `slice`, not on the union member, so compute it
         // at most once. Otherwise a union of builtin sequences (e.g.
         // `list[int] | tuple[int, ...]`) would emit the same error once per matching member.
@@ -3934,9 +3746,131 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if matches!(&base, Type::ClassDef(t) if t.name() == "tuple") {
                 base = self.heap.mk_type_of(self.heap.mk_special_form(SpecialForm::Tuple));
             }
-            if let Type::Intersect(x) = base {
-                // TODO: Handle subscription of intersections properly.
-                base = x.1;
+            if let Type::Intersect(x) = &base {
+                let (specialized, generic): (Vec<_>, Vec<_>) = x.0.iter().partition(|member| {
+                    is_builtin_sequence(member) || matches!(member, Type::TypedDict(_))
+                });
+                if !specialized.is_empty() {
+                    let index_ty = &*slice_ty;
+                    let first_use_types = self.active_first_use_types();
+                    let mut roots = vec![&base, index_ty];
+                    roots.extend(first_use_types.iter());
+                    let mut results = Vec::new();
+                    let mut failures = Vec::new();
+                    for member in specialized {
+                        let snapshot = self.solver().snapshot_reachable_vars(&roots);
+                        let member_errors = if matches!(index_ty, Type::Any(AnyStyle::Error)) {
+                            self.error_swallower()
+                        } else {
+                            self.error_collector()
+                        };
+                        let result = self.subscript_infer_for_type_with_key_present_inner(
+                            SubscriptTarget {
+                                base: member,
+                                receiver: None,
+                                index_ty: Some(index_ty),
+                            },
+                            slice,
+                            range,
+                            &member_errors,
+                            key_present,
+                            type_form_context,
+                            &mut aliases.clone(),
+                        );
+                        if member_errors.has_hard() {
+                            failures.push((member_errors, None));
+                        } else {
+                            results.push(self.solver().expand(result));
+                            errors.extend(member_errors);
+                        }
+                        self.solver().restore_vars(snapshot);
+                    }
+                    if !generic.is_empty() {
+                        let generic = self.intersect_guarantees(
+                            &generic.into_iter().cloned().collect::<Vec<_>>(),
+                        );
+                        let member_errors = self.error_collector();
+                        let return_errors = self.error_collector();
+                        let context = || ErrorContext::Index(self.for_display(base.clone()));
+                        let snapshot = self.solver().snapshot_reachable_vars(&roots);
+                        if let Some(callee) = self.type_of_magic_dunder_attr(
+                            &generic,
+                            &dunder::GETITEM,
+                            range,
+                            &member_errors,
+                            Some(&context),
+                            "Expr::subscript",
+                            true,
+                        ) {
+                            self.record_resolved_trace(range, &callee);
+                            let target = self.as_call_target_or_error(
+                                callee,
+                                CallStyle::Method(&dunder::GETITEM),
+                                range,
+                                &member_errors,
+                                Some(&context),
+                            );
+                            let index_arg = match slice {
+                                Expr::Slice(_) => CallArg::ty(index_ty, slice.range()),
+                                _ => CallArg::expr(slice),
+                            };
+                            let solver = self.for_intersection_arguments();
+                            let outcome = solver.call_infer_with_callee_range(
+                                target,
+                                &[index_arg],
+                                &[],
+                                range,
+                                None,
+                                errors,
+                                &member_errors,
+                                &return_errors,
+                                Some(&context),
+                                None,
+                                None,
+                            );
+                            if member_errors.has_hard() {
+                                failures.push((member_errors, Some(return_errors)));
+                            } else {
+                                let returns = self.solver().per_row(&outcome.overload_table, || {
+                                    self.solver().expand(outcome.ty.clone())
+                                });
+                                results.push(
+                                    Type::combine_overload_results(returns.into_vec(), self.heap)
+                                        .expect("an applicable index has at least one return"),
+                                );
+                                errors.extend(member_errors);
+                                errors.extend(return_errors);
+                            }
+                        }
+                        self.solver().restore_vars(snapshot);
+                    }
+                    if !results.is_empty() {
+                        return self.intersect_guarantees(&results);
+                    }
+                    if !failures.is_empty() {
+                        for (failure, return_errors) in failures {
+                            errors.extend(failure);
+                            if let Some(return_errors) = return_errors {
+                                errors.extend(return_errors);
+                            }
+                        }
+                        return self.heap.mk_any_error();
+                    }
+                }
+                let receiver = target.with_base(&base).getitem_receiver();
+                if let Some(result) = self.call_magic_dunder_method(
+                    receiver,
+                    &dunder::GETITEM,
+                    range,
+                    &[CallArg::expr(slice)],
+                    &[],
+                    errors,
+                    Some(&|| ErrorContext::Index(self.for_display(receiver.clone()))),
+                ) {
+                    return result;
+                }
+                // Special subscription forms without a magic method retain their existing fallback.
+                base = x.1.clone();
             }
             if let Type::Overloaded(branches) = &base {
                 return self.read_overloaded_branches(branches, errors, &|branch, errors| {
@@ -3952,25 +3886,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     )
                 });
             }
-            let is_builtin_sequence = match &base {
-                Type::Tuple(_) => true,
-                Type::ClassType(cls) | Type::SelfType(cls) => {
-                    cls.is_builtin("list")
-                        || (self.as_tuple(cls).is_some()
-                            && !self.class_overrides_tuple_getitem(cls))
-                }
-                _ => false,
-            };
+            let is_builtin_sequence = is_builtin_sequence(&base);
 
             if is_builtin_sequence
                 && let Some(error_ty) = &*slice_error
             {
                 return error_ty.clone();
             }
-            let builtin_sequence_slice_ty = match slice {
+            let builtin_sequence_slice_ty = target.index_ty.or_else(|| match slice {
                 Expr::Slice(_) if is_builtin_sequence => Some(&*slice_ty),
                 _ => None,
-            };
+            });
 
             match base {
                 Type::Forall(forall) => {
@@ -4309,7 +4235,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 Type::DataFrame(schema) => {
                     if let Expr::List(ExprList { elts, .. }) = slice
-                        && schema.kind == DataFrameKind::Polars
+                        && schema.kind.is_polars_api()
                     {
                         if elts.is_empty() {
                             return Type::DataFrame(schema);
@@ -4325,7 +4251,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         && let Some(name) = self.polars_column_name(slice)
                     {
                         match schema.columns.iter().find(|(c, _)| **c == name) {
-                            Some((_, dtype)) if schema.kind == DataFrameKind::Polars => {
+                            Some((_, dtype)) if schema.kind.is_polars_api() => {
                                 column_dtype = Some(dtype.clone());
                             }
                             Some(_) => {}
@@ -4352,7 +4278,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // Preserve the stub's Series class when attaching an element dtype.
                     match (column_dtype, result) {
                         (Some(dtype), Type::ClassType(cls))
-                            if is_polars_series(cls.class_object()) =>
+                            if is_polars_api_series(cls.class_object()) =>
                         {
                             SeriesSchema {
                                 underlying: cls,
@@ -4379,6 +4305,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 SubscriptTarget {
                                     base: bound,
                                     receiver: Some(&base),
+                                    index_ty: target.index_ty,
                                 },
                                 slice,
                                 range,
@@ -4393,6 +4320,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                     SubscriptTarget {
                                         base: constraint,
                                         receiver: Some(&base),
+                                    index_ty: target.index_ty,
                                     },
                                     slice,
                                     range,
@@ -4408,6 +4336,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 SubscriptTarget {
                                     base: &extension.upper_bound(self.stdlib, self.heap),
                                     receiver: Some(&base),
+                                    index_ty: target.index_ty,
                                 },
                                 slice,
                                 range,
@@ -4422,10 +4351,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                 }
                 Type::TypedDict(typed_dict) => {
-                    let key_ty = self.expr_infer(slice, errors);
+                    let key_ty = &*slice_ty;
                     // Don't warn on anonymous typed dicts
                     let warn_on_not_required_access = matches!(typed_dict, TypedDict::TypedDict(_));
-                    self.distribute_over_union(&key_ty, |ty| match self.literal_typed_dict_key_name(ty) {
+                    self.distribute_over_union(key_ty, |ty| match self.literal_typed_dict_key_name(ty) {
                         Some(key_name) => {
                             if let Some(field) = self.typed_dict_field(&typed_dict, &key_name) {
                                 if warn_on_not_required_access && !field.required && !key_present {

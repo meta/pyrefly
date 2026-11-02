@@ -54,10 +54,14 @@ pub mod state;
 mod stubgen;
 #[cfg(test)]
 mod test;
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 #[doc(hidden)]
 pub mod tsp;
 
 pub(crate) use compat::*;
+
+/// The version of this Pyrefly build.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// This interface is NOT stable and should not be relied upon.
 /// It will change during minor version increments.

@@ -8,6 +8,37 @@
 use crate::testcase;
 
 testcase!(
+    test_conditional_attribute_reassignment_preserves_union,
+    r#"
+from typing import Literal, assert_type
+class Foo:
+    x: bool = True
+class Bar:
+    def __init__(self, flag: bool) -> None:
+        self.x: Foo | None = None
+        if flag:
+            self.x = Foo()
+        assert_type(self.x, Foo | None)
+        assert self.x is not None
+        assert_type(self.x, Foo)
+        self.x.x = False
+class Baz:
+    x: int | str
+def f(baz: Baz, flag: bool) -> None:
+    baz.x = 0
+    if flag:
+        baz.x = "a"
+    assert_type(baz.x, Literal[0, "a"])
+def g(bar: Bar, flag: bool) -> None:
+    bar.x = Foo()
+    bar.x.x = True
+    if flag:
+        bar.x.x = False
+    assert_type(bar.x.x, bool)
+"#,
+);
+
+testcase!(
     test_one_level_simple,
     r#"
 from typing import reveal_type
@@ -733,4 +764,40 @@ def f(o: A):
     if isinstance(o, B):
         reveal_type(o.x)  # E: revealed type: int
 "#,
+);
+
+testcase!(
+    test_or_with_unreachable_branch_keeps_attribute_narrow,
+    r#"
+from typing import assert_type
+
+class A:
+    x: int | None
+
+def f(o: A) -> None:
+    if not isinstance(o, A) or o.x is not None:
+        assert_type(o.x, int)
+    "#,
+);
+
+testcase!(
+    test_eq_narrow_int_enum_attribute_keeps_parent,
+    r#"
+from enum import IntEnum
+from typing import Literal, assert_type
+
+class E(IntEnum):
+    X = 1
+
+class A:
+    e: E
+    y: int | None
+
+def f(a: A) -> None:
+    if a.e == 1:
+        assert_type(a, A)
+        assert_type(a.e, Literal[E.X])
+    if a.e == 1 or a.y is not None:
+        assert_type(a.y, int | None)
+    "#,
 );

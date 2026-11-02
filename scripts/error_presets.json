@@ -61,6 +61,7 @@
     "inconsistent-inheritance": ["legacy", "default", "strict", "all"],
     "inconsistent-overload": ["legacy", "default", "strict", "all"],
     "inconsistent-overload-default": ["legacy", "default", "strict", "all"],
+    "instance-var-assign": ["strict", "all"],
     "internal-error": ["legacy", "default", "strict", "all"],
     "invalid-abstract-method": ["all"],
     "invalid-annotation": ["basic", "legacy", "default", "strict", "all"],
@@ -111,7 +112,9 @@
     "ordered-dataclass-inheritance": ["legacy", "default", "strict", "all"],
     "parse-error": ["basic", "legacy", "default", "strict", "all"],
     "partially-unknown-type": ["all"],
+    "possibly-uninitialized-attribute": ["strict", "all"],
     "potential-bad-keyword-argument": ["strict", "all"],
+    "protected-access": ["all"],
     "protocol-implicitly-defined-attribute": ["legacy", "default", "strict", "all"],
     "pytorch-efficiency-lint-cuda-call": ["all"],
     "pytorch-efficiency-lint-item-call": ["all"],
@@ -161,7 +164,10 @@
     "unused-call-result": ["all"],
     "unused-coroutine": ["basic", "legacy", "default", "strict", "all"],
     "unused-ignore": ["strict", "all"],
+    "unused-import": ["basic", "legacy", "default", "strict", "all"],
+    "unused-parameter": ["basic", "legacy", "default", "strict", "all"],
     "unused-type-ignore": ["all"],
+    "unused-variable": ["basic", "legacy", "default", "strict", "all"],
     "useless-overload-body": ["legacy", "default", "strict", "all"],
     "variance-mismatch": ["legacy", "default", "strict", "all"]
   }

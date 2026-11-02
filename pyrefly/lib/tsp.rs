@@ -5,10 +5,11 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! Internal TSP support shared by the native server and portable hosts.
+//! Internal TSP support shared by the native server and WASI hosts.
 //!
 //! The Rust interface is unstable; only transport-independent type conversion
-//! is available on WebAssembly.
+//! is available on WASI. The browser (`wasm32-unknown-unknown`) build does not
+//! expose this module.
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod requests;
