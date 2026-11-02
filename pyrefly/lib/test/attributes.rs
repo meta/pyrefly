@@ -4705,3 +4705,408 @@ class DeletedThenDefined:
         def value(self) -> int: ...
 "#,
 );
+
+testcase!(
+    test_instance_var_assign_protocol_policy_default,
+    r#"
+from typing import Protocol
+
+class P(Protocol):
+    x: int
+
+class C:
+    x: int = 0
+
+def f(p: P) -> None:
+    pass
+
+f(C)  # E: Argument `type[C]` is not assignable to parameter `p` with type `P`
+f(C())
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_protocol_policy_enabled,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import Protocol
+
+class P(Protocol):
+    x: int
+
+class C:
+    x: int = 0
+
+def f(p: P) -> None:
+    pass
+
+f(C)  # E: Argument `type[C]` is not assignable to parameter `p` with type `P`
+f(C())
+"#,
+);
+
+// `instance-var-assign` (issue #3750): assigning to a class-body-declared
+// instance variable (annotated, not `ClassVar`) via the class object is flagged
+// when the kind is enabled. Inherited fields and fields annotated with a default
+// are still instance variables, so they are flagged too. The existing
+// bad-assignment check still runs (both fire on separate paths).
+testcase!(
+    test_instance_var_assign_diagnostic,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import ClassVar
+
+class C:
+    instance_var: int
+C.instance_var = 3  # E: Cannot set instance variable `instance_var` from the class
+
+# Annotated with a default: still an instance variable per the typing spec.
+class WithDefault:
+    x: int = 3
+WithDefault.x = 4  # E: Cannot set instance variable `x` from the class
+
+# Inherited fields keep their provenance through the MRO lookup.
+class Sub(C):
+    pass
+Sub.instance_var = 5  # E: Cannot set instance variable `instance_var` from the class
+
+# A type-incompatible value yields BOTH instance-var-assign and bad-assignment.
+C.instance_var = "oops"  # E: Cannot set instance variable `instance_var` from the class  # E: `Literal['oops']` is not assignable to attribute `instance_var` with type `int`
+
+# Suppressible via the standard directive.
+C.instance_var = 7  # pyrefly: ignore[instance-var-assign]
+    "#,
+);
+
+// Non-instance-variable fields must NOT trigger the new kind even when it is
+// enabled: unannotated assignments and ClassVars are class variables,
+// staticmethods become unannotated ClassAttributes, instance-only attributes
+// keep their existing no-access error, and instance writes are unaffected.
+testcase!(
+    test_instance_var_assign_non_instance_fields_not_flagged,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import ClassVar, Generic, TypeVar
+
+class C:
+    unannotated = 1
+    cv: ClassVar[int] = 2
+
+    @staticmethod
+    def stat() -> int:
+        return 3
+
+def f() -> int:
+    return 4
+
+T = TypeVar("T")
+
+
+class G(Generic[T]):
+    item: T
+
+
+C.unannotated = 5
+C.cv = 6
+C.stat = f
+
+# Writing a ClassVar via an instance keeps firing the pre-existing mirror rule.
+C().cv = 7  # E: Cannot set field `cv`
+
+# Instance-only attributes keep their pre-existing error on class access.
+class D:
+    def __init__(self) -> None:
+        self.only = 1
+D.only = 56  # E: Instance-only attribute `only` of class `D` is not visible on the class
+D().only = 57
+
+# Generic fields are unreachable via the class object (pre-existing no-access).
+G.item = 6  # E: Generic attribute `item` of class `G` is not visible on the class
+
+# Reads and instance writes never trigger this diagnostic.
+class E:
+    read_only_use: int = 1
+print(E.read_only_use)
+print(E().read_only_use)
+E().read_only_use = 2
+    "#,
+);
+
+// `instance-var-assign` is off by default: assignments that WOULD be flagged in
+// strict mode emit nothing under the default configuration.
+testcase!(
+    test_instance_var_assign_off_by_default,
+    r#"
+class C:
+    instance_var: int
+C.instance_var = 3
+    "#,
+);
+
+// Writes through a class object that resolve via the metaclass are metaclass-
+// instance writes and are never flagged: a class is an instance of its
+// metaclass, so assigning metaclass-declared fields (including `__name__`)
+// through the class object is valid.
+testcase!(
+    test_instance_var_assign_metaclass_writes_not_flagged,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+class Meta(type):
+    meta_field: int
+
+class UsesMeta(metaclass=Meta):
+    instance_var: int
+
+UsesMeta.meta_field = 1
+UsesMeta.__name__ = "Renamed"
+
+# A plain class reads `__name__` from `type` through the metaclass fallback.
+class Plain:
+    instance_var: int
+
+Plain.__name__ = "Renamed"
+
+# Inherited metaclass fields stay metaclass-instance writes.
+class SubUsesMeta(UsesMeta):
+    pass
+
+SubUsesMeta.meta_field = 2
+    "#,
+);
+
+// Attributes created by assigning through `cls` in a classmethod are set on the
+// class itself, so they are class attributes, not class-body instance variables.
+testcase!(
+    test_instance_var_assign_classmethod_created_attr_not_flagged,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+class C:
+    @classmethod
+    def make(cls) -> None:
+        cls.extra: int = 0
+
+C.extra = 1
+    "#,
+);
+
+// Class-body instance variables whose annotation is a union containing
+// descriptors keep their provenance through the descriptor-read conversion, so
+// writes via the class are still flagged.
+testcase!(
+    test_instance_var_assign_descriptor_union_flagged,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+class Desc:
+    def __get__(self, instance: object, owner: type) -> int:
+        return 0
+    def __set__(self, instance: object, value: int) -> None:
+        pass
+
+class C:
+    x: "int | Desc"
+
+C.x = 1  # E: Cannot set instance variable `x` from the class
+C().x = 2
+    "#,
+);
+
+testcase!(
+    test_instance_var_assign_class_metadata,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+class C:
+    pass
+
+C.__module__ = "renamed"
+C.__doc__ = "Documentation"
+C.__annotations__ = {}
+C.__name__ = "Renamed"
+C.__qualname__ = "Renamed"
+
+class Meta(type):
+    pass
+
+class Custom(metaclass=Meta):
+    pass
+
+Custom.__module__ = "renamed"
+Custom.__doc__ = "Documentation"
+Custom.__annotations__ = {}
+
+class Explicit:
+    __module__: str = "original"
+    __doc__: str | None = "Original documentation"
+    __annotations__: dict[str, object] = {}
+    ordinary: int = 0
+
+Explicit.__module__ = "renamed"
+Explicit.__doc__ = "Documentation"
+Explicit.__annotations__ = {}
+Explicit.ordinary = 1  # E: Cannot set instance variable `ordinary` from the class
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_inherited_classmethod,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import ClassVar
+
+class Base:
+    x: int = 0
+    cv: ClassVar[int] = 0
+
+class Child(Base):
+    @classmethod
+    def make(cls) -> None:
+        cls.x = 1  # E: Cannot set instance variable `x` from the class
+        cls.cv = 1
+        cls.fresh: int = 1
+
+Child.x = 2  # E: Cannot set instance variable `x` from the class
+Child.cv = 2
+Child.fresh = 2
+Base.x = 3  # E: Cannot set instance variable `x` from the class
+
+class Grandchild(Child):
+    @classmethod
+    def make_again(cls) -> None:
+        cls.x = 3  # E: Cannot set instance variable `x` from the class
+        cls.fresh = 3
+
+Grandchild.x = 4  # E: Cannot set instance variable `x` from the class
+Grandchild.fresh = 4
+
+class Direct(Base):
+    x: int = 0
+    @classmethod
+    def make(cls) -> None:
+        cls.x = 1  # E: Cannot set instance variable `x` from the class
+
+Direct.x = 2  # E: Cannot set instance variable `x` from the class
+"#,
+);
+
+testcase!(
+    bug = "Metaclass data descriptor reads still use class fields",
+    test_instance_var_assign_metaclass_descriptor_collision,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import Literal, assert_type
+
+class Meta(type):
+    @property
+    def x(cls) -> int:
+        return 0
+    @x.setter
+    def x(cls, value: int) -> None:
+        pass
+
+class C(metaclass=Meta):
+    x: int = 0
+
+C.x = 1
+assert_type(C.x, Literal[1])
+
+class Child(C):
+    pass
+
+Child.x = 2
+assert_type(Child.x, Literal[2])
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_narrowing_default,
+    r#"
+from typing import Literal, assert_type
+
+class C:
+    x: int | None = None
+
+C.x = 1
+assert_type(C.x, Literal[1])
+
+def f() -> int:
+    if C.x is None:
+        C.x = 2
+    return C.x
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_narrowing_enabled,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import Literal, assert_type
+
+class C:
+    x: int | None = None
+
+C.x = 1  # E: Cannot set instance variable `x` from the class
+assert_type(C.x, Literal[1])
+C.x = 2  # pyrefly: ignore[instance-var-assign]
+assert_type(C.x, Literal[2])
+
+def f() -> int:
+    if C.x is None:
+        C.x = 3  # pyrefly: ignore[instance-var-assign]
+    return C.x
+"#,
+);
+
+testcase!(
+    bug = "Metaclass data descriptor reads still use class fields",
+    test_metaclass_descriptor_kinds_precedence,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from functools import cached_property
+from typing import Literal, assert_type
+
+class Data:
+    def __get__(self, instance: object, owner: type) -> str:
+        return "data"
+    def __set__(self, instance: object, value: int) -> None:
+        pass
+
+class NonData:
+    def __get__(self, instance: object, owner: type) -> str:
+        return "non-data"
+
+class DeleteOnly:
+    def __get__(self, instance: object, owner: type) -> str:
+        return "delete-only"
+    def __delete__(self, instance: object) -> None:
+        pass
+
+class Meta(type):
+    data = Data()
+    non_data = NonData()
+    delete_only = DeleteOnly()
+    @property
+    def readonly(cls) -> str:
+        return "readonly"
+    @cached_property
+    def cached(cls) -> str:
+        return "cached"
+
+class C(metaclass=Meta):
+    data: int = 0
+    non_data: int = 0
+    delete_only: int = 0
+    readonly: int = 0
+    cached: int = 0
+
+assert_type(C.data, int)
+assert_type(C.non_data, int)
+assert_type(C.delete_only, int)
+assert_type(C.readonly, int)
+C.data = 1
+C.non_data = 1  # E: Cannot set instance variable `non_data` from the class
+C.delete_only = 1
+C.readonly = 1
+assert_type(C.cached, int)
+C.cached = 1  # E: Cannot set instance variable `cached` from the class
+assert_type(C.cached, Literal[1])
+"#,
+);
