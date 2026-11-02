@@ -1189,7 +1189,7 @@ impl ConfigFile {
             "conda-environment",
             "skip-interpreter-query",
             "search-path",
-            "site-package-path",
+            "site-packages-path",
         ] {
             settings.remove(key);
         }
@@ -2607,6 +2607,7 @@ mod tests {
             "#,
         )
         .unwrap();
+        let all_settings = Table::try_from(&config).unwrap();
         let settings: Table = toml::from_str(&config.remaining_settings().unwrap()).unwrap();
         for key in [
             "python-interpreter-path",
@@ -2615,8 +2616,9 @@ mod tests {
             "conda-environment",
             "skip-interpreter-query",
             "search-path",
-            "site-package-path",
+            "site-packages-path",
         ] {
+            assert!(all_settings.contains_key(key), "{key} is not serialized");
             assert!(!settings.contains_key(key), "{key} is already printed");
         }
         assert_eq!(settings["use-ignore-files"].as_bool(), Some(false));
