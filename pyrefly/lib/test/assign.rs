@@ -324,7 +324,7 @@ testcase!(
     test_never,
     r#"
 from typing import Any, Never, NoReturn
-def foo(x: Never) -> Any:
+def foo(x: Never) -> Any:  # E: Function declared to return `Any` but can never return
     y: NoReturn = x
     z: int = x
     return x

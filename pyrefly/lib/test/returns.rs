@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
@@ -188,7 +189,7 @@ from typing import NoReturn
 def fail() -> NoReturn:
     raise Exception()
 
-def f() -> int:
+def f() -> int:  # E: Function declared to return `int` but can never return
    fail()
 "#,
 );
@@ -361,6 +362,124 @@ def falls_through(b: bool) -> int:  # E: Function declared to return `int` but i
 );
 
 testcase!(
+    test_unexpected_never_return,
+    r#"
+from abc import ABC, abstractmethod
+from typing import Any, AsyncIterator, Iterator, Never, NoReturn, Protocol, assert_type, overload, override
+
+def fatal() -> Never:
+    raise RuntimeError
+
+def calls_fatal() -> int:  # E: Function declared to return `int` but can never return
+    fatal()
+
+def returns_fatal() -> str:  # E: Function declared to return `str` but can never return
+    return fatal()
+
+def raises() -> int:  # E: Function declared to return `int` but can never return
+    raise ValueError
+
+def raises_none() -> None:
+    raise ValueError
+
+async def async_fatal() -> int:  # E: Function declared to return `int` but can never return
+    return fatal()
+
+def finally_fatal() -> int:  # E: Function declared to return `int` but can never return
+    try:
+        pass
+    finally:
+        fatal()
+
+def branches(flag: bool) -> int:  # E: Function declared to return `int` but can never return
+    if flag:
+        return fatal()
+    else:
+        raise ValueError
+
+def returns_normally(flag: bool) -> int:
+    if flag:
+        fatal()
+    return 1
+
+def gradual() -> Any:  # E: Function declared to return `Any` but can never return
+    fatal()
+
+def placeholder() -> int:
+    """Implementation belongs in a subclass."""
+    raise NotImplementedError("not implemented")
+
+def stub() -> int: ...
+
+def intentional() -> NoReturn:
+    fatal()
+
+def generator() -> Iterator[int]:
+    yield 1
+    fatal()
+
+async def async_generator() -> AsyncIterator[int]:
+    yield 1
+    fatal()
+
+@overload
+def overloaded(x: int) -> int: ...
+@overload
+def overloaded(x: str) -> str: ...
+def overloaded(x: int | str) -> int | str:  # E: Function declared to return `int | str` but can never return
+    fatal()
+
+class Base(ABC):
+    @abstractmethod
+    def abstract(self) -> int:
+        fatal()
+
+    def implemented(self) -> int:
+        return 1
+
+class Child(Base):
+    def abstract(self) -> int:
+        fatal()
+
+    @override
+    def implemented(self) -> int:
+        fatal()
+
+    def raising_none(self) -> None:
+        """This operation is unsupported."""
+        raise ValueError
+
+    def calls_fatal(self) -> int:  # E: Function declared to return `int` but can never return
+        fatal()
+
+class Interface(Protocol):
+    def stub(self) -> int: ...
+
+# The published type must still follow the annotation.
+assert_type(calls_fatal(), int)
+"#,
+);
+
+testcase!(
+    test_unexpected_never_in_stub_file,
+    {
+        let mut env = TestEnv::new();
+        env.add_with_path(
+            "stub",
+            "stub.pyi",
+            "def f() -> int:\n    raise RuntimeError\n",
+        );
+        env
+    },
+    r#"
+from typing import assert_type
+from stub import f
+
+assert_type(f(), int)
+"#,
+);
+
+testcase!(
     test_return_while_false_break_else,
     r#"
 def f() -> int:
@@ -415,7 +534,7 @@ testcase!(
     r#"
 from typing import assert_type
 
-def f() -> int:
+def f() -> int:  # E: Function declared to return `int` but can never return
    raise Exception()
 assert_type(f(), int)
 "#,
