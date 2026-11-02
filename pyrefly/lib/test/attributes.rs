@@ -4993,3 +4993,59 @@ def f() -> int:
     return C.x
 "#,
 );
+
+testcase!(
+    bug = "Metaclass data descriptors cannot be shadowed by ordinary class fields",
+    test_metaclass_descriptor_kinds_precedence,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from functools import cached_property
+from typing import Literal, assert_type
+
+class Data:
+    def __get__(self, instance: object, owner: type) -> str:
+        return "data"
+    def __set__(self, instance: object, value: int) -> None:
+        pass
+
+class NonData:
+    def __get__(self, instance: object, owner: type) -> str:
+        return "non-data"
+
+class DeleteOnly:
+    def __get__(self, instance: object, owner: type) -> str:
+        return "delete-only"
+    def __delete__(self, instance: object) -> None:
+        pass
+
+class Meta(type):
+    data = Data()
+    non_data = NonData()
+    delete_only = DeleteOnly()
+    @property
+    def readonly(cls) -> str:
+        return "readonly"
+    @cached_property
+    def cached(cls) -> str:
+        return "cached"
+
+class C(metaclass=Meta):
+    data: int = 0
+    non_data: int = 0
+    delete_only: int = 0
+    readonly: int = 0
+    cached: int = 0
+
+assert_type(C.data, int)
+assert_type(C.non_data, int)
+assert_type(C.delete_only, int)
+assert_type(C.readonly, int)
+C.data = 1  # E: Cannot set instance variable `data` from the class
+C.non_data = 1  # E: Cannot set instance variable `non_data` from the class
+C.delete_only = 1  # E: Cannot set instance variable `delete_only` from the class
+C.readonly = 1  # E: Cannot set instance variable `readonly` from the class
+assert_type(C.cached, int)
+C.cached = 1  # E: Cannot set instance variable `cached` from the class
+assert_type(C.cached, Literal[1])
+"#,
+);
