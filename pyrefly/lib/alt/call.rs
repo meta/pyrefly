@@ -1248,6 +1248,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     || obj == self.stdlib.dict_object()
                     || obj == self.stdlib.mapping_object()
                     || obj == self.stdlib.none_type().class_object()
+                    || obj == self.stdlib.object().class_object()
                 {
                     return false;
                 }
@@ -1270,6 +1271,33 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    fn is_enum_lookup_compatible(&self, got: &Type, want: &Type) -> bool {
+        if self.is_subset_eq(got, want) {
+            return true;
+        }
+        // Arguments typed `object` or `Any` are accepted because enum lookup
+        // performs equality comparison on arbitrary objects at runtime.
+        if got.is_object() || got.is_any() {
+            return true;
+        }
+        let int = self.heap.mk_class_type(self.stdlib.int().clone());
+        let is_numeric_target = self.is_subset_eq(&int, want);
+        if is_numeric_target && self.is_numeric_equality_compatible(got) {
+            return true;
+        }
+        match got {
+            Type::Union(u) => u
+                .members
+                .iter()
+                .all(|t| self.is_enum_lookup_compatible(t, want)),
+            Type::Intersect(inner) => {
+                let (tys, _) = inner.as_ref();
+                tys.iter().any(|t| self.is_enum_lookup_compatible(t, want))
+            }
+            _ => false,
+        }
+    }
+
     fn check_enum_lookup_arg_compatibility(
         &self,
         got: &Type,
@@ -1278,12 +1306,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
     ) {
-        if self.is_subset_eq(got, want) {
-            return;
-        }
-        let int = self.heap.mk_class_type(self.stdlib.int().clone());
-        let is_numeric_target = self.is_subset_eq(&int, want);
-        if is_numeric_target && self.is_numeric_equality_compatible(got) {
+        if self.is_enum_lookup_compatible(got, want) {
             return;
         }
         self.check_type_as_call_argument(got, want, range, errors, &|| {

@@ -1579,7 +1579,7 @@ class E(Enum):
 def identity[T](x: T) -> T:
     return x
 
-identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(1 + "x"))))))))))))))))))))))))  # E: `+` is not supported between `Literal[1]` and `Literal['x']`
+identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(1 + "x"))))))))))))))))))))))))))))))))))))))))  # E: `+` is not supported between `Literal[1]` and `Literal['x']`
     "#,
 );
 
@@ -1684,5 +1684,48 @@ testcase!(
     r#"
 import res
 res.Resolution(7)
+"#,
+);
+
+testcase!(
+    test_enum_call_object_and_union_arguments,
+    r#"
+from enum import Enum
+from typing import Any
+
+class IntColor(Enum):
+    RED = 1
+    GREEN = 2
+
+class StrColor(Enum):
+    HOSTED = "hosted"
+    LOCAL = "local"
+
+def test_object_and_any(
+    obj: object,
+    any_val: Any,
+    opt_obj: object | None,
+    opt_str: str | None,
+    zulip_union: bool | int | str,
+    meson_union: bool | int | list[str] | str,
+) -> None:
+    # `object` and `Any` are accepted for both numeric and string enums because
+    # lookup uses equality at runtime.
+    IntColor(obj)
+    IntColor(any_val)
+    StrColor(obj)
+    StrColor(any_val)
+
+    # Nullable types must be rejected unless the enum accepts None or defines _missing_.
+    IntColor(opt_obj)  # E: Argument `object | None` is not assignable to parameter `value` with type `IntColor | complex | float | int`
+    StrColor(opt_obj)  # E: Argument `object | None` is not assignable to parameter `value` with type `StrColor | str`
+    StrColor(opt_str)  # E: Argument `str | None` is not assignable to parameter `value` with type `StrColor | str`
+
+    # Incompatible unions where some branches do not match the target must be rejected.
+    IntColor(zulip_union)  # E: Argument `bool | int | str` is not assignable to parameter `value` with type `IntColor | complex | float | int`
+    StrColor(meson_union)  # E: Argument `bool | int | list[str] | str` is not assignable to parameter `value` with type `StrColor | str`
+
+    # Disjoint type (str passed to int enum) must be rejected.
+    IntColor("1")  # E: Argument `Literal['1']` is not assignable to parameter `value` with type `IntColor | complex | float | int`
 "#,
 );
