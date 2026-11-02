@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 
 use pretty_assertions::assert_eq;
 use pyrefly_python::sys_info::PythonVersion;
+use ruff_text_size::TextRange;
+use ruff_text_size::TextSize;
 
 use crate::state::require::Require;
 use crate::state::semantic_tokens::SemanticTokensLegends;
@@ -2154,6 +2156,7 @@ token-type: variable
 fn decoded_semantic_tokens(
     code: &str,
     include_syntax_tokens: bool,
+    limit_range: Option<TextRange>,
 ) -> Vec<(usize, usize, String, String)> {
     let (handles, state) =
         mk_multi_file_state_with_env(TestEnv::new(), &[("main", code)], Require::Exports, false);
@@ -2161,7 +2164,7 @@ fn decoded_semantic_tokens(
         .transaction()
         .semantic_tokens(
             handles.get("main").unwrap(),
-            None,
+            limit_range,
             None,
             include_syntax_tokens,
         )
@@ -2258,7 +2261,7 @@ def soft(command):
 
 type Alias = list[int]
 "#;
-    let full = decoded_semantic_tokens(code, true);
+    let full = decoded_semantic_tokens(code, true, None);
     let keywords: BTreeSet<&str> = full
         .iter()
         .filter(|(_, _, _, token_type)| token_type == "keyword")
@@ -2279,5 +2282,78 @@ type Alias = list[int]
         .into_iter()
         .filter(|(_, _, _, token_type)| !syntax_token_types.contains(&token_type.as_str()))
         .collect();
-    assert_eq!(decoded_semantic_tokens(code, false), full_without_syntax);
+    assert_eq!(
+        decoded_semantic_tokens(code, false, None),
+        full_without_syntax
+    );
+}
+
+#[test]
+fn type_alias_keyword_test() {
+    let code = r#"type Alias = int
+type Generic[T] = list[T]
+class Container:
+    type Nested = str
+type First = int; type Second = str
+type(0)
+def shadow():
+    type = 0
+    type
+"#;
+    for include_syntax_tokens in [false, true] {
+        let tokens: Vec<_> = decoded_semantic_tokens(code, include_syntax_tokens, None)
+            .into_iter()
+            .filter(|(_, _, text, _)| text == "type")
+            .collect();
+        // Bug: clients that augment syntax tokens get no token for alias keywords (#5146).
+        let mut expected = Vec::new();
+        if include_syntax_tokens {
+            expected.extend([
+                (0, 0, "type", "keyword"),
+                (1, 0, "type", "keyword"),
+                (3, 4, "type", "keyword"),
+                (4, 0, "type", "keyword"),
+                (4, 18, "type", "keyword"),
+            ]);
+        }
+        expected.extend([
+            (5, 0, "type", "class"),
+            (7, 4, "type", "variable"),
+            (8, 4, "type", "variable"),
+        ]);
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(line, col, text, kind)| (line, col, text.to_owned(), kind.to_owned()))
+            .collect();
+        assert_eq!(tokens, expected);
+    }
+}
+
+#[test]
+fn type_alias_keyword_range_test() {
+    let code = "type Alias = int";
+    for include_syntax_tokens in [false, true] {
+        // Bug: only the syntax-inclusive stream highlights the alias keyword (#5146).
+        let expected = if include_syntax_tokens {
+            vec![(0, 0, "type".to_owned(), "keyword".to_owned())]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            decoded_semantic_tokens(
+                code,
+                include_syntax_tokens,
+                Some(TextRange::new(TextSize::new(0), TextSize::new(4))),
+            ),
+            expected,
+        );
+        assert!(
+            decoded_semantic_tokens(
+                code,
+                include_syntax_tokens,
+                Some(TextRange::new(TextSize::new(4), TextSize::new(5))),
+            )
+            .is_empty()
+        );
+    }
 }
