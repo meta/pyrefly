@@ -97,7 +97,7 @@ impl<'a> Transaction<'a> {
         let mod_module = self.get_ast(handle)?;
         let answers = self.get_answers(handle)?;
         let bindings = answers.bindings();
-        if !is_pytest_fixture_parameter_context(bindings, covering_nodes)
+        if !is_pytest_fixture_parameter_context(bindings, covering_nodes, identifier)
             || is_directly_parametrized(&mod_module, covering_nodes, identifier.id())
         {
             return None;

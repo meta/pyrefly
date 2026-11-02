@@ -80,7 +80,11 @@ fn collect_fixture_param_ranges_from_parameters(
         .chain(parameters.kwonlyargs.iter())
     {
         let param_name = param.name();
-        if param_name != "self" && param_name != "cls" && param_name.id() == fixture_name {
+        if param.default.is_none()
+            && param_name != "self"
+            && param_name != "cls"
+            && param_name.id() == fixture_name
+        {
             references.push(param_name.range());
         }
     }
@@ -229,7 +233,7 @@ pub(crate) fn find_pytest_fixture_definitions_for_parameter(
     identifier: &Identifier,
     covering_nodes: &[AnyNodeRef],
 ) -> Vec<PytestFixtureDefinition> {
-    if !is_pytest_fixture_parameter_context(bindings, covering_nodes) {
+    if !is_pytest_fixture_parameter_context(bindings, covering_nodes, identifier) {
         return Vec::new();
     }
     let Some(pytest_info) = bindings.pytest_info() else {
@@ -252,6 +256,7 @@ pub(crate) fn find_pytest_fixture_definitions_for_parameter(
 pub(crate) fn is_pytest_fixture_parameter_context(
     bindings: &Bindings,
     covering_nodes: &[AnyNodeRef],
+    identifier: &Identifier,
 ) -> bool {
     let function_def = covering_nodes.iter().find_map(|node| match node {
         AnyNodeRef::StmtFunctionDef(stmt) => Some(stmt),
@@ -260,6 +265,16 @@ pub(crate) fn is_pytest_fixture_parameter_context(
     let Some(function_def) = function_def else {
         return false;
     };
+    let Some(parameter) = function_def
+        .parameters
+        .iter_non_variadic_params()
+        .find(|parameter| parameter.name().range == identifier.range)
+    else {
+        return false;
+    };
+    if parameter.default.is_some() {
+        return false;
+    }
     let class_def = covering_nodes.iter().find_map(|node| match node {
         AnyNodeRef::StmtClassDef(stmt) => Some(stmt),
         _ => None,

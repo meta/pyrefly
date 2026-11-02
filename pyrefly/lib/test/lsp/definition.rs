@@ -814,7 +814,7 @@ fn pytest_conftest_class_parametrize_keeps_parameter_definition() {
 fn pytest_conftest_defaulted_parameters_keep_parameter_definition() {
     for parameters in ["answer=0", "*, answer=None"] {
         let code = format!("def test_value({parameters}): pass\n");
-        let (root, state, handle) = state_with_conftest(
+        let (_root, state, handle) = state_with_conftest(
             &[(
                 "tests/conftest.py",
                 "import pytest\n@pytest.fixture\ndef answer(): return 42\n",
@@ -826,11 +826,7 @@ fn pytest_conftest_defaulted_parameters_keep_parameter_definition() {
             .transaction()
             .goto_definition(&handle, position)
             .unwrap();
-        // BUG: pytest does not request parameters that have defaults.
-        assert_eq!(
-            definitions[0].module.path().as_path(),
-            root.path().join("tests/conftest.py"),
-        );
+        assert_eq!(definitions[0].module.path(), handle.path());
     }
 }
 
@@ -890,8 +886,12 @@ fn pytest_fixture_defaulted_parameter_references() {
     let transaction = state.transaction();
     let mut references = transaction.find_local_occurrences(&handle, ranges[0].start());
     references.sort_by_key(|range| range.start());
-    // BUG: fixture references include the defaulted parameter, which does not request it.
-    assert_eq!(references, ranges[..2]);
+    assert_eq!(references, ranges[..1]);
+    for range in &ranges[1..] {
+        let mut references = transaction.find_local_occurrences(&handle, range.start());
+        references.sort_by_key(|range| range.start());
+        assert_eq!(references, ranges[1..]);
+    }
 }
 
 #[test]
