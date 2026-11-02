@@ -1064,18 +1064,23 @@ fn pytest_conftest_override_requests_parent_with_companion_stub() {
             TextSize::try_from(code.find("local_answer(answer)").unwrap() + "local_answer(".len())
                 .unwrap();
         let transaction = state.transaction();
-        for definitions in [
-            transaction.goto_definition(&handle, position).unwrap(),
-            transaction.goto_declaration(&handle, position).unwrap(),
+        for (definitions, expected) in [
+            (
+                transaction.goto_definition(&handle, position).unwrap(),
+                "conftest.py",
+            ),
+            (
+                transaction.goto_declaration(&handle, position).unwrap(),
+                "conftest.pyi",
+            ),
         ] {
-            // BUG: the requesting fixture's companion is still selected instead of its parent.
             assert_eq!(
-                definitions[0].module.path().as_path().parent().unwrap(),
-                root.path().join("tests"),
+                definitions[0].module.path().as_path(),
+                root.path().join(expected),
             );
             assert_eq!(
                 definitions[0].module.code_at(definitions[0].range),
-                "local_answer",
+                "answer"
             );
         }
         let consumer_position = TextSize::try_from(test_code.find("answer").unwrap()).unwrap();
