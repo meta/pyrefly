@@ -1027,6 +1027,81 @@ fn pytest_conftest_override_requests_parent_definition() {
 }
 
 #[test]
+fn pytest_conftest_override_requests_parent_with_companion_stub() {
+    let source = "import pytest\n@pytest.fixture(name='answer')\ndef local_answer(answer): return answer + 1\n";
+    let stub = "# The companion has different declaration offsets.\nimport pytest\n@pytest.fixture(name='answer')\ndef local_answer(answer): ...\n";
+    for extension in ["py", "pyi"] {
+        let code = if extension == "py" { source } else { stub };
+        let test_code = "def test_value(answer): pass\n";
+        let (root, state, test_handle) = state_with_conftest(
+            &[
+                (
+                    "conftest.py",
+                    "import pytest\n@pytest.fixture\ndef answer(): return 41\n",
+                ),
+                (
+                    "conftest.pyi",
+                    "import pytest\n@pytest.fixture\ndef answer(): ...\n",
+                ),
+                ("tests/conftest.py", source),
+                ("tests/conftest.pyi", stub),
+            ],
+            test_code,
+        );
+        let module_path =
+            ModulePath::filesystem(root.path().join(format!("tests/conftest.{extension}")));
+        let config = state.config_finder().python_file(
+            ModuleNameWithKind::guaranteed(ModuleName::unknown()),
+            &module_path,
+        );
+        let handle = config.handle_from_module_path(module_path);
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction
+            .as_mut()
+            .run(slice::from_ref(&handle), Require::Everything, None);
+        state.commit_transaction(transaction, None);
+        let position =
+            TextSize::try_from(code.find("local_answer(answer)").unwrap() + "local_answer(".len())
+                .unwrap();
+        let transaction = state.transaction();
+        for definitions in [
+            transaction.goto_definition(&handle, position).unwrap(),
+            transaction.goto_declaration(&handle, position).unwrap(),
+        ] {
+            // BUG: the requesting fixture's companion is still selected instead of its parent.
+            assert_eq!(
+                definitions[0].module.path().as_path().parent().unwrap(),
+                root.path().join("tests"),
+            );
+            assert_eq!(
+                definitions[0].module.code_at(definitions[0].range),
+                "local_answer",
+            );
+        }
+        let consumer_position = TextSize::try_from(test_code.find("answer").unwrap()).unwrap();
+        for (definitions, expected) in [
+            (
+                transaction
+                    .goto_definition(&test_handle, consumer_position)
+                    .unwrap(),
+                "tests/conftest.py",
+            ),
+            (
+                transaction
+                    .goto_declaration(&test_handle, consumer_position)
+                    .unwrap(),
+                "tests/conftest.pyi",
+            ),
+        ] {
+            assert_eq!(
+                definitions[0].module.path().as_path(),
+                root.path().join(expected)
+            );
+        }
+    }
+}
+
+#[test]
 fn pytest_fixture_defaulted_parameter_references() {
     let code = "import pytest\n@pytest.fixture\ndef answer(): return 42\ndef test_value(answer=0): assert answer == 0\n";
     let (_root, state, handle) = state_with_conftest(&[], code);
