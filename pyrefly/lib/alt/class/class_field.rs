@@ -4235,6 +4235,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             return;
         }
+        // `__init_subclass__` runs during class creation, so even placeholder
+        // overrides must preserve the parent hook chain.
         if field_name != &dunder::INIT_SUBCLASS
             && (class_field.is_abstract() || self.get_metadata_for_class(cls).is_protocol())
             && class_field

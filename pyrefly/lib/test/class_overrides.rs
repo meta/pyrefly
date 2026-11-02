@@ -2910,6 +2910,28 @@ class Impl(SubProtoInitSubclass):
 );
 
 testcase!(
+    test_missing_super_call_abstract_new_child,
+    TestEnv::new().enable_missing_super_call_error(),
+    r#"
+from abc import ABC, abstractmethod
+from typing import Self
+
+class Base:
+    def __new__(cls) -> Self:
+        return super().__new__(cls)
+
+class AbstractChild(Base, ABC):
+    @abstractmethod
+    def __new__(cls) -> Self:
+        ...
+
+class ConcreteChild(Base):
+    def __new__(cls) -> Self:  # E: Method `ConcreteChild.__new__` does not call the method of the same name in a parent class
+        ...
+    "#,
+);
+
+testcase!(
     test_override_descriptor_method,
     r#"
 from typing import Callable, Self, overload
