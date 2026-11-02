@@ -1414,15 +1414,37 @@ Color(value=None)  # E: Argument `None` is not assignable to parameter `value` w
 testcase!(
     test_enum_call_cross_numeric_equality,
     r#"
+from decimal import Decimal
 from enum import Enum
+from fractions import Fraction
 
 class Color(Enum):
     RED = 1
     GREEN = 2
 
-# 1.0 == 1, so lookup succeeds at runtime.
+# Numeric values and equality domains succeed at runtime.
 Color(1.0)
 Color(True)
+Color(Decimal(1))
+Color(Fraction(1))
+
+class B(Enum):
+    YES = True
+
+B(1)
+B(1.0)
+B(1 + 0j)
+B(None)  # E: Argument `None` is not assignable to parameter `value` with type `B | bool | complex | float | int`
+
+class TupleEnum(Enum):
+    PAIR = (1, 2)
+
+TupleEnum((1.0, 2.0))
+
+class ListEnum(Enum):
+    ITEMS = [1, 2]
+
+ListEnum([1.0, 2.0])
     "#,
 );
 
@@ -1543,6 +1565,81 @@ class Color(Enum):
     RED = 1
 
 Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(1)))))))))))))))))))))
+    "#,
+);
+
+testcase!(
+    test_enum_call_deeply_nested_error_linear_time,
+    r#"
+from enum import Enum
+
+class E(Enum):
+    A = 1
+
+def identity[T](x: T) -> T:
+    return x
+
+identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(1 + "x"))))))))))))))))))))))))  # E: `+` is not supported between `Literal[1]` and `Literal['x']`
+    "#,
+);
+
+testcase!(
+    test_enum_call_extensible_base_self_type,
+    r#"
+from enum import Enum
+from typing import Self
+
+class Base(str, Enum):
+    @classmethod
+    def parse(cls, raw: object) -> Self:
+        return cls(raw)
+
+class Color(Base):
+    RED = "red"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "Color":
+        return cls.RED
+
+assert Color.parse(None) is Color.RED
+    "#,
+);
+
+testcase!(
+    test_enum_call_dataclass_mixin,
+    r#"
+from dataclasses import dataclass
+from enum import Enum
+
+@dataclass
+class Data:
+    n: int
+
+class E(Data, Enum):
+    A = (1,)
+
+assert E(Data(1)) is E.A
+    "#,
+);
+
+testcase!(
+    test_enum_call_pre_inferred_arguments,
+    r#"
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+
+    def __init__(self, value: int) -> None:
+        self._value_ = value
+
+def identity[T](x: T) -> T:
+    return x
+
+Color(None)  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+Color(identity(None))  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+Color(identity(identity(identity(identity(None)))))  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+Color(value=identity(identity(identity(identity(None)))))  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
     "#,
 );
 

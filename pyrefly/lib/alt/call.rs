@@ -1133,8 +1133,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn enum_value_lookup_expected_arg_type(
         &self,
         cls: &ClassType,
+        constructor_kind: &ConstructorKind,
         keywords: &[CallKeyword],
     ) -> Option<Type> {
+        // Do not restrict lookup on `type[Self]` calls, or on extensible memberless enum bases
+        // where subclasses can define members or dynamic lookup contracts like `_missing_`.
+        if *constructor_kind == ConstructorKind::TypeOfSelf
+            || self.get_enum_members(cls.class_object()).is_empty()
+        {
+            return None;
+        }
         if keywords
             .iter()
             .any(|kw| kw.arg.is_none_or(|id| id.as_str() != "value"))
@@ -1175,45 +1183,110 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if value_ty.is_any() || has_ellipsis {
             return None;
         }
+        // For containers (tuples, lists, etc.), cross-numeric equality across nested elements
+        // makes strict nominal lookup checking unsound without complex contextual inference.
+        // Bail out conservatively rather than rejecting equality-compatible container lookups.
+        let mut has_container = false;
+        value_ty.universe(&mut |t| {
+            has_container |= matches!(t, Type::Tuple(..))
+                || matches!(t, Type::ClassType(c) if {
+                    let obj = c.class_object();
+                    obj == self.stdlib.tuple_object()
+                        || obj == self.stdlib.list_object()
+                        || obj == self.stdlib.set_object()
+                        || obj == self.stdlib.frozenset_object()
+                        || obj == self.stdlib.dict_object()
+                });
+        });
+        if has_container {
+            return None;
+        }
         // Member literals say which values exist, but lookup accepts any value of the base
         // type and raises at runtime when it is missing, so promote literals.
         let promoted = value_ty.promote_implicit_literals(self.stdlib);
         let mut options = vec![promoted.clone(), Type::ClassType(cls.clone())];
         // Lookup uses equality, so numeric values compare equal across int/float/complex
-        // (`Color(1.0)` finds a member whose value is `1`).
+        // (`Color(1.0)` finds a member whose value is `1`, `B(1)` finds `True`).
         let int = self.heap.mk_class_type(self.stdlib.int().clone());
         let float = self.heap.mk_class_type(self.stdlib.float().clone());
-        if self.is_subset_eq(&int, &promoted) || self.is_subset_eq(&float, &promoted) {
+        let complex = self.heap.mk_class_type(self.stdlib.complex().clone());
+        let is_numeric = self.is_subset_eq(&promoted, &int)
+            || self.is_subset_eq(&int, &promoted)
+            || self.is_subset_eq(&promoted, &float)
+            || self.is_subset_eq(&float, &promoted)
+            || self.is_subset_eq(&promoted, &complex)
+            || self.is_subset_eq(&complex, &promoted);
+        if is_numeric {
+            options.push(int);
             options.push(float);
-            options.push(self.heap.mk_class_type(self.stdlib.complex().clone()));
+            options.push(complex);
         }
         Some(self.unions(options))
     }
 
-    /// Check the value-lookup argument of an enum call against the expected lookup type.
-    /// Returns rewritten args/keywords that carry the already-inferred argument type, so the
-    /// metaclass `__call__` check does not infer the argument expression a second time
-    /// (re-inferring is exponential for nested enum calls).
-    fn check_enum_value_lookup_arg<'b>(
+    fn is_numeric_equality_compatible(&self, ty: &Type) -> bool {
+        match ty {
+            Type::None
+            | Type::LiteralString(..)
+            | Type::Tuple(..)
+            | Type::TypedDict(..)
+            | Type::PartialTypedDict(..) => false,
+            Type::Literal(lit) => match &lit.value {
+                Lit::Str(..) | Lit::Bytes(..) => false,
+                Lit::Int(..) | Lit::Bool(..) => true,
+                Lit::Enum(..) => false,
+            },
+            Type::ClassType(cls) => {
+                let obj = cls.class_object();
+                if obj == self.stdlib.str().class_object()
+                    || obj == self.stdlib.bytes().class_object()
+                    || obj == self.stdlib.bytearray().class_object()
+                    || obj == self.stdlib.tuple_object()
+                    || obj == self.stdlib.list_object()
+                    || obj == self.stdlib.set_object()
+                    || obj == self.stdlib.frozenset_object()
+                    || obj == self.stdlib.dict_object()
+                    || obj == self.stdlib.mapping_object()
+                    || obj == self.stdlib.none_type().class_object()
+                {
+                    return false;
+                }
+                if self.get_metadata_for_class(obj).is_enum()
+                    && !self.is_subset_eq(ty, &self.heap.mk_class_type(self.stdlib.int().clone()))
+                {
+                    return false;
+                }
+                true
+            }
+            Type::Union(u) => u
+                .members
+                .iter()
+                .all(|t| self.is_numeric_equality_compatible(t)),
+            Type::Intersect(inner) => {
+                let (tys, _) = inner.as_ref();
+                tys.iter().any(|t| self.is_numeric_equality_compatible(t))
+            }
+            _ => false,
+        }
+    }
+
+    fn check_enum_lookup_arg_compatibility(
         &self,
-        cls: &ClassType,
-        args: &[CallArg<'b>],
-        keywords: &[CallKeyword<'b>],
+        got: &Type,
+        want: &Type,
+        range: TextRange,
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
-    ) -> Option<(Type, TextRange, bool)> {
-        let value_expr = match (args, keywords) {
-            ([CallArg::Arg(TypeOrExpr::Expr(e))], []) => (*e, true),
-            ([], [kw]) => match kw.value {
-                TypeOrExpr::Expr(e) => (e, false),
-                TypeOrExpr::Type(..) => return None,
-            },
-            _ => return None,
-        };
-        let want = self.enum_value_lookup_expected_arg_type(cls, keywords)?;
-        let (expr, positional) = value_expr;
-        let got = self.expr_infer(expr, errors);
-        self.check_type_as_call_argument(&got, &want, expr.range(), errors, &|| {
+    ) {
+        if self.is_subset_eq(got, want) {
+            return;
+        }
+        let int = self.heap.mk_class_type(self.stdlib.int().clone());
+        let is_numeric_target = self.is_subset_eq(&int, want);
+        if is_numeric_target && self.is_numeric_equality_compatible(got) {
+            return;
+        }
+        self.check_type_as_call_argument(got, want, range, errors, &|| {
             let mut tcc = TypeCheckContext::of_kind(TypeCheckKind::CallArgument(
                 Some(Name::new_static("value")),
                 None,
@@ -1223,7 +1296,36 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             tcc
         });
-        Some((got, expr.range(), positional))
+    }
+
+    /// Check the value-lookup argument of an enum call against the expected lookup type.
+    /// Accepts both expressions and already-flattened types; expressions are inferred into
+    /// `arg_errors` so errors do not trigger retry without a hint. Returns rewritten
+    /// args/keywords carrying the inferred type so metaclass checking avoids re-inference.
+    fn check_enum_value_lookup_arg<'b>(
+        &self,
+        cls: &ClassType,
+        constructor_kind: &ConstructorKind,
+        args: &[CallArg<'b>],
+        keywords: &[CallKeyword<'b>],
+        errors: &ErrorCollector,
+        arg_errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+    ) -> Option<(Type, TextRange, bool)> {
+        let (value_arg, positional) = match (args, keywords) {
+            ([CallArg::Arg(arg)], []) => (arg, true),
+            ([], [kw]) if kw.arg.as_ref().is_some_and(|id| id.as_str() == "value") => {
+                (&kw.value, false)
+            }
+            _ => return None,
+        };
+        let want = self.enum_value_lookup_expected_arg_type(cls, constructor_kind, keywords)?;
+        let (got, range) = match value_arg {
+            TypeOrExpr::Expr(e) => (self.expr_infer(e, arg_errors), e.range()),
+            TypeOrExpr::Type(ty, r) => ((*ty).clone(), *r),
+        };
+        self.check_enum_lookup_arg_compatibility(&got, &want, range, errors, context);
+        Some((got, range, positional))
     }
 
     /// If the metaclass defines a custom `__call__`, call it. If the `__call__` comes from `type`, ignore
@@ -1387,6 +1489,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
     ) -> Type {
+        let class_metadata = self.get_metadata_for_class(cls.class_object());
         // Classes that override `__new__` and also define `__init__` check/infer args
         // twice, potentially leading to exponential check costs: `O(2^depth)`.
         let checks_args_twice = |cls: &ClassType, preserve_self| {
@@ -1405,19 +1508,33 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             })
             .chain(keywords.iter().map(|k| &k.value))
             .any(is_deeply_nested)
-            && checks_args_twice(&cls, constructor_kind == ConstructorKind::TypeOfSelf);
+            && (checks_args_twice(&cls, constructor_kind == ConstructorKind::TypeOfSelf)
+                || class_metadata.is_enum());
 
+        let flatten_enum = class_metadata.is_enum()
+            && match (args, keywords) {
+                ([CallArg::Arg(TypeOrExpr::Expr(_))], []) => true,
+                ([], [kw]) => {
+                    kw.arg.as_ref().is_some_and(|id| id.as_str() == "value")
+                        && matches!(kw.value, TypeOrExpr::Expr(_))
+                }
+                _ => false,
+            };
+
+        let flatten = flatten_nested || flatten_enum;
         let call = CallWithTypes::new();
-        let flattened = flatten_nested.then(|| {
+        let flattened = flatten.then(|| {
             (
                 args.map(|a| match a {
-                    CallArg::Arg(x) | CallArg::Star(x, _) if is_deeply_nested(x) => {
+                    CallArg::Arg(x) | CallArg::Star(x, _)
+                        if (flatten_nested && is_deeply_nested(x)) || flatten_enum =>
+                    {
                         call.call_arg(a, self, arg_errors)
                     }
                     _ => a.clone(),
                 }),
                 keywords.map(|k| {
-                    if is_deeply_nested(&k.value) {
+                    if (flatten_nested && is_deeply_nested(&k.value)) || flatten_enum {
                         call.call_keyword(k, self, arg_errors)
                     } else {
                         k.clone()
@@ -1495,10 +1612,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let return_errors = self.error_collector();
         // The solutions the constructor call settled on.
         let mut ctor_table = None;
-        // For enum value lookup, infer the lookup argument once, check it, and hand the
-        // inferred type (not the expression) to the metaclass `__call__` check.
+        // For enum value lookup, check the lookup argument and hand the inferred type
+        // (not the expression) to the metaclass `__call__` check.
         let enum_lookup = if class_metadata.is_enum() {
-            self.check_enum_value_lookup_arg(&cls, args, keywords, &errors, context)
+            self.check_enum_value_lookup_arg(
+                &cls,
+                &constructor_kind,
+                args,
+                keywords,
+                &errors,
+                &arg_errors,
+                context,
+            )
         } else {
             None
         };
