@@ -5556,7 +5556,6 @@ def unchanged_mutable(values: list[int | None]):
 );
 
 testcase!(
-    bug = "Malformed None-check calls still contribute narrowing.",
     test_tuple_none_check_keywords,
     r#"
 from typing import assert_type
@@ -5564,10 +5563,10 @@ from typing import assert_type
 def any_keywords(values: tuple[int | None]):
     if any((v is None for v in values), unexpected=True):  # E: Unexpected keyword
         raise ValueError()
-    assert_type(values, tuple[int])
+    assert_type(values, tuple[int | None])
 
 def all_keywords(values: tuple[int | None]):
     if all((v is not None for v in values), unexpected=True):  # E: Unexpected keyword
-        assert_type(values, tuple[int])
+        assert_type(values, tuple[int | None])
     "#,
 );

@@ -1893,8 +1893,9 @@ impl<'a> BindingsBuilder<'a> {
         }
     }
 
-    // Only works for things with `Foo`, or `source.Foo`, or `F` where `from module import Foo as F`.
-    // Does not work for things with nested modules - but no SpecialExport's have that.
+    /// Recognize a special export referenced by a name or a single module attribute.
+    /// Recorded reads use their original bindings; an unresolved recorded read never falls
+    /// back to the current scope. Reads not yet bound are resolved from the current scope.
     pub fn as_special_export(&self, e: &Expr) -> Option<SpecialExport> {
         let mut visited_names: SmallSet<Name> = SmallSet::new();
         let mut visited_keys: SmallSet<Idx<Key>> = SmallSet::new();
@@ -2107,8 +2108,10 @@ impl<'a> BindingsBuilder<'a> {
                             resolved.insert(branch.value_key, export);
                             export
                         };
-                        if *result.get_or_insert(branch_result) != branch_result {
-                            return None;
+                        match result {
+                            None => result = Some(branch_result),
+                            Some(expected) if expected == branch_result => {}
+                            Some(_) => return None,
                         }
                     }
                     return result;
@@ -2395,7 +2398,8 @@ impl<'a> BindingsBuilder<'a> {
         bound_name_idx
     }
 
-    /// Return the value binding for an already-bound read, including static and builtin reads.
+    /// Return the binding captured for an already-bound read.
+    /// Static and implicit-builtin reads use their lookup binding when no flow value was recorded.
     fn binding_idx_at_name_read(&self, name: ShortIdentifier) -> Option<Idx<Key>> {
         self.deferred_bound_names
             .get(&name)

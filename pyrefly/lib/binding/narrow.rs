@@ -99,12 +99,12 @@ pub enum AtomicNarrowOp {
     LenGte(Expr),
     LenLt(Expr),
     LenLte(Expr),
+    /// At least one subject element is `None`. Does not narrow when true.
+    AnyElementIsNone,
+    /// No element of the subject is `None`.
+    NoElementIsNone,
     /// Narrowing for sequence pattern matching - confirms the subject is a sequence type
     IsSequence,
-    /// `any(x is None for x in <subject>)`. Does not narrow when true.
-    AnyElementIsNone,
-    /// `not any(x is None for x in <subject>)`: no element of the tuple subject is `None`.
-    NoElementIsNone,
     /// Negation of IsSequence - confirms the subject is NOT a sequence type
     IsNotSequence,
     /// Used to narrow to mapping types (types that extend typing.Mapping)
@@ -1387,6 +1387,9 @@ impl NarrowOps {
         func: &Expr,
         arguments: &'a Arguments,
     ) -> Option<(&'a Expr, AtomicNarrowOp)> {
+        if !arguments.keywords.is_empty() {
+            return None;
+        }
         let [Expr::Generator(generator)] = &*arguments.args else {
             return None;
         };
@@ -1396,8 +1399,8 @@ impl NarrowOps {
         let Expr::Compare(ExprCompare { ops, operands, .. }) = &*generator.elt else {
             return None;
         };
-        let (Expr::Name(elt), [op], [_, Expr::NoneLiteral(_)], Expr::Name(target)) =
-            (&operands[0], &**ops, &**operands, &comprehension.target)
+        let ([op], [Expr::Name(elt), Expr::NoneLiteral(_)], Expr::Name(target)) =
+            (&**ops, &**operands, &comprehension.target)
         else {
             return None;
         };
@@ -1454,7 +1457,8 @@ impl NarrowOps {
                 | AtomicNarrowOp::LenGte(..)
                 | AtomicNarrowOp::LenLt(..)
                 | AtomicNarrowOp::LenLte(..)
-                // These ops are only applied to concrete tuples, which are immutable.
+                // Non-concrete union members are unchanged, and concrete tuple elements cannot
+                // become `None` without reassigning the subject.
                 | AtomicNarrowOp::AnyElementIsNone
                 | AtomicNarrowOp::NoElementIsNone
                 // This is technically unsafe, because it marks arbitrary TypeGuard/TypeIs results
