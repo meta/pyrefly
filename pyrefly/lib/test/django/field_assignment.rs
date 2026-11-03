@@ -10,7 +10,6 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 django_testcase!(
-    bug = "An Any setter erases another intersection member's write contract",
     test_field_intersection_gradual_setter,
     r#"
 from typing import Any
@@ -34,7 +33,7 @@ class ZIntRecord:
 
 def int_first(record: AIntRecord) -> None:
     if isinstance(record, ZDynamicRecord):
-        record.value = "bad"
+        record.value = "bad"  # E: is not assignable to attribute `value`
         record.value = 1
 
 def gradual_first(record: ADynamicRecord) -> None:

@@ -1813,7 +1813,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     combined,
                     is_method,
                     is_instance_var,
-                    write_types.map(|types| self.intersects(&types)),
+                    write_types.map(|types| self.intersect_guarantees(&types)),
                 )),
             }
         } else {
