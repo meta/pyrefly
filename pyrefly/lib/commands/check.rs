@@ -334,7 +334,8 @@ struct OutputArgs {
     /// stdlib then record those source files instead of stub paths. Affects Glean output only.
     #[arg(long, value_name = "DIR", requires = "report_glean")]
     glean_stdlib_root: Option<String>,
-    /// Generate a Pysa-compatible JSON file for each module
+    /// Generate a Pysa-compatible JSON file for each module. Pysa treats every type error
+    /// as a failure, so this defaults `--min-severity` to `error`.
     #[arg(long, value_name = "OUTPUT_FILE")]
     report_pysa: Option<PathBuf>,
     /// Format for pysa report output (json or capnp)
@@ -603,7 +604,8 @@ impl OutputArgs {
     fn resolve(&self, config: Option<&ConfigFile>) -> OutputDefaults {
         let min_severity = self
             .min_severity
-            .or_else(|| config.and_then(|config| config.min_severity));
+            .or_else(|| config.and_then(|config| config.min_severity))
+            .or_else(|| self.report_pysa.is_some().then_some(Severity::Error));
         OutputDefaults {
             baseline: self
                 .baseline
@@ -624,7 +626,9 @@ impl OutputArgs {
                 .or_else(|| config.and_then(|config| config.output_format))
                 .unwrap_or_default(),
             min_severity: min_severity.unwrap_or(Severity::Error),
-            show_severity: min_severity.unwrap_or(Severity::Error),
+            // With no threshold set, warnings are printed but only errors make the exit
+            // code nonzero.
+            show_severity: min_severity.unwrap_or(Severity::Warn),
         }
     }
 
@@ -1003,9 +1007,9 @@ fn xml_escape_cdata(s: &str) -> String {
 
 /// Render diagnostics as a JUnit `<testsuites>` report. JUnit XML has no notion
 /// of severity, so every diagnostic is emitted as a `<failure>` whose `type` is
-/// the Pyrefly error kind (the conventional "failure type" slot). Severity
-/// filtering happens upstream via `--min-severity`, so by default only errors
-/// reach us; warnings appear only when the caller lowers the threshold.
+/// the Pyrefly error kind (the conventional "failure type" slot). The caller passes
+/// only the diagnostics at or above `--min-severity`, the ones that make the exit code
+/// nonzero, so by default warnings are left out even when the text output shows them.
 fn write_error_junit_xml<W: Write>(
     mut writer: W,
     relative_to: &Path,
@@ -2145,12 +2149,23 @@ impl CheckArgs {
             )
         });
 
+        // A JUnit failure means a nonzero exit code, so the report lists only the diagnostics
+        // that make the exit code nonzero; a shown warning that doesn't is left out.
+        let failing_errors: Vec<Error> = output_errors
+            .iter()
+            .filter(|e| e.severity() >= min_severity)
+            .cloned()
+            .collect();
+        let errors_for = |format: OutputFormat| match format {
+            OutputFormat::JunitXml => failing_errors.as_slice(),
+            _ => output_errors.as_slice(),
+        };
         if self.output.output.is_empty() {
             write_errors_to_console(
                 output_format,
                 version,
                 relative_to.as_path(),
-                &output_errors,
+                errors_for(output_format),
             )?;
         } else {
             for output in &self.output.output {
@@ -2160,14 +2175,14 @@ impl CheckArgs {
                         format,
                         version,
                         relative_to.as_path(),
-                        &output_errors,
+                        errors_for(format),
                     )?,
                     ErrorOutputDestination::File(path) => write_errors_to_file(
                         format,
                         path,
                         version,
                         relative_to.as_path(),
-                        &output_errors,
+                        errors_for(format),
                     )?,
                 }
             }
@@ -3250,7 +3265,32 @@ def go(w: Widget) -> int:
         assert_eq!(defaults.baseline_format, BaselineFormat::Full);
         assert_eq!(defaults.output_format, OutputFormat::default());
         assert_eq!(defaults.min_severity, Severity::Error);
+        assert_eq!(defaults.show_severity, Severity::Warn);
+    }
+
+    #[test]
+    fn report_pysa_defaults_min_severity_to_error() {
+        let pysa = OutputArgs::parse_from(["pyrefly-check", "--report-pysa", "out"]);
+        let defaults = pysa.resolve(None);
+        assert_eq!(defaults.min_severity, Severity::Error);
         assert_eq!(defaults.show_severity, Severity::Error);
+
+        let warn_config = ConfigFile {
+            min_severity: Some(Severity::Warn),
+            ..Default::default()
+        };
+        assert_eq!(
+            pysa.resolve(Some(&warn_config)).show_severity,
+            Severity::Warn
+        );
+        let warn_flag = OutputArgs::parse_from([
+            "pyrefly-check",
+            "--report-pysa",
+            "out",
+            "--min-severity",
+            "warn",
+        ]);
+        assert_eq!(warn_flag.resolve(None).show_severity, Severity::Warn);
     }
 
     #[test]

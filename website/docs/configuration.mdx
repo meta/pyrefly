@@ -718,6 +718,11 @@ below this threshold are hidden from output. Diagnostics at or above the thresho
 displayed and cause a nonzero exit code — for example, `--min-severity warn` makes
 warnings cause a nonzero exit.
 
+When `min-severity` is not set, `pyrefly check` displays warnings and errors, and only
+errors cause a nonzero exit code. Warnings are also left out of `--suppress-errors`,
+baseline updates and the `junit-xml` report, which lists only diagnostics that cause a
+nonzero exit code.
+
 The lowest threshold, `"hint"`, also shows hint-level diagnostics such as
 [`unused-parameter`](../error-kinds#unused-parameter),
 [`unused-variable`](../error-kinds#unused-variable),
@@ -738,7 +743,7 @@ min-severity = "warn"
 ```
 
 - Type: `"ignore"` | `"hint"` | `"info"` | `"warn"` | `"error"`
-- Default: `"error"`
+- Default: not set (warnings are displayed, and only errors cause a nonzero exit)
 - Flag equivalent: `--min-severity`
 - Notes:
     - `min-severity` is a **project-level setting** and cannot be overridden in
