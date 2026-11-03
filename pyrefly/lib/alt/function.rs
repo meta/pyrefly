@@ -2612,7 +2612,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Does not instantiate type variables (they should be inferred at the call site).
     pub fn bind_dunder_init(&self, mut t: Type, cls: &ClassType) -> Type {
         let bound = if let Type::BoundMethod(m) = &t {
-            let mut func_type = m.func.clone().as_type();
+            let mut func_type = self.filter_overloads_by_receiver(m.func.clone().as_type(), &m.obj);
             // For each callable, set its return type to its first param's type (i.e. `self`).
             func_type.transform_toplevel_callable_signatures(|c: &mut Callable, _| {
                 if let Some(self_type) = c.get_first_param() {

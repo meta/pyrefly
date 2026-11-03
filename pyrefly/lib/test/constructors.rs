@@ -1482,3 +1482,27 @@ class D(C[str]): ...
 k: Callable[[str], C[str]] = D
     "#,
 );
+
+testcase!(
+    test_overloaded_init_self_annotation_as_callable,
+    r#"
+from collections.abc import Callable
+from functools import partial
+from typing import Any, assert_type, overload
+
+class I[T]:
+    @overload
+    def __init__(self: I[int], x: object) -> None: ...
+    @overload
+    def __init__(self: I[str], x: str) -> None: ...
+    def __init__(self, x: Any) -> None: ...
+
+ok: Callable[[str], I[str]] = I[str]
+wrong: Callable[[str], I[int]] = I[str]  # E: `type[I[str]]` is not assignable to `(str) -> I[int]`
+assert_type(partial(I[str], "x")(), I[str])
+assert_type(I[str]("x"), I[str])
+
+# A bare generic class keeps every overload.
+bare: Callable[[str], I[str]] = I
+    "#,
+);
