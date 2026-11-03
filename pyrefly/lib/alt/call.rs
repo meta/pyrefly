@@ -49,6 +49,7 @@ use crate::alt::callable::ReturnTypeResolutionError;
 use crate::alt::class::class_field::ClassAttribute;
 use crate::alt::class::class_field::DescriptorBase;
 use crate::alt::class::dataclass::ReplaceKind;
+use crate::alt::expr::ExprCallee;
 use crate::alt::expr::TypeOrExpr;
 use crate::alt::nn_module_specials::is_nn_sequential;
 use crate::alt::unwrap::HintRef;
@@ -3073,83 +3074,88 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub fn expr_call_infer(
         &self,
-        x: &ExprCall,
-        mut callee_ty: Type,
+        mut callee: ExprCallee,
         hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> Type {
         // nn.Sequential chain: thread input through each module's forward method.
         // Must be checked before generic Module forward dispatch, which would erase shapes.
-        if let Type::ClassType(cls) = &callee_ty
+        if let Type::ClassType(cls) = &callee.ty
             && is_nn_sequential(cls)
-            && x.arguments.args.len() == 1
-            && x.arguments.keywords.is_empty()
+            && callee.expr.arguments.args.len() == 1
+            && callee.expr.arguments.keywords.is_empty()
         {
-            let input_ty = self.expr_infer(&x.arguments.args[0], errors);
+            let input_ty = self.expr_infer(&callee.expr.arguments.args[0], errors);
             if let Some(result) =
-                self.try_nn_sequential_chain_forward(cls, input_ty, x.range(), errors)
+                self.try_nn_sequential_chain_forward(cls, input_ty, callee.expr.range(), errors)
             {
                 return result;
             }
         }
 
-        let django_annotate_call = self.infer_django_annotate_call(&callee_ty, &x.arguments);
-        let polars_call = self.infer_polars_call_specialization(&callee_ty, &x.arguments, errors);
+        let django_annotate_call =
+            self.infer_django_annotate_call(&callee.ty, &callee.expr.arguments);
+        let polars_call =
+            self.infer_polars_call_specialization(&callee.ty, &callee.expr.arguments, errors);
 
-        let result = if matches!(&callee_ty, Type::ClassDef(cls) if cls.is_builtin("super")) {
+        let result = if matches!(&callee.ty, Type::ClassDef(cls) if cls.is_builtin("super")) {
             // Because we have to construct a binding for super in order to fill in implicit arguments,
             // we can't handle things like local aliases to super. If we hit a case where the binding
             // wasn't constructed, fall back to `Any`.
-            self.get_hashed_opt(Hashed::new(&Key::SuperInstance(x.range())))
+            self.get_hashed_opt(Hashed::new(&Key::SuperInstance(callee.expr.range())))
                 .map_or_else(
                     || self.heap.mk_any_implicit(),
                     |type_info| type_info.ty().clone(),
                 )
         } else {
-            self.expand_mut(&mut callee_ty);
-            self.check_unittest_mock_patch_target(&callee_ty, &x.arguments, errors);
+            self.expand_mut(&mut callee.ty);
+            self.check_unittest_mock_patch_target(&callee.ty, &callee.expr.arguments, errors);
 
             let call = CallWithTypes::new();
-            let (args, kws) = if callee_ty.is_union() {
+            let (args, kws) = if callee.ty.is_union() {
                 // If we have a union we will distribute over it, and end up duplicating each function call.
                 (
-                    x.arguments
+                    callee
+                        .expr
+                        .arguments
                         .args
                         .map(|x| call.call_arg(&CallArg::expr_maybe_starred(x), self, errors)),
-                    x.arguments
+                    callee
+                        .expr
+                        .arguments
                         .keywords
                         .map(|x| call.call_keyword(&CallKeyword::new(x), self, errors)),
                 )
             } else {
                 (
-                    x.arguments.args.map(CallArg::expr_maybe_starred),
-                    x.arguments.keywords.map(CallKeyword::new),
+                    callee.expr.arguments.args.map(CallArg::expr_maybe_starred),
+                    callee.expr.arguments.keywords.map(CallKeyword::new),
                 )
             };
 
-            let result = self.distribute_over_union(&callee_ty, |ty| {
+            let result = self.distribute_over_union(&callee.ty, |ty| {
                 // NotImplemented is a singleton constant, not a callable class.
                 if matches!(ty, Type::ClassType(cls) if cls.is_builtin("_NotImplementedType") || cls.has_qname("types", "NotImplementedType"))
                 {
                     return self.error(
                         errors,
-                        x.func.range(),
+                        callee.expr.func.range(),
                         ErrorKind::NotCallable,
                         "`NotImplemented` is not callable. Did you mean `NotImplementedError`?".to_owned(),
                     );
                 }
                 self.check_pydantic_model_validate_constraints(
                     ty,
-                    &x.arguments.args,
-                    &x.arguments.keywords,
+                    &callee.expr.arguments.args,
+                    &callee.expr.arguments.keywords,
                     errors,
                 );
                 match ty.callee_kind() {
                 Some(CalleeKind::Function(FunctionKind::AssertType)) => self
                     .call_assert_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
@@ -3158,17 +3164,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }) => self
                     .call_assert_shape(
                         ty,
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
                 Some(CalleeKind::Function(FunctionKind::RevealType)) => self
                     .call_reveal_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
@@ -3176,14 +3182,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // For typing.cast, we have to hard-code a check for whether the first argument
                     // is a type, so it's simplest to special-case the entire call.
                     self.call_typing_cast(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         errors,
                     )
                 }
                 Some(CalleeKind::Function(FunctionKind::InspectUnwrap))
-                    if let Some(ret) = self.call_inspect_unwrap(x, errors) =>
+                    if let Some(ret) = self.call_inspect_unwrap(callee.expr, errors) =>
                 {
                     ret
                 }
@@ -3208,8 +3214,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range,
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     )
@@ -3219,8 +3225,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range,
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     )
@@ -3233,8 +3239,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range,
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     )
@@ -3245,9 +3251,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ) =>
                 {
                     self.call_typeform(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         errors,
                     )
                 }
@@ -3256,50 +3262,50 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty.clone(),
                         &args,
                         &kws,
-                        x.func.range(),
-                        &x.arguments,
+                        callee.expr.func.range(),
+                        &callee.expr.arguments,
                         hint,
                         errors,
                     ),
                 // Treat assert_type and reveal_type like pseudo-builtins for convenience. Note that we still
                 // log a name-not-found error, but we also assert/reveal the type as requested.
-                None if ty.is_error() && is_special_name(&x.func, "assert_type") => self
+                None if ty.is_error() && is_special_name(&callee.expr.func, "assert_type") => self
                     .call_assert_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
-                None if ty.is_error() && is_special_name(&x.func, "reveal_type") => self
+                None if ty.is_error() && is_special_name(&callee.expr.func, "reveal_type") => self
                     .call_reveal_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
                 Some(CalleeKind::Function(FunctionKind::IsInstance))
-                    if self.has_exactly_two_posargs(&x.arguments) =>
+                    if self.has_exactly_two_posargs(&callee.expr.arguments) =>
                 {
-                    self.call_isinstance(&x.arguments.args[0], &x.arguments.args[1], errors)
+                    self.call_isinstance(&callee.expr.arguments.args[0], &callee.expr.arguments.args[1], errors)
                 }
                 Some(CalleeKind::Function(FunctionKind::IsSubclass))
-                    if self.has_exactly_two_posargs(&x.arguments) =>
+                    if self.has_exactly_two_posargs(&callee.expr.arguments) =>
                 {
-                    self.call_issubclass(&x.arguments.args[0], &x.arguments.args[1], errors)
+                    self.call_issubclass(&callee.expr.arguments.args[0], &callee.expr.arguments.args[1], errors)
                 }
                 Some(CalleeKind::Function(FunctionKind::Len))
-                    if x.arguments.args.len() == 1
-                        && x.arguments.keywords.is_empty()
-                        && !matches!(&x.arguments.args[0], Expr::Starred(_)) =>
+                    if callee.expr.arguments.args.len() == 1
+                        && callee.expr.arguments.keywords.is_empty()
+                        && !matches!(&callee.expr.arguments.args[0], Expr::Starred(_)) =>
                 {
                     self.call_len(
                         &args,
                         ty.clone(),
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     )
@@ -3307,16 +3313,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // `f.register(C)(impl)`: applying the tagged factory decorator by call.
                 _ if let Type::KwCall(kw) = ty
                     && matches!(&kw.func_metadata.kind, FunctionKind::SingleDispatchRegister(_))
-                    && x.arguments.args.len() == 1
-                    && x.arguments.keywords.is_empty() =>
+                    && callee.expr.arguments.args.len() == 1
+                    && callee.expr.arguments.keywords.is_empty() =>
                 {
                     self.apply_singledispatch_register(
                         ty,
-                        &x.arguments.args[0],
+                        &callee.expr.arguments.args[0],
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     )
@@ -3325,30 +3331,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .call_singledispatch_register(
                         fallback_first,
                         ty,
-                        &x.arguments,
+                        &callee.expr.arguments,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     ),
                 _ if matches!(ty, Type::ClassDef(cls) if cls == self.stdlib.builtins_type().class_object())
-                    && x.arguments.args.len() == 1 && x.arguments.keywords.is_empty() =>
+                    && callee.expr.arguments.args.len() == 1 && callee.expr.arguments.keywords.is_empty() =>
                 {
                     // We may be able to provide a more precise type when the constructor for `builtins.type`
                     // is called with a single argument.
-                    let arg_ty = self.expr_infer(&x.arguments.args[0], errors);
+                    let arg_ty = self.expr_infer(&callee.expr.arguments.args[0], errors);
                     self.type_of(arg_ty)
                 }
                 _ if matches!(ty, Type::ClassDef(cls) if cls == self.stdlib.builtins_type().class_object())
-                    && x.arguments.args.len() == 3 =>
+                    && callee.expr.arguments.args.len() == 3 =>
                 {
-                    self.check_dynamic_type_bases(&x.arguments.args[1], errors);
-                    self.freeform_call_infer(ty.clone(), &args, &kws, x.func.range(), x.arguments.range(), hint, errors)
+                    self.check_dynamic_type_bases(&callee.expr.arguments.args[1], errors);
+                    self.freeform_call_infer(ty.clone(), &args, &kws, callee.expr.func.range(), callee.expr.arguments.range(), hint, errors)
                         .ty
                 }
-                _ if let Some(ret) = self.call_builtin_enumerate(ty, x, errors) => ret,
+                _ if let Some(ret) = self.call_builtin_enumerate(ty, callee.expr, errors) => ret,
                 // `functools.partial(func, ...)` synthesizes the remaining callable instead of the
                 // opaque stub, so calls on the result are checked (see `alt::functools`).
                 _ if matches!(ty, Type::ClassDef(cls) if cls.has_toplevel_qname("functools", "partial")) =>
@@ -3357,8 +3363,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     )
@@ -3378,21 +3384,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.widen_singledispatch_dispatch_param(ty.clone()),
                     &args,
                     &kws,
-                    x.func.range(),
-                    x.arguments.range(),
+                    callee.expr.func.range(),
+                    callee.expr.arguments.range(),
                     hint,
                     errors,
                 ).ty,
                 _ => {
                     // Match expression inference so deprecation warnings share the value's range.
-                    let mut callee = &*x.func;
-                    while let Expr::Named(named) = callee {
-                        callee = &named.value;
+                    let mut callee_func = &*callee.expr.func;
+                    while let Expr::Named(named) = callee_func {
+                        callee_func = &named.value;
                     }
                     let target = self.resolve_call_target_or_error(
                         ty.clone(),
                         CallStyle::FreeForm,
-                        callee.range(),
+                        callee_func.range(),
                         errors,
                         None,
                     );
@@ -3400,18 +3406,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // branch reports it at its own range. Property and `__call__`
                     // deprecations still need call-site checks, and call inference
                     // separately reports deprecated overloads.
-                    let reference_already_checked = matches!(callee, Expr::If(..) | Expr::BoolOp(..))
+                    let reference_already_checked = matches!(callee_func, Expr::If(..) | Expr::BoolOp(..))
                         && ty.function_deprecation().is_some()
                         && ty.property_metadata().is_none();
                     if !reference_already_checked {
-                        self.report_call_deprecation(&target, callee.range(), errors, None);
+                        self.report_call_deprecation(&target, callee_func.range(), errors, None);
                     }
                     self.call_infer_with_callee_range(
                         target,
                         &args,
                         &kws,
-                        x.arguments.range(),
-                        Some(callee.range()),
+                        callee.expr.arguments.range(),
+                        Some(callee_func.range()),
                         errors,
                         errors,
                         errors,
