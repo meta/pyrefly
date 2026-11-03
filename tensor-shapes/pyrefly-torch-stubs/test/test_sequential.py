@@ -44,6 +44,12 @@ def test_sequential_custom_module() -> None:
     assert_shape(model(torch.randn((3, 5))).shape, (3, 10))
 
 
+def test_sequential_length() -> None:
+    model = nn.Sequential(*[nn.ReLU() for _ in range(2)])
+    len(model)  # E: not assignable
+    assert_shape(nn.Sequential(nn.ReLU())(torch.randn((3, 5))).shape, (3, 5))
+
+
 if TYPE_CHECKING:
 
     def check_symbolic_sequential[N: IntVar, M: IntVar](
