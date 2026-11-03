@@ -2937,6 +2937,99 @@ fn hover_constructor_followup_subscript_callee_components() {
 }
 
 #[test]
+fn hover_constructor_followup_stub_class_documentation() {
+    for stub_docstring in [
+        "",
+        "    \"\"\"   \"\"\"\n",
+        "    \"\"\"Stub class documentation.\"\"\"\n",
+    ] {
+        for call in ["Person()", "Alias()", "lib.Person()"] {
+            let mut env = TestEnv::new().with_run_require(Require::Exports);
+            env.add_with_path(
+                "lib",
+                "lib.py",
+                r#"
+class Person:
+    """Implementation class documentation."""
+    def __init__(self) -> None: pass
+"#,
+            );
+            env.add_with_path(
+                "lib",
+                "lib.pyi",
+                &format!("class Person:\n{stub_docstring}    def __init__(self) -> None: ...\n"),
+            );
+            let cursor = if call.starts_with("lib.") {
+                "#   ^"
+            } else {
+                "#^"
+            };
+            let main =
+                format!("import lib\nfrom lib import Person\nAlias = Person\n{call}\n{cursor}\n");
+            env.add("main", &main);
+            let (state, handles) = env.to_state();
+            let main_handle = handles("main");
+            let mut transaction = state.transaction();
+            transaction.run(slice::from_ref(&main_handle), Require::Everything, None);
+            assert!(transaction.get_ast(&handles("lib")).is_none());
+            let hover = get_hover(
+                &transaction,
+                &main_handle,
+                extract_cursors_for_test(&main)[0],
+                true,
+            )
+            .expect("constructor hover should be available");
+            let Contents::MarkupContent(markup) = hover.contents else {
+                panic!("expected Markdown hover contents");
+            };
+            let has_stub_docstring = stub_docstring.contains("Stub class documentation.");
+            assert_eq!(
+                markup.value.contains("Stub class documentation."),
+                has_stub_docstring,
+                "got: {}",
+                markup.value
+            );
+            // BUG: a local class alias cannot find implementation-only class documentation.
+            assert_eq!(
+                markup.value.contains("Implementation class documentation."),
+                !has_stub_docstring && call != "Alias()",
+                "got: {}",
+                markup.value
+            );
+            assert!(transaction.get_ast(&handles("lib")).is_none());
+        }
+    }
+}
+
+#[test]
+fn hover_constructor_followup_alias_does_not_borrow_factory_documentation() {
+    let mut env = TestEnv::new();
+    env.add_with_path(
+        "lib",
+        "lib.py",
+        r#"
+def Person() -> object:
+    """Factory implementation documentation."""
+    return object()
+"#,
+    );
+    env.add_with_path(
+        "lib",
+        "lib.pyi",
+        "class Person:\n    def __init__(self) -> None: ...\n",
+    );
+    let main = "from lib import Person\nAlias = Person\nAlias()\n#^\n";
+    env.add("main", main);
+    let (state, handles) = env.to_state();
+    let report = get_test_report(&state, &handles("main"), extract_cursors_for_test(main)[0]);
+    assert!(report.contains("__init__"), "got: {report}");
+    assert!(
+        !report.contains("Factory implementation documentation."),
+        "got: {report}"
+    );
+}
+
+#[test]
 fn hover_over_in_operator_shows_contains_dunder() {
     let code = r#"
 class Container:
