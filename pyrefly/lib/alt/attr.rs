@@ -10,6 +10,7 @@ use std::iter;
 use dupe::Dupe;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::literal::LitEnum;
 use pyrefly_types::shaped_array::ShapedArrayType;
@@ -1464,7 +1465,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return None;
         };
         let ty = match class_attr {
-            ClassAttribute::ReadWrite(ty, _) | ClassAttribute::ReadOnly(ty, _) => ty,
+            ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => ty,
             _ => return None,
         };
         let Type::BoundMethod(bound_method) = ty else {
@@ -1487,8 +1488,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         new_bound_method.func = BoundMethodType::Overload(filtered_overload);
         let new_method = self.heap.mk_bound_method(new_bound_method);
         Some(Attribute::ClassAttribute(match class_attr {
-            ClassAttribute::ReadWrite(_, is_method) => {
-                ClassAttribute::ReadWrite(new_method, *is_method)
+            ClassAttribute::ReadWrite(_, is_method, is_instance_var) => {
+                ClassAttribute::ReadWrite(new_method, *is_method, *is_instance_var)
             }
             ClassAttribute::ReadOnly(_, reason) => {
                 ClassAttribute::ReadOnly(new_method, reason.clone())
@@ -1537,7 +1538,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 let want_is_dunder_method = attr_name.starts_with("__")
                     && attr_name.ends_with("__")
-                    && matches!(want, ClassAttribute::ReadWrite(_, IsMethod::Yes));
+                    && matches!(want, ClassAttribute::ReadWrite(_, IsMethod::Yes, _));
                 for (got_attr, _) in got_attrs.iter() {
                     // A `__getattr__` fallback is not evidence that the missing member exists
                     // when Python would not consult `__getattr__` for it: `__getattr__` governs
@@ -1743,17 +1744,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut read_only_reason = None;
         let mut is_class_attribute = false;
         let mut is_method = IsMethod::No;
+        let mut is_instance_var = false;
         for base_results in candidates {
             let [(attribute, _)] = base_results.as_slice() else {
                 return None;
             };
             let ty = match attribute {
                 Attribute::Simple(ty) => ty,
-                Attribute::ClassAttribute(ClassAttribute::ReadWrite(ty, base_is_method)) => {
+                Attribute::ClassAttribute(ClassAttribute::ReadWrite(
+                    ty,
+                    base_is_method,
+                    base_is_instance_var,
+                )) => {
                     is_class_attribute = true;
                     if *base_is_method == IsMethod::Yes {
                         is_method = IsMethod::Yes;
                     }
+                    is_instance_var |= *base_is_instance_var;
                     ty
                 }
                 Attribute::ClassAttribute(ClassAttribute::ReadOnly(ty, reason)) => {
@@ -1776,7 +1783,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Some(reason) => {
                     Attribute::class_attribute(ClassAttribute::read_only(combined, reason))
                 }
-                None => Attribute::class_attribute(ClassAttribute::ReadWrite(combined, is_method)),
+                None => Attribute::class_attribute(ClassAttribute::ReadWrite(
+                    combined,
+                    is_method,
+                    is_instance_var,
+                )),
             }
         } else {
             Attribute::simple(combined)
@@ -3504,6 +3515,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         res: &mut Vec<AttrInfo>,
     ) {
         self.completions_class(cls.class_object(), expected_attribute_name, res);
+        if let Some(DjangoClassMetadata::Manager { queryset }) = cls.django_metadata() {
+            let mut forwarded = Vec::new();
+            self.completions_class(
+                queryset.class_object(),
+                expected_attribute_name,
+                &mut forwarded,
+            );
+            for info in forwarded {
+                if !res.iter().any(|existing| existing.name == info.name)
+                    && self
+                        .get_django_instance_attribute(cls, &info.name)
+                        .is_some()
+                {
+                    res.push(info);
+                }
+            }
+        }
     }
 
     fn completions_module(
@@ -3590,7 +3618,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .into_iter()
                     .filter_map(|(attr, _)| {
                         match &attr {
-                            Attribute::ClassAttribute(ClassAttribute::ReadWrite(ty, _))
+                            Attribute::ClassAttribute(ClassAttribute::ReadWrite(ty, ..))
                             | Attribute::ClassAttribute(ClassAttribute::ReadOnly(ty, _))
                             | Attribute::Simple(ty)
                             | Attribute::ClassAttribute(ClassAttribute::Property(ty, _, _))

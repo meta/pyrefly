@@ -2369,7 +2369,10 @@ impl Server {
                 // we really don't want to implicitly cancel those.
                 // `TypeErrorDisplayStatusRequest` is in the list because cancelling it leaves the
                 // status-bar item hidden until the next unrelated event; stale data is fine here.
+                // `DocumentSymbolRequest` is also in the list because VS Code's Outline asks once per
+                // document version, so cancelling it leaves the Outline empty until the next edit.
                 const ONLY_ONCE: &[&str] = &[
+                    DocumentSymbolRequest::METHOD.as_str(),
                     CompletionRequest::METHOD.as_str(),
                     CompletionResolveRequest::METHOD.as_str(),
                     SignatureHelpRequest::METHOD.as_str(),
@@ -3364,10 +3367,13 @@ impl Server {
                         {
                             None
                         } else {
-                            Some((PathBuf::from(error_cell_uri.to_string()), e.to_diagnostic()))
+                            Some((
+                                PathBuf::from(error_cell_uri.to_string()),
+                                e.to_diagnostic()?,
+                            ))
                         }
                     }
-                    LspFile::Source { .. } => Some((path.to_path_buf(), e.to_diagnostic())),
+                    LspFile::Source { .. } => Some((path.to_path_buf(), e.to_diagnostic()?)),
                 };
             }
 
@@ -3382,7 +3388,7 @@ impl Server {
                 && !config.project_excludes.covers(&path)
                 && type_error_status.is_enabled()
             {
-                return Some((path.to_path_buf(), e.to_diagnostic()));
+                return Some((path.to_path_buf(), e.to_diagnostic()?));
             }
         }
         None
@@ -7626,6 +7632,7 @@ impl Server {
                 none_type: stdlib.none_type(),
                 bool_type: stdlib.bool(),
                 int_type: stdlib.int(),
+                tuple_class: stdlib.tuple_object(),
             },
         )
     }

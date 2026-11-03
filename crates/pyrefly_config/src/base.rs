@@ -109,7 +109,7 @@ pub enum Preset {
     /// Enables additional error codes on top of the default for stricter checking.
     Strict,
     /// Enables every error kind at `Error` severity. Directives like
-    /// `reveal-type` and kinds that default to `Hint` keep their default severity.
+    /// `reveal-type` and the unused-code kinds keep their default severity.
     All,
 }
 
@@ -200,6 +200,7 @@ impl Preset {
                 let errors = HashMap::from([
                     (ErrorKind::DirectAbstractBaseInstantiation, Severity::Error),
                     (ErrorKind::ImplicitAny, Severity::Error),
+                    (ErrorKind::InstanceVarAssign, Severity::Error),
                     (ErrorKind::MethodAssign, Severity::Error),
                     (ErrorKind::MissingOverrideDecorator, Severity::Error),
                     (ErrorKind::OpenUnpacking, Severity::Error),
@@ -218,11 +219,18 @@ impl Preset {
                 // Promote every non-Error kind to Error. Directives (e.g.
                 // RevealType) are left at their default severity so they
                 // remain informational rather than becoming hard errors, and
-                // hint kinds (e.g. UnusedParameter) stay IDE hints.
+                // the unused-code kinds stay IDE hints. Unreachable also
+                // defaults to Hint, but is still promoted.
                 let errors: HashMap<ErrorKind, Severity> = all::<ErrorKind>()
                     .filter_map(|kind| {
                         (!kind.is_directive()
-                            && !matches!(kind.default_severity(), Severity::Error | Severity::Hint))
+                            && kind.default_severity() != Severity::Error
+                            && !matches!(
+                                kind,
+                                ErrorKind::UnusedImport
+                                    | ErrorKind::UnusedParameter
+                                    | ErrorKind::UnusedVariable
+                            ))
                         .then_some((kind, Severity::Error))
                     })
                     .collect();
@@ -775,16 +783,21 @@ mod tests {
     }
 
     // https://github.com/facebook/pyrefly/issues/5113
-    // bug: `deprecated` and `unreachable` default to `warn`; the team agreed on
-    // 2026-10-29 that they should default to `hint`.
     #[test]
     fn test_deprecated_and_unreachable_severity() {
         let severity = |preset: Preset, kind| match preset.apply().errors {
             Some(errors) => errors.severity(kind),
             None => kind.default_severity(),
         };
+        assert_eq!(
+            severity(Preset::Default, ErrorKind::Deprecated),
+            Severity::Warn
+        );
+        assert_eq!(
+            severity(Preset::Default, ErrorKind::Unreachable),
+            Severity::Hint
+        );
         for kind in [ErrorKind::Deprecated, ErrorKind::Unreachable] {
-            assert_eq!(severity(Preset::Default, kind), Severity::Warn);
             assert_eq!(severity(Preset::Basic, kind), Severity::Ignore);
             assert_eq!(severity(Preset::All, kind), Severity::Error);
         }

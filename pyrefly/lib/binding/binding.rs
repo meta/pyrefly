@@ -77,6 +77,7 @@ use crate::binding::base_class::BaseClassGeneric;
 use crate::binding::bindings::BindingEntry;
 use crate::binding::bindings::BindingTable;
 use crate::binding::bindings::Bindings;
+use crate::binding::bindings::UnsetNodeId;
 use crate::binding::classmethod::MethodReceiverKind;
 use crate::binding::django::DjangoFieldInfo;
 use crate::binding::narrow::NarrowOp;
@@ -992,6 +993,9 @@ pub enum Key {
     SuppressedException(TextRange),
     /// A suppression-only query for a narrow view, separate from normal with completion.
     SuppressionNarrow(TextRange),
+    /// The termination of a merged flow whose live branches each ended in a statement that
+    /// may have type `Never`. Solves to `Never` only if every branch does.
+    FlowTermination(TextRange),
     /// One syntactic exception-class expression from an `except` clause. A clause
     /// listing a tuple of classes has one of these per element.
     ExceptionClass(TextRange),
@@ -1040,6 +1044,7 @@ impl Ranged for Key {
             Self::PatternNarrow(r) => *r,
             Self::Exhaustive(_, r) => *r,
             Self::SuppressedException(r) | Self::SuppressionNarrow(r) => *r,
+            Self::FlowTermination(r) => *r,
             Self::ExceptionClass(r) => *r,
             Self::BranchTest(r) => *r,
             Self::BranchEnd(r) | Self::FunctoolsWrapperMutation(r) => *r,
@@ -1095,6 +1100,7 @@ impl DisplayWith<ModuleInfo> for Key {
                 write!(f, "Key::SuppressedException({})", ctx.display(r))
             }
             Self::SuppressionNarrow(r) => write!(f, "Key::SuppressionNarrow({})", ctx.display(r)),
+            Self::FlowTermination(r) => write!(f, "Key::FlowTermination({})", ctx.display(r)),
             Self::ExceptionClass(r) => write!(f, "Key::ExceptionClass({})", ctx.display(r)),
             Self::BranchTest(r) => write!(f, "Key::BranchTest({})", ctx.display(r)),
             Self::BranchEnd(r) => write!(f, "Key::BranchEnd({})", ctx.display(r)),
@@ -1355,24 +1361,25 @@ pub enum BindingExpect {
     PrivateAttributeAccess(Box<PrivateAttributeAccessCheck>),
     /// Deferred check for uninitialized variables. This is a "dangling" binding
     /// that doesn't affect any other types - it only exists to emit an error at
-    /// solve time if any of the termination keys don't have Never type.
+    /// solve time if some path on which the variable is unset reaches the use.
     UninitializedCheck {
         /// The variable name (for error messages).
         name: Name,
         /// The range of the variable usage (for error location).
         range: TextRange,
-        /// Termination keys from branches that don't define the variable.
-        /// At solve time, we check if ALL of these have Never type.
-        /// If any don't, the variable may be uninitialized.
-        termination_keys: Vec<Idx<Key>>,
+        /// The latest merges on the paths on which the variable is unset. If any of those paths
+        /// reaches the use, the variable may be uninitialized.
+        unset_nodes: Vec<UnsetNodeId>,
     },
     /// Check whether a class-body attribute is initialized on every completing path.
     UninitializedAttributeCheck {
         name: Name,
         range: TextRange,
         class: Idx<KeyClass>,
-        /// All missing paths must terminate. None means a path lacks termination evidence.
-        termination_keys: Option<Vec<Idx<Key>>>,
+        /// The latest merges on the paths on which the attribute is unset, as for
+        /// `UninitializedCheck`. `None` means some path has no termination key, so the attribute
+        /// may be uninitialized.
+        unset_nodes: Option<Vec<UnsetNodeId>>,
     },
     /// Check for forward reference string literal in union type.
     /// At runtime, `type.__or__` cannot handle string literals, so expressions
@@ -1535,21 +1542,21 @@ impl DisplayWith<Bindings> for BindingExpect {
             Self::UninitializedCheck {
                 name,
                 range,
-                termination_keys,
+                unset_nodes,
             } => {
                 write!(
                     f,
                     "UninitializedCheck({}, {}, {:?})",
                     name,
                     ctx.module().display(range),
-                    termination_keys
+                    unset_nodes
                 )
             }
             Self::UninitializedAttributeCheck {
                 name,
                 range,
                 class,
-                termination_keys,
+                unset_nodes,
             } => {
                 write!(
                     f,
@@ -1557,7 +1564,7 @@ impl DisplayWith<Bindings> for BindingExpect {
                     name,
                     ctx.module().display(range),
                     class,
-                    termination_keys
+                    unset_nodes
                 )
             }
             Self::ForwardRefUnion {

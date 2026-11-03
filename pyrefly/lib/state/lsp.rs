@@ -282,6 +282,8 @@ pub struct FindPreference {
     /// controls whether to prioritize finding pyi or py files. if false, we will search all search paths until a .py file is found before
     /// falling back to a .pyi.
     pub prefer_pyi: bool,
+    /// Allow conftest navigation without changing parameter identity for reference operations.
+    pub follow_pytest_conftest: bool,
     /// When true (the default), if the cursor is on a name/attribute in call
     /// position, resolve through `__init__`/`__new__`/`__call__` dunders
     /// instead of returning the class or variable definition. Set to false
@@ -310,6 +312,7 @@ impl Default for FindPreference {
         Self {
             import_behavior: ImportBehavior::JumpThroughEverything,
             prefer_pyi: true,
+            follow_pytest_conftest: false,
             resolve_call_dunders: true,
             replacement_policy: ImportReplacementPolicy::Respect,
             disable_style_fallback: false,
@@ -2631,8 +2634,8 @@ impl<'a> Transaction<'a> {
     }
 
     /// For a cursor inside a subscript's brackets (e.g. `c[0]`) that isn't on a
-    /// named identifier, return the subscript dunder method type so hover matches
-    /// the spaced form `c [0]`.
+    /// named identifier or a nested operator, return the subscript dunder method
+    /// type so hover matches the spaced form `c [0]`.
     pub(crate) fn subscript_operator_type_at(
         &self,
         handle: &Handle,
@@ -2644,13 +2647,27 @@ impl<'a> Transaction<'a> {
             return None;
         }
         let module = self.get_ast(handle)?;
-        let subscript =
-            Ast::locate_node(&module, position)
-                .into_iter()
-                .find_map(|node| match node {
-                    AnyNodeRef::ExprSubscript(subscript) => Some(subscript),
-                    _ => None,
-                })?;
+        let covering_nodes = Ast::locate_node(&module, position);
+        // Nested operators own their hover; the enclosing brackets must not replace it.
+        if covering_nodes
+            .iter()
+            .find(|node| node.as_expr_ref().is_some())
+            .is_some_and(|node| {
+                matches!(
+                    node,
+                    AnyNodeRef::ExprBinOp(_)
+                        | AnyNodeRef::ExprBoolOp(_)
+                        | AnyNodeRef::ExprUnaryOp(_)
+                        | AnyNodeRef::ExprCompare(_)
+                )
+            })
+        {
+            return None;
+        }
+        let subscript = covering_nodes.into_iter().find_map(|node| match node {
+            AnyNodeRef::ExprSubscript(subscript) => Some(subscript),
+            _ => None,
+        })?;
         // Only fire inside the bracket region, never on the base expression.
         if position < subscript.value.range().end() {
             return None;
@@ -3219,6 +3236,7 @@ impl<'a> Transaction<'a> {
                     handle,
                     &identifier,
                     &covering_nodes,
+                    preference,
                 ) {
                     Ok(pytest_definitions)
                 } else {
@@ -3430,6 +3448,7 @@ impl<'a> Transaction<'a> {
             position,
             FindPreference {
                 prefer_pyi: false,
+                follow_pytest_conftest: true,
                 replacement_policy: ImportReplacementPolicy::Bypass,
                 include_interpreter_stdlib: true,
                 ..Default::default()
@@ -3495,6 +3514,7 @@ impl<'a> Transaction<'a> {
             FindPreference {
                 import_behavior: ImportBehavior::StopAtEverything,
                 prefer_pyi: true,
+                follow_pytest_conftest: true,
                 ..Default::default()
             },
         )?;
@@ -3692,7 +3712,9 @@ impl<'a> Transaction<'a> {
         // Actions such as missing-`@override` and context-manager annotations
         // carry multiple edits that must apply together.
         let mut multi_actions: Vec<(String, Vec<(Module, TextRange, String)>)> = Vec::new();
-        if let Some(actions) = self.implement_abstract_members_code_actions(handle, range) {
+        if let Some(actions) =
+            self.implement_abstract_members_code_actions(handle, range, import_format)
+        {
             multi_actions.extend(
                 actions
                     .into_iter()
@@ -3943,6 +3965,22 @@ impl<'a> Transaction<'a> {
                     }
                 }
                 _ => {}
+            }
+        }
+        if let Some(answers) = self.get_answers(handle) {
+            let bindings = answers.bindings();
+            for unused in bindings.unused_variables() {
+                if unused.range.contains_range(range)
+                    && let Some(action) =
+                        quick_fixes::remove_unused_variable::remove_unused_variable_code_action(
+                            &module_info,
+                            &ast,
+                            unused.name.as_str(),
+                            unused.range,
+                        )
+                {
+                    other_actions.push(action);
+                }
             }
         }
 
@@ -4208,9 +4246,13 @@ impl<'a> Transaction<'a> {
         &self,
         handle: &Handle,
         selection: TextRange,
+        import_format: ImportFormat,
     ) -> Option<Vec<LocalRefactorCodeAction>> {
         quick_fixes::implement_abstract_members::implement_abstract_members_code_actions(
-            self, handle, selection,
+            self,
+            handle,
+            selection,
+            import_format,
         )
     }
 

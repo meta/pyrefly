@@ -334,7 +334,8 @@ struct OutputArgs {
     /// stdlib then record those source files instead of stub paths. Affects Glean output only.
     #[arg(long, value_name = "DIR", requires = "report_glean")]
     glean_stdlib_root: Option<String>,
-    /// Generate a Pysa-compatible JSON file for each module
+    /// Generate a Pysa-compatible JSON file for each module. Pysa treats every type error
+    /// as a failure, so this defaults `--min-severity` to `error`.
     #[arg(long, value_name = "OUTPUT_FILE")]
     report_pysa: Option<PathBuf>,
     /// Format for pysa report output (json or capnp)
@@ -601,6 +602,10 @@ impl OutputArgs {
     /// The result depends only on the arguments, so resolving again against a changed
     /// configuration always yields the current values.
     fn resolve(&self, config: Option<&ConfigFile>) -> OutputDefaults {
+        let min_severity = self
+            .min_severity
+            .or_else(|| config.and_then(|config| config.min_severity))
+            .or_else(|| self.report_pysa.is_some().then_some(Severity::Error));
         OutputDefaults {
             baseline: self
                 .baseline
@@ -620,10 +625,10 @@ impl OutputArgs {
                 .output_format
                 .or_else(|| config.and_then(|config| config.output_format))
                 .unwrap_or_default(),
-            min_severity: self
-                .min_severity
-                .or_else(|| config.and_then(|config| config.min_severity))
-                .unwrap_or(Severity::Error),
+            min_severity: min_severity.unwrap_or(Severity::Error),
+            // With no threshold set, warnings are printed but only errors make the exit
+            // code nonzero.
+            show_severity: min_severity.unwrap_or(Severity::Warn),
         }
     }
 
@@ -648,7 +653,12 @@ struct OutputDefaults {
     baseline_matching_mode: BaselineMatchingMode,
     baseline_format: BaselineFormat,
     output_format: OutputFormat,
+    /// Diagnostics at or above this severity make the exit code nonzero, and are
+    /// the ones `--suppress-errors` and baseline updates act on.
     min_severity: Severity,
+    /// Diagnostics at or above this severity are printed. It is never above
+    /// `min_severity`.
+    show_severity: Severity,
 }
 
 #[derive(Clone, Debug, ValueEnum, Default, PartialEq, Eq)]
@@ -997,9 +1007,9 @@ fn xml_escape_cdata(s: &str) -> String {
 
 /// Render diagnostics as a JUnit `<testsuites>` report. JUnit XML has no notion
 /// of severity, so every diagnostic is emitted as a `<failure>` whose `type` is
-/// the Pyrefly error kind (the conventional "failure type" slot). Severity
-/// filtering happens upstream via `--min-severity`, so by default only errors
-/// reach us; warnings appear only when the caller lowers the threshold.
+/// the Pyrefly error kind (the conventional "failure type" slot). The caller passes
+/// only the diagnostics at or above `--min-severity`, the ones that make the exit code
+/// nonzero, so by default warnings are left out even when the text output shows them.
 fn write_error_junit_xml<W: Write>(
     mut writer: W,
     relative_to: &Path,
@@ -2028,20 +2038,21 @@ impl CheckArgs {
                 .collect()
         };
 
-        // Filter by minimum severity. Directives are not subject to this
+        // Filter by the shown severity. Directives are not subject to this
         // filter — they are merged separately in the output step below.
-        // This must run before `--suppress-errors` so suppression respects
-        // the user's severity threshold: a finding the user asked to hide
-        // via `--min-severity` should not get a suppression comment written
-        // into source.
+        // Suppression, the baseline and the exit code act only on diagnostics
+        // at or above `min_severity`: a finding the user didn't ask to fail on
+        // should not get a suppression comment written into source.
         let min_severity = defaults.min_severity;
+        let show_severity = defaults.show_severity;
         let (ordinary_errors, mut hidden_errors): (Vec<_>, Vec<_>) = ordinary_errors
             .into_iter()
-            .partition(|e| e.severity() >= min_severity);
+            .partition(|e| e.severity() >= show_severity);
         let (baseline_errors, hidden_baseline_errors): (Vec<_>, Vec<_>) = displayed_baseline_errors
             .into_iter()
-            .partition(|e| e.severity() >= min_severity);
+            .partition(|e| e.severity() >= show_severity);
         hidden_errors.extend(hidden_baseline_errors);
+        let fails = |e: &&Error| e.severity() >= min_severity;
 
         // Suppress operates on ordinary diagnostics only — directives are
         // structurally excluded since they live in `directives`, not `ordinary_errors`.
@@ -2049,6 +2060,7 @@ impl CheckArgs {
             // TODO: Deprecate this in favor of `pyrefly suppress`
             let serialized_errors: Vec<SerializedError> = ordinary_errors
                 .iter()
+                .filter(fails)
                 .filter(|e| e.error_kind().is_suppressable())
                 .filter_map(SerializedError::from_error)
                 .collect();
@@ -2074,7 +2086,7 @@ impl CheckArgs {
             // The baseline only tracks errors that meet the min-severity threshold.
             let mut new_baseline = errors.baseline;
             new_baseline.retain(|e| e.severity() >= min_severity);
-            new_baseline.extend(ordinary_errors.iter().cloned());
+            new_baseline.extend(ordinary_errors.iter().filter(fails).cloned());
             prepare_baseline_rows(&mut new_baseline, defaults.baseline_matching_mode);
             write_baseline_errors_to_file(
                 baseline_path,
@@ -2115,8 +2127,8 @@ impl CheckArgs {
         // meet the user's severity threshold.
         let baselined_diagnostics_count = baseline_errors.len();
         let diagnostics_count = config_errors_count
-            + ordinary_errors.len()
-            + baseline_errors.len()
+            + ordinary_errors.iter().filter(fails).count()
+            + baseline_errors.iter().filter(fails).count()
             + directives
                 .iter()
                 .filter(|e| e.severity() >= min_severity)
@@ -2137,12 +2149,23 @@ impl CheckArgs {
             )
         });
 
+        // A JUnit failure means a nonzero exit code, so the report lists only the diagnostics
+        // that make the exit code nonzero; a shown warning that doesn't is left out.
+        let failing_errors: Vec<Error> = output_errors
+            .iter()
+            .filter(|e| e.severity() >= min_severity)
+            .cloned()
+            .collect();
+        let errors_for = |format: OutputFormat| match format {
+            OutputFormat::JunitXml => failing_errors.as_slice(),
+            _ => output_errors.as_slice(),
+        };
         if self.output.output.is_empty() {
             write_errors_to_console(
                 output_format,
                 version,
                 relative_to.as_path(),
-                &output_errors,
+                errors_for(output_format),
             )?;
         } else {
             for output in &self.output.output {
@@ -2152,14 +2175,14 @@ impl CheckArgs {
                         format,
                         version,
                         relative_to.as_path(),
-                        &output_errors,
+                        errors_for(format),
                     )?,
                     ErrorOutputDestination::File(path) => write_errors_to_file(
                         format,
                         path,
                         version,
                         relative_to.as_path(),
-                        &output_errors,
+                        errors_for(format),
                     )?,
                 }
             }
@@ -2186,6 +2209,24 @@ impl CheckArgs {
                 "error"
             };
             let mut parts = vec![count(diagnostics_count, label)];
+            let (mut shown_warnings, mut shown_info) = (0, 0);
+            for e in &output_errors {
+                if e.error_kind().is_directive() || e.severity() >= min_severity {
+                    continue;
+                }
+                match e.severity() {
+                    Severity::Error => unreachable!("an error always meets `min_severity`"),
+                    Severity::Warn => shown_warnings += 1,
+                    Severity::Info => shown_info += 1,
+                    Severity::Hint | Severity::Ignore => {}
+                }
+            }
+            if shown_warnings > 0 {
+                parts.push(count(shown_warnings, "warning"));
+            }
+            if shown_info > 0 {
+                parts.push(count(shown_info, "info message"));
+            }
             if suppress_count > 0 {
                 parts.push(format!("{} suppressed", number_thousands(suppress_count)));
             }
@@ -3224,6 +3265,32 @@ def go(w: Widget) -> int:
         assert_eq!(defaults.baseline_format, BaselineFormat::Full);
         assert_eq!(defaults.output_format, OutputFormat::default());
         assert_eq!(defaults.min_severity, Severity::Error);
+        assert_eq!(defaults.show_severity, Severity::Warn);
+    }
+
+    #[test]
+    fn report_pysa_defaults_min_severity_to_error() {
+        let pysa = OutputArgs::parse_from(["pyrefly-check", "--report-pysa", "out"]);
+        let defaults = pysa.resolve(None);
+        assert_eq!(defaults.min_severity, Severity::Error);
+        assert_eq!(defaults.show_severity, Severity::Error);
+
+        let warn_config = ConfigFile {
+            min_severity: Some(Severity::Warn),
+            ..Default::default()
+        };
+        assert_eq!(
+            pysa.resolve(Some(&warn_config)).show_severity,
+            Severity::Warn
+        );
+        let warn_flag = OutputArgs::parse_from([
+            "pyrefly-check",
+            "--report-pysa",
+            "out",
+            "--min-severity",
+            "warn",
+        ]);
+        assert_eq!(warn_flag.resolve(None).show_severity, Severity::Warn);
     }
 
     #[test]

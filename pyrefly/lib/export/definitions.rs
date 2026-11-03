@@ -181,6 +181,17 @@ impl Definition {
     }
 }
 
+/// What the export step records about a name marked `Final`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalName {
+    /// The assigned value, if it is a string literal (e.g. `X: Final = "x"`), used to resolve
+    /// Final variable references in synthesized class field names.
+    pub string_value: Option<String>,
+    /// Whether the name's type is declared rather than inferred: `Final[T]` gives the type, and
+    /// a bare `Final` assigned a literal has the literal's type.
+    pub has_declared_type: bool,
+}
+
 /// Find the definitions available in a scope. Does not traverse inside classes/functions,
 /// since they are separate scopes.
 #[derive(Debug, Clone, Default)]
@@ -198,10 +209,14 @@ pub struct Definitions {
     pub implicitly_imported_submodules: SmallSet<Name>,
     /// Deprecated names that are defined in this module.
     pub deprecated: SmallMap<Name, Deprecation>,
-    /// Names that are marked `Final`, with their string literal value if assigned one.
-    /// The `Option<String>` is `Some` when the RHS is a string literal (e.g. `X: Final = "x"`),
-    /// used to resolve Final variable references in synthesized class field names.
-    pub final_names: SmallMap<Name, Option<String>>,
+    /// Names that are marked `Final`.
+    pub final_names: SmallMap<Name, FinalName>,
+    /// Names with a definition inside an `if` whose tests depend on the environment, which
+    /// another configuration would replace with another definition or none.
+    pub environment_names: SmallSet<Name>,
+    /// Modules imported with `from ... import *` inside an `if` whose tests depend on the
+    /// environment, so that every name they bring in is chosen by the environment.
+    pub environment_import_all: SmallSet<ModuleName>,
     /// Special exports defined in this module
     pub special_exports: SmallMap<Name, SpecialExport>,
     /// Names that are read (not just defined) in this scope.
@@ -313,6 +328,9 @@ struct DefinitionsBuilder {
     sys_info: SysInfo,
     inner: Definitions,
     in_main_guard: bool,
+    /// Whether we are inside an `if` with a test that depends on the environment, such as
+    /// `sys.platform`, so the definitions here hold for this configuration only.
+    in_environment_branch: bool,
     /// Top-level modules with an `import foo.bar` in this scope, with the range of the last one.
     submodule_import_roots: SmallMap<Name, TextRange>,
     /// Names bound by `import foo as <alias>` in this scope, keyed by `foo`.
@@ -371,6 +389,7 @@ impl Definitions {
             is_init,
             inner: Definitions::default(),
             in_main_guard: false,
+            in_environment_branch: false,
             submodule_import_roots: SmallMap::new(),
             module_aliases: SmallMap::new(),
         };
@@ -502,6 +521,9 @@ impl DefinitionsBuilder {
             return;
         }
         let in_main_guard = self.in_main_guard;
+        if self.in_environment_branch {
+            self.inner.environment_names.insert(x.clone());
+        }
         let has_value_definition = is_value_definition(&style);
         let function_def_only = matches!(style, DefinitionStyle::Unannotated(SymbolKind::Function));
         match self.inner.definitions.entry(x.clone()) {
@@ -657,6 +679,9 @@ impl DefinitionsBuilder {
                     if &a.name == "*" {
                         if let Some(module) = name {
                             self.inner.import_all.insert(module, a.name.range);
+                            if self.in_environment_branch {
+                                self.inner.environment_import_all.insert(module);
+                            }
                         }
                     } else {
                         let style = match name {
@@ -772,15 +797,23 @@ impl DefinitionsBuilder {
                         }
                     }
                 }
-                let has_final_annotation = is_final_annotation(&x.annotation);
-                let final_string_value = if has_final_annotation {
-                    match x.value.as_deref() {
+                let final_name = is_final_annotation(&x.annotation).then(|| FinalName {
+                    string_value: match x.value.as_deref() {
                         Some(Expr::StringLiteral(s)) => Some(s.value.to_string()),
                         _ => None,
-                    }
-                } else {
-                    None
-                };
+                    },
+                    has_declared_type: matches!(*x.annotation, Expr::Subscript(_))
+                        || matches!(
+                            x.value.as_deref(),
+                            Some(
+                                Expr::BooleanLiteral(_)
+                                    | Expr::NoneLiteral(_)
+                                    | Expr::NumberLiteral(_)
+                                    | Expr::StringLiteral(_)
+                                    | Expr::BytesLiteral(_)
+                            )
+                        ),
+                });
                 match &*x.target {
                     Expr::Name(x) => {
                         self.add_name(
@@ -791,10 +824,8 @@ impl DefinitionsBuilder {
                                 ShortIdentifier::expr_name(x),
                             ),
                         );
-                        if has_final_annotation {
-                            self.inner
-                                .final_names
-                                .insert(x.id.clone(), final_string_value);
+                        if let Some(final_name) = final_name {
+                            self.inner.final_names.insert(x.id.clone(), final_name);
                         }
                     }
                     _ => self.expr_lvalue(&x.target),
@@ -996,11 +1027,46 @@ impl DefinitionsBuilder {
             Stmt::If(x) => {
                 self.named_in_expr(&x.test);
                 let sys_info = self.sys_info;
-                for (_, test, body) in sys_info.pruned_if_branches(x) {
+                // Suites before the first test of the environment are chosen the same way under
+                // every configuration, so only that test's suite and later ones are chosen by it.
+                let environment_start = Ast::if_branches(x)
+                    .find(|(_, test, _)| test.is_some_and(SysInfo::depends_on_sys_info))
+                    .map(|(range, _, _)| range.start());
+                let chosen_by_environment = |range: TextRange| {
+                    environment_start.is_some_and(|start| range.start() >= start)
+                };
+                let outer_environment = self.in_environment_branch;
+                let mut walked = SmallSet::new();
+                for (range, test, body) in sys_info.pruned_if_branches(x) {
+                    walked.insert(range);
+                    self.in_environment_branch = outer_environment || chosen_by_environment(range);
                     let outer = self.in_main_guard;
                     self.in_main_guard = outer || test.is_some_and(Ast::is_main_guard);
                     self.stmts(body);
                     self.in_main_guard = outer;
+                }
+                self.in_environment_branch = outer_environment;
+                // Another configuration walks the suites this one rules out instead, so the names
+                // they define or star-import are chosen by the environment too.
+                for (range, _, body) in Ast::if_branches(x) {
+                    if !walked.contains(&range) && chosen_by_environment(range) {
+                        let skipped =
+                            Definitions::new(body, self.module_name, self.is_init, sys_info);
+                        // The scan rules out nested suites by the configuration too, and
+                        // records what they define.
+                        self.inner.environment_names.extend(
+                            skipped
+                                .definitions
+                                .into_keys()
+                                .chain(skipped.environment_names),
+                        );
+                        self.inner.environment_import_all.extend(
+                            skipped
+                                .import_all
+                                .into_keys()
+                                .chain(skipped.environment_import_all),
+                        );
+                    }
                 }
                 return; // We went through the relevant branches already
             }

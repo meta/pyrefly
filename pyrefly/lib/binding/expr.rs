@@ -432,18 +432,17 @@ impl<'a> BindingsBuilder<'a> {
                 // Uninitialized local errors are only reported when we are neither in a stub
                 // nor a static type context.
                 if !usage.is_static() && !self.module_info.path().is_interface() {
-                    if let Some(termination_keys) = is_initialized
-                        .deferred_termination_keys()
-                        .map(|s| s.to_vec())
+                    if let Some(unset_nodes) =
+                        is_initialized.deferred_unset_nodes().map(|s| s.to_vec())
                     {
                         // Defer the uninitialized check to solve time.
-                        // At solve time, we'll check if all termination keys have Never type.
+                        // At solve time, we'll check whether any path on which it is unset reaches here.
                         self.insert_binding(
                             KeyExpect::UninitializedCheck(name.range),
                             BindingExpect::UninitializedCheck {
                                 name: name.id.clone(),
                                 range: name.range,
-                                termination_keys,
+                                unset_nodes,
                             },
                         );
                     } else if let Some(error_message) = is_initialized.as_error_message(&name.id) {

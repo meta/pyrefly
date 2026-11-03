@@ -1488,8 +1488,8 @@ pub fn get_hover_with_verbosity(
         return keyword_hover;
     };
 
-    // `a and b and c` is a single flat BoolOp, so hovering any operator in the
-    // chain highlights the whole expression. `not` highlights its unary expression.
+    // Binary operators, boolean operators, and `not` highlight their enclosing expression.
+    // `a and b and c` is a single flat BoolOp, so any operator highlights the whole chain.
     let range = ast
         .as_deref()
         .zip(module_info.as_ref())
@@ -1501,6 +1501,7 @@ pub fn get_hover_with_verbosity(
                     AnyNodeRef::ExprBoolOp(bool_op) => {
                         Some(module_info.to_lsp_range(bool_op.range()))
                     }
+                    AnyNodeRef::ExprBinOp(bin_op) => Some(module_info.to_lsp_range(bin_op.range())),
                     AnyNodeRef::ExprUnaryOp(unary_op) if unary_op.op == UnaryOp::Not => {
                         Some(module_info.to_lsp_range(unary_op.range()))
                     }
@@ -1516,6 +1517,7 @@ pub fn get_hover_with_verbosity(
             position,
             FindPreference {
                 prefer_pyi: false,
+                follow_pytest_conftest: true,
                 include_interpreter_stdlib: true,
                 ..Default::default()
             },
@@ -1538,7 +1540,14 @@ pub fn get_hover_with_verbosity(
         // Only borrow documentation from the same public symbol. Preferences may otherwise
         // redirect a factory function to an unrelated stub constructor.
         transaction
-            .find_definition(handle, position, FindPreference::default())
+            .find_definition(
+                handle,
+                position,
+                FindPreference {
+                    follow_pytest_conftest: true,
+                    ..Default::default()
+                },
+            )
             .ok()
             .and_then(|items| items.into_vec().into_iter().next())
             .filter(|interface| {

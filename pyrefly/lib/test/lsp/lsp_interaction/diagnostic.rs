@@ -929,19 +929,6 @@ fn test_error_documentation_links() {
                     "source": "Pyrefly"
                 },
                 {
-                    "code": "bad-context-manager",
-                    "codeDescription": {
-                        "href": "https://pyrefly.org/en/docs/error-kinds/#bad-context-manager"
-                    },
-                    "message": "Cannot use `A` as a context manager\n  Object of class `A` has no attribute `__exit__`",
-                    "range": {
-                        "end": {"character": 8, "line": 17},
-                        "start": {"character": 5, "line": 17}
-                    },
-                    "severity": 1,
-                    "source": "Pyrefly"
-                },
-                {
                     "code": "missing-attribute",
                     "codeDescription": {
                         "href": "https://pyrefly.org/en/docs/error-kinds/#missing-attribute"
@@ -1000,7 +987,7 @@ fn test_unreachable_branch_diagnostic() {
                         "end": {"character": 12, "line": 6},
                         "start": {"character": 4, "line": 6}
                     },
-                    "severity": 2,
+                    "severity": 4,
                     "source": "Pyrefly",
                     "tags": [1]
                 }

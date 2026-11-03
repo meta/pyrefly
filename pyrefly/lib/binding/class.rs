@@ -76,6 +76,7 @@ use crate::binding::binding::KeyVariance;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::LegacyTParamCollector;
+use crate::binding::django::collect_django_queryset_only;
 use crate::binding::expr::Usage;
 use crate::binding::pydantic::PydanticConfigDict;
 use crate::binding::scope::ClassIndices;
@@ -463,6 +464,7 @@ impl<'a> BindingsBuilder<'a> {
             self.class_scopes
                 .push((body_range, class_indices.class_idx));
         }
+        let django_queryset_only = collect_django_queryset_only(&body);
         self.init_static_scope(&body, false);
         self.stmts(
             body,
@@ -510,7 +512,7 @@ impl<'a> BindingsBuilder<'a> {
 
             // Stub files declare attributes without runtime initialization.
             if !self.module_info.path().is_interface()
-                && let Some(termination_keys) = uninitialized_fields.get(name.key())
+                && let Some(unset_nodes) = uninitialized_fields.get(name.key())
             {
                 self.insert_binding(
                     KeyExpect::UninitializedAttributeCheck(range),
@@ -518,7 +520,7 @@ impl<'a> BindingsBuilder<'a> {
                         name: name.key().clone(),
                         range,
                         class: class_indices.class_idx,
-                        termination_keys: termination_keys.clone(),
+                        unset_nodes: unset_nodes.clone(),
                     },
                 );
             }
@@ -532,7 +534,8 @@ impl<'a> BindingsBuilder<'a> {
                     attrs_field_specifier,
                     range,
                     docstring_range,
-                ),
+                )
+                .with_django_queryset_only(django_queryset_only.get(name.key()).copied()),
             );
             let key_field = KeyClassField(class_indices.def_index, name.clone().into_key());
             let binding = BindingClassField {

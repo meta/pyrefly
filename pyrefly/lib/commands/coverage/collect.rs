@@ -2033,6 +2033,7 @@ pub fn collect_module_reports(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::collections::HashSet;
     use std::path::PathBuf;
 
@@ -2052,12 +2053,17 @@ mod tests {
     use crate::state::require::Require;
     use crate::test::util::TestEnv;
 
+    /// The checked-in test-file directory from the COVERAGE_TEST_PATH env var.
+    fn test_files_dir() -> PathBuf {
+        let path =
+            std::env::var("COVERAGE_TEST_PATH").expect("COVERAGE_TEST_PATH env var must be set");
+        PathBuf::from(path)
+    }
+
     /// Load a checked-in test file from the COVERAGE_TEST_PATH directory.
     /// Normalizes `\r\n` to `\n` so snapshots pass on Windows.
     fn load_test_file(name: &str) -> String {
-        let path =
-            std::env::var("COVERAGE_TEST_PATH").expect("COVERAGE_TEST_PATH env var must be set");
-        std::fs::read_to_string(PathBuf::from(path).join(name))
+        std::fs::read_to_string(test_files_dir().join(name))
             .unwrap_or_else(|e| panic!("failed to read test file {name}: {e}"))
             .replace("\r\n", "\n")
     }
@@ -2420,33 +2426,24 @@ mod tests {
 
     #[test]
     fn test_check_findings_match_report_symbols() {
-        for file in [
-            "any_annotations.py",
-            "any_detection.py",
-            "decorators.py",
-            "dunder_attrs.py",
-            "dunder_implicit.py",
-            "functions.py",
-            "incomplete_methods.py",
-            "inheritance.py",
-            "inherited_attrs.py",
-            "instance_attrs.py",
-            "method_aliases.py",
-            "optional_imports.py",
-            "overloads.py",
-            "overloads_partial.py",
-            "partial_any.py",
-            "property_basic.py",
-            "schema_classes_methods.py",
-            "stub_ignores_py_annotations.pyi",
-            "variables.py",
-        ] {
-            // `.pyi` entries are stub-merged with their `.py` source.
-            let (p, module_path) = if let Some(stem) = file.strip_suffix(".pyi") {
-                (
-                    merged_stub_symbols(file, &format!("{stem}.py")),
-                    "test.pyi".to_owned(),
-                )
+        // These need a site-package env; see their dedicated tests.
+        const SKIP: &[&str] = &["schema_classes_pydantic.py", "schema_classes_attrs.py"];
+
+        let files: BTreeSet<String> = std::fs::read_dir(test_files_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|f| (f.ends_with(".py") || f.ends_with(".pyi")) && !SKIP.contains(&f.as_str()))
+            .collect();
+        assert!(files.len() > 30, "corpus discovery looks broken: {files:?}");
+
+        for file in &files {
+            // `.pyi` entries with a `.py` twin are stub-merged, like the production pipeline.
+            let py_twin = file
+                .strip_suffix(".pyi")
+                .map(|stem| format!("{stem}.py"))
+                .filter(|py| files.contains(py));
+            let (p, module_path) = if let Some(py) = py_twin {
+                (merged_stub_symbols(file, &py), "test.pyi".to_owned())
             } else {
                 parse_test_module(file, TestEnv::new())
             };
@@ -3276,5 +3273,99 @@ def g(x: int) -> int:
         let env = TestEnv::new_with_site_package_paths(&[&path]);
         let report = build_module_report_for_test_with_env("schema_classes_attrs.py", env);
         compare_snapshot("schema_classes_attrs.expected.json", &report);
+    }
+
+    // --- prefer-stubs end-to-end tests ---
+
+    const STUB_TEST_CONFIG: &str = "search-path = ['.']\nskip-interpreter-query = true\n";
+    /// `g` exists only in the `.py`, untyped.
+    const STUB_TEST_PY: &str = "def f() -> int: ...\ndef g(x): ...\n";
+    const STUB_TEST_PYI: &str = "def f() -> int: ...\n";
+
+    /// Run `collect_module_reports` over `dir` with `prefer_stubs` enabled.
+    fn collect_reports_with_stubs(dir: &Path) -> (Vec<ModuleReport>, Vec<Error>) {
+        let globs = FilteredGlobs::new(
+            Globs::new(vec![dir.display().to_string()]).unwrap(),
+            Globs::empty(),
+            None,
+            HiddenDirFilter::Disabled,
+        );
+        collect_module_reports(
+            Box::new(globs),
+            default_config_finder(None),
+            true,
+            None,
+            false,
+            Some(false),
+            TEST_THREAD_COUNT,
+        )
+        .unwrap()
+    }
+
+    /// One stub report: `f` typed, `g` merged as untyped with its finding in the `.py`.
+    fn assert_stub_merged_report(reports: &[ModuleReport], errors: &[Error]) {
+        let [report] = reports else {
+            panic!("expected exactly one report, got {}", reports.len());
+        };
+        assert_eq!(report.name, "foo");
+        assert!(report.path.ends_with("foo.pyi"), "{}", report.path);
+
+        let slots = |name: &str| {
+            report
+                .symbol_reports
+                .iter()
+                .find(|s| s.name() == name)
+                .unwrap_or_else(|| panic!("no symbol named {name}"))
+                .slots()
+        };
+        assert_eq!((slots("foo.f").n_typable, slots("foo.f").n_typed), (1, 1));
+        assert_eq!((slots("foo.g").n_typable, slots("foo.g").n_untyped), (2, 2));
+
+        let [error] = errors else {
+            panic!("expected exactly one finding, got {}", errors.len());
+        };
+        assert!(
+            error.msg_header().contains("foo.g"),
+            "{}",
+            error.msg_header()
+        );
+        assert!(
+            error.path().to_string().ends_with("foo.py"),
+            "{}",
+            error.path()
+        );
+    }
+
+    /// A co-located `.pyi` shadows its `.py`; uncovered `.py` symbols merge into its report.
+    #[test]
+    fn test_prefer_stubs_end_to_end() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("pyrefly.toml"), STUB_TEST_CONFIG).unwrap();
+        std::fs::write(dir.path().join("foo.py"), STUB_TEST_PY).unwrap();
+        std::fs::write(dir.path().join("foo.pyi"), STUB_TEST_PYI).unwrap();
+
+        let (reports, errors) = collect_reports_with_stubs(dir.path());
+        assert_stub_merged_report(&reports, &errors);
+    }
+
+    /// A stubs-only project's `.py` is found via site-package-path and merged the same way.
+    #[test]
+    fn test_prefer_stubs_site_package_fallback() {
+        let site = TempDir::new().unwrap();
+        std::fs::write(site.path().join("foo.py"), STUB_TEST_PY).unwrap();
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("pyrefly.toml"),
+            format!(
+                "{STUB_TEST_CONFIG}site-package-path = ['{}']\n",
+                site.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("foo.pyi"), STUB_TEST_PYI).unwrap();
+
+        let (reports, errors) = collect_reports_with_stubs(dir.path());
+        assert_stub_merged_report(&reports, &errors);
     }
 }

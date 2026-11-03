@@ -141,6 +141,7 @@ use crate::binding::binding::SuperStyle;
 use crate::binding::binding::TypeAliasParams;
 use crate::binding::binding::TypeParameter;
 use crate::binding::binding::UnpackedPosition;
+use crate::binding::bindings::UnsetNodeId;
 use crate::binding::narrow::FacetSubject;
 use crate::binding::narrow::NarrowOp;
 use crate::binding::narrow::identifier_and_chain_for_expr;
@@ -795,6 +796,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ty: Some(self.expr_infer(&x.slice, errors)),
                 }
             }
+            // Check subscripts as type forms so that misplaced qualifiers are reported.
+            Expr::Subscript(_) => Annotation::new_type(
+                self.expr_infer_impl(x, None, errors, Some(TypeFormContext::ClassKeyword))
+                    .into_ty(),
+            ),
             _ => Annotation::new_type(self.expr_infer(x, errors)),
         }
     }
@@ -2149,10 +2155,31 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.distribute_over_union(context_manager_type, |context_manager_type| {
             let context =
                 || ErrorContext::BadContextManager(self.for_display(context_manager_type.clone()));
-            let enter_type =
-                self.context_value_enter(context_manager_type, kind, range, errors, Some(&context));
-            let exit =
-                self.context_value_exit(context_manager_type, kind, range, errors, Some(&context));
+            // Collect each protocol half's errors separately: when both halves fail (e.g. an
+            // async context manager in a sync `with`), both would otherwise surface as
+            // identical-header `bad-context-manager` errors on the same range. The enter
+            // half's error wins, since it is the first protocol failure in reading order.
+            let enter_errors = ErrorCollector::new(errors.module().clone(), ErrorStyle::Delayed);
+            let enter_type = self.context_value_enter(
+                context_manager_type,
+                kind,
+                range,
+                &enter_errors,
+                Some(&context),
+            );
+            let exit_errors = ErrorCollector::new(errors.module().clone(), ErrorStyle::Delayed);
+            let exit = self.context_value_exit(
+                context_manager_type,
+                kind,
+                range,
+                &exit_errors,
+                Some(&context),
+            );
+            if !enter_errors.is_empty() {
+                errors.extend(enter_errors);
+            } else {
+                errors.extend(exit_errors);
+            }
             let exit_type = self.union(exit.with_exception, exit.without_exception);
             self.check_type(
                 &exit_type,
@@ -2776,6 +2803,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 operand,
                 ..
             }) => self.declared_bool_value(operand).map(|value| !value),
+            Expr::Named(named) => self.declared_bool_value(&named.value),
             Expr::BoolOp(ExprBoolOp { op, values, .. }) => {
                 // One `or` operand that is always true makes the whole test true, and one `and`
                 // operand that is always false makes it false. Otherwise the test is settled only
@@ -2797,6 +2825,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // type, but the name always holds the assigned value, so that value's declaration
                 // settles it.
                 let idx = self.binding_before_narrowing(name);
+                if self.name_chosen_by_environment(name, idx) {
+                    return None;
+                }
                 match self.bindings().get(idx) {
                     Binding::FunctionParameter(param)
                         if matches!(**param, FunctionParameter::Annotated(_)) => {}
@@ -2816,6 +2847,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     | Binding::ClassDef(..)
                     | Binding::TypeAlias(_)
                     | Binding::AnnotatedType(..) => {}
+                    // Another module can reassign its variables, and tests patch them, so only a
+                    // `Final` with a declared type settles. Nothing reports rebinding the imported
+                    // name through `global`, so it also must not be declared `global`.
+                    Binding::Import(import)
+                        if !self.bindings().global_declarations().contains(&name.id)
+                            && self.export_settles(import.module, &import.name) => {}
                     // An unannotated assignment, a merge of several definitions, a capture, and
                     // the like all carry an inferred type.
                     _ => return None,
@@ -2824,10 +2861,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             Expr::Attribute(attr) => {
                 let base = self.expr_infer(&attr.value, &swallow);
-                // Only a class or instance attribute can be looked up as a declaration. A module
-                // attribute is an unannotated global more often than not. A read through a
-                // descriptor returns what its `__get__` returns. An enum member's `value` is the
-                // type of the expression assigned to the member, which is inferred.
+                // A module attribute settles only if it is a `Final` with a declared type, as for
+                // an imported name, read from a module that the environment does not choose.
+                if let Type::Module(module) = &base {
+                    return (!self.module_chosen_by_environment(&attr.value)
+                        && self.export_settles(
+                            ModuleName::from_parts(module.parts()),
+                            &attr.attr.id,
+                        ))
+                    .then(|| {
+                        value_of_type(&self.attr_infer_for_type(
+                            &base,
+                            &attr.attr.id,
+                            attr.range,
+                            &swallow,
+                            None,
+                        ))
+                    })
+                    .flatten();
+                }
+                // Only a class or instance attribute can be looked up as a declaration. A read
+                // through a descriptor returns what its `__get__` returns. An enum member's
+                // `value` is the type of the expression assigned to the member, which is
+                // inferred.
                 let classes = self.attribute_lookup_classes(&base)?;
                 if matches!(attr.attr.id.as_str(), "value" | "_value_")
                     && classes
@@ -2857,6 +2913,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ))
             }
             Expr::Call(call) => {
+                if let Expr::Name(name) = &*call.func
+                    && self.name_chosen_by_environment(name, self.binding_before_narrowing(name))
+                {
+                    return None;
+                }
                 // Each member of a union is called separately, and an instance, including one
                 // whose type is a type variable, is called through its `__call__` method.
                 let mut callees = Vec::new();
@@ -3190,15 +3251,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             BindingExpect::UninitializedCheck {
                 name,
                 range,
-                termination_keys,
+                unset_nodes,
             } => {
-                // Check if all branches that appeared uninitialized at binding time
-                // actually terminate due to Never/NoReturn. If any don't terminate,
-                // the variable may be uninitialized at this use.
-                let all_terminate = termination_keys
-                    .iter()
-                    .all(|key| self.get_idx(*key).ty().is_never());
-                if !all_terminate {
+                if self.some_unset_path_continues(unset_nodes) {
                     errors
                         .error_builder(
                             *range,
@@ -3212,11 +3267,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 name,
                 range,
                 class,
-                termination_keys,
+                unset_nodes,
             } => {
-                let initialized = termination_keys
+                let initialized = unset_nodes
                     .as_ref()
-                    .is_some_and(|keys| keys.iter().all(|key| self.get_idx(*key).ty().is_never()));
+                    .is_some_and(|nodes| !self.some_unset_path_continues(nodes));
                 let inherited = !initialized
                     && self.get_idx(*class).0.as_ref().is_some_and(|cls| {
                         self.get_mro_for_class(cls)
@@ -5129,6 +5184,99 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 },
             }
         })
+    }
+
+    /// Whether another configuration may give the name, read through the definition `idx`, a
+    /// different value: the definition is in a suite of an `if` with a test of the environment and
+    /// the read is outside that suite, or a suite such a test rules out also defines the name.
+    fn name_chosen_by_environment(&self, name: &ExprName, idx: Idx<Key>) -> bool {
+        self.bindings()
+            .environment_definitions()
+            .get(&idx)
+            .is_some_and(|suite| !suite.contains_range(name.range))
+            || self.bindings().environment_names().contains(&name.id)
+    }
+
+    /// Whether a name another module exports can settle a branch test: it is `Final` with a
+    /// declared type, and no module on the way to it defines or imports it under a test of the
+    /// environment.
+    fn export_settles(&self, module: ModuleName, name: &Name) -> bool {
+        let origin = self.exports.export_origin(module, name);
+        origin.final_has_declared_type && !origin.defined_under_environment
+    }
+
+    /// Whether the expression that names a module may name another module under another
+    /// configuration: it is, or reads through, a name that a test of the environment defines or
+    /// imports, here or in the module it comes from, or a variable here or in another module. An
+    /// expression other than a name or a chain of attributes counts as chosen, since nothing
+    /// records how it was chosen.
+    fn module_chosen_by_environment(&self, x: &Expr) -> bool {
+        // An export that ends at a definition may hold whichever module an earlier test of the
+        // environment chose.
+        let export_chosen = |module: ModuleName, name: &Name| {
+            let origin = self.exports.export_origin(module, name);
+            origin.defined_under_environment || origin.ends_at_definition
+        };
+        match x {
+            Expr::Name(name) => {
+                let idx = self.binding_before_narrowing(name);
+                self.name_chosen_by_environment(name, idx)
+                    || self.bindings().global_declarations().contains(&name.id)
+                    || match self.bindings().get(idx) {
+                        Binding::Module(..) => false,
+                        Binding::Import(import) => export_chosen(import.module, &import.name),
+                        // An assignment or any other binding may hold whichever module an
+                        // earlier test of the environment chose.
+                        _ => true,
+                    }
+            }
+            Expr::Attribute(attr) => {
+                self.module_chosen_by_environment(&attr.value)
+                    || match self.expr_infer(&attr.value, &self.error_swallower()) {
+                        Type::Module(module) => {
+                            export_chosen(ModuleName::from_parts(module.parts()), &attr.attr.id)
+                        }
+                        _ => true,
+                    }
+            }
+            _ => true,
+        }
+    }
+
+    /// Whether some path on which a name is unset continues past every merge it passes through,
+    /// through a branch that does not terminate due to Never/NoReturn. The nodes are the latest
+    /// merges on those paths.
+    fn some_unset_path_continues(&self, latest: &[UnsetNodeId]) -> bool {
+        let nodes = self.bindings().unset_nodes();
+        let mut reachable = SmallSet::new();
+        let mut stack = latest.to_vec();
+        while let Some(id) = stack.pop() {
+            if reachable.insert(id) {
+                stack.extend(nodes.get(id).previous.iter().copied());
+            }
+        }
+        // A path continues past a node if one of the node's keys is not `Never` and the path
+        // continued past one of the earlier nodes, unless the name became unset at this node.
+        // Earlier nodes have smaller ids, so visiting in id order decides them first.
+        let mut ids = reachable.into_iter().collect::<Vec<_>>();
+        ids.sort_unstable();
+        let mut continuing = SmallSet::new();
+        for id in ids {
+            let node = nodes.get(id);
+            if (node.previous.is_empty()
+                || node
+                    .previous
+                    .iter()
+                    .any(|previous| continuing.contains(previous)))
+                && node
+                    .keys
+                    .iter()
+                    .any(|key| !self.get_idx(*key).ty().is_never())
+            {
+                continuing.insert(id);
+            }
+        }
+        latest.iter().any(|id| continuing.contains(id))
     }
 
     /// Handle `Binding::ReturnImplicit` - compute the implicit return type.

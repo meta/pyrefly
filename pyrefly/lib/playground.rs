@@ -38,7 +38,7 @@ use starlark_map::small_map::SmallMap;
 
 use crate::config::config::ConfigFile;
 use crate::config::config::toml_error_span;
-use crate::config::error_kind::Severity;
+use crate::config::error_kind::ShownSeverity;
 use crate::config::finder::ConfigFinder;
 use crate::lsp::wasm::hover::get_hover;
 use crate::memory_project::memory_config;
@@ -417,9 +417,10 @@ impl Playground {
             output_errors.extend(collected.directives);
             output_errors.extend(unused.ordinary);
             output_errors.extend(unused.hints);
-            let file_errors = output_errors.into_map(|e| {
+            let file_errors = output_errors.into_iter().filter_map(|e| {
+                let severity = e.severity().shown()?;
                 let range = e.display_range();
-                Diagnostic {
+                Some(Diagnostic {
                     start_line: range.start.line_within_file().get() as i32,
                     start_col: range.start.column().get() as i32,
                     end_line: range.end.line_within_file().get() as i32,
@@ -428,17 +429,17 @@ impl Playground {
                     message_details: e.msg_details().unwrap_or("").to_owned(),
                     kind: e.error_kind().to_name().to_owned(),
                     // Severity values defined here: https://github.com/microsoft/vscode/blob/main/src/vs/editor/common/standalone/standaloneEnums.ts
-                    severity: match e.severity() {
-                        Severity::Error => 8,
-                        Severity::Warn => 4,
-                        Severity::Info => 2,
+                    severity: match severity {
+                        ShownSeverity::Error => 8,
+                        ShownSeverity::Warn => 4,
+                        ShownSeverity::Info => 2,
                         // As in the LSP, a hint without its own editor look is shown like `info`.
-                        Severity::Hint if e.editor_tag().is_none() => 2,
-                        Severity::Hint | Severity::Ignore => 1,
+                        ShownSeverity::Hint if e.editor_tag().is_none() => 2,
+                        ShownSeverity::Hint => 1,
                     },
                     tags: e.editor_tag().into_iter().collect(),
                     filename: filename.clone(),
-                }
+                })
             });
             all_diagnostics.extend(file_errors);
         }
