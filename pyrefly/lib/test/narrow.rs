@@ -5272,3 +5272,212 @@ def merged_all(values: tuple[int | None, str | None], flag: bool):
         assert_type(values, tuple[int, str])
     "#,
 );
+
+testcase!(
+    bug = "Special-export lookup does not preserve historical callable identity.",
+    test_special_export_historical_callees,
+    r#"
+from typing import Any, Callable, Iterable, assert_type
+
+class Checks:
+    def all(self, it: Iterable[bool]) -> bool:
+        return True
+
+def custom_all_alias(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    check = fake
+    saved = check
+    check = all
+    if saved(v is not None for v in values):
+        assert_type(values, tuple[int])
+        return values[0] + 1
+
+def custom_any_alias(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    check = fake
+    saved = check
+    check = any
+    if saved(v is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[int])
+    return values[0] + 1
+
+def custom_all_saved(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    check = fake
+    ok = check(v is not None for v in values)
+    check = all
+    if ok:
+        assert_type(values, tuple[int])
+        return values[0] + 1
+
+def custom_any_saved(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    check = fake
+    missing = check(v is None for v in values)
+    check = any
+    if missing:
+        raise ValueError()
+    assert_type(values, tuple[int])
+    return values[0] + 1
+
+def builtin_all_alias(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    from builtins import all as check
+    saved = check
+    check = fake
+    if saved(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+
+def builtin_all_saved(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    from builtins import all as check
+    ok = check(v is not None for v in values)
+    check = fake
+    if ok:
+        assert_type(values, tuple[int | None])
+
+def repeated_name(values: tuple[int | None]):
+    check = all
+    saved = check
+    check = saved
+    if check(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+
+def qualified_custom_saved(values: tuple[int | None], fake: Checks):
+    b = fake
+    ok = b.all(v is not None for v in values)
+    import builtins as b
+    if ok:
+        assert_type(values, tuple[int])
+        return values[0] + 1
+
+def qualified_builtin_saved(values: tuple[int | None], fake: Checks):
+    import builtins as b
+    ok = b.all(v is not None for v in values)
+    b = fake
+    if ok:
+        assert_type(values, tuple[int | None])
+
+def qualified_cast(value: Any):
+    import typing as t
+    saved = t.cast
+    t = value
+    assert_type(saved("int", value), int)  # E: assert_type # E: First argument to `typing.cast` must be a type
+    "#,
+);
+
+testcase!(
+    test_special_export_loop_import_identity,
+    r#"
+import builtins as b
+from builtins import hasattr as has
+from typing import assert_type
+
+class Base:
+    pass
+
+def cold_hasattr(xs: list[Base]):
+    for x in xs:
+        if hasattr(x, "attr"):
+            return x.attr
+
+def warm_hasattr(xs: list[Base]):
+    for x in xs:
+        if hasattr(x, "attr"):
+            return x.attr
+
+def warm_while(xs: list[Base]):
+    while xs:
+        x = xs.pop()
+        if hasattr(x, "attr"):
+            return x.attr
+
+def cold_type(parts: list[int | str]):
+    for part in parts:
+        if type(part) is int:
+            assert_type(part, int)
+
+def warm_type(parts: list[int | str]):
+    for part in parts:
+        if type(part) is int:
+            assert_type(part, int)
+
+def qualified_capture(xs: list[Base]):
+    for x in xs:
+        if b.hasattr(x, "attr"):
+            return x.attr
+
+def imported_capture(xs: list[Base]):
+    for x in xs:
+        if has(x, "attr"):
+            return x.attr
+
+def qualified_local(xs: list[Base]):
+    import builtins as local_b
+    for x in xs:
+        if local_b.hasattr(x, "attr"):
+            return x.attr
+
+def plain_module(xs: list[Base]):
+    import builtins
+    for x in xs:
+        if builtins.hasattr(x, "attr"):
+            return x.attr
+
+def nested_loops(xs: list[Base], ys: list[int]):
+    import builtins as local_b
+    for x in xs:
+        for y in ys:
+            if local_b.hasattr(x, "attr"):
+                return x.attr
+            if y:
+                continue
+            break
+
+def tuple_guard(values: tuple[int | None], xs: list[int]):
+    for _ in xs:
+        if any(v is None for v in values):
+            raise ValueError()
+        assert_type(values, tuple[int])
+
+def saved_tuple_guard(values: tuple[int | None], xs: list[int]):
+    for _ in xs:
+        ok = all(v is not None for v in values)
+        if ok:
+            assert_type(values, tuple[int | None])
+    "#,
+);
+
+testcase!(
+    bug = "Import styles retain builtin recognition across loop rebindings.",
+    test_special_export_loop_rebinding,
+    r#"
+from typing import Iterable, assert_type
+
+def fake(it: Iterable[bool]) -> bool:
+    return True
+
+def reassigned(values: tuple[int | None], xs: list[int]):
+    from builtins import all as check
+    for _ in xs:
+        if check(v is not None for v in values):
+            assert_type(values, tuple[int])
+        check = fake
+
+def conditional(values: tuple[int | None], xs: list[int], flag: bool):
+    from builtins import all as check
+    for _ in xs:
+        if check(v is not None for v in values):
+            assert_type(values, tuple[int])
+        if flag:
+            check = fake
+
+def walrus(values: tuple[int | None], xs: list[int]):
+    from builtins import all as check
+    for _ in xs:
+        if check(v is not None for v in values):
+            assert_type(values, tuple[int])
+        _ = (check := fake)
+
+def loop_target(values: tuple[int | None]):
+    from builtins import all as check
+    for check in [fake]:
+        if check(v is not None for v in values):
+            assert_type(values, tuple[int | None])
+    "#,
+);
