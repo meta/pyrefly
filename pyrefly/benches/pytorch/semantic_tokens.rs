@@ -7,6 +7,8 @@
 
 //! Warm full-file semantic-token latency for PyTorch's `torch.nn.Module`.
 //! Server setup, type checking, and the first request are outside the measurement.
+//! `NoTelemetry` excludes the telemetry backend's per-solve work.
+//! Internal timing and telemetry event construction still execute.
 
 use std::hint::black_box;
 use std::time::Duration;

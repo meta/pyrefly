@@ -62,6 +62,10 @@ per bench:
   the response contains only semantic tokens. This exercises attribute
   classification across a large file. Criterion id `pytorch/semantic_tokens_module`.
   The existing CodSpeed walltime job includes this benchmark.
+  `NoTelemetry` excludes the telemetry backend's per-solve work. Internal timing
+  and telemetry event construction still execute.
+  For a base/head comparison, copy this benchmark and its registration to the
+  base revision, then use the same pinned source, compiler, and arguments.
 - `pytorch/full_check.rs` — the full-check benchmark. Fresh `State` per iteration;
   runs exactly what `pyrefly check` (project mode, no file args) does from inside
   the checkout — discovers the project and checks every project file across all

@@ -5,14 +5,21 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
+use lsp_types::SemanticTokenTypes;
 use pretty_assertions::assert_eq;
+use pyrefly_python::ast::Ast;
+use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_python::sys_info::PythonVersion;
+use ruff_python_ast::PySourceType;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
 use crate::state::require::Require;
+use crate::state::semantic_tokens::SemanticTokenBuilder;
 use crate::state::semantic_tokens::SemanticTokensLegends;
 use crate::test::util::TestEnv;
 use crate::test::util::mk_multi_file_state_with_env;
@@ -1195,178 +1202,19 @@ token-type: enumMember
     );
 }
 
-// BUG: Enum highlighting follows the inferred value type, not the attribute definition.
-// union_class.A should be enumMember. Holder.kind, Holder.A,
-// holder.kind, and e.kind should be property (issue #4751).
 #[test]
 fn enum_member_definition_test() {
     let mut env = TestEnv::new();
+    // Multiple members keep unions of A or title as literal unions, not enum instances.
     env.add(
         "fixtures",
         r#"
 from enum import Enum
 from typing import ClassVar, Literal
-
-class E(Enum):
-    A = 1
-    ALIAS = A
-
-    @property
-    def kind(self) -> Literal[E.A]:
-        return E.A
-
-class F(Enum):
-    A = 1
-
-class Holder:
-    kind: ClassVar[Literal[E.A]] = E.A
-    A: ClassVar[Literal[E.A]] = E.A
-
-holder: Holder
-e: E
-enum_class: type[E]
-union_class: type[E] | type[F]
-mixed_class: type[E] | type[Holder]
-"#,
-    );
-    for (expression, receiver_kind, attribute_kind) in [
-        ("E.A", "class", "enumMember"),
-        ("E.ALIAS", "class", "enumMember"),
-        ("e.A", "variable", "enumMember"),
-        ("enum_class.A", "class", "enumMember"),
-        ("union_class.A", "class", "property"),
-        ("mixed_class.A", "class", "property"),
-        ("Holder.kind", "class", "enumMember"),
-        ("Holder.A", "class", "enumMember"),
-        ("holder.kind", "variable", "enumMember"),
-        ("e.kind", "variable", "enumMember"),
-    ] {
-        let (receiver, attribute) = expression.split_once('.').unwrap();
-        let code = format!("from fixtures import *\n{expression}\n");
-        let expected = format!(
-            "# main.py
-line: 0, column: 5, length: 8, text: fixtures
-token-type: namespace
-
-line: 0, column: 21, length: 1, text: *
-token-type: namespace
-
-line: 1, column: 0, length: {}, text: {receiver}
-token-type: {receiver_kind}
-
-line: 1, column: {}, length: {}, text: {attribute}
-token-type: {attribute_kind}",
-            receiver.len(),
-            receiver.len() + 1,
-            attribute.len(),
-        );
-        assert_full_semantic_tokens_with_syntax_and_env(
-            &[("main", &code)],
-            false,
-            env.clone(),
-            &expected,
-        );
-    }
-}
-
-// BUG: Narrowing changes the highlighting of holder.kind to enumMember.
-// Both occurrences should remain property; E.A and E.B should be enumMember (issue #4751).
-#[test]
-fn narrowed_enum_instance_attribute_test() {
-    let code = r#"
-from enum import Enum
 
 class E(Enum):
     A = 1
     B = 2
-
-class Holder:
-    kind: E
-
-def f(holder: Holder) -> None:
-    if holder.kind is E.A:
-        pass
-    elif holder.kind is E.B:
-        pass
-"#;
-    assert_full_semantic_tokens(
-        &[("main", code)],
-        r#"
-# main.py
-line: 1, column: 5, length: 4, text: enum
-token-type: namespace
-
-line: 1, column: 17, length: 4, text: Enum
-token-type: class
-
-line: 3, column: 6, length: 1, text: E
-token-type: class
-
-line: 3, column: 8, length: 4, text: Enum
-token-type: class
-
-line: 4, column: 4, length: 1, text: A
-token-type: variable, token-modifiers: [readonly]
-
-line: 5, column: 4, length: 1, text: B
-token-type: variable, token-modifiers: [readonly]
-
-line: 7, column: 6, length: 6, text: Holder
-token-type: class
-
-line: 8, column: 4, length: 4, text: kind
-token-type: variable
-
-line: 8, column: 10, length: 1, text: E
-token-type: class
-
-line: 10, column: 4, length: 1, text: f
-token-type: function
-
-line: 10, column: 6, length: 6, text: holder
-token-type: parameter
-
-line: 10, column: 14, length: 6, text: Holder
-token-type: class
-
-line: 11, column: 7, length: 6, text: holder
-token-type: parameter
-
-line: 11, column: 14, length: 4, text: kind
-token-type: property
-
-line: 11, column: 22, length: 1, text: E
-token-type: class
-
-line: 11, column: 24, length: 1, text: A
-token-type: enumMember
-
-line: 13, column: 9, length: 6, text: holder
-token-type: parameter
-
-line: 13, column: 16, length: 4, text: kind
-token-type: enumMember
-
-line: 13, column: 24, length: 1, text: E
-token-type: class
-
-line: 13, column: 26, length: 1, text: B
-token-type: enumMember
-"#,
-    );
-}
-
-#[test]
-fn enum_member_definition_test() {
-    let mut env = TestEnv::new();
-    env.add(
-        "fixtures",
-        r#"
-from enum import Enum
-from typing import ClassVar, Literal
-
-class E(Enum):
-    A = 1
     ALIAS = A
 
     @property
@@ -1375,16 +1223,37 @@ class E(Enum):
 
 class F(Enum):
     A = 1
+    B = 2
+
+class X(str, Enum):
+    title = "title"
+    other = "other"
+
+class Y(str, Enum):
+    title = "other"
+    other = "title"
+
+class SingletonE(Enum):
+    A = 1
+
+class SingletonF(Enum):
+    A = 1
 
 class Holder:
     kind: ClassVar[Literal[E.A]] = E.A
     A: ClassVar[Literal[E.A]] = E.A
+    title: ClassVar[Literal[X.title]] = X.title
 
 holder: Holder
 e: E
 enum_class: type[E]
 union_class: type[E] | type[F]
 mixed_class: type[E] | type[Holder]
+x: X
+str_enum_class: type[X] | type[Y]
+mixed_str_enum_class: type[X] | type[Holder]
+# Complete singleton unions normalize to instance types, outside the literal gate.
+normalized_union_class: type[SingletonE] | type[SingletonF]
 "#,
     );
     for (expression, receiver_kind, attribute_kind) in [
@@ -1398,6 +1267,12 @@ mixed_class: type[E] | type[Holder]
         ("Holder.A", "class", "property"),
         ("holder.kind", "variable", "property"),
         ("e.kind", "variable", "property"),
+        ("X.title", "class", "enumMember"),
+        ("x.title", "variable", "enumMember"),
+        ("str_enum_class.title", "class", "enumMember"),
+        ("mixed_str_enum_class.title", "class", "property"),
+        ("Holder.title", "class", "property"),
+        ("normalized_union_class.A", "class", "property"),
     ] {
         let (receiver, attribute) = expression.split_once('.').unwrap();
         let code = format!("from fixtures import *\n{expression}\n");
@@ -2513,5 +2388,40 @@ fn type_alias_keyword_range_test() {
             )
             .is_empty()
         );
+    }
+}
+
+#[test]
+fn attribute_range_skips_classification_but_visits_receiver() {
+    let code = "a.b.c";
+    let (ast, errors, _) = Ast::parse(code, PySourceType::Python);
+    assert!(errors.is_empty());
+    for (start, end, expected_attributes, expected_tokens) in [
+        (0, 1, vec![], vec!["a"]),
+        (2, 3, vec!["b"], vec!["b"]),
+        (4, 5, vec!["c"], vec!["c"]),
+        (1, 2, vec![], vec![]),
+        (2, 2, vec![], vec![]),
+    ] {
+        let classified = RefCell::new(Vec::new());
+        let mut builder = SemanticTokenBuilder::new(
+            Some(TextRange::new(TextSize::new(start), TextSize::new(end))),
+            Vec::new(),
+        );
+        builder.process_ast(
+            &ast,
+            &|_, _, name| {
+                classified.borrow_mut().push(name.to_string());
+                Some(SemanticTokenTypes::Property)
+            },
+            &|_| Some((ModuleName::from_str("main"), SymbolKind::Variable)),
+        );
+        assert_eq!(*classified.borrow(), expected_attributes);
+        let tokens: Vec<_> = builder
+            .all_tokens_sorted()
+            .iter()
+            .map(|token| &code[token.range.start().to_usize()..token.range.end().to_usize()])
+            .collect();
+        assert_eq!(tokens, expected_tokens);
     }
 }

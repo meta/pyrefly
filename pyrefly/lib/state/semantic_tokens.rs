@@ -670,9 +670,11 @@ impl SemanticTokenBuilder {
                 x.recurse(&mut |x| self.process_expr(x, get_attribute_kind, get_symbol_kind));
             }
             Expr::Attribute(attr) => {
-                let kind = get_attribute_kind(attr.range(), attr.value.range(), &attr.attr.id)
-                    .unwrap_or(SemanticTokenTypes::Property);
-                self.push_if_in_range(attr.attr.range(), kind, Vec::new());
+                if range_overlaps(self.limit_range, attr.attr.range()) {
+                    let kind = get_attribute_kind(attr.range(), attr.value.range(), &attr.attr.id)
+                        .unwrap_or(SemanticTokenTypes::Property);
+                    self.push_if_in_range(attr.attr.range(), kind, Vec::new());
+                }
                 attr.value
                     .visit(&mut |x| self.process_expr(x, get_attribute_kind, get_symbol_kind));
             }
