@@ -3029,6 +3029,92 @@ def Person() -> object:
 }
 
 #[test]
+fn hover_docstring_followup_blank_source_documentation() {
+    for literal in [
+        "\"\"\"   \"\"\"",
+        "\"\"\"\n\t\n    \"\"\"",
+        "\"\"\"\r\n\t\r\n    \"\"\"",
+    ] {
+        let code =
+            format!("def documented() -> None:\n    {literal}\n    pass\n\ndocumented()\n#^\n");
+        let report = get_batched_lsp_operations_report(&[("main", &code)], get_test_report);
+        assert!(report.contains("(function) documented"), "got: {report}");
+        // BUG: a blank implementation docstring still creates a documentation section.
+        assert!(report.contains("---"), "got: {report}");
+    }
+}
+
+#[test]
+fn hover_docstring_followup_nested_class_does_not_borrow_toplevel_documentation() {
+    let mut env = TestEnv::new();
+    env.add_with_path(
+        "lib",
+        "lib.py",
+        r#"
+class Person:
+    """Unrelated top-level documentation."""
+
+class Outer:
+    class Person:
+        def __init__(self) -> None: pass
+"#,
+    );
+    env.add_with_path(
+        "lib",
+        "lib.pyi",
+        "class Outer:\n    class Person:\n        def __init__(self) -> None: ...\n",
+    );
+    let main = "from lib import Outer\nAlias = Outer.Person\nAlias()\n#^\n";
+    env.add("main", main);
+    let (state, handles) = env.to_state();
+    let report = get_test_report(&state, &handles("main"), extract_cursors_for_test(main)[0]);
+    assert!(report.contains("__init__"), "got: {report}");
+    assert!(
+        !report.contains("Unrelated top-level documentation."),
+        "got: {report}"
+    );
+}
+
+#[test]
+fn hover_docstring_followup_stub_constructor_method_precedence() {
+    let mut env = TestEnv::new();
+    env.add_with_path(
+        "lib",
+        "lib.py",
+        r#"
+class Person:
+    """Implementation class documentation."""
+    def __init__(self) -> None:
+        """Implementation method documentation."""
+"#,
+    );
+    env.add_with_path(
+        "lib",
+        "lib.pyi",
+        r#"
+class Person:
+    """Stub class documentation."""
+    def __init__(self) -> None:
+        """Stub method documentation."""
+        ...
+"#,
+    );
+    let main = "from lib import Person\nAlias = Person\nAlias()\n#^\n";
+    env.add("main", main);
+    let (state, handles) = env.to_state();
+    let report = get_test_report(&state, &handles("main"), extract_cursors_for_test(main)[0]);
+    assert!(
+        report.contains("Stub method documentation."),
+        "got: {report}"
+    );
+    assert!(
+        !report.contains("Implementation method documentation."),
+        "got: {report}"
+    );
+    assert!(!report.contains("class documentation."), "got: {report}");
+}
+
+#[test]
 fn hover_over_in_operator_shows_contains_dunder() {
     let code = r#"
 class Container:
