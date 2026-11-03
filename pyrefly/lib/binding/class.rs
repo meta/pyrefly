@@ -522,7 +522,7 @@ impl<'a> BindingsBuilder<'a> {
 
             // Stub files declare attributes without runtime initialization.
             if !self.module_info.path().is_interface()
-                && let Some(termination_keys) = uninitialized_fields.get(name.key())
+                && let Some(unset_nodes) = uninitialized_fields.get(name.key())
             {
                 self.insert_binding(
                     KeyExpect::UninitializedAttributeCheck(range),
@@ -530,7 +530,7 @@ impl<'a> BindingsBuilder<'a> {
                         name: name.key().clone(),
                         range,
                         class: class_indices.class_idx,
-                        termination_keys: termination_keys.clone(),
+                        unset_nodes: unset_nodes.clone(),
                     },
                 );
             }

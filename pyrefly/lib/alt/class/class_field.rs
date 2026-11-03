@@ -1401,12 +1401,25 @@ fn make_bound_method(heap: &TypeHeap, instance: &Instance, attr: Type) -> Result
         |meta: &FuncMetadata| !meta.flags.is_staticmethod && !meta.flags.is_classmethod;
     make_bound_method_helper(heap, instance.to_type(heap), attr, &should_bind).map(|mut method| {
         method.transform_toplevel_callable_signatures(|callable, _| {
-            if let InstanceKind::TypeVar(q) = &instance.kind &&
-            matches!(q.restriction(), Restriction::Constraints(_)) &&
-            matches!(&callable.ret, Type::ClassType(cls) if cls.class_object() == instance.class && cls.targs() == instance.targs) {
-                // We're binding this method to a constrained TypeVar, and its return type matches
-                // the currently active constraint. Treat this method as returning the TypeVar.
-                callable.ret = instance.to_type(heap);
+            if let InstanceKind::TypeVar(q) = &instance.kind
+                && matches!(q.restriction(), Restriction::Constraints(_))
+            {
+                let is_constraint = |ty: &Type| {
+                    matches!(ty, Type::ClassType(cls) if cls.class_object() == instance.class && cls.targs() == instance.targs)
+                };
+                // Arguments with the receiver's TypeVar share its active constraint.
+                // Keep the declared type so concrete arguments remain valid.
+                callable.params.visit_mut(&mut |ty| {
+                    if is_constraint(ty)
+                        || matches!(ty, Type::Union(union) if union.members.iter().any(is_constraint))
+                    {
+                        *ty = unions(vec![ty.clone(), q.clone().to_type(heap)], heap);
+                    }
+                });
+                if is_constraint(&callable.ret) {
+                    // A return type that matches the active constraint preserves the TypeVar.
+                    callable.ret = instance.to_type(heap);
+                }
             }
         });
         method
@@ -4435,6 +4448,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             else {
                 continue;
             };
+            // Django gives a model without its own primary key a synthesized `id: int`,
+            // including abstract bases like `AbstractBaseUser` (stubs omit `Meta.abstract`,
+            // so we can't tell them apart). Django only adds that field to the concrete model
+            // when no pk is declared, so a child declaring `id` as its primary key replaces it
+            // rather than overriding it. An explicitly declared parent `id` is still checked.
+            if field_name.as_str() == "id"
+                && metadata
+                    .django_model_metadata()
+                    .and_then(|dm| dm.custom_primary_key_field.as_ref())
+                    == Some(field_name)
+                && self
+                    .get_non_synthesized_class_member(parent_cls, field_name)
+                    .is_none()
+            {
+                continue;
+            }
             // `__call__` is checked against a Protocol parent only, unless the user
             // opts in with `@override`. Implementing a callable interface is
             // ubiquitous - argparse actions, auth handlers, metaclasses - and

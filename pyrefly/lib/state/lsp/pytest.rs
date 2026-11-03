@@ -104,6 +104,13 @@ impl<'a> Transaction<'a> {
         {
             return None;
         }
+        let enclosing_function_range = covering_nodes
+            .iter()
+            .find_map(|node| match node {
+                AnyNodeRef::StmtFunctionDef(function) => Some(function.name.range),
+                _ => None,
+            })
+            .expect("pytest parameter context requires an enclosing function");
         let matches = find_pytest_fixture_definitions_for_parameter(
             mod_module.as_ref(),
             bindings,
@@ -113,6 +120,9 @@ impl<'a> Transaction<'a> {
         let module_info = self.get_module_info(handle)?;
         let mut definitions: Vec<_> = matches
             .into_iter()
+            .filter(|fixture| {
+                !preference.follow_pytest_conftest || fixture.range != enclosing_function_range
+            })
             .map(|fixture| FindDefinitionItemWithDocstring {
                 metadata: DefinitionMetadata::Variable(Some(SymbolKind::Function)),
                 definition_range: fixture.range,
@@ -122,6 +132,16 @@ impl<'a> Transaction<'a> {
             })
             .collect();
         if definitions.is_empty() && preference.follow_pytest_conftest {
+            let requesting_fixture_name = self
+                .get_exports_data(handle)
+                .pytest_fixtures()
+                .iter()
+                .find(|fixture| {
+                    fixture.range == enclosing_function_range
+                        && fixture.fixture_name.as_ref().unwrap_or(&fixture.name) == identifier.id()
+                })
+                .map(|fixture| fixture.name.clone());
+            let current_path = handle.path().as_path();
             // Module fixtures take precedence; discover conftests only after a local miss.
             let candidates = once(handle.clone())
                 .chain(once_with(|| pytest_conftest_handles(self, handle, preference)).flatten());
@@ -133,6 +153,18 @@ impl<'a> Transaction<'a> {
                 while seen.insert((target_handle.clone(), target_name.clone())) {
                     let exports = self.get_exports_data(&target_handle);
                     if let Some(fixture) = exports.pytest_fixtures().iter().find(|fixture| {
+                        let target_path = target_handle.path().as_path();
+                        let is_same_definition = fixture.range == enclosing_function_range
+                            && target_path == current_path;
+                        // The implementation and its stub denote the same module-level provider.
+                        let is_paired_definition = requesting_fixture_name.as_ref()
+                            == Some(&fixture.name)
+                            && target_handle.path().style() != handle.path().style()
+                            && target_path.parent() == current_path.parent()
+                            && target_path.file_stem() == current_path.file_stem();
+                        if is_same_definition || is_paired_definition {
+                            return false;
+                        }
                         if imported {
                             fixture.name == target_name
                                 && fixture

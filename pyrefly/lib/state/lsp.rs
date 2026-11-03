@@ -2634,8 +2634,8 @@ impl<'a> Transaction<'a> {
     }
 
     /// For a cursor inside a subscript's brackets (e.g. `c[0]`) that isn't on a
-    /// named identifier, return the subscript dunder method type so hover matches
-    /// the spaced form `c [0]`.
+    /// named identifier or a nested operator, return the subscript dunder method
+    /// type so hover matches the spaced form `c [0]`.
     pub(crate) fn subscript_operator_type_at(
         &self,
         handle: &Handle,
@@ -2647,13 +2647,27 @@ impl<'a> Transaction<'a> {
             return None;
         }
         let module = self.get_ast(handle)?;
-        let subscript =
-            Ast::locate_node(&module, position)
-                .into_iter()
-                .find_map(|node| match node {
-                    AnyNodeRef::ExprSubscript(subscript) => Some(subscript),
-                    _ => None,
-                })?;
+        let covering_nodes = Ast::locate_node(&module, position);
+        // Nested operators own their hover; the enclosing brackets must not replace it.
+        if covering_nodes
+            .iter()
+            .find(|node| node.as_expr_ref().is_some())
+            .is_some_and(|node| {
+                matches!(
+                    node,
+                    AnyNodeRef::ExprBinOp(_)
+                        | AnyNodeRef::ExprBoolOp(_)
+                        | AnyNodeRef::ExprUnaryOp(_)
+                        | AnyNodeRef::ExprCompare(_)
+                )
+            })
+        {
+            return None;
+        }
+        let subscript = covering_nodes.into_iter().find_map(|node| match node {
+            AnyNodeRef::ExprSubscript(subscript) => Some(subscript),
+            _ => None,
+        })?;
         // Only fire inside the bracket region, never on the base expression.
         if position < subscript.value.range().end() {
             return None;

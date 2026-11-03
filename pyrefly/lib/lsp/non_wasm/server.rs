@@ -3367,10 +3367,13 @@ impl Server {
                         {
                             None
                         } else {
-                            Some((PathBuf::from(error_cell_uri.to_string()), e.to_diagnostic()))
+                            Some((
+                                PathBuf::from(error_cell_uri.to_string()),
+                                e.to_diagnostic()?,
+                            ))
                         }
                     }
-                    LspFile::Source { .. } => Some((path.to_path_buf(), e.to_diagnostic())),
+                    LspFile::Source { .. } => Some((path.to_path_buf(), e.to_diagnostic()?)),
                 };
             }
 
@@ -3385,7 +3388,7 @@ impl Server {
                 && !config.project_excludes.covers(&path)
                 && type_error_status.is_enabled()
             {
-                return Some((path.to_path_buf(), e.to_diagnostic()));
+                return Some((path.to_path_buf(), e.to_diagnostic()?));
             }
         }
         None

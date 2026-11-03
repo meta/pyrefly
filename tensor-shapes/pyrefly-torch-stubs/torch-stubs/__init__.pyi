@@ -777,7 +777,12 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def __iter__(self) -> Iterator[Tensor]: ...
     def __array__(self, dtype: Any = None) -> Any: ...
     def zero_(self) -> Self: ...
-    def add_(self, other: Tensor | builtins.int | builtins.float) -> Self: ...
+    def add_(
+        self,
+        other: Tensor | builtins.int | builtins.float,
+        *,
+        alpha: builtins.int | builtins.float = 1,
+    ) -> Self: ...
     def pin_memory(self, device: Any = None) -> Self: ...
     def byte(self, memory_format: Any = None) -> Self: ...
     def reshape_as[OtherShape: _Shape](
@@ -1185,9 +1190,20 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Create tensor from data with same dtype/device context."""
         ...
 
+    @overload
     def new_empty(
         self,
-        *size: builtins.int,
+        size: tuple[builtins.int, ...],
+        *,
+        dtype: Any = None,
+        device: Any = None,
+        requires_grad: builtins.bool = False,
+    ) -> Tensor: ...
+    @overload
+    def new_empty(
+        self,
+        size: builtins.int,
+        *sizes: builtins.int,
         dtype: Any = None,
         device: Any = None,
         requires_grad: builtins.bool = False,

@@ -45,3 +45,24 @@ def test_torch_module_types(value: torch.FloatTensor) -> None:
     assert_type(torch.channels_last, torch.memory_format)
     assert_type(torch.uint8, Any)
     assert_type(value, Tensor)
+
+
+def check_tensor_new_empty_size_tuple(tensor: Tensor) -> None:
+    # Torch accepts a size tuple as well as varargs.
+    assert_type(tensor.new_empty(0, 3), Tensor)
+    assert_type(tensor.new_empty((0, 3)), Tensor)
+    assert_type(tensor.new_empty((0,)), Tensor)
+
+
+def check_tensor_add_alpha(tensor: Tensor) -> None:
+    # `alpha` scales the added tensor in the real in-place signature.
+    assert_type(tensor.add_(tensor, alpha=0.5), Tensor)
+
+
+def test_new_empty_and_add_alpha_runtime() -> None:
+    base = torch.ones(2, 3)
+
+    assert tuple(base.new_empty((0, 3)).shape) == (0, 3)
+    assert tuple(base.new_empty(2, 3).shape) == (2, 3)
+    assert torch.equal(base.add_(base, alpha=0.5), torch.full((2, 3), 1.5))
+    assert_shape(base.shape, (2, 3))
