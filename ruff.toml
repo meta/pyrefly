@@ -5,6 +5,7 @@ extend-exclude = [
     "conformance/**",
     "crates/pyrefly_bundled/**",
     "crates/tsp_types/**",
+    "pyrefly/lib/report/scip/snapshots/**",
     "pyrefly/lib/test/**",
     "test/**",
     "website/**",

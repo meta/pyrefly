@@ -19,12 +19,14 @@ use ruff_python_ast::ModModule;
 use ruff_python_ast::Parameters;
 use ruff_python_ast::Pattern;
 use ruff_python_ast::Stmt;
+use ruff_python_ast::TypeParams;
 use ruff_python_ast::name::Name;
 use ruff_python_ast::visitor::source_order::SourceOrderVisitor;
 use ruff_python_ast::visitor::source_order::walk_except_handler;
 use ruff_python_ast::visitor::source_order::walk_expr;
 use ruff_python_ast::visitor::source_order::walk_pattern;
 use ruff_python_ast::visitor::source_order::walk_stmt;
+use ruff_python_ast::visitor::source_order::walk_type_param;
 use ruff_text_size::TextRange;
 use scip::types::Descriptor;
 use scip::types::descriptor::Suffix;
@@ -71,8 +73,10 @@ enum ScopeKind {
         globals: SmallSet<Name>,
         nonlocals: SmallSet<Name>,
     },
-    /// A comprehension or lambda: every name it binds is a local.
-    Anonymous,
+    /// Every name a comprehension binds is a local, except a walrus target.
+    Comprehension,
+    /// Every name a lambda binds is a local.
+    Lambda,
 }
 
 struct Scope {
@@ -150,15 +154,23 @@ impl Builder {
                 ScipSymbol::Global(child(&self.module_path, name, Suffix::Term))
             }
             ScopeKind::Function { nonlocals, .. } if nonlocals.contains(name) => {
-                match (0..index)
+                // The nearest enclosing function that binds the name, or else the nearest one.
+                let functions: Vec<usize> = (0..index)
                     .rev()
-                    .find(|i| matches!(self.scopes[*i].kind, ScopeKind::Function { .. }))
+                    .filter(|i| matches!(self.scopes[*i].kind, ScopeKind::Function { .. }))
+                    .collect();
+                match functions
+                    .iter()
+                    .find(|i| self.scopes[**i].names.contains_key(name))
+                    .or(functions.first())
                 {
-                    Some(enclosing) => self.binding(enclosing, name),
+                    Some(enclosing) => self.binding(*enclosing, name),
                     None => self.new_local(),
                 }
             }
-            ScopeKind::Function { .. } | ScopeKind::Anonymous => self.new_local(),
+            ScopeKind::Function { .. } | ScopeKind::Comprehension | ScopeKind::Lambda => {
+                self.new_local()
+            }
         };
         self.scopes[index]
             .names
@@ -171,7 +183,7 @@ impl Builder {
     fn bind(&mut self, id: &Identifier, walrus: bool) {
         let mut index = self.scopes.len() - 1;
         if walrus {
-            while index > 0 && matches!(self.scopes[index].kind, ScopeKind::Anonymous) {
+            while index > 0 && matches!(self.scopes[index].kind, ScopeKind::Comprehension) {
                 index -= 1;
             }
         }
@@ -206,10 +218,24 @@ impl Builder {
         for parameter in parameters.iter() {
             let id = parameter.name();
             let symbol = match &self.scope().kind {
-                ScopeKind::Anonymous => self.new_local(),
+                ScopeKind::Comprehension | ScopeKind::Lambda => self.new_local(),
                 _ => ScipSymbol::Global(child(&self.scope().path, &id.id, Suffix::Parameter)),
             };
             self.define_in_scope(id, symbol);
+        }
+    }
+
+    /// Type parameters belong to the function, class or type alias that declares them.
+    fn bind_type_params(&mut self, type_params: Option<&TypeParams>, owner: &ScipSymbol) {
+        for type_param in type_params.iter().flat_map(|x| &x.type_params) {
+            let symbol = match owner {
+                ScipSymbol::Global(path) => {
+                    ScipSymbol::Global(child(path, &type_param.name().id, Suffix::TypeParameter))
+                }
+                ScipSymbol::Local(_) => self.new_local(),
+            };
+            self.define(type_param.name(), symbol);
+            walk_type_param(self, type_param);
         }
     }
 
@@ -218,8 +244,10 @@ impl Builder {
         if let Some(first) = generators.first() {
             self.visit_expr(&first.iter);
         }
-        self.scopes
-            .push(Scope::new(ScopeKind::Anonymous, self.scope().path.clone()));
+        self.scopes.push(Scope::new(
+            ScopeKind::Comprehension,
+            self.scope().path.clone(),
+        ));
         for (i, generator) in generators.iter().enumerate() {
             if i > 0 {
                 self.visit_expr(&generator.iter);
@@ -248,6 +276,10 @@ impl<'a> SourceOrderVisitor<'a> for Builder {
                     self.visit_expr(returns);
                 }
                 let path = self.declare(&function.name, Suffix::Method);
+                self.bind_type_params(
+                    function.type_params.as_deref(),
+                    &ScipSymbol::Global(path.clone()),
+                );
                 let receiver = match &self.scope().kind {
                     ScopeKind::Class { .. } => function
                         .parameters
@@ -277,6 +309,10 @@ impl<'a> SourceOrderVisitor<'a> for Builder {
                     self.visit_arguments(arguments);
                 }
                 let path = self.declare(&class.name, Suffix::Type);
+                self.bind_type_params(
+                    class.type_params.as_deref(),
+                    &ScipSymbol::Global(path.clone()),
+                );
                 let mut attributes = SmallSet::new();
                 for stmt in &class.body {
                     match stmt {
@@ -301,6 +337,15 @@ impl<'a> SourceOrderVisitor<'a> for Builder {
                     .push(Scope::new(ScopeKind::Class { attributes }, path));
                 self.visit_body(&class.body);
                 self.scopes.pop();
+            }
+            Stmt::TypeAlias(alias) => {
+                self.visit_expr(&alias.name);
+                if let Expr::Name(name) = &*alias.name
+                    && let Some(owner) = self.scope().names.get(&name.id).cloned()
+                {
+                    self.bind_type_params(alias.type_params.as_deref(), &owner);
+                }
+                self.visit_expr(&alias.value);
             }
             Stmt::AugAssign(assign) => {
                 if !matches!(&*assign.target, Expr::Name(_)) {
@@ -340,7 +385,7 @@ impl<'a> SourceOrderVisitor<'a> for Builder {
                     self.visit_parameters(parameters);
                 }
                 self.scopes
-                    .push(Scope::new(ScopeKind::Anonymous, self.scope().path.clone()));
+                    .push(Scope::new(ScopeKind::Lambda, self.scope().path.clone()));
                 if let Some(parameters) = &lambda.parameters {
                     self.bind_parameters(parameters);
                 }

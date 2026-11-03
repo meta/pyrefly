@@ -1,6 +1,5 @@
 # < definition scip-python python snapshot-util 0.1 main/__init__:
 
-# BUG: The nonlocal assignment has a different symbol from the outer binding.
 # All occurrences of `x` should share the same symbol, skipping `middle`.
 def outer():
 #   ^^^^^ definition  snapshot-util 0.1 main/outer().
@@ -13,9 +12,9 @@ def outer():
 #           ^^^^^ definition  snapshot-util 0.1 main/outer().middle().inner().
             nonlocal x
             x = 1
-#           ^ definition local 1
+#           ^ reference local 0
             return x
-#                  ^ reference local 1
+#                  ^ reference local 0
 
         return inner
 #              ^^^^^ reference  snapshot-util 0.1 main/outer().middle().inner().

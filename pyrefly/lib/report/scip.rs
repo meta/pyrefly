@@ -36,6 +36,7 @@ use rayon::prelude::*;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprContext;
 use ruff_python_ast::Identifier;
+use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
 use ruff_python_ast::name::Name;
@@ -66,8 +67,10 @@ use crate::lsp::wasm::hover::get_hover_with_verbosity;
 use crate::report::scip::symbols::ScipSymbol;
 use crate::report::scip::symbols::definitions;
 use crate::report::scip::symbols::descriptor;
+use crate::state::lsp::CalleeKind;
 use crate::state::lsp::FindDefinitionItemWithDocstring;
 use crate::state::lsp::FindPreference;
+use crate::state::lsp::callee_kind_from_call;
 use crate::state::require::Require;
 use crate::state::state::Transaction;
 use crate::types::globals::ImplicitGlobal;
@@ -145,6 +148,7 @@ pub struct ScipWriter<W> {
     project_root: PathBuf,
     project: Package,
     definitions: Mutex<HashMap<Handle, Arc<SmallMap<TextRange, ScipSymbol>>>>,
+    asts: Mutex<HashMap<Handle, Arc<ModModule>>>,
     distributions: Mutex<HashMap<PathBuf, Arc<HashMap<Name, Package>>>>,
     external_symbols: Mutex<HashMap<String, ExternalUse>>,
 }
@@ -182,6 +186,7 @@ impl<W: Write + Send> ScipWriter<W> {
             project_root,
             project,
             definitions: Mutex::new(HashMap::new()),
+            asts: Mutex::new(HashMap::new()),
             distributions: Mutex::new(HashMap::new()),
             external_symbols: Mutex::new(HashMap::new()),
         })
@@ -193,6 +198,7 @@ impl<W: Write + Send> ScipWriter<W> {
             project_root: &self.project_root,
             project: &self.project,
             definitions: &self.definitions,
+            asts: &self.asts,
             distributions: &self.distributions,
             external_symbols: &self.external_symbols,
         }
@@ -278,6 +284,8 @@ struct Indexer<'a> {
     project: &'a Package,
     /// The definitions of every module seen so far, keyed by the range of the defining identifier.
     definitions: &'a Mutex<HashMap<Handle, Arc<SmallMap<TextRange, ScipSymbol>>>>,
+    /// The parsed AST of every dependency seen so far, since only the indexed files keep theirs.
+    asts: &'a Mutex<HashMap<Handle, Arc<ModModule>>>,
     /// The installed distributions of every site-packages directory seen so far.
     distributions: &'a Mutex<HashMap<PathBuf, Arc<HashMap<Name, Package>>>>,
     /// The first use, in path and position order, of every symbol defined outside the project and
@@ -362,7 +370,7 @@ impl Indexer<'_> {
         uses.retain(|x| !definitions.contains_key(&x.range));
         uses.sort_by_key(|x| x.range.start());
         for x in uses {
-            let symbol = match (self.reference(handle, &module, &x), x.kind) {
+            let symbol = match (self.reference(handle, &module, &x), &x.kind) {
                 (Some((symbol, external)), _) => {
                     if let Some(definition) = external {
                         let position = use_position(&x);
@@ -396,7 +404,7 @@ impl Indexer<'_> {
                     format!("local {}", unresolved.entry(x.identifier.id).or_insert(id))
                 }
                 // An unresolved attribute or keyword isn't a variable, so it gets no local.
-                (None, UseKind::Attribute | UseKind::Keyword) => continue,
+                (None, UseKind::Attribute | UseKind::Keyword(_)) => continue,
             };
             occurrences.push(Occurrence {
                 range: scip_range(&module, x.range),
@@ -534,7 +542,7 @@ impl Indexer<'_> {
     /// `None` if it has no definition we can name.
     fn reference(&self, handle: &Handle, module: &Module, x: &Use) -> Option<(String, External)> {
         let preference = preference();
-        let definition = match x.kind {
+        let definition = match &x.kind {
             UseKind::Name => {
                 let definition = self
                     .transaction
@@ -557,7 +565,36 @@ impl Indexer<'_> {
                 }
                 definition
             }
-            UseKind::Import | UseKind::Attribute | UseKind::Keyword => {
+            UseKind::Keyword(callee_kind) => {
+                // Dependencies keep no AST, so the callee's module comes from our cache rather
+                // than being parsed again for every keyword.
+                let definition = self
+                    .transaction
+                    .find_definition_for_keyword_argument_with_ast(
+                        handle,
+                        &x.identifier,
+                        callee_kind,
+                        preference,
+                        |module| {
+                            let defining = Handle::new(
+                                module.name(),
+                                module.path().dupe(),
+                                handle.sys_info().dupe(),
+                            );
+                            self.ast(module, &defining)
+                        },
+                    )
+                    .into_iter()
+                    .next()?;
+                Some(FindDefinitionItemWithDocstring {
+                    metadata: definition.metadata,
+                    definition_range: definition.definition_range,
+                    module: definition.module,
+                    docstring_range: None,
+                    display_name: Some(x.identifier.id.to_string()),
+                })
+            }
+            UseKind::Import | UseKind::Attribute => {
                 let definitions = self
                     .transaction
                     .find_definition(handle, use_position(x), preference)
@@ -576,12 +613,7 @@ impl Indexer<'_> {
         module: &Module,
         definition: FindDefinitionItemWithDocstring,
     ) -> Option<(String, External)> {
-        let external = (!definition
-            .module
-            .path()
-            .as_path()
-            .starts_with(self.project_root))
-        .then(|| {
+        let external = (!self.in_project(&definition.module, handle)).then(|| {
             let defining = Handle::new(
                 definition.module.name(),
                 definition.module.path().dupe(),
@@ -619,10 +651,7 @@ impl Indexer<'_> {
         if let Some(definitions) = self.definitions.lock().get(&handle) {
             return Some(definitions.dupe());
         }
-        // Only the indexed files keep their AST, so a dependency is parsed again.
-        let ast = self.transaction.get_ast(&handle).unwrap_or_else(|| {
-            Arc::new(Ast::parse(module.contents(), module.source_type()).0)
-        });
+        let ast = self.ast(module, &handle);
         let mut table: SmallMap<_, _> = definitions(module.name(), &ast).into_iter().collect();
         for (module_name, name, suffix) in SPECIAL_FORMS {
             if module.name().as_str() != *module_name {
@@ -642,11 +671,40 @@ impl Indexer<'_> {
         Some(table)
     }
 
+    /// The AST of `module`, parsed again if it is a dependency.
+    fn ast(&self, module: &Module, handle: &Handle) -> Arc<ModModule> {
+        if let Some(ast) = self.transaction.get_ast(handle) {
+            return ast;
+        }
+        if let Some(ast) = self.asts.lock().get(handle) {
+            return ast.dupe();
+        }
+        let ast = Arc::new(Ast::parse(module.contents(), module.source_type()).0);
+        self.asts.lock().insert(handle.clone(), ast.dupe());
+        ast
+    }
+
+    /// Whether a module referenced from `handle` belongs to the project: it is under the project
+    /// root, and not in a site-packages directory there, such as a virtual environment's.
+    fn in_project(&self, module: &Module, handle: &Handle) -> bool {
+        let path = module.path().as_path();
+        path.starts_with(self.project_root)
+            && !self
+                .transaction
+                .get_config(handle)
+                .iter()
+                .flat_map(|config| config.site_package_path())
+                .any(|root| path.starts_with(root))
+    }
+
     /// The package of a module referenced from `handle`, whose site-packages are searched for
     /// installed distributions.
     fn package(&self, module: &Module, handle: &Handle) -> Package {
-        let bundled = matches!(module.path().details(), ModulePathDetails::BundledTypeshed(_));
-        if !bundled && module.path().as_path().starts_with(self.project_root) {
+        let bundled = matches!(
+            module.path().details(),
+            ModulePathDetails::BundledTypeshed(_)
+        );
+        if !bundled && self.in_project(module, handle) {
             return self.project.clone();
         }
         // Match by top-level module, so that bundled stubs get the installed package too, even for
@@ -762,15 +820,14 @@ struct Use {
     kind: UseKind,
 }
 
-#[derive(Clone, Copy)]
 enum UseKind {
     /// A name in an expression.
     Name,
     /// A module or name in an import statement.
     Import,
     Attribute,
-    /// The name of a keyword argument in a call.
-    Keyword,
+    /// The name of a keyword argument in a call to the callee.
+    Keyword(CalleeKind),
 }
 
 /// Collects every name that is read or deleted, every attribute, and every keyword argument.
@@ -790,7 +847,7 @@ fn collect_expr_uses(x: &Expr, uses: &mut Vec<Use>) {
         Expr::Call(call) => {
             for keyword in call.arguments.keywords.iter() {
                 if let Some(arg) = &keyword.arg {
-                    push(arg.clone(), UseKind::Keyword);
+                    push(arg.clone(), UseKind::Keyword(callee_kind_from_call(call)));
                 }
             }
         }

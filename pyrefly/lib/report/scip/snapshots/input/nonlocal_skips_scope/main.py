@@ -1,4 +1,3 @@
-# BUG: The nonlocal assignment has a different symbol from the outer binding.
 # All occurrences of `x` should share the same symbol, skipping `middle`.
 def outer():
     x = 0
