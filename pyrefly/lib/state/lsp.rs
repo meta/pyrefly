@@ -4821,14 +4821,13 @@ impl<'a> Transaction<'a> {
         definition_range: TextRange,
         expected_name: &Name,
     ) -> Vec<TextRange> {
-        // We first find all the attributes of the form `<expr>.<expected_name>`.
-        // These are candidates for the references of `definition`.
+        // Attributes with this name are candidates; receiver types determine their definitions.
         let relevant_attributes = if let Some(mod_module) = self.get_ast(handle) {
-            fn f(x: &Expr, expected_name: &Name, res: &mut Vec<ExprAttribute>) {
+            fn f(x: &Expr, expected_name: &Name, res: &mut Vec<(Identifier, TextRange)>) {
                 if let Expr::Attribute(x) = x
                     && &x.attr.id == expected_name
                 {
-                    res.push(x.clone());
+                    res.push((x.attr.clone(), x.value.range()));
                 }
                 x.recurse(&mut |x| f(x, expected_name, res));
             }
@@ -4838,13 +4837,31 @@ impl<'a> Transaction<'a> {
         } else {
             Vec::new()
         };
-        // For each attribute we found above, we will test whether it actually will jump to the
-        // given `definition`.
+        let Some(module) = self.get_module_info(handle) else {
+            return Vec::new();
+        };
+        self.attribute_references_from_ranges(
+            handle,
+            &relevant_attributes,
+            &TextRangeWithModule::new(module, definition_range),
+        )
+    }
+
+    /// Resolve attribute-name ranges by receiver type and definition identity.
+    fn attribute_references_from_ranges(
+        &self,
+        handle: &Handle,
+        attributes: &[(Identifier, TextRange)],
+        target: &TextRangeWithModule,
+    ) -> Vec<TextRange> {
+        if attributes.is_empty() {
+            return Vec::new();
+        }
         self.ad_hoc_solve(handle, "attribute_references", |solver| {
             let mut references = Vec::new();
-            for attribute in relevant_attributes {
+            for (attribute, receiver_range) in attributes {
                 if let Some(answers) = self.get_answers(handle)
-                    && let Some(base_type) = answers.get_type_trace(attribute.value.range())
+                    && let Some(base_type) = answers.get_type_trace(*receiver_range)
                 {
                     for AttrInfo {
                         name,
@@ -4853,7 +4870,7 @@ impl<'a> Transaction<'a> {
                         definition,
                         is_reexport: _,
                         is_from_object: _,
-                    } in solver.completions(base_type, Some(expected_name), false, false)
+                    } in solver.completions(base_type, Some(&attribute.id), false, false)
                     {
                         if let Some((TextRangeWithModule { module, range }, _)) = self
                             .resolve_attribute_definition(
@@ -4862,10 +4879,10 @@ impl<'a> Transaction<'a> {
                                 definition,
                                 FindPreference::default(),
                             )
-                            && module.path() == module.path()
-                            && range == definition_range
+                            && module.path() == target.module.path()
+                            && range == target.range
                         {
-                            references.push(attribute.attr.range());
+                            references.push(attribute.range);
                         }
                     }
                 }
