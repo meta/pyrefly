@@ -278,6 +278,30 @@ def positive_int(x: int):
 "#,
 );
 
+// Narrowing the receiver must not let a missing-attribute fallback erase a concrete
+// refinement already established on the attribute. This is the reverse of `rebase` above:
+// there a missing attribute is replaced by a concrete type; here a concrete type must
+// survive rebasing against a base that lacks the attribute.
+testcase!(
+    test_missing_attribute_narrow_preserves_refinement_on_rebase,
+    r#"
+from typing import assert_type, final
+
+@final
+class A:
+    foo: int
+class B:
+    pass
+
+def f(x: A | B):
+    if isinstance(x.foo, int):  # E: Object of class `B` has no attribute `foo`
+        assert_type(x.foo, int)
+        if isinstance(x, B):
+            assert_type(x.foo, int)
+            x.foo[0]  # E: Cannot index into `int`
+"#,
+);
+
 testcase!(
     test_missing_class_attribute_narrow_preserves_access_errors,
     r#"
@@ -332,6 +356,9 @@ def f(c: C):
         c.implicit  # E: The type of attribute `implicit` is unknown
     if c.explicit:  # E: The type of attribute `explicit` is an explicit `Any`
         c.explicit  # E: The type of attribute `explicit` is an explicit `Any`
+    if c.error:  # E: The type of attribute `error` is unknown because it comes from an error
+        c.error  # E: The type of attribute `error` is unknown because it comes from an error
+    c.error  # E: The type of attribute `error` is unknown because it comes from an error
 "#,
 );
 

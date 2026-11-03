@@ -3130,6 +3130,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.unions(results)
     }
 
+    /// Whether `attr_name` is genuinely absent from the looked-up members of `base`, as opposed
+    /// to being present but resolving to an error type. This distinguishes a narrowed
+    /// missing-attribute facet, whose access error was already reported where it arose, from a
+    /// declared attribute whose own type is an error, which must keep reporting.
+    pub(crate) fn attr_missing_from_base(&self, base: &Type, attr_name: &Name) -> bool {
+        self.as_attribute_base(base.clone())
+            .is_some_and(|attr_base| {
+                let (found, not_found, _) = self.lookup_attr(attr_base, attr_name).decompose();
+                found.is_empty() && !not_found.is_empty()
+            })
+    }
+
     // When determining the boolean value of some term used in a boolean context
     // to bool, check that either it does not override __bool__, or the
     // condition_type.__bool__ is callable.
