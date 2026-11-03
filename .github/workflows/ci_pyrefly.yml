@@ -58,6 +58,10 @@ jobs:
       uses: Swatinem/rust-cache@v2
       with:
         prefix-key: pyrefly-wasm-browser
+    - name: Install browser C toolchain
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends --yes clang llvm
     - name: Build browser package
       working-directory: pyrefly_wasm
       env:
