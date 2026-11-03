@@ -2784,6 +2784,161 @@ Person()
 }
 
 #[test]
+fn hover_constructor_followup_nested_expression() {
+    for expression in [
+        "people = [Person()]\n#         ^",
+        "consume(Person())\n#       ^",
+        "f\"{Person()}\"\n#  ^",
+    ] {
+        let code = format!(
+            r#"
+class Person:
+    """Nested class documentation."""
+    def __init__(self) -> None: pass
+
+def consume(value): pass
+
+{expression}
+"#
+        );
+        let report = get_batched_lsp_operations_report(&[("main", &code)], get_test_report);
+        assert!(report.contains("__init__"), "got: {report}");
+        // BUG: callee discovery does not visit expressions nested inside expressions.
+        assert!(
+            !report.contains("Nested class documentation."),
+            "got: {report}"
+        );
+    }
+}
+
+#[test]
+fn hover_constructor_followup_identifier_end() {
+    let code = r#"
+class Person:
+    """Boundary class documentation."""
+    def __init__(self) -> None: pass
+
+Person()
+#     ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(report.contains("__init__"), "got: {report}");
+    // BUG: constructor documentation excludes the end of the callee identifier.
+    assert!(
+        !report.contains("Boundary class documentation."),
+        "got: {report}"
+    );
+}
+
+#[test]
+fn hover_constructor_followup_method_documentation_wins() {
+    let code = r#"
+class Person:
+    """Class documentation."""
+    def __init__(self) -> None:
+        """Constructor documentation."""
+
+Person()
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("Constructor documentation."),
+        "got: {report}"
+    );
+    assert!(!report.contains("Class documentation."), "got: {report}");
+}
+
+#[test]
+fn hover_constructor_followup_inherited_constructor() {
+    let code = r#"
+class Person:
+    """Class with an inherited constructor."""
+
+Person()
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("Class with an inherited constructor."),
+        "got: {report}"
+    );
+}
+
+#[test]
+fn hover_constructor_followup_explicit_method_call() {
+    let code = r#"
+class Person:
+    """Class documentation."""
+    def __init__(self) -> None: pass
+
+    def reset(self) -> None:
+        self.__init__()
+#              ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(report.contains("__init__"), "got: {report}");
+    assert!(!report.contains("Class documentation."), "got: {report}");
+}
+
+#[test]
+fn hover_constructor_followup_specialized_generic_callee() {
+    let code = r#"
+class Box[T]:
+    def __init__(self, value: T) -> None: pass
+
+Box[int](1)
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(report.contains("value: int"), "got: {report}");
+    assert!(report.contains("self: Box[int]"), "got: {report}");
+}
+
+#[test]
+fn hover_constructor_followup_chained_call_argument() {
+    let code = r#"
+class C:
+    def __init__(self, x: int) -> None: pass
+    def copy(self) -> "C":
+        return type(self)(1)
+#                   ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(report.contains("self: Self@C"), "got: {report}");
+}
+
+#[test]
+fn hover_constructor_followup_chained_getattr_arguments() {
+    for (cursor, expected) in [
+        ("#                  ^", "obj: object"),
+        ("#                       ^", "name: str"),
+    ] {
+        let code = format!(
+            "def use(obj: object, name: str):\n    return getattr(obj, name)()\n{cursor}\n"
+        );
+        let report = get_batched_lsp_operations_report(&[("main", &code)], get_test_report);
+        assert!(report.contains(expected), "got: {report}");
+    }
+}
+
+#[test]
+fn hover_constructor_followup_subscript_callee_components() {
+    for (cursor, expected) in [
+        ("#          ^", "handlers: dict[str,"),
+        ("#                   ^", "key: str"),
+    ] {
+        let code = format!(
+            "from typing import Callable\ndef use(handlers: dict[str, Callable[[], int]], key: str) -> int:\n    return handlers[key]()\n{cursor}\n"
+        );
+        let report = get_batched_lsp_operations_report(&[("main", &code)], get_test_report);
+        assert!(report.contains("(parameter)"), "got: {report}");
+        // BUG: subscript receivers and indices are coerced to the indexed callable.
+        assert!(!report.contains(expected), "got: {report}");
+    }
+}
+
+#[test]
 fn hover_over_in_operator_shows_contains_dunder() {
     let code = r#"
 class Container:
