@@ -12,7 +12,7 @@ Welcome! We’re excited that you’re interested in contributing to Pyrefly. Wh
 
 To get started with contributing to Pyrefly:
 
-1. [Find](#choosing-what-to-work-on) and [claim](#repository-automation) an issue that you would like to fix. If you have encountered a problem with Pyrefly, it's perfectly acceptable to open and then claim your own issue! We recommend choosing a bug fix rather than a feature request and not claiming more than one issue to start.
+1. [Find](#choosing-what-to-work-on) and [claim](#repository-automation) an issue that you would like to fix. If you have encountered a problem with Pyrefly, it's perfectly acceptable to open and then claim your own issue! We recommend choosing a bug fix rather than a feature request for your first issue. If it's your first time contributing to Pyrefly, the issue claim bot will only allow you to hold one open issue at a time. This restriction is removed once you've had a contribution merged.
 1. As you work on the issue, feel free to hop over to the `#dev` channel in our [Discord](https://discord.com/invite/Cf7mFQtW7W) if you have any questions.
 1. If you find yourself needing to make multiple fixes or improvements, we strongly recommend [splitting your work](#splitting-a-pull-request) for faster reviews.
 1. When you're ready, follow our [pull request checklist](#making-a-pull-request) to submit your code for review.
@@ -47,11 +47,25 @@ To pick up an issue, comment `#claim` on it and the bot will assign it to you. W
 How it works:
 - `#claim` only works on **unassigned** issues. If the issue is already claimed by someone else, the bot leaves the existing assignee in place and tells you to coordinate with them — it won't reassign the issue to you. If it's already assigned to you, it just confirms that.
 - `#unclaim` only removes *your own* assignment, and only if you're currently assigned.
+- You can only hold one `good first issue` at a time. Until you've had a pull request merged, you can only hold one issue of any kind at a time.
 - Both commands are case-insensitive and can appear anywhere in a comment (e.g. "I'd like to work on this, #claim").
 - If the bot can't assign you automatically (GitHub only allows assigning users with repository access), it leaves a comment so a maintainer can assign you manually.
 - If you'd like to work on an already-`#claim`ed issue, please post a comment on the issue mentioning a maintainer. You may message us in the `#dev` channel of our Discord server if we don't respond to your issue comment after a few days. We generally ask that you wait until two weeks after the issue is claimed by the current contributor, and that there's little activity indicating progress on the issue before request reassignment.
 
-**Please note:** Claiming issues helps other contributors and maintainers see what is being worked on. If you do not claim an issue you're working on, multiple people may work on the same issue at the same time. This can lead to multiple PRs for the same task and increased review burden on maintainers. In cases where multiple PRs are opened for the same task, maintainers will prioritise reviewing the PR from the author who #claim-ed the issue. For issues marked with the `good-first-issue` tag, please only claim and work on one issue at a time to allow other newcomers to also work on issues.
+**Please note:** Claiming issues helps other contributors and maintainers see what is being worked on. If you do not claim an issue you're working on, multiple people may work on the same issue at the same time. This can lead to multiple PRs for the same task and increased review burden on maintainers. In cases where multiple PRs are opened for the same task, maintainers will prioritise reviewing the PR from the author who #claim-ed the issue. For issues marked with the `good first issue` tag, please only claim and work on one issue at a time to allow other newcomers to also work on issues.
+
+### PR readiness checks
+
+Automated readiness checks run on newly opened PRs, checking items from our [PR checklist](#making-a-pull-request). If an "⚠️ **Action needed**" comment is posted on your PR, please follow the required steps in the comment to ensure the PR is ready for review. The comment may also include optional recommendations, which don't block review. The check automatically reruns when the PR is updated, with a lag of up to half an hour.
+
+### PR turn tracking
+
+PRs opened by non-maintainers are automatically labeled with who should act next:
+* "waiting-for-author" means the PR is waiting for action by the author, usually to sign the CLA, address failed [readiness checks](#pr-readiness-checks), or respond to review feedback.
+* "waiting-for-reviewer" means the PR is waiting for action by the reviewer, usually to leave a code review.
+* "waiting-for-merge" means the PR has been approved and is waiting to be merged by a maintainer.
+
+Labels update within half an hour of a waited-for action. If a label fails to update on a PR that you are the author or reviewer on, double-check that you've actually taken the action it's waiting for. As author, make sure to [explicitly re-request review](#responding-to-review-feedback). As reviewer, make sure to use the "Submit review" mechanism; a comment in the main conversation thread does not count as a review. If the label is still incorrect, you can update it manually if you have write permissions, or ping a maintainer if not.
 
 ## Developing Pyrefly
 
@@ -194,7 +208,7 @@ Contributing a pull request (PR) is the main way to propose changes to Pyrefly. 
 - [ ] **IMPORTANT** [Claim the issue](#repository-automation) before starting work on it.
 - [ ] Update or add new tests to cover your changes (see testing section for details).
 - [ ] Limit your PR to a single purpose or issue. Avoid mixing unrelated changes, as this makes review harder. If the PR is large, consider [splitting it](#splitting-a-pull-request) for faster reviews.
-- [ ] Write a clear PR description following the [template](.github/pull_request_template.md).
+- [ ] Write a clear PR description following the [template](.github/pull_request_template.md), including checking the "I am a human" box to attest that you've followed our [AI policy](AI_POLICY.md).
 - [ ] Make sure all continuous integration (CI) checks pass. Fix any errors or warnings, or ask us about any CI results you don't understand. If the contributor license agreement (CLA) check fails, look for a comment from the meta-cla bot with instructions on how to sign the CLA.
 
 We aim to respond to all PRs in a timely manner, but please note we prioritise reviews for work that is highest priority (e.g. critical bug fixes, upcoming milestones). If you're waiting on a review for more than a week, feel free to `@` one of the [maintainers](https://github.com/facebook/pyrefly/blob/main/.github/owners.json) in a comment on your PR or ask for a review in the `#dev` channel of our Discord server.

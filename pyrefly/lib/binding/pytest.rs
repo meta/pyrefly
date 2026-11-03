@@ -22,12 +22,17 @@ use crate::binding::binding::KeyClass;
 pub struct PytestAliases {
     pytest_module_aliases: Vec<String>,
     fixture_aliases: Vec<String>,
+    mark_aliases: Vec<String>,
 }
 
 impl PytestAliases {
     pub fn from_module(module: &ModModule) -> Self {
+        Self::from_stmts(&module.body)
+    }
+
+    pub(crate) fn from_stmts(stmts: &[Stmt]) -> Self {
         let mut aliases = Self::default();
-        for stmt in &module.body {
+        for stmt in stmts {
             match stmt {
                 Stmt::Import(import_stmt) => {
                     for alias in &import_stmt.names {
@@ -54,6 +59,9 @@ impl PytestAliases {
                                 .map(|asname| asname.id.as_str())
                                 .unwrap_or(alias.name.id.as_str());
                             aliases.fixture_aliases.push(local_name.to_owned());
+                        } else if module.id == "pytest" && alias.name.id == "mark" {
+                            let local_name = alias.asname.as_ref().unwrap_or(&alias.name);
+                            aliases.mark_aliases.push(local_name.id.to_string());
                         }
                     }
                 }
@@ -77,6 +85,24 @@ impl PytestAliases {
         self.fixture_aliases
             .iter()
             .any(|alias| alias == name.as_str())
+    }
+
+    /// Recognize parametrization through pytest module and mark aliases.
+    pub(crate) fn is_parametrize(&self, expr: &Expr) -> bool {
+        let Expr::Attribute(attr) = expr else {
+            return false;
+        };
+        attr.attr.id == "parametrize"
+            && match attr.value.as_ref() {
+                Expr::Name(name) => self
+                    .mark_aliases
+                    .iter()
+                    .any(|alias| alias == name.id.as_str()),
+                Expr::Attribute(mark) if mark.attr.id == "mark" => {
+                    matches!(mark.value.as_ref(), Expr::Name(name) if self.is_pytest_module_alias(name.id()))
+                }
+                _ => false,
+            }
     }
 }
 
@@ -169,7 +195,7 @@ pub fn is_pytest_fixture_function(function_def: &StmtFunctionDef, aliases: &Pyte
         .any(|decorator| is_pytest_fixture_decorator(&decorator.expression, aliases))
 }
 
-fn is_pytest_fixture_decorator(expr: &Expr, aliases: &PytestAliases) -> bool {
+pub(crate) fn is_pytest_fixture_decorator(expr: &Expr, aliases: &PytestAliases) -> bool {
     match expr {
         Expr::Name(name) => aliases.is_fixture_alias(name.id()),
         Expr::Attribute(attr) => {

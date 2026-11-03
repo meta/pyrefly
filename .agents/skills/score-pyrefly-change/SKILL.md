@@ -61,6 +61,7 @@ Always score I1 and I2. For non-code changes, interpret I1 as whether the change
 - **I2**: Does the change fully implement its intended scope?
   - Consider only counterexamples that demonstrate an unintentionally incomplete implementation of the change description.
 - **I3**: Is the change's mypy_primer delta free of regressions?
+  - If a mypy_primer delta is present as a pull request comment or diff signal, analyze it using steps 2-4 of the `interpret-mypy-primer` skill.
 
 ### Validation (10%)
 

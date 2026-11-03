@@ -16,6 +16,7 @@ use pyrefly_build::module_resolver::StubSearchResult;
 use pyrefly_build::module_resolver::find_module_prefixes;
 use pyrefly_build::module_resolver::find_module_results;
 use pyrefly_build::module_resolver::package_has_py_typed;
+use pyrefly_python::keywords::is_reserved_keyword;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModulePathDetails;
@@ -32,6 +33,7 @@ static STDLIB_SUGGESTION_CACHE: LazyLock<LockedMap<ModuleName, Option<ModuleName
     LazyLock::new(LockedMap::new);
 
 use crate::config::config::ConfigFile;
+use crate::config::config::FallbackSearchPath;
 use crate::module::bundled::BundledStub;
 use crate::module::third_party::get_bundled_third_party;
 use crate::module::typeshed::custom_typeshed_excludes;
@@ -316,10 +318,11 @@ const CONFIGERATOR_EXTENSIONS: &[&str] = &["cinc", "cconf", "thrift-cvalidator",
 /// (e.g. `if_` → `if`), return the keyword. Otherwise return the component
 /// unchanged. This handles configerator paths where directories or filename
 /// segments are named with Python keywords, and the module path uses `if_`
-/// because Python syntax forbids bare keywords as identifiers.
+/// because Python syntax forbids bare keywords as identifiers. Like the
+/// configerator importer, this unescapes every reserved keyword.
 fn unescape_keyword(component: &str) -> &str {
     if let Some(base) = component.strip_suffix('_')
-        && pyrefly_python::keywords::is_keyword_escaped_dir(base)
+        && is_reserved_keyword(base)
     {
         return base;
     }
@@ -692,7 +695,14 @@ pub(crate) fn find_import_with_mode(
             options.module_options(style_filter, &mut namespaces_found),
         )
     {
-        path
+        if matches!(
+            config.fallback_search_path,
+            FallbackSearchPath::DirectoryRelative(_)
+        ) {
+            path.with_error(FindError::FallbackSearchPathRelativeImport(module))
+        } else {
+            path
+        }
     } else if style_filter == Some(ModuleStyle::Executable)
         && lookup_mode.include_interpreter_stdlib()
         && let Some(path) = find_module(
@@ -844,17 +854,23 @@ fn suggest_stdlib_import_uncached(missing: ModuleName) -> Option<ModuleName> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::Arc;
 
     use pyrefly_config::config::ConfigSource;
+    use pyrefly_config::config::DirectoryRelativeFallbackSearchPathCache;
     use pyrefly_config::environment::environment::PythonEnvironment;
     use pyrefly_config::environment::interpreters::Interpreters;
     use pyrefly_python::module_path::ModulePathDetails;
+    use pyrefly_python::sys_info::PythonPlatform;
     use pyrefly_python::sys_info::PythonVersion;
+    use pyrefly_python::sys_info::SysInfo;
+    use pyrefly_util::arc_id::ArcId;
     use pyrefly_util::test_path::TestPath;
 
     use super::*;
     use crate::module::typeshed::clear_custom_typeshed_versions;
     use crate::state::loader::Finding;
+    use crate::test::util::buck_check_source_db;
 
     #[test]
     fn test_find_module_simple() {
@@ -2252,6 +2268,49 @@ mod tests {
     }
 
     #[test]
+    fn test_find_site_package_path_abi_tagged_extension_source() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![
+                TestPath::dir(
+                    "foo",
+                    vec![
+                        TestPath::file("__init__.py"),
+                        TestPath::file("linux.cpython-312-x86_64-linux-gnu.so"),
+                        TestPath::file("stable.abi3.so"),
+                        TestPath::file("windows.cp312-win_amd64.pyd"),
+                    ],
+                ),
+                TestPath::dir(
+                    "foo-stubs",
+                    vec![
+                        TestPath::file("__init__.pyi"),
+                        TestPath::file("linux.pyi"),
+                        TestPath::file("stable.pyi"),
+                        TestPath::file("windows.pyi"),
+                    ],
+                ),
+            ],
+        );
+        // Each stub has a compiled source, so no `MissingSource` error is attached.
+        for module in ["linux", "stable", "windows"] {
+            assert_eq!(
+                find_module(
+                    ModuleName::from_str(&format!("foo.{module}")),
+                    [root.to_path_buf()].iter(),
+                    FindModuleOptions::new(&DirEntryCache::new()),
+                )
+                .unwrap(),
+                FindingOrError::new_finding(ModulePath::filesystem(
+                    root.join(format!("foo-stubs/{module}.pyi"))
+                )),
+            );
+        }
+    }
+
+    #[test]
     fn test_find_namespaces_with_nested_init_files() {
         let tempdir = tempfile::tempdir().unwrap();
         let root = tempdir.path();
@@ -2611,6 +2670,106 @@ mod tests {
         };
         config.configure();
         config
+    }
+
+    #[test]
+    fn test_directory_relative_fallback_reports_fallback_search_path_relative_import() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir(
+                "pkg",
+                vec![TestPath::file("main.py"), TestPath::file("helper.py")],
+            )],
+        );
+        let mut config = get_config(ConfigSource::File(root.join("pyrefly.toml")));
+        config.fallback_search_path = FallbackSearchPath::DirectoryRelative(
+            DirectoryRelativeFallbackSearchPathCache::new(Some(root.to_path_buf())),
+        );
+        let module = ModuleName::from_str("helper");
+        let origin = ModulePath::filesystem(root.join("pkg/main.py"));
+
+        let dir_cache = DirEntryCache::new();
+        let result = find_import(
+            &config,
+            module,
+            FindImportOptions {
+                origin: Some(&origin),
+                ..FindImportOptions::new(&dir_cache)
+            },
+        );
+
+        assert_eq!(
+            result,
+            FindingOrError::Finding(Finding {
+                finding: ModulePath::filesystem(root.join("pkg/helper.py")),
+                error: Some(FindError::FallbackSearchPathRelativeImport(module)),
+            })
+        );
+    }
+
+    #[test]
+    fn test_explicit_fallback_does_not_report_fallback_search_path_relative_import() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(root, vec![TestPath::file("helper.py")]);
+        let mut config = get_config(ConfigSource::File(root.join("pyrefly.toml")));
+        config.fallback_search_path =
+            FallbackSearchPath::Explicit(Arc::new(vec![root.to_path_buf()]));
+        let origin = ModulePath::filesystem(root.join("pkg/main.py"));
+
+        let dir_cache = DirEntryCache::new();
+        let result = find_import(
+            &config,
+            ModuleName::from_str("helper"),
+            FindImportOptions {
+                origin: Some(&origin),
+                ..FindImportOptions::new(&dir_cache)
+            },
+        );
+
+        assert_eq!(
+            result,
+            FindingOrError::new_finding(ModulePath::filesystem(root.join("helper.py")))
+        );
+    }
+
+    #[test]
+    fn test_absolute_search_path_precedes_directory_relative_fallback() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![
+                TestPath::dir("src", vec![TestPath::file("helper.py")]),
+                TestPath::dir(
+                    "pkg",
+                    vec![TestPath::file("main.py"), TestPath::file("helper.py")],
+                ),
+            ],
+        );
+        let mut config = get_config(ConfigSource::File(root.join("pyrefly.toml")));
+        config.search_path_from_file = vec![root.join("src")];
+        config.fallback_search_path = FallbackSearchPath::DirectoryRelative(
+            DirectoryRelativeFallbackSearchPathCache::new(Some(root.to_path_buf())),
+        );
+        let origin = ModulePath::filesystem(root.join("pkg/main.py"));
+
+        let dir_cache = DirEntryCache::new();
+        let result = find_import(
+            &config,
+            ModuleName::from_str("helper"),
+            FindImportOptions {
+                origin: Some(&origin),
+                ..FindImportOptions::new(&dir_cache)
+            },
+        );
+
+        assert_eq!(
+            result,
+            FindingOrError::new_finding(ModulePath::filesystem(root.join("src/helper.py")))
+        );
     }
 
     /// A first-party root plus a site package directory holding representative
@@ -3123,6 +3282,242 @@ mod tests {
             find_in_custom_typeshed(&typeshed, "chunk", PythonVersion::new(3, 13, 0)),
             FindingOrError::Finding(_)
         ));
+    }
+
+    /// A config that resolves imports the way `pyrefly buck-check` does.
+    fn buck_check_config(
+        root: &Path,
+        sources: &[&str],
+        dependencies: &[&str],
+        typeshed: &[&str],
+        version: PythonVersion,
+    ) -> ConfigFile {
+        let mut config = get_config(ConfigSource::Synthetic(None));
+        config.python_environment.python_version = Some(version);
+        config.source_db = Some(ArcId::new(Box::new(buck_check_source_db(
+            root,
+            sources,
+            dependencies,
+            typeshed,
+            SysInfo::new(version, PythonPlatform::linux()),
+        ))));
+        config.configure();
+        config
+    }
+
+    /// Resolve `module` for an import in the checked target's `main.py`.
+    fn find_from_source(
+        config: &ConfigFile,
+        root: &Path,
+        module: &str,
+        lookup_mode: ImportLookupMode,
+    ) -> ModulePath {
+        let origin = ModulePath::filesystem(root.join("src/main.py"));
+        find_import_with_mode(
+            config,
+            ModuleName::from_str(module),
+            lookup_mode,
+            FindImportOptions {
+                origin: Some(&origin),
+                ..FindImportOptions::new(&DirEntryCache::new())
+            },
+        )
+        .finding()
+        .unwrap()
+    }
+
+    #[test]
+    fn test_buck_dependency_source_with_bundled_stub() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let config = buck_check_config(
+            root,
+            &["main.py"],
+            &["typing_extensions.py"],
+            &[],
+            PythonVersion::new(3, 12, 0),
+        );
+        let dependency = ModulePath::filesystem(root.join("deps/typing_extensions.py"));
+
+        // The bundled stub should win. The implementation defines `Self` and `TypeAlias` at
+        // runtime, so the type checker cannot use them as types.
+        assert_eq!(
+            find_from_source(
+                &config,
+                root,
+                "typing_extensions",
+                ImportLookupMode::TypeChecking
+            ),
+            dependency
+        );
+        assert_eq!(
+            find_from_source(
+                &config,
+                root,
+                "typing_extensions",
+                ImportLookupMode::style(ModuleStyle::Executable)
+            ),
+            dependency
+        );
+    }
+
+    #[test]
+    fn test_buck_owner_source_or_buck_stub_with_bundled_stub() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let version = PythonVersion::new(3, 12, 0);
+        let find = |config: &ConfigFile| {
+            find_from_source(
+                config,
+                root,
+                "typing_extensions",
+                ImportLookupMode::TypeChecking,
+            )
+        };
+
+        let owner = buck_check_config(
+            root,
+            &["main.py", "typing_extensions.py"],
+            &["typing_extensions.py"],
+            &[],
+            version,
+        );
+        // The bundled stub should win over the target's own implementation.
+        assert_eq!(
+            find(&owner),
+            ModulePath::filesystem(root.join("src/typing_extensions.py"))
+        );
+
+        let dependency_stub = buck_check_config(
+            root,
+            &["main.py"],
+            &["typing_extensions.py", "typing_extensions.pyi"],
+            &[],
+            version,
+        );
+        assert_eq!(
+            find(&dependency_stub),
+            ModulePath::filesystem(root.join("deps/typing_extensions.pyi"))
+        );
+
+        let toolchain_stub = buck_check_config(
+            root,
+            &["main.py"],
+            &["typing_extensions.py"],
+            &["typing_extensions.pyi"],
+            version,
+        );
+        assert_eq!(
+            find(&toolchain_stub),
+            ModulePath::filesystem(root.join("typeshed/typing_extensions.pyi"))
+        );
+    }
+
+    #[test]
+    fn test_buck_dependency_source_with_versioned_bundled_stub() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let find = |version| {
+            let config =
+                buck_check_config(root, &["main.py"], &["asyncore/__init__.py"], &[], version);
+            find_from_source(&config, root, "asyncore", ImportLookupMode::TypeChecking)
+        };
+        let dependency = ModulePath::filesystem(root.join("deps/asyncore/__init__.py"));
+
+        // The bundled stub should win on 3.11, the last version with `asyncore` in the
+        // standard library.
+        assert_eq!(find(PythonVersion::new(3, 11, 0)), dependency);
+        assert_eq!(find(PythonVersion::new(3, 12, 0)), dependency);
+    }
+
+    /// A custom typeshed replaces the bundled one, so a module that the custom typeshed excludes
+    /// or omits never resolves to the bundled stub.
+    #[test]
+    fn test_buck_dependency_source_with_custom_typeshed_stub() {
+        let typeshed = custom_typeshed(Some("graphlib: 3.0-3.10\n"));
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let mut config = buck_check_config(
+            root,
+            &["main.py"],
+            &["chunk.py", "graphlib.py", "asyncore/__init__.py"],
+            &[],
+            PythonVersion::new(3, 11, 0),
+        );
+        config.typeshed_path = Some(typeshed.path().to_path_buf());
+        config.configure();
+        let find = |module| find_from_source(&config, root, module, ImportLookupMode::TypeChecking);
+        let dependency = |file: &str| ModulePath::filesystem(root.join("deps").join(file));
+
+        // The custom typeshed's `chunk` stub should win.
+        assert_eq!(find("chunk"), dependency("chunk.py"));
+        assert_eq!(find("graphlib"), dependency("graphlib.py"));
+        assert_eq!(find("asyncore"), dependency("asyncore/__init__.py"));
+    }
+
+    #[test]
+    fn test_buck_dependency_source_with_bundled_third_party_stub() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let config = buck_check_config(
+            root,
+            &["main.py"],
+            &[
+                "mypy_extensions.py",
+                "requests/__init__.py",
+                "pandas/__init__.py",
+                "google/protobuf/descriptor.py",
+            ],
+            &[],
+            PythonVersion::new(3, 12, 0),
+        );
+        for (module, path) in [
+            (
+                "mypy_extensions",
+                ModulePath::filesystem(root.join("deps/mypy_extensions.py")),
+            ),
+            (
+                "requests",
+                ModulePath::filesystem(root.join("deps/requests/__init__.py")),
+            ),
+            (
+                "pandas",
+                ModulePath::filesystem(root.join("deps/pandas/__init__.py")),
+            ),
+            ("google", ModulePath::namespace(root.join("deps/google"))),
+        ] {
+            assert_eq!(
+                find_from_source(&config, root, module, ImportLookupMode::TypeChecking),
+                path,
+                "{module}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_buck_dependency_namespace_with_bundled_stub() {
+        let find = |root: &Path| {
+            let config = buck_check_config(
+                root,
+                &["main.py"],
+                &["xml/sax/handler.py"],
+                &[],
+                PythonVersion::new(3, 12, 0),
+            );
+            find_from_source(&config, root, "xml", ImportLookupMode::TypeChecking)
+        };
+
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(
+            find(plain.path()),
+            ModulePath::namespace(plain.path().join("deps/xml"))
+        );
+
+        let stubs = tempfile::Builder::new().suffix("-stubs").tempdir().unwrap();
+        assert_eq!(
+            find(stubs.path()),
+            ModulePath::namespace(stubs.path().join("deps/xml"))
+        );
     }
 
     #[test]
@@ -4411,6 +4806,34 @@ mod tests {
             )
             .unwrap(),
             FindingOrError::new_finding(ModulePath::filesystem(root.join("rules/if.config.cconf")))
+        );
+    }
+
+    #[test]
+    fn test_find_extra_extension_module_unescapes_every_keyword() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        // The configerator importer unescapes every reserved keyword, not only common ones.
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir(
+                "some",
+                vec![TestPath::dir("class", vec![TestPath::file("config.cinc")])],
+            )],
+        );
+        let extra = vec!["cinc".to_owned()];
+
+        assert_eq!(
+            find_extra_extension_module(
+                ModuleName::from_str("some.class_.config.cinc"),
+                [root.to_path_buf()].iter(),
+                &extra,
+                &mut None,
+            )
+            .unwrap(),
+            FindingOrError::new_finding(ModulePath::filesystem(
+                root.join("some/class/config.cinc")
+            ))
         );
     }
 

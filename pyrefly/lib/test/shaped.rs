@@ -9,7 +9,7 @@ use crate::test::util::TestEnv;
 use crate::test::util::shape_extensions_env;
 use crate::testcase;
 
-fn shaped_env() -> TestEnv {
+pub(super) fn shaped_env() -> TestEnv {
     let mut env = shape_extensions_env();
     env.add_with_path(
         "arrays",
@@ -24,6 +24,42 @@ class ndarray[Shape: IntTuple = IntTuple, DType = Any]: ...
     );
     env
 }
+
+testcase!(
+    test_shaped_class_shorthand_preserves_dsl_return_context,
+    shaped_env(),
+    r#"
+from typing import assert_type
+from arrays import ndarray
+from shape_extensions import Shaped, broadcast, shape_vars
+
+@shape_vars("*Left, *Right")
+def combine(
+    left: Shaped[ndarray, "Left"],
+    right: Shaped[ndarray, "Right"],
+) -> Shaped[ndarray, "broadcast(Left, Right)"]: ...
+
+def check(left: ndarray[[3, 1]], right: ndarray[[1, 4]]) -> None:
+    assert_type(combine(left, right), ndarray[[3, 4]])
+"#,
+);
+
+testcase!(
+    test_shaped_comment_declarations_share_native_shape_vars,
+    shaped_env(),
+    r#"
+# enable-shape-type-comments
+from typing import assert_type
+from arrays import ndarray
+from shape_extensions import Shaped
+
+# shapes: N
+def successor(x: Shaped[ndarray, "[N]"]) -> Shaped[ndarray, "[N + 1]"]: ...
+
+def check(x: ndarray[[3]]) -> None:
+    assert_type(successor(x), ndarray[[4]])
+"#,
+);
 
 testcase!(
     test_shaped_carrier_and_shorthand,
@@ -848,5 +884,38 @@ def f(x: Shaped[ndarray, "[M]"], y: M) -> None:
     class Inner:
         def g(self, z: Shaped[ndarray, "[M]"]) -> None:
             assert_type(z, ndarray)
+"#,
+);
+
+testcase!(
+    test_bare_array_gradual_assignability,
+    shaped_env(),
+    r#"
+from arrays import ndarray
+from shape_extensions import IntTuple
+
+def take_bare(value: ndarray) -> None: ...
+
+def check[S: IntTuple](shaped: ndarray[S], bare: ndarray) -> ndarray[S]:
+    take_bare(shaped)
+    return bare
+
+def check_concrete(shaped: ndarray[[2, 3]], bare: ndarray) -> ndarray[[2, 3]]:
+    take_bare(shaped)
+    return bare
+"#,
+);
+
+testcase!(
+    test_inttuple_bound_return,
+    shaped_env(),
+    r#"
+from shape_extensions import IntTuple
+
+def bounded[S: IntTuple](x: S) -> IntTuple:
+    return x
+
+def unbounded[T](x: T) -> IntTuple:
+    return x  # E: Returned type `T` is not assignable to declared return type `IntTuple`
 "#,
 );

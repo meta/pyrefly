@@ -37,8 +37,9 @@ pub struct ImportTracker {
     alias_modules: SmallMap<ModuleName, String>,
     imported_names: SmallMap<ModuleName, SmallMap<String, String>>,
     /// Names bound at module scope.
-    /// A generated `from <module> import <head>` binds `head` for the whole file,
-    /// so it must not be generated when `head` is already bound here.
+    /// A generated `from <module> import <head>` or `import <head>.<rest>` binds
+    /// `head` for the whole file, so it must not be generated when `head` is
+    /// already bound here.
     module_scope_names: SmallSet<String>,
 }
 
@@ -185,12 +186,17 @@ impl ImportTracker {
     /// Resolve annotation references to names available in the current module.
     /// A reference whose `(module, head)` is in `direct_imports` renders
     /// unqualified, on the caller's promise to emit `from <module> import <head>`.
+    /// Any other reference that no existing import covers renders qualified, and its
+    /// module is returned so the caller can emit `import <module>`. Returns `None`
+    /// when such an import would bind a name the file already binds to something
+    /// else, because that binding could shadow the module where the annotation is
+    /// evaluated.
     pub fn resolve_annotation(
         &self,
         parts: &[AnnotationPart],
         current_module: ModuleName,
         direct_imports: &[(ModuleName, &str)],
-    ) -> (String, SmallSet<ModuleName>) {
+    ) -> Option<(String, SmallSet<ModuleName>)> {
         let mut text = String::new();
         let mut missing = SmallSet::new();
         for part in parts {
@@ -246,6 +252,15 @@ impl ImportTracker {
                     // The import binds the head, so the whole dotted name reads as written.
                     text.push_str(name);
                 } else {
+                    let (module_head, _) = split_head(module.as_str());
+                    if self.module_scope_names.contains(module_head)
+                        && !self
+                            .canonical_modules
+                            .iter()
+                            .any(|imported| split_head(imported.as_str()).0 == module_head)
+                    {
+                        return None;
+                    }
                     text.push_str(module.as_str());
                     text.push('.');
                     text.push_str(name);
@@ -253,7 +268,7 @@ impl ImportTracker {
                 }
             }
         }
-        (text, missing)
+        Some((text, missing))
     }
 }
 
@@ -371,11 +386,13 @@ mod tests {
             reference("bar", "Bar"),
         ];
 
-        let (text, missing) = tracker.resolve_annotation(
-            &parts,
-            ModuleName::from_str("current"),
-            &[(ModuleName::from_str("foo"), "Outer")],
-        );
+        let (text, missing) = tracker
+            .resolve_annotation(
+                &parts,
+                ModuleName::from_str("current"),
+                &[(ModuleName::from_str("foo"), "Outer")],
+            )
+            .unwrap();
         assert_eq!(text, "Outer.Inner | bar.Bar");
         assert_eq!(missing.len(), 1);
         assert!(missing.contains(&ModuleName::from_str("bar")));
@@ -395,8 +412,9 @@ mod tests {
             reference("bar", "Bar.Inner"),
         ];
 
-        let (text, missing) =
-            tracker.resolve_annotation(&parts, ModuleName::from_str("current"), &[]);
+        let (text, missing) = tracker
+            .resolve_annotation(&parts, ModuleName::from_str("current"), &[])
+            .unwrap();
         assert_eq!(text, "Literal['é'] | f.C | B.Inner");
         assert!(missing.is_empty());
     }
@@ -412,8 +430,9 @@ mod tests {
             reference("foo", "Foo"),
         ];
 
-        let (text, missing) =
-            tracker.resolve_annotation(&parts, ModuleName::from_str("current"), &[]);
+        let (text, missing) = tracker
+            .resolve_annotation(&parts, ModuleName::from_str("current"), &[])
+            .unwrap();
         assert_eq!(text, "foo.Foo | bar.Bar | foo.Foo");
         assert_eq!(missing.len(), 2);
         assert!(missing.contains(&ModuleName::from_str("foo")));
@@ -432,8 +451,9 @@ mod tests {
             reference("bar.child", "D"),
         ];
 
-        let (text, missing) =
-            tracker.resolve_annotation(&parts, ModuleName::from_str("current"), &[]);
+        let (text, missing) = tracker
+            .resolve_annotation(&parts, ModuleName::from_str("current"), &[])
+            .unwrap();
         assert_eq!(text, "foo.child.C | bar.child.D");
         assert_eq!(missing.len(), 2);
         assert!(missing.contains(&ModuleName::from_str("foo.child")));
@@ -452,8 +472,9 @@ mod tests {
             reference("other.child", "Outer.Inner"),
         ];
 
-        let (text, missing) =
-            tracker.resolve_annotation(&parts, ModuleName::from_str("current"), &[]);
+        let (text, missing) = tracker
+            .resolve_annotation(&parts, ModuleName::from_str("current"), &[])
+            .unwrap();
         assert_eq!(text, "module.Type | alias.Outer.Inner");
         assert!(missing.is_empty());
     }
@@ -475,7 +496,9 @@ mod tests {
             reference("absolute", "Absolute"),
         ];
 
-        let (text, missing) = tracker.resolve_annotation(&parts, current_module, &[]);
+        let (text, missing) = tracker
+            .resolve_annotation(&parts, current_module, &[])
+            .unwrap();
         assert_eq!(text, "L | Shared | Absolute");
         assert!(missing.is_empty());
     }
@@ -485,9 +508,28 @@ mod tests {
         let current_module = ModuleName::from_str("package.current");
         let tracker = import_tracker("from .foo import Bar\n", current_module);
 
-        let (text, missing) =
-            tracker.resolve_annotation(&[reference("foo", "Bar")], current_module, &[]);
+        let (text, missing) = tracker
+            .resolve_annotation(&[reference("foo", "Bar")], current_module, &[])
+            .unwrap();
         assert_eq!(text, "foo.Bar");
         assert!(missing.contains(&ModuleName::from_str("foo")));
+    }
+
+    #[test]
+    fn refuses_module_import_shadowed_by_module_binding() {
+        let current_module = ModuleName::from_str("current");
+        let parts = [reference("foo.child", "C")];
+        let shadowed = import_tracker("foo = 1\n", current_module);
+        assert_eq!(
+            shadowed.resolve_annotation(&parts, current_module, &[]),
+            None
+        );
+        // `import foo.other` binds `foo` to the package, which `import foo.child` rebinds harmlessly.
+        let package = import_tracker("import foo.other\n", current_module);
+        let (text, missing) = package
+            .resolve_annotation(&parts, current_module, &[])
+            .unwrap();
+        assert_eq!(text, "foo.child.C");
+        assert!(missing.contains(&ModuleName::from_str("foo.child")));
     }
 }

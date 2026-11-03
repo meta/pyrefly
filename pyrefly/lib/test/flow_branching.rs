@@ -406,6 +406,525 @@ def f(x):
     "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/3374
+testcase!(
+    test_narrow_after_terminating_conjunction,
+    r#"
+from datetime import date
+from typing import assert_type
+
+def f(x: float | None, y: date | None, z: date) -> float:
+    if x is None and y is None:
+        raise ValueError()
+    if x is None:
+        assert_type(y, date)
+        return (y - z).days / 365.25
+    return x
+
+def reverse(x: float | None, y: date | None) -> None:
+    if x is None and y is None:
+        raise ValueError()
+    if y is None:
+        assert_type(x, float)
+
+def reassigned(x: float | None, y: date | None) -> None:
+    if x is None and y is None:
+        raise ValueError()
+    x = None
+    if x is None:
+        assert_type(y, date | None)
+"#,
+);
+
+testcase!(
+    test_none_relations_unrelated_conditions,
+    r#"
+from typing import assert_type
+
+def c() -> bool:
+    return False
+
+def d() -> bool:
+    return False
+
+def separate_guards(x: int | None, y: int | None):
+    if x is None and c():
+        raise ValueError()
+    elif y is None and d():
+        raise ValueError()
+    if x is None:
+        assert_type(y, int | None)
+        return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def disjunction(x: int | None, y: int | None):
+    if (x is None and c()) or (y is None and d()):
+        raise ValueError()
+    if x is None:
+        assert_type(y, int | None)
+        return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+"#,
+);
+
+testcase!(
+    test_none_relations_loop_paths,
+    r#"
+from typing import assert_type
+
+def possibly_empty(x: int | None, y: int | None, items: list[int]):
+    for _ in items:
+        if x is None and y is None:
+            raise ValueError()
+    if x is None:
+        assert_type(y, int | None)
+        return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def backedge(x: int | None, y: int | None, items: list[int]):
+    if x is None and y is None:
+        raise ValueError()
+    for _ in items:
+        if x is None:
+            assert_type(y, int | None)
+            print(y + 1)  # E: `+` is not supported between `None` and `Literal[1]`
+        x = None
+
+def established_in_body(x: int | None, y: int | None, items: list[int]):
+    for _ in items:
+        if x is None and y is None:
+            raise ValueError()
+        if x is None:
+            assert_type(y, int)
+        x = None
+
+def while_may_skip(x: int | None, y: int | None, flag: bool):
+    while flag:
+        if x is None and y is None:
+            raise ValueError()
+        flag = False
+    if x is None:
+        assert_type(y, int | None)
+
+def while_backedge(x: int | None, y: int | None, flag: bool):
+    if x is None and y is None:
+        raise ValueError()
+    while flag:
+        if x is None:
+            assert_type(y, int | None)
+        x = None
+
+def nonempty(x: int | None, y: int | None):
+    for _ in [0]:
+        if x is None and y is None:
+            raise ValueError()
+    if x is None:
+        assert_type(y, int)
+
+def break_before_guard(x: int | None, y: int | None, items: list[int], flag: bool):
+    for _ in items:
+        if flag:
+            break
+        if x is None and y is None:
+            raise ValueError()
+    if x is None:
+        assert_type(y, int | None)
+"#,
+);
+
+testcase!(
+    test_none_relations_comprehension_writes,
+    r#"
+from typing import assert_type
+
+def assign_first(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    [(x := None) for _ in [0]]
+    if x is None:
+        assert_type(y, int | None)
+        return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def assign_second(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    [[(y := None) for _ in [0]] for _ in [0]]
+    if y is None:
+        assert_type(x, int | None)
+        return x + 1  # E: `+` is not supported between `None` and `Literal[1]`
+"#,
+);
+
+testcase!(
+    test_none_relations_merges,
+    r#"
+from typing import assert_type
+
+def reversed_pair(x: int | None, y: int | None, flag: bool):
+    if flag:
+        if x is None and y is None:
+            raise ValueError()
+    else:
+        if y is None and x is None:
+            raise ValueError()
+    if x is None:
+        assert_type(y, int)
+
+def missing_path(x: int | None, y: int | None, flag: bool):
+    if flag:
+        if x is None and y is None:
+            raise ValueError()
+    if x is None:
+        assert_type(y, int | None)
+
+def write_in_branch(x: int | None, y: int | None, flag: bool):
+    if x is None and y is None:
+        raise ValueError()
+    if flag:
+        x = None
+    if x is None:
+        assert_type(y, int | None)
+"#,
+);
+
+testcase!(
+    test_none_relations_equivalent_flows,
+    r#"
+from typing import assert_type
+
+def fallthrough(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    if x is not None:
+        return x
+    assert_type(y, int)
+
+def explicit_else(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    else:
+        if x is None:
+            assert_type(y, int)
+    if x is None:
+        assert_type(y, int)
+
+def nonterminating(x: int | None, y: int | None):
+    if x is None and y is None:
+        pass
+    if x is None:
+        assert_type(y, int | None)
+
+def condition_write(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    elif (x := None) is not None:
+        pass
+    else:
+        if x is None:
+            assert_type(y, int | None)
+"#,
+);
+
+testcase!(
+    test_none_relations_exception_paths,
+    r#"
+from contextlib import suppress
+from typing import assert_type
+
+def suppressed_guard(x: int | None, y: int | None):
+    with suppress(ValueError):
+        if x is None and y is None:
+            raise ValueError()
+    if x is None:
+        assert_type(y, int | None)
+
+def exceptional_write(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    try:
+        x = None
+        raise ValueError()
+    except ValueError:
+        if x is None:
+            assert_type(y, int | None)
+"#,
+);
+
+testcase!(
+    test_none_relations_finally_paths,
+    r#"
+from typing import assert_type
+
+def guard_raises(x: int | None, y: int | None):
+    try:
+        if x is None and y is None:
+            raise ValueError()
+    finally:
+        if x is None:
+            assert_type(y, int | None)
+            return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def earlier_exception(x: int | None, y: int | None):
+    try:
+        int("invalid")
+        if x is None and y is None:
+            raise ValueError()
+    finally:
+        if x is None:
+            assert_type(y, int | None)
+            return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def materialized_narrow(x: int | None, y: int | None):
+    try:
+        if x is None and y is None:
+            raise ValueError()
+        assert x is None
+    finally:
+        assert_type(y, int | None)
+        return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def break_write(x: int | None, y: int | None):
+    while True:
+        try:
+            if x is None and y is None:
+                raise ValueError()
+            break
+        finally:
+            x = None
+    if x is None:
+        assert_type(y, int | None)
+        return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def break_materialized_narrow(x: int | None, y: int | None):
+    while True:
+        try:
+            if x is None and y is None:
+                raise ValueError()
+            assert x is None
+            break
+        finally:
+            y = None
+    if x is None:
+        assert_type(y, int | None)
+        return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def continue_write(x: int | None, y: int | None):
+    for _ in [0]:
+        try:
+            if x is None and y is None:
+                raise ValueError()
+            continue
+        finally:
+            x = None
+    if x is None:
+        assert_type(y, int | None)
+        return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+"#,
+);
+
+testcase!(
+    test_none_relations_finally_scope_boundaries,
+    r#"
+from typing import assert_type
+
+def nested_function(x: int | None, y: int | None):
+    try:
+        def inner(a: int | None, b: int | None):
+            if a is None and b is None:
+                raise ValueError()
+            if a is None:
+                assert_type(b, int)
+    finally:
+        pass
+    if x is None and y is None:
+        raise ValueError()
+    if x is None:
+        assert_type(y, int)
+
+def without_finally(x: int | None, y: int | None):
+    try:
+        if x is None and y is None:
+            raise ValueError()
+        if x is None:
+            assert_type(y, int)
+    except ValueError:
+        pass
+
+    try:
+        raise ValueError()
+    except ValueError:
+        if x is None and y is None:
+            raise ValueError()
+        if x is None:
+            assert_type(y, int)
+"#,
+);
+
+testcase!(
+    test_none_relations_while_header_writes,
+    r#"
+from typing import assert_type
+
+def assign_first(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    while (x := None) is not None:
+        return 0
+    if x is None:
+        assert_type(y, int | None)
+        return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def assign_second(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    while (y := None) is not None:
+        raise ValueError()
+    if y is None:
+        assert_type(x, int | None)
+        return x + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def tuple_header(x: int | None, y: int | None, flag: bool):
+    if x is None and y is None:
+        raise ValueError()
+    while ((x := None), flag)[1]:
+        return 0
+    if x is None:
+        assert_type(y, int | None)
+        return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+"#,
+);
+
+testcase!(
+    test_none_relations_materialized_before_finally,
+    r#"
+from typing import assert_type
+
+def before_try(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    assert x is None
+    while True:
+        try:
+            break
+        finally:
+            y = None
+    assert_type(y, int | None)
+    return y + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def alias_before_try(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    assert x is None
+    z = y
+    while True:
+        try:
+            break
+        finally:
+            z = None
+    assert_type(z, int | None)
+    return z + 1  # E: `+` is not supported between `None` and `Literal[1]`
+"#,
+);
+
+testcase!(
+    test_none_relations_eager_class_finally,
+    r#"
+from typing import assert_type
+
+def f(x: int | None, y: int | None):
+    if x is None and y is None:
+        raise ValueError()
+    assert x is None
+    class C:
+        z = y
+        while True:
+            try:
+                break
+            finally:
+                z = None
+        assert_type(z, int | None)
+        result = z + 1  # E: `+` is not supported between `None` and `Literal[1]`
+"#,
+);
+
+testcase!(
+    test_none_relations_enclosing_statement_boundaries,
+    r#"
+from typing import assert_type
+
+def containing_loop(x: int | None, y: int | None, items: list[int]):
+    for _ in items:
+        try:
+            pass
+        finally:
+            pass
+        if x is None and y is None:
+            raise ValueError()
+        if x is None:
+            assert_type(y, int | None)
+    if x is None and y is None:
+        raise ValueError()
+    if x is None:
+        assert_type(y, int)
+
+def after_class(x: int | None, y: int | None):
+    class C:
+        pass
+    if x is None and y is None:
+        raise ValueError()
+    if x is None:
+        assert_type(y, int)
+"#,
+);
+
+testcase!(
+    bug = "Exception paths can lose writes to ordinary and relation-derived narrows.",
+    test_none_relations_shared_exception_flow_limit,
+    r#"
+from contextlib import suppress
+from typing import assert_type
+
+def ordinary_except(y: int | None, flag: bool):
+    assert y is not None
+    try:
+        if flag:
+            y = None
+            raise ValueError()
+    except ValueError:
+        assert_type(y, int)
+        return y + 1
+
+def related_except(x: int | None, y: int | None, flag: bool):
+    if x is None and y is None:
+        raise ValueError()
+    assert x is None
+    try:
+        if flag:
+            y = None
+            raise ValueError()
+    except ValueError:
+        assert_type(y, int)
+        return y + 1
+
+def ordinary_with(y: int | None, flag: bool):
+    assert y is not None
+    with suppress(ValueError):
+        if flag:
+            y = None
+            raise ValueError()
+    assert_type(y, int)
+    return y + 1
+
+def related_with(x: int | None, y: int | None, flag: bool):
+    if x is None and y is None:
+        raise ValueError()
+    assert x is None
+    with suppress(ValueError):
+        if flag:
+            y = None
+            raise ValueError()
+    assert_type(y, int)
+    return y + 1
+"#,
+);
+
 // Regression test to ensure we don't forget to create loop recursion
 // bindings when the loop has early termination.
 testcase!(
@@ -432,6 +951,7 @@ c = C()
 while True:
     if True:
         c = C()
+        break
 
 assert_type(c, C)
     "#,
@@ -989,7 +1509,7 @@ for x in []:
 pass  # E: Expected an indented block
 
 while True:
-pass  # E: Expected an indented block
+pass  # E: Expected an indented block  # E: This code is unreachable
 "#,
 );
 
@@ -1199,21 +1719,27 @@ def foo(x: tuple[int, str, bool, int]) -> None:
             assert_type(b, str)
             assert_type(c, bool)
             assert_type(d, int)
+        case [a, b, c, d, e]:
+            assert_type(x, Never)
         case [a, *rest]:
             assert_type(a, int)
             assert_type(rest, list[str | bool | int])
+
+    match x:
         case [a, *middle, b]:
             assert_type(a, int)
             assert_type(b, int)
             assert_type(middle, list[str | bool])
-        case [a, b, c, d, e]:
-            assert_type(x, Never)
+
+    match x:
         case [a, b, *middle, c, d]:
             assert_type(a, int)
             assert_type(b, str)
             assert_type(c, bool)
             assert_type(d, int)
             assert_type(middle, list[Never])
+
+    match x:
         case [*first, c, d]:
             assert_type(first, list[int | str])
             assert_type(c, bool)
@@ -1475,6 +2001,88 @@ while foo:  # E: Function object `foo` used as condition
     "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/5151
+testcase!(
+    test_unused_coroutine_condition,
+    r#"
+async def foo() -> bool:
+    return True
+
+async def bar(flag: bool) -> None:
+    if foo():  # E: Coroutine used as a condition. Did you forget to `await`?
+        pass
+    while foo():  # E: Coroutine used as a condition. Did you forget to `await`?
+        break
+    assert foo()  # E: Coroutine used as a condition. Did you forget to `await`?
+    negated = not foo()  # E: Coroutine used as a condition. Did you forget to `await`?
+    conditional = 1 if foo() else 0  # E: Coroutine used as a condition. Did you forget to `await`?
+    conjunction = foo() and flag  # E: Coroutine used as a condition. Did you forget to `await`?
+    disjunction = foo() or flag  # E: Coroutine used as a condition. Did you forget to `await`?
+    filtered = [x for x in range(3) if foo()]  # E: Coroutine used as a condition. Did you forget to `await`?
+    match flag:
+        case _ if foo():  # E: Coroutine used as a condition. Did you forget to `await`?
+            pass
+    coroutine = foo()
+    if coroutine:  # E: Coroutine used as a condition. Did you forget to `await`?
+        pass
+    "#,
+);
+
+testcase!(
+    test_unused_coroutine_condition_valid,
+    r#"
+from typing import Any, Awaitable, Coroutine, Never
+
+async def foo() -> bool:
+    return True
+
+class Dynamic(Any):
+    pass
+
+async def bar(
+    dynamic: Any,
+    instance: Dynamic,
+    awaitable: Awaitable[bool],
+    optional: Coroutine[Any, Any, bool] | None,
+    flag: bool,
+) -> None:
+    if await foo():
+        pass
+    if dynamic:
+        pass
+    if instance:
+        pass
+    if awaitable:
+        pass
+    if optional:
+        await optional
+    coroutine = optional or foo()
+    selected = flag and foo()
+    assigned = foo()
+
+def unreachable(value: Never) -> None:
+    if value:
+        pass
+    "#,
+);
+
+testcase!(
+    test_unused_coroutine_condition_with_implicit_bool,
+    implicit_bool_env(),
+    r#"
+async def foo() -> bool:
+    return True
+
+async def bar() -> None:
+    if foo():  # E: Coroutine used as a condition. Did you forget to `await`?
+        pass
+    if await foo():
+        pass
+    if foo():  # pyrefly: ignore[unused-coroutine]
+        pass
+    "#,
+);
+
 testcase!(
     test_implicit_bool,
     implicit_bool_env(),
@@ -1530,6 +2138,199 @@ while Foo:  # E: Class name `Foo` used as condition
     ...
 [x for x in range(42) if Foo]  # E: Class name `Foo` used as condition
     "#,
+);
+
+testcase!(
+    test_redundant_condition_none,
+    r#"
+from typing import TypeIs
+
+def get() -> str | None: ...
+def is_none(x: object) -> TypeIs[None]: ...
+
+def narrowed_param(x: str | None) -> None:
+    if x is None:
+        if x:  # E: `None` used as condition. It's equivalent to `False`
+            print("unreachable")
+
+def narrowed_local() -> None:
+    x = get()
+    if x is None:
+        print("missing" if x else "")  # E: `None` used as condition. It's equivalent to `False`
+
+def narrowed_in_comprehension(xs: list[str | None]) -> None:
+    print([x for x in xs if x is None if x])  # E: `None` used as condition. It's equivalent to `False`
+
+def narrowed_in_elif(x: str | None) -> None:
+    if x is not None:
+        print(x)
+    elif x:  # E: `None` used as condition. It's equivalent to `False`
+        print("unreachable")
+
+def narrowed_by_match(x: str | None) -> None:
+    match x:
+        case None:
+            if x:  # E: `None` used as condition. It's equivalent to `False`
+                print("unreachable")
+        case _:
+            print(x)
+
+def narrowed_by_type_is_in_capture(x: str | None) -> None:
+    if is_none(x):
+        def inner() -> None:
+            if x:  # E: `None` used as condition. It's equivalent to `False`
+                print("unreachable")
+        inner()
+
+# The inner `if` narrows `x` in both branches, so the read after it is a merge of narrows.
+def narrowed_again(x: str | None) -> None:
+    if x is None:
+        if x is None:
+            print("missing")
+        if x:  # E: `None` used as condition. It's equivalent to `False`
+            print("unreachable")
+
+def optional(x: str | None) -> None:
+    if x:
+        print(x)
+    if not x:
+        print("empty or missing")
+
+# Only a `None` produced by narrowing is reported, so a name declared as `None` is not.
+def declared(x: None) -> None:
+    if x:
+        print("unreachable")  # E: This code is unreachable
+"#,
+);
+
+// Unannotated `None` globals read as `None` in every function, even when reassigned through
+// `global`, so they must not trigger the warning. Attribute types can be `None` from inference
+// alone, so attributes are never reported. A local set to `None` before a loop and reassigned
+// inside it reads as `None` joined with the loop's values, so it is not reported either.
+testcase!(
+    test_redundant_condition_none_not_narrowed,
+    r#"
+_instance = None
+_lazy = None
+
+def get_instance() -> object:
+    global _instance
+    if _instance:
+        return _instance
+    _instance = object()
+    return _instance
+
+def set_lazy() -> None:
+    global _lazy
+    _lazy = 1
+
+def read_lazy() -> None:
+    if _lazy:
+        print(_lazy)
+    if _lazy is None:
+        if _lazy:
+            pass
+
+# Reading through a merge of narrows still finds the unannotated assignment.
+def read_lazy_after_narrowing_merge() -> None:
+    if _lazy is None:
+        if _lazy is None:
+            print("missing")
+        if _lazy:
+            pass
+
+class C:
+    attr = None
+    def __init__(self) -> None:
+        self.inst = None
+    def m(self) -> None:
+        if self.attr:
+            pass
+        if self.inst:
+            pass
+    def set(self) -> None:
+        self.inst = 1
+
+class D:
+    def __init__(self, x: int | None) -> None:
+        self.x = x
+
+def narrowed_attribute(d: D) -> None:
+    if d.x is None:
+        if d.x:
+            pass
+
+def walrus() -> None:
+    if (y := _instance):
+        print(y)
+
+def for_loop(xs: list[str]) -> None:
+    prev = None
+    for x in xs:
+        if prev:
+            print(prev)
+        prev = x
+
+def while_loop(n: int) -> None:
+    last = None
+    while n > 0:
+        if last:
+            print(last)
+        last = n
+        n -= 1
+
+def loop_break(xs: list[str]) -> None:
+    found = None
+    for x in xs:
+        if x:
+            found = x
+            break
+    if found:
+        print(found)
+
+def loop_else(xs: list[str]) -> None:
+    found = None
+    for x in xs:
+        if found:
+            break
+        found = x
+    else:
+        if found:
+            print(found)
+"#,
+);
+
+// Narrowing survives a call, so a `None` narrowed before a call that reassigns the name through
+// `global` or `nonlocal` is stale. The `missing-attribute` errors show the existing blind spot.
+testcase!(
+    bug = "A call after narrowing to `None` can reassign a global or nonlocal name",
+    test_redundant_condition_none_reassigned_by_call,
+    r#"
+_c: int | None = None
+
+def init() -> None:
+    global _c
+    _c = 1
+
+def get() -> int:
+    if _c is None:
+        init()
+        if _c:  # E: `None` used as condition. It's equivalent to `False`
+            return _c
+        _c.bit_length()  # E: Object of class `NoneType` has no attribute `bit_length`
+    return 0
+
+def with_closure() -> None:
+    x: int | None = None
+    def setter() -> None:
+        nonlocal x
+        x = 1
+    if x is None:
+        setter()
+        if x:  # E: `None` used as condition. It's equivalent to `False`
+            print(x)
+        x.bit_length()  # E: Object of class `NoneType` has no attribute `bit_length`
+"#,
 );
 
 testcase!(
@@ -2106,7 +2907,6 @@ def f() -> int:
 
 // elif condition only executes if the first `if` was False — walrus may not run.
 testcase!(
-    bug = "In order to fix false positives, we handled narrows differently in if/elif and introduced a false negative here",
     test_walrus_in_elif,
     r#"
 def condition() -> bool: ...
@@ -2115,7 +2915,7 @@ def f() -> bool:
         pass
     elif (x := condition()):
         pass
-    return x  # False negative: x winds up getting applied as if it were in the base flow due to the negative narrow
+    return x  # E: `x` may be uninitialized
     "#,
 );
 
@@ -2203,7 +3003,6 @@ def f() -> None:
 
 // the walrus may not execute, so x should be possibly-uninitialized.
 testcase!(
-    bug = "Should report x as possibly uninitialized since the if branch does not terminate",
     test_walrus_in_elif_preceding_if_no_terminate,
     r#"
 def foo() -> bool:
@@ -2217,7 +3016,7 @@ def f() -> None:
         pass
     elif (x := bar()) > 1:
         pass
-    print(x)  # should be an error: x may be uninitialized
+    print(x)  # E: `x` may be uninitialized
     "#,
 );
 
@@ -2734,6 +3533,101 @@ def f(x: int) -> str:
     else:
         maybe_raises()
     return y  # E: `y` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_nested_noreturn_branches_terminate_outer_branch,
+    r#"
+from typing import NoReturn
+
+def raises() -> NoReturn:
+    raise Exception()
+
+def f(cond: bool, cond2: bool) -> str:
+    if cond:
+        x = "defined"
+    else:
+        if cond2:
+            raises()
+        else:
+            raises()
+    return x
+"#,
+);
+
+testcase!(
+    test_nested_noreturn_and_non_noreturn_branches,
+    r#"
+from typing import NoReturn
+
+def raises() -> NoReturn:
+    raise Exception()
+
+def maybe_raises() -> None:
+    if True:
+        raise Exception()
+
+def f(cond: bool, cond2: bool) -> str:
+    if cond:
+        x = "defined"
+    else:
+        if cond2:
+            raises()
+        else:
+            maybe_raises()
+    return x  # E: `x` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_nested_exhaustive_match_terminates_outer_branch,
+    r#"
+class A: ...
+
+def f(flag: bool, x: A) -> int:
+    if flag:
+        y = 1
+    else:
+        match x:
+            case A():
+                raise ValueError("x")
+    return y
+"#,
+);
+
+testcase!(
+    test_nested_non_exhaustive_match_does_not_terminate_outer_branch,
+    r#"
+class A: ...
+class B: ...
+
+def f(flag: bool, x: A | B) -> int:
+    if flag:
+        y = 1
+    else:
+        match x:
+            case A():
+                raise ValueError("x")
+    return y  # E: `y` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_nested_noreturn_in_loop_does_not_terminate,
+    r#"
+from typing import NoReturn
+
+def raises() -> NoReturn:
+    raise Exception()
+
+def f(cond: bool, xs: list[int]) -> str:
+    if cond:
+        x = "defined"
+    else:
+        for _ in xs:
+            raises()
+    return x  # E: `x` may be uninitialized
 "#,
 );
 
@@ -3445,6 +4339,15 @@ def truthy_preempts_the_rest(value: Literal[True], other: bool) -> None:
     else:
         print(8)  # E: This code is unreachable
 
+# The `elif` test is narrowed to `Never` by the test above it, which does not hide the suites below.
+def preempted_test_narrowed_to_never(value: Literal[True]) -> None:
+    if value:
+        pass
+    elif value:
+        print(23)  # E: This code is unreachable
+    else:
+        print(24)  # E: This code is unreachable
+
 def falsy_else_is_live(value: Literal[False]) -> None:
     if value:
         print(9)  # E: This code is unreachable
@@ -3499,6 +4402,12 @@ def wrapped_class_object_bool() -> None:
     else:
         print(19)  # E: This code is unreachable
 
+# The inner suite is inside one already reported, so it is not reported again.
+def nested_in_dead(value: Literal[False]) -> None:
+    if value:
+        if value:  # E: This code is unreachable
+            print(23)
+
 def genuinely_live(value: bool, mixed: Literal[False] | Literal[True]) -> None:
     if value:
         print(20)
@@ -3506,6 +4415,28 @@ def genuinely_live(value: bool, mixed: Literal[False] | Literal[True]) -> None:
         print(21)
     if mixed:
         print(22)
+"#,
+);
+
+// The value of a walrus test is the value it assigns.
+testcase!(
+    test_unreachable_branch_suite_from_walrus_test,
+    r#"
+from typing import Literal
+
+def falsy(value: Literal[False]) -> None:
+    if x := value:
+        print(1)  # E: This code is unreachable
+
+def truthy(value: Literal[True]) -> None:
+    if x := value:
+        print(2)
+    else:
+        print(3)  # E: This code is unreachable
+
+def in_a_bool_op(value: Literal[False], other: bool) -> None:
+    if (x := value) and other:
+        print(4)  # E: This code is unreachable
 "#,
 );
 
@@ -3662,6 +4593,1281 @@ def impossible_isinstance(x: int) -> None:
 "#,
 );
 
+// A suite that declarations settle as dead never runs, so it should not contribute to the types
+// after the chain. See https://github.com/facebook/pyrefly/issues/3537.
+testcase!(
+    test_suite_settled_dead_by_declarations_is_pruned,
+    r#"
+from typing import Final, Literal, assert_type
+
+FLAG: Final = False
+ON: Final = True
+
+if FLAG:
+    x = 1  # E: This code is unreachable
+else:
+    x = 2
+assert_type(x, Literal[2])
+
+# An annotation settles the test without `Final`.
+ANNOTATED: Literal[False] = False
+
+if ANNOTATED:
+    a = 1  # E: This code is unreachable
+else:
+    a = 2
+assert_type(a, Literal[2])
+
+def parameter(value: Literal[False]) -> None:
+    if value:
+        y = 1  # E: This code is unreachable
+    else:
+        y = 2
+    assert_type(y, Literal[2])
+
+class Config:
+    DEBUG: Final = False
+
+    def method(self) -> None:
+        if self.DEBUG:
+            z = 1  # E: This code is unreachable
+        else:
+            z = 2
+        assert_type(z, Literal[2])
+
+def preempted(other: bool) -> None:
+    if ON:
+        w = 1
+    elif other:
+        w = 2  # E: This code is unreachable
+    else:
+        w = 3  # E: This code is unreachable
+    assert_type(w, Literal[1])
+"#,
+);
+
+// A call to a function declared to return `Literal[False]` settles its test like a name does,
+// and a declared-true `if` with no `else` leaves no path past it on which `y` is unset. A test
+// that reads the environment settles nothing, even when declarations alone would decide it.
+testcase!(
+    test_pruning_after_calls_fall_throughs_and_environment_tests,
+    r#"
+import sys
+from typing import Final, Literal, assert_type
+
+ON: Final = True
+
+def off() -> Literal[False]:
+    return False
+
+def declared_call() -> None:
+    if off():
+        x = 1  # E: This code is unreachable
+    else:
+        x = 2
+    assert_type(x, Literal[2])
+
+def fall_through() -> None:
+    if not off():
+        y = 1
+    print(y)
+
+def environment() -> None:
+    if sys.platform.startswith("win") or ON:
+        x = 1
+    else:
+        x = 2
+    assert_type(x, Literal[1, 2])
+
+# The environment removes the first clause, and the `elif` still preempts the `else`.
+def after_environment_clause() -> None:
+    if sys.platform == "win32":
+        x = 1
+    elif ON:
+        x = 2
+    else:
+        x = 3  # E: This code is unreachable
+    assert_type(x, Literal[2])
+"#,
+);
+
+// The first `if` leaves `x` unset on the path through its `else`. That path reaches the read only
+// through the second `if`'s `else`, so it needs both suites to reach their ends.
+testcase!(
+    test_unset_path_from_earlier_if_needs_every_branch_on_it,
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+
+def cut_off_later(c: bool, d: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    if d:
+        x = 2
+    else:
+        stop()
+    print(x)
+
+def cut_off_earlier(c: bool, d: bool) -> None:
+    if c:
+        x = 1
+    else:
+        stop()
+    if d:
+        x = 2
+    else:
+        print(0)
+    print(x)
+
+def not_cut_off(c: bool, d: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    if d:
+        x = 2
+    else:
+        print(0)
+    print(x)  # E: `x` may be uninitialized
+
+def cut_off_two_merges_later(c: bool, d: bool, e: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    if d:
+        print(0)
+    else:
+        print(1)
+    if e:
+        x = 2
+    else:
+        stop()
+    print(x)
+
+# Branches that carry the same unset paths share one node, and a merge in which every branch
+# carries them adds no node at all.
+def many_later_merges(c: bool, e: list[bool]) -> None:
+    if c:
+        x = 1
+    if e[0]: print(0)
+    if e[1]: print(1)
+    if e[2]: print(2)
+    if e[3]: print(3)
+    if e[4]: print(4)
+    if e[5]: print(5)
+    if e[6]: print(6)
+    if e[7]: print(7)
+    if e[8]: print(8)
+    if e[9]: print(9)
+    if e[10]: print(10)
+    if e[11]: print(11)
+    if e[12]: print(12)
+    if e[13]: print(13)
+    if e[14]: print(14)
+    if e[15]: print(15)
+    if e[16]: print(16)
+    if e[17]: print(17)
+    if e[18]: print(18)
+    if e[19]: print(19)
+    if e[20]: print(20)
+    if e[21]: print(21)
+    if e[22]: print(22)
+    if e[23]: print(23)
+    if e[24]: print(24)
+    if e[25]: print(25)
+    if e[26]: print(26)
+    if e[27]: print(27)
+    if e[28]: print(28)
+    if e[29]: print(29)
+    print(x)  # E: `x` may be uninitialized
+
+# A value assigned inside nested `if`s carries the unset paths to the outer merge beside the earlier
+# value. The two share their earlier nodes, so the graph grows by a few nodes per `if` instead of
+# doubling.
+def nested_later_merges(c: bool, d: list[bool], e: list[bool]) -> None:
+    if c:
+        x = 0
+    if d[0]:
+        if e[0]: x = 1
+    if d[1]:
+        if e[1]: x = 2
+    if d[2]:
+        if e[2]: x = 3
+    if d[3]:
+        if e[3]: x = 4
+    if d[4]:
+        if e[4]: x = 5
+    if d[5]:
+        if e[5]: x = 6
+    if d[6]:
+        if e[6]: x = 7
+    if d[7]:
+        if e[7]: x = 8
+    if d[8]:
+        if e[8]: x = 9
+    if d[9]:
+        if e[9]: x = 10
+    if d[10]:
+        if e[10]: x = 11
+    if d[11]:
+        if e[11]: x = 12
+    if d[12]:
+        if e[12]: x = 13
+    if d[13]:
+        if e[13]: x = 14
+    if d[14]:
+        if e[14]: x = 15
+    if d[15]:
+        if e[15]: x = 16
+    if d[16]:
+        if e[16]: x = 17
+    if d[17]:
+        if e[17]: x = 18
+    if d[18]:
+        if e[18]: x = 19
+    if d[19]:
+        if e[19]: x = 20
+    if d[20]:
+        if e[20]: x = 21
+    if d[21]:
+        if e[21]: x = 22
+    if d[22]:
+        if e[22]: x = 23
+    if d[23]:
+        if e[23]: x = 24
+    if d[24]:
+        if e[24]: x = 25
+    if d[25]:
+        if e[25]: x = 26
+    if d[26]:
+        if e[26]: x = 27
+    if d[27]:
+        if e[27]: x = 28
+    if d[28]:
+        if e[28]: x = 29
+    if d[29]:
+        if e[29]: x = 30
+    print(x)  # E: `x` may be uninitialized
+
+# The same nesting stays exact: a later branch that never returns cuts off every path.
+def nested_then_cut_off(c: bool, d: list[bool], e: list[bool]) -> None:
+    if c:
+        x = 0
+    if d[0]:
+        if e[0]: x = 1
+    if d[1]:
+        if e[1]: x = 2
+    if d[2]:
+        if e[2]: x = 3
+    if d[3]:
+        if e[3]: x = 4
+    if d[4]:
+        if e[4]: x = 5
+    if d[5]:
+        x = 6
+    else:
+        stop()
+    print(x)
+
+# Two branches carry the unset paths through one merge, and only one of them never returns.
+def shared_merge(c: bool, d: bool, e: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    if d:
+        x = 2
+    elif e:
+        stop()
+    else:
+        pass
+    print(x)  # E: `x` may be uninitialized
+"#,
+);
+
+// A `match`, a `try`, and a loop's `else` are merges too, and a branch of one that never returns
+// cuts off the paths that pass through it.
+testcase!(
+    test_unset_path_from_earlier_if_cut_off_by_other_merges,
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+
+def through_match(c: bool, v: int) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    match v:
+        case 0:
+            x = 2
+        case _:
+            stop()
+    print(x)
+
+def through_try(c: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    try:
+        x = 2
+    except ValueError:
+        stop()
+    print(x)
+
+def through_for_else(c: bool, d: bool, r: list[int]) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    for i in r:
+        if d:
+            x = 2
+            break
+    else:
+        stop()
+    print(x)
+
+def through_while_else(c: bool, d: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    while d:
+        x = 2
+        break
+    else:
+        stop()
+    print(x)
+"#,
+);
+
+// The suite that assigns `x` never runs, and control never evaluates the test that assigns `n`,
+// so both names are unset after the `if`.
+testcase!(
+    bug = "A name assigned only in dead code is only possibly uninitialized, and may keep its type",
+    test_name_assigned_only_in_dead_code,
+    r#"
+from typing import Final, Literal, Never, assert_type
+
+FLAG: Final = False
+ON: Final = True
+
+def dead_suite() -> None:
+    if FLAG:
+        x = 1  # E: This code is unreachable
+    print(x)  # E: `x` may be uninitialized
+    assert_type(x, Literal[1])
+
+def walrus_in_preempted_test(other: int) -> None:
+    if ON:
+        pass
+    elif n := other:
+        print(n)  # E: This code is unreachable
+    print(n)  # E: `n` may be uninitialized
+    assert_type(n, Never)
+"#,
+);
+
+// A name assigned only in suites that run is initialized, whatever the dead suites do.
+testcase!(
+    test_uninitialized_ignores_suite_settled_dead_by_declarations,
+    r#"
+from typing import Final
+
+FLAG: Final = False
+ON: Final = True
+
+def dead_if() -> None:
+    if FLAG:
+        pass  # E: This code is unreachable
+    else:
+        x = 1
+    print(x)
+
+def dead_elif(other: bool) -> None:
+    if ON:
+        y = 1
+    elif other:
+        pass  # E: This code is unreachable
+    print(y)
+"#,
+);
+
+// Control cannot fall off the end of a function through a suite that never runs.
+testcase!(
+    test_implicit_return_ignores_suite_settled_dead_by_declarations,
+    r#"
+import sys
+from typing import Final
+
+FLAG: Final = False
+ON: Final = True
+
+def dead_if() -> int:
+    if FLAG:
+        pass  # E: This code is unreachable
+    else:
+        return 1
+
+def dead_elif(other: bool) -> int:
+    if ON:
+        return 1
+    elif other:
+        pass  # E: This code is unreachable
+
+# The environment removes the first clause, so the `elif` is the first suite left, and it has a
+# test of its own. It may run, so control can fall off the end.
+def after_pruned_clause(other: bool) -> int:  # E: Function declared to return `int`, but one or more paths are missing an explicit `return`
+    if sys.version_info < (3, 0):
+        return 0
+    elif other:
+        pass
+    else:
+        return 1
+
+# The environment chooses the `elif`, but the test above it still decides whether it runs.
+def chosen_by_environment(other: bool) -> int:  # E: Function declared to return `int`, but one or more paths are missing an explicit `return`
+    if other:
+        return 1
+    elif sys.version_info >= (3, 0):
+        pass
+    else:
+        return 2
+"#,
+);
+
+// An earlier test of the same name narrows it in each branch, and the merge of those narrows
+// is what a later test reads. The narrowing does not change the declaration that settles it.
+testcase!(
+    test_test_settled_after_earlier_narrowing,
+    r#"
+from typing import Final, Literal, assert_type
+
+FLAG: Final = False
+
+if FLAG:
+    print(0)  # E: This code is unreachable
+if FLAG:
+    x = 1  # E: This code is unreachable
+else:
+    x = 2
+assert_type(x, Literal[2])
+
+def in_function() -> None:
+    if FLAG:
+        print(0)  # E: This code is unreachable
+    if FLAG:
+        y = 1  # E: This code is unreachable
+    else:
+        y = 2
+    assert_type(y, Literal[2])
+"#,
+);
+
+// A test is settled only by declared types. An unannotated return type, `__bool__`, or attribute
+// is inferred from the code at hand, which a subclass, a monkeypatch, or a later assignment the
+// inference does not see can make wrong.
+testcase!(
+    test_inferred_types_do_not_settle_tests,
+    r#"
+from enum import Enum
+from typing import Final, Literal, TypeVar, assert_type
+
+def enabled():
+    return False
+
+def off() -> Literal[False]:
+    return False
+
+if enabled():
+    print(1)
+
+# A bare `Final` holds its value, which here is only inferred.
+ENABLED: Final = enabled()
+if ENABLED:
+    print(5)
+
+class Config:
+    DEBUG: Final = False
+
+    @classmethod
+    def method(cls) -> None:
+        if cls.DEBUG:
+            print(6)  # E: This code is unreachable
+
+class Empty:
+    def __bool__(self):
+        return False
+
+def user_bool(e: Empty) -> None:
+    if e:
+        print(2)
+
+class AlsoEmpty:
+    def __bool__(self):
+        return False
+
+def union_bool(e: Empty | AlsoEmpty, o: Empty | None) -> None:
+    if e:
+        print(7)
+    if o:
+        print(8)
+
+class Flags:
+    @property
+    def declared(self) -> Literal[False]:
+        return False
+
+    @property
+    def inferred(self):
+        return False
+
+def properties(f: Flags) -> None:
+    if f.declared:
+        print(3)  # E: This code is unreachable
+    if f.inferred:
+        print(4)
+
+class AlwaysEmpty:
+    def __bool__(self) -> Literal[False]:
+        return False
+
+class CallInferred:
+    def __call__(self):
+        return False
+
+def inferred_call(c: CallInferred, pick: bool) -> None:
+    if c():
+        print(9)
+    # One member of a union callee infers its return type.
+    f = off if pick else enabled
+    if f():
+        print(10)
+
+class CallsItself:
+    def __call__(self):
+        return False
+
+    def m(self) -> None:
+        if self():
+            print(11)
+
+CallsInferred = TypeVar("CallsInferred", bound=CallInferred)
+
+def bounded_call(c: CallsInferred) -> None:
+    if c():
+        print(13)
+
+class InferredGet:
+    def __get__(self, obj: object, owner: type):
+        return False
+
+class Holder:
+    flag: InferredGet = InferredGet()
+
+def descriptor(h: Holder) -> None:
+    if h.flag:
+        print(12)
+
+# An enum member's value is the type of the expression assigned to it, even for a literal.
+class Mode(Enum):
+    A = enabled()
+    B = 0
+
+def enum_value(m: Mode) -> None:
+    if Mode.A.value:
+        print(14)
+    if Mode.B.value:  # E: Integer literal used as condition. It's equivalent to `False`
+        print(15)
+    if m.value:
+        print(16)
+
+# Only the attribute is inferred: its class declares `__bool__`.
+class Builder:
+    def __init__(self) -> None:
+        self.tail = AlwaysEmpty()
+
+    def append(self, make) -> None:
+        if not self.tail:
+            x = 1
+        else:
+            self.tail = make()
+            x = 2
+        assert_type(x, Literal[1, 2])
+"#,
+);
+
+// A lambda's return type is inferred, but its type cannot be told apart from an annotated
+// `Callable`. A field holds no record of the expression assigned to it, so a bare `Final` field
+// cannot be told apart from one assigned a literal. A decorated function's type is the
+// decorator's return type, which may be inferred.
+testcase!(
+    bug = "A lambda, a bare `Final` field, and a decorator settle tests through inferred values",
+    test_inferred_values_that_still_settle_tests,
+    r#"
+from typing import Callable, Final, Literal
+
+def enabled():
+    return False
+
+check = lambda: False
+
+def via_lambda() -> None:
+    if check():
+        print(1)  # E: This code is unreachable
+
+class C:
+    def __init__(self) -> None:
+        self.x: Final = enabled()
+
+    def m(self) -> None:
+        if self.x:
+            print(2)  # E: This code is unreachable
+
+def deco(f: Callable[[], bool]):
+    def inner() -> Literal[False]:
+        return False
+    return inner
+
+# The decorator's return type is inferred, but the name is bound by a `def`.
+@deco
+def decorated() -> bool:
+    return True
+
+def via_decorator() -> None:
+    if decorated():
+        print(3)  # E: This code is unreachable
+"#,
+);
+
+// A call with a declared return type is settled by the inferred type of the call, so a generic
+// return, a constructor, and a `__call__` method settle it through their declarations too.
+testcase!(
+    test_call_settled_by_declared_return_type,
+    r#"
+from typing import Literal, TypeVar, overload
+
+T = TypeVar("T")
+
+def off() -> Literal[False]:
+    return False
+
+@overload
+def always_off(x: int) -> Literal[False]: ...
+@overload
+def always_off(x: str) -> Literal[False]: ...
+def always_off(x):
+    return False
+
+@overload
+def pick(x: Literal[0]) -> Literal[False]: ...
+@overload
+def pick(x: int) -> bool: ...
+def pick(x: int) -> bool:
+    return x != 0
+
+def ident(x: T) -> T:
+    return x
+
+class AlwaysFalse:
+    def __bool__(self) -> Literal[False]:
+        return False
+
+class Off:
+    def __call__(self) -> Literal[False]:
+        return False
+
+def calls(flag: Literal[False], o: Off) -> None:
+    if off():
+        print(1)  # E: This code is unreachable
+    if ident(flag):
+        print(2)  # E: This code is unreachable
+    if AlwaysFalse():
+        print(3)  # E: This code is unreachable
+    if o():
+        print(4)  # E: This code is unreachable
+    # One overload returns `Literal[False]`, so the call is inferred to pick it.
+    if pick(0):
+        print(6)  # E: This code is unreachable
+    # The overloads declare the return type, whatever the implementation infers.
+    if always_off(1):
+        print(7)  # E: This code is unreachable
+
+# The callee is inferred rather than looked up as a declaration, so a call through an unannotated
+# alias is settled by the declared return type of the function the alias holds.
+hook = off
+
+def through_alias() -> None:
+    if hook():
+        print(5)  # E: This code is unreachable
+"#,
+);
+
+// An attribute is looked up the way an attribute read is, so it is declared when every class the
+// read searches declares it. A read through a descriptor returns its `__get__` return type.
+testcase!(
+    test_attribute_settled_by_every_class_the_read_searches,
+    r#"
+from enum import Enum
+from typing import Literal, TypeVar
+
+class Cfg:
+    on: Literal[False] = False
+
+class OtherCfg:
+    on: Literal[False] = False
+
+C = TypeVar("C", bound=Cfg)
+
+class Mode(Enum):
+    A = 1
+
+    @property
+    def on(self) -> Literal[False]:
+        return False
+
+class Off:
+    def __get__(self, obj: object, owner: type) -> Literal[False]:
+        return False
+
+class Holder:
+    flag = Off()
+
+def off() -> Literal[False]:
+    return False
+
+def also_off() -> Literal[False]:
+    return False
+
+def reads(c: C, u: Cfg | OtherCfg, h: Holder, pick: bool) -> None:
+    if c.on:
+        print(1)  # E: This code is unreachable
+    if u.on:
+        print(2)  # E: This code is unreachable
+    if Mode.A.on:
+        print(3)  # E: This code is unreachable
+    if h.flag:
+        print(4)  # E: This code is unreachable
+    f = off if pick else also_off
+    if f():
+        print(5)  # E: This code is unreachable
+"#,
+);
+
+fn env_imported_constants() -> TestEnv {
+    let mut env = TestEnv::new();
+    env.add(
+        "cfg",
+        r#"
+from typing import Final, Literal
+
+def enabled():
+    return False
+
+DEBUG: Final = False
+ON: Final[Literal[True]] = True
+TYPED: Final[bool] = False
+INFERRED: Final = enabled()
+PLAIN = False
+ANNOTATED: Literal[False] = False
+"#,
+    );
+    env.add("reexport", "from cfg import DEBUG as DEBUG");
+    env.add("pkg", "");
+    env.add("pkg.sub", "from typing import Final\nOFF: Final = False");
+    env.add(
+        "plat",
+        r#"
+import sys
+from typing import Final
+
+if sys.platform == "win32":
+    IS_WIN: Final = True
+    from cfg import ON as CHOSEN
+    import cfg as config
+    from cfg import *
+else:
+    IS_WIN: Final = False
+    from cfg import DEBUG as CHOSEN
+    import pkg.sub as config
+    from pkg.sub import *
+"#,
+    );
+    env.add(
+        "holder",
+        r#"
+import pkg.sub as sub_alias
+import plat
+import settings
+from chooser import chooser as conf
+held = plat.config
+"#,
+    );
+    env.add(
+        "chooser",
+        r#"
+import sys
+
+if sys.platform == "win32":
+    import cfg as chooser
+else:
+    import pkg.sub as chooser
+"#,
+    );
+    env.add(
+        "early",
+        r#"
+import sys
+from typing import Final
+
+def flag() -> bool: ...
+
+if flag():
+    EARLY: Final = False
+    LATE: Final = False
+elif sys.platform == "win32":
+    LATE: Final = True
+else:
+    raise ImportError()
+"#,
+    );
+    env.add(
+        "star_defaults",
+        "from typing import Final\nOVERRIDE: Final = False\nfrom win_override import *",
+    );
+    env.add(
+        "win_override",
+        "import sys\nif sys.platform == \"win32\":\n    OVERRIDE = True",
+    );
+    env.add(
+        "settings",
+        "from typing import Final\nOFF: Final = False\nsettings = 1",
+    );
+    env.add_with_path("rpkg", "rpkg/__init__.py", "from . import sub");
+    env.add("rpkg.sub", "from typing import Final\nOFF: Final = False");
+    env.add("win_sub", "from typing import Final\nOFF: Final = True");
+    env.add(
+        "nested_win",
+        r#"
+import sys
+from typing import Final
+
+G: Final = False
+DEEP: Final = False
+if sys.platform == "win32":
+    if sys.version_info < (3, 10):
+        G: Final = True
+        from win_deep import *
+"#,
+    );
+    env.add("win_deep", "from typing import Final\nDEEP: Final = True");
+    env.add(
+        "defaults_then_win",
+        r#"
+import sys
+from pkg.sub import *
+
+if sys.platform == "win32":
+    from win_sub import *
+"#,
+    );
+    env.add(
+        "rebinder",
+        r#"
+from cfg import DEBUG
+
+def enable() -> None:
+    global DEBUG
+    DEBUG = True
+"#,
+    );
+    env
+}
+
+// Another module can reassign its variables, and tests patch them, so a name from another module
+// settles a test only if it is `Final` with a declared type: `Final[T]`, or a bare `Final` assigned
+// a literal. A name, or a module, defined or imported under a test of the environment has another
+// value elsewhere.
+testcase!(
+    test_final_from_another_module_settles_tests,
+    env_imported_constants(),
+    r#"
+import cfg
+import cfg as cfg_alias
+import defaults_then_win
+import holder
+import plat
+import rpkg
+import star_defaults
+import sys
+from cfg import ANNOTATED, DEBUG, INFERRED, ON, PLAIN, TYPED
+from early import EARLY, LATE
+from holder import held
+from pkg import sub
+from star_defaults import OVERRIDE
+from pkg.sub import OFF as LOCAL_OFF
+from plat import IS_WIN
+from reexport import DEBUG as REEXPORTED
+from typing import Literal, assert_type
+
+if sys.platform == "win32":
+    import cfg as chosen
+    from win_sub import OFF as LOCAL_OFF
+else:
+    import pkg.sub as chosen
+aliased = chosen
+
+def settled() -> None:
+    if DEBUG:
+        print(1)  # E: This code is unreachable
+    if ON:
+        x = 1
+    else:
+        x = 2  # E: This code is unreachable
+    assert_type(x, Literal[1])
+    if cfg.DEBUG:
+        print(2)  # E: This code is unreachable
+    if REEXPORTED:
+        print(3)  # E: This code is unreachable
+    if cfg_alias.DEBUG:
+        print(31)  # E: This code is unreachable
+    if sub.OFF:
+        print(32)  # E: This code is unreachable
+    if holder.sub_alias.OFF:
+        print(33)  # E: This code is unreachable
+    if rpkg.sub.OFF:
+        print(34)  # E: This code is unreachable
+    if holder.settings.OFF:
+        print(35)  # E: This code is unreachable
+    if EARLY:
+        print(37)  # E: This code is unreachable
+
+def not_settled() -> None:
+    if TYPED:
+        print(4)
+    if INFERRED:
+        print(5)
+    if PLAIN:
+        print(6)
+    if ANNOTATED:
+        print(7)
+    if cfg.PLAIN:
+        print(8)
+    if IS_WIN:
+        print(9)
+    if plat.CHOSEN:
+        print(10)
+    if plat.OFF:
+        print(11)
+    if chosen.OFF:
+        print(12)
+    if plat.config.OFF:
+        print(13)
+    if defaults_then_win.OFF:
+        print(14)
+    if LOCAL_OFF:
+        print(15)
+    if aliased.OFF:
+        print(16)
+    if holder.held.OFF:
+        print(17)
+    if held.OFF:
+        print(18)
+    if LATE:
+        print(19)
+    if holder.conf.OFF:
+        print(20)
+    if OVERRIDE:
+        print(21)
+    if star_defaults.OVERRIDE:
+        print(22)
+"#,
+);
+
+// The imported name is not itself `Final`, so a module that rebinds or deletes it settles nothing
+// through it, while a submodule attribute still settles.
+testcase!(
+    test_final_from_another_module_rebound_by_importer,
+    env_imported_constants(),
+    r#"
+import pkg.sub
+from cfg import DEBUG, ON
+
+def enable() -> None:
+    global DEBUG
+    DEBUG = True
+
+del ON
+
+def reads() -> None:
+    if DEBUG:
+        print(1)
+    if pkg.sub.OFF:
+        print(2)  # E: This code is unreachable
+    if ON:
+        print(3)
+"#,
+);
+
+// Another configuration may run a definition that this one rules out two tests deep, or one that
+// a star import in a suite this configuration rules out brings in.
+testcase!(
+    test_override_in_skipped_suite_settles_nothing,
+    env_imported_constants(),
+    r#"
+import nested_win
+import sys
+from typing import Final
+
+G: Final = False
+if sys.platform == "win32":
+    if sys.version_info < (3, 10):
+        G: Final = True
+if G:
+    print(1)
+
+OFF: Final = False
+if sys.platform == "win32":
+    from win_sub import *
+if OFF:
+    print(2)
+
+if nested_win.G:
+    print(3)
+
+DEEP: Final = False
+if sys.platform == "win32":
+    if sys.version_info < (3, 10):
+        from win_deep import *
+if DEEP:
+    print(4)
+
+if nested_win.DEEP:
+    print(5)
+"#,
+);
+
+// Only the importing module's own `global` declarations are checked, not those of a module the
+// name is re-exported through.
+testcase!(
+    bug = "A re-exporting module that rebinds a `Final` through `global` still settles it",
+    test_final_reexported_by_rebinding_module,
+    env_imported_constants(),
+    r#"
+import rebinder
+
+rebinder.enable()
+if rebinder.DEBUG:
+    print(1)  # E: This code is unreachable
+"#,
+);
+
+// A test of the environment chooses which definition the configuration sees, and another
+// configuration chooses another, so the definition settles nothing.
+testcase!(
+    test_definition_under_environment_test_settles_nothing,
+    r#"
+import sys
+from typing import Final, Literal
+
+def flag() -> bool: ...
+
+if sys.platform == "win32":
+    IS_WIN: Final = True
+    def native() -> Literal[True]: ...
+else:
+    IS_WIN: Final = False
+    def native() -> Literal[False]: ...
+
+if IS_WIN:
+    print(1)
+if native():
+    print(2)
+
+def f() -> None:
+    if IS_WIN:
+        print(3)
+
+# The test chooses whether a function or class exists, but not what its body defines.
+if sys.version_info >= (3, 8):
+    def g(flag: Literal[False]) -> None:
+        if flag:
+            print(4)  # E: This code is unreachable
+
+    class C:
+        OFF: Final = False
+        if OFF:
+            print(5)  # E: This code is unreachable
+
+    # A read inside the same suite exists exactly when the definition does.
+    SAME: Final = False
+    if SAME:
+        print(6)  # E: This code is unreachable
+    if flag():
+        pass
+    AFTER_NESTED: Final = False
+OUTSIDE: Final = False
+if OUTSIDE:
+    print(7)  # E: This code is unreachable
+if SAME:
+    print(8)
+if AFTER_NESTED:
+    print(11)
+
+# Another configuration sees the definition in the suite this one rules out.
+OVERRIDDEN: Final = False
+if sys.platform == "win32":
+    OVERRIDDEN: Final = True
+if OVERRIDDEN:
+    print(9)
+
+# A definition before the first test of the environment is the same in every configuration, but
+# a suite after it may override it.
+if flag():
+    CHAINED: Final = False
+elif sys.platform == "win32":
+    CHAINED: Final = True
+else:
+    raise ValueError()
+if CHAINED:
+    print(10)
+if flag():
+    EARLIER: Final = False
+elif sys.platform == "win32":
+    raise ValueError()
+else:
+    raise ValueError()
+if EARLIER:
+    print(17)  # E: This code is unreachable
+
+# An override nested in the same suite may run before a read there.
+if sys.platform == "linux":
+    NESTED: Final = False
+    if sys.version_info < (3, 10):
+        NESTED: Final = True
+    if NESTED:
+        print(12)
+
+# Another configuration may choose a suite after the one this configuration chooses.
+LATER: Final = False
+if sys.platform == "linux":
+    pass
+else:
+    LATER: Final = True
+if LATER:
+    print(13)
+
+# A suite that runs is followed by the code after it, so an override nested in it reaches there.
+CHOSEN_OUTER: Final = False
+if sys.platform == "linux":
+    if sys.version_info < (3, 10):
+        CHOSEN_OUTER: Final = True
+if CHOSEN_OUTER:
+    print(15)
+"#,
+);
+
+// The paths inside a suite that declarations settle as dead never reach the end, whether the
+// suite ends in an expression or in a nested `if`.
+testcase!(
+    test_paths_inside_suite_settled_dead_by_declarations,
+    r#"
+import sys
+from typing import Final
+
+FLAG: Final = False
+ON: Final = True
+
+# A test that is always true leaves the suites below it dead, whatever their own paths.
+def preempted(other: bool) -> int:
+    if ON:
+        return 1
+    elif other:
+        print("x")  # E: This code is unreachable
+    else:
+        print("y")  # E: This code is unreachable
+
+def ends_in_expression() -> int:
+    if FLAG:
+        print("debug")  # E: This code is unreachable
+    else:
+        return 1
+
+def nested(c: bool) -> int:
+    if FLAG:
+        if c:  # E: This code is unreachable
+            pass
+        else:
+            return 0
+    else:
+        return 1
+
+def dead_after() -> None:
+    if FLAG:
+        print("debug")  # E: This code is unreachable
+    else:
+        sys.exit(1)
+    print(1)  # E: This code is unreachable
+
+# A chain with no `else` falls through only if its last test can be false.
+def after_settled_return() -> None:
+    if ON:
+        return
+    print(1)  # E: This code is unreachable
+
+def through_with(path: str) -> int:
+    if FLAG:
+        with open(path):  # E: This code is unreachable
+            print("debug")
+    else:
+        return 1
+
+def through_try() -> int:
+    if FLAG:
+        try:  # E: This code is unreachable
+            print("debug")
+        except ValueError:
+            print("error")
+    else:
+        return 1
+
+def through_match(x: int) -> int:
+    if FLAG:
+        match x:  # E: This code is unreachable
+            case 0:
+                print("zero")
+            case _:
+                print("other")
+    else:
+        return 1
+"#,
+);
+
+// The walker looks for a `break` anywhere in a `while True` body, including suites that
+// declarations settle as dead, so a dead `break` still lets control leave the loop.
+testcase!(
+    bug = "A `break` in a suite settled dead by declarations still ends the loop",
+    test_implicit_return_break_in_suite_settled_dead,
+    r#"
+from typing import Final
+
+FLAG: Final = False
+
+def f() -> int:  # E: Function declared to return `int`, but one or more paths are missing an explicit `return`
+    while True:
+        if FLAG:
+            break  # E: This code is unreachable
+        return 1
+"#,
+);
+
 // A call that never returns leaves the rest of its suite dead. The flow does not terminate
 // syntactically, and whether the call diverges is known only once its return type is solved,
 // so the diagnostic is deferred.
@@ -3761,8 +5967,8 @@ def mixed_with_return() -> None:
 "#,
 );
 
-// Two kinds of path the compound gate refuses. A branch the environment pruned decides the
-// statement under this configuration only. An exhaustive chain is dead by narrowing, which
+// Two kinds of path the compound gate never reports. A branch the environment pruned decides the
+// statement under this configuration only. An exhaustive chain is dead only by narrowing, which
 // `assert_never` deliberately relies on, so reporting it would condemn the idiom.
 testcase!(
     test_no_compound_gate_for_environment_or_exhaustiveness,

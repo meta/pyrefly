@@ -463,30 +463,15 @@ mod tests {
         let src_foo_path = ModulePath::filesystem(PathBuf::from_str("/src/foo.py").unwrap());
         let dep_foo_path = ModulePath::filesystem(PathBuf::from_str("/dep/foo.py").unwrap());
 
-        let src_bar_path = ModulePath::filesystem(PathBuf::from_str("/src/bar.py").unwrap());
-        let dep_bar_path = ModulePath::filesystem(PathBuf::from_str("/dep/bar.pyi").unwrap());
-
         let source_db = BuckCheckSourceDatabase::from_manifest_items(
-            vec![
-                ManifestItem {
-                    module_name: ModuleName::from_str("foo"),
-                    module_path: src_foo_path.dupe(),
-                },
-                ManifestItem {
-                    module_name: ModuleName::from_str("bar"),
-                    module_path: src_bar_path.dupe(),
-                },
-            ],
-            vec![
-                ManifestItem {
-                    module_name: ModuleName::from_str("foo"),
-                    module_path: dep_foo_path.dupe(),
-                },
-                ManifestItem {
-                    module_name: ModuleName::from_str("bar"),
-                    module_path: dep_bar_path.dupe(),
-                },
-            ],
+            vec![ManifestItem {
+                module_name: ModuleName::from_str("foo"),
+                module_path: src_foo_path.dupe(),
+            }],
+            vec![ManifestItem {
+                module_name: ModuleName::from_str("foo"),
+                module_path: dep_foo_path.dupe(),
+            }],
             vec![],
             SysInfo::default(),
             false,
@@ -496,9 +481,29 @@ mod tests {
             source_db.lookup_for_test(ModuleName::from_str("foo")),
             Some(src_foo_path)
         );
+    }
+
+    #[test]
+    fn test_load_dependency_stub_with_source() {
+        let src_path = ModulePath::filesystem(PathBuf::from_str("/src/foo.py").unwrap());
+        let dep_path = ModulePath::filesystem(PathBuf::from_str("/dep/foo.pyi").unwrap());
+        let source_db = BuckCheckSourceDatabase::from_manifest_items(
+            vec![ManifestItem {
+                module_name: ModuleName::from_str("foo"),
+                module_path: src_path.dupe(),
+            }],
+            vec![ManifestItem {
+                module_name: ModuleName::from_str("foo"),
+                module_path: dep_path,
+            }],
+            vec![],
+            SysInfo::default(),
+            false,
+            Vec::new(),
+        );
         assert_eq!(
-            source_db.lookup_for_test(ModuleName::from_str("bar")),
-            Some(src_bar_path)
+            source_db.lookup_for_test(ModuleName::from_str("foo")),
+            Some(src_path)
         );
     }
 

@@ -111,8 +111,12 @@ impl<'solver, Ans: LookupAnswer> TypeOrder<'solver, Ans> {
         }
     }
 
-    pub fn get_enum_member_count(self, cls: &Class) -> Option<usize> {
-        self.0.get_enum_member_count(cls)
+    pub fn enum_literal_covers_class(self, cls: &Class, member: &Name) -> bool {
+        self.0.enum_literal_covers_class(cls, member)
+    }
+
+    pub fn get_expandable_enum_member_count(self, cls: &Class) -> Option<usize> {
+        self.0.get_expandable_enum_member_count(cls)
     }
 
     pub fn instance_as_dunder_call(self, class_type: &ClassType) -> Option<Type> {

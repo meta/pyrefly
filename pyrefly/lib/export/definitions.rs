@@ -40,6 +40,7 @@ use starlark_map::small_set::SmallSet;
 use crate::binding::stmt::SpecialImportForm;
 use crate::binding::stmt::is_special_import_function;
 use crate::binding::stmt::special_import_form;
+use crate::binding::stmt::special_import_module;
 use crate::export::deprecation::parse_deprecation;
 use crate::export::special::SpecialExport;
 use crate::types::globals::ImplicitGlobal;
@@ -109,19 +110,24 @@ pub struct Definition {
     /// If the first statement in a definition (class, function) is a string literal, PEP 257 convention
     /// states that is the docstring.
     pub docstring_range: Option<TextRange>,
-    /// The range of the textually last assignment site. When there is only one
-    /// definition, this equals `range`. Used to determine if a variable is
+    /// The range of the textually last site that assigns or rebinds this name, including an
+    /// `import foo.bar` that rebinds an alias bound by `import foo as <alias>`. When there is
+    /// only one definition, this equals `range`. Used to determine if a variable is
     /// reassigned after a given point (e.g. after a nested function definition).
     pub last_range: TextRange,
     /// True while every definition site is inside an `if __name__ == "__main__":` body.
     /// Such names resolve in-module but are not importable, so the export surface excludes them.
     pub main_guard_only: bool,
-    /// True if any definition site assigns or imports a value, as opposed to merely
-    /// declaring the name (`global`/`nonlocal`) or deleting it. Only meaningful when
-    /// `style` is `MutableCapture`: a capture whose own scope defines a value
-    /// (`global x; x = 1`) legally creates the outer-scope name, so it needs no
-    /// pre-existing outer definition.
+    /// True if any definition site assigns, imports or annotates the name (a bare `x: int`
+    /// counts), as opposed to merely declaring it (`global`/`nonlocal`) or deleting it. A
+    /// `MutableCapture` whose own scope defines a value (`global x; x = 1`) legally creates
+    /// the outer-scope name, so it needs no pre-existing outer definition.
     pub has_value_definition: bool,
+    /// True while every definition site is a `def`. This is purely syntactic: a decorated `def`
+    /// (e.g. `@property`) counts, but a method-like assignment such as `f = staticmethod(g)` or
+    /// `f = lambda self: 1` does not. Telling such assignments apart from data attributes would
+    /// need type information, so the syntactic rule is much simpler and stays predictable.
+    pub function_def_only: bool,
 }
 
 /// Does this definition style give the name a value in the current scope?
@@ -147,6 +153,8 @@ impl Definition {
 
     fn merge(&mut self, other: DefinitionStyle, range: TextRange, in_main_guard: bool) {
         self.main_guard_only &= in_main_guard;
+        self.function_def_only &=
+            matches!(other, DefinitionStyle::Unannotated(SymbolKind::Function));
         self.has_value_definition |= is_value_definition(&other);
         // To ensure binding code cannot produce invalid lookups, we ensure that
         // `self.style` and `self.range` always match.
@@ -173,6 +181,17 @@ impl Definition {
     }
 }
 
+/// What the export step records about a name marked `Final`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalName {
+    /// The assigned value, if it is a string literal (e.g. `X: Final = "x"`), used to resolve
+    /// Final variable references in synthesized class field names.
+    pub string_value: Option<String>,
+    /// Whether the name's type is declared rather than inferred: `Final[T]` gives the type, and
+    /// a bare `Final` assigned a literal has the literal's type.
+    pub has_declared_type: bool,
+}
+
 /// Find the definitions available in a scope. Does not traverse inside classes/functions,
 /// since they are separate scopes.
 #[derive(Debug, Clone, Default)]
@@ -190,15 +209,22 @@ pub struct Definitions {
     pub implicitly_imported_submodules: SmallSet<Name>,
     /// Deprecated names that are defined in this module.
     pub deprecated: SmallMap<Name, Deprecation>,
-    /// Names that are marked `Final`, with their string literal value if assigned one.
-    /// The `Option<String>` is `Some` when the RHS is a string literal (e.g. `X: Final = "x"`),
-    /// used to resolve Final variable references in synthesized class field names.
-    pub final_names: SmallMap<Name, Option<String>>,
+    /// Names that are marked `Final`.
+    pub final_names: SmallMap<Name, FinalName>,
+    /// Names with a definition inside an `if` whose tests depend on the environment, which
+    /// another configuration would replace with another definition or none.
+    pub environment_names: SmallSet<Name>,
+    /// Modules imported with `from ... import *` inside an `if` whose tests depend on the
+    /// environment, so that every name they bring in is chosen by the environment.
+    pub environment_import_all: SmallSet<ModuleName>,
     /// Special exports defined in this module
     pub special_exports: SmallMap<Name, SpecialExport>,
     /// Names that are read (not just defined) in this scope.
     /// Used to compute implicit captures when entering nested function scopes.
     pub name_reads: SmallSet<Name>,
+    /// The last outermost statement containing a finally suite or an eager class scope.
+    /// Nested function scopes are excluded.
+    pub last_finally_or_class: Option<TextRange>,
 }
 
 /// Whether `__all__` was explicitly defined by the user or synthesized from module definitions.
@@ -302,6 +328,13 @@ struct DefinitionsBuilder {
     sys_info: SysInfo,
     inner: Definitions,
     in_main_guard: bool,
+    /// Whether we are inside an `if` with a test that depends on the environment, such as
+    /// `sys.platform`, so the definitions here hold for this configuration only.
+    in_environment_branch: bool,
+    /// Top-level modules with an `import foo.bar` in this scope, with the range of the last one.
+    submodule_import_roots: SmallMap<Name, TextRange>,
+    /// Names bound by `import foo as <alias>` in this scope, keyed by `foo`.
+    module_aliases: SmallMap<Name, Vec<Name>>,
 }
 
 fn is_private_name(name: &Name) -> bool {
@@ -356,8 +389,28 @@ impl Definitions {
             is_init,
             inner: Definitions::default(),
             in_main_guard: false,
+            in_environment_branch: false,
+            submodule_import_roots: SmallMap::new(),
+            module_aliases: SmallMap::new(),
         };
         builder.stmts(x);
+        // An `import foo.bar` rebinds a name that is bound by `import foo as <alias>` at
+        // that point in the same scope, so it is a definition site of the alias: reads from
+        // an enclosed scope need an `Anywhere` to see the rebinding, and the import counts
+        // as the alias's last definition site, as it already does for `foo` itself. A `global` or
+        // `nonlocal` alias is owned by another scope and never has an `Anywhere` here.
+        for (root, range) in &builder.submodule_import_roots {
+            for alias in builder.module_aliases.get(root).into_iter().flatten() {
+                if let Some(definition) = builder.inner.definitions.get_mut(alias)
+                    && !matches!(definition.style, DefinitionStyle::MutableCapture(..))
+                {
+                    definition.needs_anywhere = true;
+                    if range.start() > definition.last_range.start() {
+                        definition.last_range = *range;
+                    }
+                }
+            }
+        }
 
         builder.inner
     }
@@ -374,6 +427,7 @@ impl Definitions {
                     last_range: TextRange::default(),
                     main_guard_only: false,
                     has_value_definition: false,
+                    function_def_only: false,
                 },
             );
         }
@@ -447,7 +501,12 @@ impl Definitions {
 impl DefinitionsBuilder {
     fn stmts(&mut self, xs: &[Stmt]) {
         for x in xs {
+            let previous = self.inner.last_finally_or_class;
             self.stmt(x);
+            if self.inner.last_finally_or_class != previous {
+                // Include the enclosing statement: loops can revisit an earlier cleanup.
+                self.inner.last_finally_or_class = Some(x.range());
+            }
         }
     }
 
@@ -462,7 +521,11 @@ impl DefinitionsBuilder {
             return;
         }
         let in_main_guard = self.in_main_guard;
+        if self.in_environment_branch {
+            self.inner.environment_names.insert(x.clone());
+        }
         let has_value_definition = is_value_definition(&style);
+        let function_def_only = matches!(style, DefinitionStyle::Unannotated(SymbolKind::Function));
         match self.inner.definitions.entry(x.clone()) {
             Entry::Occupied(mut e) => {
                 e.get_mut().merge(style, range, in_main_guard);
@@ -476,6 +539,7 @@ impl DefinitionsBuilder {
                     last_range: range,
                     main_guard_only: in_main_guard,
                     has_value_definition,
+                    function_def_only,
                 });
             }
         }
@@ -568,19 +632,33 @@ impl DefinitionsBuilder {
                         self.inner.implicitly_imported_submodules.insert(submodule);
                     }
                     match &a.asname {
-                        None => self.add_name(
-                            &imported_module.first_component(),
-                            a.name.range,
-                            DefinitionStyle::ImportModule(imported_module),
-                        ),
-                        Some(alias) => self.add_identifier(
-                            alias,
-                            if alias.id == a.name.id {
-                                DefinitionStyle::ImportAsEq(imported_module)
-                            } else {
-                                DefinitionStyle::ImportAs(imported_module, a.name.id.clone())
-                            },
-                        ),
+                        None => {
+                            if imported_module.as_str().contains('.') {
+                                self.submodule_import_roots
+                                    .insert(imported_module.first_component(), a.name.range);
+                            }
+                            self.add_name(
+                                &imported_module.first_component(),
+                                a.name.range,
+                                DefinitionStyle::ImportModule(imported_module),
+                            )
+                        }
+                        Some(alias) => {
+                            if !imported_module.as_str().contains('.') {
+                                self.module_aliases
+                                    .entry(imported_module.first_component())
+                                    .or_default()
+                                    .push(alias.id.clone());
+                            }
+                            self.add_identifier(
+                                alias,
+                                if alias.id == a.name.id {
+                                    DefinitionStyle::ImportAsEq(imported_module)
+                                } else {
+                                    DefinitionStyle::ImportAs(imported_module, a.name.id.clone())
+                                },
+                            )
+                        }
                     };
                 }
             }
@@ -601,6 +679,9 @@ impl DefinitionsBuilder {
                     if &a.name == "*" {
                         if let Some(module) = name {
                             self.inner.import_all.insert(module, a.name.range);
+                            if self.in_environment_branch {
+                                self.inner.environment_import_all.insert(module);
+                            }
                         }
                     } else {
                         let style = match name {
@@ -634,6 +715,7 @@ impl DefinitionsBuilder {
                 decorator_list,
                 ..
             }) => {
+                self.inner.last_finally_or_class = Some(x.range());
                 let mut deprecated_decoration = None;
                 for d in decorator_list {
                     self.named_in_expr(&d.expression);
@@ -715,15 +797,23 @@ impl DefinitionsBuilder {
                         }
                     }
                 }
-                let has_final_annotation = is_final_annotation(&x.annotation);
-                let final_string_value = if has_final_annotation {
-                    match x.value.as_deref() {
+                let final_name = is_final_annotation(&x.annotation).then(|| FinalName {
+                    string_value: match x.value.as_deref() {
                         Some(Expr::StringLiteral(s)) => Some(s.value.to_string()),
                         _ => None,
-                    }
-                } else {
-                    None
-                };
+                    },
+                    has_declared_type: matches!(*x.annotation, Expr::Subscript(_))
+                        || matches!(
+                            x.value.as_deref(),
+                            Some(
+                                Expr::BooleanLiteral(_)
+                                    | Expr::NoneLiteral(_)
+                                    | Expr::NumberLiteral(_)
+                                    | Expr::StringLiteral(_)
+                                    | Expr::BytesLiteral(_)
+                            )
+                        ),
+                });
                 match &*x.target {
                     Expr::Name(x) => {
                         self.add_name(
@@ -734,10 +824,8 @@ impl DefinitionsBuilder {
                                 ShortIdentifier::expr_name(x),
                             ),
                         );
-                        if has_final_annotation {
-                            self.inner
-                                .final_names
-                                .insert(x.id.clone(), final_string_value);
+                        if let Some(final_name) = final_name {
+                            self.inner.final_names.insert(x.id.clone(), final_name);
                         }
                     }
                     _ => self.expr_lvalue(&x.target),
@@ -771,9 +859,9 @@ impl DefinitionsBuilder {
             Stmt::Delete(x) => {
                 for target in &x.targets {
                     self.named_in_expr(target);
-                    if let Expr::Name(name) = target {
+                    Ast::expr_lvalue(target, &mut |name| {
                         self.add_name(&name.id, name.range, DefinitionStyle::Delete)
-                    }
+                    });
                 }
             }
             Stmt::Expr(StmtExpr { value, .. }) => {
@@ -791,8 +879,7 @@ impl DefinitionsBuilder {
                     && !arguments.args.is_empty()
                     && let Expr::StringLiteral(path_lit) = &arguments.args[0]
                 {
-                    let module_name_str = path_lit.value.to_str().replace('/', ".");
-                    let m = ModuleName::from_string(module_name_str);
+                    let m = special_import_module(path_lit.value.to_str());
 
                     match special_import_form(&arguments.args) {
                         SpecialImportForm::Wildcard => {
@@ -921,6 +1008,9 @@ impl DefinitionsBuilder {
                 }
             }
             Stmt::Try(x) => {
+                if !x.finalbody.is_empty() {
+                    self.inner.last_finally_or_class = Some(x.range());
+                }
                 for x in &x.handlers {
                     match x {
                         ExceptHandler::ExceptHandler(x) => {
@@ -937,11 +1027,46 @@ impl DefinitionsBuilder {
             Stmt::If(x) => {
                 self.named_in_expr(&x.test);
                 let sys_info = self.sys_info;
-                for (test, body) in sys_info.pruned_if_branches(x) {
+                // Suites before the first test of the environment are chosen the same way under
+                // every configuration, so only that test's suite and later ones are chosen by it.
+                let environment_start = Ast::if_branches(x)
+                    .find(|(_, test, _)| test.is_some_and(SysInfo::depends_on_sys_info))
+                    .map(|(range, _, _)| range.start());
+                let chosen_by_environment = |range: TextRange| {
+                    environment_start.is_some_and(|start| range.start() >= start)
+                };
+                let outer_environment = self.in_environment_branch;
+                let mut walked = SmallSet::new();
+                for (range, test, body) in sys_info.pruned_if_branches(x) {
+                    walked.insert(range);
+                    self.in_environment_branch = outer_environment || chosen_by_environment(range);
                     let outer = self.in_main_guard;
                     self.in_main_guard = outer || test.is_some_and(Ast::is_main_guard);
                     self.stmts(body);
                     self.in_main_guard = outer;
+                }
+                self.in_environment_branch = outer_environment;
+                // Another configuration walks the suites this one rules out instead, so the names
+                // they define or star-import are chosen by the environment too.
+                for (range, _, body) in Ast::if_branches(x) {
+                    if !walked.contains(&range) && chosen_by_environment(range) {
+                        let skipped =
+                            Definitions::new(body, self.module_name, self.is_init, sys_info);
+                        // The scan rules out nested suites by the configuration too, and
+                        // records what they define.
+                        self.inner.environment_names.extend(
+                            skipped
+                                .definitions
+                                .into_keys()
+                                .chain(skipped.environment_names),
+                        );
+                        self.inner.environment_import_all.extend(
+                            skipped
+                                .import_all
+                                .into_keys()
+                                .chain(skipped.environment_import_all),
+                        );
+                    }
                 }
                 return; // We went through the relevant branches already
             }
@@ -978,10 +1103,19 @@ impl DefinitionsBuilder {
         match x {
             Expr::Named(expr_named) => {
                 self.expr_lvalue(&expr_named.target);
-                expr_named.value.recurse(&mut |x| self.named_in_expr(x));
+                self.named_in_expr(&expr_named.value);
             }
             Expr::Name(name) => {
                 self.inner.name_reads.insert(name.id.clone());
+            }
+            // The binder skips a ternary branch that the environment rules out, so a
+            // walrus in that branch has no binding and must not be defined.
+            Expr::If(x) => {
+                self.named_in_expr(&x.test);
+                let sys_info = self.sys_info;
+                for branch in sys_info.pruned_ternary_branches(x) {
+                    self.named_in_expr(branch);
+                }
             }
             // Lambda defines a fully separate scope; walrus operators inside
             // a lambda are scoped to the lambda, not the enclosing scope.
@@ -1004,13 +1138,18 @@ impl DefinitionsBuilder {
         match x {
             Expr::Named(expr_named) => {
                 self.expr_lvalue(&expr_named.target);
-                expr_named
-                    .value
-                    .recurse(&mut |x| self.walrus_targets_in_expr(x));
+                self.walrus_targets_in_expr(&expr_named.value);
             }
             // Stop at lambdas — walrus inside lambda-in-comprehension is
             // scoped to the lambda.
             Expr::Lambda(..) => {}
+            Expr::If(x) => {
+                self.walrus_targets_in_expr(&x.test);
+                let sys_info = self.sys_info;
+                for branch in sys_info.pruned_ternary_branches(x) {
+                    self.walrus_targets_in_expr(branch);
+                }
+            }
             _ => x.recurse(&mut |x| self.walrus_targets_in_expr(x)),
         }
     }

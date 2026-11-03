@@ -23,6 +23,8 @@ use pyrefly_util::display::commas_iter;
 use ruff_python_ast::Expr;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
+use starlark_map::Hashed;
+use starlark_map::small_map::SmallMap;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
@@ -30,6 +32,7 @@ use crate::alt::solve::TypeFormContext;
 use crate::binding::base_class::BaseClass;
 use crate::binding::base_class::BaseClassExpr;
 use crate::binding::binding::Key;
+use crate::binding::binding::KeyTParams;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::style::ErrorStyle;
@@ -115,12 +118,14 @@ impl fmt::Display for ClassBases {
 }
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
-    // This is a version of `subscript_infer_for_type` with very restricted capability, in order to avoid cyclic dependencies
+    // This is a version of `subscript_infer_for_type` with very restricted capability, in order to avoid cyclic dependencies.
+    // Type arguments using special subscript forms (`has_special_class_subscript`) defer to the full version.
     fn base_class_subscript_infer(
         &self,
         mut base: Type,
         slice: &Expr,
         range: TextRange,
+        direct_base: bool,
         errors: &ErrorCollector,
     ) -> (Type, bool) {
         if let Type::Var(v) = base {
@@ -168,6 +173,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::Forall(forall) => {
                 let tys = arguments_untype(slice, forall.tparams.as_vec(), &mut has_strict);
                 self.specialize_forall_in_base_class(*forall, tys, range, errors)
+            }
+            // As a type argument (e.g. `Base[type[T]]`), a class with special subscript
+            // semantics must be parsed the way an annotation would be, not specialized as a
+            // generic class.
+            Type::ClassDef(ref cls) if !direct_base && self.has_special_class_subscript(cls) => {
+                self.subscript_infer_for_type_with_key_present(
+                    &base,
+                    slice,
+                    range,
+                    errors,
+                    false,
+                    type_argument_context,
+                )
             }
             Type::ClassDef(cls) => self.heap.mk_type_of(
                 self.specialize_in_base_class(
@@ -247,8 +265,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 let (base_ty, has_strict_from_value) =
                     self.base_class_expr_infer(value, false, errors);
-                let (result_ty, has_strict_from_subscript) =
-                    self.base_class_subscript_infer(base_ty.into_ty(), slice, *range, errors);
+                let (result_ty, has_strict_from_subscript) = self.base_class_subscript_infer(
+                    base_ty.into_ty(),
+                    slice,
+                    *range,
+                    direct_base,
+                    errors,
+                );
                 (
                     TypeInfo::of_ty(result_ty),
                     has_strict_from_value || has_strict_from_subscript,
@@ -296,6 +319,47 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
     }
 
+    /// Replace raw legacy type variables in a call-base type with the class's type parameters.
+    /// Call bases are ordinary expressions and do not introduce type parameters.
+    /// Only type-variable positions are substituted; runtime values remain unchanged.
+    pub(crate) fn quantify_call_base_legacy_typevars(&self, ty: &mut Type, range: TextRange) {
+        if !self.bindings().has_call_bases() {
+            return;
+        }
+        let mut raw = Vec::new();
+        ty.collect_raw_legacy_type_variables(&mut raw);
+        if raw.is_empty() {
+            return;
+        }
+        let Some(class_index) = self.bindings().call_base_class(range) else {
+            return;
+        };
+        let Some(idx) = self
+            .bindings()
+            .key_to_idx_hashed_opt(Hashed::new(&KeyTParams(class_index)))
+        else {
+            return;
+        };
+        let quantified = self
+            .bindings()
+            .get(idx)
+            .legacy_tparams
+            .iter()
+            .filter_map(|key| {
+                let parameter = self.get_idx(*key).parameter()?;
+                let value = self.legacy_tparam_value(self.bindings().get(*key));
+                Some((value.into_ty(), parameter))
+            })
+            .collect::<SmallMap<_, _>>();
+        ty.transform_types_in_type_variable_positions(&mut |t| {
+            if t.is_raw_legacy_type_variable()
+                && let Some(parameter) = quantified.get(t)
+            {
+                *t = (*parameter).clone().to_type(self.heap);
+            }
+        });
+    }
+
     pub fn class_bases_of(
         &self,
         cls: &Class,
@@ -325,6 +389,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     if !is_new_type {
                         self.check_legacy_typevar_scoping(&mut ty, x.range(), errors);
                     }
+                    Some((ty, x.range()))
+                }
+                BaseClass::Call(x) => {
+                    let mut ty = self.expr_untype(
+                        x.as_expr(),
+                        TypeFormContext::BaseClassList,
+                        &fake_error_collector,
+                    );
+                    self.quantify_call_base_legacy_typevars(&mut ty, x.range());
+                    self.check_legacy_typevar_scoping(&mut ty, x.range(), errors);
                     Some((ty, x.range()))
                 }
                 BaseClass::NamedTuple(..) => Some((
@@ -478,6 +552,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 (base_class_type, range)
             })
             .collect::<Vec<_>>();
+
+        // `object` ends every MRO, so a class that lists any other base after an explicit `object`
+        // has no consistent MRO. An `Any` base is not in this list, so it never triggers the error.
+        if let Some(position) = base_class_types_with_ranges
+            .iter()
+            .position(|(ty, _)| ty.is_builtin("object"))
+            && position + 1 < base_class_types_with_ranges.len()
+        {
+            self.error(
+                errors,
+                cls.range(),
+                ErrorKind::InvalidInheritance,
+                format!(
+                    "Class `{}` has a nonlinearizable inheritance chain detected at `object`",
+                    cls.name()
+                ),
+            );
+        }
+
+        // An explicit `object` base is dropped, so `class C(object)` has the same bases as
+        // `class C`. The MRO leaves `object` out of every class's ancestors and puts it last, so a
+        // stored `object` would be linearized ahead of the bases that follow it.
+        base_class_types_with_ranges.retain(|(ty, _)| !ty.is_builtin("object"));
 
         let metadata = self.get_metadata_for_class(cls);
         if metadata.is_typed_dict() && base_class_types_with_ranges.is_empty() {

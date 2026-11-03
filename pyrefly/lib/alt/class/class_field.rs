@@ -52,6 +52,7 @@ use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
+use crate::alt::attr::AttrNarrowing;
 use crate::alt::attr::AttrSetter;
 use crate::alt::attr::AttrSubsetError;
 use crate::alt::attr::ClassBase;
@@ -115,12 +116,28 @@ use crate::types::types::TArgs;
 use crate::types::types::Type;
 use crate::types::types::Union;
 
+/// Whether a read-write attribute resolves to a method. Assignment to a method is allowed, but
+/// it is reported as `method-assign`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsMethod {
+    Yes,
+    No,
+}
+
 /// The result of looking up an attribute access on a class (either as an instance or a
 /// class access, and possibly through a special case lookup such as a type var with a bound).
 #[derive(Debug, Clone)]
 pub enum ClassAttribute {
-    /// A read-write attribute with a closed form type for both get and set actions.
-    ReadWrite(Type),
+    /// A read-write attribute with a read type and an optional distinct assignment type.
+    ReadWrite {
+        read_type: Type,
+        /// Enables the `method-assign` diagnostic.
+        is_method: IsMethod,
+        /// Marks annotated instance-variable declarations for `instance-var-assign`.
+        is_instance_var: bool,
+        /// An explicit assignment type. When absent, assignments use `read_type`.
+        write_type: Option<Type>,
+    },
     /// A read-only attribute with a closed form type for get actions.
     ReadOnly(Type, ReadOnlyReason),
     /// A `NoAccess` attribute indicates that the attribute is well-defined, but does
@@ -134,18 +151,36 @@ pub enum ClassAttribute {
     Descriptor(Descriptor, DescriptorBase),
     /// An attribute whose declared type contains descriptor members. After attribute lookup,
     /// reads apply `__get__` to descriptor members. Lookup precedence, writes, deletes, and
-    /// override checks use the raw declared union.
+    /// override checks use the raw declared union. Like `ReadWrite`, the flag marks
+    /// class-body-declared instance variables so writes via the class are flagged.
     DescriptorRead {
         union: Box<Union>,
         range: TextRange,
         base: DescriptorBase,
         read_only_reason: Option<ReadOnlyReason>,
+        is_instance_var: bool,
     },
 }
 
 impl ClassAttribute {
     pub fn read_write(ty: Type) -> Self {
-        Self::ReadWrite(ty)
+        Self::ReadWrite {
+            read_type: ty,
+            is_method: IsMethod::No,
+            is_instance_var: false,
+            write_type: None,
+        }
+    }
+
+    /// Like [`read_write`](Self::read_write) but marks the attribute as a
+    /// class-body-declared instance variable (annotated, not `ClassVar`).
+    pub fn read_write_instance_var(ty: Type) -> Self {
+        Self::ReadWrite {
+            read_type: ty,
+            is_method: IsMethod::No,
+            is_instance_var: true,
+            write_type: None,
+        }
     }
 
     pub fn read_only(ty: Type, reason: ReadOnlyReason) -> Self {
@@ -165,16 +200,20 @@ impl ClassAttribute {
     }
 
     /// Drops descriptor-read behavior so writes and deletes use the declared union.
+    /// The instance-variable provenance is preserved so writes via the class stay flagged.
     fn into_declared(self) -> Self {
         match self {
             Self::DescriptorRead {
                 union,
                 read_only_reason,
+                is_instance_var,
                 ..
             } => {
                 let ty = Type::Union(union);
                 if let Some(reason) = read_only_reason {
                     Self::read_only(ty, reason)
+                } else if is_instance_var {
+                    Self::read_write_instance_var(ty)
                 } else {
                     Self::read_write(ty)
                 }
@@ -185,7 +224,7 @@ impl ClassAttribute {
 
     pub fn read_only_equivalent(self, reason: ReadOnlyReason) -> Self {
         match self {
-            Self::ReadWrite(ty) => Self::ReadOnly(ty, reason),
+            Self::ReadWrite { read_type: ty, .. } => Self::ReadOnly(ty, reason),
             Self::Property(getter, _, cls) => Self::Property(getter, None, cls),
             Self::Descriptor(descriptor, base) => Self::Descriptor(
                 Descriptor {
@@ -199,11 +238,13 @@ impl ClassAttribute {
                 range,
                 base,
                 read_only_reason,
+                is_instance_var,
             } => Self::DescriptorRead {
                 union,
                 range,
                 base,
                 read_only_reason: read_only_reason.or(Some(reason)),
+                is_instance_var,
             },
             attr @ (Self::NoAccess(..) | Self::ReadOnly(..)) => attr,
         }
@@ -217,7 +258,9 @@ impl ClassAttribute {
         match self {
             // TODO(stroxler): ReadWrite attributes are not actually methods but limiting access to
             // ReadOnly breaks unit tests; we should investigate callsites to understand this better.
-            ClassAttribute::ReadWrite(ty) | ClassAttribute::ReadOnly(ty, _) => Some(ty),
+            ClassAttribute::ReadWrite { read_type: ty, .. } | ClassAttribute::ReadOnly(ty, _) => {
+                Some(ty)
+            }
             ClassAttribute::NoAccess(..)
             | ClassAttribute::Property(..)
             | ClassAttribute::Descriptor(..)
@@ -381,12 +424,16 @@ enum ClassFieldInner {
     /// should succeed.
     ClassAttribute {
         ty: Type,
+        /// Django fields can accept values with a different type from their read type.
+        django_set_type: Option<Type>,
         annotation: Option<Annotation>,
         initialization: ClassFieldInitialization,
         read_only_reason: Option<ReadOnlyReason>,
         descriptor_range: Option<TextRange>,
         /// ClassVar: can read from instance, but cannot write/shadow from instance
         is_classvar: bool,
+        /// Whether this declaration is eligible for the `instance-var-assign` diagnostic.
+        is_instance_var: bool,
         is_staticmethod: bool,
         /// Django ForeignKey - triggers synthesis of _id field
         is_foreign_key: bool,
@@ -437,57 +484,52 @@ impl Display for ClassField {
 }
 
 impl ClassField {
-    fn new(
+    /// Python's metadata attributes are writable on both classes and instances.
+    fn is_class_metadata_attribute(name: &Name) -> bool {
+        matches!(name.as_str(), "__module__" | "__doc__" | "__annotations__")
+    }
+
+    fn new_typed_dict_field(
+        name: &Name,
         ty: Type,
         annotation: Option<Annotation>,
-        initialization: ClassFieldInitialization,
         read_only_reason: Option<ReadOnlyReason>,
-        is_foreign_key: bool,
-        has_choices: bool,
-        is_inherited: IsInherited,
     ) -> Self {
+        let is_instance_var = annotation.is_some() && !Self::is_class_metadata_attribute(name);
+        let initialization = if annotation.is_some() {
+            ClassFieldInitialization::Uninitialized
+        } else {
+            ClassFieldInitialization::Magic
+        };
         Self(
             ClassFieldInner::ClassAttribute {
                 ty,
+                django_set_type: None,
                 annotation,
                 initialization,
                 read_only_reason,
                 descriptor_range: None,
                 is_classvar: false,
+                is_instance_var,
                 is_staticmethod: false,
-                is_foreign_key,
-                has_choices,
+                is_foreign_key: false,
+                has_choices: false,
             },
-            is_inherited,
-        )
-    }
-
-    pub fn invalid_typed_dict_field(heap: &TypeHeap) -> Self {
-        ClassField::new(
-            heap.mk_any_error(),
-            None,
-            ClassFieldInitialization::Magic,
-            None,
-            false,
-            false,
             IsInherited::Maybe,
         )
     }
 
+    pub fn invalid_typed_dict_field(name: &Name, heap: &TypeHeap) -> Self {
+        Self::new_typed_dict_field(name, heap.mk_any_error(), None, None)
+    }
+
     pub fn typed_dict_field(
+        name: &Name,
         ty: Type,
         annotation: Annotation,
         read_only_reason: Option<ReadOnlyReason>,
     ) -> Self {
-        Self::new(
-            ty,
-            Some(annotation),
-            ClassFieldInitialization::Uninitialized,
-            read_only_reason,
-            false,
-            false,
-            IsInherited::Maybe,
-        )
+        Self::new_typed_dict_field(name, ty, Some(annotation), read_only_reason)
     }
 
     pub fn for_variance_inference(&self) -> (&Type, Option<&Annotation>, bool) {
@@ -576,11 +618,13 @@ impl ClassField {
             ClassField(
                 ClassFieldInner::ClassAttribute {
                     ty,
+                    django_set_type: None,
                     annotation: None,
                     initialization: ClassFieldInitialization::ClassBody(None),
                     read_only_reason: None,
                     descriptor_range: None,
                     is_classvar,
+                    is_instance_var: false,
                     is_staticmethod: false,
                     is_foreign_key: false,
                     has_choices: false,
@@ -594,11 +638,13 @@ impl ClassField {
         Self(
             ClassFieldInner::ClassAttribute {
                 ty: heap.mk_any_implicit(),
+                django_set_type: None,
                 annotation: None,
                 initialization: ClassFieldInitialization::recursive(),
                 read_only_reason: None,
                 descriptor_range: None,
                 is_classvar: false,
+                is_instance_var: false,
                 is_staticmethod: false,
                 is_foreign_key: false,
                 has_choices: false,
@@ -619,7 +665,7 @@ impl ClassField {
         }
     }
 
-    fn instantiate_helper(&self, f: &mut dyn FnMut(&mut Type)) -> Self {
+    pub(crate) fn instantiate_helper(&self, f: &mut dyn FnMut(&mut Type)) -> Self {
         match &self.0 {
             ClassFieldInner::Property { ty, is_abstract } => {
                 let mut ty = ty.clone();
@@ -687,25 +733,33 @@ impl ClassField {
             }
             ClassFieldInner::ClassAttribute {
                 ty,
+                django_set_type,
                 annotation,
                 initialization,
                 read_only_reason,
                 descriptor_range,
                 is_classvar,
+                is_instance_var,
                 is_staticmethod,
                 is_foreign_key,
                 has_choices,
             } => {
                 let mut ty = ty.clone();
                 f(&mut ty);
+                let mut django_set_type = django_set_type.clone();
+                if let Some(ty) = &mut django_set_type {
+                    f(ty);
+                }
                 Self(
                     ClassFieldInner::ClassAttribute {
                         ty,
+                        django_set_type,
                         annotation: annotation.clone(),
                         initialization: initialization.clone(),
                         read_only_reason: read_only_reason.clone(),
                         descriptor_range: *descriptor_range,
                         is_classvar: *is_classvar,
+                        is_instance_var: *is_instance_var,
                         is_staticmethod: *is_staticmethod,
                         is_foreign_key: *is_foreign_key,
                         has_choices: *has_choices,
@@ -851,6 +905,35 @@ impl ClassField {
             ClassFieldInner::NestedClass { ty, .. } => ty.clone(),
             ClassFieldInner::ClassAttribute { ty, .. } => ty.clone(),
             ClassFieldInner::InstanceAttribute { ty, .. } => ty.clone(),
+        }
+    }
+
+    pub fn is_staticmethod(&self) -> bool {
+        match &self.0 {
+            ClassFieldInner::ClassAttribute {
+                is_staticmethod: true,
+                ..
+            } => true,
+            ClassFieldInner::ClassAttribute { ty, .. } | ClassFieldInner::Method { ty, .. } => {
+                is_staticmethod_type(ty)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_classmethod(&self) -> bool {
+        match &self.0 {
+            ClassFieldInner::Method { ty, .. } | ClassFieldInner::ClassAttribute { ty, .. } => {
+                is_classmethod_type(ty)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_ordinary_instance_method(&self) -> bool {
+        match &self.0 {
+            ClassFieldInner::Method { ty, .. } => is_ordinary_instance_method_type(ty),
+            _ => false,
         }
     }
 
@@ -1179,6 +1262,27 @@ impl ClassField {
         }
     }
 
+    /// Whether the field's type is declared rather than inferred: an annotated attribute, or a
+    /// property whose getter has an annotated return type.
+    pub fn has_declared_type(&self) -> bool {
+        match &self.0 {
+            ClassFieldInner::Property { ty, .. } => ty
+                .toplevel_func_metadata()
+                .is_some_and(|meta| !meta.flags.is_return_inferred),
+            _ => self.has_explicit_annotation(),
+        }
+    }
+
+    /// The descriptor class whose `__get__` a read of this field calls, if there is one.
+    pub fn descriptor_getter_class(&self) -> Option<&ClassType> {
+        match &self.0 {
+            ClassFieldInner::Descriptor { descriptor, .. } if descriptor.getter => {
+                Some(&descriptor.cls)
+            }
+            _ => None,
+        }
+    }
+
     fn is_function_without_return_annotation(&self) -> bool {
         match &self.0 {
             ClassFieldInner::Property { .. } => false,
@@ -1249,10 +1353,13 @@ fn bind_class_attribute(
     cls: &ClassBase,
     attr: Type,
     read_only_reason: Option<ReadOnlyReason>,
+    is_instance_var: bool,
 ) -> ClassAttribute {
     let ty = make_bound_classmethod(heap, cls, attr).into_inner();
     if let Some(reason) = read_only_reason {
         ClassAttribute::read_only(ty, reason)
+    } else if is_instance_var {
+        ClassAttribute::read_write_instance_var(ty)
     } else {
         ClassAttribute::read_write(ty)
     }
@@ -1296,6 +1403,12 @@ fn make_bound_method_helper(
             let ts = &f.members;
             let mut bound_methods = Vec::with_capacity(ts.len());
             for t in ts {
+                // Binding `Any` yields `Any`, so it should not prevent the other members from
+                // being bound.
+                if t.is_any() {
+                    bound_methods.push(t.clone());
+                    continue;
+                }
                 match make_bound_method_helper(heap, obj.clone(), t.clone(), should_bind) {
                     Ok(x) => bound_methods.push(x),
                     Err(_) => return Err(attr),
@@ -1318,12 +1431,25 @@ fn make_bound_method(heap: &TypeHeap, instance: &Instance, attr: Type) -> Result
         |meta: &FuncMetadata| !meta.flags.is_staticmethod && !meta.flags.is_classmethod;
     make_bound_method_helper(heap, instance.to_type(heap), attr, &should_bind).map(|mut method| {
         method.transform_toplevel_callable_signatures(|callable, _| {
-            if let InstanceKind::TypeVar(q) = &instance.kind &&
-            matches!(q.restriction(), Restriction::Constraints(_)) &&
-            matches!(&callable.ret, Type::ClassType(cls) if cls.class_object() == instance.class && cls.targs() == instance.targs) {
-                // We're binding this method to a constrained TypeVar, and its return type matches
-                // the currently active constraint. Treat this method as returning the TypeVar.
-                callable.ret = instance.to_type(heap);
+            if let InstanceKind::TypeVar(q) = &instance.kind
+                && matches!(q.restriction(), Restriction::Constraints(_))
+            {
+                let is_constraint = |ty: &Type| {
+                    matches!(ty, Type::ClassType(cls) if cls.class_object() == instance.class && cls.targs() == instance.targs)
+                };
+                // Arguments with the receiver's TypeVar share its active constraint.
+                // Keep the declared type so concrete arguments remain valid.
+                callable.params.visit_mut(&mut |ty| {
+                    if is_constraint(ty)
+                        || matches!(ty, Type::Union(union) if union.members.iter().any(is_constraint))
+                    {
+                        *ty = unions(vec![ty.clone(), q.clone().to_type(heap)], heap);
+                    }
+                });
+                if is_constraint(&callable.ret) {
+                    // A return type that matches the active constraint preserves the TypeVar.
+                    callable.ret = instance.to_type(heap);
+                }
             }
         });
         method
@@ -1372,6 +1498,35 @@ fn has_any_method_type(ty: &Type) -> bool {
     }
 }
 
+fn is_staticmethod_type(ty: &Type) -> bool {
+    match ty {
+        Type::Union(union) => union.members.iter().all(is_staticmethod_type),
+        _ => ty
+            .toplevel_func_metadata()
+            .is_some_and(|m| m.flags.is_staticmethod),
+    }
+}
+
+fn is_classmethod_type(ty: &Type) -> bool {
+    match ty {
+        Type::Union(union) => union.members.iter().all(is_classmethod_type),
+        _ => ty
+            .toplevel_func_metadata()
+            .is_some_and(|m| m.flags.is_classmethod),
+    }
+}
+
+fn is_ordinary_instance_method_type(ty: &Type) -> bool {
+    match ty {
+        Type::Union(union) => union.members.iter().all(is_ordinary_instance_method_type),
+        _ => ty.toplevel_func_metadata().is_some_and(|m| {
+            !m.flags.is_staticmethod
+                && !m.flags.is_classmethod
+                && m.flags.property_metadata.is_none()
+        }),
+    }
+}
+
 fn has_any_abstract(ty: &Type) -> bool {
     match ty {
         Type::Union(union) => union.members.iter().any(|item| item.is_abstract_method()),
@@ -1384,11 +1539,13 @@ fn has_any_abstract(ty: &Type) -> bool {
 /// - or, it's a Callable initialized on the class body and satisfying some special case:
 ///   - it's marked as a ClassVar
 ///   - it's assigned to a dunder name like `__add__`
+///   - it's unannotated and its first positional parameter is an instance of the containing class
 /// - or, it's a union where ANY element satisfies the above rules
 ///
 /// Note: staticmethods and union types that have at least one method type are included.
 /// We rely on make_bound_method_helper to handle defining the binding logic for those cases.
 fn is_method(
+    class: &Class,
     ty: &Type,
     initialization: &ClassFieldInitialization,
     name: &Name,
@@ -1407,12 +1564,22 @@ fn is_method(
     }
 
     // Special cases where Callable is assumed to be a method
-    if matches!(ty, Type::Callable(_)) {
+    if let Type::Callable(callable) = ty {
         if is_dunder(name.as_str()) {
             return true;
         }
         if annotation
             .is_some_and(|ann| ann.is_class_var() && matches!(ann.get_type(), Type::Callable(_)))
+        {
+            return true;
+        }
+        // An unannotated Callable that expects an instance of the containing class as its first
+        // argument is a method in all but name, e.g. `isNull = _unary_op("isNull")` where
+        // `_unary_op` returns `Callable[[Column], Column]`. An explicit non-`ClassVar` annotation
+        // declares an instance attribute, which is not bound.
+        if annotation.is_none()
+            && let Some(Type::ClassType(first_param)) = callable.get_positional_param(0)
+            && first_param.class_object() == class
         {
             return true;
         }
@@ -1479,10 +1646,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // container defaults.
         if !has_keyword_conflict
             && let Some(default) = mutable_default
-            && function_id.is_some_and(|id| {
-                id.has_toplevel_qname("sqlalchemy.orm", "mapped_column")
-                    || id.has_toplevel_qname("sqlalchemy.orm._orm_constructors", "mapped_column")
-            })
+            && matches!(
+                callee_kind,
+                Some(CalleeKind::Function(FunctionKind::SqlAlchemyMappedColumn(
+                    _
+                )))
+            )
         {
             self.error(
                 errors,
@@ -1558,6 +1727,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // decorator turns the function into a `ClassType`. Recover it here so the override
         // consistency check can see it.
         let mut descriptor_is_override = false;
+        let mut inherited_instance_var = false;
 
         let (
             initialization,
@@ -1570,6 +1740,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ClassFieldDefinition::DeclaredByAnnotation {
                 annotation: annot,
                 initialized_in_recognized_method,
+                initialized_on_new_instance,
             } => {
                 let direct_annotation = Some(self.get_idx(*annot).annotation.clone());
 
@@ -1643,10 +1814,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     );
                 }
                 // An annotated instance attribute declared in the class body must be
-                // initialized there or in a recognized method such as `__init__`. Final
-                // fields are already reported by the check above, so skip them here to
-                // avoid a duplicate diagnostic.
+                // initialized there, in a recognized method such as `__init__`, or by
+                // `__new__` on the instance it creates. Final fields are already reported
+                // by the check above, so skip them here to avoid a duplicate diagnostic.
                 let is_uninit_instance_var = !initialized_in_recognized_method
+                    && !initialized_on_new_instance
                     && !direct_annotation.as_ref().is_some_and(|a| a.is_final())
                     && matches!(initialization, ClassFieldInitialization::Uninitialized);
                 // A dataclass normally initializes every annotated field through its
@@ -1654,12 +1826,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // a plain `@dataclass(init=False)`, which synthesizes no `__init__` and so
                 // leaves annotation-only fields uninitialized at runtime. attrs and pydantic
                 // manage initialization in ways we do not model here, so they stay excluded.
+                // Metaclass attributes are typically filled by subclass class bodies via
+                // `type.__new__`, so annotation-only declarations on a metaclass are not
+                // uninitialized instance vars in the ordinary sense (see #5278).
+                // Enum sets `_value_` and `_name_` on every member it creates, so annotating
+                // them in the enum body only declares their types.
                 // Reuse `is_special_class` so new special classes are excluded here too, then
                 // carve out the plain `@dataclass(init=False)` case, which it over-excludes.
-                let excluded_from_uninit_check = is_special_class
-                    && metadata.dataclass_metadata().is_none_or(|dc| {
-                        !matches!(dc.kind, DataclassKind::Dataclass { .. }) || dc.kws.init
-                    });
+                let excluded_from_uninit_check = metadata.is_metaclass()
+                    || (metadata.is_enum() && matches!(name.as_str(), "_value_" | "_name_"))
+                    || (is_special_class
+                        && metadata.dataclass_metadata().is_none_or(|dc| {
+                            !matches!(dc.kind, DataclassKind::Dataclass { .. }) || dc.kws.init
+                        }));
                 if is_uninit_instance_var && !excluded_from_uninit_check {
                     self.error(
                         errors,
@@ -1698,11 +1877,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .and_then(|annot| {
                         self.extract_pydantic_field_from_annotation(annot, name, metadata)
                     })
-                    .and_then(|flags| flags.strict)
-                    .map(|strict| {
-                        let mut flags = DataclassFieldKeywords::new();
-                        flags.strict = Some(strict);
-                        flags
+                    .map(|flags| DataclassFieldKeywords {
+                        default: flags.default,
+                        strict: flags.strict,
+                        pydantic_unknown_validation_alias: flags.pydantic_unknown_validation_alias,
+                        pydantic_unchecked_metadata: flags.pydantic_unchecked_metadata
+                            || flags.init_by_alias.is_some(),
+                        pydantic_has_custom_schema: flags.pydantic_has_custom_schema,
+                        ..DataclassFieldKeywords::new()
                     });
                 if metadata.is_protocol()
                     && direct_annotation.is_none()
@@ -1760,9 +1942,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     );
                     if let Some(f) = &mut flags
                         && let Some(annotation_flags) = annotation_flags.as_ref()
-                        && f.strict.is_none()
                     {
-                        f.strict = annotation_flags.strict;
+                        // An assigned Field() preserves annotation defaults unless it supplies a default.
+                        f.default = f
+                            .default
+                            .take()
+                            .or_else(|| annotation_flags.default.clone());
+                        f.strict = f.strict.or(annotation_flags.strict);
+                        f.pydantic_unknown_validation_alias |=
+                            annotation_flags.pydantic_unknown_validation_alias;
+                        f.pydantic_unchecked_metadata |=
+                            annotation_flags.pydantic_unchecked_metadata;
+                        f.pydantic_has_custom_schema |= annotation_flags.pydantic_has_custom_schema;
                     }
                     if flags.is_some() {
                         // A field specifier with no type annotation is a definition-time error,
@@ -1881,34 +2072,42 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 method: _,
                 annotation: annot,
                 receiver_kind,
+                has_instance_write: _,
             } => {
                 let direct_annotation = annot.map(|a| self.get_idx(a).annotation.clone());
-                // Check if there's an inherited property or descriptor field from a parent class.
-                // If so, use the parent's field instead of creating a new field.
-                if !Ast::is_mangled_attr(name) {
-                    // Use get_field_from_ancestors to only look at parent classes, not the current class
-                    if let Some(parent_field) = self.get_field_from_ancestors(
+                // Inherited properties and descriptors keep their setters. Django fields do so
+                // only for unannotated writes; annotations retain normal declaration checks.
+                if !Ast::is_mangled_attr(name)
+                    && let Some(parent_field) = self.get_field_from_ancestors(
                         class,
                         self.get_mro_for_class(class).ancestors(self.stdlib),
                         name,
                         &|cls, name| self.get_field_from_current_class_only(cls, name),
-                    ) {
-                        match parent_field.value.as_ref() {
-                            ClassField(
-                                ClassFieldInner::Property { .. }
-                                | ClassFieldInner::Descriptor { .. },
-                                _,
-                            ) => {
-                                // The child is using the inherited property/descriptor setter,
-                                // not redefining the field. Return the parent's field with
-                                // IsInherited::No so the override check skips it.
-                                let ClassField(inner, _) = parent_field.value.into_owned();
-                                return ClassField(inner, IsInherited::No);
-                            }
-                            _ => {
-                                // For non-property fields, continue with normal processing
-                            }
+                    )
+                {
+                    let inherits_setter = match parent_field.value.as_ref() {
+                        ClassField(
+                            ClassFieldInner::Property { .. } | ClassFieldInner::Descriptor { .. },
+                            _,
+                        ) => true,
+                        ClassField(
+                            ClassFieldInner::ClassAttribute {
+                                django_set_type,
+                                is_instance_var,
+                                ..
+                            },
+                            _,
+                        ) => {
+                            inherited_instance_var = *is_instance_var;
+                            django_set_type.is_some() && direct_annotation.is_none()
                         }
+                        _ => false,
+                    };
+                    if inherits_setter {
+                        // The child uses the inherited setter. IsInherited::No skips
+                        // the override check because the field is not redefined.
+                        let ClassField(inner, _) = parent_field.value.into_owned();
+                        return ClassField(inner, IsInherited::No);
                     }
                 }
 
@@ -2022,26 +2221,47 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let (value_ty, annotation, is_inherited) =
                     self.analyze_class_field_value(value, class, name, None, false, range, errors);
                 // A class-body name bound by unpacking, a `for` loop or `with` is a class
-                // attribute, so an unknown type is reported like a plain class-body assignment,
-                // at the binding that produced it. Imports, walrus targets and match captures
-                // also end up here and are not reported, as at other scopes. So is a name whose
-                // final value merges several bindings, which is only checked as a whole here.
+                // attribute, so an unknown type is reported like a plain class-body assignment: an
+                // implicit or explicit `Any` at the binding that produced it, and an error `Any` at
+                // the value it came from, like other targets. Imports, walrus targets and match
+                // captures also end up here and are not reported, as at other scopes. So is a name
+                // whose final value merges several bindings, which is only checked as a whole here.
+                let binding = self.bindings().get(*definition);
                 let is_reported_target = matches!(
-                    self.bindings().get(*definition),
+                    binding,
                     Binding::IterableValueLoop(..)
                         | Binding::ContextValue(..)
                         | Binding::UnpackedValue(..)
                 );
-                if is_reported_target
-                    && annotation.is_none()
-                    && matches!(value_ty, Type::Any(AnyStyle::Implicit))
-                {
-                    self.error(
-                        errors,
-                        self.bindings().idx_to_key(*definition).range(),
-                        ErrorKind::UnknownAttributeType,
-                        "This expression is implicitly inferred to be `Any`. Please provide an explicit type annotation.".to_owned(),
-                    );
+                if is_reported_target && annotation.is_none() {
+                    let range = self.bindings().idx_to_key(*definition).range();
+                    match value_ty {
+                        Type::Any(AnyStyle::Implicit) => {
+                            self.error(
+                                errors,
+                                range,
+                                ErrorKind::UnknownAttributeType,
+                                "This expression is implicitly inferred to be `Any`. Please provide an explicit type annotation.".to_owned(),
+                            );
+                        }
+                        Type::Any(AnyStyle::Error) => self.error_unknown_from_error(
+                            errors,
+                            self.target_value_range(binding).unwrap_or(range),
+                            "The type of this attribute",
+                        ),
+                        Type::Any(AnyStyle::Explicit) => {
+                            self.error_explicit_any_use(errors, range, "The type of this attribute")
+                        }
+                        _ if value_ty.contains_implicit_any() => {
+                            self.error(
+                                errors,
+                                range,
+                                ErrorKind::PartiallyUnknownType,
+                                "This expression's type is partially unknown; it contains an implicit `Any`. Please provide an explicit type annotation.".to_owned(),
+                            );
+                        }
+                        _ => {}
+                    }
                 }
                 (
                     initialization,
@@ -2207,7 +2427,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             false
         };
 
-        let ty = if let Some(special_ty) = self.get_special_class_field_type(
+        let (ty, django_set_type) = if let Some(special_types) = self.get_special_class_field_type(
             class,
             name,
             direct_annotation.as_ref(),
@@ -2221,9 +2441,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Don't use the descriptor, since we've set a custom type instead.
             descriptor_methods = None;
             descriptor_range = None;
-            special_ty
+            special_types
         } else {
-            ty
+            (ty, None)
         };
 
         // Pin any vars in the type: leaking a var in a class field is particularly
@@ -2232,6 +2452,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // TODO(stroxler): Ideally we would implement some simple heuristics, similar to
         // first-use based inference we use with assignments, to get more useful types here.
         let ty = self.solver().force(ty);
+        let django_set_type = django_set_type.map(|ty| self.solver().force(ty));
         let descriptor = match (descriptor_methods, &ty) {
             (Some((getter, setter, deleter)), Type::ClassType(cls)) => Some(Descriptor {
                 range,
@@ -2379,7 +2600,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 },
                 is_inherited,
             )
-        } else if is_method(&ty, &initialization, name, annotation.as_ref()) {
+        } else if is_method(class, &ty, &initialization, name, annotation.as_ref()) {
             // Use helper functions to compute flags for unions
             let is_abstract_flag = has_any_abstract(&ty);
             let is_classvar = annotation.as_ref().is_some_and(|ann| ann.is_class_var());
@@ -2426,14 +2647,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 _ => {
                     let is_staticmethod =
                         matches!(&ty, Type::ClassType(cls) if cls.is_builtin("staticmethod"));
+                    // Classmethod-created fields are exempt unless they inherit an instance declaration.
+                    let is_instance_var = annotation.is_some()
+                        && !is_class_var
+                        && (initialization != ClassFieldInitialization::ClassMethod
+                            || inherited_instance_var)
+                        && !ClassField::is_class_metadata_attribute(name);
                     ClassField(
                         ClassFieldInner::ClassAttribute {
                             ty,
+                            django_set_type,
                             annotation,
                             initialization,
                             read_only_reason,
                             descriptor_range,
                             is_classvar: is_class_var,
+                            is_instance_var,
                             is_staticmethod,
                             is_foreign_key,
                             has_choices,
@@ -2507,10 +2736,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             );
         }
 
-        if matches!(
-            field_definition,
-            ClassFieldDefinition::DefinedInMethod { .. }
-        ) && name != &dunder::SLOTS
+        if let ClassFieldDefinition::DefinedInMethod {
+            has_instance_write: true,
+            ..
+        } = field_definition
+            && name != &dunder::SLOTS
             && let Some(allowed_slots) = self.effective_slots_for_instance_write(class)
             && !allowed_slots.contains::<Name>(name)
         {
@@ -2563,22 +2793,54 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             (None, _) => self.expr_infer(x, errors),
         };
         self.expand_mut(&mut ty);
-        // An unannotated attribute whose value has a bare implicit `Any` type (e.g. from an
-        // untyped call) is reported separately from the `None`/empty-tuple sentinel cases above.
-        if annotation.is_none() && matches!(&ty, Type::Any(AnyStyle::Implicit)) {
-            self.error(
-                errors,
-                x.range(),
-                ErrorKind::UnknownAttributeType,
-                "This expression is implicitly inferred to be `Any`. Please provide an explicit type annotation.".to_owned(),
-            );
+        if annotation.is_none() {
+            self.check_unannotated_attribute_type(&ty, x.range(), errors);
         }
         ty
     }
 
+    /// Diagnose the effective attribute type after inference and specialization.
+    fn check_unannotated_attribute_type(
+        &self,
+        ty: &Type,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) {
+        // An unannotated attribute whose value has a bare `Any` type is reported separately from
+        // the `None`/empty-tuple sentinel cases above, under the kind for the style of that `Any`:
+        // an untyped call gives an implicit `Any`, a failed import an error `Any`, and a library
+        // function annotated `-> Any` an explicit `Any`.
+        match ty {
+            Type::Any(AnyStyle::Implicit) => {
+                self.error(
+                    errors,
+                    range,
+                    ErrorKind::UnknownAttributeType,
+                    "This expression is implicitly inferred to be `Any`. Please provide an explicit type annotation.".to_owned(),
+                );
+            }
+            Type::Any(AnyStyle::Error) => {
+                self.error_unknown_from_error(errors, range, "The type of this attribute")
+            }
+            Type::Any(AnyStyle::Explicit) => {
+                self.error_explicit_any_use(errors, range, "The type of this attribute")
+            }
+            _ if ty.contains_implicit_any() => {
+                self.error(
+                    errors,
+                    range,
+                    ErrorKind::PartiallyUnknownType,
+                    "This expression's type is partially unknown; it contains an implicit `Any`. Please provide an explicit type annotation.".to_owned(),
+                );
+            }
+            _ => {}
+        }
+    }
+
     /// Apply any class-specific logic for postprocessing the type of a class field. Hook into this
     /// function if you need to modify the type of an existing field. If you need to add a new
-    /// field, see ClassSynthesizedField instead.
+    /// field, see ClassSynthesizedField instead. The result contains the read type and an optional
+    /// Django assignment type.
     fn get_special_class_field_type(
         &self,
         class: &Class,
@@ -2590,7 +2852,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         is_descriptor: bool,
         range: TextRange,
         errors: &ErrorCollector,
-    ) -> Option<Type> {
+    ) -> Option<(Type, Option<Type>)> {
+        let initial_value_expr = match field_definition {
+            ClassFieldDefinition::AssignedInBody { value, .. } => {
+                if let ExprOrBinding::Expr(expr) = value.as_ref() {
+                    Some(expr)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
         self.get_enum_class_field_type(
             class,
             name,
@@ -2603,18 +2876,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
         .or_else(|| self.get_property_class_field_type(class, name, field_definition))
         .or_else(|| self.get_pydantic_root_model_class_field_type(class, name))
+        .map(|ty| (ty, None))
         .or_else(|| {
-            let initial_value_expr = match field_definition {
-                ClassFieldDefinition::AssignedInBody { value, .. } => {
-                    if let ExprOrBinding::Expr(expr) = value.as_ref() {
-                        Some(expr)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-            self.get_django_field_type(ty, class, Some(name), initial_value_expr)
+            self.get_django_field_types(ty, class, Some(name), initial_value_expr)
+                .map(|(get_type, set_type)| (get_type, Some(set_type)))
         })
     }
 
@@ -2775,7 +3040,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     fn is_ordinary_instance_method_type(ty: &Type) -> bool {
         ty.toplevel_func_metadata()
-            .is_some_and(&|metadata: &FuncMetadata| {
+            .is_some_and(|metadata: &FuncMetadata| {
                 !metadata.flags.is_staticmethod
                     && !metadata.flags.is_classmethod
                     && metadata.flags.property_metadata.is_none()
@@ -2970,7 +3235,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ///   class C(B):
     ///     x = 1
     /// `get_inherited_type_and_annotation(C, 'x')` will get the type from `B` and the annotation from `A`.
-    fn get_inherited_type_and_annotation(
+    pub(crate) fn get_inherited_type_and_annotation(
         &self,
         class: &Class,
         name: &Name,
@@ -3111,6 +3376,32 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Otherwise, analyze the value to determine the type
         let (inherited_ty, inherited_annotation) =
             self.get_inherited_type_and_annotation(class, name);
+        if !inferred_from_method
+            && direct_annotation.is_none()
+            && self.get_metadata_for_class(class).is_django_model()
+            && inherited_annotation
+                .as_ref()
+                .and_then(|ann| ann.ty.as_ref())
+                .is_none_or(|ty| {
+                    matches!(ty, Type::ClassType(cls) if
+                        cls.has_qname("django.db.models.manager", "Manager")
+                        || cls.has_qname("django.db.models.manager", "BaseManager"))
+                })
+            && let ExprOrBinding::Expr(e) = value
+            && let Some(mut manager) = self.get_django_manager_assignment_type(class, e, errors)
+        {
+            // Standard manager interfaces allow model rebinding. Explicit custom interfaces
+            // retain their declared type and use ordinary assignment checking below.
+            self.expand_mut(&mut manager);
+            self.check_unannotated_attribute_type(&manager, e.range(), errors);
+            let annotation = inherited_annotation.and_then(|mut ann| {
+                ann.ty = None;
+                ann.qualifiers
+                    .retain(|q| matches!(q, Qualifier::ClassVar | Qualifier::Final));
+                (!ann.qualifiers.is_empty()).then_some(ann)
+            });
+            return (manager, annotation, IsInherited::Maybe);
+        }
         let mut is_inherited = if inherited_ty.is_none() {
             IsInherited::No
         } else {
@@ -3159,7 +3450,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             name,
                             &errors2,
                         );
-                        if errors2.is_empty() {
+                        if !errors2.has_hard() {
                             // The new type is compatible with the inherited one; use the child's
                             // inferred type to preserve type precision. Skip the override check
                             // since we've already validated compatibility above.
@@ -3536,7 +3827,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         None
     }
 
-    fn as_instance_attribute(
+    pub(crate) fn as_instance_attribute(
         &self,
         field_name: &Name,
         field: &ClassField,
@@ -3547,7 +3838,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // quantified to capture `cls`. Note that `__new__` is the only method that needs this
         // special case because it's not legal to use `Self` in other static methods.
         let self_quantified =
-            if field_name == &dunder::NEW && matches!(instance.kind, InstanceKind::ClassType) {
+            if field_name == &dunder::NEW && matches!(instance.kind, InstanceKind::ClassType(_)) {
                 Some(self.get_self_quantified(instance.class, instance.to_type(self.heap)))
             } else {
                 None
@@ -3619,7 +3910,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if is_classvar {
                     ClassAttribute::read_only(ty, ReadOnlyReason::ClassVar)
                 } else {
-                    ClassAttribute::read_write(ty)
+                    ClassAttribute::ReadWrite {
+                        read_type: ty,
+                        is_method: IsMethod::Yes,
+                        is_instance_var: false,
+                        write_type: None,
+                    }
                 }
             }
             ClassFieldInner::ProxyMethod { target, .. } => {
@@ -3639,12 +3935,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             ClassFieldInner::ClassAttribute {
                 mut ty,
+                django_set_type,
                 is_classvar,
                 read_only_reason,
                 descriptor_range,
                 ..
             } => {
                 ty = self.normalize_attr_ty(ty);
+                // The instance-variable provenance flag is only meaningful on the
+                // class-attribute path: an instance access (including a class read as
+                // an instance of its metaclass) is always a valid target for writes,
+                // so no flag is recorded here.
                 let read_only_reason = if is_classvar {
                     Some(ReadOnlyReason::ClassVar)
                 } else {
@@ -3664,13 +3965,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             range,
                             base,
                             read_only_reason,
+                            is_instance_var: false,
                         }
                     }
                     (_, ty) => {
                         if let Some(reason) = read_only_reason {
                             ClassAttribute::read_only(ty, reason)
                         } else {
-                            ClassAttribute::read_write(ty)
+                            ClassAttribute::ReadWrite {
+                                read_type: ty,
+                                is_method: IsMethod::No,
+                                is_instance_var: false,
+                                write_type: django_set_type,
+                            }
                         }
                     }
                 }
@@ -3724,7 +4031,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ClassFieldInner::Property { mut ty, .. } => {
                 // When accessing a property on a class (not instance), you get the property object itself
                 ty = self.normalize_attr_ty(ty);
-                bind_class_attribute(self.heap, cls, ty, None)
+                bind_class_attribute(self.heap, cls, ty, None, false)
             }
             ClassFieldInner::Descriptor { descriptor, .. } => {
                 ClassAttribute::descriptor(descriptor, DescriptorBase::ClassDef(cls.clone()))
@@ -3746,7 +4053,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if let Some(quantified) = self_quantified {
                     ty = self.wrap_with_quantified(ty, quantified);
                 }
-                bind_class_attribute(self.heap, cls, ty, None)
+                ClassAttribute::ReadWrite {
+                    read_type: make_bound_classmethod(self.heap, cls, ty).into_inner(),
+                    is_method: IsMethod::Yes,
+                    is_instance_var: false,
+                    write_type: None,
+                }
             }
             ClassFieldInner::ProxyMethod { .. } => ClassAttribute::no_access(
                 NoAccessReason::ProxyMethodClassAccess(cls.class_object().dupe()),
@@ -3759,6 +4071,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     cls,
                     ty,
                     Some(ReadOnlyReason::ClassObjectInitializedOnBody),
+                    false,
                 )
             }
             ClassFieldInner::ClassAttribute {
@@ -3769,6 +4082,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             )),
             ClassFieldInner::ClassAttribute {
                 mut ty,
+                is_instance_var,
                 read_only_reason,
                 descriptor_range,
                 ..
@@ -3787,8 +4101,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             range,
                             base: DescriptorBase::ClassDef(cls.clone()),
                             read_only_reason,
+                            is_instance_var,
                         },
-                        (_, ty) => bind_class_attribute(self.heap, cls, ty, read_only_reason),
+                        (_, ty) => bind_class_attribute(
+                            self.heap,
+                            cls,
+                            ty,
+                            read_only_reason,
+                            is_instance_var,
+                        ),
                     }
                 }
             }
@@ -4053,6 +4374,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if cls.module_path().is_interface() {
             return;
         }
+        if class_field
+            .ty()
+            .toplevel_func_metadata()
+            .is_some_and(|meta| meta.flags.is_in_type_checking_block)
+        {
+            return;
+        }
+        // `__init_subclass__` runs during class creation, so even placeholder
+        // overrides must preserve the parent hook chain.
+        if field_name != &dunder::INIT_SUBCLASS
+            && (class_field.is_abstract() || self.get_metadata_for_class(cls).is_protocol())
+            && class_field
+                .ty()
+                .toplevel_func_metadata()
+                .is_some_and(|meta| {
+                    matches!(
+                        meta.flags.body_kind,
+                        BodyKind::Ellipsis | BodyKind::Trivial | BodyKind::RaiseNotImplementedError
+                    )
+                })
+        {
+            return;
+        }
         // If any base derives from `Any`, we can't reliably tell whether the method
         // overrides a concrete parent method, so suppress the check. Gather this
         // across all bases first so the decision is independent of base order.
@@ -4070,6 +4414,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 continue;
             };
             if want_field.defining_class.is_builtin("object") {
+                continue;
+            }
+            if self.super_method_needs_impl_reason(&want_field).is_some() {
                 continue;
             }
             self.error(
@@ -4162,6 +4509,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             else {
                 continue;
             };
+            // Django gives a model without its own primary key a synthesized `id: int`,
+            // including abstract bases like `AbstractBaseUser` (stubs omit `Meta.abstract`,
+            // so we can't tell them apart). Django only adds that field to the concrete model
+            // when no pk is declared, so a child declaring `id` as its primary key replaces it
+            // rather than overriding it. An explicitly declared parent `id` is still checked.
+            if field_name.as_str() == "id"
+                && metadata
+                    .django_model_metadata()
+                    .and_then(|dm| dm.custom_primary_key_field.as_ref())
+                    == Some(field_name)
+                && self
+                    .get_non_synthesized_class_member(parent_cls, field_name)
+                    .is_none()
+            {
+                continue;
+            }
             // `__call__` is checked against a Protocol parent only, unless the user
             // opts in with `@override`. Implementing a callable interface is
             // ubiquitous - argparse actions, auth handlers, metaclasses - and
@@ -4226,6 +4589,47 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         );
                     continue;
                 }
+            }
+            if metadata.is_django_model()
+                && self.is_django_manager_type(&class_field.ty())
+                && self.is_django_manager_type(&want_class_field.ty())
+            {
+                // Qualifier-only annotations do not declare a manager interface.
+                let parent_is_inferred = matches!(
+                    &want_class_field.0,
+                    ClassFieldInner::Descriptor { annotation, .. }
+                        | ClassFieldInner::ClassAttribute { annotation, .. }
+                        | ClassFieldInner::InstanceAttribute { annotation, .. }
+                        if annotation.as_ref().is_none_or(|ann| ann.ty.is_none())
+                );
+                let parent_is_standard = matches!(want_class_field.ty(), Type::ClassType(cls) if
+                    cls.has_qname("django.db.models.manager", "Manager")
+                    || cls.has_qname("django.db.models.manager", "BaseManager"));
+                // Inferred interfaces allow replacements; declared standard interfaces only
+                // permit implicit rebinding. Other declared interfaces keep ordinary checks.
+                if parent_is_inferred
+                    || (parent_is_standard && !cls_fields.is_field_annotated(field_name))
+                {
+                    continue;
+                }
+            }
+            let want_is_static = want_class_field.is_staticmethod();
+            let want_is_class = want_class_field.is_classmethod();
+            if (want_is_static || want_is_class) && class_field.is_ordinary_instance_method() {
+                let parent_method_kind = if want_is_static { "static" } else { "class" };
+                self.error(
+                    errors,
+                    range,
+                    ErrorKind::BadOverride,
+                    format!(
+                        "Instance method `{}.{}` overrides {} method of the same name in parent class `{}`",
+                        cls.name(),
+                        field_name,
+                        parent_method_kind,
+                        parent.name(),
+                    ),
+                );
+                continue;
             }
             if is_typed_dict_field != self.is_typed_dict_field(parent_metadata, field_name) {
                 // TypedDict fields are actually dict keys, so we want to check them against other
@@ -4319,7 +4723,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     });
                 };
                 match &mut attr {
-                    ClassAttribute::ReadOnly(ty, _) | ClassAttribute::ReadWrite(ty)
+                    ClassAttribute::ReadOnly(ty, _)
+                    | ClassAttribute::ReadWrite { read_type: ty, .. }
                         if ty.has_toplevel_func_metadata() =>
                     {
                         relax_ty(ty);
@@ -4797,6 +5202,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
+    /// Look up a member while ignoring fields synthesized on `cls` itself, but not those
+    /// synthesized on its ancestors. Use this while computing `cls`'s own synthesized fields.
+    pub fn get_class_member_ignoring_own_synthesized(
+        &self,
+        cls: &Class,
+        name: &Name,
+    ) -> Option<WithDefiningClass<Cow<'_, ClassField>>> {
+        self.get_field_from_mro(cls, name, &|c, name| {
+            if c == cls {
+                self.get_non_synthesized_field_from_current_class_only(c, name)
+            } else {
+                self.get_field_from_current_class_only(c, name)
+            }
+        })
+        .filter(|field| !field.value.is_init_var())
+    }
+
     pub(crate) fn get_synthesized_field_from_current_class_only(
         &self,
         cls: &Class,
@@ -4879,14 +5301,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub fn get_instance_attribute(&self, cls: &ClassType, name: &Name) -> Option<ClassAttribute> {
+        if let Some(attribute) = self.get_django_instance_attribute(cls, name) {
+            return Some(attribute);
+        }
         self.get_class_member(cls.class_object(), name)
             .map(|field| self.as_instance_attribute(name, field.as_ref(), &Instance::of_class(cls)))
     }
 
     pub fn get_self_attribute(&self, cls: &ClassType, name: &Name) -> Option<ClassAttribute> {
-        self.get_class_member(cls.class_object(), name)
-            .map(|field| {
-                self.as_instance_attribute(name, field.as_ref(), &Instance::of_self_type(cls))
+        let metadata = self.get_metadata_for_class(cls.class_object());
+        self.special_case_enum_attr_lookup(cls, None, metadata, name)
+            .or_else(|| {
+                self.get_class_member(cls.class_object(), name)
+                    .map(|field| {
+                        self.as_instance_attribute(
+                            name,
+                            field.as_ref(),
+                            &Instance::of_self_type(cls),
+                        )
+                    })
             })
     }
 
@@ -4941,6 +5374,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         }
         None
+    }
+
+    /// Test raw metaclass fields without binding methods or applying descriptors.
+    fn metaclass_intercepts_write(&self, cls: &ClassBase, name: &Name) -> bool {
+        self.get_metadata_for_class(cls.class_object())
+            .custom_metaclass()
+            .and_then(|metaclass| self.get_class_member(metaclass.class_object(), name))
+            .is_some_and(|field| match &field.0 {
+                // Unlike `class_attribute_is_data_descriptor`, writes must exclude
+                // cached properties, which are non-data descriptors at runtime.
+                ClassFieldInner::Property { ty, .. } => ty
+                    .toplevel_func_metadata()
+                    .is_none_or(|meta| !meta.flags.is_cached_property),
+                ClassFieldInner::Descriptor { descriptor, .. } => {
+                    descriptor.setter || descriptor.deleter
+                }
+                _ => false,
+            })
     }
 
     pub fn get_metaclass_attribute(
@@ -5136,8 +5587,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .ty()
             .toplevel_func_metadata()
             .is_some_and(|meta| {
-                matches!(meta.flags.body_kind, BodyKind::Ellipsis | BodyKind::Trivial)
-                    && meta.flags.module_style == ModuleStyle::Executable
+                matches!(
+                    meta.flags.body_kind,
+                    BodyKind::Ellipsis | BodyKind::Trivial | BodyKind::RaiseNotImplementedError
+                ) && meta.flags.module_style == ModuleStyle::Executable
             });
         if (member.value.is_abstract()
             || self
@@ -5428,7 +5881,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     Some(AttrSetter::Declared {
                         ty: attr_ty,
-                        narrow: true,
+                        narrow: AttrNarrowing::Always,
                     })
                 } else {
                     errors
@@ -5442,7 +5895,42 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     None
                 }
             }
-            ClassAttribute::ReadWrite(attr_ty) => {
+            ClassAttribute::ReadWrite {
+                read_type: attr_ty,
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+            } => {
+                if is_method == IsMethod::Yes {
+                    self.error_with_context(
+                        errors,
+                        range,
+                        ErrorKind::MethodAssign,
+                        format!("Cannot assign to method `{attr_name}`"),
+                        context,
+                    );
+                }
+                // Writing a class-body-declared instance variable via the class object
+                // misuses it (it should be assigned on instances). The diagnostic is
+                // purely additive: it never affects the returned setter, so narrowing
+                // and type checking are unchanged when the kind is disabled or suppressed.
+                if is_instance_var
+                    && instance_class.is_none()
+                    && let Some(class_base) = class_base
+                    && !self.metaclass_intercepts_write(class_base, attr_name)
+                {
+                    errors
+                        .error_builder(
+                            range,
+                            ErrorKind::InstanceVarAssign,
+                            format!("Cannot set instance variable `{attr_name}` from the class"),
+                        )
+                        .with_detail(
+                            "Assign it on an instance, or declare it as `ClassVar` if it is a class variable."
+                                .to_owned(),
+                        )
+                        .emit();
+                }
                 // If the attribute has a converter, then `want` should be the type expected by the converter.
                 let attr_ty = match instance_class {
                     Some(cls) => match self.get_dataclass_member(cls.class_object(), attr_name) {
@@ -5458,9 +5946,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if let Some(class_object) = class_object {
                     self.check_dataclass_field_final(class_object, attr_name, errors, range);
                 }
-                Some(AttrSetter::Declared {
-                    ty: attr_ty,
-                    narrow: true,
+                Some(match set_type {
+                    Some(ty) => AttrSetter::Declared {
+                        ty,
+                        narrow: AttrNarrowing::IfAssignable(attr_ty),
+                    },
+                    None => AttrSetter::Declared {
+                        ty: attr_ty,
+                        narrow: AttrNarrowing::Always,
+                    },
                 })
             }
             ClassAttribute::Property(getter, None, cls) => {
@@ -5470,7 +5964,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if is_cached_property {
                     Some(AttrSetter::Declared {
                         ty: self.call_property_getter(getter, range, errors, context),
-                        narrow: false,
+                        narrow: AttrNarrowing::Never,
                     })
                 } else {
                     let e = NoAccessReason::SettingReadOnlyProperty(cls);
@@ -5516,7 +6010,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // that the value is assignable to the descriptor type.
                     Some(AttrSetter::Declared {
                         ty: self.heap.mk_class_type(x.cls.clone()),
-                        narrow: false,
+                        narrow: AttrNarrowing::Never,
                     })
                 }
             },
@@ -5561,7 +6055,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .with_detail(reason.error_message())
                     .emit();
             }
-            ClassAttribute::ReadWrite(..)
+            ClassAttribute::ReadWrite { .. }
             | ClassAttribute::Property(..)
             | ClassAttribute::Descriptor(..) => {
                 // Allow deleting most attributes for now, for compatibility with mypy.
@@ -5626,7 +6120,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         };
         match attr {
-            ClassAttribute::ReadWrite(ty) => Some(ClassAttribute::ReadWrite(filter_type(ty)?)),
+            ClassAttribute::ReadWrite {
+                read_type: ty,
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+            } => Some(ClassAttribute::ReadWrite {
+                read_type: filter_type(ty)?,
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+            }),
             ClassAttribute::ReadOnly(ty, reason) => {
                 Some(ClassAttribute::ReadOnly(filter_type(ty)?, reason))
             }
@@ -5677,7 +6181,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Property(got_getter, Some(got_setter), _),
-                ClassAttribute::ReadWrite(want),
+                ClassAttribute::ReadWrite {
+                    read_type: want, ..
+                },
             ) if allow_property_override => {
                 is_subset(
                     got_getter,
@@ -5718,18 +6224,42 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 })
             }
             (
+                ClassAttribute::Property(getter, None, _),
+                ClassAttribute::ReadWrite { .. } | ClassAttribute::ReadOnly(..),
+            ) if allow_property_override
+                && getter
+                    .toplevel_func_metadata()
+                    .is_some_and(|meta| meta.flags.is_cached_property) =>
+            {
+                // An invalid getter's recovery type is not evidence of compatibility.
+                let errors = self.error_collector();
+                let value =
+                    self.call_property_getter(getter.clone(), TextRange::default(), &errors, None);
+                if errors.has_hard() {
+                    return Err(Box::new(AttrSubsetError::NoAccess));
+                }
+                self.is_class_attribute_subset(
+                    &ClassAttribute::read_write(value),
+                    want,
+                    allow_property_override,
+                    is_subset,
+                )
+            }
+            (
                 ClassAttribute::Property(_, _, _),
-                ClassAttribute::ReadOnly(..) | ClassAttribute::ReadWrite(..),
+                ClassAttribute::ReadOnly(..) | ClassAttribute::ReadWrite { .. },
             ) => Err(Box::new(AttrSubsetError::Property)),
             (
                 ClassAttribute::ReadOnly(..),
-                ClassAttribute::Property(_, Some(_), _) | ClassAttribute::ReadWrite(_),
+                ClassAttribute::Property(_, Some(_), _) | ClassAttribute::ReadWrite { .. },
             ) => Err(Box::new(AttrSubsetError::ReadOnly)),
             (
                 // TODO(stroxler): Investigate this case more: methods should be ReadOnly, but
                 // in some cases for unknown reasons they wind up being ReadWrite.
-                ClassAttribute::ReadWrite(got),
-                ClassAttribute::ReadWrite(want),
+                ClassAttribute::ReadWrite { read_type: got, .. },
+                ClassAttribute::ReadWrite {
+                    read_type: want, ..
+                },
             ) if got.has_toplevel_func_metadata() && want.has_toplevel_func_metadata() => {
                 is_subset(got, want).map_err(|subset_error| {
                     Box::new(AttrSubsetError::Covariant {
@@ -5741,8 +6271,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     })
                 })
             }
-            (ClassAttribute::ReadWrite(got), ClassAttribute::ReadWrite(want)) => {
-                let subset_error = is_subset(got, want)
+            (
+                ClassAttribute::ReadWrite { read_type: got, .. },
+                ClassAttribute::ReadWrite {
+                    read_type: want, ..
+                },
+            ) => {
+                // A value matching any branch of an `Overloaded` attribute can be assigned to it.
+                let assignable = match want {
+                    Type::Overloaded(branches) => branches
+                        .iter()
+                        .map(|branch| is_subset(got, branch))
+                        .find_or_last(Result::is_ok)
+                        .expect("`Overloaded` has at least one branch"),
+                    _ => is_subset(got, want),
+                };
+                let subset_error = assignable
                     .map_or_else(Some, |_| is_subset(want, got).map_or_else(Some, |_| None));
                 if let Some(subset_error) = subset_error {
                     Err(Box::new(AttrSubsetError::Invariant {
@@ -5755,7 +6299,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             (
-                ClassAttribute::ReadWrite(got) | ClassAttribute::ReadOnly(got, ..),
+                ClassAttribute::ReadWrite { read_type: got, .. }
+                | ClassAttribute::ReadOnly(got, ..),
                 ClassAttribute::ReadOnly(want, _),
             ) => is_subset(got, want).map_err(|subset_error| {
                 Box::new(AttrSubsetError::Covariant {
@@ -5782,7 +6327,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     })
                 })
             }
-            (ClassAttribute::ReadWrite(got), ClassAttribute::Property(want, want_setter, _)) => {
+            (
+                ClassAttribute::ReadWrite {
+                    read_type: got,
+                    write_type: got_set_type,
+                    ..
+                },
+                ClassAttribute::Property(want, want_setter, _),
+            ) => {
                 is_subset(
                     // Synthesize a getter method
                     &self.heap.mk_callable_ellipsis(got.clone()),
@@ -5806,10 +6358,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         && let Some(rest) = setter_sig.strip_first_param()
                         && let Some(setter_value_type) = rest.get_first_param()
                     {
-                        is_subset(setter_value_type, got).map_err(|subset_error| {
+                        let got_set_type = got_set_type.as_ref().unwrap_or(got);
+                        is_subset(setter_value_type, got_set_type).map_err(|subset_error| {
                             Box::new(AttrSubsetError::Contravariant {
                                 want: want_setter.clone(),
-                                got: got.clone(),
+                                got: got_set_type.clone(),
                                 got_is_property: false,
                                 want_is_property: true,
                                 subset_error,
@@ -5978,7 +6531,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Descriptor(got_d, got_base),
-                ClassAttribute::ReadWrite(want_ty) | ClassAttribute::ReadOnly(want_ty, _),
+                ClassAttribute::ReadWrite {
+                    read_type: want_ty, ..
+                }
+                | ClassAttribute::ReadOnly(want_ty, _),
             ) if want_ty.has_toplevel_func_metadata() => {
                 let (got_read_ty, _) = self.resolve_descriptor_types(got_d, got_base);
                 is_subset(&got_read_ty, want_ty).map_err(|subset_error| {
@@ -5992,7 +6548,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 })
             }
             (
-                ClassAttribute::ReadWrite(got_ty) | ClassAttribute::ReadOnly(got_ty, _),
+                ClassAttribute::ReadWrite {
+                    read_type: got_ty, ..
+                }
+                | ClassAttribute::ReadOnly(got_ty, _),
                 ClassAttribute::Descriptor(want_d, want_base),
             ) if got_ty.has_toplevel_func_metadata() => {
                 let (want_read_ty, want_setter) = self.resolve_descriptor_types(want_d, want_base);
@@ -6025,7 +6584,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Result<Type, NoAccessReason> {
         match class_attr {
             ClassAttribute::NoAccess(reason) => Err(reason),
-            ClassAttribute::ReadWrite(ty) | ClassAttribute::ReadOnly(ty, _) => Ok(ty),
+            ClassAttribute::ReadWrite { read_type: ty, .. } | ClassAttribute::ReadOnly(ty, _) => {
+                Ok(ty)
+            }
             ClassAttribute::Property(getter, ..) => {
                 self.record_property_getter(range, &getter);
                 Ok(self.call_property_getter(getter, range, errors, context))

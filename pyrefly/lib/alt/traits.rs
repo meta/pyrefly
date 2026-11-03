@@ -10,6 +10,7 @@ use std::sync::Arc;
 use pyrefly_graph::index::Idx;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::type_alias::TypeAlias;
+use pyrefly_types::type_info::JoinStyle;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
 
@@ -151,10 +152,14 @@ pub trait Solve<Ans: LookupAnswer>: Keyed {
     /// written to the shared answer cache.
     fn check_shortcut(
         _answers: &AnswersSolver<Ans>,
+        _idx: Idx<Self>,
         _binding: &Self::Value,
     ) -> Option<Self::Answer> {
         None
     }
+
+    /// Called after the current solve has computed the answer for `idx`, before recording it.
+    fn before_record(_answers: &AnswersSolver<Ans>, _idx: Idx<Self>) {}
 }
 
 impl<Ans: LookupAnswer> Solve<Ans> for Key {
@@ -168,11 +173,22 @@ impl<Ans: LookupAnswer> Solve<Ans> for Key {
     }
 
     fn create_recursive(answers: &AnswersSolver<Ans>, binding: &Self::Value) -> Var {
-        answers.create_recursive(binding)
+        if matches!(binding, Binding::Function { .. }) {
+            // Function-definition SCCs grow from `Never`, so they do not need a recursive
+            // variable. A variable nested in the callable's return type cannot be simplified
+            // by `record_recursive` and would remain `Unknown` in the inferred return.
+            Var::ZERO
+        } else {
+            answers.create_recursive(binding)
+        }
     }
 
-    fn promote_recursive(_heap: &TypeHeap, x: Var) -> Self::Answer {
-        TypeInfo::of_ty(Type::Var(x))
+    fn promote_recursive(heap: &TypeHeap, x: Var) -> Self::Answer {
+        TypeInfo::of_ty(if x == Var::ZERO {
+            heap.mk_never()
+        } else {
+            Type::Var(x)
+        })
     }
 
     fn record_recursive(
@@ -180,10 +196,18 @@ impl<Ans: LookupAnswer> Solve<Ans> for Key {
         answer: TypeInfo,
         recursive: Var,
     ) -> TypeInfo {
+        if recursive == Var::ZERO {
+            // The `Never` function-definition seed does not occur in the computed answer.
+            return answer;
+        }
         answer.map_ty(|ty| answers.record_recursive(ty, recursive))
     }
 
-    fn check_shortcut(answers: &AnswersSolver<Ans>, binding: &Binding) -> Option<TypeInfo> {
+    fn check_shortcut(
+        answers: &AnswersSolver<Ans>,
+        idx: Idx<Self>,
+        binding: &Binding,
+    ) -> Option<TypeInfo> {
         match binding {
             Binding::ForwardToFirstUse(fwd) => {
                 let def_idx = answers.def_idx_for_forward_to_first_use(*fwd)?;
@@ -195,12 +219,22 @@ impl<Ans: LookupAnswer> Solve<Ans> for Key {
                 let ty = answers.resolve_lambda_param_type(*id, *owner);
                 Some(TypeInfo::of_ty(ty))
             }
+            Binding::StaticLambdaParameter(_) => {
+                Some(TypeInfo::of_ty(answers.heap.mk_any_implicit()))
+            }
             Binding::TypeLevelLambdaParameter(parameter) => {
                 let ty = answers.resolve_map_int_tuples_mapper_parameter(&parameter.identifier);
                 Some(TypeInfo::of_ty(ty))
             }
+            Binding::Forward(_) | Binding::Narrow(..) | Binding::Phi(JoinStyle::NarrowOf(_), _) => {
+                answers.lambda_binding_answer(idx, binding)
+            }
             _ => None,
         }
+    }
+
+    fn before_record(answers: &AnswersSolver<Ans>, idx: Idx<Self>) {
+        answers.publish_owned_lambda_param_types(idx);
     }
 }
 
@@ -261,6 +295,9 @@ impl<Ans: LookupAnswer> Solve<Ans> for KeyExport {
             BindingExport::PromoteForward(idx) => Binding::PromoteForward(*idx),
             BindingExport::AnnotatedForward(ann, idx) => {
                 Binding::AnnotatedType(*ann, Box::new(Binding::Forward(*idx)))
+            }
+            BindingExport::SpecialForm(special, _) => {
+                return SolveResult::Answer(special.to_type(answers.heap));
             }
         };
         SolveResult::Answer(answers.solve_binding(&inner, range, errors).into_ty())

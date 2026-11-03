@@ -10,10 +10,582 @@
 use crate::test::util::TestEnv;
 use crate::testcase;
 
+testcase!(
+    test_class_body_initialization_is_independent_of_methods,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def cond() -> bool: ...
+
+class Constructor:
+    if cond():
+        x = 1  # E: Attribute `x` may be uninitialized
+
+    def __init__(self) -> None:
+        self.x = 2
+
+class Helper:
+    if cond():
+        x = 1  # E: Attribute `x` may be uninitialized
+
+    def initialize(self) -> None:
+        self.x = 2
+"#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_attribute_initialization_inherited,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+class Base:
+    timeout = 10
+    def __init__(self) -> None:
+        self.value = 0
+
+class Child(Base):
+    def __init__(self, t: int | None = None) -> None:
+        super().__init__()
+        if t is not None:
+            self.timeout = t
+            self.value = t
+            self.own = t
+
+class Grandchild(Child):
+    def __init__(self, t: int | None = None) -> None:
+        if t is not None:
+            self.timeout = t
+            self.value = t
+
+class ClassBody(Base):
+    if bool():
+        timeout = 20
+"#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_attribute_initialization_trailing_noreturn,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn:
+    raise ValueError()
+
+def proceed() -> None: ...
+
+class TrailingCall:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        stop()
+
+class TrailingRaise:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        raise ValueError()
+
+class DeferredThenStop:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        else:
+            proceed()
+        stop()
+
+class DeferredThenProceed:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        else:
+            stop()
+        proceed()
+
+class EarlyReturn:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            return
+        self.value = 1
+        stop()
+"#,
+);
+
+// A path on which the attribute is unset reaches the end of the class body only if every branch
+// it passes through completes.
+testcase!(
+    test_class_attribute_unset_path_cut_off_by_later_branch,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+def coin() -> bool: ...
+
+class CutOff:
+    if coin():
+        value = 1
+    else:
+        pass
+    if coin():
+        value = 2
+    else:
+        stop()
+
+class NotCutOff:
+    if coin():
+        value = 1  # E: Attribute `value` may be uninitialized
+    else:
+        pass
+    if coin():
+        print(0)
+    else:
+        stop()
+"#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_attribute_initialization_while_true_return,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def connect() -> int: ...
+
+class Retry:
+    def __init__(self) -> None:
+        while True:
+            try:
+                self.conn = connect()
+                return
+            except OSError:
+                continue
+
+class EarlyReturn:
+    def __init__(self, flag: bool) -> None:
+        while True:
+            if flag:
+                return
+            self.value = 1
+            return
+
+class ReturnOrBreak:
+    def __init__(self, flag: bool) -> None:
+        while True:
+            if flag:
+                self.value = 1
+                return
+            break
+"#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_attribute_initialization_nested_function,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+class NestedOnly:
+    def __init__(self) -> None:
+        def later() -> None:
+            self.value = 1
+
+class ConditionalOuter:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        def later() -> None:
+            self.value = 2
+
+class InitializedOuter:
+    def __init__(self) -> None:
+        self.value = 1
+        def later() -> None:
+            del self.value
+
+class NestedMethod:
+    def __init__(self) -> None:
+        class Inner:
+            def later(inner) -> None:
+                self.value = 1
+
+class NestedReturn:
+    def __init__(self) -> None:
+        def later() -> None:
+            return
+        self.value = 1
+"#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_attribute_initialization_control_flow,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from contextlib import nullcontext
+from typing import Literal
+
+class TryExcept:
+    def __init__(self, raw: str) -> None:
+        try:
+            self.value = int(raw)
+        except ValueError:
+            self.value = 0
+
+class TryExceptMissing:
+    def __init__(self, raw: str) -> None:
+        try:
+            self.value = int(raw)
+        except ValueError:
+            pass
+
+class Finally:
+    def __init__(self) -> None:
+        try:
+            int("1")
+        finally:
+            self.value = 1
+
+class With:
+    def __init__(self) -> None:
+        with nullcontext():
+            self.value = 1
+
+class WithConditional:
+    def __init__(self, flag: bool) -> None:
+        with nullcontext():
+            if flag:
+                self.value = 1
+
+class Match:
+    def __init__(self, kind: Literal["a", "b"]) -> None:
+        match kind:
+            case "a":
+                self.value = 1
+            case "b":
+                self.value = 2
+
+class MatchMissing:
+    def __init__(self, kind: str) -> None:
+        match kind:
+            case "a":
+                self.value = 1
+
+class Deleted:
+    def __init__(self) -> None:
+        self.value = 1
+        del self.value
+
+class DeletedConditionally:
+    def __init__(self, flag: bool) -> None:
+        self.value = 1
+        if flag:
+            del self.value
+
+class Reassigned:
+    def __init__(self) -> None:
+        self.value = 1
+        del self.value
+        self.value = 2
+"#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_attribute_initialization_class_conditions_and_hooks,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+import sys
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, assert_type
+
+class Conditional:
+    if TYPE_CHECKING:
+        type_only = 1
+    if sys.version_info >= (3, 10):
+        versioned = 1
+
+class VersionedLoop:
+    while sys.version_info >= (3, 0):
+        pass
+    value = 1
+
+@dataclass
+class PostInit:
+    flag: bool
+    def __post_init__(self) -> None:
+        self.value = 1
+
+@dataclass
+class ConditionalPostInit:
+    flag: bool
+    def __post_init__(self) -> None:
+        if self.flag:
+            self.value = 1
+
+class SubclassHook:
+    def __init_subclass__(cls) -> None:
+        cls.value = 1
+
+class ConditionalSubclassHook:
+    def __init_subclass__(cls, flag: bool = False) -> None:
+        if flag:
+            cls.value = 1
+
+class ClassLoop:
+    for value in [1]:
+        pass
+
+assert_type(Conditional.type_only, int)
+assert_type(Conditional.versioned, int)
+assert_type(ClassLoop.value, int)
+"#,
+);
+
+testcase!(
+    bug = "Suppressed exceptions do not merge attribute initialization",
+    test_attribute_initialization_suppressed_exception,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from contextlib import suppress
+
+class C:
+    def __init__(self, raw: str) -> None:
+        with suppress(ValueError):
+            self.value = int(raw)
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_finally_after_return,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+class C:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            self.value = 1
+"#,
+);
+
+testcase!(
+    bug = "For loop targets are treated as assigned before the first iteration",
+    test_attribute_initialization_class_loop_target,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import assert_type
+
+class C:
+    for value in list[int]():
+        pass
+
+assert_type(C.value, int)
+"#,
+);
+
+testcase!(
+    test_possibly_uninitialized_attribute_default_disabled,
+    r#"
+def enabled() -> bool: ...
+
+class C:
+    if enabled():
+        class_value = 1
+
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+
+C(True).missing  # E: Object of class `C` has no attribute `missing`
+"#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_possibly_uninitialized_attribute_suppression,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+class C:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.suppressed = 1  # pyrefly: ignore[possibly-uninitialized-attribute]
+            self.reported = 1  # pyrefly: ignore[missing-attribute]
+
+C(True).missing  # pyrefly: ignore[possibly-uninitialized-attribute]  # E: Object of class `C` has no attribute `missing`
+"#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_possibly_uninitialized_attribute_stub,
+    TestEnv::one_with_path(
+        "foo",
+        "foo.pyi",
+        r#"
+def enabled() -> bool: ...
+
+class Stub:
+    if enabled():
+        value = 1
+        annotated: int = 1
+
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.instance_value = 1
+"#,
+    )
+    .enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import assert_type
+from foo import Stub
+
+assert_type(Stub.value, int)
+assert_type(Stub.annotated, int)
+assert_type(Stub(True).instance_value, int)
+
+class Child(Stub): ...
+
+assert_type(Child.value, int)
+
+def enabled() -> bool: ...
+
+class Implementation:
+    if enabled():
+        value = 1  # E: Attribute `value` may be uninitialized
+
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.instance_value = 1
+"#,
+);
+
+fn env_with_conditional_attribute() -> TestEnv {
+    TestEnv::one(
+        "foo",
+        r#"
+def coin() -> bool: ...
+class Base:
+    if coin():
+        value = 1  # E: Attribute `value` may be uninitialized
+"#,
+    )
+    .enable_possibly_uninitialized_attribute_error()
+}
+
+testcase!(
+    test_conditionally_defined_imported_attribute,
+    env_with_conditional_attribute(),
+    r#"
+from foo import Base
+class Child(Base): ...
+Base.value
+Child.value
+"#,
+);
+
+testcase!(
+    test_conditionally_defined_methods,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import assert_type
+
+def enabled() -> bool: ...
+def fallback() -> None: ...
+
+class ConditionalMethods:
+    if enabled():
+        def method(self) -> int:
+            return 1
+
+        async def async_method(self) -> int:
+            return 1
+
+        @staticmethod
+        def static_method() -> int:
+            return 1
+
+        @classmethod
+        def class_method(cls) -> int:
+            return 1
+
+        @property
+        def prop(self) -> int:
+            return 1
+
+        if enabled():
+            def nested(self) -> int:
+                return 1
+        else:
+            def nested(self) -> int:
+                return 2
+
+    while enabled():
+        def loop_method(self) -> int:
+            return 1
+        break
+
+    if enabled():
+        def deferred(self) -> int:
+            return 1
+    else:
+        fallback()
+
+    # A later merge must also preserve the method's definition source.
+    if enabled():
+        data = 1  # E: Attribute `data` may be uninitialized
+
+assert_type(ConditionalMethods().method(), int)
+assert_type(ConditionalMethods.static_method(), int)
+assert_type(ConditionalMethods.class_method(), int)
+assert_type(ConditionalMethods().prop, int)
+assert_type(ConditionalMethods().nested(), int)
+assert_type(ConditionalMethods().loop_method(), int)
+assert_type(ConditionalMethods().deferred(), int)
+
+async def use_async() -> None:
+    assert_type(await ConditionalMethods().async_method(), int)
+"#,
+);
+
+testcase!(
+    test_conditional_method_assignment_initialization,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def enabled() -> bool: ...
+def callback() -> int:
+    return 1
+
+class CallableAttribute:
+    if enabled():
+        value = callback  # E: Attribute `value` may be uninitialized
+
+class ReassignedMethod:
+    if enabled():
+        @staticmethod
+        def value() -> int: ...
+        value = callback  # E: Attribute `value` may be uninitialized
+
+class MixedDefinitions:
+    if enabled():
+        if enabled():
+            @staticmethod
+            def value() -> int: ...
+        else:
+            value = callback  # E: Attribute `value` may be uninitialized
+
+# Local function reads still require a definition on every reachable path.
+def local() -> None:
+    if enabled():
+        def value() -> int:
+            return 1
+    value()  # E: `value` may be uninitialized
+"#,
+);
+
 // Test case for various edge cases where a name isn't in the flow, and we might
 // or might not decide an attribute has been defined.
 testcase!(
     test_semantics_for_when_class_body_defines_attributes,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
 from typing import assert_type, Any
 def condition() -> bool: ...
@@ -25,8 +597,8 @@ class A:
     c: str
     # Defined in conditional control flow, with and without annotation
     if condition():
-        d = 42
-        e: int = 42
+        d = 42  # E: Attribute `d` may be uninitialized
+        e: int = 42  # E: Attribute `e` may be uninitialized
     # Defined (with or without annotation) but only in terminating control flow
     if condition():
         f = 42
@@ -163,6 +735,57 @@ def f(a: A):
 );
 
 testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_conditional_attribute_initialized_in_helper,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import assert_type
+
+class DelegatingInit:
+    def __init__(self, cfg: int | None = None) -> None:
+        if cfg is None:
+            self._load_defaults()
+        else:
+            self.cfg = cfg
+
+    def _load_defaults(self) -> None:
+        self.cfg = 0
+
+# An unconditional helper assignment suffices even without a call from __init__.
+class HelperFirst:
+    def _load_defaults(self) -> None:
+        self.cfg = 0
+
+    def __init__(self, cfg: int | None = None) -> None:
+        if cfg is not None:
+            self.cfg = cfg
+
+class ConditionalHelper:
+    def __init__(self, cfg: int | None = None) -> None:
+        if cfg is not None:
+            self.cfg = cfg
+
+    def _load_defaults(self, enabled: bool) -> None:
+        if enabled:
+            self.cfg = 0
+
+# The constructor still determines the attribute type.
+class IncompatibleHelper:
+    def __init__(self, cfg: int | None = None) -> None:
+        if cfg is not None:
+            self.cfg = cfg
+
+    def _load_defaults(self) -> None:
+        self.cfg = "bad"  # E: `Literal['bad']` is not assignable to attribute `cfg` with type `int`
+
+assert_type(DelegatingInit().cfg, int)
+assert_type(HelperFirst().cfg, int)
+assert_type(ConditionalHelper().cfg, int)
+assert_type(IncompatibleHelper().cfg, int)
+"#,
+);
+
+testcase!(
     test_self_attribute_in_unrecognized_method_default_disabled,
     r#"
 from typing import assert_type
@@ -172,6 +795,211 @@ class A:
 def f(a: A):
     assert_type(a.x, int)
     "#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_attribute_initialization_deferred_methods,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import Never
+
+def stop() -> Never:
+    raise RuntimeError()
+
+def proceed() -> None: ...
+
+class ConstructorTerminates:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        else:
+            stop()
+
+    def initialize(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        else:
+            proceed()
+
+class HelperTerminates:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        else:
+            proceed()
+
+    def initialize(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        else:
+            stop()
+
+class NeitherTerminates:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        else:
+            proceed()
+
+    def initialize(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        else:
+            proceed()
+
+class ConditionalHelper:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        else:
+            stop()
+
+    def initialize(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+
+class ConditionalConstructor:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+
+    def initialize(self, flag: bool) -> None:
+        if flag:
+            self.value = 1
+        else:
+            stop()
+"#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_attribute_initialization_loops,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import Never, assert_type
+
+def stop() -> Never:
+    raise RuntimeError()
+
+class BeforeLoop:
+    def __init__(self, values: list[int]) -> None:
+        self.value = 0
+        for value in values:
+            self.value = value
+
+class PossiblyEmpty:
+    def __init__(self, values: list[int]) -> None:
+        for value in values:
+            self.value = value
+
+class NonEmpty:
+    def __init__(self) -> None:
+        for value in [1]:
+            self.value = value
+
+class NoReturningLoop:
+    def __init__(self) -> None:
+        self.value = 0
+        for value in [1]:
+            raise RuntimeError()
+
+class ConditionalContinue:
+    def __init__(self, flag: bool) -> None:
+        for value in [1]:
+            if flag:
+                continue
+            self.value = value
+
+class ConditionalBreak:
+    def __init__(self, flag: bool) -> None:
+        while True:
+            if flag:
+                break
+            self.value = 1
+            break
+
+class LoopElse:
+    def __init__(self, values: list[int]) -> None:
+        for value in values:
+            self.value = value
+        else:
+            self.value = 0
+
+class DeferredBeforeLoop:
+    def __init__(self, flag: bool, values: list[int]) -> None:
+        if flag:
+            self.value = 1
+        else:
+            stop()
+        for value in values:
+            pass
+
+class DeferredInLoop:
+    def __init__(self, flag: bool) -> None:
+        for value in [1]:
+            if flag:
+                self.value = value
+            else:
+                stop()
+
+assert_type(BeforeLoop([]).value, int)
+assert_type(NonEmpty().value, int)
+assert_type(LoopElse([]).value, int)
+"#,
+);
+
+testcase!(
+    bug = "Attributes assigned in methods are not checked for initialization",
+    test_attribute_initialization_deferred_return_paths,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import Never
+
+def stop() -> Never:
+    raise RuntimeError()
+
+def proceed() -> None: ...
+
+class AllPathsTerminate:
+    def __init__(self, early: bool, flag: bool) -> None:
+        if early:
+            if flag:
+                self.value = 1
+            else:
+                stop()
+            return
+        if flag:
+            self.value = 1
+        else:
+            stop()
+
+class EarlyPathContinues:
+    def __init__(self, early: bool, flag: bool) -> None:
+        if early:
+            if flag:
+                self.value = 1
+            else:
+                proceed()
+            return
+        if flag:
+            self.value = 1
+        else:
+            stop()
+
+class FinalPathContinues:
+    def __init__(self, early: bool, flag: bool) -> None:
+        if early:
+            if flag:
+                self.value = 1
+            else:
+                stop()
+            return
+        if flag:
+            self.value = 1
+        else:
+            proceed()
+"#,
 );
 
 testcase!(
@@ -261,9 +1089,9 @@ Child.shared
     "#,
 );
 
+// This demonstrates why allowing method assignment is unsound when method types are covariant.
 testcase!(
-    bug = "Example of how making methods read-write but not invariant is unsound",
-    test_method_assign,
+    test_method_assign_disabled_by_default,
     r#"
 from typing import Protocol
 class X(Protocol):
@@ -277,6 +1105,86 @@ def func(x: X):
 y: Y = Y()
 func(y)
 y.foo()  # result is "hi"
+    "#,
+);
+
+testcase!(
+    test_method_assign,
+    TestEnv::new().enable_method_assign_error(),
+    r#"
+from collections.abc import Callable
+from typing import ClassVar
+
+class A:
+    def method(self) -> None: ...
+
+    @staticmethod
+    def static_method() -> None: ...
+
+    @classmethod
+    def class_method(cls) -> None: ...
+
+    callback: Callable[[], None] = lambda: None
+    class_var_method: ClassVar[Callable[["A"], None]] = lambda self: None
+
+class B(A):
+    pass
+
+def replacement(self: A) -> None: ...
+
+a = A()
+A.method = replacement  # E: Cannot assign to method `method`
+a.method = lambda: None  # E: Cannot assign to method `method`
+A.static_method = lambda: None  # E: Cannot assign to method `static_method`
+a.static_method = lambda: None  # E: Cannot assign to method `static_method`
+A.class_method = lambda: None  # E: Cannot assign to method `class_method`
+a.class_method = lambda: None  # E: Cannot assign to method `class_method`
+B.method = replacement  # E: Cannot assign to method `method`
+B().method = lambda: None  # E: Cannot assign to method `method`
+A.callback = lambda: None
+a.callback = lambda: None
+a.class_var_method = lambda: None  # E: Cannot set field `class_var_method`
+    "#,
+);
+
+testcase!(
+    test_method_assign_lookup_precedence,
+    TestEnv::new().enable_method_assign_error(),
+    r#"
+from collections.abc import Callable
+from typing import TypedDict
+
+class Meta(type):
+    def f(cls) -> None: ...
+
+class C(metaclass=Meta):
+    pass
+
+C.f = C.f  # E: Cannot assign to method `f`
+
+class D(TypedDict):
+    items: int
+
+d: D = {"items": 1}
+d.items = d.items  # E: Cannot assign to method `items`
+
+class Base:
+    def f(self) -> None: ...
+
+class Child(Base):
+    f: Callable[[], None] = lambda: None
+
+    def test(self) -> None:
+        super().f = lambda: None  # E: Cannot set field `f`
+
+class Parent:
+    f: Callable[[], None] = lambda: None
+
+class Derived(Parent):
+    def f(self) -> None: ...
+
+    def test(self) -> None:
+        super().f = lambda: None  # E: Cannot set field `f`
     "#,
 );
 
@@ -581,6 +1489,48 @@ assert_type(C().f(None, 1), int)
 # This is why the behavior is ambiguous - at runtime, the default `C.f` is a
 # method but the instance-level shadow is not.
 C().f = lambda _, x: x
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/3465
+testcase!(
+    test_callable_with_containing_class_first_param_is_method,
+    r#"
+from typing import assert_type, Callable
+def _unary_op(name: str) -> Callable[["Column"], "Column"]: ...
+def _bin_op(name: str) -> Callable[["Column", "Column | int"], "Column"]: ...
+def _callback(name: str) -> Callable[[int], int]: ...
+class Column:
+    isNull = _unary_op("isNull")
+    eqNullSafe = _bin_op("eqNullSafe")
+    callback = _callback("callback")
+c = Column()
+assert_type(c.isNull(), Column)
+assert_type(c.eqNullSafe(c), Column)
+assert_type(c.eqNullSafe(1), Column)
+assert_type(Column.isNull(c), Column)
+assert_type(c.callback(1), int)
+c.isNull(c)  # E: Expected 0 positional arguments
+# An instance-level shadow is not bound at runtime, so it must accept the bound signature.
+c.isNull = lambda: c
+c.isNull = _unary_op("isNull")  # E: not assignable to attribute `isNull`
+"#,
+);
+
+// An explicitly annotated Callable is an instance attribute, so it is not bound even when its
+// first parameter is the containing class. This pattern appears in aiohttp's `ClientResponse`.
+testcase!(
+    test_annotated_callable_with_containing_class_first_param_is_not_method,
+    r#"
+from typing import assert_type, Callable
+class Response:
+    resolve: Callable[["Response", bytes], str] = lambda *_: "utf-8"
+    def __init__(self, resolve: Callable[["Response", bytes], str]) -> None:
+        self.resolve = resolve
+    def encoding(self) -> str:
+        return self.resolve(self, b"")
+r = Response(lambda _, b: "utf-8")
+assert_type(r.resolve(r, b""), str)
 "#,
 );
 
@@ -1527,6 +2477,54 @@ class C:
     __secret: int = 0
     def reveal(self, a: A):
         return a.__secret  # E: Private attribute `__secret` cannot be accessed outside of its defining class
+
+class Outer:
+    __secret: int = 0
+
+    class Inner:
+        def reveal(self, outer: "Outer") -> int:
+            return outer.__secret  # E: Private attribute `__secret` cannot be accessed outside of its defining class
+"#,
+);
+
+testcase!(
+    test_protected_attribute_access,
+    TestEnv::new().enable_protected_access_error(),
+    r#"
+class A:
+    _protected: int = 0
+
+    def reveal(self, other: "A") -> int:
+        return self._protected + other._protected
+
+outside_instance = A()._protected  # E: Protected attribute `_protected` cannot be accessed outside of its defining class or a subclass
+outside_class = A._protected  # E: Protected attribute `_protected` cannot be accessed outside of its defining class or a subclass
+
+class B(A):
+    inherited = A._protected
+
+    def reveal(self, other: A) -> int:
+        return self._protected + other._protected
+
+class Unrelated:
+    def leak(self, a: A) -> int:
+        return a._protected  # E: Protected attribute `_protected` cannot be accessed outside of its defining class or a subclass
+"#,
+);
+
+testcase!(
+    test_same_named_protected_attribute_from_unrelated_class,
+    TestEnv::new().enable_protected_access_error(),
+    r#"
+class A:
+    _protected: int = 0
+
+class B(A):
+    def leak(self, other: "Unrelated") -> int:
+        return other._protected  # E: Protected attribute `_protected` cannot be accessed outside of its defining class or a subclass
+
+class Unrelated:
+    _protected: int = 0
 "#,
 );
 
@@ -1592,6 +2590,17 @@ class A:
         def get():
             return self.__secret
         return get()
+    "#,
+);
+
+testcase!(
+    test_private_attribute_in_lambda_and_comprehension_in_class_body,
+    r#"
+class A:
+    __secret: int = 0
+    instances: list["A"] = []
+    secrets = [a.__secret for a in instances]
+    get_secret = lambda: A.__secret
     "#,
 );
 
@@ -3162,8 +4171,8 @@ def untyped(x):
     return x
 
 # With both rules enabled, a class-body attribute is reported ONLY by
-# unknown-attribute-type, not unknown-variable-type (the is_class_body_assignment
-# guard prevents a double report). Exactly one error must fire here.
+# unknown-attribute-type, not unknown-variable-type (the class-body guard on
+# unknown-variable-type prevents a double report). Exactly one error must fire here.
 class C:
     x = untyped(1)  # E: implicitly inferred to be `Any`
 "#,
@@ -3402,5 +4411,736 @@ class C:
 
 def use(c: C) -> None:
     reveal_type(c.f)  # E: revealed type: Unknown
+"#,
+);
+
+testcase!(
+    test_unknown_attribute_access,
+    TestEnv::new().enable_unknown_attribute_access_error(),
+    r#"
+class C:
+    def __init__(self, v) -> None:
+        self.known: int = 1
+        self.unknown = v
+
+def use(obj, c: C) -> None:
+    obj.attr  # E: The type of attribute `attr` is unknown
+    obj.method(1)  # E: The type of attribute `method` is unknown
+    obj.attr.deeper  # E: The type of attribute `attr` is unknown  # E: The type of attribute `deeper` is unknown
+    c.unknown  # E: The type of attribute `unknown` is unknown
+    c.known
+"#,
+);
+
+testcase!(
+    test_unknown_attribute_access_no_error,
+    TestEnv::new().enable_unknown_attribute_access_error(),
+    r#"
+from typing import Any
+
+class C:
+    x: int = 1
+
+def use(obj, a: Any, c: C) -> None:
+    a.attr  # An explicit `Any` is intentional.
+    c.missing  # E: Object of class `C` has no attribute `missing`
+    obj.attr = 1  # Assignment targets are not accesses.
+    c.x
+"#,
+);
+
+testcase!(
+    test_protected_attribute_ignored_by_default,
+    r#"
+class A:
+    _protected: int = 0
+
+value = A()._protected
+"#,
+);
+
+testcase!(
+    test_protected_attribute_dynamic_values,
+    TestEnv::new().enable_protected_access_error(),
+    r#"
+from typing import Any
+
+class Dynamic:
+    def __getattr__(self, name: str) -> Any: ...
+
+def outside(value: Any, cls: type[Any], dynamic: Dynamic):
+    value._protected
+    cls._protected
+    dynamic._protected
+
+class A:
+    _protected: int = 0
+
+    def inside(self, value: Any, cls: type[Any], dynamic: Dynamic):
+        value._protected
+        cls._protected
+        dynamic._protected
+"#,
+);
+
+testcase!(
+    test_protected_attribute_from_stub,
+    {
+        let mut env = TestEnv::new().enable_protected_access_error();
+        env.add("source", "class SourceBase:\n    _protected: int = 0\n");
+        env.add_with_path(
+            "lib",
+            "lib.pyi",
+            "from source import SourceBase\nclass A:\n    _protected: int\n    __private: int\nclass StubDerived(SourceBase): ...\n",
+        );
+        env
+    },
+    r#"
+from lib import A, StubDerived
+
+value = A()._protected
+A()._protected = 1
+A().__private  # E: Private attribute `__private` cannot be accessed outside of its defining class
+StubDerived()._protected  # E: Protected attribute `_protected` cannot be accessed outside of its defining class or a subclass
+
+class B:
+    def method(self, value: A):
+        return value._protected
+
+class Derived(A):
+    pass
+
+inherited = Derived()._protected
+
+class Override(A):
+    _protected: int = 1
+
+Override()._protected  # E: Protected attribute `_protected` cannot be accessed outside of its defining class or a subclass
+
+class Source:
+    _protected: int = 1
+
+def read(value: A | Source) -> int:
+    return value._protected  # E: Protected attribute `_protected` cannot be accessed outside of its defining class or a subclass
+"#,
+);
+
+testcase!(
+    test_protected_attribute_on_bounded_type_variable,
+    TestEnv::new().enable_protected_access_error(),
+    r#"
+class A:
+    _protected: int = 0
+
+    def read[T: A](self, other: T) -> int:
+        return other._protected
+"#,
+);
+
+testcase!(
+    test_protected_attribute_quoted_cast_default,
+    r#"
+from typing import Any, assert_type, cast
+
+class Owner:
+    _value: int = 1
+
+def read(value: Any) -> None:
+    assert_type(cast("Owner", value)._value, int)
+    assert_type(cast(Owner, value)._value, int)
+"#,
+);
+
+testcase!(
+    test_protected_attribute_quoted_cast_enabled,
+    TestEnv::new().enable_protected_access_error(),
+    r#"
+from typing import Any, cast
+
+class Owner:
+    _value: int = 1
+
+def read(value: Any) -> None:
+    cast("Owner", value)._value  # E: Protected attribute `_value` cannot be accessed outside of its defining class or a subclass
+    cast(Owner, value)._value  # E: Protected attribute `_value` cannot be accessed outside of its defining class or a subclass
+"#,
+);
+
+testcase!(
+    test_protected_attribute_named_tuple_public_api,
+    TestEnv::new().enable_protected_access_error(),
+    r#"
+from collections import namedtuple
+from typing import NamedTuple
+from urllib.parse import urlsplit
+
+class Record(NamedTuple):
+    value: int
+
+    def _internal(self) -> int:
+        return self.value
+
+record = Record(1)
+record._replace(value=2)
+record._asdict()
+Record._make([1])
+record._fields
+Record._field_defaults
+record._internal()  # E: Protected attribute `_internal` cannot be accessed outside of its defining class or a subclass
+
+Row = namedtuple("Row", ["value"])
+Row(1)._replace(value=2)
+Row(1)._asdict()
+urlsplit("https://example.com/a")._replace(scheme="file")
+
+class Other:
+    def _replace(self) -> None: ...
+
+Other()._replace()  # E: Protected attribute `_replace` cannot be accessed outside of its defining class or a subclass
+"#,
+);
+
+testcase!(
+    test_protected_attribute_enclosing_class_scopes,
+    TestEnv::new().enable_protected_access_error(),
+    r#"
+from typing import assert_type
+
+class _CodeWriter:
+    _indent: int = 1
+
+    def indent(self):
+        class Indenter:
+            def __exit__(_, *args):
+                assert_type(self._indent, int)
+        return Indenter()
+
+class Base:
+    _value: int = 1
+
+class HeaderBase:
+    def __init_subclass__(cls, flag: int) -> None: ...
+
+class InHeader(Base, HeaderBase, flag=Base._value):  # E: Protected attribute `_value` cannot be accessed outside of its defining class or a subclass
+    pass
+
+class Derived(Base):
+    class Inner:
+        value = Base._value
+
+        def read(self, other: Base) -> int:
+            def nested() -> int:
+                return other._value
+            return nested()
+
+class Container:
+    class First:
+        _value: int = 1
+
+    class Second:
+        def read(self, other: "Container.First") -> int:
+            return other._value  # E: Protected attribute `_value` cannot be accessed outside of its defining class or a subclass
+
+class Unrelated:
+    class Inner:
+        def read(self, other: Base) -> int:
+            return other._value  # E: Protected attribute `_value` cannot be accessed outside of its defining class or a subclass
+
+def outside(other: Base) -> int:
+    def nested() -> int:
+        return other._value  # E: Protected attribute `_value` cannot be accessed outside of its defining class or a subclass
+    return nested()
+"#,
+);
+
+// The exemption for conditional methods requires every binding of the name in the class body
+// to be a `def`, even when a later `def` replaces the other binding.
+testcase!(
+    test_conditional_method_with_other_binding,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def coin() -> bool: ...
+
+class AssignedThenDefined:
+    if coin():
+        value = 1  # E: Attribute `value` may be uninitialized
+        def value(self) -> int: ...
+
+class DeletedThenDefined:
+    if coin():
+        def value(self) -> int: ...  # E: Attribute `value` may be uninitialized
+        del value
+        def value(self) -> int: ...
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_protocol_policy_default,
+    r#"
+from typing import Protocol
+
+class P(Protocol):
+    x: int
+
+class C:
+    x: int = 0
+
+def f(p: P) -> None:
+    pass
+
+f(C)  # E: Argument `type[C]` is not assignable to parameter `p` with type `P`
+f(C())
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_protocol_policy_enabled,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import Protocol
+
+class P(Protocol):
+    x: int
+
+class C:
+    x: int = 0
+
+def f(p: P) -> None:
+    pass
+
+f(C)  # E: Argument `type[C]` is not assignable to parameter `p` with type `P`
+f(C())
+"#,
+);
+
+// `instance-var-assign` (issue #3750): assigning to a class-body-declared
+// instance variable (annotated, not `ClassVar`) via the class object is flagged
+// when the kind is enabled. Inherited fields and fields annotated with a default
+// are still instance variables, so they are flagged too. The existing
+// bad-assignment check still runs (both fire on separate paths).
+testcase!(
+    test_instance_var_assign_diagnostic,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import ClassVar
+
+class C:
+    instance_var: int
+C.instance_var = 3  # E: Cannot set instance variable `instance_var` from the class
+
+# Annotated with a default: still an instance variable per the typing spec.
+class WithDefault:
+    x: int = 3
+WithDefault.x = 4  # E: Cannot set instance variable `x` from the class
+
+# Inherited fields keep their provenance through the MRO lookup.
+class Sub(C):
+    pass
+Sub.instance_var = 5  # E: Cannot set instance variable `instance_var` from the class
+
+# A type-incompatible value yields BOTH instance-var-assign and bad-assignment.
+C.instance_var = "oops"  # E: Cannot set instance variable `instance_var` from the class  # E: `Literal['oops']` is not assignable to attribute `instance_var` with type `int`
+
+# Suppressible via the standard directive.
+C.instance_var = 7  # pyrefly: ignore[instance-var-assign]
+    "#,
+);
+
+testcase!(
+    test_instance_var_assign_typed_dict,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import NotRequired, TypedDict, assert_type
+
+class TD(TypedDict):
+    x: int
+    optional: NotRequired[int]
+
+class Child(TD):
+    y: str
+
+class Grandchild(Child):
+    pass
+
+assert_type(TD.x, int)
+TD.x = 1  # E: Cannot set instance variable `x` from the class
+Child.x = 2  # E: Cannot set instance variable `x` from the class
+Grandchild.x = 3  # E: Cannot set instance variable `x` from the class
+Child.y = "value"  # E: Cannot set instance variable `y` from the class
+TD.optional = 4  # E: Cannot set instance variable `optional` from the class
+TD.x = "oops"  # E: Cannot set instance variable `x` from the class  # E: `Literal['oops']` is not assignable to attribute `x` with type `int`
+TD.x = 5  # pyrefly: ignore[instance-var-assign]
+
+class Partial(TypedDict, total=False):
+    x: int
+
+Partial.x = 6  # E: Cannot set instance variable `x` from the class
+
+# Reads and dictionary-item writes are unaffected.
+td: TD = {"x": 1}
+assert_type(td["x"], int)
+td["x"] = 2
+
+class Metadata(TypedDict):
+    __module__: str
+    __doc__: str | None
+    __annotations__: dict[str, object]
+
+Metadata.__module__ = "renamed"
+Metadata.__doc__ = "Documentation"
+Metadata.__annotations__ = {}
+
+class MetadataChild(Metadata):
+    pass
+
+MetadataChild.__module__ = "renamed"
+MetadataChild.__doc__ = None
+MetadataChild.__annotations__ = {}
+"#,
+);
+
+// Non-instance-variable fields must NOT trigger the new kind even when it is
+// enabled: unannotated assignments and ClassVars are class variables,
+// staticmethods become unannotated ClassAttributes, instance-only attributes
+// keep their existing no-access error, and instance writes are unaffected.
+testcase!(
+    test_instance_var_assign_non_instance_fields_not_flagged,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import ClassVar, Generic, TypeVar
+
+class C:
+    unannotated = 1
+    cv: ClassVar[int] = 2
+
+    @staticmethod
+    def stat() -> int:
+        return 3
+
+def f() -> int:
+    return 4
+
+T = TypeVar("T")
+
+
+class G(Generic[T]):
+    item: T
+
+
+C.unannotated = 5
+C.cv = 6
+C.stat = f
+
+# Writing a ClassVar via an instance keeps firing the pre-existing mirror rule.
+C().cv = 7  # E: Cannot set field `cv`
+
+# Instance-only attributes keep their pre-existing error on class access.
+class D:
+    def __init__(self) -> None:
+        self.only = 1
+D.only = 56  # E: Instance-only attribute `only` of class `D` is not visible on the class
+D().only = 57
+
+# Generic fields are unreachable via the class object (pre-existing no-access).
+G.item = 6  # E: Generic attribute `item` of class `G` is not visible on the class
+
+# Reads and instance writes never trigger this diagnostic.
+class E:
+    read_only_use: int = 1
+print(E.read_only_use)
+print(E().read_only_use)
+E().read_only_use = 2
+    "#,
+);
+
+// `instance-var-assign` is off by default: assignments that WOULD be flagged in
+// strict mode emit nothing under the default configuration.
+testcase!(
+    test_instance_var_assign_off_by_default,
+    r#"
+from typing import Literal, TypedDict, assert_type
+
+class C:
+    instance_var: int
+C.instance_var = 3
+
+class TD(TypedDict):
+    x: int
+
+class Child(TD):
+    pass
+
+TD.x = 1
+Child.x = 2
+assert_type(TD.x, Literal[1])
+assert_type(Child.x, Literal[2])
+    "#,
+);
+
+// Writes through a class object that resolve via the metaclass are metaclass-
+// instance writes and are never flagged: a class is an instance of its
+// metaclass, so assigning metaclass-declared fields (including `__name__`)
+// through the class object is valid.
+testcase!(
+    test_instance_var_assign_metaclass_writes_not_flagged,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+class Meta(type):
+    meta_field: int
+
+class UsesMeta(metaclass=Meta):
+    instance_var: int
+
+UsesMeta.meta_field = 1
+UsesMeta.__name__ = "Renamed"
+
+# A plain class reads `__name__` from `type` through the metaclass fallback.
+class Plain:
+    instance_var: int
+
+Plain.__name__ = "Renamed"
+
+# Inherited metaclass fields stay metaclass-instance writes.
+class SubUsesMeta(UsesMeta):
+    pass
+
+SubUsesMeta.meta_field = 2
+    "#,
+);
+
+// Attributes created by assigning through `cls` in a classmethod are set on the
+// class itself, so they are class attributes, not class-body instance variables.
+testcase!(
+    test_instance_var_assign_classmethod_created_attr_not_flagged,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+class C:
+    @classmethod
+    def make(cls) -> None:
+        cls.extra: int = 0
+
+C.extra = 1
+    "#,
+);
+
+// Class-body instance variables whose annotation is a union containing
+// descriptors keep their provenance through the descriptor-read conversion, so
+// writes via the class are still flagged.
+testcase!(
+    test_instance_var_assign_descriptor_union_flagged,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+class Desc:
+    def __get__(self, instance: object, owner: type) -> int:
+        return 0
+    def __set__(self, instance: object, value: int) -> None:
+        pass
+
+class C:
+    x: "int | Desc"
+
+C.x = 1  # E: Cannot set instance variable `x` from the class
+C().x = 2
+    "#,
+);
+
+testcase!(
+    test_instance_var_assign_class_metadata,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+class C:
+    pass
+
+C.__module__ = "renamed"
+C.__doc__ = "Documentation"
+C.__annotations__ = {}
+C.__name__ = "Renamed"
+C.__qualname__ = "Renamed"
+
+class Meta(type):
+    pass
+
+class Custom(metaclass=Meta):
+    pass
+
+Custom.__module__ = "renamed"
+Custom.__doc__ = "Documentation"
+Custom.__annotations__ = {}
+
+class Explicit:
+    __module__: str = "original"
+    __doc__: str | None = "Original documentation"
+    __annotations__: dict[str, object] = {}
+    ordinary: int = 0
+
+Explicit.__module__ = "renamed"
+Explicit.__doc__ = "Documentation"
+Explicit.__annotations__ = {}
+Explicit.ordinary = 1  # E: Cannot set instance variable `ordinary` from the class
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_inherited_classmethod,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import ClassVar
+
+class Base:
+    x: int = 0
+    cv: ClassVar[int] = 0
+
+class Child(Base):
+    @classmethod
+    def make(cls) -> None:
+        cls.x = 1  # E: Cannot set instance variable `x` from the class
+        cls.cv = 1
+        cls.fresh: int = 1
+
+Child.x = 2  # E: Cannot set instance variable `x` from the class
+Child.cv = 2
+Child.fresh = 2
+Base.x = 3  # E: Cannot set instance variable `x` from the class
+
+class Grandchild(Child):
+    @classmethod
+    def make_again(cls) -> None:
+        cls.x = 3  # E: Cannot set instance variable `x` from the class
+        cls.fresh = 3
+
+Grandchild.x = 4  # E: Cannot set instance variable `x` from the class
+Grandchild.fresh = 4
+
+class Direct(Base):
+    x: int = 0
+    @classmethod
+    def make(cls) -> None:
+        cls.x = 1  # E: Cannot set instance variable `x` from the class
+
+Direct.x = 2  # E: Cannot set instance variable `x` from the class
+"#,
+);
+
+testcase!(
+    bug = "Metaclass data descriptor reads still use class fields",
+    test_instance_var_assign_metaclass_descriptor_collision,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import Literal, assert_type
+
+class Meta(type):
+    @property
+    def x(cls) -> int:
+        return 0
+    @x.setter
+    def x(cls, value: int) -> None:
+        pass
+
+class C(metaclass=Meta):
+    x: int = 0
+
+C.x = 1
+assert_type(C.x, Literal[1])
+
+class Child(C):
+    pass
+
+Child.x = 2
+assert_type(Child.x, Literal[2])
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_narrowing_default,
+    r#"
+from typing import Literal, assert_type
+
+class C:
+    x: int | None = None
+
+C.x = 1
+assert_type(C.x, Literal[1])
+
+def f() -> int:
+    if C.x is None:
+        C.x = 2
+    return C.x
+"#,
+);
+
+testcase!(
+    test_instance_var_assign_narrowing_enabled,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import Literal, assert_type
+
+class C:
+    x: int | None = None
+
+C.x = 1  # E: Cannot set instance variable `x` from the class
+assert_type(C.x, Literal[1])
+C.x = 2  # pyrefly: ignore[instance-var-assign]
+assert_type(C.x, Literal[2])
+
+def f() -> int:
+    if C.x is None:
+        C.x = 3  # pyrefly: ignore[instance-var-assign]
+    return C.x
+"#,
+);
+
+testcase!(
+    bug = "Metaclass data descriptor reads still use class fields",
+    test_metaclass_descriptor_kinds_precedence,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from functools import cached_property
+from typing import Literal, assert_type
+
+class Data:
+    def __get__(self, instance: object, owner: type) -> str:
+        return "data"
+    def __set__(self, instance: object, value: int) -> None:
+        pass
+
+class NonData:
+    def __get__(self, instance: object, owner: type) -> str:
+        return "non-data"
+
+class DeleteOnly:
+    def __get__(self, instance: object, owner: type) -> str:
+        return "delete-only"
+    def __delete__(self, instance: object) -> None:
+        pass
+
+class Meta(type):
+    data = Data()
+    non_data = NonData()
+    delete_only = DeleteOnly()
+    @property
+    def readonly(cls) -> str:
+        return "readonly"
+    @cached_property
+    def cached(cls) -> str:
+        return "cached"
+
+class C(metaclass=Meta):
+    data: int = 0
+    non_data: int = 0
+    delete_only: int = 0
+    readonly: int = 0
+    cached: int = 0
+
+assert_type(C.data, int)
+assert_type(C.non_data, int)
+assert_type(C.delete_only, int)
+assert_type(C.readonly, int)
+C.data = 1
+C.non_data = 1  # E: Cannot set instance variable `non_data` from the class
+C.delete_only = 1
+C.readonly = 1
+assert_type(C.cached, int)
+C.cached = 1  # E: Cannot set instance variable `cached` from the class
+assert_type(C.cached, Literal[1])
 "#,
 );

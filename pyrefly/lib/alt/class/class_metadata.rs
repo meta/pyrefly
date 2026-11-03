@@ -118,6 +118,8 @@ enum BaseClassParseResult<'a> {
     /// We can't parse the base class but we also don't want to error on it for some reason (e.g. the error
     /// will be reported elsewhere, or the base class literally just has the `Any` type)
     AnyType,
+    /// The base class has an implicit `Any` type, e.g. from a missing annotation.
+    UnknownType(TextRange),
     /// This base class does not participate in inheritance related computation (e.g. `Generic`, `Protocol`, etc.)
     Ignored,
 }
@@ -128,7 +130,8 @@ impl BaseClassParseResult<'_> {
             BaseClassParseResult::InvalidBase(..)
             | BaseClassParseResult::InvalidExpr(..)
             | BaseClassParseResult::InvalidType(..)
-            | BaseClassParseResult::AnyType => true,
+            | BaseClassParseResult::AnyType
+            | BaseClassParseResult::UnknownType(..) => true,
             BaseClassParseResult::Parsed(parsed) => parsed.has_dynamic_base,
             _ => false,
         }
@@ -1266,6 +1269,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let attrs_hash =
                     if Self::field_specifiers_reference_attrs(&defaults.field_specifiers) {
                         self.validate_attrs_eq_order_cmp(&call.keywords, *decorator_range, errors);
+                        // attrs defaults an omitted `order` to `eq` and rejects `order=True`
+                        // with `eq=False`, so `order` never holds without `eq`.
+                        kws.order &= kws.eq;
                         DataclassKeywords::attrs_hash_from_map(&call.keywords)
                     } else {
                         None
@@ -1441,6 +1447,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let mut m = metadata.dataclass_metadata().cloned()?;
             // Avoid accidentally overwriting a non-synthesized `__init__`.
             m.kws.init = false;
+            m.is_inherited = true;
             Some(m)
         });
         let mut has_fresh_local_slots_decorator = false;
@@ -1470,6 +1477,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             CalleeKind::Function(FunctionKind::DataclassField),
                             CalleeKind::Class(ClassKind::DataclassField),
                         ],
+                        is_stdlib_dataclass: true,
                     };
                     let fields = self.get_dataclass_fields(cls, bases_with_metadata, &kind);
                     let pseudo_field_names = self.get_dataclass_pseudo_field_names(
@@ -1489,6 +1497,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         default_can_be_positional,
                         pydantic_before_validator_fields: SmallSet::new(),
                         kind,
+                        is_inherited: false,
                     });
                 }
                 // `@dataclass(...)`
@@ -1501,6 +1510,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             CalleeKind::Function(FunctionKind::DataclassField),
                             CalleeKind::Class(ClassKind::DataclassField),
                         ],
+                        is_stdlib_dataclass: true,
                     };
                     let fields = self.get_dataclass_fields(cls, bases_with_metadata, &kind);
                     let pseudo_field_names = self.get_dataclass_pseudo_field_names(
@@ -1523,6 +1533,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         default_can_be_positional,
                         pydantic_before_validator_fields: SmallSet::new(),
                         kind,
+                        is_inherited: false,
                     });
                 }
                 _ => {}
@@ -1569,7 +1580,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     field_specifiers,
                 }
             } else {
-                DataclassKind::Dataclass { field_specifiers }
+                DataclassKind::Dataclass {
+                    field_specifiers,
+                    is_stdlib_dataclass: false,
+                }
             };
             let fields = self.get_dataclass_fields(cls, bases_with_metadata, &kind);
             let pseudo_field_names =
@@ -1583,6 +1597,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 default_can_be_positional,
                 pydantic_before_validator_fields: inherited_before_validator_fields,
                 kind,
+                is_inherited: false,
             });
         }
         (dataclass_metadata, has_fresh_local_slots_decorator)
@@ -1781,6 +1796,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             _ => {
                 if is_new_type || !ty.is_any() {
                     BaseClassParseResult::InvalidType(ty, range)
+                } else if ty.has_top_level_implicit_any() {
+                    BaseClassParseResult::UnknownType(range)
                 } else {
                     BaseClassParseResult::AnyType
                 }
@@ -1800,6 +1817,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if is_new_type && matches!(&ty, Type::None) {
                     return BaseClassParseResult::InvalidType(ty, x.range());
                 }
+                match self.untype_opt(ty.clone(), x.range(), &errors) {
+                    None => BaseClassParseResult::InvalidType(ty, x.range()),
+                    Some(ty) => parse_base_class_type(ty),
+                }
+            }
+            BaseClass::Call(x) => {
+                // Call diagnostics are reported by `TypeCheckBaseClassExpr`.
+                let errors = ErrorCollector::new(self.module().dupe(), ErrorStyle::Never);
+                let ty = self.expr_infer(x.as_expr(), &errors);
                 match self.untype_opt(ty.clone(), x.range(), &errors) {
                     None => BaseClassParseResult::InvalidType(ty, x.range()),
                     Some(ty) => parse_base_class_type(ty),
@@ -1880,6 +1906,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .into_iter()
             .filter_map(|x| match x {
                 BaseClassParseResult::Ignored | BaseClassParseResult::AnyType => None,
+                BaseClassParseResult::UnknownType(range) => {
+                    self.error(
+                        errors,
+                        range,
+                        ErrorKind::UnknownBaseClass,
+                        "Type of base class is Unknown".to_owned(),
+                    );
+                    None
+                }
                 BaseClassParseResult::InvalidBase(range) => {
                     if is_new_type {
                         self.error(
@@ -2112,7 +2147,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 (base, mro)
             })
             .collect();
-        ClassMro::new(cls, bases_with_mros, errors)
+        // Two specializations of the same ancestor reached through different base
+        // paths conflict unless the later one is assignable to the first, which is
+        // the specialization the MRO keeps. Assignability of the whole specialized
+        // class respects the ancestor's variance, so specializations that differ
+        // only in a contravariant position stay consistent (see issue #4842).
+        let targs_consistent = |prev: &ClassType, cur: &ClassType| -> bool {
+            self.is_subset_eq(&cur.clone().to_type(), &prev.clone().to_type())
+        };
+        ClassMro::new(cls, bases_with_mros, errors, &targs_consistent)
     }
 
     /// Resolve `cls`'s disjoint-base representative.

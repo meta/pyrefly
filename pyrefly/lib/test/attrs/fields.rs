@@ -2354,6 +2354,23 @@ A(1)     # E: Missing argument `y`
 "#,
 );
 
+// Parse-error recovery turns the missing first target of `[, y]` into an empty
+// name, which binds nothing. The specifier unpacked into it is still evaluated
+// exactly once, so its undefined name is reported once.
+attrs_testcase!(
+    test_attrs_unpacked_specifier_into_missing_target,
+    r#"
+import attr
+
+@attr.s
+class A:
+    [, y] = attr.ib(default=undefined), attr.ib()  # E: Parse error: Expected an expression  # E: Could not find name `undefined`
+
+A(1)  # OK
+A()   # E: Missing argument `y`
+"#,
+);
+
 // The right-hand side may itself be a list literal of specifiers.
 attrs_testcase!(
     test_attrs_unpacked_specifiers_list_rhs,
@@ -2557,5 +2574,24 @@ class C:
     a: int = field()
     @a.default
     b: int = field()  # E: Parse error: Expected class, function definition or async function definition after decorator
+"#,
+);
+
+// The error makes the result an error `Any`, so it isn't reported as a use of an explicit `Any`:
+// the user has no `Any` annotation here that they could remove. `y` shows the kind is enabled, so
+// the absence of a report on `x` is meaningful.
+testcase!(
+    test_attrs_fields_of_non_attrs_class,
+    attrs_env().enable_explicit_any_use_error(),
+    r#"
+import attr
+from typing import Any
+
+class C: ...
+
+x = attr.fields(C)  # E: Argument to `fields()` is not an attrs class
+
+def any_value() -> Any: ...
+y = any_value()  # E: The type of `y` is an explicit `Any`
 "#,
 );

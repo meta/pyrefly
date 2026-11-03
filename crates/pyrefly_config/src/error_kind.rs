@@ -37,6 +37,9 @@ use yansi::Painted;
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Ignore,
+    /// Shown in the IDE as a hint, the least prominent level, and not printed by
+    /// `pyrefly check` unless `--min-severity hint` is passed.
+    Hint,
     Info,
     Warn,
     Error,
@@ -45,7 +48,8 @@ pub enum Severity {
 impl Severity {
     pub fn label(self) -> &'static str {
         match self {
-            // INFO and WARN are padded out to five characters to visually align with ERROR in messages
+            // HINT, INFO and WARN are padded out to five characters to visually align with ERROR in messages
+            Severity::Hint => " HINT",
             Severity::Info => " INFO",
             Severity::Warn => " WARN",
             Severity::Error => "ERROR",
@@ -55,6 +59,7 @@ impl Severity {
 
     pub fn painted(self) -> Painted<&'static str> {
         (match self {
+            Severity::Hint => Paint::cyan,
             Severity::Info => Paint::green,
             Severity::Warn => Paint::yellow,
             Severity::Error => Paint::red,
@@ -65,6 +70,26 @@ impl Severity {
     pub fn is_enabled(self) -> bool {
         self != Severity::Ignore
     }
+
+    /// The severity a diagnostic is shown with, or `None` for `Ignore`, which is never shown.
+    pub fn shown(self) -> Option<ShownSeverity> {
+        match self {
+            Severity::Ignore => None,
+            Severity::Hint => Some(ShownSeverity::Hint),
+            Severity::Info => Some(ShownSeverity::Info),
+            Severity::Warn => Some(ShownSeverity::Warn),
+            Severity::Error => Some(ShownSeverity::Error),
+        }
+    }
+}
+
+/// The severity of a diagnostic that is shown to the user: every `Severity` except `Ignore`.
+#[derive(Debug, Clone, Copy, Dupe, PartialEq, Eq)]
+pub enum ShownSeverity {
+    Hint,
+    Info,
+    Warn,
+    Error,
 }
 
 /// ErrorKind categorizes an error by the part of the spec the error is related to.
@@ -86,6 +111,10 @@ pub enum ErrorKind {
     AbstractMethodCall,
     /// Raised when an assert_type() call fails.
     AssertType,
+    /// Raised when an assert_type() call fails because the actual type is a subtype of the
+    /// asserted type that no type annotation can express.
+    /// This is a sub-kind of [AssertType]: suppressing `assert-type` also suppresses this error.
+    AssertTypeUnspellableSubtype,
     /// Setting an attribute on an object with type `Never`.
     AttributeAssignOnNever,
     /// Attempting to call a function with the wrong number of arguments.
@@ -175,6 +204,12 @@ pub enum ErrorKind {
     EmptyBody,
     /// Explicit usage of `typing.Any` in an annotation.
     ExplicitAny,
+    /// A value whose type is an explicit `Any`, such as a variable, argument, attribute or returned
+    /// value. The annotation that introduces the `Any` is reported as [ExplicitAny].
+    ExplicitAnyUse,
+    /// An unqualified import that resolves only through the fallback search path heuristic, so it
+    /// may fail at runtime.
+    FallbackSearchPathRelativeImport,
     /// Raised when a class that inherits from an abstract class but is not itself explicitly
     /// abstract (for example, it does not directly inherit from abc.ABC or use abc.ABCMeta) has
     /// unimplemented abstract members.
@@ -235,6 +270,8 @@ pub enum ErrorKind {
     /// An inconsistency between a function parameter's type in an overload signature and its
     /// default value in the implementation.
     InconsistentOverloadDefault,
+    /// Cannot assign to a class-body-declared instance variable via the class (e.g. `C.instance_var = ...`).
+    InstanceVarAssign,
     /// Internal Pyrefly error.
     InternalError,
     /// An `@abstractmethod` is defined in a class that is not abstract.
@@ -291,6 +328,8 @@ pub enum ErrorKind {
     /// Attempting to use `yield` in a way that is not allowed.
     /// e.g. `yield from` with something that's not an iterable.
     InvalidYield,
+    /// Assigning to a method on a class object or instance.
+    MethodAssign,
     /// A file-level `# pyrefly: ignore-errors` (or `ignore-errors[code]`) directive
     /// appears after the first line of code, where it is silently inert. File-level
     /// suppressions are only honored in the preamble, at the top of the file.
@@ -353,13 +392,22 @@ pub enum ErrorKind {
     /// target: a key with a bad type inherited by a subclass, or an extra keyword argument
     /// that the callee cannot accept.
     OpenUnpacking,
+    /// A class inherits from a stdlib dataclass with `order=True`.
+    OrderedDataclassInheritance,
     /// An error related to parsing or syntax.
     ParseError,
+    /// A value whose type is not itself `Any` but contains an implicit `Any`,
+    /// such as `list[Unknown]` or `Unknown | None`.
+    PartiallyUnknownType,
+    /// A class-body attribute may be uninitialized on some control-flow paths.
+    PossiblyUninitializedAttribute,
     /// A potential conflict between an explicit keyword argument and a NotRequired
     /// TypedDict field. The field may be absent at runtime, so the conflict is not
     /// guaranteed. This is a separate error code from BadKeywordArgument to allow
     /// users to opt-in to this stricter check.
     PotentialBadKeywordArgument,
+    /// Accessing a protected class member from outside its defining class or a subclass.
+    ProtectedAccess,
     /// A protocol attribute was first defined inside a method instead of the class body.
     ProtocolImplicitlyDefinedAttribute,
     /// Calling `.cuda()` on a `torch.Tensor` hard-codes the target device.
@@ -427,12 +475,24 @@ pub enum ErrorKind {
     /// A call argument whose type is an implicit `Any` (unknown), because the value
     /// passed has an unknown type.
     UnknownArgumentType,
+    /// Accessing an attribute whose type is an implicit `Any` (unknown).
+    UnknownAttributeAccess,
     /// An unannotated attribute assigned a value with unknown type.
     UnknownAttributeType,
+    /// A class whose base class has an implicit `Any` (unknown) type.
+    UnknownBaseClass,
     /// Accessing a DataFrame column that does not exist in the inferred schema.
     UnknownColumn,
+    /// A value whose type is unknown because it comes from an error, such as an unresolved import
+    /// or name. Reported only where the unknown type arises, and not where a shown or suppressed
+    /// error lies within its range.
+    UnknownFromError,
     /// Attempting to use a name that is not defined.
     UnknownName,
+    /// A function without a return annotation, or a lambda, returns a value whose type is an
+    /// implicit `Any` (unknown). Unless a lambda's return type comes from an expected type, this
+    /// makes the inferred return type unknown too.
+    UnknownReturnType,
     /// A variable assigned a value with unknown type without an explicit annotation.
     UnknownVariableType,
     /// Identity comparison (`is` or `is not`) between types that are provably disjoint
@@ -469,14 +529,22 @@ pub enum ErrorKind {
     UntypedFunctionDecorator,
     /// Import is missing an expected stubs package
     UntypedImport,
+    /// A `collections.namedtuple` declares no field types, so every field has an unknown type.
+    UntypedNamedtuple,
     /// Result of a call expression is not used.
     UnusedCallResult,
-    /// Result of async function call is never used or awaited
+    /// A coroutine is unused or used as a Boolean condition without being awaited.
     UnusedCoroutine,
     /// A suppression comment is unused (no error to suppress, or specific codes are unused)
     UnusedIgnore,
+    /// A module-level import whose name is never used.
+    UnusedImport,
+    /// A function parameter that is never used in the function body.
+    UnusedParameter,
     /// A `# type: ignore` comment is unused (no error to suppress on that line)
     UnusedTypeIgnore,
+    /// A local variable that is assigned but never used.
+    UnusedVariable,
     /// `@overload` bodies are never executed, so executable body logic is usually dead code.
     UselessOverloadBody,
     /// The inferred variance of a type variable does not match its declared variance.
@@ -520,6 +588,7 @@ impl ErrorKind {
     /// Suppressing the parent kind also suppresses this kind.
     pub fn parent_kind(self) -> Option<ErrorKind> {
         match self {
+            ErrorKind::AssertTypeUnspellableSubtype => Some(ErrorKind::AssertType),
             ErrorKind::DirectAbstractBaseInstantiation => Some(ErrorKind::BadInstantiation),
             ErrorKind::BadOverrideMutableAttribute | ErrorKind::BadOverrideParamName => {
                 Some(ErrorKind::BadOverride)
@@ -534,6 +603,7 @@ impl ErrorKind {
                 Some(ErrorKind::NoAnyReturn)
             }
             ErrorKind::NonExhaustiveMatchOpenType => Some(ErrorKind::NonExhaustiveMatch),
+            ErrorKind::OrderedDataclassInheritance => Some(ErrorKind::InvalidInheritance),
             ErrorKind::PytorchEfficiencyLintCudaCall
             | ErrorKind::PytorchEfficiencyLintItemCall
             | ErrorKind::PytorchEfficiencyLintPrintTensor
@@ -577,6 +647,8 @@ impl ErrorKind {
             ErrorKind::DivisionByZero => Severity::Warn,
             ErrorKind::EmptyBody => Severity::Ignore,
             ErrorKind::ExplicitAny => Severity::Ignore,
+            ErrorKind::ExplicitAnyUse => Severity::Ignore,
+            ErrorKind::FallbackSearchPathRelativeImport => Severity::Warn,
             ErrorKind::ImplicitAbstractClass => Severity::Ignore,
             ErrorKind::ImplicitAny => Severity::Ignore,
             ErrorKind::ImplicitAnyAttribute => Severity::Ignore,
@@ -588,9 +660,11 @@ impl ErrorKind {
             ErrorKind::ImplicitReexport => Severity::Ignore,
             ErrorKind::ImplicitlyDefinedAttribute => Severity::Ignore,
             ErrorKind::IncompatibleComparison => Severity::Ignore,
+            ErrorKind::InstanceVarAssign => Severity::Ignore,
             ErrorKind::InvalidAbstractMethod => Severity::Ignore,
             ErrorKind::InvalidCast => Severity::Ignore,
             ErrorKind::InvalidDecorator => Severity::Warn,
+            ErrorKind::MethodAssign => Severity::Ignore,
             ErrorKind::MisplacedIgnore => Severity::Warn,
             ErrorKind::MissingAttributePatchTarget => Severity::Warn,
             ErrorKind::MissingOverrideDecorator => Severity::Ignore,
@@ -605,7 +679,10 @@ impl ErrorKind {
             ErrorKind::NonConvergentRecursion => Severity::Warn,
             ErrorKind::NotRequiredKeyAccess => Severity::Ignore,
             ErrorKind::OpenUnpacking => Severity::Ignore,
+            ErrorKind::OrderedDataclassInheritance => Severity::Warn,
+            ErrorKind::PossiblyUninitializedAttribute => Severity::Ignore,
             ErrorKind::PotentialBadKeywordArgument => Severity::Ignore,
+            ErrorKind::ProtectedAccess => Severity::Ignore,
             ErrorKind::PytorchEfficiencyLintCudaCall => Severity::Ignore,
             ErrorKind::PytorchEfficiencyLintItemCall => Severity::Ignore,
             ErrorKind::PytorchEfficiencyLintPrintTensor => Severity::Ignore,
@@ -622,10 +699,15 @@ impl ErrorKind {
             ErrorKind::UnknownArgumentType => Severity::Ignore,
             ErrorKind::ImplicitAnyLambda => Severity::Ignore,
             ErrorKind::UnknownAttributeType => Severity::Ignore,
+            ErrorKind::UnknownBaseClass => Severity::Ignore,
+            ErrorKind::UnknownAttributeAccess => Severity::Ignore,
+            ErrorKind::UnknownFromError => Severity::Ignore,
+            ErrorKind::UnknownReturnType => Severity::Ignore,
             ErrorKind::UnknownVariableType => Severity::Ignore,
+            ErrorKind::PartiallyUnknownType => Severity::Ignore,
             ErrorKind::UnnecessaryComparison => Severity::Warn,
             ErrorKind::UnnecessaryTypeConversion => Severity::Warn,
-            ErrorKind::Unreachable => Severity::Warn,
+            ErrorKind::Unreachable => Severity::Hint,
             ErrorKind::UnreachableExceptClause => Severity::Warn,
             ErrorKind::UnreachableMatchCase => Severity::Warn,
             ErrorKind::UnresolvableDunderAll => Severity::Warn,
@@ -633,9 +715,13 @@ impl ErrorKind {
             ErrorKind::UntypedClassDecorator => Severity::Ignore,
             ErrorKind::UntypedFunctionDecorator => Severity::Ignore,
             ErrorKind::UntypedImport => Severity::Warn,
+            ErrorKind::UntypedNamedtuple => Severity::Ignore,
             ErrorKind::UnusedCallResult => Severity::Ignore,
             ErrorKind::UnusedIgnore => Severity::Ignore,
+            ErrorKind::UnusedImport => Severity::Hint,
+            ErrorKind::UnusedParameter => Severity::Hint,
             ErrorKind::UnusedTypeIgnore => Severity::Ignore,
+            ErrorKind::UnusedVariable => Severity::Hint,
             ErrorKind::VarianceMismatch => Severity::Warn,
             // Overload bodies are runtime-dead, so this should warn rather than fail CI by default.
             ErrorKind::UselessOverloadBody => Severity::Warn,
@@ -675,6 +761,9 @@ impl ErrorKind {
                 ErrorKind::Deprecated
                     | ErrorKind::RedundantCast
                     | ErrorKind::UnnecessaryTypeConversion
+                    | ErrorKind::UnusedImport
+                    | ErrorKind::UnusedParameter
+                    | ErrorKind::UnusedVariable
             )
     }
 
@@ -710,6 +799,7 @@ mod tests {
     fn severity_str(s: Severity) -> &'static str {
         match s {
             Severity::Ignore => "ignore",
+            Severity::Hint => "hint",
             Severity::Info => "info",
             Severity::Warn => "warn",
             Severity::Error => "error",

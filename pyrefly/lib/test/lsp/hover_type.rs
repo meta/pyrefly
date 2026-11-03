@@ -22,6 +22,61 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
 }
 
 #[test]
+fn quoted_class_in_type_subscript_hover() {
+    // Regression for https://github.com/facebook/pyrefly/issues/4703:
+    // a quoted class inside `type[...]` must not hover as `type[type[Child]]`.
+    let code = r#"
+class Child: ...
+class Holder:
+    value: type['Child']
+#                   ^
+    other: type[Child]
+#                    ^
+"#;
+    let report = get_batched_lsp_operations_report_allow_error(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+4 |     value: type['Child']
+                        ^
+Hover Result: `type[Child]`
+
+6 |     other: type[Child]
+                         ^
+Hover Result: `type[Child]`
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn name_in_quoted_subscript_hover() {
+    // Each name inside a forward-reference string hovers as itself, not as the whole string.
+    let code = r#"
+class Child: ...
+class Holder:
+    value: 'list[Child]'
+#            ^    ^
+"#;
+    let report = get_batched_lsp_operations_report_allow_error(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+4 |     value: 'list[Child]'
+                 ^
+Hover Result: `type[list]`
+
+4 |     value: 'list[Child]'
+                      ^
+Hover Result: `type[Child]`
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
 fn basic_test() {
     let code = r#"
 from typing import Literal
@@ -112,7 +167,7 @@ xy = xy + 1
 # main.py
 3 | xy = xy + 1
      ^
-Hover Result: `int`
+Hover Result: `Literal[6]`
 "#
         .trim(),
         report.trim(),
@@ -219,6 +274,77 @@ Hover Result: `Literal[2]`
 2 | tup = (1, +2)
                 ^
 Hover Result: `Literal[2]`
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn class_field_comprehension_shadowing_hover() {
+    let code = r#"
+class C:
+    x: str = "class field"
+    a = [x for x in (1, 2)]
+#              ^
+    b = {x for x in (1, 2)}
+#              ^
+    c = {x: x for x in (1, 2)}
+#                 ^
+    d = (x for x in (1, 2))
+#              ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+4 |     a = [x for x in (1, 2)]
+                   ^
+Hover Result: `Literal[1, 2]`
+
+6 |     b = {x for x in (1, 2)}
+                   ^
+Hover Result: `Literal[1, 2]`
+
+8 |     c = {x: x for x in (1, 2)}
+                      ^
+Hover Result: `Literal[1, 2]`
+
+10 |     d = (x for x in (1, 2))
+                    ^
+Hover Result: `Literal[1, 2]`
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn inherited_classvar_hover_prefers_resolved_field_type() {
+    let code = r#"
+from typing import ClassVar
+
+class A:
+    x: ClassVar[tuple[str, ...]] = ("A",)
+
+class B(A):
+    x = ("B",)
+#   ^
+
+reveal = B.x
+#          ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+8 |     x = ("B",)
+        ^
+Hover Result: `tuple[str, ...]`
+
+11 | reveal = B.x
+                ^
+Hover Result: `tuple[str, ...]`
 "#
         .trim(),
         report.trim(),
@@ -423,7 +549,7 @@ while True:
 y = x
 #   ^
 "#;
-    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    let report = get_batched_lsp_operations_report_allow_error(&[("main", code)], get_test_report);
     assert_eq!(
         r#"
 # main.py

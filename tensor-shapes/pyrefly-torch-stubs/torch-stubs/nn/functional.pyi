@@ -12,7 +12,7 @@ import builtins
 import importlib as importlib
 import math as math
 import warnings as warnings
-from collections.abc import Callable as Callable
+from collections.abc import Callable as Callable, Sequence
 from typing import (
     Any,
     Literal,
@@ -25,6 +25,7 @@ import numpy as np
 import shape_extensions
 import torch as torch
 from shape_extensions import (
+    broadcast,
     Flag,
     gufunc_broadcast,
     Int as _Int,
@@ -72,6 +73,7 @@ from torch._shapes import (
     conv_transpose_shape,
     cosine_embedding_score_shape,
     cosine_similarity_shape,
+    ctc_unreduced_shape,
     fold_list_shape,
     fold_shape,
     fractional_pool_extent,
@@ -83,6 +85,7 @@ from torch._shapes import (
     pad_shape,
     pairwise_distance_shape,
     pool_shape,
+    upsample_fallback_shape,
 )
 from torch._torch_docs import (
     reproducibility_notes as reproducibility_notes,
@@ -1270,6 +1273,78 @@ def upsample(
     mode: str = "nearest",
     align_corners: bool | None = None,
 ) -> Tensor: ...
+@overload
+def upsample_nearest[
+    Shape: IntTuple,
+    Size: _Int | None = None,
+    Scale: _Int | None = None,
+](
+    input: Tensor[Shape], size: Size = None, scale_factor: Scale = None
+) -> Tensor[interpolate_scalar_shape(Shape, Size, Scale)]: ...
+@overload
+def upsample_nearest[Shape: IntTuple, Size: IntTuple](
+    input: Tensor[Shape], size: Size, scale_factor: None = None
+) -> Tensor[interpolate_size_shape(Shape, Size)]: ...
+@overload
+def upsample_nearest[Shape: IntTuple, Scale: IntTuple](
+    input: Tensor[Shape], size: None = None, scale_factor: Scale = ...
+) -> Tensor[interpolate_scale_shape(Shape, Scale)]: ...
+@overload
+def upsample_nearest[
+    Shape: IntTuple,
+](
+    input: Tensor[Shape],
+    size: int | list[int],
+    scale_factor: None = None,
+) -> Tensor[upsample_fallback_shape(Shape)]: ...
+@overload
+def upsample_nearest[
+    Shape: IntTuple,
+](
+    input: Tensor[Shape],
+    size: None = None,
+    scale_factor: int | float | tuple[int | float, ...] | list[float] = ...,
+) -> Tensor[upsample_fallback_shape(Shape)]: ...
+@overload
+def upsample_bilinear[B: IntVar, C: IntVar, H: IntVar, W: IntVar, O: IntVar](
+    input: Tensor[[B, C, H, W]], size: _Int[O], scale_factor: None = None
+) -> Tensor[[B, C, O, O]]: ...
+@overload
+def upsample_bilinear[
+    B: IntVar,
+    C: IntVar,
+    H: IntVar,
+    W: IntVar,
+    OutH: IntVar,
+    OutW: IntVar,
+](
+    input: Tensor[[B, C, H, W]],
+    size: tuple[_Int[OutH], _Int[OutW]],
+    scale_factor: None = None,
+) -> Tensor[[B, C, OutH, OutW]]: ...
+@overload
+def upsample_bilinear[B: IntVar, C: IntVar, H: IntVar, W: IntVar, S: IntVar](
+    input: Tensor[[B, C, H, W]], size: None = None, scale_factor: _Int[S] = ...
+) -> Tensor[[B, C, H * S, W * S]]: ...
+@overload
+def upsample_bilinear[B: IntVar, C: IntVar, H: IntVar, W: IntVar](
+    input: Tensor[[B, C, H, W]],
+    size: int | tuple[int, int] | list[int],
+    scale_factor: None = None,
+) -> Tensor[[B, C, int, int]]: ...
+
+# TODO(stroxler): Validate that either size or scale_factor is supplied and
+# enforce the two spatial dimensions of dynamic size and scale sequences.
+@overload
+def upsample_bilinear[B: IntVar, C: IntVar, H: IntVar, W: IntVar](
+    input: Tensor[[B, C, H, W]],
+    size: None = None,
+    scale_factor: int
+    | float
+    | tuple[int | float, int | float]
+    | list[float]
+    | None = None,
+) -> Tensor[[B, C, int, int]]: ...
 
 # Phase 2: Activation functions
 def relu[Shape: IntTuple](input: Tensor[Shape], inplace: bool = False) -> Tensor[Shape]:
@@ -2228,15 +2303,294 @@ def fold[Batch: IntTuple](
     stride: int | tuple[int, int] = 1,
 ) -> Tensor[[*Batch, int, int, int]]: ...
 
-# TODO: Add precise types and signatures for the remaining public API.
-ctc_loss: Any
-gaussian_nll_loss: Any
-grouped_mm: Any
-multi_head_attention_forward: Any
-multilabel_soft_margin_loss: Any
-scaled_grouped_mm: Any
-scaled_mm: Any
-triplet_margin_with_distance_loss: Any
-unfold: Any
-upsample_bilinear: Any
-upsample_nearest: Any
+# Torch accepts unbatched 3D input as well as batched 4D input.
+@overload
+def unfold[B: IntVar, C: IntVar, H: IntVar, W: IntVar, K: IntVar](
+    input: Tensor[[B, C, H, W]],
+    kernel_size: _Int[K],
+    dilation: int | tuple[int, int] = 1,
+    padding: int | tuple[int, int] = 0,
+    stride: int | tuple[int, int] = 1,
+) -> Tensor[[B, C * K * K, int]]: ...
+@overload
+def unfold[B: IntVar, C: IntVar, H: IntVar, W: IntVar, KH: IntVar, KW: IntVar](
+    input: Tensor[[B, C, H, W]],
+    kernel_size: tuple[_Int[KH], _Int[KW]],
+    dilation: int | tuple[int, int] = 1,
+    padding: int | tuple[int, int] = 0,
+    stride: int | tuple[int, int] = 1,
+) -> Tensor[[B, C * KH * KW, int]]: ...
+@overload
+def unfold[C: IntVar, H: IntVar, W: IntVar, K: IntVar](
+    input: Tensor[[C, H, W]],
+    kernel_size: _Int[K],
+    dilation: int | tuple[int, int] = 1,
+    padding: int | tuple[int, int] = 0,
+    stride: int | tuple[int, int] = 1,
+) -> Tensor[[C * K * K, int]]: ...
+@overload
+def unfold[C: IntVar, H: IntVar, W: IntVar, KH: IntVar, KW: IntVar](
+    input: Tensor[[C, H, W]],
+    kernel_size: tuple[_Int[KH], _Int[KW]],
+    dilation: int | tuple[int, int] = 1,
+    padding: int | tuple[int, int] = 0,
+    stride: int | tuple[int, int] = 1,
+) -> Tensor[[C * KH * KW, int]]: ...
+
+# TODO(stroxler): Replace the dynamic-kernel overloads with a shape rule that
+# rejects invalid kernel/stride/dilation/padding geometry while preserving the
+# precise channel products above. A Flag-based scalar/tuple DSL dispatch currently
+# loses those products and lets this gradual branch accept invalid literal calls.
+@overload
+def unfold[B: IntVar, C: IntVar, H: IntVar, W: IntVar](
+    input: Tensor[[B, C, H, W]],
+    kernel_size: int | tuple[int, int],
+    dilation: int | tuple[int, int] = 1,
+    padding: int | tuple[int, int] = 0,
+    stride: int | tuple[int, int] = 1,
+) -> Tensor[[B, int, int]]: ...
+@overload
+def unfold[C: IntVar, H: IntVar, W: IntVar](
+    input: Tensor[[C, H, W]],
+    kernel_size: int | tuple[int, int],
+    dilation: int | tuple[int, int] = 1,
+    padding: int | tuple[int, int] = 0,
+    stride: int | tuple[int, int] = 1,
+) -> Tensor[[int, int]]: ...
+def ctc_loss[Shape: IntTuple, Reduction: Flag[str] = "mean"](
+    log_probs: Tensor[Shape],
+    targets: Tensor,
+    input_lengths: Tensor | Sequence[int],
+    target_lengths: Tensor | Sequence[int],
+    blank: int = 0,
+    reduction: Reduction = "mean",
+    zero_infinity: bool = False,
+) -> Tensor[loss_shape(ctc_unreduced_shape(Shape), Reduction, None, None)]: ...
+def gaussian_nll_loss[Input: IntTuple, Target: IntTuple, Reduction: Flag[str] = "mean"](
+    input: Tensor[Input],
+    target: Tensor[Target],
+    # TODO(stroxler): Check tensor variance geometry against the broadcast input.
+    var: Tensor | float,
+    full: bool = False,
+    eps: float = 1e-6,
+    reduction: Reduction = "mean",
+) -> Tensor[loss_shape(broadcast(Input, Target), Reduction, None, None)]: ...
+@overload
+def grouped_mm[G: IntVar, M: IntVar, K: IntVar, N: IntVar](
+    mat_a: Tensor[[G, M, K]],
+    mat_b: Tensor[[G, K, N]],
+    *,
+    offs: None = None,
+    bias: Tensor | None = None,
+    out_dtype: DType | None = None,
+) -> Tensor[[G, M, N]]: ...
+@overload
+def grouped_mm[G: IntVar, M: IntVar, K: IntVar, N: IntVar](
+    mat_a: Tensor[[M, K]],
+    mat_b: Tensor[[G, K, N]],
+    *,
+    offs: Tensor[[G]],
+    bias: Tensor | None = None,
+    out_dtype: DType | None = None,
+) -> Tensor[[M, N]]: ...
+@overload
+def grouped_mm[G: IntVar, M: IntVar, K: IntVar, N: IntVar](
+    mat_a: Tensor[[G, M, K]],
+    mat_b: Tensor[[K, N]],
+    *,
+    offs: Tensor[[G]],
+    bias: Tensor | None = None,
+    out_dtype: DType | None = None,
+) -> Tensor[[M, N]]: ...
+
+# Both operands are partitioned by offs along their contraction dimensions.
+@overload
+def grouped_mm[G: IntVar, M: IntVar, K1: IntVar, K2: IntVar, N: IntVar](
+    mat_a: Tensor[[M, K1]],
+    mat_b: Tensor[[K2, N]],
+    *,
+    offs: Tensor[[G]],
+    bias: Tensor | None = None,
+    out_dtype: DType | None = None,
+) -> Tensor[[G, M, N]]: ...
+def multi_head_attention_forward[QueryShape: IntTuple, ProjectionShape: IntTuple](
+    query: Tensor[QueryShape],
+    key: Tensor,
+    value: Tensor,
+    embed_dim_to_check: int,
+    num_heads: int,
+    in_proj_weight: Tensor | None,
+    in_proj_bias: Tensor | None,
+    bias_k: Tensor | None,
+    bias_v: Tensor | None,
+    add_zero_attn: bool,
+    dropout_p: float,
+    out_proj_weight: Tensor[ProjectionShape],
+    out_proj_bias: Tensor | None,
+    training: bool = True,
+    key_padding_mask: Tensor | None = None,
+    need_weights: bool = True,
+    attn_mask: Tensor | None = None,
+    use_separate_proj_weight: bool = False,
+    q_proj_weight: Tensor | None = None,
+    k_proj_weight: Tensor | None = None,
+    v_proj_weight: Tensor | None = None,
+    static_k: Tensor | None = None,
+    static_v: Tensor | None = None,
+    average_attn_weights: bool = True,
+    is_causal: bool = False,
+) -> tuple[
+    Tensor[gufunc_broadcast("(e),(o,e)->(o)", tuple[QueryShape, ProjectionShape])],
+    Tensor | None,
+]: ...
+@overload
+def multilabel_soft_margin_loss[
+    Batch: IntTuple,
+    Classes: IntVar,
+    SizeAverage: Flag[bool | None],
+    Reduce: Flag[bool | None],
+    Reduction: Flag[str],
+](
+    input: Tensor[[*Batch, Classes]],
+    target: Tensor[[*Batch, Classes]],
+    weight: Tensor[[Classes]] | Tensor[[*Batch, Classes]] | None = None,
+    size_average: SizeAverage = None,
+    reduce: Reduce = None,
+    reduction: Reduction = "mean",
+) -> Tensor[loss_shape(Batch, Reduction, SizeAverage, Reduce)]: ...
+
+# TODO(stroxler): Check input, target, and weight shapes in the dynamic fallback;
+# a broad Tensor overload otherwise accepts incompatible concrete dimensions.
+@overload
+def multilabel_soft_margin_loss[
+    SizeAverage: Flag[bool | None],
+    Reduce: Flag[bool | None],
+    Reduction: Flag[str],
+](
+    input: Tensor,
+    target: Tensor,
+    weight: Tensor | None = None,
+    size_average: SizeAverage = None,
+    reduce: Reduce = None,
+    reduction: Reduction = "mean",
+) -> Tensor[loss_shape(IntTuple, Reduction, SizeAverage, Reduce)]: ...
+
+# Grouped output rank follows the operand-rank combination.
+@overload
+def scaled_grouped_mm[G: IntVar, M: IntVar, K: IntVar, N: IntVar](
+    mat_a: Tensor[[G, M, K]],
+    mat_b: Tensor[[G, K, N]],
+    scale_a: Tensor | list[Tensor],
+    scale_recipe_a: ScalingType | list[ScalingType],
+    scale_b: Tensor | list[Tensor],
+    scale_recipe_b: ScalingType | list[ScalingType],
+    swizzle_a: SwizzleType | list[SwizzleType] | None = None,
+    swizzle_b: SwizzleType | list[SwizzleType] | None = None,
+    bias: Tensor | None = None,
+    offs: None = None,
+    output_dtype: DType | None = torch.bfloat16,
+    contraction_dim: list[int] | tuple[int, ...] = (),
+    use_fast_accum: bool = False,
+) -> Tensor[[G, M, N]]: ...
+@overload
+def scaled_grouped_mm[G: IntVar, M: IntVar, K: IntVar, N: IntVar](
+    mat_a: Tensor[[M, K]],
+    mat_b: Tensor[[G, K, N]],
+    scale_a: Tensor | list[Tensor],
+    scale_recipe_a: ScalingType | list[ScalingType],
+    scale_b: Tensor | list[Tensor],
+    scale_recipe_b: ScalingType | list[ScalingType],
+    swizzle_a: SwizzleType | list[SwizzleType] | None = None,
+    swizzle_b: SwizzleType | list[SwizzleType] | None = None,
+    bias: Tensor | None = None,
+    offs: Tensor[[G]] = ...,
+    output_dtype: DType | None = torch.bfloat16,
+    contraction_dim: list[int] | tuple[int, ...] = (),
+    use_fast_accum: bool = False,
+) -> Tensor[[M, N]]: ...
+@overload
+def scaled_grouped_mm[G: IntVar, M: IntVar, K: IntVar, N: IntVar](
+    mat_a: Tensor[[G, M, K]],
+    mat_b: Tensor[[K, N]],
+    scale_a: Tensor | list[Tensor],
+    scale_recipe_a: ScalingType | list[ScalingType],
+    scale_b: Tensor | list[Tensor],
+    scale_recipe_b: ScalingType | list[ScalingType],
+    swizzle_a: SwizzleType | list[SwizzleType] | None = None,
+    swizzle_b: SwizzleType | list[SwizzleType] | None = None,
+    bias: Tensor | None = None,
+    offs: Tensor[[G]] = ...,
+    output_dtype: DType | None = torch.bfloat16,
+    contraction_dim: list[int] | tuple[int, ...] = (),
+    use_fast_accum: bool = False,
+) -> Tensor[[M, N]]: ...
+@overload
+def scaled_grouped_mm[G: IntVar, M: IntVar, K: IntVar, L: IntVar, N: IntVar](
+    mat_a: Tensor[[M, K]],
+    mat_b: Tensor[[L, N]],
+    scale_a: Tensor | list[Tensor],
+    scale_recipe_a: ScalingType | list[ScalingType],
+    scale_b: Tensor | list[Tensor],
+    scale_recipe_b: ScalingType | list[ScalingType],
+    swizzle_a: SwizzleType | list[SwizzleType] | None = None,
+    swizzle_b: SwizzleType | list[SwizzleType] | None = None,
+    bias: Tensor | None = None,
+    offs: Tensor[[G]] = ...,
+    output_dtype: DType | None = torch.bfloat16,
+    contraction_dim: list[int] | tuple[int, ...] = (),
+    use_fast_accum: bool = False,
+) -> Tensor[[G, M, N]]: ...
+def scaled_mm[M: IntVar, K: IntVar, N: IntVar](
+    mat_a: Tensor[[M, K]],
+    mat_b: Tensor[[K, N]],
+    scale_a: Tensor | list[Tensor],
+    scale_recipe_a: ScalingType | list[ScalingType],
+    scale_b: Tensor | list[Tensor],
+    scale_recipe_b: ScalingType | list[ScalingType],
+    swizzle_a: SwizzleType | list[SwizzleType] | None = None,
+    swizzle_b: SwizzleType | list[SwizzleType] | None = None,
+    bias: Tensor | None = None,
+    output_dtype: DType | None = torch.bfloat16,
+    contraction_dim: list[int] | tuple[int, ...] = (),
+    use_fast_accum: bool = False,
+) -> Tensor[[M, N]]: ...
+@overload
+def triplet_margin_with_distance_loss[
+    Anchor: IntTuple,
+    Positive: IntTuple,
+    Negative: IntTuple,
+    Reduction: Flag[str],
+](
+    anchor: Tensor[Anchor],
+    positive: Tensor[Positive],
+    negative: Tensor[Negative],
+    *,
+    distance_function: None = None,
+    margin: float = 1.0,
+    swap: bool = False,
+    reduction: Reduction = "mean",
+) -> Tensor[
+    loss_shape(
+        broadcast(
+            pairwise_distance_shape(Anchor, Positive, broadcast(Anchor, Positive)),
+            pairwise_distance_shape(Anchor, Negative, broadcast(Anchor, Negative)),
+        ),
+        Reduction,
+        None,
+        None,
+    )
+]: ...
+
+# TODO(stroxler): Model the callback result shape so a custom distance can be
+# reduced without a gradual Tensor overload that hides operand shape errors.
+@overload
+def triplet_margin_with_distance_loss[Reduction: Flag[str] = "mean"](
+    anchor: Tensor,
+    positive: Tensor,
+    negative: Tensor,
+    *,
+    distance_function: Callable[[Tensor, Tensor], Tensor],
+    margin: float = 1.0,
+    swap: bool = False,
+    reduction: Reduction = "mean",
+) -> Tensor[loss_shape(IntTuple, Reduction, None, None)]: ...

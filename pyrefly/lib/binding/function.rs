@@ -50,7 +50,6 @@ use crate::binding::binding::BindingUndecoratedFunction;
 use crate::binding::binding::BindingUndecoratedFunctionRange;
 use crate::binding::binding::BindingYield;
 use crate::binding::binding::BindingYieldFrom;
-use crate::binding::binding::ExhaustivenessKind;
 use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::FunctionDefData;
 use crate::binding::binding::IsAsync;
@@ -64,12 +63,14 @@ use crate::binding::binding::KeyUndecoratedFunction;
 use crate::binding::binding::KeyUndecoratedFunctionRange;
 use crate::binding::binding::LastStmt;
 use crate::binding::binding::MethodSelfKind;
+use crate::binding::binding::NNModuleRegistrations;
 use crate::binding::binding::ReturnExplicit;
 use crate::binding::binding::ReturnImplicit;
 use crate::binding::binding::ReturnType;
 use crate::binding::binding::ReturnTypeKind;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::LegacyTParamCollector;
+use crate::binding::classmethod::FunctionDecorators;
 use crate::binding::expr::Usage;
 use crate::binding::pattern::match_case_always_matches;
 use crate::binding::scope::FlowStyle;
@@ -89,6 +90,7 @@ struct Decorators {
     is_abstract_method: bool,
     is_override: bool,
     is_classmethod: bool,
+    decorator_kind: FunctionDecorators,
     decorators: Box<[Idx<KeyDecorator>]>,
 }
 
@@ -172,7 +174,7 @@ impl<'a, 'b> SourceOrderVisitor<'a> for SuperMethodCallFinder<'b> {
 pub struct SelfAssignments {
     pub method_name: Name,
     pub instance_attributes: SmallMap<Name, InstanceAttribute>,
-    pub nn_module_registrations: SmallMap<Name, Vec<Expr>>,
+    pub nn_module_registrations: NNModuleRegistrations,
 }
 
 /// Determine whether a function definition is annotated.
@@ -485,12 +487,11 @@ impl<'a> BindingsBuilder<'a> {
     /// to a panic).
     fn implicit_return(&mut self, body: &[Stmt], func_name: &Identifier) -> Idx<Key> {
         let last_exprs = function_last_expressions(body, self.sys_info).map(|x| {
-            x.exprs
-                .into_map(|(last, x)| {
-                    (
-                        last.clone(),
-                        self.last_statement_idx_for_implicit_return(last, x),
-                    )
+            x.clauses
+                .into_map(|clause| {
+                    clause
+                        .into_map(|path| self.last_path(path))
+                        .into_boxed_slice()
                 })
                 .into_boxed_slice()
         });
@@ -661,8 +662,21 @@ impl<'a> BindingsBuilder<'a> {
         let mut has_no_type_check = false;
         let mut is_abstract_method = false;
         let mut is_classmethod = false;
+        let mut decorator_kind = FunctionDecorators::Undecorated;
+        let mut all_receiver_overload = true;
         for d in &decorator_list {
             let special_export = self.as_special_export(&d.expression);
+            let receiver_special = if self.track_classmethod_uses {
+                self.as_receiver_special_export(&d.expression)
+            } else {
+                None
+            };
+            all_receiver_overload &= receiver_special == Some(SpecialExport::Overload);
+            decorator_kind = if decorator_list.len() == 1 {
+                FunctionDecorators::single(receiver_special)
+            } else {
+                FunctionDecorators::Other
+            };
             is_overload = is_overload || matches!(special_export, Some(SpecialExport::Overload));
             is_override = is_override || matches!(special_export, Some(SpecialExport::Override));
             is_abstract_method = is_abstract_method
@@ -678,6 +692,13 @@ impl<'a> BindingsBuilder<'a> {
                     Some(SpecialExport::ClassMethod | SpecialExport::AbstractClassMethod)
                 );
         }
+        if is_overload {
+            decorator_kind = if all_receiver_overload {
+                FunctionDecorators::Overload
+            } else {
+                FunctionDecorators::OverloadWithOther
+            };
+        }
         let decorators = self
             .ensure_and_bind_decorators(decorator_list, usage)
             .into_boxed_slice();
@@ -687,10 +708,13 @@ impl<'a> BindingsBuilder<'a> {
             is_abstract_method,
             is_override,
             is_classmethod,
+            decorator_kind,
             decorators,
         }
     }
 
+    /// Returns the body kind, whether the body statements were bound, whether the return
+    /// type is inferred, and the `self` assignments.
     fn function_body(
         &mut self,
         parameters: &mut Box<Parameters>,
@@ -703,7 +727,7 @@ impl<'a> BindingsBuilder<'a> {
         parent: &NestingContext,
         undecorated_idx: Idx<KeyUndecoratedFunction>,
         class_key: Option<Idx<KeyClass>>,
-    ) -> (BodyKind, bool, Option<SelfAssignments>) {
+    ) -> (BodyKind, bool, bool, Option<SelfAssignments>) {
         // If the first statement in the body is a docstring, remove it
         let body_no_docstring = if let Some(s) = body.first()
             && is_docstring(s)
@@ -767,9 +791,9 @@ impl<'a> BindingsBuilder<'a> {
 
         let is_unannotated =
             !self.check_unannotated_defs && !is_annotated(&return_ann_with_range, parameters);
-        let (is_return_inferred, self_assignments) = if decorators.has_no_type_check
-            || (is_unannotated && !self.analyze_unannotated_for_ide)
-        {
+        let skips_body =
+            decorators.has_no_type_check || (is_unannotated && !self.analyze_unannotated_for_ide);
+        let (is_return_inferred, self_assignments) = if skips_body {
             self.mark_as_returns_any(func_name, class_key, is_async);
             let self_assignments = self.unchecked_function_body_scope(
                 parameters,
@@ -855,7 +879,7 @@ impl<'a> BindingsBuilder<'a> {
             (is_return_inferred, self_assignments)
         };
 
-        (body_kind, is_return_inferred, self_assignments)
+        (body_kind, !skips_body, is_return_inferred, self_assignments)
     }
 
     pub fn function_def(&mut self, mut x: StmtFunctionDef, parent: &NestingContext) {
@@ -886,7 +910,7 @@ impl<'a> BindingsBuilder<'a> {
         );
 
         // Get preceding function definition, if any. Used for building an overload type.
-        let (function_idx, pred_idx) = self.create_function_index(&func_name);
+        let (function_idx, pred_idx, is_contiguous) = self.create_function_index(&func_name);
 
         let class_key = self.scopes.current_class_key();
         let enclosing_class = class_key.or_else(|| self.scopes.current_method_context());
@@ -898,6 +922,7 @@ impl<'a> BindingsBuilder<'a> {
 
         self.maybe_record_pytest_fixture_definition(&x, class_key);
 
+        let receiver_uses = self.classmethod_receiver_uses(&x);
         let decorators = self.decorators(mem::take(&mut x.decorator_list), def_idx.usage());
 
         self.scopes.push(Scope::annotation(x.range, false));
@@ -906,7 +931,8 @@ impl<'a> BindingsBuilder<'a> {
 
         let docstring_range = Docstring::range_from_stmts(x.body.as_slice());
         let calls_super_method = SuperMethodCallFinder::find(&func_name.id, &x.body);
-        let (body_kind, is_return_inferred, self_assignments) = self.function_body(
+        let previous_tracking = mem::replace(&mut self.track_classmethod_uses, false);
+        let (body_kind, is_body_bound, is_return_inferred, self_assignments) = self.function_body(
             &mut x.parameters,
             mem::take(&mut x.body),
             &decorators,
@@ -919,11 +945,13 @@ impl<'a> BindingsBuilder<'a> {
             class_key,
         );
 
+        self.track_classmethod_uses = previous_tracking;
         // Pop the annotation scope to get back to the parent scope, and handle this
         // case where we need to track assignments to `self` from methods.
         self.scopes.pop();
         self.scopes
             .record_self_assignments_if_applicable(self_assignments);
+        self.record_classmethod_function(undecorated_idx, decorators.decorator_kind, receiver_uses);
         let undecorated_idx = self.insert_binding_idx(
             undecorated_idx,
             BindingUndecoratedFunction {
@@ -938,7 +966,9 @@ impl<'a> BindingsBuilder<'a> {
                 legacy_tparams: legacy_tparams.into_boxed_slice(),
                 parent: parent.dupe(),
                 shape_dsl_def: shape_metadata.shape_dsl_def,
-                type_shape_dsl_def: shape_metadata.type_shape_dsl_def,
+                // The solver validates a type-level DSL function by inferring expressions in
+                // its body, which only have bindings if the body was bound.
+                type_shape_dsl_def: shape_metadata.type_shape_dsl_def.filter(|_| is_body_bound),
                 uses_shape_dsl_ir_name: shape_metadata.uses_shape_dsl_ir_name,
             },
         );
@@ -949,6 +979,7 @@ impl<'a> BindingsBuilder<'a> {
                 undecorated_idx,
                 successor: None,
                 docstring_range,
+                is_contiguous,
             },
         );
 
@@ -966,24 +997,72 @@ impl<'a> BindingsBuilder<'a> {
                 is_overload: decorators.is_overload,
             },
         );
+
+        self.scopes
+            .set_last_func_def(Some((func_name.id.clone(), decorators.is_overload)));
     }
 }
 
-/// The expressions every path through some statements ends in, when they all end in one.
+/// A path that may fall off the end of a body: its last statement, the expression that keys
+/// it, and the ranges of the `if` suites enclosing it whose test may make it dead.
+#[derive(Clone)]
+pub(crate) struct LastPathExpr<'a> {
+    pub last: LastStmt,
+    pub expr: &'a Expr,
+    pub guards: Box<[TextRange]>,
+}
+
+/// Path endings as a DNF: the region diverges if any clause fully diverges.
+/// Each clause is an AND of endings (every path in that alternative must be Never /
+/// non-fallthrough). An empty clause means that alternative never falls through.
 pub(crate) struct LastExpressions<'a> {
-    pub exprs: Vec<(LastStmt, &'a Expr)>,
+    pub clauses: Vec<Vec<LastPathExpr<'a>>>,
     /// Set when the configured environment decided which paths exist, by pruning a branch or
     /// settling an assertion. The answer then holds for that configuration only, which suits
     /// inferring a return type but not reporting code as dead.
     pub decided_by_environment: bool,
 }
 
+fn or_dnf<'a>(
+    a: Option<Vec<Vec<LastPathExpr<'a>>>>,
+    b: Option<Vec<Vec<LastPathExpr<'a>>>>,
+) -> Option<Vec<Vec<LastPathExpr<'a>>>> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (Some(mut x), Some(y)) => {
+            x.extend(y);
+            Some(x)
+        }
+    }
+}
+
+fn and_dnf<'a>(
+    a: Option<Vec<Vec<LastPathExpr<'a>>>>,
+    b: Option<Vec<Vec<LastPathExpr<'a>>>>,
+) -> Option<Vec<Vec<LastPathExpr<'a>>>> {
+    match (a, b) {
+        (None, _) | (_, None) => None,
+        (Some(a), Some(b)) => {
+            let mut out = Vec::with_capacity(a.len() * b.len());
+            for ca in &a {
+                for cb in &b {
+                    let mut clause = ca.clone();
+                    clause.extend(cb.iter().cloned());
+                    out.push(clause);
+                }
+            }
+            Some(out)
+        }
+    }
+}
+
 /// Given the body of a function, what are the potential expressions that
 /// could be the last ones to be executed, where the function then falls off the end.
 ///
 /// * Return None to say there are branches that fall off the end always.
-/// * Return Some([]) to say that we can never reach the end (e.g. always return, raise)
-/// * Return Some(xs) to say this set might be the last expression.
+/// * Return Some with an empty clause to say that we can never reach the end (e.g. always return, raise)
+/// * Return Some(clauses) as DNF over endings that may be the last expression.
 pub(crate) fn function_last_expressions<'a>(
     x: &'a [Stmt],
     sys_info: SysInfo,
@@ -991,9 +1070,9 @@ pub(crate) fn function_last_expressions<'a>(
     fn f<'a>(
         sys_info: SysInfo,
         x: &'a [Stmt],
-        res: &mut Vec<(LastStmt, &'a Expr)>,
+        guards: &mut Vec<TextRange>,
         environment: &mut bool,
-    ) -> Option<()> {
+    ) -> Option<Vec<Vec<LastPathExpr<'a>>>> {
         fn loop_body_has_break_statement(statement: &Stmt, has_break: &mut bool) {
             match statement {
                 Stmt::Break(_) => {
@@ -1006,33 +1085,43 @@ pub(crate) fn function_last_expressions<'a>(
         }
 
         match x.last()? {
-            Stmt::Expr(x) => res.push((LastStmt::Expr, &x.value)),
-            Stmt::Return(_) | Stmt::Raise(_) => {}
+            Stmt::Expr(x) => Some(vec![vec![LastPathExpr {
+                last: LastStmt::Expr,
+                expr: &x.value,
+                guards: guards.as_slice().into(),
+            }]]),
+            Stmt::Return(_) | Stmt::Raise(_) => Some(vec![vec![]]),
             Stmt::Assert(x) if sys_info.evaluate_bool(&x.test) == Some(false) => {
                 *environment |= SysInfo::depends_on_sys_info(&x.test);
+                Some(vec![vec![]])
             }
             Stmt::With(x) => {
                 let kind = IsAsync::new(x.is_async);
+                let mut with_clause = Vec::new();
                 for y in &x.items {
-                    res.push((LastStmt::With(kind), &y.context_expr));
+                    with_clause.push(LastPathExpr {
+                        last: LastStmt::With(kind),
+                        expr: &y.context_expr,
+                        guards: guards.as_slice().into(),
+                    });
                 }
-                f(sys_info, &x.body, res, environment)?;
+                let body = f(sys_info, &x.body, guards, environment)?;
+                and_dnf(Some(vec![with_clause]), Some(body))
             }
             Stmt::While(x) => {
                 let test_value = sys_info.evaluate_bool(&x.test);
                 *environment |= SysInfo::depends_on_sys_info(&x.test);
-                // Only scan for breaks when the body is reachable.
                 let mut has_break = false;
                 if test_value != Some(false) {
                     x.body
                         .visit(&mut |stmt| loop_body_has_break_statement(stmt, &mut has_break));
                 }
                 if test_value == Some(true) && !has_break {
-                    // Infinite loop with no break never falls through.
+                    Some(vec![vec![]])
                 } else if has_break || x.orelse.is_empty() {
-                    return None;
+                    None
                 } else {
-                    f(sys_info, &x.orelse, res, environment)?;
+                    f(sys_info, &x.orelse, guards, environment)
                 }
             }
             Stmt::For(x) => {
@@ -1040,9 +1129,10 @@ pub(crate) fn function_last_expressions<'a>(
                 x.body
                     .visit(&mut |stmt| loop_body_has_break_statement(stmt, &mut has_break));
                 if has_break || x.orelse.is_empty() {
-                    return None;
+                    None
+                } else {
+                    f(sys_info, &x.orelse, guards, environment)
                 }
-                f(sys_info, &x.orelse, res, environment)?;
             }
             Stmt::If(x) => {
                 *environment |= iter::once(Some(&*x.test))
@@ -1050,84 +1140,119 @@ pub(crate) fn function_last_expressions<'a>(
                     .any(|t| t.is_some_and(SysInfo::depends_on_sys_info));
                 let mut last_test = None;
                 let mut any_branch_processed = false;
-                for (test, body) in sys_info.pruned_if_branches(x) {
+                // AND-identity for diverge formulas: always diverges.
+                let mut acc: Option<Vec<Vec<LastPathExpr<'a>>>> = Some(vec![vec![]]);
+                for (index, (range, test, body)) in sys_info.pruned_if_branches(x).enumerate() {
                     any_branch_processed = true;
                     last_test = test;
-                    f(sys_info, body, res, environment)?;
+                    // A suite whose test makes it dead never reaches its end, whichever paths it
+                    // has, so its `BranchEnd` guards them, and stands for the suite when it falls
+                    // off its end. The binder gives one to every suite with a test of its own or
+                    // a test above it. In this pruned view, that is every suite but a first one
+                    // without a test: a clause whose test `SysInfo` evaluates as true, which runs
+                    // whenever the statement does, or an `else` after clauses whose tests it
+                    // evaluates as false.
+                    // Neither can be dead by its test, so it needs no guard.
+                    let branch = if index == 0 && test.is_none() {
+                        f(sys_info, body, guards, environment)?
+                    } else {
+                        guards.push(range);
+                        let branch = f(sys_info, body, guards, environment);
+                        guards.pop();
+                        branch.unwrap_or_else(|| {
+                            vec![vec![LastPathExpr {
+                                last: LastStmt::BranchEnd(range),
+                                expr: &x.test,
+                                guards: guards.as_slice().into(),
+                            }]]
+                        })
+                    };
+                    acc = and_dnf(acc, Some(branch));
                 }
                 if !any_branch_processed {
-                    // All branches were pruned, so the code falls through
                     return None;
                 }
                 if last_test.is_some() {
-                    // The if/elif chain has no else clause, so it's not syntactically exhaustive.
-                    // But it might be type-exhaustive. Add a LastStmt::Exhaustive entry so we can check
-                    // at solve time. We use the test expression as a placeholder; the actual
-                    // exhaustiveness check uses the if range to find the Exhaustive binding.
-                    res.push((
-                        LastStmt::Exhaustive(ExhaustivenessKind::IfElif, x.range),
-                        &x.test,
-                    ));
+                    // The chain has no `else`, so control may fall through it. The fall-through's
+                    // `BranchEnd` decides whether it is dead, either because its test settles it
+                    // or because the chain is type-exhaustive. We use the test expression as a
+                    // placeholder; the key is found by the range.
+                    let fall_through = vec![LastPathExpr {
+                        last: LastStmt::BranchEnd(TextRange::empty(x.range.start())),
+                        expr: &x.test,
+                        guards: guards.as_slice().into(),
+                    }];
+                    acc = and_dnf(acc, Some(vec![fall_through]));
                 }
+                acc
             }
             Stmt::Try(x) => {
-                // If final body is not empty, _and_ contains a return statement,
-                // process it.
-                if !x.finalbody.is_empty()
-                    && x.finalbody
-                        .iter()
-                        .any(|stmt| matches!(stmt, Stmt::Return(_)))
-                {
-                    f(sys_info, &x.finalbody, res, environment)?;
-                } else {
-                    if x.orelse.is_empty() {
-                        f(sys_info, &x.body, res, environment)?;
+                // Fall-through after try/finally requires both the try path and the finally
+                // path to fall through, so the try diverges if either side diverges (OR).
+                let body_paths = {
+                    let mut body_acc: Option<Vec<Vec<LastPathExpr<'a>>>> = Some(vec![vec![]]);
+                    let body_suite = if x.orelse.is_empty() {
+                        &x.body
                     } else {
-                        f(sys_info, &x.orelse, res, environment)?;
+                        &x.orelse
+                    };
+                    match f(sys_info, body_suite, guards, environment) {
+                        None => body_acc = None,
+                        Some(p) => body_acc = and_dnf(body_acc, Some(p)),
                     }
-                    for handler in &x.handlers {
-                        match handler {
-                            ExceptHandler::ExceptHandler(x) => {
-                                f(sys_info, &x.body, res, environment)?
+                    if body_acc.is_some() {
+                        for handler in &x.handlers {
+                            match handler {
+                                ExceptHandler::ExceptHandler(h) => {
+                                    match f(sys_info, &h.body, guards, environment) {
+                                        None => {
+                                            body_acc = None;
+                                            break;
+                                        }
+                                        Some(p) => body_acc = and_dnf(body_acc, Some(p)),
+                                    }
+                                }
                             }
                         }
                     }
-                    // If we don't have a matching handler, we raise an exception, which is fine.
+                    body_acc
+                };
+                if x.finalbody.is_empty() {
+                    body_paths
+                } else {
+                    let finally_paths = f(sys_info, &x.finalbody, guards, environment);
+                    or_dnf(finally_paths, body_paths)
                 }
             }
             Stmt::Match(x) => {
                 let mut syntactically_exhaustive = false;
+                let mut acc: Option<Vec<Vec<LastPathExpr<'a>>>> = Some(vec![vec![]]);
                 for case in x.cases.iter() {
-                    f(sys_info, &case.body, res, environment)?;
-                    // Must match the binding step's exhaustiveness judgment in
-                    // `stmt_match`; otherwise the `Key::Exhaustive(Match, ...)` promised
-                    // below is never inserted and solve time panics.
+                    let branch = f(sys_info, &case.body, guards, environment)?;
+                    acc = and_dnf(acc, Some(branch));
                     if match_case_always_matches(&case.pattern, &x.subject, case.guard.as_deref()) {
                         syntactically_exhaustive = true;
                         break;
                     }
                 }
                 if !syntactically_exhaustive {
-                    // The match is not syntactically exhaustive, but might be type-exhaustive.
-                    // Add a LastStmt::Exhaustive entry so we can check at solve time.
-                    // We use the subject expression as a placeholder; the actual exhaustiveness
-                    // check uses the match range to find the Exhaustive binding.
-                    res.push((
-                        LastStmt::Exhaustive(ExhaustivenessKind::Match, x.range),
-                        x.subject.as_ref(),
-                    ));
+                    let exhaustive = vec![LastPathExpr {
+                        last: LastStmt::Exhaustive(x.range),
+                        expr: x.subject.as_ref(),
+                        guards: guards.as_slice().into(),
+                    }];
+                    acc = and_dnf(acc, Some(vec![exhaustive]));
                 }
+                acc
             }
-            _ => return None,
+            _ => None,
         }
-        Some(())
     }
 
-    let mut res = Vec::new();
     let mut environment = false;
-    f(sys_info, x, &mut res, &mut environment)?;
+    let clauses = f(sys_info, x, &mut Vec::new(), &mut environment)?;
     Some(LastExpressions {
-        exprs: res,
+        clauses,
         decided_by_environment: environment,
     })
 }

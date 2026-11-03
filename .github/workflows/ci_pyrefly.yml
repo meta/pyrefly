@@ -76,8 +76,10 @@ jobs:
       if: ${{ matrix.os != 'windows-latest' }}
     - run: cargo fmt -- --check
     - run: cargo clippy --release
-    - run: cargo build --release
-    - run: cargo test --release
+    # The release profile's fat LTO and single codegen unit make compiling the
+    # test binaries very slow, so the tests use the bench profile, which turns
+    # both off. This also builds the pyrefly binary.
+    - run: cargo test --profile bench
     - name: Check conformance output is up to date
       # The generated output is platform-independent, so one OS is enough. It must not
       # be Windows: the check keys results by splitting paths on "/".
@@ -101,7 +103,9 @@ jobs:
     - name: Bootstrap tensor-shapes virtualenv
       run: python tensor-shapes/bootstrap_venv.py
     - name: Run tensor-shape type checks
-      run: python tensor-shapes/run_tests.py --release --static-only
+      env:
+        PYREFLY: ${{ github.workspace }}/target/release/pyrefly
+      run: python tensor-shapes/run_tests.py --static-only
     - name: Run tensor-shape runtime tests
       run: python tensor-shapes/run_tests.py --runtime-only
       if: ${{ matrix.os == 'ubuntu-latest' }}

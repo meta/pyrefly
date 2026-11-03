@@ -17,7 +17,7 @@ use serde::Serialize;
 /// three buckets: typed (concrete annotation with no `Any`), any (annotation
 /// that resolves to or contains `Any`), or untyped (no annotation at all).
 /// `n_typable` is always the sum of the other three.
-#[derive(Debug, Serialize, Default, Clone, Copy)]
+#[derive(Debug, Serialize, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SlotCounts {
     /// Total number of annotation sites.
     pub n_typable: usize,

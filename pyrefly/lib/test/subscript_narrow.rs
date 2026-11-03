@@ -9,6 +9,22 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_conditional_subscript_reassignment_preserves_union,
+    r#"
+from typing import Literal, TypedDict, assert_type
+class C(TypedDict):
+    x: int | None
+def f(c: C, flag: bool) -> None:
+    c["x"] = None
+    if flag:
+        c["x"] = 1
+    assert_type(c["x"], Literal[1] | None)
+    assert c["x"] is not None
+    assert_type(c["x"], Literal[1])
+"#,
+);
+
+testcase!(
     test_index_narrow,
     r#"
 from typing import assert_type
@@ -726,4 +742,26 @@ def test() -> None:
     # fall back to `int` instead of tracking the literal value.
     assert_type(d["k"], int)
 "#,
+);
+
+testcase!(
+    test_or_with_unreachable_branch_keeps_subscript_narrow,
+    r#"
+from typing import assert_type
+
+def f(x: tuple[str, int | None]) -> None:
+    if isinstance(x, int) or x[1] is not None:
+        assert_type(x[1], int)
+    "#,
+);
+
+testcase!(
+    test_or_with_only_unreachable_branches_is_never,
+    r#"
+from typing import Never, assert_type
+
+def f(x: tuple[str, int]) -> None:
+    if isinstance(x, int) or len(x) != 2:
+        assert_type(x, Never)
+    "#,
 );

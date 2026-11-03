@@ -7,9 +7,11 @@
 
 // @lint-ignore-every SPELL
 
+use std::cell::LazyCell;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use dupe::Dupe;
 use lsp_types::Contents;
 use lsp_types::Hover;
 use lsp_types::MarkupContent;
@@ -20,6 +22,7 @@ use pyrefly_build::handle::Handle;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::docstring::parse_parameter_documentation;
+use pyrefly_python::dunder;
 use pyrefly_python::ignore::Ignore;
 use pyrefly_python::ignore::Tool;
 use pyrefly_python::ignore::TypeIgnoreUnknownTagBehavior;
@@ -38,14 +41,17 @@ use pyrefly_types::type_var::Variance;
 use pyrefly_types::types::Type;
 use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::lined_buffer::LineNumber;
-use pyrefly_util::visit::Visit;
 use regex::Regex;
 use ruff_python_ast::AnyNodeRef;
+use ruff_python_ast::CmpOp;
+use ruff_python_ast::Expr;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::UnaryOp;
 use ruff_python_ast::name::Name;
+use ruff_python_ast::token::Token;
+use ruff_python_ast::token::TokenKind;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -54,6 +60,7 @@ use vec1::Vec1;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::binding::binding::Key;
 use crate::error::error::Error;
+use crate::export::exports::ExportLocation;
 use crate::lsp::module_helpers::collect_symbol_def_paths;
 use crate::lsp::module_helpers::to_real_path;
 use crate::lsp::wasm::signature_help::CallInfo;
@@ -508,6 +515,70 @@ fn identifier_text_at(
         .map(|id| id.identifier.id.to_string())
 }
 
+/// Find documentation for a class object, including classes in closed modules.
+fn docstring_for_class_object_type(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    type_: &Type,
+) -> Option<Docstring> {
+    let qname = match type_ {
+        Type::ClassDef(cls) => cls.qname(),
+        Type::Type(inner) => match inner.as_ref() {
+            Type::ClassType(cls) => cls.qname(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let definition_handle = Handle::new(
+        qname.module_name(),
+        qname.module_path().dupe(),
+        handle.sys_info().dupe(),
+    );
+    let module = transaction.get_module_info(&definition_handle)?;
+    // Exported classes retain their docstring range after their AST is evicted.
+    let range = if let Some(ExportLocation::ThisModule(export)) =
+        transaction.get_exports(&definition_handle).get(qname.id())
+        && export.location == qname.range()
+    {
+        export.docstring_range
+    } else {
+        let ast = transaction.get_ast_or_parse_module(handle, &module);
+        Ast::locate_node(&ast, qname.range().start())
+            .into_iter()
+            .find_map(|node| match node {
+                AnyNodeRef::StmtClassDef(class) if class.name.range() == qname.range() => {
+                    Docstring::range_from_stmts(&class.body)
+                }
+                _ => None,
+            })
+    };
+    range
+        .map(|range| Docstring(range, module))
+        .and_then(nonempty_docstring)
+        .or_else(|| {
+            // A module export must not stand in for a nested class with the same name.
+            if !qname.module_path().is_interface() || !qname.parent().is_toplevel() {
+                return None;
+            }
+            let (implementation_handle, _, export) = transaction.resolve_named_import(
+                handle,
+                qname.module_name(),
+                qname.id().clone(),
+                FindPreference {
+                    prefer_pyi: false,
+                    include_interpreter_stdlib: true,
+                    ..FindPreference::default()
+                },
+            )?;
+            if export.symbol_kind != Some(SymbolKind::Class) {
+                return None;
+            }
+            let range = export.docstring_range?;
+            let module = transaction.get_module_info(&implementation_handle)?;
+            nonempty_docstring(Docstring(range, module))
+        })
+}
+
 fn collect_typed_dict_fields_for_hover<'a>(
     solver: &AnswersSolver<TransactionHandle<'a>>,
     ty: &Type,
@@ -757,6 +828,447 @@ fn in_keyword_in_iteration_at(ast: Option<&ModModule>, position: TextSize) -> Op
     None
 }
 
+/// Find a keyword using the lexer tokens retained for LSP requests.
+fn keyword_token_at(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    position: TextSize,
+) -> Option<Token> {
+    let tokens = transaction.get_parsed_module(handle)?.tokens()?;
+    tokens
+        .at_offset(position)
+        .find(|token| token.kind().is_keyword())
+}
+
+/// Soft keywords remain valid identifiers outside their specific grammar constructs.
+fn soft_keyword_is_syntax(token: Token, ast: &ModModule) -> bool {
+    let position = token.range().start();
+    Ast::locate_node(ast, position)
+        .into_iter()
+        .any(|node| match (token.kind(), node) {
+            (TokenKind::Match, AnyNodeRef::StmtMatch(stmt)) => {
+                position < stmt.subject.range().start()
+            }
+            (TokenKind::Case, AnyNodeRef::MatchCase(case)) => {
+                position < case.pattern.range().start()
+            }
+            (TokenKind::Lazy, AnyNodeRef::StmtImport(stmt)) => {
+                stmt.is_lazy && position == stmt.range().start()
+            }
+            (TokenKind::Lazy, AnyNodeRef::StmtImportFrom(stmt)) => {
+                stmt.is_lazy && position == stmt.range().start()
+            }
+            (TokenKind::Type, AnyNodeRef::StmtTypeAlias(stmt)) => {
+                position < stmt.name.range().start()
+            }
+            _ => false,
+        })
+}
+
+/// Select documentation for the keyword's grammatical role, if it is documented.
+fn keyword_documentation(token: Token, ast: &ModModule) -> Option<(&'static str, &'static str)> {
+    let compound = "https://docs.python.org/3/reference/compound_stmts.html";
+    let position = token.range().start();
+    let nodes = LazyCell::new(|| Ast::locate_node(ast, position));
+    // Operand boundaries distinguish each operator in a comparison chain, including
+    // compound operators whose keywords are separated by comments or newlines.
+    let comparison = LazyCell::new(|| {
+        nodes.iter().find_map(|node| {
+            let AnyNodeRef::ExprCompare(compare) = node else {
+                return None;
+            };
+            let mut left = compare.first_operand();
+            for (op, right) in compare.ops.iter().zip(compare.comparators()) {
+                if TextRange::new(left.range().end(), right.range().start()).contains(position) {
+                    return Some(*op);
+                }
+                left = right;
+            }
+            None
+        })
+    });
+    Some(match token.kind() {
+        TokenKind::False => (
+            "The false value of the `bool` type.",
+            "https://docs.python.org/3/library/constants.html#False",
+        ),
+        TokenKind::None => (
+            "The singleton value used to represent the absence of a value.",
+            "https://docs.python.org/3/library/constants.html#None",
+        ),
+        TokenKind::True => (
+            "The true value of the `bool` type.",
+            "https://docs.python.org/3/library/constants.html#True",
+        ),
+        TokenKind::And => (
+            "Evaluates the right operand only when the left operand is true, then returns one of the operands.",
+            "https://docs.python.org/3/reference/expressions.html#boolean-operations",
+        ),
+        TokenKind::Or => (
+            "Evaluates the right operand only when the left operand is false, then returns one of the operands.",
+            "https://docs.python.org/3/reference/expressions.html#boolean-operations",
+        ),
+        TokenKind::Not if *comparison == Some(CmpOp::NotIn) => (
+            "Negates a membership test, producing `True` when the left operand is not a member of the right operand.",
+            "https://docs.python.org/3/reference/expressions.html#membership-test-operations",
+        ),
+        TokenKind::Not if *comparison == Some(CmpOp::IsNot) => (
+            "Completes the `is not` operator, which tests whether two references point to different objects.",
+            "https://docs.python.org/3/reference/expressions.html#is-not",
+        ),
+        TokenKind::Not => (
+            "Negates the truth value of its operand.",
+            "https://docs.python.org/3/reference/expressions.html#boolean-operations",
+        ),
+        TokenKind::In if *comparison == Some(CmpOp::NotIn) => (
+            "Tests whether the left operand is not a member of the right operand.",
+            "https://docs.python.org/3/reference/expressions.html#membership-test-operations",
+        ),
+        TokenKind::In => (
+            "Tests whether the left operand is a member of the right operand.",
+            "https://docs.python.org/3/reference/expressions.html#membership-test-operations",
+        ),
+        TokenKind::Is if *comparison == Some(CmpOp::IsNot) => (
+            "Tests whether two references point to different objects.",
+            "https://docs.python.org/3/reference/expressions.html#is-not",
+        ),
+        TokenKind::Is => (
+            "Tests whether two references point to the same object.",
+            "https://docs.python.org/3/reference/expressions.html#is-not",
+        ),
+        TokenKind::Lambda => (
+            "Creates an anonymous function whose body is a single expression.",
+            "https://docs.python.org/3/reference/expressions.html#lambdas",
+        ),
+        TokenKind::Yield
+            if nodes
+                .iter()
+                .any(|node| matches!(node, AnyNodeRef::ExprYieldFrom(_))) =>
+        {
+            (
+                "Delegates part of a generator's operation to another iterable with `yield from`.",
+                "https://docs.python.org/3/reference/expressions.html#yield-expressions",
+            )
+        }
+        TokenKind::Yield => (
+            "Suspends a generator and produces a value for its caller.",
+            "https://docs.python.org/3/reference/expressions.html#yield-expressions",
+        ),
+        TokenKind::Await => (
+            "Suspends the current coroutine until the awaitable completes.",
+            "https://docs.python.org/3/reference/expressions.html#await-expression",
+        ),
+        TokenKind::Assert => (
+            "Checks a condition and raises `AssertionError` when it is false. Assertions may be disabled with optimization.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-assert-statement",
+        ),
+        TokenKind::Break => (
+            "Exits the nearest enclosing loop and skips that loop's `else` clause.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-break-statement",
+        ),
+        TokenKind::Continue => (
+            "Skips the rest of the current loop iteration and proceeds with the next one.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-continue-statement",
+        ),
+        TokenKind::Del => (
+            "Deletes a name, item, slice, or attribute according to the target.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-del-statement",
+        ),
+        TokenKind::From
+            if nodes
+                .iter()
+                .any(|node| matches!(node, AnyNodeRef::ExprYieldFrom(_))) =>
+        {
+            (
+                "Delegates part of a generator's operation to another iterable.",
+                "https://docs.python.org/3/reference/expressions.html#yield-expressions",
+            )
+        }
+        TokenKind::From
+            if nodes
+                .iter()
+                .any(|node| matches!(node, AnyNodeRef::StmtRaise(_))) =>
+        {
+            (
+                "Introduces the explicit cause of an exception, or suppresses its context with `from None`.",
+                "https://docs.python.org/3/reference/simple_stmts.html#the-raise-statement",
+            )
+        }
+        TokenKind::From => (
+            "Introduces the module in a `from ... import ...` statement.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-import-statement",
+        ),
+        TokenKind::Import
+            if nodes.iter().any(|node| {
+                matches!(node, AnyNodeRef::StmtImport(stmt) if stmt.is_lazy)
+                    || matches!(node, AnyNodeRef::StmtImportFrom(stmt) if stmt.is_lazy)
+            }) =>
+        {
+            (
+                "Binds names through an import whose module loading is deferred until first use.",
+                "https://docs.python.org/3.15/reference/simple_stmts.html#lazy-imports",
+            )
+        }
+        TokenKind::Import => (
+            "Loads a module and binds selected names, or binds the module itself.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-import-statement",
+        ),
+        TokenKind::Global => (
+            "Makes listed names refer to bindings in the module's global scope.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-global-statement",
+        ),
+        TokenKind::Nonlocal => (
+            "Makes listed names refer to existing bindings in the nearest enclosing function scope.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-nonlocal-statement",
+        ),
+        TokenKind::Pass => (
+            "Performs no operation; it is a placeholder where syntax requires a statement.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-pass-statement",
+        ),
+        TokenKind::Raise => nodes
+            .iter()
+            .find_map(|node| match node {
+                AnyNodeRef::StmtRaise(stmt) if stmt.cause.is_some() => Some((
+                    "Raises an exception with an explicit cause set or suppressed by `from`.",
+                    "https://docs.python.org/3/reference/simple_stmts.html#the-raise-statement",
+                )),
+                AnyNodeRef::StmtRaise(stmt) if stmt.exc.is_none() => Some((
+                    "Re-raises the exception currently being handled.",
+                    "https://docs.python.org/3/reference/simple_stmts.html#the-raise-statement",
+                )),
+                AnyNodeRef::StmtRaise(_) => Some((
+                    "Raises the specified exception.",
+                    "https://docs.python.org/3/reference/simple_stmts.html#the-raise-statement",
+                )),
+                _ => None,
+            })
+            .unwrap_or((
+                "Raises an exception, or re-raises the exception currently being handled.",
+                "https://docs.python.org/3/reference/simple_stmts.html#the-raise-statement",
+            )),
+        TokenKind::Return => (
+            "Leaves the current function and supplies its result to the caller.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-return-statement",
+        ),
+        TokenKind::Type => (
+            "Declares a type alias. `type` is a soft keyword in this context.",
+            "https://docs.python.org/3/reference/simple_stmts.html#the-type-statement",
+        ),
+        TokenKind::Lazy => (
+            "Marks an import as potentially lazy, deferring module loading until the imported name is first used. `lazy` is a soft keyword added in Python 3.15.",
+            "https://docs.python.org/3.15/reference/simple_stmts.html#lazy-imports",
+        ),
+        TokenKind::As => nodes
+            .iter()
+            .find_map(|node| match node {
+                AnyNodeRef::Alias(_) => Some((
+                    "Binds an imported module or name under an alternate name.",
+                    "https://docs.python.org/3/reference/simple_stmts.html#the-import-statement",
+                )),
+                AnyNodeRef::ExceptHandlerExceptHandler(_) => Some((
+                    "Binds the handled exception to a name for the duration of the handler.",
+                    "https://docs.python.org/3/reference/compound_stmts.html#except-clause",
+                )),
+                AnyNodeRef::WithItem(_) => Some((
+                    "Binds the value returned by a context manager's enter method.",
+                    "https://docs.python.org/3/reference/compound_stmts.html#the-with-statement",
+                )),
+                AnyNodeRef::PatternMatchAs(_) => Some((
+                    "Binds the value matched by a pattern to a name.",
+                    "https://docs.python.org/3/reference/compound_stmts.html#the-match-statement",
+                )),
+                _ => None,
+            })
+            .unwrap_or((
+                "Binds a value under a name in the surrounding construct.",
+                compound,
+            )),
+        TokenKind::Async
+            if nodes
+                .iter()
+                .any(|node| matches!(node, AnyNodeRef::Comprehension(_))) =>
+        {
+            (
+                "Marks a comprehension clause as asynchronous.",
+                "https://docs.python.org/3/reference/expressions.html#displays-for-lists-sets-and-dictionaries",
+            )
+        }
+        TokenKind::Async
+            if nodes
+                .iter()
+                .any(|node| matches!(node, AnyNodeRef::StmtFor(_))) =>
+        {
+            (
+                "Marks a `for` statement as asynchronous, iterating with the asynchronous iteration protocol.",
+                "https://docs.python.org/3/reference/compound_stmts.html#the-async-for-statement",
+            )
+        }
+        TokenKind::Async
+            if nodes
+                .iter()
+                .any(|node| matches!(node, AnyNodeRef::StmtWith(_))) =>
+        {
+            (
+                "Marks a `with` statement as asynchronous, using asynchronous context managers.",
+                "https://docs.python.org/3/reference/compound_stmts.html#the-async-with-statement",
+            )
+        }
+        TokenKind::Async => (
+            "Marks a function definition as asynchronous.",
+            "https://docs.python.org/3/reference/compound_stmts.html#coroutine-function-definition",
+        ),
+        TokenKind::Class => (
+            "Creates a class object by executing the class body in a new namespace.",
+            "https://docs.python.org/3/reference/compound_stmts.html#class-definitions",
+        ),
+        TokenKind::Def => (
+            "Defines a function and binds the resulting function object to a name.",
+            "https://docs.python.org/3/reference/compound_stmts.html#function-definitions",
+        ),
+        TokenKind::Elif => (
+            "Tests another condition when all preceding conditions in the `if` statement were false.",
+            "https://docs.python.org/3/reference/compound_stmts.html#the-if-statement",
+        ),
+        TokenKind::Else => nodes
+            .iter()
+            .find_map(|node| match node {
+                AnyNodeRef::ExprIf(_) => Some((
+                    "Introduces the value selected when a conditional expression's condition is false.",
+                    "https://docs.python.org/3/reference/expressions.html#conditional-expressions",
+                )),
+                AnyNodeRef::StmtIf(_) => Some((
+                    "Introduces the suite selected when all preceding conditions are false.",
+                    "https://docs.python.org/3/reference/compound_stmts.html#the-if-statement",
+                )),
+                AnyNodeRef::StmtFor(_) => Some((
+                    "Introduces the suite run after iteration is exhausted, but not after `break`.",
+                    "https://docs.python.org/3/reference/compound_stmts.html#the-for-statement",
+                )),
+                AnyNodeRef::StmtWhile(_) => Some((
+                    "Introduces the suite run when the condition becomes false, but not after `break`.",
+                    "https://docs.python.org/3/reference/compound_stmts.html#the-while-statement",
+                )),
+                AnyNodeRef::StmtTry(_) => Some((
+                    "Introduces the suite run when the `try` suite completes without an exception or control-flow exit.",
+                    "https://docs.python.org/3/reference/compound_stmts.html#the-try-statement",
+                )),
+                _ => None,
+            })
+            .unwrap_or((
+                "Introduces a fallback branch in the surrounding construct.",
+                compound,
+            )),
+        TokenKind::Except
+            if nodes
+                .iter()
+                .any(|node| matches!(node, AnyNodeRef::StmtTry(stmt) if stmt.is_star)) =>
+        {
+            (
+                "Handles matching subgroups from an exception group independently with `except*`.",
+                "https://docs.python.org/3/reference/compound_stmts.html#except-clause",
+            )
+        }
+        TokenKind::Except => (
+            "Handles an exception raised by the associated `try` suite when its type matches.",
+            "https://docs.python.org/3/reference/compound_stmts.html#except-clause",
+        ),
+        TokenKind::Finally => (
+            "Runs a cleanup suite when control leaves the associated `try` statement, including during exceptions and returns.",
+            "https://docs.python.org/3/reference/compound_stmts.html#finally-clause",
+        ),
+        TokenKind::For
+            if nodes
+                .iter()
+                .any(|node| matches!(node, AnyNodeRef::Comprehension(_))) =>
+        {
+            (
+                "Introduces an iteration clause in a comprehension.",
+                "https://docs.python.org/3/reference/expressions.html#displays-for-lists-sets-and-dictionaries",
+            )
+        }
+        TokenKind::For => (
+            "Iterates over an iterable, assigning each item to the target. Its `else` suite runs after exhaustion, but not after `break`.",
+            "https://docs.python.org/3/reference/compound_stmts.html#the-for-statement",
+        ),
+        TokenKind::If => nodes
+            .iter()
+            .find_map(|node| match node {
+                AnyNodeRef::ExprIf(_) => Some((
+                    "Selects one of two values according to a condition.",
+                    "https://docs.python.org/3/reference/expressions.html#conditional-expressions",
+                )),
+                AnyNodeRef::Comprehension(_) => Some((
+                    "Filters items in a comprehension according to a condition.",
+                    "https://docs.python.org/3/reference/expressions.html#displays-for-lists-sets-and-dictionaries",
+                )),
+                AnyNodeRef::MatchCase(_) => Some((
+                    "Introduces a guard that must succeed after a `case` pattern matches.",
+                    "https://docs.python.org/3/reference/compound_stmts.html#guards",
+                )),
+                AnyNodeRef::StmtIf(_) => Some((
+                    "Conditionally selects a suite.",
+                    "https://docs.python.org/3/reference/compound_stmts.html#the-if-statement",
+                )),
+                _ => None,
+            })
+            .unwrap_or((
+                "Conditionally selects a suite or value.",
+                "https://docs.python.org/3/reference/compound_stmts.html#the-if-statement",
+            )),
+        TokenKind::Match => (
+            "Evaluates a subject and selects the first `case` whose pattern and optional guard succeed. `match` is a soft keyword.",
+            "https://docs.python.org/3/reference/compound_stmts.html#the-match-statement",
+        ),
+        TokenKind::Case => (
+            "Introduces a pattern and optional guard within a `match` statement. `case` is a soft keyword.",
+            "https://docs.python.org/3/reference/compound_stmts.html#the-match-statement",
+        ),
+        TokenKind::Try => (
+            "Runs a protected suite with optional exception handlers, an `else` suite, and cleanup in `finally`.",
+            "https://docs.python.org/3/reference/compound_stmts.html#the-try-statement",
+        ),
+        TokenKind::While => (
+            "Repeats a suite while its condition is true. Its `else` suite runs when the condition becomes false, but not after `break`.",
+            "https://docs.python.org/3/reference/compound_stmts.html#the-while-statement",
+        ),
+        TokenKind::With => (
+            "Runs a suite under one or more context managers, ensuring their exit methods are called.",
+            "https://docs.python.org/3/reference/compound_stmts.html#the-with-statement",
+        ),
+        _ => return None,
+    })
+}
+
+/// Build keyword documentation that can stand alone or supplement a type hover.
+fn keyword_hover(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    module: Option<&Module>,
+    ast: Option<&ModModule>,
+    position: TextSize,
+) -> Option<HoverResult> {
+    let module = module?;
+    let ast = ast?;
+    let token = keyword_token_at(transaction, handle, position)?;
+    if token.kind().is_soft_keyword() && !soft_keyword_is_syntax(token, ast) {
+        return None;
+    }
+    let (documentation, reference) = keyword_documentation(token, ast)?;
+    let keyword = module.code_at(token.range());
+    Some(HoverResult {
+        hover: Hover {
+            contents: Contents::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!(
+                    "```python\n(keyword) {keyword}\n```\n---\n{documentation}\n\n[Python language reference]({reference})"
+                ),
+            }),
+            range: Some(module.to_lsp_range(token.range())),
+        },
+        can_increase_verbosity: false,
+    })
+}
+
 /// Hover contents when the cursor is on an ignore comment covering suppressed errors.
 fn ignore_comment_hover(
     transaction: &Transaction<'_>,
@@ -796,23 +1308,82 @@ fn ignore_comment_hover(
 fn in_keyword_hover(
     transaction: &Transaction<'_>,
     handle: &Handle,
+    module: Option<&Module>,
     ast: Option<&ModModule>,
     position: TextSize,
 ) -> Option<HoverResult> {
-    let iterable_range = in_keyword_in_iteration_at(ast, position)?;
+    let module = module?;
+    let ast = ast?;
+    let token = keyword_token_at(transaction, handle, position)?;
+    if token.kind() != TokenKind::In {
+        return None;
+    }
+    let iterable_range = in_keyword_in_iteration_at(Some(ast), position)?;
     let iterable_type = transaction.get_type_at(handle, iterable_range.start())?;
+    let (documentation, reference) = if Ast::locate_node(ast, position)
+        .iter()
+        .any(|node| matches!(node, AnyNodeRef::Comprehension(_)))
+    {
+        (
+            "Separates the target and iterable in a comprehension's iteration clause.",
+            "https://docs.python.org/3/reference/expressions.html#displays-for-lists-sets-and-dictionaries",
+        )
+    } else {
+        (
+            "Separates the target and iterable in a `for` statement. The iterable is evaluated once, then its items are assigned to the target one by one.",
+            "https://docs.python.org/3/reference/compound_stmts.html#the-for-statement",
+        )
+    };
     Some(HoverResult {
         hover: Hover {
             contents: Contents::MarkupContent(MarkupContent {
                 kind: MarkupKind::Markdown,
                 value: format!(
-                    "```python\n(keyword) in\n```\n---\nIteration over `{iterable_type}`"
+                    "```python\n(keyword) in\n```\n---\nIteration over `{iterable_type}`\n\n{documentation}\n\n[Python language reference]({reference})"
                 ),
             }),
-            range: None,
+            range: Some(module.to_lsp_range(token.range())),
         },
         can_increase_verbosity: false,
     })
+}
+
+/// Find the innermost call enclosing the cursor, if the cursor is in its callee.
+/// The returned ranges identify the callee and arguments; the flag excludes receivers and indices.
+fn callee_at_position(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    ast: &ModModule,
+    position: TextSize,
+) -> Option<(TextRange, TextRange, bool)> {
+    let call = Ast::locate_node(ast, position)
+        .into_iter()
+        .find_map(|node| match node {
+            AnyNodeRef::ExprCall(call) => Some(call),
+            _ => None,
+        })?;
+    // An inner call's argument must not be mistaken for part of an outer callee.
+    if !call.func.range().contains_inclusive(position) {
+        return None;
+    }
+    let mut name = call.func.as_ref();
+    // Class specialization names a constructor; ordinary indexing names a receiver.
+    while let Expr::Subscript(subscript) = name {
+        if !transaction
+            .get_answers(handle)?
+            .get_type_trace(subscript.value.range())
+            .is_some_and(is_constructor_call)
+        {
+            break;
+        }
+        name = subscript.value.as_ref();
+    }
+    let on_name = match name {
+        Expr::Name(name) => name.range().contains_inclusive(position),
+        Expr::Attribute(attr) => attr.attr.range().contains_inclusive(position),
+        _ => false,
+    };
+    Some((call.func.range(), call.arguments.range, on_name))
 }
 
 /// Resolve the type under the cursor, coercing it to a callable when hovering over a
@@ -828,39 +1399,20 @@ fn resolve_hovered_type(
         .or_else(|| transaction.get_type_at(handle, position))
         .or_else(|| transaction.operator_type_at(handle, position))?;
 
-    // Find the innermost call whose callee (func) encloses the cursor, returning the
-    // callee's range and whether the cursor is on the callee's own name — the attribute
-    // in `a.b()`, or the whole callee otherwise. A receiver like `a` in `a.b()` is inside
-    // the callee range but not on the name, so hovering it must not coerce its type.
-    let callee_at_position = || -> Option<(TextRange, bool)> {
-        use ruff_python_ast::Expr;
-        let ast = ast?;
-        let mut result = None;
-        ast.visit(&mut |expr: &Expr| {
-            if let Expr::Call(call) = expr
-                && call.func.range().contains(position)
-            {
-                let on_callee_name = match &*call.func {
-                    Expr::Attribute(attr) => attr.attr.range(),
-                    _ => call.func.range(),
-                }
-                .contains(position);
-                result = Some((call.func.range(), on_callee_name));
+    // A nested callee takes precedence over the surrounding call's argument list.
+    // Receivers and other argument expressions retain their own types.
+    let (callee_range_opt, call_arguments_range, hovering_over_callee) =
+        match ast.and_then(|ast| callee_at_position(transaction, handle, ast, position)) {
+            Some((callee_range, arguments_range, on_name)) => {
+                (Some(callee_range), Some(arguments_range), on_name)
             }
-        });
-        result
-    };
-
-    // Prefer the enclosing call found from the argument list; only walk the AST for a
-    // callee hover when the cursor is not inside an argument. Hovering inside arguments
-    // is never "on the callee", so coercion stays disabled there.
-    let (callee_range_opt, hovering_over_callee) =
-        match transaction.get_callables_from_call(handle, position) {
-            Some(info) => (Some(info.callee_range), false),
-            None => match callee_at_position() {
-                Some((range, on_name)) => (Some(range), on_name),
-                None => (None, false),
-            },
+            None => (
+                transaction
+                    .get_callables_from_call(handle, position)
+                    .map(|info| info.callee_range),
+                None,
+                false,
+            ),
         };
 
     if let Some(callee_range) = callee_range_opt {
@@ -871,7 +1423,16 @@ fn resolve_hovered_type(
         if is_constructor && let Some(new_type) = override_constructor_return_type(type_.clone()) {
             type_ = new_type;
         } else if hovering_over_callee {
-            type_ = transaction.coerce_type_to_callable(handle, type_);
+            // Signature help owns navigation through an overload set. Keep the hover
+            // compact by showing the same selected (or first) signature that it starts on.
+            type_ = call_arguments_range
+                .and_then(|range| transaction.get_callables_from_call(handle, range.start()))
+                .and_then(|info| {
+                    info.callables
+                        .get(info.chosen_overload_index.unwrap_or(0))
+                        .cloned()
+                })
+                .unwrap_or_else(|| transaction.coerce_type_to_callable(handle, type_));
         }
     }
     Some(type_)
@@ -907,6 +1468,61 @@ fn resolve_hover_parameter_doc(
     }
 
     None
+}
+
+fn is_constructor_dunder(name: Option<&str>) -> bool {
+    name.is_some_and(|name| name == dunder::INIT.as_str() || name == dunder::NEW.as_str())
+}
+
+fn nonempty_docstring(docstring: Docstring) -> Option<Docstring> {
+    docstring.has_content().then_some(docstring)
+}
+
+/// Class docstring for a constructor call whose `__init__` or `__new__` has none.
+///
+/// Eligibility comes from the callee's class type. `find_definition` with dunder
+/// resolution disabled reports `Attribute` or `Variable` for `lib.Person()` and
+/// for a class alias, even though the callee type is the class. A stub docstring
+/// wins over the implementation.
+fn class_docstring_for_constructor(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    position: TextSize,
+) -> Option<Docstring> {
+    let ast = transaction.get_ast(handle)?;
+    let (callee_range, _, on_name) = callee_at_position(transaction, handle, &ast, position)?;
+    if !on_name {
+        return None;
+    }
+    let callee_type = transaction
+        .get_answers(handle)?
+        .get_type_trace(callee_range)?;
+    if !is_constructor_call(callee_type.clone()) {
+        return None;
+    }
+
+    let preferences = [
+        FindPreference {
+            resolve_call_dunders: false,
+            ..FindPreference::default()
+        },
+        FindPreference {
+            prefer_pyi: false,
+            include_interpreter_stdlib: true,
+            resolve_call_dunders: false,
+            ..FindPreference::default()
+        },
+    ];
+    let from_definition = preferences.into_iter().find_map(|preference| {
+        let item = transaction
+            .find_definition(handle, position, preference)
+            .ok()
+            .and_then(|items| items.into_vec().into_iter().next())?;
+        item.docstring_range
+            .map(|range| Docstring(range, item.module))
+            .and_then(nonempty_docstring)
+    });
+    from_definition.or_else(|| docstring_for_class_object_type(transaction, handle, &callee_type))
 }
 
 pub fn get_hover(
@@ -947,14 +1563,30 @@ pub fn get_hover_with_verbosity(
         return None;
     }
 
-    if let Some(result) = in_keyword_hover(transaction, handle, ast.as_deref(), position) {
+    if let Some(result) = in_keyword_hover(
+        transaction,
+        handle,
+        module_info.as_ref(),
+        ast.as_deref(),
+        position,
+    ) {
         return Some(result);
     }
 
-    let type_ = resolve_hovered_type(transaction, handle, ast.as_deref(), position)?;
+    let keyword_hover = keyword_hover(
+        transaction,
+        handle,
+        module_info.as_ref(),
+        ast.as_deref(),
+        position,
+    );
 
-    // `a and b and c` is a single flat BoolOp, so hovering any operator in the
-    // chain highlights the whole expression. `not` highlights its unary expression.
+    let Some(type_) = resolve_hovered_type(transaction, handle, ast.as_deref(), position) else {
+        return keyword_hover;
+    };
+
+    // Binary operators, boolean operators, and `not` highlight their enclosing expression.
+    // `a and b and c` is a single flat BoolOp, so any operator highlights the whole chain.
     let range = ast
         .as_deref()
         .zip(module_info.as_ref())
@@ -966,6 +1598,7 @@ pub fn get_hover_with_verbosity(
                     AnyNodeRef::ExprBoolOp(bool_op) => {
                         Some(module_info.to_lsp_range(bool_op.range()))
                     }
+                    AnyNodeRef::ExprBinOp(bin_op) => Some(module_info.to_lsp_range(bin_op.range())),
                     AnyNodeRef::ExprUnaryOp(unary_op) if unary_op.op == UnaryOp::Not => {
                         Some(module_info.to_lsp_range(unary_op.range()))
                     }
@@ -981,6 +1614,7 @@ pub fn get_hover_with_verbosity(
             position,
             FindPreference {
                 prefer_pyi: false,
+                follow_pytest_conftest: true,
                 include_interpreter_stdlib: true,
                 ..Default::default()
             },
@@ -1003,7 +1637,14 @@ pub fn get_hover_with_verbosity(
         // Only borrow documentation from the same public symbol. Preferences may otherwise
         // redirect a factory function to an unrelated stub constructor.
         transaction
-            .find_definition(handle, position, FindPreference::default())
+            .find_definition(
+                handle,
+                position,
+                FindPreference {
+                    follow_pytest_conftest: true,
+                    ..Default::default()
+                },
+            )
             .ok()
             .and_then(|items| items.into_vec().into_iter().next())
             .filter(|interface| {
@@ -1012,6 +1653,9 @@ pub fn get_hover_with_verbosity(
                     && executable.display_name == interface.display_name
             })
     });
+    let hover_constructor_dunder = definition
+        .as_ref()
+        .is_some_and(|item| is_constructor_dunder(item.display_name.as_deref()));
     let (kind, name, fallback_docstring) = if let Some(FindDefinitionItemWithDocstring {
         metadata,
         definition_range: definition_location,
@@ -1036,8 +1680,15 @@ pub fn get_hover_with_verbosity(
             item.docstring_range
                 .map(|range| Docstring(range, item.module))
         })
-        .filter(|docstring| !docstring.resolve().trim().is_empty())
-        .or(fallback_docstring);
+        .and_then(nonempty_docstring)
+        .or_else(|| fallback_docstring.and_then(nonempty_docstring))
+        .or_else(|| docstring_for_class_object_type(transaction, handle, &type_));
+
+    let docstring = if hover_constructor_dunder {
+        docstring.or_else(|| class_docstring_for_constructor(transaction, handle, position))
+    } else {
+        docstring
+    };
 
     let name = name.or_else(|| identifier_text_at(transaction, handle, position));
 
@@ -1097,19 +1748,32 @@ pub fn get_hover_with_verbosity(
 
     let parameter_doc = resolve_hover_parameter_doc(transaction, handle, position);
 
+    let mut hover = HoverValue {
+        kind,
+        name,
+        type_,
+        range,
+        docstring,
+        parameter_doc,
+        type_sources: type_sources_for_hover(transaction, handle, position),
+        display: type_display,
+        show_go_to_links: options.show_go_to_links,
+    }
+    .format(transaction, handle);
+
+    if let Some(keyword_hover) = keyword_hover {
+        let (Contents::MarkupContent(contents), Contents::MarkupContent(documentation)) =
+            (&mut hover.contents, keyword_hover.hover.contents)
+        else {
+            unreachable!("type and keyword hovers always use markdown contents")
+        };
+        contents.value.push_str("\n---\n");
+        contents.value.push_str(&documentation.value);
+        hover.range = hover.range.or(keyword_hover.hover.range);
+    }
+
     Some(HoverResult {
-        hover: HoverValue {
-            kind,
-            name,
-            type_,
-            range,
-            docstring,
-            parameter_doc,
-            type_sources: type_sources_for_hover(transaction, handle, position),
-            display: type_display,
-            show_go_to_links: options.show_go_to_links,
-        }
-        .format(transaction, handle),
+        hover,
         can_increase_verbosity,
     })
 }

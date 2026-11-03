@@ -23,6 +23,7 @@ use ruff_python_ast::name::Name;
 use crate::binding::binding::KeyExport;
 use crate::binding::binding::KeyTParams;
 use crate::state::lsp::attribute_symbol_kind_from_type;
+use crate::state::require::Require;
 use crate::test::class_keywords::get_class_metadata;
 use crate::test::util::TestEnv;
 use crate::test::util::get_class;
@@ -31,7 +32,7 @@ use crate::test::util::testcase_for_macro;
 use crate::testcase;
 use crate::types::types::Type;
 
-fn legacy_shaped_array_env() -> TestEnv {
+pub(super) fn legacy_shaped_array_env() -> TestEnv {
     let mut env = shape_extensions_env();
     // This private top-level stub shadows the shipped package while its real submodules remain
     // available through the site-package path. It deliberately duplicates only the public names
@@ -191,6 +192,53 @@ fn shape_extensions_env_with_torch_and_jaxtyping() -> TestEnv {
     add_jaxtyping_stubs(&mut env);
     env
 }
+
+// https://github.com/facebook/pyrefly/issues/5172
+// A partial Torch overlay can inherit an Any base when runtime Torch is absent.
+testcase!(
+    test_any_base_tensor_argument_dimensions,
+    shape_extensions_env(),
+    r#"
+from shape_extensions import IntTuple, IntVar
+from typing import Any, reveal_type
+
+class Tensor[Shape: IntTuple](Any):
+    shape: Shape
+
+def identity[B: IntVar, H: IntVar](x: Tensor[[B, 16, H, H]]) -> Tensor[[B, 16, H, H]]:
+    return x
+
+def symbolic[B: IntVar](x: Tensor[[B, 16, 8, 8]]) -> Tensor[[B, 16, 4, 4]]:
+    reveal_type(x)  # E: revealed type: Tensor[[B, 16, 8, 8]]
+    reveal_type(identity(x))  # E: revealed type: Tensor[[B, 16, 8, 8]]
+    return identity(x)  # E: Shape dimension mismatch: expected Int[4], got Int[8]
+
+def concrete(x: Tensor[[2, 16, 8, 8]]) -> Tensor[[2, 16, 4, 4]]:
+    reveal_type(identity(x))  # E: revealed type: Tensor[[2, 16, 8, 8]]
+    return identity(x)  # E: Shape dimension mismatch: expected Int[4], got Int[8]
+"#,
+);
+
+testcase!(
+    test_any_base_tensor_argument_shape,
+    shape_extensions_env(),
+    r#"
+from shape_extensions import IntTuple
+from typing import Any, reveal_type
+
+type _Shape = IntTuple
+class _TensorBase(Any): ...
+class Tensor[Shape: _Shape = _Shape](_TensorBase):
+    shape: Shape
+
+def identity[S: IntTuple](x: Tensor[S]) -> Tensor[S]:
+    return x
+
+def wrong_return(x: Tensor[[2, 16, 8, 8]]) -> Tensor[[2, 16, 4, 4]]:
+    reveal_type(identity(x))  # E: revealed type: Tensor[[2, 16, 8, 8]]
+    return identity(x)  # E: Shape dimension mismatch: expected Int[4], got Int[8]
+"#,
+);
 
 testcase!(
     test_flag_int_accepts_shape_int_capture,
@@ -656,7 +704,7 @@ from shape_extensions import Int, IntVar, type_shape_dsl_function
 
 @type_shape_dsl_function
 def invalid(x: Int) -> Int:
-    return abs(x)
+    return round(x)
 
 @type_shape_dsl_function
 def invalid_domain(x: str) -> str:
@@ -1417,6 +1465,78 @@ def explicit_alias(x: Dim[str]) -> None:  # E: Tensor shape dimensions must be i
 );
 
 testcase!(
+    test_intvar_gradual_argument_in_return_arithmetic,
+    shape_extensions_env(),
+    r#"
+from typing import assert_type, reveal_type
+from shape_extensions import Int, IntVar
+
+def add[A: IntVar, B: IntVar](a: Int[A], b: Int[B]) -> Int[IntVar[A] + IntVar[B]]: ...
+
+class Dim[N: IntVar]: ...
+
+def add_dims[A: IntVar, B: IntVar](a: Dim[A], b: Dim[B]) -> Dim[IntVar[A] + IntVar[B]]: ...
+
+def check[M: IntVar](
+    symbolic: Int[M], unknown: Int[int], bare: Int, plain: int,
+    symbolic_dim: Dim[M], unknown_dim: Dim[int],
+) -> None:
+    reveal_type(add(unknown, symbolic))  # E: revealed type: Int[int]
+    reveal_type(add(symbolic, unknown))  # E: revealed type: Int[int]
+    reveal_type(add(bare, symbolic))  # E: revealed type: Int[int]
+    reveal_type(add(plain, symbolic))  # E: revealed type: Int[int]
+    reveal_type(add_dims(unknown_dim, symbolic_dim))  # E: revealed type: Dim[int]
+    reveal_type(add_dims(symbolic_dim, unknown_dim))  # E: revealed type: Dim[int]
+    assert_type(add(symbolic, symbolic), Int[M + M])
+    assert_type(add_dims(symbolic_dim, symbolic_dim), Dim[M + M])
+"#,
+);
+
+testcase!(
+    test_intvar_gradual_bounds_yield_to_precise_arguments,
+    shape_extensions_env(),
+    r#"
+from typing import assert_type
+from shape_extensions import Int, IntVar
+
+def same[N: IntVar](x: Int[N], y: Int[N]) -> Int[N + 1]: ...
+def same_three[N: IntVar](x: Int[N], y: Int[N], z: Int[N]) -> Int[N + 1]: ...
+def fixed(x: Int[3]) -> None: ...
+class Dim[N: IntVar]: ...
+def same_dims[N: IntVar](x: Dim[N], y: Dim[N]) -> Dim[N + 1]: ...
+
+def check[M: IntVar](
+    unknown: Int[int], three: Int[3], four: Int[4], symbolic: Int[M], plain: int,
+    unknown_dim: Dim[int], three_dim: Dim[3], four_dim: Dim[4], symbolic_dim: Dim[M],
+) -> None:
+    assert_type(same(unknown, three), Int[4])
+    assert_type(same(three, unknown), Int[4])
+    assert_type(same(unknown, symbolic), Int[M + 1])
+    assert_type(same(symbolic, unknown), Int[M + 1])
+    assert_type(same(plain, symbolic), Int[M + 1])
+    assert_type(same(symbolic, plain), Int[M + 1])
+    assert_type(same(plain, three), Int[4])
+    assert_type(same(three, plain), Int[4])
+    assert_type(same(unknown, unknown), Int[int])
+    assert_type(same_dims(unknown_dim, three_dim), Dim[4])
+    assert_type(same_dims(three_dim, unknown_dim), Dim[4])
+    assert_type(same_dims(unknown_dim, symbolic_dim), Dim[M + 1])
+    assert_type(same_dims(symbolic_dim, unknown_dim), Dim[M + 1])
+    assert_type(same_dims(unknown_dim, unknown_dim), Dim[int])
+    assert_type(same_three(unknown, three, three), Int[4])
+    assert_type(same_three(three, unknown, three), Int[4])
+    assert_type(same_three(three, three, unknown), Int[4])
+    assert_type(same_three(unknown, unknown, three), Int[4])
+    assert_type(same_three(unknown, three, unknown), Int[4])
+    assert_type(same_three(three, unknown, unknown), Int[4])
+    same(three, four)  # E: Argument `Int[4]` is not assignable to parameter `y`
+    same_three(unknown, three, four)  # E: Argument `Int[4]` is not assignable to parameter `z`
+    same_dims(three_dim, four_dim)  # E: Argument `Dim[4]` is not assignable to parameter `y`
+    fixed(plain)  # E: Argument `int` is not assignable to parameter `x`
+"#,
+);
+
+testcase!(
     test_intvar_bad_call_bound_recovers_to_int_gradual,
     shape_extensions_env(),
     r#"
@@ -1948,7 +2068,10 @@ def check[M: IntVar](
     assert_type(bounded_pair(exact, exact), Tensor[[3]])
     assert_type(bounded_pair(3, 3), Tensor[[3]])
     assert_type(bounded_pair(3, 4), Tensor[[int]])
-    assert_type(bounded_pair(gradual, exact), Tensor[[int]])
+    assert_type(bounded_pair(gradual, exact), Tensor[[3]])
+    assert_type(bounded_pair(exact, gradual), Tensor[[3]])
+    assert_type(bounded_pair(gradual, symbolic), Tensor[[M]])
+    assert_type(bounded_pair(symbolic, gradual), Tensor[[M]])
     assert_type(optional_bounded(3), Tensor[[3]])
     assert_type(optional_bounded(None), Tensor[[7]])
     assert_type(optional_bounded(dynamic), Tensor[[int]])
@@ -2006,6 +2129,25 @@ class Other:
 def invalid_same_named_bound[N: Other.Int]() -> Tensor[[identity(N)]]: ...  # E: Expected an `Int` argument for parameter `x` (position 1) of `identity`, got `N`
 def invalid_constraints[N: (Int, str)]() -> Tensor[[identity(N)]]: ...  # E: Expected an `Int` argument for parameter `x` (position 1) of `identity`, got `N`
 def raw_arithmetic[N: Int]() -> Tensor[[identity(N + N)]]: ...  # E: `N` must be an `IntVar` to be used in shape arithmetic  # E: `N` must be an `IntVar` to be used in shape arithmetic
+"#,
+);
+
+testcase!(
+    test_literal_arithmetic_is_concrete_in_shape_inference,
+    shape_extensions_env(),
+    r#"
+from shape_extensions import Int
+from typing import assert_type
+
+class Layer[N: Int]:
+    def __init__(self, channels: N) -> None: ...
+
+layer = Layer(128 + 64)
+assert_type(layer, Layer[Int[192]])
+
+def expects_256(layer: Layer[Int[256]]) -> None: ...
+
+expects_256(layer)  # E: is not assignable to parameter `layer`
 "#,
 );
 
@@ -3414,6 +3556,62 @@ def test_symbolic[N: IntVar, M: IntVar](x: Tensor[[N]], y: Tensor[[M]]) -> None:
 );
 
 testcase!(
+    test_type_shape_dsl_abs,
+    shape_extensions_env_with_torch(),
+    r#"
+from builtins import abs as magnitude
+from shape_extensions import Flag, Int, IntTuple, IntVar, type_shape_dsl_function
+from torch import Tensor
+from typing import assert_type
+
+@type_shape_dsl_function
+def abs_flag(value: int) -> Int:
+    return abs(value)
+
+@type_shape_dsl_function
+def abs_flag_control(n: Int, value: int) -> Int:
+    if abs(value) == 2:
+        return n + 1
+    return n
+
+@type_shape_dsl_function
+def abs_first(shape: IntTuple) -> Int:
+    value = abs(shape[0])
+    if abs(shape[0]) == abs(shape[0]):
+        return value
+    return value
+
+@type_shape_dsl_function
+def diag_extent(n: Int, offset: Int) -> Int:
+    return n + magnitude(offset)
+
+def direct_abs[N: IntVar](x: Tensor[[N]]) -> Tensor[[abs(N)]]: ...
+def first_abs[Shape: IntTuple](x: Tensor[Shape]) -> Tensor[[abs_first(Shape)]]: ...
+def diagonal[N: IntVar, Offset: Int](
+    x: Tensor[[N]], offset: Offset,
+) -> Tensor[[diag_extent(Int[N], Offset)]]: ...
+def flag_result[Offset: Flag[int]](offset: Offset) -> Tensor[[abs_flag(Offset)]]: ...
+def controlled[Offset: Flag[int]](offset: Offset) -> Tensor[[
+    abs_flag_control(Int[3], Offset)
+]]: ...
+
+def check_symbolic[N: IntVar](x: Tensor[[N]]) -> None:
+    assert_type(direct_abs(x), Tensor[[abs(N)]])
+    assert_type(first_abs(x), Tensor[[abs(N)]])
+    assert_type(diagonal(x, -2), Tensor[[N + 2]])
+
+def check_concrete(x: Tensor[[3]], broad: int) -> None:
+    assert_type(direct_abs(x), Tensor[[3]])
+    assert_type(diagonal(x, -2), Tensor[[5]])
+    assert_type(flag_result(-2), Tensor[[2]])
+    assert_type(flag_result(broad), Tensor[[int]])
+    assert_type(flag_result(-9223372036854775808), Tensor[[int]])
+    assert_type(controlled(-2), Tensor[[4]])
+    assert_type(controlled(broad), Tensor[[int]])
+"#,
+);
+
+testcase!(
     test_type_shape_dsl_flag_values,
     shape_extensions_env_with_torch(),
     r#"
@@ -4187,7 +4385,7 @@ def modulo(n: Int, k: int) -> Int:
 
 @type_shape_dsl_function
 def computed_zero_divisor(n: Int) -> Int:
-    return n // (1 - 1)
+    return n // (1 - 1)  # E: Cannot divide by zero
 
 @type_shape_dsl_function
 def local_extent(shape: IntTuple, k: int) -> Int:
@@ -4817,6 +5015,61 @@ def bad_dimension() -> Tensor[[broadcast(IntTuple[2], IntTuple[2])]]: ...  # E: 
 "#,
 );
 
+// `Elements` can unpack the result of a type-level DSL function whose result
+// domain is an `IntTuple`, like `broadcast` (issue #4977).
+testcase!(
+    test_type_level_dsl_broadcast_unpacked_by_elements,
+    shape_extensions_env_with_torch(),
+    r#"
+from shape_extensions import Elements, IntTuple, IntVar, broadcast
+from torch import Tensor
+
+def f[B1: IntTuple, B2: IntTuple, Dim: IntVar](
+    x: Tensor[B1], y: Tensor[[*Elements[B2], Dim]]
+) -> Tensor[[*Elements[broadcast(B1, B2)], Dim]]: ...
+"#,
+);
+
+// `Elements` inherits the ambient context's allowance for type-level DSL calls
+// rather than granting its own, so `Elements[broadcast(...)]` stays rejected
+// under parameter-annotation, alias, and global roots.
+testcase!(
+    test_type_level_dsl_broadcast_rejected_in_elements_outside_return_annotation,
+    shape_extensions_env_with_torch(),
+    r#"
+from shape_extensions import Elements, IntTuple, IntVar, broadcast
+from torch import Tensor
+
+def bad_parameter[B1: IntTuple, B2: IntTuple, Dim: IntVar](x: Tensor[[*Elements[broadcast(B1, B2)], Dim]]) -> None: ...  # E: Function call cannot be used in annotations
+
+BadAlias = Tensor[[*Elements[broadcast(IntTuple[2], IntTuple[3])], 4]]  # E: Function call cannot be used in annotations
+
+bad_global: Tensor[[*Elements[broadcast(IntTuple[2], IntTuple[3])], 4]]  # E: Function call cannot be used in annotations
+"#,
+);
+
+// Inside `Elements`, a type-level DSL call with a non-`IntTuple` result domain
+// keeps the existing `requires an IntTuple` rejection, and a non-DSL call
+// still fails the type-level DSL parse.
+testcase!(
+    test_type_level_dsl_non_inttuple_results_rejected_in_elements,
+    shape_extensions_env_with_torch(),
+    r#"
+from shape_extensions import Elements, Int, IntTuple, broadcast, type_shape_dsl_function
+from torch import Tensor
+
+@type_shape_dsl_function
+def select_int(shape: IntTuple, dim: Int) -> Int:
+    return dim
+
+def bad_result_domain() -> Tensor[[*Elements[select_int(IntTuple[2, 3], Int[2])], 4]]: ...  # E: `Elements[...]` requires an `IntTuple` or integer tuple, got `select_int(IntTuple[2, 3], Int[2])`
+
+def plain() -> IntTuple: ...
+
+def bad_plain_call() -> Tensor[[*Elements[plain()], 4]]: ...  # E: Expected a type-level DSL function, got `() -> IntTuple`
+"#,
+);
+
 testcase!(
     test_type_level_dsl_broadcast_rejected_at_direct_type_roots,
     legacy_shaped_array_env_with_torch(),
@@ -4936,6 +5189,25 @@ def check(x: Fixed) -> None:
 );
 
 testcase!(
+    test_int_and_map_int_tuples_type_arguments_preserved_in_base_class,
+    shape_extensions_env(),
+    r#"
+from shape_extensions import Int, IntTuple, MapIntTuples
+from typing import assert_type
+
+class Box[T]:
+    def get(self) -> T: ...
+
+class FixedInt(Box[Int[3]]): ...
+class Mapped(Box[MapIntTuples[lambda S: list[S], tuple[IntTuple[2], IntTuple[3]]]]): ...
+
+def check(x: FixedInt, y: Mapped) -> None:
+    assert_type(x.get(), Int[3])
+    assert_type(y.get(), tuple[list[IntTuple[2]], list[IntTuple[3]]])
+"#,
+);
+
+testcase!(
     test_tensor_shapes_inttuple_assignability,
     shape_extensions_env(),
     r#"
@@ -5039,6 +5311,23 @@ def all_arr_forms[Batch: IntTuple, M: IntVar](
     prefix: Arr[[M, *Elements[Batch]]],
     pure: Arr[[*Elements[Batch]]],
 ) -> None: ...
+"#,
+);
+
+testcase!(
+    test_tensor_shapes_legacy_shape_typevar,
+    shape_extensions_env(),
+    r#"
+from typing import Generic
+from shape_extensions import IntTuple, IntVar, TypeVar
+
+Shape = TypeVar("Shape", bound=IntTuple)
+N = IntVar("N")
+
+class Tensor(Generic[Shape]): ...
+
+def append_dim(x: Tensor[[*Shape, N]]) -> Tensor[[*Shape, N]]:
+    return x
 "#,
 );
 
@@ -6692,6 +6981,29 @@ def check(default: Array, explicit: Array[IntTuple]) -> None:
 );
 
 testcase!(
+    test_gradual_int_tuple_argument_overrides_default,
+    shape_extensions_env(),
+    r#"
+from typing import Any, assert_type
+from shape_extensions import IntTuple
+
+class Array[Shape: IntTuple = IntTuple]: ...
+
+type ArrayLike[Shape: IntTuple = []] = Array[Shape] | float
+
+def as_array[Shape: IntTuple = []](value: ArrayLike[Shape]) -> Array[Shape]: ...
+def as_unpacked[Shape: IntTuple = []](value: Array[[*Shape]] | float) -> Array[Shape]: ...
+
+def check(explicit: Array[IntTuple], bare: Array, any_shape: Array[Any]) -> None:
+    assert_type(as_array(explicit), Array[IntTuple])
+    assert_type(as_array(bare), Array[IntTuple])
+    assert_type(as_array(any_shape), Array[IntTuple])
+    assert_type(as_unpacked(bare), Array[IntTuple])
+    assert_type(as_unpacked(1.0), Array[[]])
+"#,
+);
+
+testcase!(
     test_empty_int_tuple_defaults_for_array_like_unions,
     shape_extensions_env(),
     r#"
@@ -6879,7 +7191,7 @@ testcase!(
     shape_extensions_env(),
     r#"
 from shape_extensions import Int, IntVar
-from typing import reveal_type
+from typing import assert_type, reveal_type
 
 def take_symbolic[N: IntVar](x: Int[N]) -> Int[N]: ...
 def same_symbolic[N: IntVar](x: Int[N], y: Int[N]) -> Int[N]: ...
@@ -6891,10 +7203,8 @@ def f(i: int, s3: Int[3]) -> None:
     reveal_type(take_symbolic(s3))  # E: revealed type: Int[3]
     take_size3(i)  # E: Argument `int` is not assignable to parameter `x` with type `Int[3]`
     take_size3(3)
-    same_symbolic(s3, i)  # E: Argument `int` is not assignable to parameter `y` with type `Int[3]`
-    # Two `int`s into a repeated symbolic dimension: the first pins N gradual, the
-    # second matches that gradual bound (accepted).
-    same_symbolic(i, i)
+    assert_type(same_symbolic(s3, i), Int[3])
+    assert_type(same_symbolic(i, i), Int[int])
 "#,
 );
 
@@ -6908,29 +7218,24 @@ from typing import assert_type
 def take_symbolic[N: IntVar](x: Int[N]) -> Int[N]: ...
 
 # A gradual `Int` (bare `Int` == `Int[int]`) flowing into a fresh symbolic
-# `Int[N]` resolves to the gradual size: the unconstrained `IntVar` defaults
-# to gradual rather than leaking an unsolved `Var`.
+# `Int[N]` contributes a gradual lower bound, so the result remains gradual.
 def f(s: Int) -> None:
     assert_type(take_symbolic(s), Int)
 "#,
 );
 
 testcase!(
-    bug = "int eagerly pins a repeated IntVar to gradual, so argument order flips accept/reject",
-    test_tensor_shapes_symvar_inference_is_order_dependent,
+    test_tensor_shapes_symvar_inference_is_order_independent,
     shape_extensions_env(),
     r#"
 from shape_extensions import Int, IntVar
+from typing import assert_type
 
 def same_symbolic[N: IntVar](x: Int[N], y: Int[N]) -> Int[N]: ...
 
-# An `int` argument eagerly pins the fresh `N` to the gradual size, so the later
-# concrete `Int[3]` is accepted; the mirror-image call correctly rejects the
-# `int`. The two orders should agree once `int` accumulates a gradual bound
-# instead of pinning it (see the `IntVar` eager-pin note in solver/subset.rs).
 def f(i: int, s3: Int[3]) -> None:
-    same_symbolic(i, s3)
-    same_symbolic(s3, i)  # E: Argument `int` is not assignable to parameter `y` with type `Int[3]`
+    assert_type(same_symbolic(i, s3), Int[3])
+    assert_type(same_symbolic(s3, i), Int[3])
 "#,
 );
 
@@ -7128,17 +7433,17 @@ def h(x: int) -> None:
 );
 
 testcase!(
-    test_tensor_shapes_keeps_ordinary_literal_arithmetic_int,
+    test_tensor_shapes_preserves_ordinary_literal_arithmetic,
     shape_extensions_env(),
     r#"
 from shape_extensions import Int, IntVar
 from typing import reveal_type
 
 def ordinary_literals() -> None:
-    reveal_type(1 + 2)  # E: revealed type: int
-    reveal_type(1 - 2)  # E: revealed type: int
-    reveal_type(2 * 3)  # E: revealed type: int
-    reveal_type(5 // 2)  # E: revealed type: int
+    reveal_type(1 + 2)  # E: revealed type: Literal[3]
+    reveal_type(1 - 2)  # E: revealed type: Literal[-1]
+    reveal_type(2 * 3)  # E: revealed type: Literal[6]
+    reveal_type(5 // 2)  # E: revealed type: Literal[2]
     reveal_type(2 ** 3)  # E: revealed type: int
     total = 1
     total += 2
@@ -10317,6 +10622,42 @@ def f(shapeless: Array[IntTuple, int], concrete: Array[[3], int]) -> None:
 "#,
 );
 testcase!(
+    test_type_shape_dsl_axis_reduction_with_symbolic_rank,
+    shape_extensions_env_with_torch(),
+    r#"
+import shape_extensions.dsl as dsl
+from shape_extensions import Flag, IntTuple, IntVar, type_shape_dsl_function
+from torch import Tensor
+from typing import assert_type
+
+@type_shape_dsl_function
+def reduce_shape(shape: IntTuple, axis: int | tuple[int, ...] | None,
+                 keepdims: bool, empty_means_all: bool, scalar_axis_ok: bool,
+                 scalar_tuple_axis_ok: bool) -> IntTuple:
+    return dsl.axis_reduce(shape, axis, keepdims, empty_means_all,
+                           scalar_axis_ok, scalar_tuple_axis_ok)
+
+def reduce[Shape: IntTuple, Axis: Flag[int | tuple[int, ...] | None],
+           Keep: Flag[bool]](x: Tensor[Shape], axis: Axis,
+                             keep: Keep = False) -> Tensor[reduce_shape(Shape, Axis, Keep, False, False, False)]: ...
+
+def test[D: IntVar, E: IntVar, S: IntTuple](leading: Tensor[[D, *S]],
+                                            trailing: Tensor[[*S, E]]) -> None:
+    assert_type(reduce(leading, 0), Tensor[[*S]])
+    assert_type(reduce(leading, 0, True), Tensor[[1, *S]])
+    assert_type(reduce(trailing, -1), Tensor[[*S]])
+    assert_type(reduce(trailing, -1, True), Tensor[[*S, 1]])
+    assert_type(reduce(leading, ()), Tensor[[D, *S]])
+    assert_type(reduce(leading, None), Tensor[[]])
+    assert_type(reduce(Tensor[[D, *S, E]](), (0, -1)), Tensor[[*S]])
+
+def concrete(x: Tensor[[2, 3]]) -> None:
+    assert_type(reduce(x, 0), Tensor[[3]])
+    assert_type(reduce(x, -1, True), Tensor[[2, 1]])
+"#,
+);
+
+testcase!(
     test_type_shape_dsl_reduction_flag_values,
     shape_extensions_env_with_torch(),
     r#"
@@ -11015,6 +11356,81 @@ def test(x: Tensor[[2, 3]]) -> None:
     check_known_before_invalid(x)  # E: Flag integer modulo by zero
     check_invalid_before_unknown(x)  # E: Flag integer modulo by zero
     reveal_type(check_false_before_invalid(x))  # E: revealed type: Tensor[[2, 3]]
+"#,
+);
+
+// The binder binds nothing in a clause whose test it decides statically is false, or
+// in any clause after one it decides is true. Validation skips the same clauses, so
+// nothing in them is inferred, whatever it contains.
+testcase!(
+    test_type_shape_dsl_statically_decided_branches,
+    shape_extensions_env_with_torch(),
+    r#"
+from typing import reveal_type
+import shape_extensions.dsl as dsl
+from shape_extensions import IntTuple, type_shape_dsl_function
+from torch import Tensor
+
+@type_shape_dsl_function
+def undefined_name(shape: IntTuple) -> IntTuple:
+    if 0 == 1:
+        return u  # E: This code is unreachable
+    return shape
+
+@type_shape_dsl_function
+def intrinsic_call(shape: IntTuple) -> IntTuple:
+    if 0 == 1:
+        return dsl.Invalid("never")  # E: This code is unreachable
+    return shape
+
+@type_shape_dsl_function
+def helper_call(shape: IntTuple) -> IntTuple:
+    if 0 == 1:
+        return u(shape)  # E: This code is unreachable
+    return shape
+
+@type_shape_dsl_function
+def yield_callee(shape: IntTuple) -> IntTuple:  # E: Generator function should return `Generator`
+    if 0 == 1:
+        return (yield)(shape)  # E: This code is unreachable
+    return shape
+
+@type_shape_dsl_function
+def walrus_callee(shape: IntTuple) -> IntTuple:
+    if 0 == 1:
+        return (g := 0)(shape)  # E: This code is unreachable
+    return shape
+
+@type_shape_dsl_function
+def else_after_true(shape: IntTuple) -> IntTuple:
+    if 1 == 1:
+        return shape
+    else:
+        return u(shape)  # E: This code is unreachable
+
+# Tests that are decided even though one operand is not. Evaluation must agree and
+# never enter the skipped clause.
+@type_shape_dsl_function
+def unknown_or_true(shape: IntTuple, axis: int) -> IntTuple:
+    if axis < 0 or 1 == 1:
+        return shape
+    else:
+        return u(shape)  # E: This code is unreachable
+
+@type_shape_dsl_function
+def unknown_and_false(shape: IntTuple, axis: int) -> IntTuple:
+    if axis < 0 and 0 == 1:
+        return u(shape)  # E: This code is unreachable
+    return shape
+
+def check_unknown_or_true(x: Tensor[[2, 3]]) -> Tensor[unknown_or_true(IntTuple[2, 3], int)]: ...
+def check_unknown_and_false(x: Tensor[[2, 3]]) -> Tensor[unknown_and_false(IntTuple[2, 3], int)]: ...
+def check_else_after_true(x: Tensor[[2, 3]]) -> Tensor[else_after_true(IntTuple[2, 3])]: ...
+
+def test(x: Tensor[[2, 3]]) -> None:
+    reveal_type(check_unknown_or_true(x))  # E: revealed type: Tensor[[2, 3]]
+    reveal_type(check_unknown_and_false(x))  # E: revealed type: Tensor[[2, 3]]
+    reveal_type(check_else_after_true(x))  # E: revealed type: Tensor[[2, 3]]
 "#,
 );
 
@@ -15185,6 +15601,8 @@ def matrix_product() -> ShapeBox[equation("ij,jk->ik", tuple[IntTuple[2, 3], Int
 def transposed() -> ShapeBox[equation("ij,jk->ki", tuple[IntTuple[2, 3], IntTuple[3, 5]])]: ...
 def scalar() -> ShapeBox[equation("i,i->", tuple[IntTuple[4], IntTuple[4]])]: ...
 def three_operands() -> ShapeBox[equation("ij,jk,kl->il", tuple[IntTuple[2, 3], IntTuple[3, 5], IntTuple[5, 7]])]: ...
+def singleton_contract() -> ShapeBox[equation("ip,pj->ij", tuple[IntTuple[2, 1], IntTuple[4, 3]])]: ...
+def singleton_output() -> ShapeBox[equation("i,i->i", tuple[IntTuple[1], IntTuple[4]])]: ...
 def unbounded() -> ShapeBox[equation("ij,jk->ik", tuple[IntTuple[3, 3], ...])]: ...
 def gradual_member() -> ShapeBox[equation("ij,jk->ik", tuple[IntTuple[2, 3], IntTuple])]: ...
 def unbounded_gradual() -> ShapeBox[equation("ij,jk->ik", tuple[IntTuple, ...])]: ...
@@ -15195,6 +15613,8 @@ assert_type(matrix_product(), ShapeBox[IntTuple[2, 5]])
 assert_type(transposed(), ShapeBox[IntTuple[5, 2]])
 assert_type(scalar(), ShapeBox[IntTuple[()]])
 assert_type(three_operands(), ShapeBox[IntTuple[2, 7]])
+assert_type(singleton_contract(), ShapeBox[IntTuple[2, 3]])
+assert_type(singleton_output(), ShapeBox[IntTuple[4]])
 assert_type(unbounded(), ShapeBox[IntTuple])
 assert_type(gradual_member(), ShapeBox[IntTuple[2, int]])
 assert_type(unbounded_gradual(), ShapeBox[IntTuple])
@@ -15205,12 +15625,16 @@ def batched[N: IntVar](n: Int[N]) -> ShapeBox[equation("bij,bjk->bik", tuple[Int
 def repeated_equal[N: IntVar](n: Int[N]) -> ShapeBox[equation("ii->i", tuple[IntTuple[N, N]])]: ...
 def repeated_literal[N: IntVar](n: Int[N]) -> ShapeBox[equation("ii->i", tuple[IntTuple[N, 3]])]: ...
 def repeated_unknown[N: IntVar, M: IntVar](n: Int[N], m: Int[M]) -> ShapeBox[equation("ii->i", tuple[IntTuple[N, M]])]: ...
+def broadcast_literal[N: IntVar](n: Int[N]) -> ShapeBox[equation("i,i->i", tuple[IntTuple[N], IntTuple[4]])]: ...
+def broadcast_unknown[N: IntVar, M: IntVar](n: Int[N], m: Int[M]) -> ShapeBox[equation("i,i->i", tuple[IntTuple[N], IntTuple[M]])]: ...
 
 def symbolic[N: IntVar, M: IntVar](n: Int[N], m: Int[M]) -> None:
     assert_type(batched(n), ShapeBox[IntTuple[N, 2, 5]])
     assert_type(repeated_equal(n), ShapeBox[IntTuple[N]])
     assert_type(repeated_literal(n), ShapeBox[IntTuple[3]])
     assert_type(repeated_unknown(n, m), ShapeBox[IntTuple[int]])
+    assert_type(broadcast_literal(n), ShapeBox[IntTuple[4]])
+    assert_type(broadcast_unknown(n, m), ShapeBox[IntTuple[int]])
 "#,
 );
 
@@ -15826,5 +16250,51 @@ def check(
     assert_type(as_array(value), Array[[2, 3]])  # E: is not assignable to parameter `value`
     assert_type(as_array(reversed_value), Array[[2, 3]])  # E: is not assignable to parameter `value`
     assert_type(as_array(different_ranks), Array[[2]])  # E: is not assignable to parameter `value`
+"#,
+);
+
+// `@no_type_check` leaves the body of a `@type_shape_dsl_function` unbound, so the
+// function is not validated as a DSL function.
+testcase!(
+    test_type_shape_dsl_under_no_type_check_names_builtin,
+    r#"
+from typing import no_type_check
+from shape_extensions import type_shape_dsl_function  # E: Cannot find module `shape_extensions`
+
+@no_type_check
+@type_shape_dsl_function
+def f(x):
+    return max
+"#,
+);
+
+// In batch mode with unannotated bodies unchecked, as `pyrefly check` runs by default,
+// the body of an unannotated `@type_shape_dsl_function` is unbound, so the function is
+// not validated as a DSL function.
+testcase!(
+    test_type_shape_dsl_unannotated_call_in_if_test,
+    TestEnv::new_skip_check_infer_return_types().with_run_require(Require::Errors),
+    r#"
+from shape_extensions import type_shape_dsl_function  # E: Cannot find module `shape_extensions`
+
+@type_shape_dsl_function
+def g(x):
+    if f():
+        pass
+"#,
+);
+
+// In IDE mode the body of an unannotated `@type_shape_dsl_function` is bound, so the
+// function is validated as a DSL function even though unannotated bodies are unchecked.
+testcase!(
+    test_type_shape_dsl_unannotated_call_in_if_test_in_ide,
+    TestEnv::new_skip_check_infer_return_types().with_run_require(Require::Everything),
+    r#"
+from shape_extensions import type_shape_dsl_function  # E: Cannot find module `shape_extensions`
+
+@type_shape_dsl_function
+def g(x):
+    if f():  # E: Could not find name `f` # E: condition may use only boolean Flag values
+        pass
 "#,
 );

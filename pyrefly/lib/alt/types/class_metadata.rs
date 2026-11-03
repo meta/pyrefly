@@ -694,6 +694,7 @@ impl Default for InitDefaults {
 pub enum DataclassKind {
     Dataclass {
         field_specifiers: Vec<CalleeKind>,
+        is_stdlib_dataclass: bool,
     },
     Attrs {
         auto_attribs: Option<bool>,
@@ -707,7 +708,9 @@ pub enum DataclassKind {
 impl DataclassKind {
     pub fn field_specifiers(&self) -> &[CalleeKind] {
         match self {
-            Self::Dataclass { field_specifiers }
+            Self::Dataclass {
+                field_specifiers, ..
+            }
             | Self::Attrs {
                 field_specifiers, ..
             } => field_specifiers,
@@ -734,6 +737,10 @@ pub struct DataclassMetadata {
     pub pydantic_before_validator_fields: SmallSet<Name>,
     /// Which dataclass flavor this is; carries attrs `auto_attribs`.
     pub kind: DataclassKind,
+    /// Whether this class copied its metadata from a base rather than computing it from its own
+    /// dataclass decorator or `dataclass_transform`. Only classes with non-inherited metadata get
+    /// generated methods (such as `__lt__`) at runtime.
+    pub is_inherited: bool,
 }
 
 impl DataclassMetadata {
@@ -874,8 +881,9 @@ impl ClassMro {
         cls: &Class,
         bases_with_mro: Vec<(&ClassType, &ClassMro)>,
         errors: &ErrorCollector,
+        targs_consistent: &dyn Fn(&ClassType, &ClassType) -> bool,
     ) -> Self {
-        match Linearization::new(cls, bases_with_mro, errors) {
+        match Linearization::new(cls, bases_with_mro, errors, targs_consistent) {
             Linearization::Cyclic => Self::Cyclic,
             Linearization::Resolved {
                 ancestor_chains,
@@ -1009,6 +1017,7 @@ impl Linearization {
         cls: &Class,
         bases_with_mro: Vec<(&ClassType, &ClassMro)>,
         errors: &ErrorCollector,
+        targs_consistent: &dyn Fn(&ClassType, &ClassType) -> bool,
     ) -> Linearization {
         let bases = match Vec1::try_from_vec(
             bases_with_mro
@@ -1038,35 +1047,34 @@ impl Linearization {
                         .rev()
                         .collect::<Vec<_>>();
                     let mut check_conflicting_targs = |ctype: &ClassType| -> bool {
-                        if let Some(prev) = seen_ancestors.get(ctype.class_object())
-                            && (prev.targs().len() != ctype.targs().len()
-                                || prev
-                                    .targs()
-                                    .as_slice()
-                                    .iter()
-                                    .zip(ctype.targs().as_slice())
-                                    .any(|(ta, tb)| ta != tb && !ta.is_any() && !tb.is_any()))
-                        {
-                            let ctx = ClassDisplayContext::new(&[cls, ctype.class_object()]);
-                            // TODO: Extend this error message to say where in the class bases the mismatch comes from
-                            // we will need to wire additional information for this.
-                            errors
-                                .error_builder(
-                                    cls.range(),
-                                    ErrorKind::InvalidInheritance,
-                                    format!(
-                                        "Class `{}` has inconsistent type arguments for base class `{}`: `{}` and `{}`",
-                                        ctx.display(cls),
-                                        ctx.display(ctype.class_object()),
-                                        Type::ClassType(prev.clone()),
-                                        Type::ClassType(ctype.clone()),
-                                    ),
-                                )
-                                .emit();
-                            true
-                        } else {
-                            seen_ancestors.insert(ctype.class_object().dupe(), ctype.clone());
-                            false
+                        match seen_ancestors.get(ctype.class_object()) {
+                            // The first specialization seen in walk order is the one the
+                            // MRO keeps, so every later one is checked against it and the
+                            // recorded specialization never changes.
+                            Some(prev) if !targs_consistent(prev, ctype) => {
+                                let ctx = ClassDisplayContext::new(&[cls, ctype.class_object()]);
+                                // TODO: Extend this error message to say where in the class bases the mismatch comes from
+                                // we will need to wire additional information for this.
+                                errors
+                                    .error_builder(
+                                        cls.range(),
+                                        ErrorKind::InvalidInheritance,
+                                        format!(
+                                            "Class `{}` has inconsistent type arguments for base class `{}`: `{}` and `{}`",
+                                            ctx.display(cls),
+                                            ctx.display(ctype.class_object()),
+                                            Type::ClassType(prev.clone()),
+                                            Type::ClassType(ctype.clone()),
+                                        ),
+                                    )
+                                    .emit();
+                                true
+                            }
+                            Some(_) => false,
+                            None => {
+                                seen_ancestors.insert(ctype.class_object().dupe(), ctype.clone());
+                                false
+                            }
                         }
                     };
 

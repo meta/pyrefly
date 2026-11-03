@@ -14,12 +14,15 @@ use std::path::Path;
 use itertools::Itertools;
 use lsp_types::CodeDescription;
 use lsp_types::Diagnostic;
+use lsp_types::DiagnosticSeverity;
 use lsp_types::DiagnosticTag;
 use lsp_types::Uri;
+use pyrefly_python::ignore::SuppressionEdit;
 use pyrefly_python::ignore::SuppressionEffect;
 use pyrefly_python::ignore::Tool;
 use pyrefly_python::ignore::TypeIgnoreUnknownTagBehavior;
 use pyrefly_python::module::Module;
+use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_util::display::number_thousands;
 use pyrefly_util::lined_buffer::DisplayRange;
@@ -41,6 +44,7 @@ use yansi::Paint;
 
 use crate::config::error_kind::ErrorKind;
 use crate::config::error_kind::Severity;
+use crate::config::error_kind::ShownSeverity;
 use crate::error::legacy::LegacyError;
 
 /// A secondary annotation that labels a span in the same file as the primary error.
@@ -55,6 +59,31 @@ pub struct SecondaryAnnotation {
 pub enum ErrorQuickFix {
     ReplaceWithEnumMember { replacement: String },
     AssertNotNone,
+    RemoveUnusedSuppression(SuppressionEdit),
+    ImportModule { module: ModuleName },
+    ReplaceDeprecatedContextManagerReturn(ContextManagerKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContextManagerKind {
+    Sync,
+    Async,
+}
+
+impl ContextManagerKind {
+    /// The iterator, generator, and explicit defaults for a return annotation.
+    pub fn return_annotation_replacement(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Sync => ("Iterator", "Generator", ", None, None"),
+            Self::Async => ("AsyncIterator", "AsyncGenerator", ", None"),
+        }
+    }
+}
+
+impl From<SuppressionEdit> for ErrorQuickFix {
+    fn from(edit: SuppressionEdit) -> Self {
+        Self::RemoveUnusedSuppression(edit)
+    }
 }
 
 /// Whether an error was compared with the configured baseline.
@@ -105,7 +134,7 @@ pub struct Error {
     msg_details: Option<Box<str>>,
     /// Additional labeled spans in the same file for richer diagnostics.
     secondary_annotations: Vec<SecondaryAnnotation>,
-    /// Structured fixes that can be exposed by editor integrations.
+    /// Structured fixes used by editor and command integrations.
     quick_fixes: Vec<ErrorQuickFix>,
     /// Whether to mark `range` with the LSP `DEPRECATED` tag, which editors render as a
     /// strikethrough. This is only correct when `range` is the reference to the deprecated
@@ -581,36 +610,51 @@ impl Error {
         self.baseline_status
     }
 
-    /// Create a diagnostic suitable for use in LSP.
-    pub fn to_diagnostic(&self) -> Diagnostic {
+    /// The tag editors use to draw this diagnostic in their own way: struck
+    /// through for a deprecated name, greyed out for unreachable or unused code.
+    pub fn editor_tag(&self) -> Option<DiagnosticTag> {
+        if self.deprecated_tag {
+            Some(DiagnosticTag::Deprecated)
+        } else if matches!(
+            self.error_kind(),
+            ErrorKind::Unreachable
+                | ErrorKind::UnusedImport
+                | ErrorKind::UnusedParameter
+                | ErrorKind::UnusedVariable
+        ) {
+            Some(DiagnosticTag::Unnecessary)
+        } else {
+            None
+        }
+    }
+
+    /// Create a diagnostic suitable for use in LSP, or `None` for an ignored error.
+    pub fn to_diagnostic(&self) -> Option<Diagnostic> {
+        let severity = self.severity().shown()?;
         let code = self.error_kind().to_name().to_owned();
         let code_description = Uri::parse(&self.error_kind().docs_url())
             .ok()
             .map(|href| CodeDescription { href });
+        let tag = self.editor_tag();
         // TODO: Map secondary_annotations to DiagnosticRelatedInformation for LSP clients.
         // This requires constructing a Uri from the module path, which may not always succeed.
-        Diagnostic {
+        Some(Diagnostic {
             range: self.module.to_lsp_range(self.range()),
-            severity: Some(match self.severity() {
-                Severity::Error => lsp_types::DiagnosticSeverity::Error,
-                Severity::Warn => lsp_types::DiagnosticSeverity::Warning,
-                Severity::Info => lsp_types::DiagnosticSeverity::Information,
-                // Ignored errors shouldn't be here
-                Severity::Ignore => lsp_types::DiagnosticSeverity::Information,
+            severity: Some(match severity {
+                ShownSeverity::Error => DiagnosticSeverity::Error,
+                ShownSeverity::Warn => DiagnosticSeverity::Warning,
+                ShownSeverity::Hint if tag.is_some() => DiagnosticSeverity::Hint,
+                // VS Code draws an untagged LSP hint as three small dots under its first
+                // characters, with no underline, so a hint without a tag is shown like `info`.
+                ShownSeverity::Info | ShownSeverity::Hint => DiagnosticSeverity::Information,
             }),
             source: Some("Pyrefly".to_owned()),
             message: self.msg().to_owned().into(),
             code: Some(lsp_types::Code::String(code)),
             code_description,
-            tags: if self.deprecated_tag {
-                Some(vec![DiagnosticTag::Deprecated])
-            } else if self.error_kind() == ErrorKind::Unreachable {
-                Some(vec![DiagnosticTag::Unnecessary])
-            } else {
-                None
-            },
+            tags: tag.map(|tag| vec![tag]),
             ..Default::default()
-        }
+        })
     }
 
     pub fn get_notebook_cell(&self) -> Option<usize> {
@@ -836,6 +880,7 @@ fn severity_to_level(severity: Severity) -> Level<'static> {
         Severity::Error => Level::ERROR,
         Severity::Warn => Level::WARNING,
         Severity::Info => Level::INFO,
+        Severity::Hint => Level::NOTE.with_name("hint"),
         Severity::Ignore => Level::NOTE.no_name(),
     }
 }
@@ -843,7 +888,7 @@ fn severity_to_level(severity: Severity) -> Level<'static> {
 fn severity_to_annotation_kind(severity: Severity) -> AnnotationKind {
     match severity {
         Severity::Error | Severity::Warn | Severity::Ignore => AnnotationKind::Primary,
-        Severity::Info => AnnotationKind::Context,
+        Severity::Hint | Severity::Info => AnnotationKind::Context,
     }
 }
 
@@ -1066,5 +1111,84 @@ def f(x: None) -> None:
         assert_eq!(annotations.len(), 2);
         assert_eq!(&*annotations[0].label, "has type `None`");
         assert_eq!(&*annotations[1].label, "has type `Literal[2]`");
+    }
+
+    // https://github.com/facebook/pyrefly/issues/5113
+    #[test]
+    fn test_hint_severity_in_lsp() {
+        let module_info = Module::new(
+            ModuleName::from_str("test"),
+            ModulePath::filesystem(PathBuf::from("test.py")),
+            Arc::new("x".to_owned()),
+        );
+        let diagnostic = |kind| {
+            Error::new(
+                module_info.clone(),
+                TextRange::new(TextSize::new(0), TextSize::new(1)),
+                "message".to_owned(),
+                Vec::new(),
+                kind,
+            )
+            .with_severity(Severity::Hint)
+            .to_diagnostic()
+            .expect("a severity other than ignore is shown")
+        };
+        let unused = diagnostic(ErrorKind::UnusedImport);
+        assert_eq!(unused.severity, Some(DiagnosticSeverity::Hint));
+        assert_eq!(unused.tags, Some(vec![DiagnosticTag::Unnecessary]));
+        let assignment = diagnostic(ErrorKind::BadAssignment);
+        assert_eq!(assignment.severity, Some(DiagnosticSeverity::Information));
+        assert_eq!(assignment.tags, None);
+    }
+
+    #[test]
+    fn test_ignored_error_has_no_lsp_diagnostic() {
+        let module_info = Module::new(
+            ModuleName::from_str("test"),
+            ModulePath::filesystem(PathBuf::from("test.py")),
+            Arc::new("x".to_owned()),
+        );
+        let error = Error::new(
+            module_info,
+            TextRange::new(TextSize::new(0), TextSize::new(1)),
+            "message".to_owned(),
+            Vec::new(),
+            ErrorKind::BadAssignment,
+        );
+        assert!(error.to_diagnostic().is_some());
+        assert!(
+            error
+                .with_severity(Severity::Ignore)
+                .to_diagnostic()
+                .is_none(),
+            "an ignored error is never published"
+        );
+    }
+
+    // https://github.com/facebook/pyrefly/issues/5113
+    #[test]
+    fn test_deprecated_and_unreachable_in_lsp() {
+        let module_info = Module::new(
+            ModuleName::from_str("test"),
+            ModulePath::filesystem(PathBuf::from("test.py")),
+            Arc::new("x".to_owned()),
+        );
+        let diagnostic = |kind| {
+            Error::new(
+                module_info.clone(),
+                TextRange::new(TextSize::new(0), TextSize::new(1)),
+                "message".to_owned(),
+                Vec::new(),
+                kind,
+            )
+            .to_diagnostic()
+            .expect("a severity other than ignore is shown")
+        };
+        let deprecated = diagnostic(ErrorKind::Deprecated);
+        assert_eq!(deprecated.severity, Some(DiagnosticSeverity::Warning));
+        assert_eq!(deprecated.tags, Some(vec![DiagnosticTag::Deprecated]));
+        let unreachable = diagnostic(ErrorKind::Unreachable);
+        assert_eq!(unreachable.severity, Some(DiagnosticSeverity::Hint));
+        assert_eq!(unreachable.tags, Some(vec![DiagnosticTag::Unnecessary]));
     }
 }

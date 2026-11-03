@@ -346,3 +346,86 @@ def use(value: Base) -> None:
     assert_type(value, make_type())  # E: Function call cannot be used in annotations
 "#,
 );
+
+testcase!(
+    test_type_call_in_annotations,
+    TestEnv::new_with_version(PythonVersion::new(3, 13, 0)),
+    r#"
+import types
+from typing import TypeVar, Union, cast
+
+class MyClass: ...
+instance = MyClass()
+
+def not_impl_param(x: type(NotImplemented)) -> None: ...  # E: Function call cannot be used in annotations. Did you mean `types.NotImplementedType`?
+def not_impl_union_param(x: Union[bool, type(NotImplemented)]) -> None: ...  # E: Function call cannot be used in annotations. Did you mean `types.NotImplementedType`?
+def not_impl_return() -> type(NotImplemented): ...  # E: Function call cannot be used in annotations. Did you mean `types.NotImplementedType`?
+def not_impl_union_return() -> Union[bool, type(NotImplemented)]: ...  # E: Function call cannot be used in annotations. Did you mean `types.NotImplementedType`?
+def not_impl_bitor_return() -> bool | type(NotImplemented): ...  # E: Function call cannot be used in annotations. Did you mean `types.NotImplementedType`?
+var_not_impl: type(NotImplemented)  # E: Function call cannot be used in annotations. Did you mean `types.NotImplementedType`?
+
+T = TypeVar("T", int, type(None))  # E: Function call cannot be used in annotations. Did you mean `None`?
+var_none: type(None)  # E: Function call cannot be used in annotations. Did you mean `None`?
+var_ellipsis: type(Ellipsis)  # E: Function call cannot be used in annotations. Did you mean `types.EllipsisType`?
+var_dots: type(...)  # E: Function call cannot be used in annotations. Did you mean `types.EllipsisType`?
+var_module: type(types)  # E: Function call cannot be used in annotations. Did you mean `types.ModuleType`?
+
+var_cls: type(MyClass)  # E: Function call cannot be used in annotations. Did you mean `type[MyClass]`?
+def cls_return() -> list[type(MyClass)]: ...  # E: Function call cannot be used in annotations. Did you mean `type[MyClass]`?
+def cls_cast(x: object) -> None:
+    cast(type(MyClass), x)  # E: Function call cannot be used in annotations. Did you mean `type[MyClass]`?
+
+var_instance: type(instance)  # E: Function call cannot be used in annotations
+self_ref: type(self_ref) = 1  # E: Function call cannot be used in annotations
+"#,
+);
+
+testcase!(
+    test_annotated_metadata_is_not_checked,
+    r#"
+from typing import Annotated, Callable
+
+def validator(func: Callable[[int], object]) -> object: ...
+def needs_int(x: int) -> object: ...
+
+a: Annotated[str, needs_int("oops")]
+b: Annotated[str, [e for e in 1]]
+c: Annotated[str, validator(lambda v: v.missing)]
+d: Annotated[str, undefined_name]  # E: Could not find name `undefined_name`
+
+class C:
+    e: Annotated[str, [e for e in 1]]
+    f: Annotated[str, undefined_in_class]  # E: Could not find name `undefined_in_class`
+"#,
+);
+
+testcase!(
+    test_annotated_metadata_postponed_class_body_forward_reference,
+    r#"
+from __future__ import annotations
+from typing import Annotated
+
+def validator(f: object) -> object: ...
+
+class C:
+    a: Annotated[int, validator(later)]
+
+    @staticmethod
+    def later(v: str) -> int: ...
+"#,
+);
+
+testcase!(
+    test_annotated_metadata_runtime_class_body_forward_reference,
+    r#"
+from typing import Annotated
+
+def validator(f: object) -> object: ...
+
+class C:
+    a: Annotated[int, validator(later)]  # E: Could not find name `later`
+
+    @staticmethod
+    def later(v: str) -> int: ...
+"#,
+);

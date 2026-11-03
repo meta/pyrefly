@@ -237,35 +237,114 @@ assert_type(keep([]), list[Any])
 );
 
 testcase!(
+    test_any_bounded_typevar_preserves_structure,
+    r#"
+from typing import Any, assert_type, overload
+
+class Array[S, D]: ...
+
+@overload
+def stack[S: tuple[int, int, *tuple[Any, ...]], D](
+    xs: list[Array[S, D]],
+) -> Array[S, D]: ...
+@overload
+def stack[D](xs: list[Array[tuple[int], D]]) -> Array[tuple[int, int], D]: ...
+def stack(xs):
+    return Array()
+
+a: Array[tuple[int], int] = Array()
+assert_type(stack([a, a]), Array[tuple[int, int], int])
+b: Array[tuple[int, int, int], str] = Array()
+assert_type(stack([b, b]), Array[tuple[int, int, int], str])
+
+def keep[T: dict[float, Any]](x: T) -> T: ...
+assert_type(keep({0: "a"}), dict[float, str])
+    "#,
+);
+
+testcase!(
+    test_any_bounded_typevar_preserves_subclass,
+    r#"
+from typing import Any, assert_type
+
+class Scalar[T]:
+    def item(self) -> T: ...
+class Float32(Scalar[float]): ...
+class Array[S, D]:
+    def scalar(self) -> D: ...
+
+def stack[T: Scalar[Any]](
+    xs: list[T | Array[tuple[int], T]],
+) -> Array[tuple[int, int], T]: ...
+
+a: Array[tuple[int], Float32] = Array()
+assert_type(stack([a, a]), Array[tuple[int, int], Float32])
+    "#,
+);
+
+// The `Any` in the element bound supplies no hint for a nested empty literal.
+testcase!(
     test_any_bounded_typevar_nested_empty_literal,
     r#"
 from typing import Any, reveal_type
 
 def keep[T: list[Any]](x: T) -> T: ...
 
-reveal_type(keep([[]]))  # E: revealed type: list[list[Any]]
-reveal_type(keep([[], [1]]))  # E: revealed type: list[list[int] | list[Any]]
-reveal_type(keep([[] for _ in [0]]))  # E: revealed type: list[list[Any]]
-reveal_type(keep([set()]))  # E: revealed type: list[set[Any]]
-reveal_type(keep([list()]))  # E: revealed type: list[list[Any]]
-reveal_type(keep([{}]))  # E: revealed type: list[dict[Any, Any]]
+reveal_type(keep([[]]))  # E: revealed type: list[list[@_]]
+reveal_type(keep([[], [1]]))  # E: revealed type: list[list[int] | list[@_]]
+reveal_type(keep([[] for _ in [0]]))  # E: revealed type: list[list[@_]]
+reveal_type(keep([set()]))  # E: revealed type: list[set[@_]]
+reveal_type(keep([list()]))  # E: revealed type: list[list[@_]]
+reveal_type(keep([{}]))  # E: revealed type: list[dict[@_, @_]]
+    "#,
+);
+
+// https://github.com/facebook/pyrefly/issues/3265
+// Any in a bound should preserve the concrete element types asserted below.
+testcase!(
+    test_any_bounded_typevar_container_hints,
+    r#"
+from typing import Any, Iterator, Protocol, assert_type
+
+def keep_set[T: set[Any]](x: T) -> T: ...
+def keep_dict[T: dict[Any, Any]](x: T) -> T: ...
+assert_type(keep_set({0}), set[int])
+assert_type(keep_set({x for x in [0]}), set[int])
+assert_type(keep_dict({0: "a"}), dict[int, str])
+assert_type(keep_dict({x: str(x) for x in [0]}), dict[int, str])
+assert_type(keep_dict({}), dict[Any, Any])
+assert_type(keep_dict({0: []}), dict[int, list[Any]])
+
+class ReturnsIterator[T](Protocol):
+    def __iter__(self) -> T: ...
+
+def iterator[I: Iterator[Any]](x: ReturnsIterator[I]) -> I: ...
+assert_type(iterator([0]), Iterator[int])
+assert_type(iterator({0}), Iterator[int])
+assert_type(iterator({0: "a"}), Iterator[int])
+
+# Concrete bounds and explicit Any annotations still supply contextual types.
+def floats[T: list[float]](x: T) -> T: ...
+def explicit(x: list[Any]) -> list[Any]: ...
+assert_type(floats([0]), list[float])
+assert_type(explicit([0]), list[Any])
     "#,
 );
 
 // An unconstrained generic return should not narrow permanently from its first mutation.
+// Both appends should succeed, and xs should retain type list[Any].
 testcase!(
-    bug = "Repeated append over-narrows an empty generic list return",
     test_any_bounded_typevar_empty_list_repeated_append,
     r#"
-from typing import Any, reveal_type
+from typing import Any, assert_type
 
 def keep[T: list[Any]](x: T) -> T: ...
 
 def f():
     xs = keep([])
     xs.append(1)
-    xs.append(2)  # E: Argument `Literal[2]` is not assignable to parameter `object` with type `Literal[1]`
-    reveal_type(xs)  # E: revealed type: list[Literal[1]] | list[Any]
+    xs.append(2)
+    assert_type(xs, list[Any])
     "#,
 );
 
@@ -995,4 +1074,44 @@ x1: X = [{"x": ""}]
 x2: X = [{}]
 x3: X = [{"x": 1.0}]  # E: `float` is not assignable to TypedDict key `x` with type `int`
     "#,
+);
+
+// Regression: a union return hint is tried one member at a time, and a rejected
+// member (here `None`) can fix the `key` lambda's parameter to the wrong type and
+// make `x.n` fail. That error belongs to the rejected member and must not leak
+// into the accepted result, which types `x` as `C` from the iterable.
+testcase!(
+    test_max_key_lambda_with_default_and_union_hint,
+    r#"
+class C:
+    n: int
+
+def with_max(xs: list[C]) -> C | None:
+    return max(xs, key=lambda x: x.n, default=None)
+
+def with_min(xs: list[C]) -> C | None:
+    return min(xs, key=lambda x: x.n, default=None)
+
+def with_annotated_local(xs: list[C]) -> None:
+    best: C | None = max(xs, key=lambda x: x.n, default=None)
+
+def with_non_none_sentinel(xs: list[C]) -> C | str:
+    return max(xs, key=lambda x: x.n, default="sentinel")
+
+def with_other_error_kind(rows: list[list[int]]) -> list[int] | None:
+    return max(rows, key=lambda r: r[0], default=None)
+"#,
+);
+
+// A genuine error in a `key` lambda body is still reported: only errors from
+// rejected hint members are discarded, not those from the accepted member.
+testcase!(
+    test_max_key_lambda_real_error_still_reported,
+    r#"
+class C:
+    n: int
+
+def f(xs: list[C]) -> C | None:
+    return max(xs, key=lambda x: x.missing, default=None)  # E: Object of class `C` has no attribute `missing`
+"#,
 );

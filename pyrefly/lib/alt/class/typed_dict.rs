@@ -852,7 +852,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             unions_with_literals(
                 values,
                 self.stdlib,
-                &|cls| self.get_enum_member_count(cls),
+                &|cls| self.get_expandable_enum_member_count(cls),
                 self.heap,
             )
         }
@@ -1027,7 +1027,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         let annotation = match annotation {
             None => {
-                return ClassField::invalid_typed_dict_field(self.heap);
+                return ClassField::invalid_typed_dict_field(name, self.heap);
             }
             Some(idx) => self.get_idx(*idx).annotation.clone(),
         };
@@ -1135,7 +1135,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // likely to lead to data races where downstream uses can pin inconsistently.
         let ty = self.solver().force(ty);
 
-        ClassField::typed_dict_field(ty, annotation, read_only_reason)
+        ClassField::typed_dict_field(name, ty, annotation, read_only_reason)
     }
 }
 

@@ -38,7 +38,9 @@ use crate::binding::pydantic::GE;
 use crate::binding::pydantic::GT;
 use crate::binding::pydantic::LE;
 use crate::binding::pydantic::LT;
+use crate::binding::pydantic::MODEL_CONSTRUCT;
 use crate::binding::pydantic::STRICT;
+use crate::binding::pydantic::VALIDATION_ALIAS;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::TypeCheckContext;
@@ -214,6 +216,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             );
             fields.insert(Name::new_static("__attrs_init__"), init_method);
         }
+        if metadata.is_pydantic_model()
+            && let Some(model_construct) =
+                self.get_pydantic_model_construct(cls, dataclass, &kw_only_by_class)
+        {
+            fields.insert(MODEL_CONSTRUCT, model_construct);
+        }
         let dataclass_fields_type = self.stdlib.dict(
             self.heap.mk_class_type(self.stdlib.str().clone()),
             self.heap.mk_any_implicit(),
@@ -223,7 +231,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ClassSynthesizedField::new_classvar(self.heap.mk_class_type(dataclass_fields_type)),
         );
 
-        if dataclass.kws.order {
+        // Only the decorated class gets these methods at runtime. Subclasses that merely inherit
+        // the metadata inherit the methods, including any override defined in between.
+        if dataclass.kws.order && !dataclass.is_inherited {
             fields.extend(self.get_dataclass_rich_comparison_methods(cls));
         }
         if dataclass.kws.match_args {
@@ -849,6 +859,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         let mut kw_only = map.get_bool(&DataclassFieldKeywords::KW_ONLY);
 
+        let effective_alias_keyword = if map.is_set(alias_keyword) {
+            alias_keyword
+        } else {
+            &DataclassFieldKeywords::ALIAS
+        };
+        let pydantic_unknown_validation_alias = alias_keyword == &VALIDATION_ALIAS
+            && ((map.is_set(effective_alias_keyword)
+                && map.get_string(effective_alias_keyword).is_none())
+                || args.keywords.iter().any(|kw| kw.arg.is_none()));
         let mut alias = if dataclass_metadata.init_defaults.init_by_alias {
             map.get_string(alias_keyword)
                 .or_else(|| map.get_string(&DataclassFieldKeywords::ALIAS))
@@ -916,6 +935,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             kw_only,
             init_by_name: dataclass_metadata.init_defaults.init_by_name || alias.is_none(),
             init_by_alias: alias,
+            pydantic_unknown_validation_alias,
+            pydantic_unchecked_metadata: false,
             lt,
             gt,
             ge,
@@ -924,6 +945,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             frozen,
             converter_param,
             attrs_setattr_frozen,
+            pydantic_has_custom_schema: false,
         }
     }
 
@@ -970,6 +992,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 &args.args.map(CallArg::expr_maybe_starred),
                 &args.keywords.map(CallKeyword::new),
                 args.range,
+                errors,
                 errors,
                 errors,
                 None,
@@ -1347,6 +1370,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // If this field has a `@field_validator(..., mode='before'|'plain')`, the init
                 // parameter accepts `Any` because the validator transforms arbitrary input.
                 let converter_param = if dataclass.pydantic_before_validator_fields.contains(&name)
+                    // A custom schema may accept input that is not of the declared
+                    // type, so only the `__init__` parameter is widened to `Any`. The
+                    // stored `converter_param` is left alone: attribute assignment and
+                    // `__replace__` also read it, and assignment must still enforce
+                    // the declared type.
+                    || field_flags.pydantic_has_custom_schema
                 {
                     Some(self.heap.mk_any_explicit())
                 } else {

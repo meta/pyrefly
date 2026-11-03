@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any, assert_type
+from typing import Any, assert_type, TYPE_CHECKING
 
 import numpy as np
 from shape_extensions import assert_shape, Int, IntTuple, IntVar
@@ -283,6 +283,19 @@ def test_norm_without_axis_returns_numpy_scalar() -> None:
     assert_type(result, np.floating)
     result.astype(np.float32)
     assert_shape(np.asarray(result).shape, ())
+
+
+def test_norm_axis_shapes_and_errors() -> None:
+    array = np.ones((2, 3, 4))
+
+    assert_shape(np.linalg.norm(array, axis=(0, 2)).shape, (3,))
+    assert_shape(np.linalg.norm(array, axis=1, keepdims=True).shape, (2, 1, 4))
+    assert_type(np.linalg.norm([3.0, 4.0]), np.floating)
+
+    if TYPE_CHECKING:
+        np.linalg.norm(array, axis=3)  # E: axis out of bounds
+        np.linalg.norm(array, axis=(1, 1))  # E: duplicate axis
+        np.linalg.norm(array, axis="bad")  # E: No matching overload
 
 
 def gravitational_force_shape_path(

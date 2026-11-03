@@ -168,6 +168,26 @@ def valid(x: int) -> Container[Any]:
  "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/5269
+testcase!(
+    test_bound_with_nested_optional_argument,
+    r#"
+from typing import Any
+
+class Pair[T: int]:
+    def __init__(self, delta: T | None) -> None: ...
+
+def optional[T: int](x: T | None) -> T | None:
+    return x
+
+def f[T: int](d: T | None) -> Pair[T]:
+    return Pair(optional(d))
+
+def g(d: int | None) -> Pair[Any]:
+    return Pair(optional(d))
+ "#,
+);
+
 // A bound of `Any` or `object` accepts everything, so keeping such a parameter free buys no
 // checking and only discards the solution the expected type supplies.
 testcase!(
@@ -209,6 +229,67 @@ def f() -> None:
     c: Container[Any] = Container(list([v]))
     assert_type(v, list[Any])
     v.append("s")
+ "#,
+);
+
+// Modeled on `pd.Series(pd.NA, dtype="Int64")` under a bare `-> pd.Series` annotation.
+testcase!(
+    test_gradual_expected_type_restriction_violation_rejects_overload,
+    r#"
+from typing import Any, Self, assert_type, overload
+
+class NA: ...
+
+class Series[S: int | str]:
+    @overload
+    def __new__(cls, data: S, dtype: int) -> Self: ...
+    @overload
+    def __new__(cls, data: S, dtype: str | None = None) -> Self: ...
+    @overload
+    def __new__(cls, data: NA, dtype: str | None = None) -> Series: ...
+    def __new__(cls, data: Any, dtype: Any = None) -> Any: ...
+
+def unhinted() -> None:
+    assert_type(Series(NA(), dtype="Int64"), Series[Any])
+
+def hinted() -> Series:
+    return Series(NA(), dtype="Int64")
+ "#,
+);
+
+// A restriction violation discards the expected type, so the call reports what the unhinted call
+// reports.
+testcase!(
+    test_gradual_expected_type_restriction_violation_without_overloads,
+    r#"
+from typing import Any
+
+class Pair[T: (int, str)]:
+    def __init__(self, left: T, right: T) -> None: ...
+
+def unhinted(left: int | str, right: int | str | bytes) -> None:
+    Pair(left, right)  # E: `int | str` is not assignable to any of constraints `int`, `str`  # E: Argument `bytes | int | str` is not assignable to parameter `right`
+
+def hinted(left: int | str, right: int | str | bytes) -> Pair[Any]:
+    return Pair(left, right)  # E: `int | str` is not assignable to any of constraints `int`, `str`  # E: Argument `bytes | int | str` is not assignable to parameter `right`
+ "#,
+);
+
+// When every overload violates the restriction, the closest overload reports the violation once.
+testcase!(
+    test_gradual_expected_type_restriction_violation_in_every_overload,
+    r#"
+from typing import Self, overload
+
+class Box[S: int]:
+    @overload
+    def __new__(cls, data: S) -> Self: ...
+    @overload
+    def __new__(cls, data: S, extra: int) -> Self: ...
+    def __new__(cls, data: S, extra: int = 0) -> Self: ...
+
+def hinted() -> Box:
+    return Box("s")  # E: `str` is not assignable to upper bound `int` of type variable `S`
  "#,
 );
 
@@ -447,6 +528,20 @@ assert_type(C.attr, int)  # E: assert_type(Unknown, int) failed  # E: Generic at
 );
 
 testcase!(
+    test_gradual_argument_overrides_typevar_default,
+    r#"
+from typing import Any, assert_type
+
+class C[T]: ...
+
+def f[T = int](value: C[T]) -> T: ...
+
+def check(value: C[Any]) -> None:
+    assert_type(f(value), Any)
+"#,
+);
+
+testcase!(
     test_union_bound_attr_get,
     r#"
 from typing import assert_type
@@ -677,6 +772,154 @@ class B:
 
 def foo[T: (A, B)](x: T) -> T:
     return x.method()
+    "#,
+);
+
+testcase!(
+    test_bounded_typevar_subscript_return_self,
+    r#"
+from typing import Protocol, Self, assert_type
+
+class SupportsSlice(Protocol):
+    def __getitem__(self, index: slice) -> Self: ...
+
+class Concrete:
+    def __getitem__(self, index: slice) -> Self:
+        return self
+
+def protocol_bound[S: SupportsSlice](seq: S) -> None:
+    assert_type(seq[0:1], S)
+
+def class_bound[S: Concrete](seq: S) -> None:
+    assert_type(seq[0:1], S)
+
+def tuple_bound[S: tuple[int, str]](seq: S) -> None:
+    assert_type(seq[0], int)
+    "#,
+);
+
+testcase!(
+    test_restricted_typevar_subscript_return_self,
+    r#"
+from typing import NamedTuple, Self, assert_type
+
+class A:
+    def __getitem__(self, index: slice) -> Self:
+        return self
+
+class B:
+    def __getitem__(self, index: slice) -> Self:
+        return self
+
+class NT(NamedTuple):
+    x: int
+    y: str
+
+def union_bound[S: A | B](seq: S) -> None:
+    assert_type(seq[0:1], S)
+
+def constrained[S: (A, B)](seq: S) -> None:
+    assert_type(seq[0:1], S)
+
+def named_tuple_bound[S: NT](seq: S) -> None:
+    assert_type(seq[0], int)
+
+def list_bound[S: list[int]](seq: S) -> None:
+    assert_type(seq[0:1], list[int])
+
+def not_subscriptable[S: int](x: S) -> None:
+    x[0]  # E: Cannot index into `S`
+    "#,
+);
+
+testcase!(
+    test_constrained_typevar_method_arguments,
+    r#"
+# https://github.com/facebook/pyrefly/issues/3621
+from typing import TypeVar, assert_type
+
+class DataFrame:
+    def join(self, other: DataFrame) -> DataFrame: ...
+
+class LazyFrame:
+    def join(self, other: LazyFrame) -> LazyFrame: ...
+
+Frame = TypeVar("Frame", DataFrame, LazyFrame)
+
+def join_legacy(df1: Frame, df2: Frame) -> Frame:
+    return df1.join(df2)
+
+def join_modern[T: (DataFrame, LazyFrame)](df1: T, df2: T) -> T:
+    assert_type(df1.join(df2), T)
+    assert_type(df1.join(other=df2), T)
+    join = df1.join
+    return join(df2)
+
+assert_type(join_legacy(DataFrame(), DataFrame()), DataFrame)
+assert_type(join_modern(LazyFrame(), LazyFrame()), LazyFrame)
+    "#,
+);
+
+testcase!(
+    test_constrained_typevar_method_arguments_union,
+    r#"
+class A:
+    def merge(self, other: A | None) -> None: ...
+
+class B:
+    def merge(self, other: A | B | None) -> None: ...
+
+def merge[T: (A, B)](x: T, y: T) -> None:
+    x.merge(y)
+    x.merge(A())
+    x.merge(None)
+    "#,
+);
+
+testcase!(
+    test_constrained_typevar_method_arguments_invalid,
+    r#"
+class A:
+    def merge(self, other: A) -> None: ...
+
+class B:
+    def merge(self, other: B) -> None: ...
+
+def independent[T: (A, B), U: (A, B)](x: T, y: U) -> None:
+    x.merge(y)  # E: Argument `U` is not assignable # E: Argument `U` is not assignable
+
+def concrete[T: (A, B)](x: T, y: A, z: B, union: A | B) -> None:
+    x.merge(y)  # E: Argument `A` is not assignable
+    x.merge(z)  # E: Argument `B` is not assignable
+    x.merge(union)  # E: Argument `A | B` is not assignable # E: Argument `A | B` is not assignable
+
+def bounded[T: A | B](x: T, y: T) -> None:
+    x.merge(y)  # E: Argument `T` is not assignable # E: Argument `T` is not assignable
+    "#,
+);
+
+testcase!(
+    test_constrained_typevar_method_arguments_overload,
+    r#"
+from typing import assert_type, overload
+
+class A:
+    @overload
+    def merge(self, other: A) -> A: ...
+    @overload
+    def merge(self, other: None) -> None: ...
+    def merge(self, other: A | None) -> A | None: ...
+
+class B:
+    @overload
+    def merge(self, other: B) -> B: ...
+    @overload
+    def merge(self, other: None) -> None: ...
+    def merge(self, other: B | None) -> B | None: ...
+
+def merge[T: (A, B)](x: T, y: T) -> None:
+    assert_type(x.merge(y), T)
+    assert_type(x.merge(None), None)
     "#,
 );
 

@@ -66,6 +66,8 @@ enum CompletionSource {
     Local,
     /// Defined in another module, exposed from this one.
     Reexport,
+    /// An attribute inherited from `object`.
+    Object,
     /// Auto-import from a public module path.
     AutoimportPublic,
     /// Auto-import from a private module path (segment starts with `_`).
@@ -113,6 +115,7 @@ fn assign_sort_text(ranked: &mut RankedCompletion, mru_rank: Option<Option<usize
         let base = match ranked.source {
             CompletionSource::AutoimportPrivate => "4b",
             CompletionSource::AutoimportPublic => "4a",
+            CompletionSource::Object => "3a",
             CompletionSource::Reexport => "1",
             CompletionSource::Local => {
                 if ranked.item.label.starts_with("__") {
@@ -374,6 +377,15 @@ impl Transaction<'_> {
         position: TextSize,
         completions: &mut Vec<RankedCompletion>,
     ) {
+        let mut seen = SmallSet::new();
+        if let Some(mod_module) = self.get_ast(handle)
+            && let Some(fields) =
+                self.typed_dict_constructor_kwargs(handle, mod_module.as_ref(), position)
+        {
+            for (name, ty) in fields {
+                push_kwarg_completion(&Name::new(name), &ty, &mut seen, completions);
+            }
+        }
         if let Some(CallInfo {
             callables,
             provided_arg_ranges,
@@ -382,7 +394,6 @@ impl Transaction<'_> {
         {
             let callables =
                 self.filter_compatible_overloads(handle, callables, &provided_arg_ranges);
-            let mut seen = SmallSet::new();
             for callable in callables {
                 if let Some(params) = Self::normalize_singleton_function_type_into_params(callable)
                 {
@@ -991,7 +1002,7 @@ impl Transaction<'_> {
     ) {
         self.ad_hoc_solve(handle, "completion_attributes", |solver| {
             solver
-                .completions(base_type, None, true)
+                .completions(base_type, None, true, true)
                 .iter()
                 .for_each(|attr| {
                     let kind = match attr.ty {
@@ -1013,7 +1024,9 @@ impl Transaction<'_> {
                         expected_type,
                         attr.ty.as_ref(),
                     );
-                    let source = if attr.is_reexport {
+                    let source = if attr.is_from_object {
+                        CompletionSource::Object
+                    } else if attr.is_reexport {
                         CompletionSource::Reexport
                     } else {
                         CompletionSource::Local
@@ -1389,6 +1402,7 @@ impl Transaction<'_> {
                                 in_string_literal,
                             );
                         }
+                        self.add_endpoint_completions(handle, &nodes, position, &mut result);
                         // in foo(x=<>, y=2<>), the first containing node is AnyNodeRef::Arguments(_)
                         // in foo(<>), the first containing node is AnyNodeRef::ExprCall
                         if let Some(first) = nodes.first()

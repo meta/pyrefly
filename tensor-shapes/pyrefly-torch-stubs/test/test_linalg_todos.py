@@ -110,6 +110,13 @@ def test_linalg_tensor_operations() -> None:
     assert_shape(decomposition.Vh.shape, (2, 3, 3))
     assert_shape(torch.linalg.svd(rectangular).U.shape, (2, 4, 4))
     assert_shape(torch.linalg.svd(rectangular).Vh.shape, (2, 3, 3))
+    matrix_solution = torch.linalg.lstsq(batch_matrix, torch.ones((2, 3, 4)))
+    assert_shape(matrix_solution.solution.shape, (2, 3, 4))
+    assert matrix_solution.residuals.shape == (0,)
+    assert matrix_solution.rank.shape == (2,)
+    assert matrix_solution.singular_values.shape == (0,)
+    vector_solution = torch.linalg.lstsq(batch_matrix, torch.ones((2, 3)))
+    assert_shape(vector_solution.solution.shape, (2, 3))
 
 
 if TYPE_CHECKING:
@@ -225,6 +232,16 @@ if TYPE_CHECKING:
         assert_type(
             torch.linalg.svd(factor, full_matrices=False),
             torch.return_types.linalg_svd[[*Batch, N, N], [*Batch, N], [*Batch, N, N]],
+        )
+        assert_type(
+            torch.linalg.lstsq(factor, rhs),
+            torch.return_types.linalg_lstsq[
+                [*Batch, N, K], IntTuple, IntTuple, IntTuple
+            ],
+        )
+        assert_type(
+            torch.linalg.lstsq(factor, pivots),
+            torch.return_types.linalg_lstsq[[*Batch, N], IntTuple, IntTuple, IntTuple],
         )
 
     def check_linalg_tensor_equations[

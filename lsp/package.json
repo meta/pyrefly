@@ -88,6 +88,11 @@
                 "title": "Run Test",
                 "category": "pyrefly",
                 "command": "pyrefly.runTest"
+            },
+            {
+                "title": "Find File Usages",
+                "category": "pyrefly",
+                "command": "pyrefly.findFileUsages"
             }
         ],
         "semanticTokenScopes": [
@@ -101,6 +106,15 @@
                     "string.byteString.rawString": [
                         "string.quoted.raw.binary.single.python",
                         "string.quoted.raw.binary.multi.python"
+                    ],
+                    "string.escapeSequence": [
+                        "constant.character.escape.python"
+                    ],
+                    "string.formatPlaceholder": [
+                        "constant.character.format.placeholder.other.python"
+                    ],
+                    "string.formatSpecifier": [
+                        "storage.type.format.python"
                     ],
                     "string.formatString": [
                         "string.interpolated.python"
@@ -437,7 +451,7 @@
     "dependencies": {
         "@vscode/python-environments": "^1.0.0",
         "@vscode/python-extension": "^1.0.5",
-        "serialize-javascript": "^7.0.5",
+        "serialize-javascript": "^7.1.3",
         "underscore": "^1.13.8",
         "vsce": "^2.15.0",
         "vscode-languageclient": "9.0.1"

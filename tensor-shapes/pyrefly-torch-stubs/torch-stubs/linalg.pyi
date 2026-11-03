@@ -105,10 +105,28 @@ def matrix_rank[Batch: IntTuple, M: IntVar, N: IntVar](
     input: Tensor[[*Batch, M, N]], tol: float = None, hermitian: bool = False
 ) -> Tensor[Batch]: ...
 
-# TODO: Add precise types and signatures for the remaining public API.
 common_notes: dict[str, str]
-lstsq: Any
 
+@overload
+def lstsq[Batch: IntTuple, M: IntVar, N: IntVar, K: IntVar](
+    A: Tensor[[*Batch, M, N]],
+    B: Tensor[[*Batch, M, K]],
+    rcond: float | None = None,
+    *,
+    driver: str | None = None,
+) -> return_types.linalg_lstsq[[*Batch, N, K], IntTuple, IntTuple, IntTuple]: ...
+@overload
+def lstsq[Batch: IntTuple, M: IntVar, N: IntVar](
+    A: Tensor[[*Batch, M, N]],
+    B: Tensor[[*Batch, M]],
+    rcond: float | None = None,
+    *,
+    driver: str | None = None,
+) -> return_types.linalg_lstsq[[*Batch, N], IntTuple, IntTuple, IntTuple]: ...
+@overload
+def lstsq(
+    A: Tensor, B: Tensor, rcond: float | None = None, *, driver: str | None = None
+) -> return_types.linalg_lstsq[IntTuple, IntTuple, IntTuple, IntTuple]: ...
 @overload
 def lu[Batch: IntTuple, N: IntVar](
     A: Tensor[[*Batch, N, N]],

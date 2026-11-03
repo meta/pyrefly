@@ -25,7 +25,6 @@ use super::extract_shared::build_from_import_edit;
 use super::extract_shared::build_from_import_line;
 use super::extract_shared::code_at_range;
 use super::extract_shared::find_enclosing_statement_range;
-use super::extract_shared::import_insertion_point;
 use super::extract_shared::is_exact_expression;
 use super::extract_shared::line_indent_and_start;
 use super::extract_shared::selection_anchor;
@@ -33,6 +32,7 @@ use super::extract_shared::split_selection;
 use super::extract_shared::type_to_annotation;
 use super::extract_shared::unique_name;
 use super::types::LocalRefactorCodeAction;
+use crate::state::ide::prepare_import_insertion;
 use crate::state::lsp::Transaction;
 use crate::types::stdlib::Stdlib;
 
@@ -300,7 +300,6 @@ fn build_dataclass_action(
     indent: &str,
 ) -> Option<LocalRefactorCodeAction> {
     let mut edits = Vec::new();
-    let position = import_insertion_point(ast);
     let mut import_text = String::new();
     if requires_any && let Some(line) = build_from_import_line(ast, "typing", &["Any"]) {
         import_text.push_str(&line);
@@ -309,6 +308,7 @@ fn build_dataclass_action(
         import_text.push_str(&line);
     }
     if !import_text.is_empty() {
+        let (position, import_text) = prepare_import_insertion(ast, import_text);
         edits.push((
             module_info.dupe(),
             TextRange::at(position, TextSize::new(0)),
@@ -334,7 +334,6 @@ fn build_pydantic_action(
     indent: &str,
 ) -> Option<LocalRefactorCodeAction> {
     let mut edits = Vec::new();
-    let position = import_insertion_point(ast);
     let mut import_text = String::new();
     if requires_any && let Some(line) = build_from_import_line(ast, "typing", &["Any"]) {
         import_text.push_str(&line);
@@ -343,6 +342,7 @@ fn build_pydantic_action(
         import_text.push_str(&line);
     }
     if !import_text.is_empty() {
+        let (position, import_text) = prepare_import_insertion(ast, import_text);
         edits.push((
             module_info.dupe(),
             TextRange::at(position, TextSize::new(0)),

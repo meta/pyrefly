@@ -4937,6 +4937,17 @@
     },
     {
       "code": -2,
+      "column": 7,
+      "concise_description": "`_directives_deprecated_library.Ham` is deprecated",
+      "description": "`_directives_deprecated_library.Ham` is deprecated\n  Use Spam instead",
+      "line": 34,
+      "name": "deprecated",
+      "severity": "warn",
+      "stop_column": 10,
+      "stop_line": 34
+    },
+    {
+      "code": -2,
       "column": 5,
       "concise_description": "`+` is not supported between `Spam` and `Literal[1]`",
       "description": "`+` is not supported between `Spam` and `Literal[1]`\n  `_directives_deprecated_library.Spam.__add__` is deprecated\n  There is enough spam in the world",
@@ -13731,10 +13742,10 @@
     {
       "code": -2,
       "column": 18,
-      "concise_description": "`ClassVar` is not allowed in this context",
-      "description": "`ClassVar` is not allowed in this context",
+      "concise_description": "`object` is not assignable to `TypeForm[Any]`",
+      "description": "`object` is not assignable to `TypeForm[Any]`",
       "line": 71,
-      "name": "invalid-annotation",
+      "name": "bad-assignment",
       "severity": "error",
       "stop_column": 31,
       "stop_line": 71
@@ -13742,10 +13753,10 @@
     {
       "code": -2,
       "column": 18,
-      "concise_description": "`Final` is not allowed in this context",
-      "description": "`Final` is not allowed in this context",
+      "concise_description": "`object` is not assignable to `TypeForm[Any]`",
+      "description": "`object` is not assignable to `TypeForm[Any]`",
       "line": 72,
-      "name": "invalid-annotation",
+      "name": "bad-assignment",
       "severity": "error",
       "stop_column": 28,
       "stop_line": 72

@@ -214,6 +214,37 @@ impl TestTspServer {
         }));
     }
 
+    /// Send a `pyrefly/typeFacts` request. Each query is `(range, expected)`, with
+    /// the range as `(start_line, start_character, end_line, end_character)`.
+    pub fn type_facts(
+        &mut self,
+        uri: &str,
+        queries: &[((u32, u32, u32, u32), bool)],
+        snapshot: i32,
+    ) {
+        let id = self.next_request_id();
+        let queries: Vec<serde_json::Value> = queries
+            .iter()
+            .map(
+                |&((start_line, start_character, end_line, end_character), expected)| {
+                    serde_json::json!({
+                        "range": {
+                            "start": { "line": start_line, "character": start_character },
+                            "end": { "line": end_line, "character": end_character },
+                        },
+                        "expected": expected,
+                    })
+                },
+            )
+            .collect();
+        self.send_message(Message::Request(Request {
+            id,
+            method: "pyrefly/typeFacts".to_owned(),
+            params: serde_json::json!({ "uri": uri, "snapshot": snapshot, "queries": queries }),
+            activity_key: None,
+        }));
+    }
+
     /// Send a `typeServer/getExpectedType` request with a Node arg.
     pub fn get_expected_type(&mut self, uri: &str, line: u32, character: u32, snapshot: i32) {
         self.send_get_type_request("typeServer/getExpectedType", uri, line, character, snapshot);
@@ -494,7 +525,6 @@ impl TestTspClient {
         }
     }
 
-    #[expect(dead_code)]
     pub fn receive_any_message(&self) -> Message {
         match self.receiver.recv_timeout(self.timeout) {
             Ok(msg) => {
@@ -573,6 +603,11 @@ pub struct TspInteraction {
 
 impl TspInteraction {
     pub fn new() -> Self {
+        Self::with_config(None)
+    }
+
+    /// Starts a server as `pyrefly tsp --config <config>` would.
+    pub fn with_config(config: Option<PathBuf>) -> Self {
         init_test();
 
         let ((conn_server, server_reader), (conn_client, _client_reader)) = Connection::memory();
@@ -582,6 +617,7 @@ impl TspInteraction {
             indexing_mode: IndexingMode::LazyBlocking,
             workspace_indexing_limit: 0,
             transport: "stdio".to_owned(),
+            config,
         };
 
         let args = args.clone();

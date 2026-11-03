@@ -34,8 +34,6 @@ use ruff_python_ast::ModModule;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::visitor::walk_expr;
 use ruff_text_size::Ranged;
-use ruff_text_size::TextRange;
-use ruff_text_size::TextSize;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 
@@ -346,7 +344,10 @@ impl Errors {
         Self { loads }
     }
 
-    fn merge_display_errors(mut ordinary: Vec<Error>, directives: Vec<Error>) -> Vec<Error> {
+    pub(crate) fn merge_display_errors(
+        mut ordinary: Vec<Error>,
+        directives: Vec<Error>,
+    ) -> Vec<Error> {
         ordinary.extend(directives);
         ordinary.sort_by_cached_key(|e| {
             (
@@ -465,6 +466,8 @@ impl Errors {
         let mut collected = self.collect_errors();
         let unused = self.collect_unused_ignore_errors_for_display(&collected);
         collected.ordinary.extend(unused.ordinary);
+        collected.ordinary.extend(unused.hints);
+        collected.ordinary.append(&mut collected.hints);
         let config_by_path: SmallMap<&ModulePath, &ArcId<ConfigFile>> = self
             .loads
             .iter()
@@ -589,7 +592,12 @@ impl Errors {
             })
             .collect();
 
-        for error in collected.suppressed.iter().chain(&collected.ordinary) {
+        for error in collected
+            .suppressed
+            .iter()
+            .chain(&collected.ordinary)
+            .chain(&collected.hints)
+        {
             let module_path = error.path();
             let enabled_ignores = enabled_ignores_by_module
                 .get(&module_path)
@@ -667,7 +675,7 @@ impl Errors {
         }
 
         // Iterate over each module and check for unused ignores
-        for (load, _, config) in &self.loads {
+        for (load, ranges, config) in &self.loads {
             let module = &load.module_info;
             let module_path = module.path();
             let ignore = module.ignore();
@@ -678,6 +686,12 @@ impl Errors {
 
             for (applies_to_line, suppressions) in ignore.iter() {
                 for supp in suppressions {
+                    if ranges
+                        .as_ref()
+                        .is_some_and(|ranges| ranges.ignore_all.contains(supp))
+                    {
+                        continue;
+                    }
                     let tool = supp.tool();
                     // Only check tools that are enabled and that we support
                     // reporting unused ignores for (Pyrefly and Pyre).
@@ -694,16 +708,6 @@ impl Errors {
                         .and_then(|m| m.get(applies_to_line))
                         .cloned()
                         .unwrap_or_default();
-                    let line_start = module.lined_buffer().line_start(supp.comment_line());
-                    let comment_range = TextRange::new(
-                        line_start
-                            + TextSize::try_from(supp.comment_offset())
-                                .expect("Python source offsets fit in TextSize"),
-                        line_start
-                            + TextSize::try_from(supp.comment_end_offset())
-                                .expect("Python source offsets fit in TextSize"),
-                    );
-
                     // For Tool::Pyre, error code filtering is not enforced
                     // (any Pyre suppression suppresses all errors on the line),
                     // so we only report it as unused when no errors at all were
@@ -712,13 +716,17 @@ impl Errors {
                         if !used_codes.is_empty() {
                             continue; // Pyre suppression is used
                         }
-                        unused_errors.push(Error::new(
-                            module.dupe(),
-                            comment_range,
-                            "Unused pyre-fixme comment".to_owned(),
-                            Vec::new(),
-                            ErrorKind::UnusedIgnore,
-                        ));
+                        let edit = supp.removal_edit(module.lined_buffer(), None);
+                        unused_errors.push(
+                            Error::new(
+                                module.dupe(),
+                                edit.range,
+                                "Unused pyre-fixme comment".to_owned(),
+                                Vec::new(),
+                                ErrorKind::UnusedIgnore,
+                            )
+                            .with_quick_fix(edit.into()),
+                        );
                         continue;
                     }
 
@@ -728,13 +736,17 @@ impl Errors {
                         if !used_codes.is_empty() {
                             continue; // type: ignore is used
                         }
-                        unused_errors.push(Error::new(
-                            module.dupe(),
-                            comment_range,
-                            "Unused `# type: ignore` comment".to_owned(),
-                            Vec::new(),
-                            ErrorKind::UnusedTypeIgnore,
-                        ));
+                        let edit = supp.removal_edit(module.lined_buffer(), None);
+                        unused_errors.push(
+                            Error::new(
+                                module.dupe(),
+                                edit.range,
+                                "Unused `# type: ignore` comment".to_owned(),
+                                Vec::new(),
+                                ErrorKind::UnusedTypeIgnore,
+                            )
+                            .with_quick_fix(edit.into()),
+                        );
                         continue;
                     }
 
@@ -763,7 +775,6 @@ impl Errors {
                         unused
                     };
 
-                    // Create an error for the unused suppression
                     let msg = if declared_codes.is_empty() {
                         "Unused `# pyrefly: ignore` comment".to_owned()
                     } else if unused_codes.len() == declared_codes.len() {
@@ -778,13 +789,22 @@ impl Errors {
                         )
                     };
 
-                    unused_errors.push(Error::new(
-                        module.dupe(),
-                        comment_range,
-                        msg,
-                        Vec::new(),
-                        ErrorKind::UnusedIgnore,
-                    ));
+                    let partially_unused =
+                        !declared_codes.is_empty() && unused_codes.len() != declared_codes.len();
+                    let edit = supp.removal_edit(
+                        module.lined_buffer(),
+                        partially_unused.then_some(&unused_codes),
+                    );
+                    unused_errors.push(
+                        Error::new(
+                            module.dupe(),
+                            edit.range,
+                            msg,
+                            Vec::new(),
+                            ErrorKind::UnusedIgnore,
+                        )
+                        .with_quick_fix(edit.into()),
+                    );
                 }
             }
         }
@@ -817,6 +837,7 @@ impl Errors {
                 let error = error.with_severity(severity);
                 match severity {
                     Severity::Ignore => result.disabled.push(error),
+                    Severity::Hint => result.hints.push(error),
                     Severity::Info | Severity::Warn | Severity::Error => {
                         result.ordinary.push(error)
                     }
@@ -861,6 +882,7 @@ mod tests {
 
     use dupe::Dupe;
     use pyrefly_build::handle::Handle;
+    use pyrefly_config::error_kind::ErrorKind;
     use pyrefly_config::error_kind::Severity;
     use pyrefly_python::ast::Ast;
     use pyrefly_python::ignore::Ignore;
@@ -1029,6 +1051,28 @@ def f() -> int:
         assert_eq!(unused.len(), 1);
         assert!(unused[0].msg().contains("bad-override"));
         assert!(!unused[0].msg().contains("bad-return"));
+    }
+
+    #[test]
+    fn test_ignore_comments_suppress_hint() {
+        let contents = r#"
+def f(x: int) -> int:  # pyrefly: ignore
+    return 1
+
+def g(x: int) -> int:  # pyrefly: ignore[unused-parameter]
+    return 1
+"#;
+        let (errors, _tdir) = get_errors(contents);
+        let collected = errors.collect_errors();
+        assert_eq!(
+            collected
+                .suppressed
+                .iter()
+                .map(|e| e.error_kind())
+                .collect::<Vec<_>>(),
+            vec![ErrorKind::UnusedParameter, ErrorKind::UnusedParameter]
+        );
+        assert!(errors.collect_unused_ignore_errors(&collected).is_empty());
     }
 
     #[test]

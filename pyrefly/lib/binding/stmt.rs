@@ -5,20 +5,25 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use dupe::Dupe;
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
+use pyrefly_python::keywords::is_reserved_keyword;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_python::sys_info::SysInfo;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::AtomicNodeIndex;
+use ruff_python_ast::ExceptHandler;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
+use ruff_python_ast::ExprContext;
 use ruff_python_ast::ExprList;
 use ruff_python_ast::ExprName;
 use ruff_python_ast::ExprNumberLiteral;
 use ruff_python_ast::ExprSet;
+use ruff_python_ast::ExprStarred;
 use ruff_python_ast::ExprTuple;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::Pattern;
@@ -27,6 +32,8 @@ use ruff_python_ast::StmtAssign;
 use ruff_python_ast::StmtImportFrom;
 use ruff_python_ast::StmtReturn;
 use ruff_python_ast::name::Name;
+use ruff_python_ast::visitor::Visitor;
+use ruff_python_ast::visitor::walk_expr;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -38,7 +45,9 @@ use crate::binding::binding::Binding;
 use crate::binding::binding::BindingAnnotation;
 use crate::binding::binding::BindingExpect;
 use crate::binding::binding::BindingTypeAlias;
+use crate::binding::binding::BranchEnd;
 use crate::binding::binding::BranchSuite;
+use crate::binding::binding::BranchTest;
 use crate::binding::binding::ExceptClauseCatches;
 use crate::binding::binding::ExhaustiveBinding;
 use crate::binding::binding::ExhaustivenessKind;
@@ -52,15 +61,19 @@ use crate::binding::binding::KeyAnnotation;
 use crate::binding::binding::KeyExpect;
 use crate::binding::binding::KeyTypeAlias;
 use crate::binding::binding::LinkedKey;
+use crate::binding::binding::ModuleDiagnostic;
+use crate::binding::binding::NNModuleRegistrationKind;
 use crate::binding::binding::NarrowUseLocation;
 use crate::binding::binding::RaisedException;
 use crate::binding::binding::SuppressedException;
 use crate::binding::binding::TypeAliasBinding;
 use crate::binding::binding::TypeAliasParams;
 use crate::binding::bindings::BindingsBuilder;
+use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::expr::Usage;
 use crate::binding::narrow::AtomicNarrowOp;
+use crate::binding::narrow::ExcludedNonePair;
 use crate::binding::narrow::NarrowOp;
 use crate::binding::narrow::NarrowOps;
 use crate::binding::narrow::identifier_and_chain_prefix_for_expr;
@@ -70,6 +83,7 @@ use crate::binding::scope::LoopExit;
 use crate::binding::scope::Scope;
 use crate::binding::scope::TerminationKind;
 use crate::config::error_kind::ErrorKind;
+use crate::export::definitions::Definitions;
 use crate::export::definitions::MutableCaptureKind;
 use crate::export::special::SpecialExport;
 use crate::state::loader::FindingOrError;
@@ -91,6 +105,35 @@ pub(crate) const SPECIAL_IMPORT_FUNCTIONS: &[&str] = &[
 /// Returns true if the given name is a special import function.
 pub(crate) fn is_special_import_function(name: &str) -> bool {
     SPECIAL_IMPORT_FUNCTIONS.contains(&name)
+}
+
+/// The module that the path argument of a special import call names. This is the configerator
+/// compiler's Python-safe name for the file, which configs spell in import statements and stubs
+/// are laid out under: `/` and `.` both separate components, and a keyword component gets a
+/// trailing underscore. A Thrift path also maps `-` to `_`, e.g. `"a/if/b-c.thrift.python"`
+/// names `a.if_.b_c.thrift.python`. Other paths keep their hyphens, because the finder locates
+/// those files by their real names and unescapes only keywords.
+pub(crate) fn special_import_module(path: &str) -> ModuleName {
+    let file_name = path
+        .rsplit_once('/')
+        .map_or(path, |(_, file_name)| file_name);
+    let is_thrift = file_name.split('.').skip(1).any(|ext| ext == "thrift");
+    let components: Vec<String> = path
+        .split(['/', '.'])
+        .map(|component| {
+            let component = if is_thrift {
+                component.replace('-', "_")
+            } else {
+                component.to_owned()
+            };
+            if is_reserved_keyword(&component) {
+                format!("{component}_")
+            } else {
+                component
+            }
+        })
+        .collect();
+    ModuleName::from_string(components.join("."))
 }
 
 /// What the second argument of a special import call asks for.
@@ -181,6 +224,34 @@ fn pattern_may_raise(x: &Pattern) -> bool {
     }
 }
 
+/// Attribute/subscript write targets exclude a root even on a discarded body path.
+/// An unidentified write root conservatively prevents narrow repair in this with.
+#[derive(Default)]
+struct WithFacetRoots {
+    names: SmallSet<Name>,
+    unknown: bool,
+}
+
+impl<'a> Visitor<'a> for WithFacetRoots {
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        let is_write = match expr {
+            Expr::Attribute(attr) => matches!(attr.ctx, ExprContext::Store | ExprContext::Del),
+            Expr::Subscript(subscript) => {
+                matches!(subscript.ctx, ExprContext::Store | ExprContext::Del)
+            }
+            _ => false,
+        };
+        if is_write {
+            if let Some((root, _)) = identifier_and_chain_prefix_for_expr(expr) {
+                self.names.insert(root.id);
+            } else {
+                self.unknown = true;
+            }
+        }
+        walk_expr(self, expr);
+    }
+}
+
 impl<'a> BindingsBuilder<'a> {
     /// Whether iterating this expression definitely performs at least one iteration.
     ///
@@ -213,12 +284,24 @@ impl<'a> BindingsBuilder<'a> {
         }
     }
 
+    /// Bind a condition that `BindingExpect::Bool` checks. The returned link owns any lambda in the
+    /// condition, and solving it solves the check. Pass it to `insert_bool_condition`.
+    pub(crate) fn bind_bool_condition(&mut self, test: &mut Expr) -> CurrentIdx {
+        let link = self.declare_current_idx(Key::UsageLink(test.range()));
+        self.ensure_expr(test, &mut Usage::NonPinningValue(Some(link.idx())));
+        link
+    }
+
+    pub(crate) fn insert_bool_condition(&mut self, link: CurrentIdx, test: Expr) {
+        let idx = self.insert_binding(KeyExpect::Bool(test.range()), BindingExpect::Bool(test));
+        self.insert_binding_current(link, Binding::UsageLink(LinkedKey::Expect(idx)));
+    }
+
     fn assert(&mut self, assert_range: TextRange, mut test: Expr, msg: Option<Expr>) {
-        let test_range = test.range();
-        self.ensure_expr(&mut test, &mut Usage::NonPinningValue(None));
+        let test_link = self.bind_bool_condition(&mut test);
         let narrow_ops = NarrowOps::from_expr(self, Some(&test));
         let static_test = self.sys_info.evaluate_bool(&test);
-        self.insert_binding(KeyExpect::Bool(test_range), BindingExpect::Bool(test));
+        self.insert_bool_condition(test_link, test);
         if let Some(mut msg_expr) = msg {
             let mut base = self.scopes.clone_current_flow();
             // Negate the narrowing of the test expression when typechecking
@@ -259,16 +342,18 @@ impl<'a> BindingsBuilder<'a> {
     /// For the alias case, we use this range to create `Key::Definition` that matches the
     /// definitions phase, which also uses the function name range. The symbol-list case
     /// instead anchors each name at its own list element, so the names get distinct keys.
-    fn handle_special_import_call(&mut self, func_name_range: TextRange, args: &[Expr]) {
+    fn handle_special_import_call(&mut self, func_name_range: TextRange, args: &mut [Expr]) {
+        // The arguments are only read for their string values, so bind them here.
+        for arg in args.iter_mut() {
+            self.bind_unread_argument(arg);
+        }
         // Extract the module path from the first string argument.
         let module_path = match &args[0] {
             Expr::StringLiteral(lit) => lit.value.to_str(),
             _ => return,
         };
 
-        // Convert path separators to dots to form a module name.
-        let module_name_str = module_path.replace('/', ".");
-        let m = ModuleName::from_string(module_name_str);
+        let m = special_import_module(module_path);
 
         let module_found = matches!(self.lookup.module_exists(m), FindingOrError::Finding(_));
 
@@ -334,10 +419,7 @@ impl<'a> BindingsBuilder<'a> {
                             name: name.clone(),
                             original_name_range: None,
                             check_deprecated: Some(range),
-                            fallback: Some(ImportFallback {
-                                stmt_range: range,
-                                is_unreachable: self.scopes.is_unreachable_from_static_test(),
-                            }),
+                            fallback: Some(self.import_fallback(range, &name)),
                         }))
                     } else {
                         Binding::Any(AnyStyle::Implicit)
@@ -512,7 +594,7 @@ impl<'a> BindingsBuilder<'a> {
             is_annotation: false,
         };
         self.ensure_expr(&mut call.func, static_type_usage);
-        if let Some(expr) = call.arguments.args.iter_mut().next() {
+        for expr in call.arguments.args.iter_mut() {
             self.ensure_expr(expr, static_type_usage);
         }
         for kw in call.arguments.keywords.iter_mut() {
@@ -850,6 +932,19 @@ impl<'a> BindingsBuilder<'a> {
         // Clear last_stmt_expr at the start - will be set again if this is a StmtExpr
         self.scopes.set_last_stmt_expr(None);
 
+        if !matches!(
+            x,
+            Stmt::FunctionDef(_)
+                | Stmt::If(_)
+                | Stmt::Match(_)
+                | Stmt::While(_)
+                | Stmt::For(_)
+                | Stmt::With(_)
+                | Stmt::Try(_)
+        ) {
+            self.scopes.set_last_func_def(None);
+        }
+
         match x {
             Stmt::FunctionDef(x) => {
                 self.function_def(x, parent);
@@ -858,21 +953,40 @@ impl<'a> BindingsBuilder<'a> {
             Stmt::Return(x) => {
                 self.record_return(x);
             }
-            Stmt::Delete(mut x) => {
-                for target in &mut x.targets {
+            Stmt::Delete(x) => {
+                let mut targets = x.targets;
+                // `targets` is used as a stack, so it is reversed to pop the targets
+                // from left to right.
+                targets.reverse();
+                while let Some(target) = targets.pop() {
+                    let mut target = match target {
+                        Expr::Tuple(ExprTuple { elts, .. }) | Expr::List(ExprList { elts, .. }) => {
+                            // The elements are pushed in reverse so that the leftmost one
+                            // is popped next.
+                            targets.extend(elts.into_iter().rev());
+                            continue;
+                        }
+                        // The export pass records every name `Ast::expr_lvalue` finds as deleted,
+                        // and each of those names needs a `Key::Delete` binding here.
+                        Expr::Starred(ExprStarred { value, .. }) => {
+                            targets.push(*value);
+                            continue;
+                        }
+                        target => target,
+                    };
                     let mut delete_idx = self.declare_current_idx(Key::Delete(target.range()));
-                    if let Expr::Name(name) = target {
+                    if let Expr::Name(name) = &target {
                         self.ensure_expr_name(name, delete_idx.usage());
                         self.scopes.mark_as_deleted(&name.id);
                     } else {
-                        self.ensure_expr(target, delete_idx.usage());
+                        self.ensure_expr(&mut target, delete_idx.usage());
                     }
                     let idx = self.insert_binding_current(
                         delete_idx,
                         Binding::Delete(Box::new(target.clone())),
                     );
                     if let Expr::Attribute(_) = target
-                        && let Some((identifier, _)) = identifier_and_chain_prefix_for_expr(target)
+                        && let Some((identifier, _)) = identifier_and_chain_prefix_for_expr(&target)
                     {
                         self.narrow_if_name_is_defined(identifier, idx);
                     }
@@ -906,6 +1020,16 @@ impl<'a> BindingsBuilder<'a> {
                             self.assign_type_var(name, call, kind);
                             return;
                         }
+                        if special == SpecialExport::ClassMethod
+                            && self.scopes.in_unconditional_class_body()
+                            && call.arguments.keywords.is_empty()
+                            && let [Expr::Name(argument)] = &*call.arguments.args
+                            && argument.id == name.id
+                            && self.as_receiver_special_export(&call.func)
+                                == Some(SpecialExport::ClassMethod)
+                        {
+                            self.infer_classmethod_receiver(&name.id);
+                        }
                         match special {
                             SpecialExport::ParamSpec => {
                                 self.assign_param_spec(name, call);
@@ -935,6 +1059,7 @@ impl<'a> BindingsBuilder<'a> {
                                         &mut call.func,
                                         arg_name,
                                         members,
+                                        &mut call.arguments.keywords,
                                     );
                                     return;
                                 }
@@ -963,6 +1088,7 @@ impl<'a> BindingsBuilder<'a> {
                                         arg_name,
                                         ErrorKind::NameMismatch,
                                     );
+                                    self.bind_unread_argument(arg_name);
                                     let adjacent_defaults =
                                         self.adjacent_namedtuple_defaults.take();
                                     self.synthesize_typing_named_tuple_def(
@@ -972,6 +1098,7 @@ impl<'a> BindingsBuilder<'a> {
                                         members,
                                         true,
                                         adjacent_defaults,
+                                        &mut call.arguments.keywords,
                                     );
                                     return;
                                 }
@@ -985,6 +1112,7 @@ impl<'a> BindingsBuilder<'a> {
                                         arg_name,
                                         ErrorKind::NameMismatch,
                                     );
+                                    self.bind_unread_argument(arg_name);
                                     let adjacent_defaults =
                                         self.adjacent_namedtuple_defaults.take();
                                     self.synthesize_collections_named_tuple_def(
@@ -1007,6 +1135,7 @@ impl<'a> BindingsBuilder<'a> {
                                         &mut call.func,
                                         new_type_name,
                                         base,
+                                        &mut call.arguments.keywords,
                                     );
                                     return;
                                 }
@@ -1014,6 +1143,7 @@ impl<'a> BindingsBuilder<'a> {
                             _ => {}
                         }
                     }
+                    self.scopes.record_new_instance_name(&name.id, &x.value);
                     self.bind_single_name_assign(
                         &Ast::expr_name_identifier(name.clone()),
                         x.value,
@@ -1159,8 +1289,8 @@ impl<'a> BindingsBuilder<'a> {
                     );
                     let value = match x.value {
                         Some(mut assigned) => {
-                            self.bind_attr_assign(attr.clone(), &mut assigned, |v, _| {
-                                ExprOrBinding::Expr(v.clone())
+                            self.bind_attr_assign(attr.clone(), &mut assigned, |_attr, value, _| {
+                                ExprOrBinding::Expr(value.clone())
                             })
                         }
                         _ => {
@@ -1231,18 +1361,24 @@ impl<'a> BindingsBuilder<'a> {
                     }
                     Expr::Attribute(attr) => {
                         let mut x_cloned = x.clone();
-                        self.bind_attr_assign(attr.clone(), &mut x.value, move |expr, ann| {
-                            *x_cloned.value = expr.clone();
-                            ExprOrBinding::Binding(Binding::AugAssign(ann, Box::new(x_cloned)))
-                        });
+                        self.bind_attr_assign(
+                            attr.clone(),
+                            &mut x.value,
+                            move |attr, value, ann| {
+                                *x_cloned.target = Expr::Attribute(attr.clone());
+                                *x_cloned.value = value.clone();
+                                ExprOrBinding::Binding(Binding::AugAssign(ann, Box::new(x_cloned)))
+                            },
+                        );
                     }
                     Expr::Subscript(subscr) => {
                         let mut x_cloned = x.clone();
                         self.bind_subscript_assign(
                             subscr.clone(),
                             &mut x.value,
-                            move |expr, ann| {
-                                *x_cloned.value = expr.clone();
+                            move |subscr, value, ann| {
+                                *x_cloned.target = Expr::Subscript(subscr.clone());
+                                *x_cloned.value = value.clone();
                                 ExprOrBinding::Binding(Binding::AugAssign(ann, Box::new(x_cloned)))
                             },
                         );
@@ -1357,12 +1493,13 @@ impl<'a> BindingsBuilder<'a> {
                 );
             }
             Stmt::While(mut x) => {
+                let was_unreachable = self.scopes.is_definitely_unreachable();
                 self.setup_loop(x.range, &SmallSet::new());
                 // Note that it is important we ensure *after* we set up the loop, so that both the
                 // narrowing and type checking are aware that the test might be impacted by changes
                 // made in the loop (e.g. if we reassign the test variable).
                 // Typecheck the test condition during solving.
-                self.ensure_expr(&mut x.test, &mut Usage::NonPinningValue(None));
+                let test_link = self.bind_bool_condition(&mut x.test);
                 // The while condition always evaluates at least once, so walrus
                 // targets are guaranteed to be assigned after the loop.
                 self.scopes.propagate_new_flow_entries_to_loop_base();
@@ -1370,10 +1507,7 @@ impl<'a> BindingsBuilder<'a> {
                 let test_is_environment_independent = !SysInfo::depends_on_sys_info(&x.test);
                 let is_while_true = static_test == Some(true);
                 let narrow_ops = NarrowOps::from_expr(self, Some(&x.test));
-                self.insert_binding(
-                    KeyExpect::Bool(x.test.range()),
-                    BindingExpect::Bool(*x.test),
-                );
+                self.insert_bool_condition(test_link, *x.test);
                 // An environment-dependent condition is false only under the configuration
                 // being checked, so its body stays ordinary live code: binding it as dead
                 // would silence real diagnostics in it, such as an undefined name.
@@ -1410,6 +1544,16 @@ impl<'a> BindingsBuilder<'a> {
                     is_while_true,
                     is_while_true,
                 );
+                if is_while_true
+                    && !test_is_environment_independent
+                    && self.scopes.has_terminated()
+                    && !was_unreachable
+                {
+                    // Another Python environment can skip the loop.
+                    self.scopes.set_definitely_unreachable(false);
+                    self.scopes
+                        .mark_flow_termination(TerminationKind::StaticTest);
+                }
             }
             Stmt::If(mut x) => {
                 let is_definitely_unreachable = self.scopes.is_definitely_unreachable();
@@ -1418,7 +1562,13 @@ impl<'a> BindingsBuilder<'a> {
                 // Process the first `if` test before forking so that walrus-defined names
                 // are in the base flow and visible after the if-statement. This mirrors the
                 // fix for ternary expressions in expr.rs (Expr::If handling).
-                self.ensure_expr(&mut x.test, &mut Usage::NonPinningValue(None));
+                // Every test is checked by one `BranchSuiteReachability` binding, which is
+                // reserved here so that a link to it can own the lambdas in the tests.
+                let reachability_idx =
+                    self.idx_for_promise(KeyExpect::BranchSuiteReachability(if_range));
+                let tests_link = self.declare_current_idx(Key::UsageLink(if_range));
+                let tests_usage = Usage::NonPinningValue(Some(tests_link.idx()));
+                self.ensure_expr(&mut x.test, &mut tests_usage.clone());
                 self.start_fork(if_range);
                 // Type narrowing operations that are carried over from one branch to the next. For example, in:
                 //   if x is None:
@@ -1429,9 +1579,17 @@ impl<'a> BindingsBuilder<'a> {
                 // is carried over to the else branch.
                 let mut negated_prev_ops = NarrowOps::new();
                 let mut branch_suites = Vec::new();
+                // The `BranchTest` of the latest clause bound so far, which decides whether
+                // control reaches the next clause.
+                let mut previous_test = None;
                 let mut contains_environment_test_with_no_else = false;
                 let mut is_first_branch = true;
                 let mut following_runtime_only_branch = false;
+                // Under another configuration, a test of the environment may choose another suite
+                // from its own clause onward, so the definitions in those suites settle no test
+                // outside the suite, and those of the suites the configuration rules out settle
+                // none at all.
+                let mut after_environment_test = false;
                 let mut branches = Ast::if_branches_owned(x);
                 while let Some((range, mut test, body)) = branches.next() {
                     self.start_branch();
@@ -1451,7 +1609,7 @@ impl<'a> BindingsBuilder<'a> {
                     // The first `if` test was already processed before the fork (above).
                     // Only process elif/else tests here, inside the branch.
                     if !is_first_branch {
-                        self.ensure_expr_opt(test.as_mut(), &mut Usage::NonPinningValue(None));
+                        self.ensure_expr_opt(test.as_mut(), &mut tests_usage.clone());
                         // Lift walrus-defined names from the elif condition into the
                         // fork's base flow. The elif condition always executes when
                         // control reaches past the preceding branch, so any walrus
@@ -1461,6 +1619,8 @@ impl<'a> BindingsBuilder<'a> {
                         }
                     }
                     is_first_branch = false;
+                    after_environment_test |=
+                        test.as_ref().is_some_and(SysInfo::depends_on_sys_info);
                     let later_branches_are_type_checking = test
                         .as_ref()
                         .is_some_and(SysInfo::is_not_type_checking_guard);
@@ -1481,6 +1641,8 @@ impl<'a> BindingsBuilder<'a> {
                     let new_narrow_ops = if this_branch_chosen == Some(false) {
                         if test_is_environment_independent {
                             self.report_unreachable_body(&body);
+                        } else {
+                            self.record_environment_names(&body);
                         }
                         // Skip the body in this case - it typically means a check (e.g. a sys version,
                         // platform, or TYPE_CHECKING check) where the body is not statically analyzable.
@@ -1495,25 +1657,58 @@ impl<'a> BindingsBuilder<'a> {
                     } else {
                         NarrowOps::from_expr(self, test.as_ref())
                     };
-                    // The solver typechecks each test and uses the same inferred type to decide
-                    // whether this suite, or any environment-independent suites below it, is dead.
+                    // The solver decides from the declarations in each test whether this suite is
+                    // dead. An environment-independent test that is always true also makes every
+                    // suite below it dead.
+                    let excluded_none_pair = test.as_ref().and_then(ExcludedNonePair::from_test);
+                    let this_test = test.map(|test| {
+                        self.insert_binding(
+                            Key::BranchTest(test.range()),
+                            Binding::BranchTest(Box::new(BranchTest {
+                                test,
+                                previous: previous_test,
+                                is_environment_independent: test_is_environment_independent,
+                            })),
+                        )
+                    });
                     branch_suites.push(BranchSuite {
                         range: self.unreachable_body_range(&body),
-                        test,
-                        test_is_environment_independent,
+                        test: this_test,
                     });
+                    // An `if` or `elif` suite runs when its own test is true, and an `else`
+                    // suite when the latest test is false.
+                    let decided_by = this_test
+                        .map(|test| (test, true))
+                        .or(previous_test.map(|test| (test, false)));
+                    previous_test = this_test.or(previous_test);
                     self.bind_narrow_ops(
                         &new_narrow_ops,
                         NarrowUseLocation::Span(range),
                         &Usage::NonPinningValue(None),
                     );
                     negated_prev_ops.and_all(new_narrow_ops.negate());
+                    let outer_environment_suite = self.environment_suite;
+                    if after_environment_test {
+                        self.environment_suite = Some(range);
+                    }
                     if is_type_checking_branch {
                         self.type_checking_depth += 1;
                         self.stmts(body, parent);
                         self.type_checking_depth -= 1;
                     } else {
                         self.stmts(body, parent);
+                    }
+                    self.environment_suite = outer_environment_suite;
+                    if let Some((test, runs_when)) = decided_by {
+                        let end = self.insert_binding(
+                            Key::BranchEnd(range),
+                            Binding::BranchEnd(Box::new(BranchEnd {
+                                test,
+                                runs_when,
+                                last: self.scopes.last_stmt_expr(),
+                            })),
+                        );
+                        self.scopes.set_last_stmt_expr(Some(end));
                     }
                     if this_branch_chosen == Some(true)
                         && !test_is_environment_independent
@@ -1522,6 +1717,10 @@ impl<'a> BindingsBuilder<'a> {
                         contains_environment_test_with_no_else = true;
                     }
                     self.finish_branch();
+                    if let Some(pair) = excluded_none_pair {
+                        self.scopes
+                            .exclude_none_pair_in_fork_base(pair, range.start());
+                    }
                     if this_branch_chosen == Some(true) {
                         // Choosing an environment-independent branch kills every later suite
                         // in every environment. Choosing an environment-dependent one only
@@ -1541,6 +1740,8 @@ impl<'a> BindingsBuilder<'a> {
                             });
                             if report_all_remaining || unconditional == Some(false) {
                                 self.report_unreachable_body(&body);
+                            } else {
+                                self.record_environment_names(&body);
                             }
                             report_all_remaining |= unconditional == Some(true);
                             if Ast::body_contains_yield(&body) {
@@ -1551,12 +1752,14 @@ impl<'a> BindingsBuilder<'a> {
                         break; // We definitely picked this branch if we got here, nothing below is reachable.
                     }
                 }
-                if branch_suites.iter().any(|branch| branch.test.is_some()) {
-                    self.insert_binding(
-                        KeyExpect::BranchSuiteReachability(if_range),
-                        BindingExpect::BranchSuiteReachability(branch_suites.into_boxed_slice()),
-                    );
-                }
+                self.insert_binding_idx(
+                    reachability_idx,
+                    BindingExpect::BranchSuiteReachability(branch_suites.into_boxed_slice()),
+                );
+                self.insert_binding_current(
+                    tests_link,
+                    Binding::UsageLink(LinkedKey::Expect(reachability_idx)),
+                );
                 // Create Exhaustive binding for type-based exhaustiveness checking.
                 // This is done BEFORE finish_*_fork() so the binding exists in the right scope.
                 // Only do this when there's no else clause (not syntactically exhaustive).
@@ -1575,7 +1778,19 @@ impl<'a> BindingsBuilder<'a> {
                 if exhaustive {
                     self.finish_exhaustive_fork();
                 } else {
-                    self.finish_non_exhaustive_fork(&negated_prev_ops, exhaustive_key);
+                    // The fall-through runs when the latest test is false.
+                    let fall_through_key = match previous_test {
+                        Some(test) => Some(self.insert_binding(
+                            Key::BranchEnd(TextRange::empty(if_range.start())),
+                            Binding::BranchEnd(Box::new(BranchEnd {
+                                test,
+                                runs_when: false,
+                                last: exhaustive_key,
+                            })),
+                        )),
+                        None => exhaustive_key,
+                    };
+                    self.finish_non_exhaustive_fork(&negated_prev_ops, fall_through_key);
                 }
                 // Preserve the configured-environment termination without treating it as
                 // universally unreachable. This keeps later bindings out of a dead branch
@@ -1606,6 +1821,15 @@ impl<'a> BindingsBuilder<'a> {
                 // visiting the body: a terminator in the body marks the flow dead, and
                 // we must not resurrect a flow that was already dead beforehand.
                 let reachable = !self.scopes.is_definitely_unreachable();
+                let mut facet_roots = WithFacetRoots::default();
+                facet_roots.visit_body(&x.body);
+                for item in &x.items {
+                    facet_roots.visit_expr(&item.context_expr);
+                    if let Some(target) = &item.optional_vars {
+                        facet_roots.visit_expr(target);
+                    }
+                }
+                let mut entry = None;
                 let mut contexts = Vec::with_capacity(x.items.len());
                 let in_class_body = self.scopes.in_class_body();
                 for mut item in x.items {
@@ -1635,6 +1859,11 @@ impl<'a> BindingsBuilder<'a> {
                             ),
                         );
                     }
+                    if entry.is_none() {
+                        // This manager cannot suppress its own failed entry; its as target
+                        // exists on every continuation that this with can resume.
+                        entry = Some(self.scopes.clone_current_flow());
+                    }
                 }
                 // Evaluating and entering these managers happens inside the extent of any
                 // enclosing `with`, so an exception here is suppressible by those — which is
@@ -1645,6 +1874,10 @@ impl<'a> BindingsBuilder<'a> {
                 self.scopes.enter_with();
                 self.stmts(x.body, parent);
                 let body_may_raise = self.scopes.exit_with();
+                if body_may_raise || contexts.len() > 1 {
+                    // Suppression can bypass guards after an earlier write or exception.
+                    self.scopes.clear_excluded_none_pairs();
+                }
                 // An exception raised in the body may be suppressed by the context
                 // manager, in which case control flow resumes after the `with`. That
                 // depends on the type of `__exit__`, so defer the decision to solving.
@@ -1672,6 +1905,22 @@ impl<'a> BindingsBuilder<'a> {
                 } else {
                     body.is_some()
                 };
+                if reachable
+                    && (self.scopes.terminated_by_raise() || body_may_raise || entering_may_raise)
+                    && !facet_roots.unknown
+                    && let Some(entry) = entry
+                {
+                    self.merge_with_narrows(
+                        entry,
+                        &facet_roots.names,
+                        with_range,
+                        SuppressedException {
+                            contexts: contexts.clone().into_boxed_slice(),
+                            kind,
+                            body: None,
+                        },
+                    );
+                }
                 if reachable && suppressible {
                     let contexts = contexts.into_boxed_slice();
                     let key = self.insert_binding(
@@ -1718,6 +1967,8 @@ impl<'a> BindingsBuilder<'a> {
                 self.scopes.mark_flow_termination(TerminationKind::Raise);
             }
             Stmt::Try(x) => {
+                // Handlers can observe writes made before an exception, not just entry values.
+                self.scopes.clear_excluded_none_pairs();
                 self.start_fork_and_branch(x.range);
 
                 // We branch before the body, conservatively assuming that any statement can fail
@@ -1725,7 +1976,35 @@ impl<'a> BindingsBuilder<'a> {
                 //   |                     ^
                 //   ----> handler --------|
 
+                // A name has a fallback only if every `except` clause binds it, because any of
+                // them may be the one that handles the failed import. A `try` statement without
+                // `except` clauses can't handle it, so its body doesn't count as a `try` body.
+                let fallbacks = x
+                    .handlers
+                    .iter()
+                    .map(|ExceptHandler::ExceptHandler(h)| {
+                        Definitions::new(
+                            &h.body,
+                            self.module_info.name(),
+                            self.module_info.path().is_init(),
+                            self.sys_info.dupe(),
+                        )
+                        .definitions
+                        .into_iter()
+                        .filter_map(|(name, d)| d.has_value_definition.then_some(name))
+                        .collect::<SmallSet<_>>()
+                    })
+                    .reduce(|all, next| {
+                        all.into_iter().filter(|name| next.contains(name)).collect()
+                    });
+                let has_handlers = fallbacks.is_some();
+                if let Some(fallbacks) = fallbacks {
+                    self.scopes.enter_try_body(fallbacks);
+                }
                 self.stmts(x.body, parent);
+                if has_handlers {
+                    self.scopes.exit_try_body();
+                }
                 self.stmts(x.orelse, parent);
                 self.finish_branch();
 
@@ -1837,12 +2116,17 @@ impl<'a> BindingsBuilder<'a> {
             Stmt::Import(x) => {
                 for x in x.names {
                     let m = ModuleName::from_name(&x.name.id);
+                    let bound_name = x
+                        .asname
+                        .as_ref()
+                        .map_or_else(|| m.first_component(), |asname| asname.id.clone());
+                    let is_optional_import = self.scopes.has_try_fallback(&bound_name);
                     // A `__files__`/`__recursefiles__` directory import names a directory
-                    // rather than a module on disk, so it has no missing-module diagnostic
-                    // range. Every import still binds a name, which the static definitions
+                    // rather than a module on disk, so it has no missing-module diagnostic.
+                    // Every import still binds a name, which the static definitions
                     // pass has already declared; skipping the binding would leave that
                     // declaration without one.
-                    let diagnostic_range = self.import_diagnostic_range(m, x.range);
+                    let diagnostic = self.module_diagnostic(m, x.range, is_optional_import);
 
                     match x.asname {
                         Some(asname) => {
@@ -1853,19 +2137,44 @@ impl<'a> BindingsBuilder<'a> {
                             } else {
                                 self.scopes.register_import(&asname);
                             }
+                            // `import foo as f` also sees the submodules already imported
+                            // through the name `foo`. A dotted `import foo.bar as fb` binds
+                            // `foo.bar` itself, so it has nothing to inherit.
+                            let module_key = if m.as_str().contains('.') {
+                                None
+                            } else {
+                                self.scopes.existing_module_import_at(&m.first_component())
+                            };
                             self.bind_definition(
                                 &asname,
                                 Binding::Module(Box::new((
                                     m,
                                     m.components().into_boxed_slice(),
-                                    None,
-                                    diagnostic_range,
+                                    module_key,
+                                    diagnostic,
                                 ))),
                                 FlowStyle::ImportAs(m),
                             );
                         }
                         None => {
                             let first = m.first_component();
+                            let root = ModuleName::from_name(&first);
+                            // A plain `import foo` adds no submodule, so aliases of `foo` keep
+                            // their current binding.
+                            if m.as_str().contains('.') {
+                                for (alias, alias_key) in self.scopes.module_aliases_at(root) {
+                                    let key = self.insert_binding(
+                                        Key::ModuleAlias(Box::new((alias.clone(), x.name.range))),
+                                        Binding::Module(Box::new((
+                                            m,
+                                            Box::new([first.clone()]),
+                                            Some(alias_key),
+                                            None,
+                                        ))),
+                                    );
+                                    self.bind_name(&alias, key, FlowStyle::ImportAs(root));
+                                }
+                            }
                             let module_key = self.scopes.existing_module_import_at(&first);
                             let key = self.insert_binding(
                                 Key::Import(Box::new((first.clone(), x.name.range))),
@@ -1873,7 +2182,7 @@ impl<'a> BindingsBuilder<'a> {
                                     m,
                                     Box::new([first.clone()]),
                                     module_key,
-                                    diagnostic_range,
+                                    diagnostic,
                                 ))),
                             );
                             // Register the import using the first component (e.g., "os" from "os.path")
@@ -1930,7 +2239,7 @@ impl<'a> BindingsBuilder<'a> {
                 ) =>
             {
                 let expr_range = stmt_expr.range;
-                let Expr::Call(call) = *stmt_expr.value else {
+                let Expr::Call(mut call) = *stmt_expr.value else {
                     unreachable!("guarded by matches! above")
                 };
                 let Expr::Name(name) = &*call.func else {
@@ -1941,7 +2250,8 @@ impl<'a> BindingsBuilder<'a> {
                 // (the range of the full call expression). The definitions phase
                 // uses the function name range for DefinitionStyle::Import, so
                 // the binding phase must use the same range to produce matching keys.
-                self.handle_special_import_call(name.range, &call.arguments.args);
+                let name_range = name.range;
+                self.handle_special_import_call(name_range, &mut call.arguments.args);
             }
             Stmt::Expr(stmt_expr)
                 if matches!(&*stmt_expr.value,
@@ -1985,12 +2295,10 @@ impl<'a> BindingsBuilder<'a> {
                 // Collect literal-name candidates now; solving later verifies nn.Module ancestry.
                 if let Expr::Call(call) = x.value.as_ref()
                     && let Expr::Attribute(func) = call.func.as_ref()
-                    && let Some(value_keyword) = match func.attr.id.as_str() {
-                        "register_buffer" => Some("tensor"),
-                        "register_parameter" => Some("param"),
-                        _ => None,
-                    }
+                    && let Some(kind) =
+                        NNModuleRegistrationKind::from_method_name(func.attr.id.as_str())
                 {
+                    let value_keyword = kind.value_parameter_name();
                     let name = call.arguments.args.first().or_else(|| {
                         call.arguments.keywords.iter().find_map(|keyword| {
                             (keyword
@@ -2013,6 +2321,7 @@ impl<'a> BindingsBuilder<'a> {
                         self.scopes.record_nn_module_registration(
                             &func.value,
                             Name::new(name.value.to_str()),
+                            kind,
                             value.clone(),
                         );
                     }
@@ -2085,20 +2394,42 @@ impl<'a> BindingsBuilder<'a> {
         }
     }
 
-    fn import_diagnostic_range(
+    fn module_diagnostic(
         &self,
         module_name: ModuleName,
         range: TextRange,
-    ) -> Option<TextRange> {
+        is_optional_import: bool,
+    ) -> Option<ModuleDiagnostic> {
         if is_directory_import(module_name) || self.scopes.is_unreachable_from_static_test() {
             None
         } else {
-            Some(range)
+            Some(ModuleDiagnostic {
+                range,
+                is_optional_import,
+                is_in_type_checking_block: self.type_checking_depth > 0,
+            })
+        }
+    }
+
+    fn import_fallback(&self, range: TextRange, bound_name: &Name) -> ImportFallback {
+        ImportFallback {
+            diagnostic: ModuleDiagnostic {
+                range,
+                is_optional_import: self.scopes.has_try_fallback(bound_name),
+                is_in_type_checking_block: self.type_checking_depth > 0,
+            },
+            is_unreachable: self.scopes.is_unreachable_from_static_test(),
         }
     }
 
     fn bind_module_exports(&mut self, x: StmtImportFrom, m: ModuleName) {
         let module_range = x.range;
+        // A statement with no names failed to parse, so it has no fallback to check.
+        let is_optional_import = !x.names.is_empty()
+            && x.names.iter().all(|a| {
+                self.scopes
+                    .has_try_fallback(&a.asname.as_ref().unwrap_or(&a.name).id)
+            });
         // Single solve-time module-existence check per `from X import …`
         // statement. Surfaces a `MissingImport` (or other find-error)
         // diagnostic for `X` without firing bind-time `module_exists`,
@@ -2113,7 +2444,7 @@ impl<'a> BindingsBuilder<'a> {
                 m,
                 m.components().into_boxed_slice(),
                 None,
-                self.import_diagnostic_range(m, module_range),
+                self.module_diagnostic(m, module_range, is_optional_import),
             ))),
         );
         for x in x.names {
@@ -2169,10 +2500,7 @@ impl<'a> BindingsBuilder<'a> {
                     name: x.name.id.clone(),
                     original_name_range,
                     check_deprecated: Some(x.range),
-                    fallback: Some(ImportFallback {
-                        stmt_range: x.range,
-                        is_unreachable: self.scopes.is_unreachable_from_static_test(),
-                    }),
+                    fallback: Some(self.import_fallback(x.range, &asname.id)),
                 }));
                 // __future__ imports have side effects even if not explicitly used,
                 // so we skip the unused import check for them.
@@ -2190,5 +2518,69 @@ impl<'a> BindingsBuilder<'a> {
                 self.bind_definition(&asname, val, FlowStyle::Import(m, x.name.id));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ruff_python_ast::PySourceType;
+
+    use super::*;
+
+    #[test]
+    fn with_facet_roots_track_targets_not_reads() {
+        let (ast, errors, _) = Ast::parse(
+            "print(obj.value, factory().value, table[0], [1][0])\ndef read():\n    print(factory().value)\n",
+            PySourceType::Python,
+        );
+        assert!(errors.is_empty());
+        let mut roots = WithFacetRoots::default();
+        roots.visit_body(&ast.body);
+        assert!(roots.names.is_empty());
+        assert!(
+            !roots.unknown,
+            "unknown load roots do not block narrow repair"
+        );
+
+        for source in [
+            "obj.value = 1",
+            "obj.value: int = 1",
+            "obj.value += 1",
+            "del obj.value",
+            "for obj.value in [1]:\n    pass",
+            "with manager() as obj.value:\n    pass",
+            "(obj.value, local) = (1, 2)",
+            "[1 for obj.value in [1]]",
+            "def write():\n    obj.value = 1",
+        ] {
+            let (ast, errors, _) = Ast::parse(source, PySourceType::Python);
+            assert!(errors.is_empty(), "{source}");
+            let mut roots = WithFacetRoots::default();
+            roots.visit_body(&ast.body);
+            assert_eq!(roots.names.len(), 1, "{source}");
+            assert!(roots.names.contains(&Name::new_static("obj")), "{source}");
+            assert!(!roots.unknown, "{source}");
+        }
+        for source in [
+            "table[0] = 1",
+            "table[0] += 1",
+            "del table[0]",
+            "with manager() as table[0]:\n    pass",
+        ] {
+            let (ast, errors, _) = Ast::parse(source, PySourceType::Python);
+            assert!(errors.is_empty(), "{source}");
+            let mut roots = WithFacetRoots::default();
+            roots.visit_body(&ast.body);
+            assert!(roots.names.contains(&Name::new_static("table")), "{source}");
+            assert!(!roots.unknown, "{source}");
+        }
+        let (ast, errors, _) = Ast::parse("factory().value = 1", PySourceType::Python);
+        assert!(errors.is_empty());
+        let mut roots = WithFacetRoots::default();
+        roots.visit_body(&ast.body);
+        assert!(
+            roots.unknown,
+            "unknown write roots conservatively block narrow repair"
+        );
     }
 }

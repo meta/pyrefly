@@ -10,6 +10,7 @@ use std::sync::Arc;
 use dupe::Dupe;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_types::callable::Callable;
+use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::class::PrecomputedTParams;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::special_form::SpecialForm;
@@ -26,7 +27,7 @@ use crate::alt::types::class_metadata::ClassDisjointBase;
 use crate::alt::types::class_metadata::ClassMetadata;
 use crate::alt::types::class_metadata::ClassMro;
 use crate::alt::types::class_metadata::EnumMetadata;
-use crate::binding::binding::ClassDefData;
+use crate::binding::binding::ClassBinding;
 use crate::binding::binding::KeyAbstractClassCheck;
 use crate::binding::binding::KeyClassBaseType;
 use crate::binding::binding::KeyClassDisjointBase;
@@ -63,23 +64,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    pub fn class_definition(
-        &self,
-        def_index: ClassDefIndex,
-        x: &ClassDefData,
-        parent: &NestingContext,
-        is_protocol: bool,
-        tparams_require_binding: bool,
-        errors: &ErrorCollector,
-    ) -> Class {
+    pub fn class_definition(&self, binding: &ClassBinding, errors: &ErrorCollector) -> Class {
         // Legacy type variables can produce a cycle, so their tparams are left to
         // the class's `KeyTParams` binding. Everything else is computed here, and
         // a class that turns out to declare nothing records no tparams at all.
-        let precomputed_tparams = if tparams_require_binding {
+        let precomputed_tparams = if binding.tparams_require_binding {
             PrecomputedTParams::FromBinding
         } else {
-            let tparams =
-                self.calculate_class_tparams_no_legacy(&x.name, x.type_params.as_deref(), errors);
+            let tparams = self.calculate_class_tparams_no_legacy(
+                &binding.def.name,
+                binding.def.type_params.as_deref(),
+                errors,
+            );
             if tparams.is_empty() {
                 PrecomputedTParams::NotGeneric
             } else {
@@ -87,12 +83,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         };
         Class::new(
-            def_index,
-            x.name.clone(),
-            parent.dupe(),
+            binding.def_index,
+            binding.def.name.clone(),
+            binding.parent.dupe(),
             self.module().dupe(),
             precomputed_tparams,
-            is_protocol,
+            binding.is_protocol,
+            binding.deprecation.as_deref().cloned(),
         )
     }
 
@@ -109,6 +106,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self.module().dupe(),
             PrecomputedTParams::NotGeneric,
             false,
+            None,
         )
     }
 
@@ -189,6 +187,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::TypeAlias(ta) => {
                 self.unwrap_class_object_silently(&self.get_type_alias(ta).as_value(self.stdlib))
             }
+            Type::Intersect(intersection) => {
+                // A class-object member proves that the intersection is a class object.
+                intersection
+                    .0
+                    .iter()
+                    .find_map(|member| self.unwrap_class_object_silently(member))
+            }
             // Note that for the purposes of type narrowing, we always unwrap Type::Type(Type::ClassType),
             // but it's not always a valid argument to isinstance/issubclass. expr_infer separately checks
             // whether the argument is valid.
@@ -254,6 +259,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub fn as_superclass(&self, class: &ClassType, want: &Class) -> Option<ClassType> {
         if class.class_object() == want {
             Some(class.clone())
+        } else if let Some(DjangoClassMetadata::SpecializedBase { base }) = class.django_metadata()
+            && self.has_superclass(base.class_object(), want)
+        {
+            self.as_superclass(base, want)
         } else if !class.class_object().is_builtin("tuple")
             && let Some(tuple) = self.as_tuple(class)
             && self.has_superclass(self.stdlib.tuple_object(), want)

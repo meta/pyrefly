@@ -289,6 +289,10 @@ impl ModuleName {
         Self::from_str("django.db.models.base")
     }
 
+    pub fn django_models_expressions() -> Self {
+        Self::from_str("django.db.models.expressions")
+    }
+
     pub fn django_models_fields() -> Self {
         Self::from_str("django.db.models.fields")
     }
