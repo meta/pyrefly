@@ -11,6 +11,76 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_setattr_inferred_instance_attributes,
+    r#"
+from typing import Final, assert_type
+
+class Plain:
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", 1)
+        setattr(self, "y", "hello")
+
+assert_type(Plain().x, int)
+assert_type(Plain().y, str)
+
+class FinalField:
+    x: Final[int]
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", 1)
+
+assert_type(FinalField().x, int)
+
+class Starred:
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", *[1])
+        setattr(self, "y", *[1])
+
+_ = Starred().x  # E: Object of class `Starred` has no attribute `x`
+_ = Starred().y  # E: Object of class `Starred` has no attribute `y`
+"#,
+);
+
+testcase!(
+    test_setattr_classmethod_attribute_parity,
+    r#"
+from typing import assert_type
+
+class TestDirect:
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.x = 1
+
+class TestSetattr:
+    @classmethod
+    def setUpClass(cls) -> None:
+        setattr(cls, "x", 1)
+
+assert_type(TestDirect.x, int)
+assert_type(TestDirect().x, int)
+assert_type(TestSetattr.x, int)
+assert_type(TestSetattr().x, int)
+"#,
+);
+
+testcase!(
+    test_setattr_classmethod_attribute_boundaries,
+    TestEnv::new().enable_implicitly_defined_attribute_error(),
+    r#"
+from typing import assert_type
+
+class ClsSetattr:
+    @classmethod
+    def setup(cls) -> None:
+        setattr(cls, "x", 1)  # E: Attribute `x` is implicitly defined by assignment in method `setup`, which is not a constructor
+        object.__setattr__(cls, "y", 1)
+
+def check(c: ClsSetattr) -> None:
+    assert_type(c.x, int)
+    _ = c.y  # E: Object of class `ClsSetattr` has no attribute `y`
+"#,
+);
+
+testcase!(
     test_class_body_initialization_is_independent_of_methods,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"

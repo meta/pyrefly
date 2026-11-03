@@ -202,14 +202,14 @@ class File:
     inner: tuple[PurePosixPath, int]
     def __init__(self, path: str, /, *, size: int) -> None:
         object.__setattr__(self, "inner", (PurePosixPath(path), size))
-@dataclass(frozen=True, init=False)
+@dataclass(init=False)
 class ViaBuiltin:
     x: int
     _protected: int
     def __init__(self, x: int) -> None:
         setattr(self, "x", x)
         object.__setattr__(self, "_protected", 1)
-@dataclass(frozen=True, init=False)
+@dataclass(init=False)
 class ViaImportedBuiltins:
     x: int
     y: int
@@ -278,58 +278,6 @@ class ShadowedObject:
 );
 
 testcase!(
-    test_setattr_inferred_instance_attributes,
-    r#"
-from typing import Final, assert_type
-
-class Plain:
-    def __init__(self) -> None:
-        object.__setattr__(self, "x", 1)
-        setattr(self, "y", "hello")
-
-assert_type(Plain().x, int)
-assert_type(Plain().y, str)
-
-class FinalField:
-    x: Final[int]
-    def __init__(self) -> None:
-        object.__setattr__(self, "x", 1)
-
-assert_type(FinalField().x, int)
-
-class Starred:
-    def __init__(self) -> None:
-        object.__setattr__(self, "x", *[1])
-        setattr(self, "y", *[1])
-
-_ = Starred().x  # E: Object of class `Starred` has no attribute `x`
-_ = Starred().y  # E: Object of class `Starred` has no attribute `y`
-"#,
-);
-
-testcase!(
-    test_setattr_classmethod_attribute_parity,
-    r#"
-from typing import assert_type
-
-class TestDirect:
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.x = 1
-
-class TestSetattr:
-    @classmethod
-    def setUpClass(cls) -> None:
-        setattr(cls, "x", 1)
-
-assert_type(TestDirect.x, int)
-assert_type(TestDirect().x, int)
-assert_type(TestSetattr.x, int)
-assert_type(TestSetattr().x, int)
-"#,
-);
-
-testcase!(
     test_setattr_checked_unannotated_constructor,
     TestEnv::new().enable_uninitialized_instance_variable_error(),
     r#"
@@ -357,23 +305,5 @@ class Skipped:
     def __init__(self) -> None:
         setattr(self, "x", 1)
         self.y = 2
-"#,
-);
-
-testcase!(
-    test_setattr_classmethod_attribute_boundaries,
-    TestEnv::new().enable_implicitly_defined_attribute_error(),
-    r#"
-from typing import assert_type
-
-class ClsSetattr:
-    @classmethod
-    def setup(cls) -> None:
-        setattr(cls, "x", 1)  # E: Attribute `x` is implicitly defined by assignment in method `setup`, which is not a constructor
-        object.__setattr__(cls, "y", 1)
-
-def check(c: ClsSetattr) -> None:
-    assert_type(c.x, int)
-    _ = c.y  # E: Object of class `ClsSetattr` has no attribute `y`
 "#,
 );

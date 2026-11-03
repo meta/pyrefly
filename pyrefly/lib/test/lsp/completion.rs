@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::slice;
+
 use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::CompletionItemTag;
@@ -67,22 +69,29 @@ class C:
         setattr(self, "class", 1)
         setattr(self, "con" "cat", 1)
         setattr(self, "esca\x70ed", 1)
+        setattr(self, "K", 1)
+        setattr(self, "match", 1)
 
 C().
 "#;
     let (state, handle) = TestEnv::one("main", source).to_state();
     let handle = handle("main");
     let mut transaction = state.transaction();
-    transaction.run(std::slice::from_ref(&handle), Require::Everything, None);
+    transaction.run(slice::from_ref(&handle), Require::Everything, None);
     let position = TextSize::try_from(source.rfind("C().").unwrap() + "C().".len()).unwrap();
     let mut names = transaction
         .completion(&handle, position, ImportFormat::Absolute, true, None)
         .into_iter()
         .map(|item| item.label)
-        .filter(|name| ["x", "foo-bar", "class", "concat", "escaped"].contains(&name.as_str()))
+        .filter(|name| {
+            [
+                "x", "foo-bar", "class", "concat", "escaped", "K", "K", "match",
+            ]
+            .contains(&name.as_str())
+        })
         .collect::<Vec<_>>();
     names.sort();
-    assert_eq!(names, ["x"]);
+    assert_eq!(names, ["match", "x"]);
 }
 
 #[test]
