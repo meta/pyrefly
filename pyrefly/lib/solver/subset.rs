@@ -2808,17 +2808,13 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 Ok(())
             }
             (Type::QuantifiedValue(_), Type::ClassType(cls)) if is_int_class_type(cls) => Ok(()),
+            // Enum literal expansion makes a sole non-Flag member equivalent to its enum type.
             (Type::ClassType(got_cls), Type::Literal(lit))
                 if let Lit::Enum(enum_lit) = &lit.value
                     && got_cls.class_object() == enum_lit.class.class_object()
-                    && !self.type_order.has_superclass(
-                        got_cls.class_object(),
-                        self.type_order.stdlib().enum_flag().class_object(),
-                    )
                     && self
                         .type_order
-                        .get_enum_member_count(got_cls.class_object())
-                        == Some(1) =>
+                        .enum_literal_covers_class(got_cls.class_object(), &enum_lit.member) =>
             {
                 Ok(())
             }

@@ -403,6 +403,31 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .unwrap_or_else(|| self.heap.mk_any_implicit()) // Fall back to `Any` if `_generate_next_value_` is missing or not callable
     }
 
+    /// Whether this member literal is equivalent to the entire enum type.
+    /// `member` is the canonical member name, after resolving aliases.
+    pub fn enum_literal_covers_class(&self, cls: &Class, member: &Name) -> bool {
+        if !self.get_metadata_for_class(cls).is_enum()
+            || self.has_superclass(cls, self.stdlib.enum_flag().class_object())
+        {
+            return false;
+        }
+        let Some(fields) = self.get_class_fields(cls) else {
+            return false;
+        };
+        let mut members = fields
+            .names()
+            .filter_map(|name| self.get_enum_member(cls, name))
+            .peekable();
+        // Stop at the first different member, without constructing the full member set.
+        members.peek().is_some()
+            && members.all(|literal| {
+                let Lit::Enum(enum_lit) = literal else {
+                    unreachable!("enum members must be represented as enum literals");
+                };
+                enum_lit.member == *member
+            })
+    }
+
     pub fn get_enum_member_count(&self, cls: &Class) -> Option<usize> {
         let meta = self.get_metadata_for_class(cls);
         if meta.is_enum() {
