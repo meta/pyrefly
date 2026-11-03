@@ -264,9 +264,8 @@ fn collapse_literals(
     let enums_to_delete: SmallSet<ClassType> = enums
         .into_iter()
         .filter(|(k, n)| {
-            // `enum_members` returns a count only for classes it classifies as enums, and
-            // `None` otherwise. That `None` case is reachable, so when we can't get a count
-            // we leave the literals alone rather than promoting.
+            // `enum_members` returns a count only for enums eligible for literal expansion.
+            // Leave non-expandable enums, including Flag-derived classes, as literals.
             let Some(num_members) = enum_members(k.class_object()) else {
                 return false;
             };

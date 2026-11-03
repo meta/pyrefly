@@ -2655,7 +2655,7 @@ impl Solver {
         unions_with_literals(
             branches,
             type_order.stdlib(),
-            &|cls| type_order.get_enum_member_count(cls),
+            &|cls| type_order.get_expandable_enum_member_count(cls),
             &self.heap,
         )
     }

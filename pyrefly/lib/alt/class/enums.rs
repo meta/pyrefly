@@ -403,12 +403,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .unwrap_or_else(|| self.heap.mk_any_implicit()) // Fall back to `Any` if `_generate_next_value_` is missing or not callable
     }
 
-    /// Whether this member literal is equivalent to the entire enum type.
+    /// Whether the class can be represented by its declared enum member literals.
+    /// Flag-derived enums are excluded because they allow additional combined values.
+    /// https://typing.python.org/en/latest/spec/enums.html#enum-literal-expansion
+    fn is_expandable_enum(&self, cls: &Class) -> bool {
+        self.get_metadata_for_class(cls).is_enum()
+            && !self.has_superclass(cls, self.stdlib.enum_flag().class_object())
+    }
+
+    /// Whether the named member's literal is equivalent to the entire enum type.
     /// `member` is the canonical member name, after resolving aliases.
     pub fn enum_literal_covers_class(&self, cls: &Class, member: &Name) -> bool {
-        if !self.get_metadata_for_class(cls).is_enum()
-            || self.has_superclass(cls, self.stdlib.enum_flag().class_object())
-        {
+        if !self.is_expandable_enum(cls) {
             return false;
         }
         let Some(fields) = self.get_class_fields(cls) else {
@@ -428,9 +434,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             })
     }
 
-    pub fn get_enum_member_count(&self, cls: &Class) -> Option<usize> {
-        let meta = self.get_metadata_for_class(cls);
-        if meta.is_enum() {
+    /// Count distinct members only for enums eligible for literal expansion.
+    pub fn get_expandable_enum_member_count(&self, cls: &Class) -> Option<usize> {
+        if self.is_expandable_enum(cls) {
             Some(self.get_enum_members(cls).len())
         } else {
             None

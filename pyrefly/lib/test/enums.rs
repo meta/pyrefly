@@ -530,7 +530,6 @@ def check(flag: SingleFlag, int_flag: SingleIntFlag) -> None:
 );
 
 testcase!(
-    bug = "Flag literal unions should not expand to their enum class",
     test_flag_literal_union_normalization,
     r#"
 from enum import Flag, IntFlag
@@ -551,20 +550,19 @@ class MultiIntFlag(IntFlag):
     Y = 2
 
 def check(single: SingleFlag, single_int: SingleIntFlag, multi: MultiFlag, multi_int: MultiIntFlag, condition: bool) -> None:
-    optional: Literal[SingleFlag.X] | None = single
-    optional_int: Literal[SingleIntFlag.X] | None = single_int
-    complete: Literal[MultiFlag.X, MultiFlag.Y] = multi
-    complete_int: Literal[MultiIntFlag.X, MultiIntFlag.Y] = multi_int
+    optional: Literal[SingleFlag.X] | None = single  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X] | None`
+    optional_int: Literal[SingleIntFlag.X] | None = single_int  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X] | None`
+    complete: Literal[MultiFlag.X, MultiFlag.Y] = multi  # E: `MultiFlag` is not assignable to `Literal[MultiFlag.X, MultiFlag.Y]`
+    complete_int: Literal[MultiIntFlag.X, MultiIntFlag.Y] = multi_int  # E: `MultiIntFlag` is not assignable to `Literal[MultiIntFlag.X, MultiIntFlag.Y]`
 
-    assert_type(SingleFlag.X if condition else None, SingleFlag | None)
-    assert_type(SingleIntFlag.X if condition else None, SingleIntFlag | None)
-    assert_type(MultiFlag.X if condition else MultiFlag.Y, MultiFlag)
-    assert_type(MultiIntFlag.X if condition else MultiIntFlag.Y, MultiIntFlag)
+    assert_type(SingleFlag.X if condition else None, Literal[SingleFlag.X] | None)
+    assert_type(SingleIntFlag.X if condition else None, Literal[SingleIntFlag.X] | None)
+    assert_type(MultiFlag.X if condition else MultiFlag.Y, Literal[MultiFlag.X, MultiFlag.Y])
+    assert_type(MultiIntFlag.X if condition else MultiIntFlag.Y, Literal[MultiIntFlag.X, MultiIntFlag.Y])
 "#,
 );
 
 testcase!(
-    bug = "TypedDict value unions should preserve Flag literals",
     test_flag_literals_in_typed_dict_values,
     r#"
 from enum import Flag, IntFlag
@@ -587,8 +585,8 @@ class IntValues(TypedDict, closed=True):
     b: Literal[IntBits.B]
 
 def check(values: Values, int_values: IntValues) -> None:
-    assert_type(next(iter(values.values())), Bits)
-    assert_type(next(iter(int_values.values())), IntBits)
+    assert_type(next(iter(values.values())), Literal[Bits.A, Bits.B])
+    assert_type(next(iter(int_values.values())), Literal[IntBits.A, IntBits.B])
 "#,
 );
 
