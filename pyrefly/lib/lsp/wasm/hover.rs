@@ -41,7 +41,6 @@ use pyrefly_types::type_var::Variance;
 use pyrefly_types::types::Type;
 use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::lined_buffer::LineNumber;
-use pyrefly_util::visit::Visit;
 use regex::Regex;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::CmpOp;
@@ -1324,6 +1323,44 @@ fn in_keyword_hover(
     })
 }
 
+/// Find the innermost call enclosing the cursor, if the cursor is in its callee.
+/// The returned ranges identify the callee and arguments; the flag excludes receivers and indices.
+fn callee_at_position(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    ast: &ModModule,
+    position: TextSize,
+) -> Option<(TextRange, TextRange, bool)> {
+    let call = Ast::locate_node(ast, position)
+        .into_iter()
+        .find_map(|node| match node {
+            AnyNodeRef::ExprCall(call) => Some(call),
+            _ => None,
+        })?;
+    // An inner call's argument must not be mistaken for part of an outer callee.
+    if !call.func.range().contains_inclusive(position) {
+        return None;
+    }
+    let mut name = call.func.as_ref();
+    // Class specialization names a constructor; ordinary indexing names a receiver.
+    while let Expr::Subscript(subscript) = name {
+        if !transaction
+            .get_answers(handle)?
+            .get_type_trace(subscript.value.range())
+            .is_some_and(is_constructor_call)
+        {
+            break;
+        }
+        name = subscript.value.as_ref();
+    }
+    let on_name = match name {
+        Expr::Name(name) => name.range().contains_inclusive(position),
+        Expr::Attribute(attr) => attr.attr.range().contains_inclusive(position),
+        _ => false,
+    };
+    Some((call.func.range(), call.arguments.range, on_name))
+}
+
 /// Resolve the type under the cursor, coercing it to a callable when hovering over a
 /// call's callee (or to the constructor's return type for a constructor call).
 fn resolve_hovered_type(
@@ -1337,41 +1374,20 @@ fn resolve_hovered_type(
         .or_else(|| transaction.get_type_at(handle, position))
         .or_else(|| transaction.operator_type_at(handle, position))?;
 
-    // Find the innermost call whose callee (func) encloses the cursor, returning the
-    // callee and argument ranges and whether the cursor is on the callee's own name —
-    // the attribute in `a.b()`, or the whole callee otherwise. A receiver like `a` in
-    // `a.b()` is inside the callee range but not on the name, so hovering it must not
-    // coerce its type.
-    let callee_at_position = || -> Option<(TextRange, TextRange, bool)> {
-        let ast = ast?;
-        let mut result = None;
-        ast.visit(&mut |expr: &Expr| {
-            if let Expr::Call(call) = expr
-                && call.func.range().contains(position)
-            {
-                let on_callee_name = match &*call.func {
-                    Expr::Attribute(attr) => attr.attr.range(),
-                    _ => call.func.range(),
-                }
-                .contains(position);
-                result = Some((call.func.range(), call.arguments.range, on_callee_name));
-            }
-        });
-        result
-    };
-
-    // Prefer the enclosing call found from the argument list; only walk the AST for a
-    // callee hover when the cursor is not inside an argument. Hovering inside arguments
-    // is never "on the callee", so coercion stays disabled there.
+    // A nested callee takes precedence over the surrounding call's argument list.
+    // Receivers and other argument expressions retain their own types.
     let (callee_range_opt, call_arguments_range, hovering_over_callee) =
-        match transaction.get_callables_from_call(handle, position) {
-            Some(info) => (Some(info.callee_range), None, false),
-            None => match callee_at_position() {
-                Some((callee_range, arguments_range, on_name)) => {
-                    (Some(callee_range), Some(arguments_range), on_name)
-                }
-                None => (None, None, false),
-            },
+        match ast.and_then(|ast| callee_at_position(transaction, handle, ast, position)) {
+            Some((callee_range, arguments_range, on_name)) => {
+                (Some(callee_range), Some(arguments_range), on_name)
+            }
+            None => (
+                transaction
+                    .get_callables_from_call(handle, position)
+                    .map(|info| info.callee_range),
+                None,
+                false,
+            ),
         };
 
     if let Some(callee_range) = callee_range_opt {
@@ -1449,15 +1465,10 @@ fn class_docstring_for_constructor(
     position: TextSize,
 ) -> Option<Docstring> {
     let ast = transaction.get_ast(handle)?;
-    let mut callee_range = None;
-    ast.visit(&mut |expr: &Expr| {
-        if let Expr::Call(call) = expr
-            && call.func.range().contains(position)
-        {
-            callee_range = Some(call.func.range());
-        }
-    });
-    let callee_range = callee_range?;
+    let (callee_range, _, on_name) = callee_at_position(transaction, handle, &ast, position)?;
+    if !on_name {
+        return None;
+    }
     let callee_type = transaction
         .get_answers(handle)?
         .get_type_trace(callee_range)?;

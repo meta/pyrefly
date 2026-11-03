@@ -2803,11 +2803,11 @@ def consume(value): pass
         );
         let report = get_batched_lsp_operations_report(&[("main", &code)], get_test_report);
         assert!(report.contains("__init__"), "got: {report}");
-        // BUG: callee discovery does not visit expressions nested inside expressions.
         assert!(
-            !report.contains("Nested class documentation."),
+            report.contains("Nested class documentation."),
             "got: {report}"
         );
+        assert!(report.contains("-> Person"), "got: {report}");
     }
 }
 
@@ -2823,9 +2823,8 @@ Person()
 "#;
     let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
     assert!(report.contains("__init__"), "got: {report}");
-    // BUG: constructor documentation excludes the end of the callee identifier.
     assert!(
-        !report.contains("Boundary class documentation."),
+        report.contains("Boundary class documentation."),
         "got: {report}"
     );
 }
@@ -2933,8 +2932,7 @@ fn hover_constructor_followup_subscript_callee_components() {
         );
         let report = get_batched_lsp_operations_report(&[("main", &code)], get_test_report);
         assert!(report.contains("(parameter)"), "got: {report}");
-        // BUG: subscript receivers and indices are coerced to the indexed callable.
-        assert!(!report.contains(expected), "got: {report}");
+        assert!(report.contains(expected), "got: {report}");
     }
 }
 
