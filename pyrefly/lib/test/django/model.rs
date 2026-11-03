@@ -181,6 +181,61 @@ assert_type(Ordinary.objects.get(), Person)
 );
 
 django_testcase!(
+    bug = "Annotated children cannot replace inferred Django managers",
+    test_annotated_custom_manager_replacements,
+    r#"
+from typing import ClassVar, TypeVar, assert_type
+from django.db import models
+
+M = TypeVar("M", bound=models.Model, covariant=True)
+
+class CustomManager(models.Manager[M]):
+    def custom(self) -> int:
+        return 1
+
+class SiblingManager(models.Manager):
+    def sibling(self) -> int:
+        return 1
+
+class Parent(models.Model):
+    objects = CustomManager()
+
+class Plain(Parent):
+    objects: ClassVar[models.Manager["Plain"]] = models.Manager()  # E: overrides parent class `Parent` in an inconsistent manner
+
+class Sibling(Parent):
+    objects: ClassVar[SiblingManager] = SiblingManager()  # E: overrides parent class `Parent` in an inconsistent manner
+
+assert_type(Plain.objects.get(), Plain)
+assert_type(Sibling.objects.sibling(), int)
+Plain().objects = Plain.objects  # E: Cannot set field `objects`
+Sibling().objects = Sibling.objects  # E: Cannot set field `objects`
+
+class DeclaredParent(models.Model):
+    objects: ClassVar[CustomManager["DeclaredParent"]] = CustomManager()
+
+class InvalidCustom(DeclaredParent):
+    objects: ClassVar[models.Manager["InvalidCustom"]] = models.Manager()  # E: overrides parent class `DeclaredParent` in an inconsistent manner
+
+class Middle(DeclaredParent):
+    objects = CustomManager()
+
+class InvalidInherited(Middle):
+    objects: ClassVar[models.Manager["InvalidInherited"]] = models.Manager()  # E: overrides parent class `Middle` in an inconsistent manner
+
+assert_type(Middle.objects.custom(), int)
+
+class StandardParent(models.Model):
+    objects: ClassVar[models.Manager["StandardParent"]] = models.Manager()
+
+class Other(models.Model): ...
+
+class InvalidModel(StandardParent):
+    objects: ClassVar[models.Manager[Other]] = models.Manager()  # E: overrides parent class `StandardParent` in an inconsistent manner
+"#,
+);
+
+django_testcase!(
     test_model,
     r#"
 from typing import assert_type
