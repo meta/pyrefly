@@ -3039,8 +3039,7 @@ fn hover_docstring_followup_blank_source_documentation() {
             format!("def documented() -> None:\n    {literal}\n    pass\n\ndocumented()\n#^\n");
         let report = get_batched_lsp_operations_report(&[("main", &code)], get_test_report);
         assert!(report.contains("(function) documented"), "got: {report}");
-        // BUG: a blank implementation docstring still creates a documentation section.
-        assert!(report.contains("---"), "got: {report}");
+        assert!(!report.contains("---"), "got: {report}");
     }
 }
 

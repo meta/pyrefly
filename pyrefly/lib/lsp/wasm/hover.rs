@@ -1522,10 +1522,7 @@ fn class_docstring_for_constructor(
             .map(|range| Docstring(range, item.module))
             .and_then(nonempty_docstring)
     });
-    from_definition.or_else(|| {
-        docstring_for_class_object_type(transaction, handle, &callee_type)
-            .and_then(nonempty_docstring)
-    })
+    from_definition.or_else(|| docstring_for_class_object_type(transaction, handle, &callee_type))
 }
 
 pub fn get_hover(
@@ -1684,13 +1681,11 @@ pub fn get_hover_with_verbosity(
                 .map(|range| Docstring(range, item.module))
         })
         .and_then(nonempty_docstring)
-        .or(fallback_docstring)
+        .or_else(|| fallback_docstring.and_then(nonempty_docstring))
         .or_else(|| docstring_for_class_object_type(transaction, handle, &type_));
 
     let docstring = if hover_constructor_dunder {
-        docstring
-            .and_then(nonempty_docstring)
-            .or_else(|| class_docstring_for_constructor(transaction, handle, position))
+        docstring.or_else(|| class_docstring_for_constructor(transaction, handle, position))
     } else {
         docstring
     };
