@@ -57,6 +57,35 @@ fn is_object_attribute(item: &CompletionItem) -> bool {
         .is_some_and(|sort_text| sort_text.starts_with("3a"))
 }
 
+// BUG: setter names that are not plain source identifiers become inferred fields.
+#[test]
+fn completion_setattr_literal_name_boundaries() {
+    let source = r#"
+class C:
+    def __init__(self) -> None:
+        setattr(self, "x", 1)
+        setattr(self, "foo-bar", 1)
+        setattr(self, "class", 1)
+        setattr(self, "con" "cat", 1)
+        setattr(self, "esca\x70ed", 1)
+
+C().
+"#;
+    let (state, handle) = TestEnv::one("main", source).to_state();
+    let handle = handle("main");
+    let mut transaction = state.transaction();
+    transaction.run(std::slice::from_ref(&handle), Require::Everything, None);
+    let position = TextSize::try_from(source.rfind("C().").unwrap() + "C().".len()).unwrap();
+    let mut names = transaction
+        .completion(&handle, position, ImportFormat::Absolute, true, None)
+        .into_iter()
+        .map(|item| item.label)
+        .filter(|name| ["x", "foo-bar", "class", "concat", "escaped"].contains(&name.as_str()))
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["class", "concat", "escaped", "foo-bar", "x"]);
+}
+
 #[test]
 fn completion_magic_methods_in_class() {
     let code = r#"
