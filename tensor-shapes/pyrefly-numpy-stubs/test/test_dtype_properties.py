@@ -421,3 +421,19 @@ def test_identity_explicit_dtype_object() -> None:
     assert_shape(x.shape, (5, 5))
     assert_type(x.dtype, np.dtype[np.int64])
     assert x.dtype == np.dtype(np.int64)
+
+
+def test_dtype_str_attribute() -> None:
+    # `dtype.str` is the array-protocol type string; the overlay omits it.
+    x = np.zeros((2, 3))
+
+    assert_shape(x.shape, (2, 3))
+    assert x.dtype.str.endswith("f8")  # E: no attribute
+
+
+def test_structured_array_field_assignment() -> None:
+    # Field-name assignment on a structured array; the overlay models index keys.
+    values = np.zeros(3, dtype=[("x", "f4"), ("y", "f4")])
+
+    values["x"] = np.ones(3)  # E: Cannot set item
+    assert_shape(values.shape, (3,))
