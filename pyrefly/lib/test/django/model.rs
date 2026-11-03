@@ -181,7 +181,6 @@ assert_type(Ordinary.objects.get(), Person)
 );
 
 django_testcase!(
-    bug = "Annotated children cannot replace inferred Django managers",
     test_annotated_custom_manager_replacements,
     r#"
 from typing import ClassVar, TypeVar, assert_type
@@ -201,10 +200,10 @@ class Parent(models.Model):
     objects = CustomManager()
 
 class Plain(Parent):
-    objects: ClassVar[models.Manager["Plain"]] = models.Manager()  # E: overrides parent class `Parent` in an inconsistent manner
+    objects: ClassVar[models.Manager["Plain"]] = models.Manager()
 
 class Sibling(Parent):
-    objects: ClassVar[SiblingManager] = SiblingManager()  # E: overrides parent class `Parent` in an inconsistent manner
+    objects: ClassVar[SiblingManager] = SiblingManager()
 
 assert_type(Plain.objects.get(), Plain)
 assert_type(Sibling.objects.sibling(), int)

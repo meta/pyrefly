@@ -4580,19 +4580,27 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             if metadata.is_django_model()
-                && !cls_fields.is_field_annotated(field_name)
                 && self.is_django_manager_type(&class_field.ty())
                 && self.is_django_manager_type(&want_class_field.ty())
-                && (matches!(want_class_field.ty(), Type::ClassType(cls) if
-                    cls.has_qname("django.db.models.manager", "Manager")
-                    || cls.has_qname("django.db.models.manager", "BaseManager"))
-                    || self
-                        .get_class_fields(&want_field.defining_class)
-                        .is_some_and(|fields| !fields.is_field_annotated(field_name)))
             {
-                // Django permits replacing inferred managers, including sibling manager classes.
-                // Explicit custom interfaces still require ordinary override checks.
-                continue;
+                // Qualifier-only annotations do not declare a manager interface.
+                let parent_is_inferred = matches!(
+                    &want_class_field.0,
+                    ClassFieldInner::Descriptor { annotation, .. }
+                        | ClassFieldInner::ClassAttribute { annotation, .. }
+                        | ClassFieldInner::InstanceAttribute { annotation, .. }
+                        if annotation.as_ref().is_none_or(|ann| ann.ty.is_none())
+                );
+                let parent_is_standard = matches!(want_class_field.ty(), Type::ClassType(cls) if
+                    cls.has_qname("django.db.models.manager", "Manager")
+                    || cls.has_qname("django.db.models.manager", "BaseManager"));
+                // Inferred interfaces allow replacements; declared standard interfaces only
+                // permit implicit rebinding. Other declared interfaces keep ordinary checks.
+                if parent_is_inferred
+                    || (parent_is_standard && !cls_fields.is_field_annotated(field_name))
+                {
+                    continue;
+                }
             }
             let want_is_static = want_class_field.is_staticmethod();
             let want_is_class = want_class_field.is_classmethod();
