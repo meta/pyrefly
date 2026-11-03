@@ -1369,7 +1369,6 @@ def g(x: E):
 );
 
 testcase!(
-    bug = "Flag arguments must not expand to declared member literals",
     test_do_not_expand_flag_arguments,
     r#"
 from enum import Flag, IntFlag
@@ -1401,8 +1400,8 @@ def choose_int(value: IntBits) -> str:
     return value.name or ""
 
 def check(value: Bits, int_value: IntBits) -> None:
-    choose(value)
-    choose_int(int_value)
+    choose(value)  # E: No matching overload found for function `choose`
+    choose_int(int_value)  # E: No matching overload found for function `choose_int`
 
 def check_members(value: Literal[Bits.A, Bits.B], int_value: Literal[IntBits.A, IntBits.B]) -> None:
     assert_type(choose(value), Literal["A", "B"])

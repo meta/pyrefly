@@ -405,8 +405,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Whether the class can be represented by its declared enum member literals.
     /// Flag-derived enums are excluded because they allow additional combined values.
-    /// https://typing.python.org/en/latest/spec/enums.html#enum-literal-expansion
-    fn is_expandable_enum(&self, cls: &Class) -> bool {
+    /// See <https://typing.python.org/en/latest/spec/enums.html#enum-literal-expansion>.
+    pub(crate) fn is_expandable_enum(&self, cls: &Class) -> bool {
         self.get_metadata_for_class(cls).is_enum()
             && !self.has_superclass(cls, self.stdlib.enum_flag().class_object())
     }
