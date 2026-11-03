@@ -778,7 +778,7 @@ assert_type(Ordinary.records.get(), Base)
 );
 
 django_testcase!(
-    test_queryset_manager_inferred_custom_interface,
+    test_queryset_manager_inferred_manager_replacements,
     r#"
 from typing import assert_type
 from django.db import models
@@ -797,11 +797,14 @@ class Base(ModelBase):
     standard = models.Manager[ModelBase]()
     base_manager = BaseManager[ModelBase]()
 
-class InvalidManager(Base):
-    records = models.Manager()  # E: overrides parent class `Base` in an inconsistent manner
+class PlainManager(Base):
+    records = models.Manager()
 
-class InvalidQuerySet(Base):
-    records = Q.as_manager()  # E: overrides parent class `Base` in an inconsistent manner
+class GeneratedManager(Base):
+    records = Q.as_manager()
+
+assert_type(PlainManager.records.get(), PlainManager)
+assert_type(GeneratedManager.records.get(), GeneratedManager)
 
 class Valid(Base):
     records = SpecificManager()
