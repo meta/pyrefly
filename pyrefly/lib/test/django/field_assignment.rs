@@ -108,7 +108,6 @@ class CharField(Field):
 }
 
 testcase!(
-    bug = "A missing assignment marker discards the field's read type",
     test_field_missing_setter_marker,
     incomplete_django_env(),
     r#"
@@ -120,27 +119,26 @@ class Record(models.Model):
     optional_count = models.IntegerField(null=True)
 
 def update(record: Record) -> None:
-    assert_type(record.count, models.IntegerField)
-    assert_type(record.optional_count, models.IntegerField)
-    record.count = 1  # E: is not assignable to attribute `count`
+    assert_type(record.count, int)
+    assert_type(record.optional_count, int | None)
+    record.count = 1
     record.count = "bad"  # E: is not assignable to attribute `count`
 "#,
 );
 
 testcase!(
-    bug = "A missing Combinable export discards the field's finite read type",
     test_field_choices_missing_expression_export,
     incomplete_django_env(),
     r#"
-from typing import assert_type
+from typing import Literal, assert_type
 from django.db import models
 
 class Record(models.Model):
     choice = models.CharField(choices=(("A", "A"), ("B", "B")))
 
 def update(record: Record) -> None:
-    assert_type(record.choice, models.CharField)
-    record.choice = "A"  # E: is not assignable to attribute `choice`
+    assert_type(record.choice, Literal["A", "B"])
+    record.choice = "A"
     record.choice = "bad"  # E: is not assignable to attribute `choice`
 "#,
 );

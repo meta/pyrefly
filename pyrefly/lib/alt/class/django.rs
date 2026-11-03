@@ -332,7 +332,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         let base_type = base_type.or_else(|| {
             let get_type = self.get_class_member(field, &DJANGO_PRIVATE_GET_TYPE)?.ty();
-            let set_type = self.get_class_member(field, &DJANGO_PRIVATE_SET_TYPE)?.ty();
+            let set_type = self
+                .get_class_member(field, &DJANGO_PRIVATE_SET_TYPE)
+                .map(|field| field.ty())
+                .unwrap_or_else(|| get_type.clone());
             Some((get_type, set_type))
         })?;
 
@@ -342,12 +345,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let set_type = if get_type != base_get_type {
             // Ordinary writes must preserve the finite read type. Expressions retain their
             // declared assignment type because their database result is not known here.
-            let combinable = self.try_get_from_export(
+            if let Some(combinable) = self.try_get_from_export(
                 ModuleName::from_str("django.db.models.expressions"),
                 Name::new_static("Combinable"),
-            )?;
-            let combinable = self.class_def_to_instance_type(combinable);
-            self.union(get_type.clone(), self.intersects(&[set_type, combinable]))
+            ) {
+                let combinable = self.class_def_to_instance_type(combinable);
+                self.union(get_type.clone(), self.intersects(&[set_type, combinable]))
+            } else {
+                get_type.clone()
+            }
         } else {
             set_type
         };
