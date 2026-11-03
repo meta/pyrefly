@@ -111,6 +111,39 @@ class EarlyReturn:
 "#,
 );
 
+// A path on which the attribute is unset reaches the end of the class body only if every branch
+// it passes through completes.
+testcase!(
+    test_class_attribute_unset_path_cut_off_by_later_branch,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+def coin() -> bool: ...
+
+class CutOff:
+    if coin():
+        value = 1
+    else:
+        pass
+    if coin():
+        value = 2
+    else:
+        stop()
+
+class NotCutOff:
+    if coin():
+        value = 1  # E: Attribute `value` may be uninitialized
+    else:
+        pass
+    if coin():
+        print(0)
+    else:
+        stop()
+"#,
+);
+
 testcase!(
     bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_while_true_return,

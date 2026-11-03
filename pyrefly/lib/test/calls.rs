@@ -420,6 +420,183 @@ fn test_env_3_12() -> TestEnv {
 }
 
 testcase!(
+    test_deprecated_union_decorator,
+    r#"
+from collections.abc import Callable
+from typing import assert_type
+from warnings import deprecated
+
+def cache[**P, T](fn: Callable[P, T]) -> Callable[P, T] | Callable[[str], T]: ...
+
+@deprecated("Use another function")
+@cache
+def old_function(value: str) -> str: ...
+
+assert_type(old_function(""), str)  # E: `old_function` is deprecated
+_ = old_function  # E: `old_function` is deprecated
+
+@cache
+@deprecated("Use another function")
+def inner_deprecated(value: str) -> str: ...
+
+assert_type(inner_deprecated(""), str)  # E: `inner_deprecated` is deprecated
+_ = inner_deprecated  # E: `inner_deprecated` is deprecated
+
+@cache
+def current_function(value: str) -> str: ...
+
+assert_type(current_function(""), str)
+_ = current_function
+    "#,
+);
+
+testcase!(
+    test_deprecated_union_callback_decorator,
+    r#"
+from collections.abc import Callable
+from typing import Protocol, assert_type
+from warnings import deprecated
+
+class P(Protocol):
+    @deprecated("Use another callback")
+    def __call__(self, x: int) -> int: ...
+
+def dec(fn: Callable[[int], int]) -> P | None: ...
+
+@dec
+def f(x: int) -> int: ...
+
+if f is not None:
+    assert_type(f(1), int)  # E: Use another callback
+
+def direct_dec(fn: Callable[[int], int]) -> P: ...
+
+@direct_dec
+def direct(x: int) -> int: ...
+
+_ = direct
+assert_type(direct(1), int)  # E: Use another callback
+
+@deprecated("Use another function")
+@direct_dec
+def both(x: int) -> int: ...
+
+_ = both  # E: Use another function
+assert_type(both(1), int)  # E: Use another function
+    "#,
+);
+
+testcase!(
+    test_deprecated_union_expression,
+    r#"
+from collections.abc import Callable
+from typing import assert_type
+from warnings import deprecated
+
+@deprecated("Use new instead")
+def old(x: int) -> int: ...
+
+def new(x: int) -> int: ...
+
+def select(flag: bool, cb: Callable[[int], int] | None) -> None:
+    g = old if flag else new  # E: `old` is deprecated
+    h = cb or old  # E: `old` is deprecated
+    _ = flag and old  # E: `old` is deprecated
+    _ = old if flag else old  # E: `old` is deprecated  # E: `old` is deprecated
+    _ = cb or (old if flag else new)  # E: `old` is deprecated
+    assert_type(g(1), int)  # E: `old` is deprecated
+    assert_type(h(1), int)  # E: `old` is deprecated
+    "#,
+);
+
+testcase!(
+    test_union_decorator_method_binding,
+    r#"
+from collections.abc import Awaitable, Callable
+from typing import assert_type
+
+def maybe_async[**P, T](fn: Callable[P, T]) -> Callable[P, T] | Callable[P, Awaitable[T]]: ...
+
+class C:
+    @maybe_async
+    def instance(self, value: int) -> str: ...
+
+    @staticmethod
+    @maybe_async
+    def static(value: int) -> str: ...
+
+    @classmethod
+    @maybe_async
+    def class_method(cls, value: int) -> str: ...
+
+c = C()
+assert_type(c.instance(1), str | Awaitable[str])
+assert_type(C.instance(c, 1), str | Awaitable[str])
+assert_type(c.static(1), str | Awaitable[str])
+assert_type(C.static(1), str | Awaitable[str])
+assert_type(c.class_method(1), str | Awaitable[str])
+assert_type(C.class_method(1), str | Awaitable[str])
+    "#,
+);
+
+testcase!(
+    test_deprecated_aggregate_callee,
+    r#"
+from collections.abc import Callable
+from typing import assert_type
+from warnings import deprecated
+
+@deprecated("Use new instead")
+def old(value: int) -> int: ...
+
+def new(value: int) -> int: ...
+
+def select(flag: bool, cb: Callable[[int], int] | None) -> None:
+    assert_type((old if flag else new)(1), int)  # E: `old` is deprecated
+    assert_type((old or new)(1), int)  # E: `old` is deprecated
+    assert_type((old if flag else old)(1), int)  # E: `old` is deprecated  # E: `old` is deprecated
+    assert_type((cb or old)(1), int)  # E: `old` is deprecated
+    assert_type((cb or (old if flag else new))(1), int)  # E: `old` is deprecated
+    assert_type((chosen := old if flag else new)(1), int)  # E: `old` is deprecated
+    (old if flag else 0)(1)  # E: `old` is deprecated  # E: Expected a callable
+    "#,
+);
+
+testcase!(
+    test_deprecated_aggregate_call_only_metadata,
+    r#"
+from collections.abc import Callable
+from typing import Protocol, assert_type, overload
+from warnings import deprecated
+
+class P(Protocol):
+    @deprecated("Deprecated callback")
+    def __call__(self, value: int) -> int: ...
+
+def dec(fn: Callable[[int], int]) -> P: ...
+
+@dec
+def wrapped(value: int) -> int: ...
+
+@overload
+@deprecated("Deprecated int overload")
+def overloaded(value: int) -> int: ...
+@overload
+def overloaded(value: str) -> str: ...
+def overloaded(value: int | str) -> int | str: ...
+
+def invoke(flag: bool, p: P, q: P) -> None:
+    assert_type((p if flag else q)(1), int)  # E: Deprecated callback
+    assert_type((p or q)(1), int)  # E: Deprecated callback
+    assert_type((wrapped if flag else p)(1), int)  # E: Deprecated callback
+    assert_type((wrapped or p)(1), int)  # E: Deprecated callback
+    assert_type((overloaded if flag else overloaded)(1), int)  # E: Deprecated int overload
+    assert_type((overloaded or overloaded)(1), int)  # E: Deprecated int overload
+    assert_type((overloaded if flag else overloaded)(""), str)
+    "#,
+);
+
+testcase!(
     test_deprecated_call_3_12,
     test_env_3_12(),
     r#"
