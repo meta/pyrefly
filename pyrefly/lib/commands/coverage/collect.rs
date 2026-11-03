@@ -3512,18 +3512,7 @@ class Child(Middle):
                         .unwrap_or_else(|| panic!("missing attribute {name}"))
                         .slots;
                     assert_eq!(
-                        (
-                            actual.n_typable,
-                            actual.n_typed,
-                            actual.n_any,
-                            actual.n_untyped
-                        ),
-                        (
-                            expected.n_typable,
-                            expected.n_typed,
-                            expected.n_any,
-                            expected.n_untyped
-                        ),
+                        actual, expected,
                         "{name}, retention={retention:?}, threads={thread_count:?}",
                     );
                 }
