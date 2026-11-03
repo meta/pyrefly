@@ -278,6 +278,90 @@ class ShadowedObject:
 );
 
 testcase!(
+    test_setattr_inferred_instance_attributes,
+    r#"
+from typing import Final, assert_type
+
+class Plain:
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", 1)
+        setattr(self, "y", "hello")
+
+assert_type(Plain().x, int)
+assert_type(Plain().y, str)
+
+class FinalField:
+    x: Final[int]
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", 1)
+
+assert_type(FinalField().x, int)
+
+class Starred:
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", *[1])
+        setattr(self, "y", *[1])
+
+_ = Starred().x  # E: Object of class `Starred` has no attribute `x`
+_ = Starred().y  # E: Object of class `Starred` has no attribute `y`
+"#,
+);
+
+// BUG: builtin setattr on a classmethod receiver does not define a class attribute.
+testcase!(
+    test_setattr_classmethod_attribute_parity,
+    r#"
+from typing import assert_type
+
+class TestDirect:
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.x = 1
+
+class TestSetattr:
+    @classmethod
+    def setUpClass(cls) -> None:
+        setattr(cls, "x", 1)
+
+assert_type(TestDirect.x, int)
+assert_type(TestDirect().x, int)
+_ = TestSetattr.x  # E: Class `TestSetattr` has no class attribute `x`
+_ = TestSetattr().x  # E: Object of class `TestSetattr` has no attribute `x`
+"#,
+);
+
+testcase!(
+    test_setattr_checked_unannotated_constructor,
+    TestEnv::new().enable_uninitialized_instance_variable_error(),
+    r#"
+class Checked:
+    x: int
+    y: int
+    def __init__(self):
+        setattr(self, "x", 1)
+        object.__setattr__(self, "y", 2)
+"#,
+);
+
+// Skipped method bodies only discover ordinary attribute assignment targets.
+// Setter recognition would also need lexical shadowing information from those bodies.
+testcase!(
+    test_setattr_skipped_constructor_boundary,
+    TestEnv::new().enable_uninitialized_instance_variable_error(),
+    r#"
+from typing import no_type_check
+
+class Skipped:
+    x: int  # E: Instance attribute `x` is declared but never initialized
+    y: int
+    @no_type_check
+    def __init__(self) -> None:
+        setattr(self, "x", 1)
+        self.y = 2
+"#,
+);
+
+testcase!(
     test_setattr_on_classmethod_receiver_ignored,
     TestEnv::new().enable_implicitly_defined_attribute_error(),
     r#"

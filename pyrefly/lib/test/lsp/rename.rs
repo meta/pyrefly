@@ -429,6 +429,38 @@ Rename locations:
     );
 }
 
+// BUG: inferred setattr fields use a quoted definition range, so rename removes the quotes.
+#[test]
+fn test_rename_setattr_inferred_field() {
+    for setter in [
+        "setattr",
+        "object.__setattr__",
+        "builtins.setattr",
+        "builtins.object.__setattr__",
+    ] {
+        for name in ["x", "café", "变量"] {
+            let source = format!(
+                "import builtins\nclass A:\n    def __init__(self) -> None:\n        {setter}(self, \"{name}\", 1)\n\nA().{name}\n"
+            );
+            let (state, handle) = TestEnv::one("main", &source).to_state();
+            let handle = handle("main");
+            let mut transaction = state.transaction();
+            transaction.run(&[handle.dupe()], Require::Everything, None);
+            let position = TextSize::try_from(source.rfind(name).unwrap()).unwrap();
+            let ranges = transaction.find_local_references(
+                &handle,
+                position,
+                ReferenceOptions::textual_only(true),
+            );
+            let mut renamed = source.clone();
+            for range in ranges.into_iter().rev() {
+                renamed.replace_range(Range::<usize>::from(range), "renamed");
+            }
+            assert_eq!(renamed, source.replace(&format!("\"{name}\""), "renamed"));
+        }
+    }
+}
+
 #[test]
 fn test_rename_legacy_type_parameters_updates_constructor_names() {
     let code = r#"
