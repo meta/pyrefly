@@ -14,6 +14,7 @@ use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::module::TextRangeWithModule;
 use pyrefly_python::module_path::ModulePath;
+use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 use tempfile::TempDir;
 
@@ -466,7 +467,6 @@ fn test_rename_setattr_inferred_field() {
     }
 }
 
-// BUG: setter literals are not references except when one happens to be the field definition.
 #[test]
 fn test_rename_setattr_literal_references() {
     for declared in [false, true] {
@@ -477,21 +477,17 @@ fn test_rename_setattr_literal_references() {
         let first_literal = source.find("\"x\"").unwrap() + 1;
         let second_literal = source.find("\"x\", 2)").unwrap() + 1;
         let use_position = source.rfind("A().x").unwrap() + 4;
-        let mut expected = source
+        let expected = source
             .replacen("x: int", "renamed: int", 1)
+            .replacen("\"x\"", "\"renamed\"", 2)
             .replace("self.x", "self.renamed")
             .replace("A().x", "A().renamed");
-        if !declared {
-            expected = expected.replacen("\"x\"", "\"renamed\"", 1);
-        }
-        assert_eq!(rename_local_symbol(&source, use_position), expected);
-        for position in [first_literal, second_literal] {
-            assert_eq!(rename_local_symbol(&source, position), source);
+        for position in [use_position, first_literal, second_literal] {
+            assert_eq!(rename_local_symbol(&source, position), expected);
         }
     }
 }
 
-// BUG: a setter's name literal has no prepare-rename range.
 #[test]
 fn test_prepare_rename_setattr_literal() {
     let source = "class A:\n    def __init__(self) -> None:\n        setattr(self, \"x\", 1)\n";
@@ -500,10 +496,12 @@ fn test_prepare_rename_setattr_literal() {
     let mut transaction = state.transaction();
     transaction.run(&[handle.dupe()], Require::Everything, None);
     let position = TextSize::try_from(source.find("\"x\"").unwrap() + 1).unwrap();
-    assert_eq!(transaction.prepare_rename(&handle, position), None);
+    let range = TextRange::at(position, TextSize::new(1));
+    for position in [range.start(), range.end()] {
+        assert_eq!(transaction.prepare_rename(&handle, position), Some(range));
+    }
 }
 
-// BUG: source/stub rename leaves a setter's name literal unchanged.
 #[test]
 fn test_rename_setattr_paired_field() {
     let source = "class A:\n    x: int = 0\n    def __init__(self) -> None:\n        setattr(self, \"x\", 1)\n";
@@ -513,10 +511,7 @@ fn test_rename_setattr_paired_field() {
         rename_paired_symbol(source, stub, consumer, None, source.find("x:").unwrap()),
         vec![
             ("consumer.py".to_owned(), consumer.replace(".x", ".renamed")),
-            (
-                "lib.py".to_owned(),
-                source.replacen("x: int", "renamed: int", 1)
-            ),
+            ("lib.py".to_owned(), source.replace("x", "renamed")),
             ("lib.pyi".to_owned(), stub.replace("x: int", "renamed: int")),
         ],
     );

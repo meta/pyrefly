@@ -300,6 +300,8 @@ pub struct Bindings {
     unused_imports: Vec<UnusedImport>,
     unused_variables: Vec<UnusedVariable>,
     pytest_info: Option<PytestBindingInfo>,
+    /// Literal setter names and their receiver ranges, retained only for IDE operations.
+    setattr_name_literals: Vec<(Identifier, TextRange)>,
     promote_ranges: SmallSet<TextRange>,
     /// Immutable module-wide wrapping uncertainty, read as a solver dependency by `inspect.unwrap`.
     functools_wrapper_mutation: Idx<Key>,
@@ -417,6 +419,8 @@ pub struct BindingsBuilder<'a> {
     /// Lambda parameters, grouped by their lambdas' owners.
     owned_lambda_params: SmallMap<Idx<Key>, Vec<LambdaParamId>>,
     next_lambda_param_id: u32,
+    /// See `Bindings::setattr_name_literals`; batch checking does not retain these references.
+    pub(super) setattr_name_literals: Option<Vec<(Identifier, TextRange)>>,
     /// Class body ranges paired with class indices, populated as
     /// `class_def_inner` enters each class body. The solver uses this to
     /// recover the enclosing class for a given expression range without
@@ -542,6 +546,7 @@ impl Bindings {
             unused_imports: Vec::new(),
             unused_variables: Vec::new(),
             pytest_info: None,
+            setattr_name_literals: Vec::new(),
             lambda_yield_keys: Vec::new(),
             owned_lambda_params: SmallMap::new(),
             lambda_parameter_derived: OnceLock::new(),
@@ -634,6 +639,10 @@ impl Bindings {
 
     pub fn unused_variables(&self) -> &[UnusedVariable] {
         &self.unused_variables
+    }
+
+    pub(crate) fn setattr_name_literals(&self) -> &[(Identifier, TextRange)] {
+        &self.setattr_name_literals
     }
 
     pub(crate) fn pytest_info(&self) -> Option<&PytestBindingInfo> {
@@ -966,6 +975,7 @@ impl Bindings {
             lambda_yield_keys: Vec::new(),
             owned_lambda_params: SmallMap::new(),
             next_lambda_param_id: 0,
+            setattr_name_literals: enable_trace.then(Vec::new),
             class_scopes: Vec::new(),
             call_base_classes: Vec::new(),
             class_field_definitions: SmallMap::new(),
@@ -1121,6 +1131,7 @@ impl Bindings {
             unused_imports: builder.unused_imports,
             unused_variables: builder.unused_variables,
             pytest_info: builder.pytest_info,
+            setattr_name_literals: builder.setattr_name_literals.unwrap_or_default(),
             lambda_yield_keys: builder.lambda_yield_keys,
             owned_lambda_params: builder.owned_lambda_params,
             lambda_parameter_derived: OnceLock::new(),

@@ -2975,6 +2975,19 @@ impl<'a> Transaction<'a> {
             .collect()
     }
 
+    fn setattr_name_literal_at(
+        &self,
+        handle: &Handle,
+        position: TextSize,
+    ) -> Option<(Identifier, TextRange)> {
+        self.get_answers(handle)?
+            .bindings()
+            .setattr_name_literals()
+            .iter()
+            .find(|(name, _)| name.range.contains_inclusive(position))
+            .cloned()
+    }
+
     /// Find the definition, metadata and optionally the docstring for the given position.
     pub fn find_definition(
         &self,
@@ -2990,10 +3003,20 @@ impl<'a> Transaction<'a> {
         if covering_nodes
             .iter()
             .any(|node| matches!(node, AnyNodeRef::ExprStringLiteral(_)))
-            && let Some(definition) =
-                self.find_definition_for_dunder_all_entry(handle, position, preference)
         {
-            return Ok(vec1![definition]);
+            if let Some((name, receiver_range)) = self.setattr_name_literal_at(handle, position) {
+                return self.find_definition_for_attribute(
+                    handle,
+                    receiver_range,
+                    &name.id,
+                    preference,
+                );
+            }
+            if let Some(definition) =
+                self.find_definition_for_dunder_all_entry(handle, position, preference)
+            {
+                return Ok(vec1![definition]);
+            }
         }
 
         if let Some(AnyNodeRef::ExprStringLiteral(literal)) = covering_nodes
@@ -4557,7 +4580,12 @@ impl<'a> Transaction<'a> {
             }
         }
 
-        Some(identifier_context?.identifier.range)
+        identifier_context
+            .map(|context| context.identifier.range)
+            .or_else(|| {
+                self.setattr_name_literal_at(handle, position)
+                    .map(|(name, _)| name.range)
+            })
     }
 
     pub fn find_local_references(
@@ -4761,6 +4789,24 @@ impl<'a> Transaction<'a> {
                 options.include_declaration,
             )?
         };
+        if matches!(
+            definition_metadata,
+            DefinitionMetadata::Attribute | DefinitionMetadata::VariableOrAttribute(_)
+        ) && let Some(answers) = self.get_answers(handle)
+        {
+            let literals = answers
+                .bindings()
+                .setattr_name_literals()
+                .iter()
+                .filter(|(name, _)| name.id == definition_name)
+                .cloned()
+                .collect::<Vec<_>>();
+            references.extend(self.attribute_references_from_ranges(
+                handle,
+                &literals,
+                &TextRangeWithModule::new(module.dupe(), definition_range),
+            ));
+        }
         // Constructor call sites are indexed separately because the AST scan for
         // `<expr>.<name>` cannot see them: `Foo()` never spells `__init__`.
         if options.include_constructor_call_sites {

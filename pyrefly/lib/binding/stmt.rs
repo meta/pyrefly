@@ -2353,15 +2353,20 @@ impl<'a> BindingsBuilder<'a> {
                             Ast::parse_expr(literal.value.as_ref(), TextSize::new(0))
                         && name.id.as_str() == literal.value.as_ref()
                         && !Ast::is_mangled_attr(&name.id)
-                    {
-                        self.scopes.record_self_attr_assign_named(
+                        && self.scopes.record_self_attr_assign_named(
                             receiver,
                             &name.id,
                             literal.content_range(),
                             ExprOrBinding::Expr(value.clone()),
                             None,
                             true,
-                        );
+                        )
+                        && let Some(literals) = &mut self.setattr_name_literals
+                    {
+                        literals.push((
+                            Identifier::new(name.id, literal.content_range()),
+                            receiver.range(),
+                        ));
                     }
                 }
                 let special_export = if let Expr::Call(ExprCall { func, .. }) = &*x.value {
