@@ -2349,6 +2349,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if self.is_equivalent(&old, &new) {
                 continue;
             }
+            // If the narrowed base lacks the attribute, `new` is a missing-attribute error `Any`,
+            // which `intersect` returns unchanged because it is assignable into any `stored` type.
+            // That would discard an independently established concrete refinement (such as `int`)
+            // and silently suppress later errors on it. A missing-attribute fallback carries no
+            // refinement information, so keep the stored refinement instead.
+            if new.is_error() {
+                continue;
+            }
             let rebased = self.intersect(stored, &new);
             if rebased.is_never() {
                 return TypeInfo::of_ty(self.heap.mk_never());
