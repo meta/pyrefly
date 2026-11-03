@@ -449,7 +449,26 @@ def f(test: bool, e1: E1, e2: E2):
     x: Literal[E1.X, E1.Y] = e1
     y: Literal[E1.X, E1.Y, 1] = e1
     z: Literal[E2.X, E2.Y] = e2  # E: `E2` is not assignable to `Literal[E2.X, E2.Y]`
+    single: Literal[E2.X] = e2  # E: `E2` is not assignable to `Literal[E2.X]`
     "#,
+);
+
+testcase!(
+    test_single_member_flag_not_assignable_to_literal,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal
+
+class SingleFlag(Flag):
+    X = 1
+
+class SingleIntFlag(IntFlag):
+    X = 1
+
+def check(flag: SingleFlag, int_flag: SingleIntFlag) -> None:
+    x: Literal[SingleFlag.X] = flag  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X]`
+    y: Literal[SingleIntFlag.X] = int_flag  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X]`
+"#,
 );
 
 testcase!(
