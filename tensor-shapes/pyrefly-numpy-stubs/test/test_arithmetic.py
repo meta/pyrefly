@@ -173,10 +173,10 @@ def check_array_like_operands() -> None:
     scale = np.float64(2.0)
 
     product = matrix @ [1.0, 0.0, 0.0]  # E: not supported
-    quotient = [2.0, 4.0] / scale  # E: not supported
+    quotient = [2.0, 4.0] / scale
 
     assert product.tolist() == [1.0, 0.0, 0.0]
-    assert quotient.tolist() == [1.0, 2.0]  # E: no attribute
+    assert quotient.tolist() == [1.0, 2.0]
 
 
 def check_unary_ufunc_sequence_input() -> None:
@@ -184,6 +184,6 @@ def check_unary_ufunc_sequence_input() -> None:
     radians = np.deg2rad([23.0, -47.0, 31.0])
     finite = np.isfinite([1.0, 2.0])
 
-    x, y, z = radians  # E: not iterable
-    assert finite.all()  # E: no attribute
+    x, y, z = radians
+    assert finite.all()
     assert (x, y, z) != (0.0, 0.0, 0.0)

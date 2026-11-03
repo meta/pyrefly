@@ -428,12 +428,13 @@ def test_dtype_str_attribute() -> None:
     x = np.zeros((2, 3))
 
     assert_shape(x.shape, (2, 3))
-    assert x.dtype.str.endswith("f8")  # E: no attribute
+    assert_type(x.dtype.str, str)
+    assert x.dtype.str.endswith("f8")
 
 
 def test_structured_array_field_assignment() -> None:
     # Field-name assignment on a structured array; the overlay models index keys.
     values = np.zeros(3, dtype=[("x", "f4"), ("y", "f4")])
 
-    values["x"] = np.ones(3)  # E: Cannot set item
+    values["x"] = np.ones(3)
     assert_shape(values.shape, (3,))
