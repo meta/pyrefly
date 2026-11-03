@@ -10566,7 +10566,7 @@
       "concise_description": "Method `draw` inherited from class `PColor` has no implementation and cannot be accessed via `super()`",
       "description": "Method `draw` inherited from class `PColor` has no implementation and cannot be accessed via `super()`",
       "line": 27,
-      "name": "missing-attribute",
+      "name": "abstract-method-call",
       "severity": "error",
       "stop_column": 28,
       "stop_line": 27
