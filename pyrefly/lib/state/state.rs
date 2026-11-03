@@ -715,6 +715,9 @@ pub(crate) struct TransactionData<'a> {
     cinderx_reporter: Option<Box<crate::report::cinderx::CinderxReporter>>,
     /// When set, called per solved module while its answers are still live (before eviction).
     solutions_hook: Option<Box<dyn Fn(&Handle, &Transaction) + Send + Sync + 'a>>,
+    /// When set, the answers of a module are evicted once the solutions hook has seen it,
+    /// whatever its require level.
+    evict_after_solutions_hook: bool,
 }
 
 impl<'a> TransactionData<'a> {
@@ -865,6 +868,12 @@ impl<'a> Transaction<'a> {
         hook: Option<Box<dyn Fn(&Handle, &Transaction) + Send + Sync + 'a>>,
     ) {
         self.data.solutions_hook = hook;
+    }
+
+    /// Evict each module's answers once the solutions hook has seen it, so a hook that needs
+    /// them at `Require::Everything` doesn't keep them for the rest of the run.
+    pub fn set_evict_after_solutions_hook(&mut self, evict: bool) {
+        self.data.evict_after_solutions_hook = evict;
     }
 
     /// Take the pysa reporter out of the transaction, consuming ownership.
@@ -1684,7 +1693,7 @@ impl<'a> Transaction<'a> {
                 if let Some(hook) = &self.data.solutions_hook {
                     hook(&module_data.handle, self);
                 }
-                if !require.keep_answers() {
+                if !require.keep_answers() || self.data.evict_after_solutions_hook {
                     // From now on we can use the solutions directly, so evict the answers.
                     post.evict_answers();
                 }
@@ -3615,6 +3624,7 @@ impl State {
                 pysa_reporter: None,
                 cinderx_reporter: None,
                 solutions_hook: None,
+                evict_after_solutions_hook: false,
             },
         }
     }
@@ -3719,6 +3729,7 @@ impl State {
                             pysa_reporter: _,
                             cinderx_reporter: _,
                             solutions_hook: _,
+                            evict_after_solutions_hook: _,
                         },
                 },
             committing_transaction_guard,

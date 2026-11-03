@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::iter;
-use std::mem;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -116,10 +115,9 @@ impl Package {
     }
 }
 
-/// Writes a SCIP index as a stream of `Index` messages, which a reader merges into one: the
-/// metadata, then each document as soon as it is built, in no particular order, then the
-/// external symbols.
-pub fn write_scip(
+/// Writes a SCIP index of `handles` after they have been checked.
+#[cfg(test)]
+fn write_scip(
     writer: &mut (impl Write + Send),
     transaction: &mut Transaction,
     handles: &[Handle],
@@ -127,94 +125,143 @@ pub fn write_scip(
     project: &Package,
     version: &str,
 ) -> anyhow::Result<()> {
-    let project_root = project_root.absolutize();
-    let indexer = Indexer {
-        transaction: &*transaction,
-        project_root: &project_root,
-        project,
-        definitions: Mutex::new(HashMap::new()),
-        distributions: Mutex::new(HashMap::new()),
-        external_symbols: Mutex::new(HashMap::new()),
-    };
-    Index {
-        metadata: Some(Metadata {
-            project_root: Uri::from_directory_path(&project_root)
-                .map(|uri| uri.to_string())
-                .unwrap_or_default(),
-            tool_info: Some(ToolInfo {
-                name: "pyrefly".to_owned(),
-                version: version.to_owned(),
+    let scip = ScipWriter::new(writer, handles, project_root, project.clone(), version)?;
+    transaction.install(|| {
+        handles
+            .par_iter()
+            .try_for_each(|handle| scip.write_document(transaction, handle))
+    })?;
+    scip.finish(transaction)?;
+    Ok(())
+}
+
+/// Writes a SCIP index as a stream of `Index` messages, which a reader merges into one: the
+/// metadata, then each document as soon as it is built, in no particular order, then the
+/// external symbols. Documents can be written while the files are being checked, from a
+/// solutions hook.
+pub struct ScipWriter<W> {
+    writer: Mutex<W>,
+    handles: SmallSet<Handle>,
+    project_root: PathBuf,
+    project: Package,
+    definitions: Mutex<HashMap<Handle, Arc<SmallMap<TextRange, ScipSymbol>>>>,
+    distributions: Mutex<HashMap<PathBuf, Arc<HashMap<Name, Package>>>>,
+    external_symbols: Mutex<HashMap<String, ExternalUse>>,
+}
+
+impl<W: Write + Send> ScipWriter<W> {
+    pub fn new(
+        mut writer: W,
+        handles: &[Handle],
+        project_root: &Path,
+        project: Package,
+        version: &str,
+    ) -> anyhow::Result<Self> {
+        let project_root = project_root.absolutize();
+        Index {
+            metadata: Some(Metadata {
+                project_root: Uri::from_directory_path(&project_root)
+                    .map(|uri| uri.to_string())
+                    .unwrap_or_default(),
+                tool_info: Some(ToolInfo {
+                    name: "pyrefly".to_owned(),
+                    version: version.to_owned(),
+                    ..Default::default()
+                })
+                .into(),
+                text_document_encoding: TextEncoding::UTF8.into(),
                 ..Default::default()
             })
             .into(),
-            text_document_encoding: TextEncoding::UTF8.into(),
             ..Default::default()
+        }
+        .write_to_writer(&mut writer)?;
+        Ok(Self {
+            writer: Mutex::new(writer),
+            handles: handles.iter().cloned().collect(),
+            project_root,
+            project,
+            definitions: Mutex::new(HashMap::new()),
+            distributions: Mutex::new(HashMap::new()),
+            external_symbols: Mutex::new(HashMap::new()),
         })
-        .into(),
-        ..Default::default()
     }
-    .write_to_writer(writer)?;
-    let documents_writer = Mutex::new(&mut *writer);
-    transaction.install(|| {
-        handles.par_iter().try_for_each(|handle| {
-            let Some(document) = indexer.document(handle) else {
-                return anyhow::Ok(());
-            };
-            let bytes = Index {
-                documents: vec![document],
-                ..Default::default()
-            }
-            .write_to_bytes()?;
-            documents_writer.lock().write_all(&bytes)?;
-            Ok(())
-        })
-    })?;
-    let Indexer {
-        definitions,
-        distributions,
-        external_symbols,
-        ..
-    } = indexer;
-    // A keyword argument is documented with its parameter's type, which comes from the defining
-    // module's answers. Those are only kept for modules solved to `Require::Everything`.
-    let dependencies: Vec<Handle> = definitions
-        .lock()
-        .keys()
-        .filter(|x| transaction.get_ast(x).is_none())
-        .cloned()
-        .collect();
-    transaction.run(&dependencies, Require::Everything, None);
-    let indexer = Indexer {
-        transaction: &*transaction,
-        project_root: &project_root,
-        project,
-        definitions,
-        distributions,
-        external_symbols,
-    };
-    let first_uses: Vec<_> = mem::take(&mut *indexer.external_symbols.lock())
-        .into_iter()
-        .collect();
-    let mut external_symbols: Vec<SymbolInformation> = transaction.install(|| {
-        first_uses
-            .into_par_iter()
-            .filter_map(|(symbol, first_use)| {
-                let documentation = indexer.documentation(&first_use.handle, first_use.position);
-                (!documentation.is_empty()).then_some(SymbolInformation {
-                    symbol,
-                    documentation,
-                    ..Default::default()
-                })
+
+    fn indexer<'a>(&'a self, transaction: &'a Transaction<'a>) -> Indexer<'a> {
+        Indexer {
+            transaction,
+            project_root: &self.project_root,
+            project: &self.project,
+            definitions: &self.definitions,
+            distributions: &self.distributions,
+            external_symbols: &self.external_symbols,
+        }
+    }
+
+    /// Writes the document of `handle`, if it is one of the indexed files.
+    pub fn write_document(&self, transaction: &Transaction, handle: &Handle) -> anyhow::Result<()> {
+        if !self.handles.contains(handle) {
+            return Ok(());
+        }
+        let Some(document) = self.indexer(transaction).document(handle) else {
+            return Ok(());
+        };
+        let bytes = Index {
+            documents: vec![document],
+            ..Default::default()
+        }
+        .write_to_bytes()?;
+        self.writer.lock().write_all(&bytes)?;
+        Ok(())
+    }
+
+    /// Writes the external symbols, once every document is written.
+    pub fn finish(self, transaction: &mut Transaction) -> anyhow::Result<W> {
+        let Self {
+            writer,
+            definitions,
+            external_symbols,
+            ..
+        } = self;
+        let mut writer = writer.into_inner();
+        let mut first_uses: Vec<(String, ExternalUse)> =
+            external_symbols.into_inner().into_iter().collect();
+        // A keyword argument is documented with its parameter's type, which comes from the
+        // defining module's answers. Those are only kept for modules solved to
+        // `Require::Everything`, so the symbol is documented at its definition instead.
+        let dependencies: Vec<Handle> = definitions
+            .into_inner()
+            .into_keys()
+            .filter(|x| transaction.get_ast(x).is_none())
+            .collect();
+        transaction.run(&dependencies, Require::Everything, None);
+        let transaction = &*transaction;
+        transaction.install(|| {
+            first_uses.par_iter_mut().for_each(|(_, first_use)| {
+                if first_use.documentation.is_empty()
+                    && let Some((handle, position)) = &first_use.definition
+                {
+                    first_use.documentation = documentation(transaction, handle, *position);
+                }
             })
-            .collect()
-    });
-    external_symbols.sort_by(|a, b| a.symbol.cmp(&b.symbol));
-    Index {
-        external_symbols,
-        ..Default::default()
+        });
+        let mut external_symbols: Vec<SymbolInformation> = first_uses
+            .into_iter()
+            .filter(|(_, first_use)| !first_use.documentation.is_empty())
+            .map(|(symbol, first_use)| SymbolInformation {
+                symbol,
+                documentation: first_use.documentation,
+                ..Default::default()
+            })
+            .collect();
+        external_symbols.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        Index {
+            external_symbols,
+            ..Default::default()
+        }
+        .write_to_writer(&mut writer)?;
+        Ok(writer)
     }
-    .write_to_writer(writer)?;
-    Ok(())
 }
 
 /// Top-level names whose kind in the bundled stubs differs from how other indexers name them:
@@ -230,19 +277,25 @@ struct Indexer<'a> {
     project_root: &'a Path,
     project: &'a Package,
     /// The definitions of every module seen so far, keyed by the range of the defining identifier.
-    definitions: Mutex<HashMap<Handle, Arc<SmallMap<TextRange, ScipSymbol>>>>,
+    definitions: &'a Mutex<HashMap<Handle, Arc<SmallMap<TextRange, ScipSymbol>>>>,
     /// The installed distributions of every site-packages directory seen so far.
-    distributions: Mutex<HashMap<PathBuf, Arc<HashMap<Name, Package>>>>,
+    distributions: &'a Mutex<HashMap<PathBuf, Arc<HashMap<Name, Package>>>>,
     /// The first use, in path and position order, of every symbol defined outside the project and
     /// referenced so far. The symbol is documented with the hover there, so its documentation
     /// doesn't depend on the order documents are built in.
-    external_symbols: Mutex<HashMap<String, ExternalUse>>,
+    external_symbols: &'a Mutex<HashMap<String, ExternalUse>>,
 }
+
+/// For a symbol defined outside the project, where to document it when the hover at its use has
+/// nothing.
+type External = Option<Option<(Handle, TextSize)>>;
 
 struct ExternalUse {
     relative_path: PathBuf,
     position: TextSize,
-    handle: Handle,
+    documentation: Vec<String>,
+    /// Where the symbol is defined, to document it there when the hover at the use has nothing.
+    definition: Option<(Handle, TextSize)>,
 }
 
 impl Indexer<'_> {
@@ -311,25 +364,29 @@ impl Indexer<'_> {
         for x in uses {
             let symbol = match (self.reference(handle, &module, &x), x.kind) {
                 (Some((symbol, external)), _) => {
-                    if external {
+                    if let Some(definition) = external {
                         let position = use_position(&x);
-                        let mut external_symbols = self.external_symbols.lock();
-                        let first_use =
-                            external_symbols
-                                .entry(symbol.clone())
-                                .or_insert_with(|| ExternalUse {
-                                    relative_path: relative_path.to_owned(),
-                                    position,
-                                    handle: handle.dupe(),
-                                });
-                        if (relative_path, position)
-                            < (first_use.relative_path.as_path(), first_use.position)
-                        {
-                            *first_use = ExternalUse {
-                                relative_path: relative_path.to_owned(),
-                                position,
-                                handle: handle.dupe(),
-                            };
+                        let is_first = |external_symbols: &HashMap<String, ExternalUse>| {
+                            external_symbols.get(&symbol).is_none_or(|first_use| {
+                                (relative_path, position)
+                                    < (first_use.relative_path.as_path(), first_use.position)
+                            })
+                        };
+                        // Documented here, while this file's answers are still in memory.
+                        if is_first(&self.external_symbols.lock()) {
+                            let documentation = documentation(self.transaction, handle, position);
+                            let mut external_symbols = self.external_symbols.lock();
+                            if is_first(&external_symbols) {
+                                external_symbols.insert(
+                                    symbol.clone(),
+                                    ExternalUse {
+                                        relative_path: relative_path.to_owned(),
+                                        position,
+                                        documentation,
+                                        definition,
+                                    },
+                                );
+                            }
                         }
                     }
                     symbol
@@ -366,7 +423,7 @@ impl Indexer<'_> {
         for (range, symbol) in definitions.iter() {
             let symbol = format_scip_symbol(self.project, symbol);
             if !symbols.contains_key(&symbol) {
-                let documentation = self.documentation(handle, range.start());
+                let documentation = documentation(self.transaction, handle, range.start());
                 symbols.insert(
                     symbol.clone(),
                     SymbolInformation {
@@ -473,29 +530,9 @@ impl Indexer<'_> {
         implementations
     }
 
-    /// The hover text at a position, as SCIP documentation.
-    fn documentation(&self, handle: &Handle, position: TextSize) -> Vec<String> {
-        let options = HoverOptions {
-            show_go_to_links: false,
-            verbosity_level: 0,
-            field_docstring_at_definition: true,
-        };
-        match get_hover_with_verbosity(self.transaction, handle, position, options) {
-            Some(HoverResult {
-                hover:
-                    Hover {
-                        contents: Contents::MarkupContent(markup),
-                        ..
-                    },
-                ..
-            }) => vec![markup.value],
-            _ => Vec::new(),
-        }
-    }
-
-    /// The symbol a use refers to, and whether it is defined outside the project, or `None` if
-    /// it has no definition we can name.
-    fn reference(&self, handle: &Handle, module: &Module, x: &Use) -> Option<(String, bool)> {
+    /// The symbol a use refers to, and where it is defined if that is outside the project, or
+    /// `None` if it has no definition we can name.
+    fn reference(&self, handle: &Handle, module: &Module, x: &Use) -> Option<(String, External)> {
         let preference = preference();
         let definition = match x.kind {
             UseKind::Name => {
@@ -513,7 +550,10 @@ impl Indexer<'_> {
                         descriptor("builtins", Suffix::Namespace),
                         descriptor(&x.identifier.id, Suffix::Type),
                     ];
-                    return Some((global_symbol(&stdlib_package(handle), descriptors), true));
+                    return Some((
+                        global_symbol(&stdlib_package(handle), descriptors),
+                        Some(None),
+                    ));
                 }
                 definition
             }
@@ -535,18 +575,29 @@ impl Indexer<'_> {
         handle: &Handle,
         module: &Module,
         definition: FindDefinitionItemWithDocstring,
-    ) -> Option<(String, bool)> {
-        let external = !definition
+    ) -> Option<(String, External)> {
+        let external = (!definition
             .module
             .path()
             .as_path()
-            .starts_with(self.project_root);
+            .starts_with(self.project_root))
+        .then(|| {
+            let defining = Handle::new(
+                definition.module.name(),
+                definition.module.path().dupe(),
+                handle.sys_info().dupe(),
+            );
+            Some((defining, definition.definition_range.start()))
+        });
         let package = self.package(&definition.module, handle);
         // A submodule accessed as an attribute resolves to the empty range at the module's start.
         if definition.metadata.symbol_kind() == Some(SymbolKind::Module)
             || definition.definition_range.is_empty()
         {
-            return Some((module_symbol(&package, definition.module.name()), external));
+            return Some((
+                module_symbol(&package, definition.module.name()),
+                external.map(|_| None),
+            ));
         }
         let symbols = self.definitions(&definition.module, handle.sys_info().dupe())?;
         match symbols.get(&definition.definition_range)? {
@@ -554,7 +605,7 @@ impl Indexer<'_> {
                 Some((global_symbol(&package, descriptors.clone()), external))
             }
             ScipSymbol::Local(id) => {
-                (definition.module.path() == module.path()).then(|| (format!("local {id}"), false))
+                (definition.module.path() == module.path()).then(|| (format!("local {id}"), None))
             }
         }
     }
@@ -625,6 +676,26 @@ impl Indexer<'_> {
                 }
             }
         })
+    }
+}
+
+/// The hover text at a position, as SCIP documentation.
+fn documentation(transaction: &Transaction, handle: &Handle, position: TextSize) -> Vec<String> {
+    let options = HoverOptions {
+        show_go_to_links: false,
+        verbosity_level: 0,
+        field_docstring_at_definition: true,
+    };
+    match get_hover_with_verbosity(transaction, handle, position, options) {
+        Some(HoverResult {
+            hover:
+                Hover {
+                    contents: Contents::MarkupContent(markup),
+                    ..
+                },
+            ..
+        }) => vec![markup.value],
+        _ => Vec::new(),
     }
 }
 

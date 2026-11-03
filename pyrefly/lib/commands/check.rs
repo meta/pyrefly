@@ -1591,7 +1591,7 @@ impl IncrementalCheckCommand {
             )
         });
         let defaults = args.output.resolve(config.as_deref());
-        let run = args.prepare_cli_run(timings, transaction, handles, &defaults)?;
+        let run = args.prepare_cli_run(timings, transaction, version, handles, &defaults)?;
         check.run(|transaction, handles, sourcedb_errors| {
             let result = args.finish_cli_run(
                 run,
@@ -1638,6 +1638,7 @@ struct PreparedCliRun {
     memory_trace: MemoryUsageTrace,
     demand_tree_subscriber: Option<TestSubscriber>,
     type_check_start: Instant,
+    scip: Option<Arc<report::scip::ScipWriter<BufWriter<File>>>>,
 }
 
 impl CheckArgs {
@@ -1810,7 +1811,7 @@ impl CheckArgs {
         require: Require,
         upsell: UpsellDecision,
     ) -> anyhow::Result<(CommandExitStatus, Vec<Error>)> {
-        let run = self.prepare_cli_run(timings, transaction, handles, defaults)?;
+        let run = self.prepare_cli_run(timings, transaction, version, handles, defaults)?;
         transaction.run(handles, require, None);
         self.finish_cli_run(
             run,
@@ -1827,6 +1828,7 @@ impl CheckArgs {
         &self,
         timings: Timings,
         transaction: &mut Transaction,
+        version: &str,
         handles: &[Handle],
         defaults: &OutputDefaults,
     ) -> anyhow::Result<PreparedCliRun> {
@@ -1887,6 +1889,41 @@ impl CheckArgs {
             transaction.set_cinderx_reporter(Some(cinderx_reporter));
         }
 
+        // Each indexed file is written as soon as it is solved, while its answers are still in
+        // memory, so they don't have to be kept for the whole run.
+        let scip = match &self.output.report_scip {
+            Some(path) => {
+                let relative_to = self.output.relative_to.as_ref().map_or_else(
+                    || std::env::current_dir().ok().unwrap_or_default(),
+                    |x| PathBuf::from_str(x.as_str()).unwrap(),
+                );
+                let project = report::scip::Package::project(
+                    &relative_to,
+                    self.output.report_scip_project_name.clone(),
+                    self.output.report_scip_project_version.clone(),
+                )?;
+                let scip = Arc::new(report::scip::ScipWriter::new(
+                    BufWriter::new(File::create(path)?),
+                    handles,
+                    &relative_to,
+                    project,
+                    version,
+                )?);
+                let hook_scip = scip.dupe();
+                transaction.set_solutions_hook(Some(Box::new(move |handle, transaction| {
+                    if let Err(e) = hook_scip.write_document(transaction, handle) {
+                        error!(
+                            "while writing SCIP document for `{}`: {e:#}",
+                            handle.module()
+                        );
+                    }
+                })));
+                transaction.set_evict_after_solutions_hook(true);
+                Some(scip)
+            }
+            None => None,
+        };
+
         let type_check_start = Instant::now();
         let demand_tree_subscriber = if self.output.report_demand_tree.is_some() {
             transaction.set_demand_collector(Some(DemandCollector::new()));
@@ -1903,6 +1940,7 @@ impl CheckArgs {
             memory_trace,
             demand_tree_subscriber,
             type_check_start,
+            scip,
         })
     }
 
@@ -1921,6 +1959,7 @@ impl CheckArgs {
             mut memory_trace,
             demand_tree_subscriber,
             type_check_start,
+            scip,
         } = run;
         transaction.set_subscriber(None);
 
@@ -2278,23 +2317,15 @@ impl CheckArgs {
                 )?;
             }
         }
-        if let Some(path) = &self.output.report_scip {
-            let project = report::scip::Package::project(
-                &relative_to,
-                self.output.report_scip_project_name.clone(),
-                self.output.report_scip_project_version.clone(),
-            )?;
-            let mut writer = BufWriter::new(File::create(path)?);
-            report::scip::write_scip(
-                &mut writer,
-                transaction,
-                handles,
-                &relative_to,
-                &project,
-                version,
-            )
-            .and_then(|()| Ok(writer.flush()?))
-            .with_context(|| format!("while writing SCIP index to `{}`", path.display()))?;
+        if let Some(scip) = scip
+            && let Some(path) = &self.output.report_scip
+        {
+            transaction.set_solutions_hook(None);
+            transaction.set_evict_after_solutions_hook(false);
+            let scip = Arc::into_inner(scip).expect("the solutions hook holds the only other copy");
+            scip.finish(transaction)
+                .and_then(|mut writer| Ok(writer.flush()?))
+                .with_context(|| format!("while writing SCIP index to `{}`", path.display()))?;
         }
         if let Some(pysa_reporter) = transaction.take_pysa_reporter() {
             report::pysa::write_project_file(&pysa_reporter, transaction, handles, &output_errors)?;
