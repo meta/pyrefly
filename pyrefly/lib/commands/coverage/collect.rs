@@ -21,6 +21,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
+use pyrefly_types::annotation::Annotation;
 use pyrefly_types::class::Class;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::function::PropertyRole;
@@ -240,15 +241,18 @@ fn classify_annotation(
     answers: &Answers,
     annotation_idx: Option<Idx<KeyAnnotation>>,
 ) -> SlotCounts {
+    let Some(idx) = annotation_idx else {
+        return SlotCounts::untyped();
+    };
     let bindings = answers.bindings();
-    let has_annotation = annotation_idx
-        .is_some_and(|idx| matches!(bindings.get(idx), BindingAnnotation::AnnotateExpr(..)));
-    let resolved_ty = annotation_idx.and_then(|idx| {
-        answers
-            .get_idx(idx)
-            .and_then(|awt| awt.annotation.ty.as_ref().map(is_type_known))
-    });
-    classify_annotation_rank(has_annotation, resolved_ty).into()
+    if let Some(resolved) = answers.get_idx(idx) {
+        return classify_resolved_annotation_rank(bindings, idx, &resolved.annotation).into();
+    }
+    classify_annotation_rank(
+        matches!(bindings.get(idx), BindingAnnotation::AnnotateExpr(..)),
+        None,
+    )
+    .into()
 }
 
 /// Returns true if the name is public: does not start with `_`, or is a dunder (`__x__`).
@@ -648,21 +652,39 @@ fn class_mro<'a>(answers: &'a Answers, class: &Class) -> &'a ClassMro {
 /// each module before its answers are evicted, so subclasses solved later can still inherit it.
 type AnnotatedFields = Mutex<HashMap<(Handle, KeyClassField), SlotCounts>>;
 
-/// Slots of the annotation that `field`'s own class gives it, if any. Solves the annotation first,
-/// because a module only solves its non-exported keys on demand unless it computes errors.
-fn own_annotation_slots(
-    solver: &AnswersSolver<TransactionHandle>,
+/// The annotation declared directly on `field`, not the effective inherited class field.
+fn own_annotation_idx(
+    bindings: &Bindings,
     field: Idx<KeyClassField>,
-) -> Option<SlotCounts> {
-    let answers = solver.current();
-    let annot = match &answers.bindings().get(field).definition {
+) -> Option<Idx<KeyAnnotation>> {
+    match &bindings.get(field).definition {
         ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => Some(*annotation),
         ClassFieldDefinition::DefinedInMethod { annotation, .. }
         | ClassFieldDefinition::AssignedInBody { annotation, .. } => *annotation,
         _ => None,
-    }?;
-    solver.get_idx(annot);
-    Some(classify_annotation(answers, Some(annot)))
+    }
+}
+
+fn classify_resolved_annotation_rank(
+    bindings: &Bindings,
+    idx: Idx<KeyAnnotation>,
+    annotation: &Annotation,
+) -> SlotRank {
+    classify_annotation_rank(
+        matches!(bindings.get(idx), BindingAnnotation::AnnotateExpr(..)),
+        annotation.ty.as_ref().map(is_type_known),
+    )
+}
+
+/// Solves a direct annotation that may not have been demanded by the module's exports.
+fn own_annotation_slots(
+    solver: &AnswersSolver<TransactionHandle>,
+    field: Idx<KeyClassField>,
+) -> Option<SlotCounts> {
+    let bindings = solver.bindings();
+    let annot = own_annotation_idx(bindings, field)?;
+    let resolved = solver.get_idx(annot);
+    Some(classify_resolved_annotation_rank(bindings, annot, &resolved.annotation).into())
 }
 
 /// Record the slots of each class field annotated in its own class in `handle`'s module.
@@ -710,12 +732,24 @@ fn inherited_annotation_slots(
                 handle.sys_info().dupe(),
             );
             let key = KeyClassField(cls.index(), field_name.clone());
+            let Some(base_answers) = transaction.get_answers(&h) else {
+                // The solutions hook records annotations before answers are evicted.
+                return annotated.lock().get(&(h, key)).copied();
+            };
+            let bindings = base_answers.bindings();
+            let idx = bindings.key_to_idx_hashed_opt(Hashed::new(&key))?;
+            let annot = own_annotation_idx(bindings, idx)?;
+            if let Some(resolved) = base_answers.get_idx(annot) {
+                return Some(
+                    classify_resolved_annotation_rank(bindings, annot, &resolved.annotation).into(),
+                );
+            }
+            // Imported-only modules can leave non-exported annotations unsolved. Re-resolve the
+            // declaration against the solver's own bindings rather than the probed answers.
             let solved = transaction.ad_hoc_solve(&h, "coverage_inherited_annotation", |solver| {
                 let idx = solver.bindings().key_to_idx_hashed_opt(Hashed::new(&key))?;
                 own_annotation_slots(&solver, idx)
             });
-            // `ad_hoc_solve` fails only once the base's answers are evicted, after the solutions
-            // hook recorded its fields.
             solved.unwrap_or_else(|| annotated.lock().get(&(h, key)).copied())
         })
 }
