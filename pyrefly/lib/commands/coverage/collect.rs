@@ -1849,6 +1849,29 @@ fn collect_untyped_errors(
     }
 }
 
+/// Per-run collection state. The same hook records ancestor annotations and captures report
+/// targets before either module's answers can be evicted.
+#[derive(Default)]
+struct ModuleCollector {
+    to_collect: HashMap<Handle, bool>,
+    annotated: AnnotatedFields,
+    collected: Mutex<HashMap<Handle, ModuleSymbols>>,
+}
+
+impl ModuleCollector {
+    fn collect(&self, transaction: &Transaction, handle: &Handle) {
+        record_annotated_fields(transaction, handle, &self.annotated);
+        let Some(&for_stub_merge) = self.to_collect.get(handle) else {
+            return;
+        };
+        if let Some(symbols) =
+            ModuleSymbols::collect(transaction, handle, for_stub_merge, &self.annotated)
+        {
+            self.collected.lock().insert(handle.dupe(), symbols);
+        }
+    }
+}
+
 pub fn collect_module_reports(
     files_to_check: Box<dyn Includes>,
     config_finder: ConfigFinder,
@@ -1952,8 +1975,10 @@ pub fn collect_module_reports(
         .chain(pyi_to_py.values().map(|h| (h.dupe(), false)))
         .collect();
     let run_set: Vec<Handle> = to_collect.keys().cloned().collect();
-    let collected: Mutex<HashMap<Handle, ModuleSymbols>> = Mutex::new(HashMap::new());
-    let annotated = AnnotatedFields::default();
+    let collector = ModuleCollector {
+        to_collect,
+        ..Default::default()
+    };
 
     let mut forgetter = Forgetter::new(
         holder.as_ref().new_transaction(Require::Exports, None),
@@ -1963,15 +1988,7 @@ pub fn collect_module_reports(
     // Collect each module the moment it solves, before the run evicts its answers,
     // so peak memory holds only the solver's working set (gh-3989).
     transaction.set_solutions_hook(Some(Box::new(|handle, transaction| {
-        record_annotated_fields(transaction, handle, &annotated);
-        let Some(&for_stub_merge) = to_collect.get(handle) else {
-            return;
-        };
-        if let Some(symbols) =
-            ModuleSymbols::collect(transaction, handle, for_stub_merge, &annotated)
-        {
-            collected.lock().insert(handle.dupe(), symbols);
-        }
+        collector.collect(transaction, handle);
     })));
     transaction.run(&run_set, Require::Errors, None);
     // Later lazy computation must not fire the hook.
@@ -2002,10 +2019,13 @@ pub fn collect_module_reports(
         if !extras.is_empty() {
             // `Everything` retains answers so the extras can be collected after the run
             transaction.run(&extras, Require::Everything, None);
-            collected.lock().extend(extras.iter().filter_map(|handle| {
-                ModuleSymbols::collect(transaction, handle, false, &annotated)
-                    .map(|s| (handle.dupe(), s))
-            }));
+            collector
+                .collected
+                .lock()
+                .extend(extras.iter().filter_map(|handle| {
+                    ModuleSymbols::collect(transaction, handle, false, &collector.annotated)
+                        .map(|s| (handle.dupe(), s))
+                }));
             targets.extend(extras);
         }
         fqns
@@ -2013,7 +2033,7 @@ pub fn collect_module_reports(
 
     let mut module_reports: Vec<ModuleReport> = Vec::new();
     let mut errors: Vec<Error> = Vec::new();
-    let mut collected = collected.lock();
+    let mut collected = collector.collected.lock();
     for handle in &targets {
         let Some(mut symbols) = collected.remove(handle) else {
             continue;
@@ -3324,17 +3344,16 @@ class Child(Base):
             Handle::new(handle(name).module(), handle(name).path().dupe(), sys_info)
         };
         let platforms = [PythonPlatform::linux(), PythonPlatform::windows()];
-        let annotated = AnnotatedFields::default();
-        let collected = Mutex::new(HashMap::new());
+        let children = platforms.clone().map(|p| on("child", p));
+        let collector = ModuleCollector {
+            to_collect: children.iter().map(|h| (h.dupe(), false)).collect(),
+            ..Default::default()
+        };
         let mut transaction = state.new_transaction(Require::Exports, None);
         transaction.set_solutions_hook(Some(Box::new(|h, transaction| {
-            record_annotated_fields(transaction, h, &annotated);
-            if h.module() == ModuleName::from_str("child") {
-                let symbols = ModuleSymbols::collect(transaction, h, false, &annotated);
-                collected.lock().insert(h.dupe(), symbols.unwrap());
-            }
+            collector.collect(transaction, h);
         })));
-        let bases = platforms.clone().map(|p| on("base", p));
+        let bases = platforms.map(|p| on("base", p));
         transaction.run(&bases, Require::Errors, None);
         for base in &bases {
             assert!(
@@ -3342,10 +3361,9 @@ class Child(Base):
                 "base must be evicted"
             );
         }
-        let children = platforms.map(|p| on("child", p));
         transaction.run(&children, Require::Errors, None);
 
-        let collected = collected.lock();
+        let collected = collector.collected.lock();
         let slots = |child: &Handle| {
             collected[child]
                 .variables
@@ -3400,16 +3418,14 @@ class Child(Middle):
                 env.add("middle", middle);
                 env.add("child", child);
                 let (state, handle) = env.with_run_require(Require::Exports).to_state();
-                let annotated = AnnotatedFields::default();
-                let collected = Mutex::new(None);
                 let child_handle = handle("child");
+                let collector = ModuleCollector {
+                    to_collect: HashMap::from([(child_handle.dupe(), false)]),
+                    ..Default::default()
+                };
                 let mut transaction = state.new_transaction(Require::Exports, None);
                 transaction.set_solutions_hook(Some(Box::new(|h, transaction| {
-                    record_annotated_fields(transaction, h, &annotated);
-                    if h == &child_handle {
-                        *collected.lock() =
-                            ModuleSymbols::collect(transaction, h, false, &annotated);
-                    }
+                    collector.collect(transaction, h);
                 })));
                 let ancestors = [handle("base"), handle("middle")];
                 let require = retention.max(Require::Errors);
@@ -3423,8 +3439,10 @@ class Child(Middle):
                 }
                 transaction.run(&[child_handle.dupe()], require, None);
 
-                let collected = collected.lock();
-                let symbols = collected.as_ref().expect("child symbols must be collected");
+                let collected = collector.collected.lock();
+                let symbols = collected
+                    .get(&child_handle)
+                    .expect("child symbols must be collected");
                 for (name, expected) in [
                     ("callback", SlotCounts::typed()),
                     ("__add__", SlotCounts::typed()),
