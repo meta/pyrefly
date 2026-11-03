@@ -2989,10 +2989,9 @@ class Person:
                 "got: {}",
                 markup.value
             );
-            // BUG: a local class alias cannot find implementation-only class documentation.
             assert_eq!(
                 markup.value.contains("Implementation class documentation."),
-                !has_stub_docstring && call != "Alias()",
+                !has_stub_docstring,
                 "got: {}",
                 markup.value
             );

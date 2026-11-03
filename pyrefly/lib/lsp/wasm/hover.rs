@@ -536,22 +536,47 @@ fn docstring_for_class_object_type(
     );
     let module = transaction.get_module_info(&definition_handle)?;
     // Exported classes retain their docstring range after their AST is evicted.
-    if let Some(ExportLocation::ThisModule(export)) =
+    let range = if let Some(ExportLocation::ThisModule(export)) =
         transaction.get_exports(&definition_handle).get(qname.id())
         && export.location == qname.range()
     {
-        return export.docstring_range.map(|range| Docstring(range, module));
-    }
-    let ast = transaction.get_ast_or_parse_module(handle, &module);
-    let range = Ast::locate_node(&ast, qname.range().start())
-        .into_iter()
-        .find_map(|node| match node {
-            AnyNodeRef::StmtClassDef(class) if class.name.range() == qname.range() => {
-                Docstring::range_from_stmts(&class.body)
+        export.docstring_range
+    } else {
+        let ast = transaction.get_ast_or_parse_module(handle, &module);
+        Ast::locate_node(&ast, qname.range().start())
+            .into_iter()
+            .find_map(|node| match node {
+                AnyNodeRef::StmtClassDef(class) if class.name.range() == qname.range() => {
+                    Docstring::range_from_stmts(&class.body)
+                }
+                _ => None,
+            })
+    };
+    range
+        .map(|range| Docstring(range, module))
+        .and_then(nonempty_docstring)
+        .or_else(|| {
+            // A module export must not stand in for a nested class with the same name.
+            if !qname.module_path().is_interface() || !qname.parent().is_toplevel() {
+                return None;
             }
-            _ => None,
-        })?;
-    Some(Docstring(range, module))
+            let (implementation_handle, _, export) = transaction.resolve_named_import(
+                handle,
+                qname.module_name(),
+                qname.id().clone(),
+                FindPreference {
+                    prefer_pyi: false,
+                    include_interpreter_stdlib: true,
+                    ..FindPreference::default()
+                },
+            )?;
+            if export.symbol_kind != Some(SymbolKind::Class) {
+                return None;
+            }
+            let range = export.docstring_range?;
+            let module = transaction.get_module_info(&implementation_handle)?;
+            nonempty_docstring(Docstring(range, module))
+        })
 }
 
 fn collect_typed_dict_fields_for_hover<'a>(
