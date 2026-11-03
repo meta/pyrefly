@@ -9,6 +9,7 @@ use std::iter;
 
 use dupe::Dupe;
 use pyrefly_python::dunder;
+use pyrefly_python::keywords::is_valid_identifier;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::heap::TypeHeap;
@@ -3790,6 +3791,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     let Lit::Str(value) = &lit.value else {
                         continue;
                     };
+                    if !is_valid_identifier(value.as_str()) {
+                        continue;
+                    }
                     let name = Name::new(value);
                     if !res.iter().any(|info| info.name == name) {
                         res.push(AttrInfo {
