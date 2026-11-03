@@ -5226,3 +5226,50 @@ def f(a: int | None, b: str | None):
         assert_type(values, tuple[int, str])
     "#,
 );
+
+// Every branch refers to the same builtin, including through shared alias bindings.
+testcase!(
+    bug = "Phi traversal rejects aliases with shared ancestors.",
+    test_special_export_phi_shared_ancestors,
+    r#"
+from typing import Any, assert_type, cast
+
+def merged_len(values: tuple[int] | tuple[int, int], flag: bool):
+    if flag:
+        size = len
+    else:
+        size = len
+    if size(values) == 1:
+        assert_type(values, tuple[int] | tuple[int, int])
+
+def conditional_len(values: tuple[int] | tuple[int, int], flag: bool):
+    size = len
+    if flag:
+        size = len
+    if size(values) == 1:
+        assert_type(values, tuple[int] | tuple[int, int])
+
+def nested_len(values: tuple[int] | tuple[int, int], a: bool, b: bool):
+    size = len
+    if a:
+        if b:
+            size = len
+    if size(values) == 1:
+        assert_type(values, tuple[int] | tuple[int, int])
+
+def merged_cast(value: Any, flag: bool):
+    if flag:
+        convert = cast
+    else:
+        convert = cast
+    assert_type(convert("str", value), str)  # E: assert_type # E: First argument to `typing.cast` must be a type
+
+def merged_all(values: tuple[int | None, str | None], flag: bool):
+    if flag:
+        check = all
+    else:
+        check = all
+    if check(v is not None for v in values):
+        assert_type(values, tuple[int | None, str | None])
+    "#,
+);
