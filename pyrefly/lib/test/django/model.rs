@@ -7,6 +7,7 @@
 
 use crate::django_testcase;
 use crate::test::django::util::django_env;
+use crate::test::django::util::django_env_with_infer_with_first_use;
 use crate::test::util::TestEnv;
 use crate::testcase;
 
@@ -231,6 +232,99 @@ class Other(models.Model): ...
 
 class InvalidModel(StandardParent):
     objects: ClassVar[models.Manager[Other]] = models.Manager()  # E: overrides parent class `StandardParent` in an inconsistent manner
+"#,
+);
+
+testcase!(
+    bug = "Manager model binding diagnoses the unspecialized constructor",
+    test_manager_binding_without_first_use,
+    django_env_with_infer_with_first_use(false).enable_partially_unknown_type_error(),
+    r#"
+from typing import Generic, TypeVar, assert_type
+from django.db import models
+
+M = TypeVar("M", bound=models.Model)
+T = TypeVar("T")
+
+class GenericManager(models.Manager[M]): ...
+class ExtraManager(models.Manager[M], Generic[T, M]): ...
+class BareManager(models.Manager): ...
+
+class Plain(models.Model):
+    objects = models.Manager()  # E: This expression's type is partially unknown
+
+class GenericModel(models.Model):
+    objects = GenericManager()  # E: This expression's type is partially unknown
+
+class Bare(models.Model):
+    objects = BareManager()
+
+class Partial(models.Model):
+    records = ExtraManager()  # E: This expression's type is partially unknown
+
+class Other(models.Model): ...
+
+class Complete(models.Model):
+    records = ExtraManager[int, Other]()
+
+assert_type(Plain.objects.get(), Plain)
+assert_type(GenericModel.objects, GenericManager[GenericModel])
+assert_type(Bare.objects.get(), Bare)
+assert_type(Complete.records, ExtraManager[int, Complete])
+"#,
+);
+
+testcase!(
+    test_manager_binding_with_first_use,
+    django_env().enable_partially_unknown_type_error(),
+    r#"
+from typing import TypeVar, assert_type
+from django.db import models
+
+M = TypeVar("M", bound=models.Model)
+class CustomManager(models.Manager[M]): ...
+
+class Person(models.Model):
+    objects = models.Manager()
+    records = CustomManager()
+
+assert_type(Person.objects.get(), Person)
+assert_type(Person.records, CustomManager[Person])
+"#,
+);
+
+django_testcase!(
+    test_manager_binding_constructor_boundaries,
+    r#"
+from typing import TypeVar, assert_type
+from django.db import models
+
+M = TypeVar("M", bound=models.Model)
+class RequiredManager(models.Manager[M]):
+    def __init__(self, value: int) -> None:
+        self.value = value
+
+class Person(models.Model):
+    objects = RequiredManager("bad")  # E: not assignable to parameter `value` with type `int`
+    records = RequiredManager()  # E: Missing argument `value`
+
+assert_type(Person.objects.get(), Person)
+assert_type(Person.records.get(), Person)
+
+class Other(models.Model): ...
+class DifferentManager(models.Manager):
+    def __new__(cls) -> models.Manager[Other]:
+        return models.Manager[Other]()
+
+def factory() -> models.Manager[Other]:
+    return models.Manager[Other]()
+
+class Boundary(models.Model):
+    factory_records = factory()
+    different_records = DifferentManager()
+
+assert_type(Boundary.factory_records.get(), Other)
+assert_type(Boundary.different_records.get(), Other)
 "#,
 );
 
