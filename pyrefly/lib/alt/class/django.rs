@@ -530,16 +530,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let model = self.heap.mk_self_type(self.as_class_type_unchecked(model));
         // The model parameter can occur at any position in a custom manager's parameters.
         // Preserve other arguments inferred from the constructor.
-        let parameters = manager.tparams().clone();
-        for (parameter, argument) in parameters.iter().zip(manager.targs_mut().as_mut()) {
-            if matches!(original_model, Type::Quantified(q) if q.as_ref() == parameter) {
-                *argument = model.clone();
-            }
+        let model_parameter = manager.tparams().iter().position(
+            |parameter| matches!(original_model, Type::Quantified(q) if q.as_ref() == parameter),
+        );
+        if let Some(index) = model_parameter {
+            manager.targs_mut().as_mut()[index] = model.clone();
         }
         base.targs_mut().as_mut()[0] = model;
         let manager = if manager.class_object() == base.class_object() {
             base
+        } else if model_parameter.is_some() {
+            manager
         } else {
+            // Bare and concretely bound subclasses cannot express rebinding in their arguments.
             manager.with_django_metadata(DjangoClassMetadata::SpecializedBase { base })
         };
         Some(self.heap.mk_class_type(manager))
