@@ -236,7 +236,6 @@ class InvalidModel(StandardParent):
 );
 
 testcase!(
-    bug = "Manager model binding diagnoses the unspecialized constructor",
     test_manager_binding_without_first_use,
     django_env_with_infer_with_first_use(false).enable_partially_unknown_type_error(),
     r#"
@@ -251,10 +250,10 @@ class ExtraManager(models.Manager[M], Generic[T, M]): ...
 class BareManager(models.Manager): ...
 
 class Plain(models.Model):
-    objects = models.Manager()  # E: This expression's type is partially unknown
+    objects = models.Manager()
 
 class GenericModel(models.Model):
-    objects = GenericManager()  # E: This expression's type is partially unknown
+    objects = GenericManager()
 
 class Bare(models.Model):
     objects = BareManager()

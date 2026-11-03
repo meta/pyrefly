@@ -2793,38 +2793,48 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             (None, _) => self.expr_infer(x, errors),
         };
         self.expand_mut(&mut ty);
+        if annotation.is_none() {
+            self.check_unannotated_attribute_type(&ty, x.range(), errors);
+        }
+        ty
+    }
+
+    /// Diagnose the effective attribute type after inference and specialization.
+    fn check_unannotated_attribute_type(
+        &self,
+        ty: &Type,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) {
         // An unannotated attribute whose value has a bare `Any` type is reported separately from
         // the `None`/empty-tuple sentinel cases above, under the kind for the style of that `Any`:
         // an untyped call gives an implicit `Any`, a failed import an error `Any`, and a library
         // function annotated `-> Any` an explicit `Any`.
-        if annotation.is_none() {
-            match &ty {
-                Type::Any(AnyStyle::Implicit) => {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::UnknownAttributeType,
-                        "This expression is implicitly inferred to be `Any`. Please provide an explicit type annotation.".to_owned(),
-                    );
-                }
-                Type::Any(AnyStyle::Error) => {
-                    self.error_unknown_from_error(errors, x.range(), "The type of this attribute")
-                }
-                Type::Any(AnyStyle::Explicit) => {
-                    self.error_explicit_any_use(errors, x.range(), "The type of this attribute")
-                }
-                _ if ty.contains_implicit_any() => {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::PartiallyUnknownType,
-                        "This expression's type is partially unknown; it contains an implicit `Any`. Please provide an explicit type annotation.".to_owned(),
-                    );
-                }
-                _ => {}
+        match ty {
+            Type::Any(AnyStyle::Implicit) => {
+                self.error(
+                    errors,
+                    range,
+                    ErrorKind::UnknownAttributeType,
+                    "This expression is implicitly inferred to be `Any`. Please provide an explicit type annotation.".to_owned(),
+                );
             }
+            Type::Any(AnyStyle::Error) => {
+                self.error_unknown_from_error(errors, range, "The type of this attribute")
+            }
+            Type::Any(AnyStyle::Explicit) => {
+                self.error_explicit_any_use(errors, range, "The type of this attribute")
+            }
+            _ if ty.contains_implicit_any() => {
+                self.error(
+                    errors,
+                    range,
+                    ErrorKind::PartiallyUnknownType,
+                    "This expression's type is partially unknown; it contains an implicit `Any`. Please provide an explicit type annotation.".to_owned(),
+                );
+            }
+            _ => {}
         }
-        ty
     }
 
     /// Apply any class-specific logic for postprocessing the type of a class field. Hook into this
@@ -3378,11 +3388,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         || cls.has_qname("django.db.models.manager", "BaseManager"))
                 })
             && let ExprOrBinding::Expr(e) = value
-            && let Some(manager) = self.get_django_manager_assignment_type(class, e)
+            && let Some(mut manager) = self.get_django_manager_assignment_type(class, e)
         {
             // Standard manager interfaces allow model rebinding. Explicit custom interfaces
             // retain their declared type and use ordinary assignment checking below.
-            self.attribute_expr_infer(e, None, name, errors);
+            self.expr_infer(e, errors);
+            self.expand_mut(&mut manager);
+            self.check_unannotated_attribute_type(&manager, e.range(), errors);
             let annotation = inherited_annotation.and_then(|mut ann| {
                 ann.ty = None;
                 ann.qualifiers
