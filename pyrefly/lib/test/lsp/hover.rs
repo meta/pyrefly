@@ -18,6 +18,7 @@ use pyrefly_python::module_path::ModulePath;
 use ruff_text_size::TextSize;
 
 use crate::lsp::wasm::hover::HoverOptions;
+use crate::lsp::wasm::hover::HoverResult;
 use crate::lsp::wasm::hover::get_hover;
 use crate::lsp::wasm::hover::get_hover_with_verbosity;
 use crate::state::require::Require;
@@ -50,6 +51,7 @@ fn get_test_report_at_verbosity(
         HoverOptions {
             show_go_to_links: true,
             verbosity_level,
+            field_docstring_at_definition: false,
         },
     ) {
         Some(result) => match result.hover {
@@ -1197,6 +1199,43 @@ widget.box
         report.contains("The box containing the widget."),
         "Expected dataclass field docstring to appear in hover, got: {report}"
     );
+}
+
+#[test]
+fn hover_shows_field_docstring_at_definition_when_enabled() {
+    let code = r#"
+class Widget:
+    name: str
+#   ^
+    """Name of the widget."""
+"#;
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let position = extract_cursors_for_test(code)[0];
+    let hover = |field_docstring_at_definition| {
+        let options = HoverOptions {
+            show_go_to_links: false,
+            verbosity_level: 0,
+            field_docstring_at_definition,
+        };
+        match get_hover_with_verbosity(&state.transaction(), &handle, position, options) {
+            Some(HoverResult {
+                hover:
+                    Hover {
+                        contents: Contents::MarkupContent(markup),
+                        ..
+                    },
+                ..
+            }) => markup.value,
+            _ => "None".to_owned(),
+        }
+    };
+    let enabled = hover(true);
+    assert!(enabled.contains("Name of the widget."), "got: {enabled}");
+    let disabled = hover(false);
+    assert!(!disabled.contains("Name of the widget."), "got: {disabled}");
 }
 
 #[test]

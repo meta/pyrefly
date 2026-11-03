@@ -17,6 +17,7 @@ use lsp_types::ParameterInformationLabel;
 use lsp_types::SignatureHelp;
 use lsp_types::SignatureInformation;
 use pyrefly_build::handle::Handle;
+use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::docstring::parse_parameter_documentation;
 use pyrefly_python::module::Module;
@@ -224,7 +225,9 @@ impl Transaction<'_> {
     ) -> Option<CallInfo> {
         let mod_module = self.get_ast(handle)?;
         let mut res = None;
-        mod_module.visit(&mut |x| Self::visit_finding_signature_range(x, position, &mut res));
+        Ast::visit_covering_exprs(&mod_module, position, &mut |x| {
+            Self::visit_finding_signature_range(x, position, &mut res)
+        });
         let (callee_range, call_args_range, mut active_argument, provided_arg_ranges) = res?;
         // When the cursor is in the argument list but not inside any argument yet,
         // estimate the would-be positional index by counting commas up to the cursor.

@@ -45,6 +45,7 @@ use ruff_python_ast::visitor;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::visitor::source_order::SourceOrderVisitor;
 use ruff_python_ast::visitor::source_order::TraversalSignal;
+use ruff_python_ast::visitor::source_order::walk_stmt;
 use ruff_python_parser::ParseError;
 use ruff_python_parser::ParseOptions;
 use ruff_python_parser::Parsed;
@@ -467,6 +468,32 @@ impl Ast {
             x.body.first(),
             Some(Stmt::Expr(x)) if x.value.is_string_literal_expr()
         )
+    }
+
+    /// Like `module.visit`, but only calls `f` on expressions that contain `position`, and
+    /// skips statements that don't contain it.
+    pub fn visit_covering_exprs<'a>(
+        module: &'a ModModule,
+        position: TextSize,
+        f: &mut dyn FnMut(&'a Expr),
+    ) {
+        struct X<'a, 'f> {
+            position: TextSize,
+            f: &'f mut dyn FnMut(&'a Expr),
+        }
+        impl<'a> SourceOrderVisitor<'a> for X<'a, '_> {
+            fn visit_stmt(&mut self, x: &'a Stmt) {
+                if x.range().contains_inclusive(self.position) {
+                    walk_stmt(self, x);
+                }
+            }
+            fn visit_expr(&mut self, x: &'a Expr) {
+                if x.range().contains_inclusive(self.position) {
+                    (self.f)(x);
+                }
+            }
+        }
+        X { position, f }.visit_body(&module.body);
     }
 
     /// Given a module and a position, find all AST nodes that "cover" the position.

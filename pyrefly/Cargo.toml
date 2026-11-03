@@ -66,6 +66,7 @@ parking_lot = { version = "0.12.1", features = ["arc_lock", "send_guard"] }
 parse-display = "0.8.2"
 paste = "1.0.14"
 percent-encoding = "2.1"
+protobuf = "3.7.2"
 pyrefly_build = { path = "../crates/pyrefly_build" }
 pyrefly_bundled = { path = "../crates/pyrefly_bundled", default-features = false }
 pyrefly_config = { path = "../crates/pyrefly_config" }
@@ -83,6 +84,7 @@ ruff_python_ast = { version = "0.0.14", features = ["serde"] }
 ruff_python_parser = "0.0.14"
 ruff_source_file = "0.0.14"
 ruff_text_size = "0.0.14"
+scip = "0.10.0"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.151", features = ["alloc", "float_roundtrip", "raw_value", "unbounded_depth"] }
 serde_repr = "0.1.21"

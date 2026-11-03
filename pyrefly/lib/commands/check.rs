@@ -323,6 +323,15 @@ struct OutputArgs {
     /// Make each module's file the Glean ownership unit of its facts in the Glean report.
     #[arg(long, requires = "report_glean")]
     report_glean_ownership: bool,
+    /// Generate a SCIP index for the project
+    #[arg(long, value_name = "OUTPUT_FILE")]
+    report_scip: Option<PathBuf>,
+    /// Package name for the project's symbols in the SCIP index. Defaults to the name in `pyproject.toml`.
+    #[arg(long, requires = "report_scip")]
+    report_scip_project_name: Option<String>,
+    /// Package version for the project's symbols in the SCIP index. Defaults to the version in `pyproject.toml`.
+    #[arg(long, requires = "report_scip")]
+    report_scip_project_version: Option<String>,
     /// Generate a Pysa-compatible JSON file for each module
     #[arg(long, value_name = "OUTPUT_FILE")]
     report_pysa: Option<PathBuf>,
@@ -492,6 +501,9 @@ impl OutputArgs {
             report_timings,
             report_glean,
             report_glean_ownership,
+            report_scip,
+            report_scip_project_name,
+            report_scip_project_version,
             report_pysa,
             report_pysa_format,
             report_demand_tree,
@@ -536,6 +548,9 @@ impl OutputArgs {
             || report_timings.is_some()
             || report_glean.is_some()
             || *report_glean_ownership
+            || report_scip.is_some()
+            || report_scip_project_name.is_some()
+            || report_scip_project_version.is_some()
             || report_pysa.is_some()
             || !matches!(report_pysa_format, report::pysa::PysaFormat::Capnp)
             || report_demand_tree.is_some()
@@ -1576,7 +1591,7 @@ impl IncrementalCheckCommand {
             )
         });
         let defaults = args.output.resolve(config.as_deref());
-        let run = args.prepare_cli_run(timings, transaction, handles, &defaults)?;
+        let run = args.prepare_cli_run(timings, transaction, version, handles, &defaults)?;
         check.run(|transaction, handles, sourcedb_errors| {
             let result = args.finish_cli_run(
                 run,
@@ -1623,6 +1638,7 @@ struct PreparedCliRun {
     memory_trace: MemoryUsageTrace,
     demand_tree_subscriber: Option<TestSubscriber>,
     type_check_start: Instant,
+    scip: Option<Arc<report::scip::ScipWriter<BufWriter<File>>>>,
 }
 
 impl CheckArgs {
@@ -1765,7 +1781,8 @@ impl CheckArgs {
             || self.output.report_trace.is_some()
             || self.output.report_glean.is_some();
         RequireLevels {
-            specified: if retain {
+            // SCIP solves the dependencies it refers to once the indexed files are written.
+            specified: if retain || self.output.report_scip.is_some() {
                 Require::Everything
             } else {
                 Require::Errors
@@ -1794,7 +1811,7 @@ impl CheckArgs {
         require: Require,
         upsell: UpsellDecision,
     ) -> anyhow::Result<(CommandExitStatus, Vec<Error>)> {
-        let run = self.prepare_cli_run(timings, transaction, handles, defaults)?;
+        let run = self.prepare_cli_run(timings, transaction, version, handles, defaults)?;
         transaction.run(handles, require, None);
         self.finish_cli_run(
             run,
@@ -1811,6 +1828,7 @@ impl CheckArgs {
         &self,
         timings: Timings,
         transaction: &mut Transaction,
+        version: &str,
         handles: &[Handle],
         defaults: &OutputDefaults,
     ) -> anyhow::Result<PreparedCliRun> {
@@ -1871,6 +1889,41 @@ impl CheckArgs {
             transaction.set_cinderx_reporter(Some(cinderx_reporter));
         }
 
+        // Each indexed file is written as soon as it is solved, while its answers are still in
+        // memory, so they don't have to be kept for the whole run.
+        let scip = match &self.output.report_scip {
+            Some(path) => {
+                let relative_to = self.output.relative_to.as_ref().map_or_else(
+                    || std::env::current_dir().ok().unwrap_or_default(),
+                    |x| PathBuf::from_str(x.as_str()).unwrap(),
+                );
+                let project = report::scip::Package::project(
+                    &relative_to,
+                    self.output.report_scip_project_name.clone(),
+                    self.output.report_scip_project_version.clone(),
+                )?;
+                let scip = Arc::new(report::scip::ScipWriter::new(
+                    BufWriter::new(File::create(path)?),
+                    handles,
+                    &relative_to,
+                    project,
+                    version,
+                )?);
+                let hook_scip = scip.dupe();
+                transaction.set_solutions_hook(Some(Box::new(move |handle, transaction| {
+                    if let Err(e) = hook_scip.write_document(transaction, handle) {
+                        error!(
+                            "while writing SCIP document for `{}`: {e:#}",
+                            handle.module()
+                        );
+                    }
+                })));
+                transaction.set_evict_after_solutions_hook(true);
+                Some(scip)
+            }
+            None => None,
+        };
+
         let type_check_start = Instant::now();
         let demand_tree_subscriber = if self.output.report_demand_tree.is_some() {
             transaction.set_demand_collector(Some(DemandCollector::new()));
@@ -1887,6 +1940,7 @@ impl CheckArgs {
             memory_trace,
             demand_tree_subscriber,
             type_check_start,
+            scip,
         })
     }
 
@@ -1905,6 +1959,7 @@ impl CheckArgs {
             mut memory_trace,
             demand_tree_subscriber,
             type_check_start,
+            scip,
         } = run;
         transaction.set_subscriber(None);
 
@@ -2262,6 +2317,16 @@ impl CheckArgs {
                 )?;
             }
         }
+        if let Some(scip) = scip
+            && let Some(path) = &self.output.report_scip
+        {
+            transaction.set_solutions_hook(None);
+            transaction.set_evict_after_solutions_hook(false);
+            let scip = Arc::into_inner(scip).expect("the solutions hook holds the only other copy");
+            scip.finish(transaction)
+                .and_then(|mut writer| Ok(writer.flush()?))
+                .with_context(|| format!("while writing SCIP index to `{}`", path.display()))?;
+        }
         if let Some(pysa_reporter) = transaction.take_pysa_reporter() {
             report::pysa::write_project_file(&pysa_reporter, transaction, handles, &output_errors)?;
         }
@@ -2312,6 +2377,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use protobuf::Message as _;
     use pyrefly_config::config::ConfigScope;
     use pyrefly_python::module::Module;
     use pyrefly_python::module_name::ModuleName;
@@ -2546,6 +2612,57 @@ def go(w: Widget) -> int:
             .collect();
         assert_eq!(glean_files.len(), 1, "expected one Glean file per module");
         assert!(fs::metadata(&glean_files[0]).unwrap().len() > 0);
+    }
+
+    #[test]
+    fn check_writes_scip_report() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let module = root.join("main.py");
+        fs::write(&module, "x = 1\n").unwrap();
+        let scip_path = temp.path().join("index.scip");
+
+        let args = CheckArgs::parse_from([
+            "check",
+            "--report-scip",
+            scip_path.to_str().unwrap(),
+            "--report-scip-project-name",
+            "demo",
+            "--relative-to",
+            root.to_str().unwrap(),
+        ]);
+        let (status, errors, _) = args
+            .run_once(
+                "test",
+                Box::new(TestIncludes {
+                    root: root.clone(),
+                    initial_files: vec![module],
+                }),
+                test_config_finder(&root),
+                UpsellDecision::Skip,
+                ThreadCount::Inline,
+            )
+            .unwrap();
+        assert!(errors.is_empty(), "unexpected type errors: {errors:#?}");
+        assert!(matches!(status, CommandExitStatus::Success));
+
+        let index = scip::types::Index::parse_from_bytes(&fs::read(&scip_path).unwrap()).unwrap();
+        assert_eq!(index.documents.len(), 1);
+        assert_eq!(index.documents[0].relative_path, "main.py");
+        assert_eq!(
+            index.documents[0].occurrences[0].symbol,
+            "scip-python python demo . main/__init__:"
+        );
+        let metadata = index.metadata.unwrap();
+        assert_eq!(metadata.tool_info.name, "pyrefly");
+        assert_eq!(metadata.tool_info.version, "test");
+        assert!(
+            metadata.project_root.starts_with("file://")
+                && metadata.project_root.ends_with("/project/"),
+            "unexpected project root: {}",
+            metadata.project_root
+        );
     }
 
     #[test]
