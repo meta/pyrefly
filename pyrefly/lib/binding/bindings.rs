@@ -2009,20 +2009,18 @@ impl<'a> BindingsBuilder<'a> {
                     return SpecialExport::new(name);
                 }
                 Binding::Phi(_, branches) => {
-                    // Check all branches for a consistent special export (e.g. try/except
-                    // importing Literal from typing vs typing_extensions).
+                    // Every branch must resolve to the same special export (e.g. try/except
+                    // importing Literal from typing vs typing_extensions). A branch that is
+                    // not a special export means the name may be an ordinary object.
                     let mut result = None;
                     for branch in branches {
                         let branch_result = self.special_export_from_binding_idx(
                             branch.value_key,
                             visited_names,
                             visited_keys,
-                        );
-                        match (&result, &branch_result) {
-                            (None, _) => result = branch_result,
-                            (_, None) => {}
-                            (Some(a), Some(b)) if a == b => {}
-                            _ => return None,
+                        )?;
+                        if *result.get_or_insert(branch_result) != branch_result {
+                            return None;
                         }
                     }
                     return result;

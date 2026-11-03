@@ -1285,6 +1285,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
+    /// Removes `None` from every element of concrete tuples. A tuple with an element that is
+    /// always `None` cannot satisfy the condition, so it becomes `Never`.
+    fn narrow_tuple_elements_not_none(&self, ty: &Type) -> Type {
+        self.distribute_over_union(ty, |t| match t {
+            Type::Tuple(Tuple::Concrete(elts)) => {
+                let narrowed = elts.map(|elt| self.narrow_is_not(elt, &Type::None));
+                if narrowed.iter().any(Type::is_never) {
+                    self.heap.mk_never()
+                } else {
+                    self.heap.mk_tuple(Tuple::Concrete(narrowed))
+                }
+            }
+            _ => t.clone(),
+        })
+    }
+
     /// Keep the union members consistent with `key` being present or absent.
     fn narrow_key_membership(&self, ty: &Type, key: &Name, present: bool) -> Type {
         self.distribute_over_union(ty, |member| {
@@ -1661,6 +1677,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 };
                 self.narrow_length_less_than(ty, len + 1)
             }
+            AtomicNarrowOp::AnyElementIsNone => ty.clone(),
+            AtomicNarrowOp::NoElementIsNone => self.narrow_tuple_elements_not_none(ty),
             AtomicNarrowOp::IsSequence => {
                 self.is_type_for_pattern(ty, |t| self.is_sequence_for_pattern(t))
             }
