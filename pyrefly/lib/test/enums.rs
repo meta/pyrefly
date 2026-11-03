@@ -454,6 +454,24 @@ def f(test: bool, e1: E1, e2: E2):
 );
 
 testcase!(
+    test_enum_literal_union_member_compatibility,
+    r#"
+from enum import Enum
+from typing import Literal
+
+class Unset(Enum):
+    _UNSET = "UNSET"
+
+def takes_member(x: Literal["a", "b", Unset._UNSET] | None) -> None: ...
+def takes_class(x: Literal["a", "b"] | Unset | None) -> None: ...
+
+def f(x: Literal["a"] | Literal[Unset._UNSET] | None) -> None:
+    takes_member(x)
+    takes_class(x)
+"#,
+);
+
+testcase!(
     test_single_member_flag_not_assignable_to_literal,
     r#"
 from enum import Flag, IntFlag

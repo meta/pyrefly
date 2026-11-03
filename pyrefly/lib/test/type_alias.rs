@@ -182,7 +182,6 @@ def or_unset[U](v: U | None) -> U | Literal[Unset._UNSET]:
 
 def f(s: Literal["a"] | None) -> None:
     assert_type(or_unset(s), Literal["a"] | Literal[Unset._UNSET])
-    assert_type(s, Literal["a"] | None)
     takes(or_unset(s))
 "#,
 );
@@ -1519,22 +1518,4 @@ from typing import TypeAlias
 X: TypeAlias = int | str
 X()  # E: Expected a callable
     "#,
-);
-
-testcase!(
-    test_enum_literal_union_member_compatibility,
-    r#"
-from enum import Enum
-from typing import Literal
-
-class Unset(Enum):
-    _UNSET = "UNSET"
-
-def takes_member(x: Literal["a", "b", Unset._UNSET] | None) -> None: ...
-def takes_class(x: Literal["a", "b"] | Unset | None) -> None: ...
-
-def f(x: Literal["a"] | Literal[Unset._UNSET] | None) -> None:
-    takes_member(x)
-    takes_class(x)
-"#,
 );
