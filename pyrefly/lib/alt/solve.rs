@@ -2798,6 +2798,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 operand,
                 ..
             }) => self.declared_bool_value(operand).map(|value| !value),
+            Expr::Named(named) => self.declared_bool_value(&named.value),
             Expr::BoolOp(ExprBoolOp { op, values, .. }) => {
                 // One `or` operand that is always true makes the whole test true, and one `and`
                 // operand that is always false makes it false. Otherwise the test is settled only
