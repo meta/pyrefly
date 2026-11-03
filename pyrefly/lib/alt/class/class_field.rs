@@ -2057,46 +2057,39 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 has_instance_write: _,
             } => {
                 let direct_annotation = annot.map(|a| self.get_idx(a).annotation.clone());
-                // Unannotated Django assignments use the inherited setter. Explicit annotations
-                // define attributes with normal type and qualifier checks.
-                if !Ast::is_mangled_attr(name) {
-                    // Use get_field_from_ancestors to only look at parent classes, not the current class
-                    if let Some(parent_field) = self.get_field_from_ancestors(
+                // Inherited properties and descriptors keep their setters. Django fields do so
+                // only for unannotated writes; annotations retain normal declaration checks.
+                if !Ast::is_mangled_attr(name)
+                    && let Some(parent_field) = self.get_field_from_ancestors(
                         class,
                         self.get_mro_for_class(class).ancestors(self.stdlib),
                         name,
                         &|cls, name| self.get_field_from_current_class_only(cls, name),
-                    ) {
-                        let inherits_setter = match parent_field.value.as_ref() {
-                            ClassField(
-                                ClassFieldInner::Property { .. }
-                                | ClassFieldInner::Descriptor { .. },
-                                _,
-                            ) => true,
-                            ClassField(
-                                ClassFieldInner::ClassAttribute {
-                                    django_set_type: Some(_),
-                                    ..
-                                },
-                                _,
-                            ) => direct_annotation.is_none(),
-                            _ => false,
-                        };
-                        if inherits_setter {
-                            // The child uses the inherited setter. IsInherited::No skips
-                            // the override check because the field is not redefined.
-                            let ClassField(inner, _) = parent_field.value.into_owned();
-                            return ClassField(inner, IsInherited::No);
-                        }
-                        if let ClassField(
+                    )
+                {
+                    let inherits_setter = match parent_field.value.as_ref() {
+                        ClassField(
+                            ClassFieldInner::Property { .. } | ClassFieldInner::Descriptor { .. },
+                            _,
+                        ) => true,
+                        ClassField(
                             ClassFieldInner::ClassAttribute {
-                                is_instance_var, ..
+                                django_set_type,
+                                is_instance_var,
+                                ..
                             },
                             _,
-                        ) = parent_field.value.as_ref()
-                        {
+                        ) => {
                             inherited_instance_var = *is_instance_var;
+                            django_set_type.is_some() && direct_annotation.is_none()
                         }
+                        _ => false,
+                    };
+                    if inherits_setter {
+                        // The child uses the inherited setter. IsInherited::No skips
+                        // the override check because the field is not redefined.
+                        let ClassField(inner, _) = parent_field.value.into_owned();
+                        return ClassField(inner, IsInherited::No);
                     }
                 }
 
@@ -5895,15 +5888,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if let Some(class_object) = class_object {
                     self.check_dataclass_field_final(class_object, attr_name, errors, range);
                 }
-                if let Some(set_type) = set_type {
-                    return Some(AttrSetter::Declared {
-                        ty: set_type,
+                Some(match set_type {
+                    Some(ty) => AttrSetter::Declared {
+                        ty,
                         narrow: AttrNarrowing::IfAssignable(attr_ty),
-                    });
-                }
-                Some(AttrSetter::Declared {
-                    ty: attr_ty,
-                    narrow: AttrNarrowing::Always,
+                    },
+                    None => AttrSetter::Declared {
+                        ty: attr_ty,
+                        narrow: AttrNarrowing::Always,
+                    },
                 })
             }
             ClassAttribute::Property(getter, None, cls) => {
