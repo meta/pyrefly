@@ -1369,6 +1369,48 @@ def g(x: E):
 );
 
 testcase!(
+    bug = "Flag arguments must not expand to declared member literals",
+    test_do_not_expand_flag_arguments,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal, assert_type, overload
+
+class BaseFlag(Flag):
+    pass
+
+class Bits(BaseFlag):
+    A = 1
+    B = 2
+
+class IntBits(IntFlag):
+    A = 1
+    B = 2
+
+@overload
+def choose(value: Literal[Bits.A]) -> Literal["A"]: ...
+@overload
+def choose(value: Literal[Bits.B]) -> Literal["B"]: ...
+def choose(value: Bits) -> str:
+    return value.name or ""
+
+@overload
+def choose_int(value: Literal[IntBits.A]) -> Literal["A"]: ...
+@overload
+def choose_int(value: Literal[IntBits.B]) -> Literal["B"]: ...
+def choose_int(value: IntBits) -> str:
+    return value.name or ""
+
+def check(value: Bits, int_value: IntBits) -> None:
+    choose(value)
+    choose_int(int_value)
+
+def check_members(value: Literal[Bits.A, Bits.B], int_value: Literal[IntBits.A, IntBits.B]) -> None:
+    assert_type(choose(value), Literal["A", "B"])
+    assert_type(choose_int(int_value), Literal["A", "B"])
+"#,
+);
+
+testcase!(
     test_expand_one_member_enum,
     r#"
 from enum import Enum
