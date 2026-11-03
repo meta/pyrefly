@@ -1956,25 +1956,25 @@ impl<'a> BindingsBuilder<'a> {
                 {
                     let mut idx = idx;
                     for _ in 0..16 {
-                        let (_, binding) = self.get_original_binding(idx)?;
+                        let (_, Some(binding)) = self.get_original_binding(idx)? else {
+                            return None;
+                        };
+                        if let Some(parent) = self.special_export_identity_parent(binding) {
+                            idx = parent;
+                            continue;
+                        }
                         match binding {
-                            Some(Binding::Module(module)) => {
+                            Binding::Module(module) => {
                                 return self.lookup.is_special_export(
                                     ModuleName::from_parts(module.1.iter()),
                                     &name.id,
                                 );
                             }
-                            Some(Binding::Import(import)) => {
+                            Binding::Import(import) => {
                                 return self.lookup.is_special_export(
                                     self.from_import_submodule(import)?,
                                     &name.id,
                                 );
-                            }
-                            Some(Binding::Narrow(original_idx, ..)) => {
-                                idx = *original_idx;
-                            }
-                            Some(Binding::PossibleLegacyTParam(tparam_idx, ..)) => {
-                                idx = self.idx_to_binding(*tparam_idx)?.idx();
                             }
                             _ => return None,
                         }
@@ -2004,6 +2004,21 @@ impl<'a> BindingsBuilder<'a> {
         let module = import.module.append(&import.name);
         self.lookup.module_exists(module).finding()?;
         Some(module)
+    }
+
+    /// Return an available parent binding when a wrapper preserves runtime identity.
+    fn special_export_identity_parent(&self, binding: &Binding) -> Option<Idx<Key>> {
+        match binding {
+            Binding::Forward(idx)
+            | Binding::PromoteForward(idx)
+            | Binding::ForwardToFirstUse(idx)
+            | Binding::Narrow(idx, ..)
+            | Binding::Phi(JoinStyle::NarrowOf(idx), _) => Some(*idx),
+            Binding::PossibleLegacyTParam(tparam_idx, ..) => {
+                self.idx_to_binding(*tparam_idx).map(|tparam| tparam.idx())
+            }
+            _ => None,
+        }
     }
 
     fn special_export_via_alias(
@@ -2047,17 +2062,11 @@ impl<'a> BindingsBuilder<'a> {
                 return None;
             }
             let binding = self.idx_to_binding(idx)?;
+            if let Some(parent) = self.special_export_identity_parent(binding) {
+                idx = parent;
+                continue;
+            }
             match binding {
-                Binding::Forward(inner_idx)
-                | Binding::PromoteForward(inner_idx)
-                | Binding::ForwardToFirstUse(inner_idx)
-                | Binding::Narrow(inner_idx, ..)
-                | Binding::Phi(JoinStyle::NarrowOf(inner_idx), _) => {
-                    idx = *inner_idx;
-                }
-                Binding::PossibleLegacyTParam(tparam_idx, ..) => {
-                    idx = self.idx_to_binding(*tparam_idx)?.idx();
-                }
                 Binding::NameAssign(x) => {
                     // Receiver-constrained class assignments rebind a
                     // class-shaped name; the receiver semantics keep the
