@@ -48,6 +48,7 @@ use crate::error::collector::ErrorCollector;
 /// Django stubs use this attribute to specify the Python type that a field should infer to
 const DJANGO_PRIVATE_GET_TYPE: Name = Name::new_static("_pyi_private_get_type");
 const DJANGO_PRIVATE_SET_TYPE: Name = Name::new_static("_pyi_private_set_type");
+const COMBINABLE: Name = Name::new_static("Combinable");
 
 pub fn is_django_choices_subclass(bases_with_metadata: &[(Class, &ClassMetadata)]) -> bool {
     bases_with_metadata.iter().any(|(base, base_meta)| {
@@ -345,10 +346,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let set_type = if get_type != base_get_type {
             // Ordinary writes must preserve the finite read type. Expressions retain their
             // declared assignment type because their database result is not known here.
-            if let Some(combinable) = self.try_get_from_export(
-                ModuleName::from_str("django.db.models.expressions"),
-                Name::new_static("Combinable"),
-            ) {
+            if let Some(combinable) =
+                self.try_get_from_export(ModuleName::django_models_expressions(), COMBINABLE)
+            {
                 let combinable = self.class_def_to_instance_type(combinable);
                 self.union(get_type.clone(), self.intersects(&[set_type, combinable]))
             } else {
