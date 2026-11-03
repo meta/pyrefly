@@ -2365,12 +2365,35 @@ impl Scopes {
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
     ) -> bool {
+        self.record_self_attr_assign_named(
+            &x.value,
+            &x.attr.id,
+            x.attr.range(),
+            value,
+            annotation,
+            false,
+        )
+    }
+
+    /// Like `record_self_attr_assign`, but for initialization via `object.__setattr__`
+    /// / `setattr(self, "attr", value)` where the attribute name is a string literal.
+    /// When `instance_only` is true, classmethod receivers (e.g. `cls`) are ignored.
+    pub fn record_self_attr_assign_named(
+        &mut self,
+        receiver: &Expr,
+        attr_name: &Name,
+        attr_range: TextRange,
+        value: ExprOrBinding,
+        annotation: Option<Idx<KeyAnnotation>>,
+        instance_only: bool,
+    ) -> bool {
         for scope in self.iter_rev_mut() {
             if let ScopeKind::Method(method_scope) = &mut scope.kind
+                && (!instance_only || method_scope.receiver_kind == MethodSelfKind::Instance)
                 && let Some(self_name) = &method_scope.self_name
-                && matches!(&*x.value, Expr::Name(name) if name.id == self_name.id)
+                && matches!(receiver, Expr::Name(name) if name.id == self_name.id)
             {
-                if let Some(attr) = method_scope.instance_attributes.get_mut(&x.attr.id) {
+                if let Some(attr) = method_scope.instance_attributes.get_mut(attr_name) {
                     // Accumulate subsequent assignments in the method.
                     attr.0.push(value);
                     // Keep the first type annotation encountered in the method.
@@ -2380,11 +2403,11 @@ impl Scopes {
                 } else {
                     // First time seeing this attribute in this method: record it.
                     method_scope.instance_attributes.insert(
-                        x.attr.id.clone(),
+                        attr_name.clone(),
                         InstanceAttribute(
                             vec![value],
                             annotation,
-                            x.attr.range(), // Keep the range of the first assignment as the definition location.
+                            attr_range, // Keep the range of the first assignment as the definition location.
                             method_scope.receiver_kind,
                         ),
                     );

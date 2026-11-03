@@ -2326,6 +2326,38 @@ impl<'a> BindingsBuilder<'a> {
                         );
                     }
                 }
+                // `object.__setattr__(self, "attr", value)` and `setattr(self, "attr", value)`
+                // initialize instance attributes the same way `self.attr = value` does.
+                // Frozen dataclasses commonly use this pattern in `__init__`.
+                if let Expr::Call(call) = x.value.as_ref()
+                    && call.arguments.keywords.is_empty()
+                    && let [receiver, Expr::StringLiteral(attr_name), value] = &*call.arguments.args
+                    && !receiver.is_starred_expr()
+                    && !value.is_starred_expr()
+                {
+                    let is_object_setattr = matches!(
+                        call.func.as_ref(),
+                        Expr::Attribute(func)
+                            if func.attr.id.as_str() == "__setattr__"
+                                && self.as_special_export(&func.value)
+                                    == Some(SpecialExport::BuiltinsObject)
+                    );
+                    let is_builtin_setattr =
+                        self.as_special_export(&call.func) == Some(SpecialExport::SetAttr);
+                    if is_object_setattr || is_builtin_setattr {
+                        let name = Name::new(attr_name.value.to_str());
+                        if !Ast::is_mangled_attr(&name) {
+                            self.scopes.record_self_attr_assign_named(
+                                receiver,
+                                &name,
+                                attr_name.range,
+                                ExprOrBinding::Expr(value.clone()),
+                                None,
+                                true,
+                            );
+                        }
+                    }
+                }
                 let special_export = if let Expr::Call(ExprCall { func, .. }) = &*x.value {
                     self.as_special_export(func)
                 } else {

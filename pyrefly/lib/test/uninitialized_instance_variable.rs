@@ -188,3 +188,105 @@ class NotAnEnum:
     _value_: str  # E: Instance attribute `_value_` is declared but never initialized
 "#,
 );
+
+// https://github.com/facebook/pyrefly/issues/5326
+testcase!(
+    test_uninitialized_instance_variable_frozen_dataclass_setattr,
+    TestEnv::new().enable_uninitialized_instance_variable_error(),
+    r#"
+import builtins
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+@dataclass(frozen=True, slots=True, init=False)
+class File:
+    inner: tuple[PurePosixPath, int]
+    def __init__(self, path: str, /, *, size: int) -> None:
+        object.__setattr__(self, "inner", (PurePosixPath(path), size))
+@dataclass(frozen=True, init=False)
+class ViaBuiltin:
+    x: int
+    _protected: int
+    def __init__(self, x: int) -> None:
+        setattr(self, "x", x)
+        object.__setattr__(self, "_protected", 1)
+@dataclass(frozen=True, init=False)
+class ViaImportedBuiltins:
+    x: int
+    y: int
+    def __init__(self) -> None:
+        builtins.object.__setattr__(self, "x", 1)
+        builtins.setattr(self, "y", 2)
+@dataclass(frozen=True, init=False)
+class StillUninit:
+    y: int  # E: Instance attribute `y` is declared but never initialized
+    def __init__(self) -> None:
+        pass
+@dataclass(frozen=True, init=False)
+class StarredArg:
+    x: int  # E: Instance attribute `x` is declared but never initialized
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", *[1])
+class PlainStarred:
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", *[1])
+        setattr(self, "x", *[1])
+@dataclass(frozen=True, init=False)
+class StarredName:
+    x: int  # E: Instance attribute `x` is declared but never initialized
+    def __init__(self) -> None:
+        object.__setattr__(self, *["x", 1])
+@dataclass(frozen=True, init=False)
+class ClassmethodReceiver:
+    x: int  # E: Instance attribute `x` is declared but never initialized
+    @classmethod
+    def init_class(cls) -> None:
+        setattr(cls, "x", 1)
+@dataclass(frozen=True, init=False)
+class MangledPrivate:
+    __x: int  # E: Instance attribute `__x` is declared but never initialized
+    __y: int  # E: Instance attribute `__y` is declared but never initialized
+    def __init__(self) -> None:
+        object.__setattr__(self, "__x", 1)
+        setattr(self, "__y", 1)
+"#,
+);
+
+testcase!(
+    test_uninitialized_instance_variable_setattr_shadowed,
+    TestEnv::new().enable_uninitialized_instance_variable_error(),
+    r#"
+from dataclasses import dataclass
+from typing import Any
+
+def setattr(obj: object, name: str, value: object) -> None:
+    pass
+
+@dataclass(frozen=True, init=False)
+class ShadowedSetattr:
+    x: int  # E: Instance attribute `x` is declared but never initialized
+    def __init__(self) -> None:
+        setattr(self, "x", 1)
+
+object: Any = None
+
+@dataclass(frozen=True, init=False)
+class ShadowedObject:
+    y: int  # E: Instance attribute `y` is declared but never initialized
+    def __init__(self) -> None:
+        object.__setattr__(self, "y", 1)
+"#,
+);
+
+testcase!(
+    test_setattr_on_classmethod_receiver_ignored,
+    TestEnv::new().enable_implicitly_defined_attribute_error(),
+    r#"
+class ClsSetattr:
+    @classmethod
+    def setup(cls) -> None:
+        setattr(cls, "x", 1)
+
+def check(c: ClsSetattr) -> None:
+    _ = c.x  # E: Object of class `ClsSetattr` has no attribute `x`
+"#,
+);
