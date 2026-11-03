@@ -1898,7 +1898,8 @@ impl<'a> BindingsBuilder<'a> {
     pub fn as_special_export(&self, e: &Expr) -> Option<SpecialExport> {
         let mut visited_names: SmallSet<Name> = SmallSet::new();
         let mut visited_keys: SmallSet<Idx<Key>> = SmallSet::new();
-        self.as_special_export_inner(e, &mut visited_names, &mut visited_keys)
+        let mut resolved = SmallMap::new();
+        self.as_special_export_inner(e, &mut visited_names, &mut visited_keys, &mut resolved)
     }
 
     pub fn class_object_is_generic(&self, idx: Idx<Key>) -> bool {
@@ -1918,6 +1919,7 @@ impl<'a> BindingsBuilder<'a> {
         e: &Expr,
         visited_names: &mut SmallSet<Name>,
         visited_keys: &mut SmallSet<Idx<Key>>,
+        resolved: &mut SmallMap<Idx<Key>, SpecialExport>,
     ) -> Option<SpecialExport> {
         match e {
             Expr::Name(name) => {
@@ -1927,7 +1929,12 @@ impl<'a> BindingsBuilder<'a> {
                 self.scopes
                     .as_special_export(&name.id, None, self.module_info.name(), self.lookup)
                     .or_else(|| {
-                        self.special_export_via_alias(&name.id, visited_names, visited_keys)
+                        self.special_export_via_alias(
+                            &name.id,
+                            visited_names,
+                            visited_keys,
+                            resolved,
+                        )
                     })
             }
             Expr::Attribute(ExprAttribute {
@@ -1947,6 +1954,7 @@ impl<'a> BindingsBuilder<'a> {
         name: &Name,
         visited_names: &mut SmallSet<Name>,
         visited_keys: &mut SmallSet<Idx<Key>>,
+        resolved: &mut SmallMap<Idx<Key>, SpecialExport>,
     ) -> Option<SpecialExport> {
         let (idx, style) = self.scopes.binding_idx_for_name(name)?;
         match style {
@@ -1955,7 +1963,7 @@ impl<'a> BindingsBuilder<'a> {
             | FlowStyle::PossiblyUninitialized
             | FlowStyle::MaybeInitialized(_)
             | FlowStyle::Uninitialized => {
-                self.special_export_from_binding_idx(idx, visited_names, visited_keys)
+                self.special_export_from_binding_idx(idx, visited_names, visited_keys, resolved)
             }
             FlowStyle::MergeableImport(_)
             | FlowStyle::Import(..)
@@ -1975,6 +1983,7 @@ impl<'a> BindingsBuilder<'a> {
         mut idx: Idx<Key>,
         visited_names: &mut SmallSet<Name>,
         visited_keys: &mut SmallSet<Idx<Key>>,
+        resolved: &mut SmallMap<Idx<Key>, SpecialExport>,
     ) -> Option<SpecialExport> {
         for _ in 0..16 {
             if !visited_keys.insert(idx) {
@@ -1995,7 +2004,12 @@ impl<'a> BindingsBuilder<'a> {
                     if x.receiver_idx.is_some() {
                         return None;
                     }
-                    return self.as_special_export_inner(&x.expr, visited_names, visited_keys);
+                    return self.as_special_export_inner(
+                        &x.expr,
+                        visited_names,
+                        visited_keys,
+                        resolved,
+                    );
                 }
                 Binding::Import(x) => {
                     return self.lookup.is_special_export(x.module, &x.name);
@@ -2014,11 +2028,24 @@ impl<'a> BindingsBuilder<'a> {
                     // not a special export means the name may be an ordinary object.
                     let mut result = None;
                     for branch in branches {
-                        let branch_result = self.special_export_from_binding_idx(
-                            branch.value_key,
-                            visited_names,
-                            visited_keys,
-                        )?;
+                        let branch_result = if let Some(export) = resolved.get(&branch.value_key) {
+                            *export
+                        } else {
+                            // Siblings may share ancestors without forming a cycle. Each branch
+                            // inherits only the bindings and names on the current traversal path.
+                            let mut branch_names = visited_names.clone();
+                            let mut branch_keys = visited_keys.clone();
+                            let export = self.special_export_from_binding_idx(
+                                branch.value_key,
+                                &mut branch_names,
+                                &mut branch_keys,
+                                resolved,
+                            )?;
+                            // Only successful resolutions are reusable: failures can depend on
+                            // the current path, whereas a resolved branch has checked every leaf.
+                            resolved.insert(branch.value_key, export);
+                            export
+                        };
                         if *result.get_or_insert(branch_result) != branch_result {
                             return None;
                         }
