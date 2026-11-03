@@ -1964,16 +1964,10 @@ impl<'a> BindingsBuilder<'a> {
                                 );
                             }
                             Some(Binding::Import(import)) => {
-                                // Match the solver's export-first, then submodule fallback rule.
-                                if import.fallback.is_none()
-                                    || (import.module != self.module_info.name()
-                                        && self.lookup.export_exists(import.module, &import.name))
-                                {
-                                    return None;
-                                }
-                                let module = import.module.append(&import.name);
-                                self.lookup.module_exists(module).finding()?;
-                                return self.lookup.is_special_export(module, &name.id);
+                                return self.lookup.is_special_export(
+                                    self.from_import_submodule(import)?,
+                                    &name.id,
+                                );
                             }
                             Some(Binding::Narrow(original_idx, ..)) => {
                                 idx = *original_idx;
@@ -1995,6 +1989,20 @@ impl<'a> BindingsBuilder<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Return the fallback submodule using the solver's export-first import precedence.
+    /// Imports whose names were already verified are exports, not fallback submodules.
+    fn from_import_submodule(&self, import: &ImportBinding) -> Option<ModuleName> {
+        if import.fallback.is_none()
+            || (import.module != self.module_info.name()
+                && self.lookup.export_exists(import.module, &import.name))
+        {
+            return None;
+        }
+        let module = import.module.append(&import.name);
+        self.lookup.module_exists(module).finding()?;
+        Some(module)
     }
 
     fn special_export_via_alias(
