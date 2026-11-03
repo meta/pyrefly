@@ -429,6 +429,23 @@ Rename locations:
     );
 }
 
+fn rename_local_symbol(source: &str, position: usize) -> String {
+    let (state, handle) = TestEnv::one("main", source).to_state();
+    let handle = handle("main");
+    let mut transaction = state.transaction();
+    transaction.run(&[handle.dupe()], Require::Everything, None);
+    let ranges = transaction.find_local_references(
+        &handle,
+        TextSize::try_from(position).unwrap(),
+        ReferenceOptions::textual_only(true),
+    );
+    let mut renamed = source.to_owned();
+    for range in ranges.into_iter().rev() {
+        renamed.replace_range(Range::<usize>::from(range), "renamed");
+    }
+    renamed
+}
+
 #[test]
 fn test_rename_setattr_inferred_field() {
     for setter in [
@@ -441,23 +458,68 @@ fn test_rename_setattr_inferred_field() {
             let source = format!(
                 "import builtins\nclass A:\n    def __init__(self) -> None:\n        {setter}(self, \"{name}\", 1)\n\nA().{name}\n"
             );
-            let (state, handle) = TestEnv::one("main", &source).to_state();
-            let handle = handle("main");
-            let mut transaction = state.transaction();
-            transaction.run(&[handle.dupe()], Require::Everything, None);
-            let position = TextSize::try_from(source.rfind(name).unwrap()).unwrap();
-            let ranges = transaction.find_local_references(
-                &handle,
-                position,
-                ReferenceOptions::textual_only(true),
+            assert_eq!(
+                rename_local_symbol(&source, source.rfind(name).unwrap()),
+                source.replace(name, "renamed"),
             );
-            let mut renamed = source.clone();
-            for range in ranges.into_iter().rev() {
-                renamed.replace_range(Range::<usize>::from(range), "renamed");
-            }
-            assert_eq!(renamed, source.replace(name, "renamed"));
         }
     }
+}
+
+// BUG: setter literals are not references except when one happens to be the field definition.
+#[test]
+fn test_rename_setattr_literal_references() {
+    for declared in [false, true] {
+        let declaration = if declared { "    x: int = 0\n" } else { "" };
+        let source = format!(
+            "class A:\n{declaration}    def __init__(self) -> None:\n        setattr(self, \"x\", 1)\n        object.__setattr__(self, \"x\", 2)\n        self.x\n        unrelated = \"x\"\n\nclass Other:\n    def __init__(self) -> None:\n        setattr(self, \"x\", 1)\n\nA().x\n"
+        );
+        let first_literal = source.find("\"x\"").unwrap() + 1;
+        let second_literal = source.find("\"x\", 2)").unwrap() + 1;
+        let use_position = source.rfind("A().x").unwrap() + 4;
+        let mut expected = source
+            .replacen("x: int", "renamed: int", 1)
+            .replace("self.x", "self.renamed")
+            .replace("A().x", "A().renamed");
+        if !declared {
+            expected = expected.replacen("\"x\"", "\"renamed\"", 1);
+        }
+        assert_eq!(rename_local_symbol(&source, use_position), expected);
+        for position in [first_literal, second_literal] {
+            assert_eq!(rename_local_symbol(&source, position), source);
+        }
+    }
+}
+
+// BUG: a setter's name literal has no prepare-rename range.
+#[test]
+fn test_prepare_rename_setattr_literal() {
+    let source = "class A:\n    def __init__(self) -> None:\n        setattr(self, \"x\", 1)\n";
+    let (state, handle) = TestEnv::one("main", source).to_state();
+    let handle = handle("main");
+    let mut transaction = state.transaction();
+    transaction.run(&[handle.dupe()], Require::Everything, None);
+    let position = TextSize::try_from(source.find("\"x\"").unwrap() + 1).unwrap();
+    assert_eq!(transaction.prepare_rename(&handle, position), None);
+}
+
+// BUG: source/stub rename leaves a setter's name literal unchanged.
+#[test]
+fn test_rename_setattr_paired_field() {
+    let source = "class A:\n    x: int = 0\n    def __init__(self) -> None:\n        setattr(self, \"x\", 1)\n";
+    let stub = "class A:\n    x: int\n";
+    let consumer = "from lib import A\nA().x\n";
+    assert_eq!(
+        rename_paired_symbol(source, stub, consumer, None, source.find("x:").unwrap()),
+        vec![
+            ("consumer.py".to_owned(), consumer.replace(".x", ".renamed")),
+            (
+                "lib.py".to_owned(),
+                source.replacen("x: int", "renamed: int", 1)
+            ),
+            ("lib.pyi".to_owned(), stub.replace("x: int", "renamed: int")),
+        ],
+    );
 }
 
 #[test]
