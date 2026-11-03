@@ -14,7 +14,7 @@ description: Complete reference of how Pyrefly converts types in Pydantic lax mo
 
 This page provides a complete reference for how Pyrefly converts types when working with Pydantic models in **lax mode** (the default). For background on how lax mode works, see the [main Pydantic documentation](../pydantic).
 
-**Note:** Custom class types without a specific conversion rule are left unchanged. Other unsupported forms, such as `Callable` and generic classes not listed below, are converted to `Any`.
+**Note:** Nested Pydantic models and standard-library dataclasses accept either an instance or a `Mapping[str, Any]`. Classes with a custom `__get_pydantic_core_schema__` hook convert to `Any`. Other custom class types without a conversion rule are left unchanged. Unsupported forms, such as `Callable` and generic classes not listed below, convert to `Any`.
 
 ---
 

@@ -106,7 +106,7 @@ impl PydanticRangeConstraints {
 struct PydanticParamConstraint {
     field_name: Name,
     range: Option<PydanticRangeConstraints>,
-    lax_bool_field: Option<Type>,
+    lax_type: Option<Type>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1198,7 +1198,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 &PydanticParamConstraint {
                                     field_name: name,
                                     range: Some(constraints),
-                                    lax_bool_field: None,
+                                    lax_type: None,
                                 },
                                 value.range(),
                                 errors,
@@ -1234,28 +1234,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 continue;
             }
             let range = PydanticRangeConstraints::from_keywords(&keywords);
-            let field_ty = field.ty();
-            let lax_bool_field = if !keywords.strict.unwrap_or(dataclass.kws.strict)
-                && match &field_ty {
-                    Type::ClassType(cls) => cls == self.stdlib.bool(),
-                    Type::Union(union) => union
-                        .members
-                        .iter()
-                        .any(|member| matches!(member, Type::ClassType(cls) if cls == self.stdlib.bool())),
-                    _ => false,
-                }
+            let lax_type = if !keywords.strict.unwrap_or(dataclass.kws.strict)
+                && !keywords.pydantic_has_custom_schema
+                && keywords.converter_param.is_none()
+                && !dataclass
+                    .pydantic_before_validator_fields
+                    .contains(&field_name)
             {
-                Some(field_ty)
+                Some(field.ty())
             } else {
                 None
             };
-            if range.is_none() && lax_bool_field.is_none() {
+            if range.is_none() && lax_type.is_none() {
                 continue;
             }
             let info = PydanticParamConstraint {
                 field_name: field_name.clone(),
                 range,
-                lax_bool_field,
+                lax_type,
             };
             if keywords.init_by_name {
                 constraints.insert(PydanticParamKey::Name(field_name), info.clone());
@@ -1288,46 +1284,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             return;
         }
-        // A literal rejected by `bool` may still be valid for another member of the field union.
-        if let Some(field_ty) = &info.lax_bool_field
-            && !self.is_subset_eq(value_ty, field_ty)
+        // The signature checks input types. This check enforces value restrictions on literals.
+        if let Some(field_ty) = &info.lax_type
+            && matches!(value_ty, Type::Literal(_))
+            && self.is_subset_eq(value_ty, &self.expand_type_for_lax_mode(field_ty))
+            && !self.pydantic_lax_accepts_literal(field_ty, value_ty)
         {
-            let is_bool_string = |value: &str| {
-                matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "0" | "1"
-                        | "f"
-                        | "false"
-                        | "n"
-                        | "no"
-                        | "off"
-                        | "on"
-                        | "t"
-                        | "true"
-                        | "y"
-                        | "yes"
-                )
-            };
-            let invalid_bool = match value_ty {
-                Type::Literal(lit) => match &lit.value {
-                    Lit::Int(value) => !matches!(value.as_i64(), Some(0 | 1)),
-                    Lit::Str(value) => !is_bool_string(value),
-                    _ => false,
-                },
-                _ => false,
-            };
-            if invalid_bool {
-                self.error(
-                    errors,
-                    range,
-                    ErrorKind::BadArgumentType,
-                    format!(
-                        "Argument value `{}` is not valid for Pydantic `bool` field `{}`",
-                        self.for_display(value_ty.clone()),
-                        info.field_name
-                    ),
-                );
-            }
+            self.error(
+                errors,
+                range,
+                ErrorKind::BadArgumentType,
+                format!(
+                    "Argument value `{}` is not valid for Pydantic `bool` field `{}`",
+                    self.for_display(value_ty.clone()),
+                    info.field_name
+                ),
+            );
         }
         let Some(constraints) = &info.range else {
             return;
