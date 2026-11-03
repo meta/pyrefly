@@ -645,49 +645,42 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self_type = None;
         }
 
-        if defining_cls.is_some()
-            && flags.is_classmethod
-            && !flags.is_staticmethod
-            && flags.property_metadata.is_none()
+        // Methods with an implicit receiver need a positional parameter (or `*args`)
+        // for it. Covers classmethods, instance methods, and `__new__` (an implicit
+        // staticmethod that still takes `cls`). Skip `@no_type_check` for ordinary
+        // instance methods, properties/staticmethods other than `__new__`, and
+        // unresolved custom decorators that may reshape the signature.
+        // See https://github.com/facebook/pyrefly/issues/5295 and #5294.
+        let missing_receiver_param = defining_cls.is_some()
             && decorators.is_empty()
             && def.parameters.posonlyargs.is_empty()
             && def.parameters.args.is_empty()
             && def.parameters.vararg.is_none()
-        {
-            self.error(
-                errors,
-                def.name.range(),
-                ErrorKind::BadFunctionDefinition,
+            && (is_dunder_new
+                || (flags.is_classmethod
+                    && !flags.is_staticmethod
+                    && flags.property_metadata.is_none())
+                || (self_type.is_some()
+                    && !flags.is_classmethod
+                    && !flags.is_staticmethod
+                    && !flags.has_no_type_check));
+        if missing_receiver_param {
+            let message = if flags.is_classmethod || is_dunder_new {
                 format!(
                     "Class method `{}` must accept the class as its first positional parameter",
                     def.name
-                ),
-            );
-        }
-
-        // Instance methods expect an implicit receiver. When there is no positional
-        // parameter and no `*args` to accept it, report a definition error. Skip
-        // classmethods (handled above), staticmethods, `@no_type_check`, and methods
-        // wrapped by unresolved custom decorators that may reshape the signature.
-        // See https://github.com/facebook/pyrefly/issues/5295.
-        if defining_cls.is_some()
-            && self_type.is_some()
-            && !flags.is_classmethod
-            && !flags.is_staticmethod
-            && !flags.has_no_type_check
-            && decorators.is_empty()
-            && def.parameters.posonlyargs.is_empty()
-            && def.parameters.args.is_empty()
-            && def.parameters.vararg.is_none()
-        {
+                )
+            } else {
+                format!(
+                    "Instance method `{}` must accept a positional argument",
+                    def.name
+                )
+            };
             self.error(
                 errors,
                 def.name.range(),
                 ErrorKind::BadFunctionDefinition,
-                format!(
-                    "Instance method `{}` must accept a positional argument",
-                    def.name
-                ),
+                message,
             );
         }
 

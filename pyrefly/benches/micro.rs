@@ -943,6 +943,9 @@ fn nested_scopes(depth: usize, per_scope: usize, missing: usize) -> String {
 
 fn suggestion_nested(c: &mut Criterion) {
     let code = Arc::new(FileContents::from_source(nested_scopes(16, 60, 20)));
+    // nested_scopes inserts a class every fourth level; the three `def`s nested
+    // directly under those classes have no `self`, so the missing-receiver check
+    // adds three bad-function-definition errors on top of the 20 missing-name ones.
     assert_eq!(
         check_module(code.dupe(), "bench", BENCH_FILE),
         23,

@@ -1420,6 +1420,20 @@ Foo.static()
 );
 
 testcase!(
+    test_new_missing_cls,
+    r#"
+class A:
+    def __new__() -> "A": ...  # E: Class method `__new__` must accept the class as its first positional parameter
+
+class B:
+    def __new__(cls) -> "B": ...
+
+class C:
+    def __new__(*args: object) -> "C": ...
+    "#,
+);
+
+testcase!(
     test_instance_method_missing_receiver_decorators,
     r#"
 from typing import Any, Callable, final
