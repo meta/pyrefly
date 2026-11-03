@@ -22,6 +22,7 @@ use pyrefly_build::handle::Handle;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::docstring::parse_parameter_documentation;
+use pyrefly_python::dunder;
 use pyrefly_python::ignore::Ignore;
 use pyrefly_python::ignore::Tool;
 use pyrefly_python::ignore::TypeIgnoreUnknownTagBehavior;
@@ -44,6 +45,7 @@ use pyrefly_util::visit::Visit;
 use regex::Regex;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::CmpOp;
+use ruff_python_ast::Expr;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
@@ -1341,7 +1343,6 @@ fn resolve_hovered_type(
     // `a.b()` is inside the callee range but not on the name, so hovering it must not
     // coerce its type.
     let callee_at_position = || -> Option<(TextRange, TextRange, bool)> {
-        use ruff_python_ast::Expr;
         let ast = ast?;
         let mut result = None;
         ast.visit(&mut |expr: &Expr| {
@@ -1426,6 +1427,69 @@ fn resolve_hover_parameter_doc(
     }
 
     None
+}
+
+fn is_constructor_dunder(name: Option<&str>) -> bool {
+    name.is_some_and(|name| name == dunder::INIT.as_str() || name == dunder::NEW.as_str())
+}
+
+fn nonempty_docstring(docstring: Docstring) -> Option<Docstring> {
+    docstring.has_content().then_some(docstring)
+}
+
+/// Class docstring for a constructor call whose `__init__` or `__new__` has none.
+///
+/// Eligibility comes from the callee's class type. `find_definition` with dunder
+/// resolution disabled reports `Attribute` or `Variable` for `lib.Person()` and
+/// for a class alias, even though the callee type is the class. A stub docstring
+/// wins over the implementation.
+fn class_docstring_for_constructor(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    position: TextSize,
+) -> Option<Docstring> {
+    let ast = transaction.get_ast(handle)?;
+    let mut callee_range = None;
+    ast.visit(&mut |expr: &Expr| {
+        if let Expr::Call(call) = expr
+            && call.func.range().contains(position)
+        {
+            callee_range = Some(call.func.range());
+        }
+    });
+    let callee_range = callee_range?;
+    let callee_type = transaction
+        .get_answers(handle)?
+        .get_type_trace(callee_range)?;
+    if !is_constructor_call(callee_type.clone()) {
+        return None;
+    }
+
+    let preferences = [
+        FindPreference {
+            resolve_call_dunders: false,
+            ..FindPreference::default()
+        },
+        FindPreference {
+            prefer_pyi: false,
+            include_interpreter_stdlib: true,
+            resolve_call_dunders: false,
+            ..FindPreference::default()
+        },
+    ];
+    let from_definition = preferences.into_iter().find_map(|preference| {
+        let item = transaction
+            .find_definition(handle, position, preference)
+            .ok()
+            .and_then(|items| items.into_vec().into_iter().next())?;
+        item.docstring_range
+            .map(|range| Docstring(range, item.module))
+            .and_then(nonempty_docstring)
+    });
+    from_definition.or_else(|| {
+        docstring_for_class_object_type(transaction, handle, &callee_type)
+            .and_then(nonempty_docstring)
+    })
 }
 
 pub fn get_hover(
@@ -1556,6 +1620,9 @@ pub fn get_hover_with_verbosity(
                     && executable.display_name == interface.display_name
             })
     });
+    let hover_constructor_dunder = definition
+        .as_ref()
+        .is_some_and(|item| is_constructor_dunder(item.display_name.as_deref()));
     let (kind, name, fallback_docstring) = if let Some(FindDefinitionItemWithDocstring {
         metadata,
         definition_range: definition_location,
@@ -1580,9 +1647,17 @@ pub fn get_hover_with_verbosity(
             item.docstring_range
                 .map(|range| Docstring(range, item.module))
         })
-        .filter(|docstring| !docstring.resolve().trim().is_empty())
+        .and_then(nonempty_docstring)
         .or(fallback_docstring)
         .or_else(|| docstring_for_class_object_type(transaction, handle, &type_));
+
+    let docstring = if hover_constructor_dunder {
+        docstring
+            .and_then(nonempty_docstring)
+            .or_else(|| class_docstring_for_constructor(transaction, handle, position))
+    } else {
+        docstring
+    };
 
     let name = name.or_else(|| identifier_text_at(transaction, handle, position));
 
