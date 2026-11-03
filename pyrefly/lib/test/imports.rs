@@ -3060,7 +3060,33 @@ fn env_special_export_package_reexport() -> TestEnv {
     t.add_with_path(
         "pkg.my_typing",
         "pkg/my_typing.py",
-        "from typing import Annotated",
+        "from typing import Annotated, cast\nfrom builtins import all",
+    );
+    t.add_with_path(
+        "shadowed",
+        "shadowed/__init__.py",
+        "from typing import Iterable\nclass Checks:\n    def all(self, it: Iterable[bool]) -> bool: return True\nmy_typing = Checks()",
+    );
+    t.add_with_path(
+        "shadowed.my_typing",
+        "shadowed/my_typing.py",
+        "from builtins import all",
+    );
+    // With no child module, the imported attribute comes from the package hook.
+    t.add_with_path(
+        "dynamic",
+        "dynamic/__init__.py",
+        "from shadowed import my_typing as checks\ndef __getattr__(name: str): return checks",
+    );
+    t.add_with_path(
+        "loaded",
+        "loaded/__init__.py",
+        "from .my_typing import all\nfrom shadowed import my_typing as checks\ndef __getattr__(name: str): return checks",
+    );
+    t.add_with_path(
+        "loaded.my_typing",
+        "loaded/my_typing.py",
+        "from builtins import all",
     );
     t
 }
@@ -3071,6 +3097,51 @@ testcase!(
     r#"
 from pkg import my_typing as mt
 x: mt.Annotated[int, "metadata"] = 5
+"#,
+);
+
+testcase!(
+    test_historical_special_export_package_submodule,
+    env_special_export_package_reexport(),
+    r#"
+from typing import Any, assert_type
+
+def captured_cast(value: Any):
+    from pkg import my_typing as mt
+    saved = mt.cast
+    mt = value
+    assert_type(saved("int", value), int)
+
+def saved_builtin(values: tuple[int | None], replacement: Any):
+    from pkg import my_typing as mt
+    ok = mt.all(v is not None for v in values)
+    mt = replacement
+    if ok:
+        assert_type(values, tuple[int])
+
+def saved_custom(values: tuple[int | None], fake: Any):
+    mt = fake
+    ok = mt.all(v is not None for v in values)
+    from pkg import my_typing as mt
+    if ok:
+        assert_type(values, tuple[int | None])
+
+def exported_non_module(values: tuple[int | None]):
+    from shadowed import my_typing as mt
+    if mt.all(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+        return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def dynamic_non_module(values: tuple[int | None]):
+    from dynamic import my_typing as mt
+    if mt.all(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+        return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def already_loaded_submodule(values: tuple[int | None]):
+    from loaded import my_typing as mt
+    if mt.all(v is not None for v in values):
+        assert_type(values, tuple[int])
 "#,
 );
 

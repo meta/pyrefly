@@ -5479,3 +5479,95 @@ def loop_target(values: tuple[int | None]):
             assert_type(values, tuple[int | None])
     "#,
 );
+
+testcase!(
+    test_tuple_none_check_matching_and_invalidation,
+    r#"
+from typing import AsyncIterable, assert_type
+
+def unsupported_predicates(values: tuple[int | None], other: int | None):
+    if any(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+    if all(v is None for v in values):
+        assert_type(values, tuple[int | None])
+    if any(other is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[int | None])
+
+def filtered_all(values: tuple[int | None], flag: bool):
+    if all(v is not None for v in values if flag):
+        assert_type(values, tuple[int | None])
+
+def multiple_generators(values: tuple[int | None]):
+    if all(v is not None for row in [values] for v in row):
+        assert_type(values, tuple[int | None])
+
+async def asynchronous_generator(values: tuple[int | None] | AsyncIterable[int | None]):
+    if all(v is not None async for v in values):  # E: not assignable to parameter `iterable` # E: not an async iterable
+        assert_type(values, tuple[int | None] | AsyncIterable[int | None])
+
+def reassigned_subject(values: tuple[int | None], replacement: tuple[int | None]):
+    ok = all(v is not None for v in values)
+    values = replacement
+    if ok:
+        assert_type(values, tuple[int | None])
+
+def conditional_reassignment(values: tuple[int | None], replacement: tuple[int | None], flag: bool):
+    ok = all(v is not None for v in values)
+    if flag:
+        values = replacement
+    if ok:
+        assert_type(values, tuple[int | None])
+
+def shadowed_all(values: tuple[int | None]):
+    def all(it) -> bool:
+        return True
+    if all(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+
+def different_builtins(values: tuple[int | None], flag: bool):
+    if flag:
+        check = any
+    else:
+        check = all
+    if check(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+
+def empty_tuple(values: tuple[()] | tuple[None]):
+    if any(v is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[()])
+
+def asserted_all(values: tuple[int | None]):
+    assert all(v is not None for v in values)
+    assert_type(values, tuple[int])
+
+def negated_saved_any(values: tuple[int | None]):
+    missing = any(v is None for v in values)
+    if not missing:
+        assert_type(values, tuple[int])
+
+def unchanged_mutable(values: list[int | None]):
+    ok = all(v is not None for v in values)
+    values.append(None)
+    if ok:
+        assert_type(values, list[int | None])
+    "#,
+);
+
+testcase!(
+    bug = "Malformed None-check calls still contribute narrowing.",
+    test_tuple_none_check_keywords,
+    r#"
+from typing import assert_type
+
+def any_keywords(values: tuple[int | None]):
+    if any((v is None for v in values), unexpected=True):  # E: Unexpected keyword
+        raise ValueError()
+    assert_type(values, tuple[int])
+
+def all_keywords(values: tuple[int | None]):
+    if all((v is not None for v in values), unexpected=True):  # E: Unexpected keyword
+        assert_type(values, tuple[int])
+    "#,
+);
