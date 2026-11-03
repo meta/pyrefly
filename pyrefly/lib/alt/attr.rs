@@ -299,15 +299,22 @@ pub enum NoAccessReason {
 
 /// How to check the value assigned to an attribute on one member of the base.
 pub enum AttrSetter {
-    /// Check the value against a declared type. If `narrow` is true, the checked type of the
-    /// value may be used to narrow the attribute.
-    Declared { ty: Type, narrow: bool },
+    /// Check the value against a declared type and apply the specified narrowing rule.
+    Declared { ty: Type, narrow: AttrNarrowing },
     /// Call `__setattr__` with the value.
     SetAttr(Type),
     /// Call a property setter with the value.
     PropertySetter(Type),
     /// Call a descriptor's `__set__` with the value.
     DescriptorSetter(Type, DescriptorBase),
+}
+
+/// When an assignment can narrow the attribute's read type.
+pub enum AttrNarrowing {
+    Always,
+    Never,
+    /// Narrow only when the assigned value fits the read type.
+    IfAssignable(Type),
 }
 
 #[derive(Debug)]
@@ -1127,7 +1134,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         got.clone()
                     }
                 };
-                narrow.then_some(got_ty)
+                match narrow {
+                    AttrNarrowing::Always => Some(got_ty),
+                    AttrNarrowing::Never => None,
+                    AttrNarrowing::IfAssignable(read_type) => {
+                        self.is_subset_eq(&got_ty, &read_type).then_some(got_ty)
+                    }
+                }
             }
             AttrSetter::SetAttr(setattr_ty) => {
                 self.call_setattr(
@@ -1226,7 +1239,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Attribute::Simple(attr_ty) => {
                     setters.push(Some(AttrSetter::Declared {
                         ty: attr_ty,
-                        narrow: true,
+                        narrow: AttrNarrowing::Always,
                     }));
                 }
                 Attribute::ClassAttribute(class_attr) => {
@@ -1488,8 +1501,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         new_bound_method.func = BoundMethodType::Overload(filtered_overload);
         let new_method = self.heap.mk_bound_method(new_bound_method);
         Some(Attribute::ClassAttribute(match class_attr {
-            ClassAttribute::ReadWrite(_, is_method, is_instance_var) => {
-                ClassAttribute::ReadWrite(new_method, *is_method, *is_instance_var)
+            ClassAttribute::ReadWrite(_, is_method, is_instance_var, set_type) => {
+                ClassAttribute::ReadWrite(
+                    new_method,
+                    *is_method,
+                    *is_instance_var,
+                    set_type.clone(),
+                )
             }
             ClassAttribute::ReadOnly(_, reason) => {
                 ClassAttribute::ReadOnly(new_method, reason.clone())
@@ -1538,7 +1556,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 let want_is_dunder_method = attr_name.starts_with("__")
                     && attr_name.ends_with("__")
-                    && matches!(want, ClassAttribute::ReadWrite(_, IsMethod::Yes, _));
+                    && matches!(want, ClassAttribute::ReadWrite(_, IsMethod::Yes, ..));
                 for (got_attr, _) in got_attrs.iter() {
                     // A `__getattr__` fallback is not evidence that the missing member exists
                     // when Python would not consult `__getattr__` for it: `__getattr__` governs
@@ -1741,6 +1759,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let found_on = found_on.clone();
 
         let mut types = Vec::with_capacity(candidates.len());
+        let mut write_types = None;
         let mut read_only_reason = None;
         let mut is_class_attribute = false;
         let mut is_method = IsMethod::No;
@@ -1749,29 +1768,36 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let [(attribute, _)] = base_results.as_slice() else {
                 return None;
             };
-            let ty = match attribute {
-                Attribute::Simple(ty) => ty,
+            let (ty, set_type) = match attribute {
+                Attribute::Simple(ty) => (ty, None),
                 Attribute::ClassAttribute(ClassAttribute::ReadWrite(
                     ty,
                     base_is_method,
                     base_is_instance_var,
+                    set_type,
                 )) => {
                     is_class_attribute = true;
                     if *base_is_method == IsMethod::Yes {
                         is_method = IsMethod::Yes;
                     }
                     is_instance_var |= *base_is_instance_var;
-                    ty
+                    (ty, set_type.as_ref())
                 }
                 Attribute::ClassAttribute(ClassAttribute::ReadOnly(ty, reason)) => {
                     is_class_attribute = true;
                     // A write has to be valid for every base, so the result is read-only if any of
                     // them are.
                     read_only_reason.get_or_insert_with(|| reason.clone());
-                    ty
+                    (ty, None)
                 }
                 _ => return None,
             };
+            if set_type.is_some() && write_types.is_none() {
+                write_types = Some(types.clone());
+            }
+            if let Some(write_types) = &mut write_types {
+                write_types.push(set_type.unwrap_or(ty).clone());
+            }
             types.push(ty.clone());
         }
         let combined = match combine {
@@ -1787,6 +1813,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     combined,
                     is_method,
                     is_instance_var,
+                    write_types.map(|types| self.intersects(&types)),
                 )),
             }
         } else {
