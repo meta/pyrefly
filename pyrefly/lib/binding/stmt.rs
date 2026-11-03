@@ -2359,7 +2359,7 @@ impl<'a> BindingsBuilder<'a> {
                             literal.content_range(),
                             ExprOrBinding::Expr(value.clone()),
                             None,
-                            true,
+                            is_object_setattr,
                         )
                         && let Some(literals) = &mut self.setattr_name_literals
                     {

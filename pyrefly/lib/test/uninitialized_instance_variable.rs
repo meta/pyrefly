@@ -307,7 +307,6 @@ _ = Starred().y  # E: Object of class `Starred` has no attribute `y`
 "#,
 );
 
-// BUG: builtin setattr on a classmethod receiver does not define a class attribute.
 testcase!(
     test_setattr_classmethod_attribute_parity,
     r#"
@@ -325,8 +324,8 @@ class TestSetattr:
 
 assert_type(TestDirect.x, int)
 assert_type(TestDirect().x, int)
-_ = TestSetattr.x  # E: Class `TestSetattr` has no class attribute `x`
-_ = TestSetattr().x  # E: Object of class `TestSetattr` has no attribute `x`
+assert_type(TestSetattr.x, int)
+assert_type(TestSetattr().x, int)
 "#,
 );
 
@@ -362,15 +361,19 @@ class Skipped:
 );
 
 testcase!(
-    test_setattr_on_classmethod_receiver_ignored,
+    test_setattr_classmethod_attribute_boundaries,
     TestEnv::new().enable_implicitly_defined_attribute_error(),
     r#"
+from typing import assert_type
+
 class ClsSetattr:
     @classmethod
     def setup(cls) -> None:
-        setattr(cls, "x", 1)
+        setattr(cls, "x", 1)  # E: Attribute `x` is implicitly defined by assignment in method `setup`, which is not a constructor
+        object.__setattr__(cls, "y", 1)
 
 def check(c: ClsSetattr) -> None:
-    _ = c.x  # E: Object of class `ClsSetattr` has no attribute `x`
+    assert_type(c.x, int)
+    _ = c.y  # E: Object of class `ClsSetattr` has no attribute `y`
 "#,
 );
