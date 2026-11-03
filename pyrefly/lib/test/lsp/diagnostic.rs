@@ -385,8 +385,8 @@ def f():
     assert_eq!(report, "No unused variables");
 }
 
-// BUG: a plain reassignment in a loop is reported even though the next iteration reads it,
-// when the name was first bound by unpacking, `with`, `for` or a walrus.
+// A plain reassignment in a loop is used when the next iteration reads it, even if the name
+// was first bound by unpacking, `with`, `for` or a walrus.
 #[test]
 fn test_loop_reassignment_read_on_next_iteration() {
     let code = r#"
@@ -441,10 +441,7 @@ def paginate(pages, fetch):
     let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, true);
     let handle = handles.get("main").unwrap();
     let report = get_unused_variable_diagnostics(&state, handle);
-    assert_eq!(
-        report,
-        "Variable `t_unpack` is unused, Variable `t_with` is unused, Variable `t_for` is unused, Variable `t_walrus` is unused, Variable `t_nested` is unused, Variable `t_inner` is unused, Variable `t_comprehension` is unused, Variable `t_cursor` is unused"
-    );
+    assert_eq!(report, "No unused variables");
 }
 
 // A dead store is reported when no read in the loop sees the value it stores.

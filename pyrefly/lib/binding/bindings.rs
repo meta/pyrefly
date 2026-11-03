@@ -2165,7 +2165,7 @@ impl<'a> BindingsBuilder<'a> {
                 // Mark as used (this must happen during traversal for unused-variable detection)
                 self.scopes.mark_parameter_used(name.key());
                 self.scopes.mark_import_used(name.key());
-                self.scopes.mark_variable_used(name.key());
+                self.scopes.mark_variable_used(name.key(), value_idx);
                 if !usage.is_static()
                     && matches!(
                         initialized,
@@ -2200,7 +2200,7 @@ impl<'a> BindingsBuilder<'a> {
             } => {
                 self.scopes.mark_parameter_used(name.key());
                 self.scopes.mark_import_used(name.key());
-                self.scopes.mark_variable_used(name.key());
+                self.scopes.mark_variable_used(name.key(), None);
                 let idx = self.idx_for_promise(key);
                 if let Some(module) = implicit_builtin_module {
                     self.insert_implicit_builtin_binding(idx, module, name.key());

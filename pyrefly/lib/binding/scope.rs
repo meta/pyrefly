@@ -1347,14 +1347,22 @@ struct Loop {
     exits: Vec<(LoopExit, Flow)>,
     /// For PEP 765: The depth of finally-blocks that this loop was created in
     finally_depth: usize,
+    /// Phi keys that this loop's back edge can reach: its own loop-head phis, and the phis of
+    /// nested loops whose entering value is one of them.
+    carried_phis: SmallSet<Idx<Key>>,
+    /// Names read through a key in `carried_phis`. A plain assignment to one of them inside
+    /// this loop may be read on the next iteration.
+    carried_reads: SmallSet<Name>,
 }
 
 impl Loop {
-    pub fn new(base: Flow, finally_depth: usize) -> Self {
+    pub fn new(base: Flow, finally_depth: usize, carried_phis: SmallSet<Idx<Key>>) -> Self {
         Self {
             base,
             exits: Default::default(),
             finally_depth,
+            carried_phis,
+            carried_reads: SmallSet::new(),
         }
     }
 }
@@ -3112,7 +3120,12 @@ impl Scopes {
                 .variables
                 .get(&name.id)
                 .is_some_and(|usage| usage.used)
-                || self.is_parameter_used(&name.id);
+                || self.is_parameter_used(&name.id)
+                || self
+                    .current()
+                    .loops
+                    .iter()
+                    .any(|active| active.carried_reads.contains(&name.id));
             self.current_mut().variables.insert(
                 name.id.clone(),
                 VariableUsage {
@@ -3123,11 +3136,19 @@ impl Scopes {
         }
     }
 
-    pub fn mark_variable_used(&mut self, name: &Name) {
+    /// `value_idx` is the value the read resolved to in the current flow, if any.
+    pub fn mark_variable_used(&mut self, name: &Name, value_idx: Option<Idx<Key>>) {
         for scope in self.iter_rev_mut() {
             if let Some(info) = scope.variables.get_mut(name) {
                 info.used = true;
                 break;
+            }
+            if let Some(idx) = value_idx {
+                for active in scope.loops.iter_mut() {
+                    if active.carried_phis.contains(&idx) {
+                        active.carried_reads.insert(name.clone());
+                    }
+                }
             }
         }
     }
@@ -4762,15 +4783,26 @@ impl<'a> BindingsBuilder<'a> {
         mut flow: Flow,
         range: TextRange,
         exclude_names: &SmallSet<Name>,
-    ) -> Flow {
+    ) -> (Flow, SmallSet<Idx<Key>>) {
         // Sequential facts do not establish invariants across loop backedges.
         flow.excluded_none_pairs = ExcludedNonePairs::default();
+        let mut phis = SmallSet::new();
         for (name, info) in flow.info.iter_mut() {
             if exclude_names.contains(name) {
                 continue;
             }
             // We are promising to insert a binding for this key when we merge the flow
             let phi_idx = self.idx_for_promise(Key::Phi(Box::new((name.clone(), range))));
+            // An enclosing loop's back edge also reaches this phi when it reaches the value
+            // entering this loop.
+            if let Some(value) = &info.value {
+                for enclosing in self.scopes.current_mut().loops.iter_mut() {
+                    if enclosing.carried_phis.contains(&value.idx) {
+                        enclosing.carried_phis.insert(phi_idx);
+                    }
+                }
+            }
+            phis.insert(phi_idx);
             match &mut info.value {
                 Some(value) => {
                     value.idx = phi_idx;
@@ -4786,7 +4818,7 @@ impl<'a> BindingsBuilder<'a> {
                 }
             }
         }
-        flow
+        (flow, phis)
     }
 
     /// Set up a loop: preserve the base flow and push the loop to the current
@@ -4800,12 +4832,12 @@ impl<'a> BindingsBuilder<'a> {
         let base = mem::take(&mut self.scopes.current_mut().flow);
         // To account for possible assignments to existing names in a loop, we
         // speculatively insert phi keys upfront.
-        self.scopes.current_mut().flow =
-            self.insert_phi_keys(base.clone(), range, loop_header_targets);
+        let (flow, phis) = self.insert_phi_keys(base.clone(), range, loop_header_targets);
+        self.scopes.current_mut().flow = flow;
         self.scopes
             .current_mut()
             .loops
-            .push(Loop::new(base, finally_depth));
+            .push(Loop::new(base, finally_depth, phis));
     }
 
     pub fn teardown_loop(
