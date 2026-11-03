@@ -97,3 +97,21 @@ $ printf 'x: str = 0\ny: str = 0\n' > $TMPDIR/test.py && \
  INFO 0 errors (2 warnings not shown, use `--min-severity=warn` to see them)* (glob)
 [0]
 ```
+
+## `--min-severity=warn` prints a warning and exits with code 1
+
+```scrut {output_stream: stderr}
+$ echo "x: str = 0" > $TMPDIR/test.py && \
+> $PYREFLY check $TMPDIR/test.py --warn=bad-assignment --min-severity=warn
+ INFO 1 diagnostic* (glob)
+[1]
+```
+
+## We show how many warnings are hidden by `--min-severity=error`
+
+```scrut {output_stream: stderr}
+$ echo "x: str = 0" > $TMPDIR/test.py && \
+> $PYREFLY check $TMPDIR/test.py --warn=bad-assignment --min-severity=error
+ INFO 0 errors (1 warning not shown, use `--min-severity=warn` to see it)* (glob)
+[0]
+```

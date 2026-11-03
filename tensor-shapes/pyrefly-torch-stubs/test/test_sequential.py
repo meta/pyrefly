@@ -44,6 +44,17 @@ def test_sequential_custom_module() -> None:
     assert_shape(model(torch.randn((3, 5))).shape, (3, 10))
 
 
+def test_sequential_length() -> None:
+    # A starred build gives `Sequential` a variadic element tuple, which is the
+    # form whose `__len__` the overlay used to lose.
+    model = nn.Sequential(*[nn.ReLU() for _ in range(2)])
+    assert_type(len(model), int)
+    assert len(model) == 2
+    # `assert_shape` registers the runtime assertion the harness counts; the
+    # starred model's forward is a plain Tensor, so check a shaped sibling.
+    assert_shape(nn.Sequential(nn.ReLU(), nn.ReLU())(torch.randn((3, 5))).shape, (3, 5))
+
+
 if TYPE_CHECKING:
 
     def check_symbolic_sequential[N: IntVar, M: IntVar](

@@ -827,6 +827,13 @@ impl SemanticTokenBuilder {
                 }
                 x.recurse(&mut |x| self.process_stmt(x, false, get_symbol_kind));
             }
+            Stmt::TypeAlias(type_alias) => {
+                self.push_if_in_range(
+                    TextRange::at(type_alias.start(), text_size("type".len())),
+                    SemanticTokenTypes::Keyword,
+                    Vec::new(),
+                );
+            }
             Stmt::Assign(assign) => {
                 if self.is_disabled(assign.range()) {
                     for target in &assign.targets {

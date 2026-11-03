@@ -91,15 +91,10 @@ function ErrorMessage({
         >
             {
                 // We intentionally add a leading space to HINT, INFO and WARN so they visually line up with ERROR
-                error.severity == 1 ? (
+                error.severity <= 2 ? (
                     <span {...stylex.props(styles.ErrorMessageInfo)}>
                         {' '}
-                        HINT{' '}
-                    </span>
-                ) : error.severity == 2 ? (
-                    <span {...stylex.props(styles.ErrorMessageInfo)}>
-                        {' '}
-                        INFO{' '}
+                        {error.severity == 1 ? 'HINT' : 'INFO'}{' '}
                     </span>
                 ) : error.severity == 4 ? (
                     <span {...stylex.props(styles.ErrorMessageWarning)}>

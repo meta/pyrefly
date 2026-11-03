@@ -70,6 +70,26 @@ impl Severity {
     pub fn is_enabled(self) -> bool {
         self != Severity::Ignore
     }
+
+    /// The severity a diagnostic is shown with, or `None` for `Ignore`, which is never shown.
+    pub fn shown(self) -> Option<ShownSeverity> {
+        match self {
+            Severity::Ignore => None,
+            Severity::Hint => Some(ShownSeverity::Hint),
+            Severity::Info => Some(ShownSeverity::Info),
+            Severity::Warn => Some(ShownSeverity::Warn),
+            Severity::Error => Some(ShownSeverity::Error),
+        }
+    }
+}
+
+/// The severity of a diagnostic that is shown to the user: every `Severity` except `Ignore`.
+#[derive(Debug, Clone, Copy, Dupe, PartialEq, Eq)]
+pub enum ShownSeverity {
+    Hint,
+    Info,
+    Warn,
+    Error,
 }
 
 /// ErrorKind categorizes an error by the part of the spec the error is related to.
@@ -687,7 +707,7 @@ impl ErrorKind {
             ErrorKind::PartiallyUnknownType => Severity::Ignore,
             ErrorKind::UnnecessaryComparison => Severity::Warn,
             ErrorKind::UnnecessaryTypeConversion => Severity::Warn,
-            ErrorKind::Unreachable => Severity::Warn,
+            ErrorKind::Unreachable => Severity::Hint,
             ErrorKind::UnreachableExceptClause => Severity::Warn,
             ErrorKind::UnreachableMatchCase => Severity::Warn,
             ErrorKind::UnresolvableDunderAll => Severity::Warn,

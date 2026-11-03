@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 
 use pretty_assertions::assert_eq;
 use pyrefly_python::sys_info::PythonVersion;
+use ruff_text_size::TextRange;
+use ruff_text_size::TextSize;
 
 use crate::state::require::Require;
 use crate::state::semantic_tokens::SemanticTokensLegends;
@@ -1367,6 +1369,9 @@ type A2 = A
         &[("main", code)],
         r#"
 # main.py
+line: 1, column: 0, length: 4, text: type
+token-type: keyword
+
 line: 1, column: 5, length: 1, text: A
 token-type: interface
 
@@ -1384,6 +1389,9 @@ token-type: interface
 
 line: 2, column: 17, length: 3, text: int
 token-type: class, token-modifiers: [defaultLibrary]
+
+line: 5, column: 0, length: 4, text: type
+token-type: keyword
 
 line: 5, column: 5, length: 2, text: A2
 token-type: interface
@@ -1418,6 +1426,9 @@ token-type: interface
 
 
 # lib.py
+line: 1, column: 0, length: 4, text: type
+token-type: keyword
+
 line: 1, column: 5, length: 7, text: MyAlias
 token-type: interface
 
@@ -2154,6 +2165,7 @@ token-type: variable
 fn decoded_semantic_tokens(
     code: &str,
     include_syntax_tokens: bool,
+    limit_range: Option<TextRange>,
 ) -> Vec<(usize, usize, String, String)> {
     let (handles, state) =
         mk_multi_file_state_with_env(TestEnv::new(), &[("main", code)], Require::Exports, false);
@@ -2161,7 +2173,7 @@ fn decoded_semantic_tokens(
         .transaction()
         .semantic_tokens(
             handles.get("main").unwrap(),
-            None,
+            limit_range,
             None,
             include_syntax_tokens,
         )
@@ -2188,7 +2200,8 @@ fn decoded_semantic_tokens(
 
 /// Clients that do not augment syntax tokens rely on the full token stream for keyword
 /// highlighting, so every keyword must get a `keyword` token, and the stream must contain
-/// exactly the augmenting stream plus syntax tokens.
+/// exactly the augmenting stream plus syntax tokens. The `type` alias keyword appears
+/// in both streams.
 #[test]
 fn full_stream_covers_keywords_and_extends_augmenting_stream_test() {
     let code = r#"import os.path as osp
@@ -2258,7 +2271,7 @@ def soft(command):
 
 type Alias = list[int]
 "#;
-    let full = decoded_semantic_tokens(code, true);
+    let full = decoded_semantic_tokens(code, true, None);
     let keywords: BTreeSet<&str> = full
         .iter()
         .filter(|(_, _, _, token_type)| token_type == "keyword")
@@ -2275,9 +2288,74 @@ type Alias = list[int]
     assert_eq!(expected_keywords, keywords);
 
     let syntax_token_types = ["comment", "keyword", "number", "operator", "string"];
-    let full_without_syntax: Vec<_> = full
+    let expected_augmenting: Vec<_> = full
         .into_iter()
-        .filter(|(_, _, _, token_type)| !syntax_token_types.contains(&token_type.as_str()))
+        .filter(|(_, _, text, token_type)| {
+            !syntax_token_types.contains(&token_type.as_str())
+                || (token_type == "keyword" && text == "type")
+        })
         .collect();
-    assert_eq!(decoded_semantic_tokens(code, false), full_without_syntax);
+    assert_eq!(
+        decoded_semantic_tokens(code, false, None),
+        expected_augmenting
+    );
+}
+
+#[test]
+fn type_alias_keyword_test() {
+    let code = r#"type Alias = int
+type Generic[T] = list[T]
+class Container:
+    type Nested = str
+type First = int; type Second = str
+type(0)
+def shadow():
+    type = 0
+    type
+"#;
+    for include_syntax_tokens in [false, true] {
+        let tokens: Vec<_> = decoded_semantic_tokens(code, include_syntax_tokens, None)
+            .into_iter()
+            .filter(|(_, _, text, _)| text == "type")
+            .collect();
+        let expected = [
+            (0, 0, "type", "keyword"),
+            (1, 0, "type", "keyword"),
+            (3, 4, "type", "keyword"),
+            (4, 0, "type", "keyword"),
+            (4, 18, "type", "keyword"),
+            (5, 0, "type", "class"),
+            (7, 4, "type", "variable"),
+            (8, 4, "type", "variable"),
+        ];
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(line, col, text, kind)| (line, col, text.to_owned(), kind.to_owned()))
+            .collect();
+        assert_eq!(tokens, expected);
+    }
+}
+
+#[test]
+fn type_alias_keyword_range_test() {
+    let code = "type Alias = int";
+    for include_syntax_tokens in [false, true] {
+        let expected = vec![(0, 0, "type".to_owned(), "keyword".to_owned())];
+        assert_eq!(
+            decoded_semantic_tokens(
+                code,
+                include_syntax_tokens,
+                Some(TextRange::new(TextSize::new(0), TextSize::new(4))),
+            ),
+            expected,
+        );
+        assert!(
+            decoded_semantic_tokens(
+                code,
+                include_syntax_tokens,
+                Some(TextRange::new(TextSize::new(4), TextSize::new(5))),
+            )
+            .is_empty()
+        );
+    }
 }

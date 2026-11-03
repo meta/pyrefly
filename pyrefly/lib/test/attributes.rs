@@ -111,6 +111,39 @@ class EarlyReturn:
 "#,
 );
 
+// A path on which the attribute is unset reaches the end of the class body only if every branch
+// it passes through completes.
+testcase!(
+    test_class_attribute_unset_path_cut_off_by_later_branch,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+def coin() -> bool: ...
+
+class CutOff:
+    if coin():
+        value = 1
+    else:
+        pass
+    if coin():
+        value = 2
+    else:
+        stop()
+
+class NotCutOff:
+    if coin():
+        value = 1  # E: Attribute `value` may be uninitialized
+    else:
+        pass
+    if coin():
+        print(0)
+    else:
+        stop()
+"#,
+);
+
 testcase!(
     bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_while_true_return,
@@ -4792,6 +4825,59 @@ C.instance_var = 7  # pyrefly: ignore[instance-var-assign]
     "#,
 );
 
+testcase!(
+    test_instance_var_assign_typed_dict,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import NotRequired, TypedDict, assert_type
+
+class TD(TypedDict):
+    x: int
+    optional: NotRequired[int]
+
+class Child(TD):
+    y: str
+
+class Grandchild(Child):
+    pass
+
+assert_type(TD.x, int)
+TD.x = 1  # E: Cannot set instance variable `x` from the class
+Child.x = 2  # E: Cannot set instance variable `x` from the class
+Grandchild.x = 3  # E: Cannot set instance variable `x` from the class
+Child.y = "value"  # E: Cannot set instance variable `y` from the class
+TD.optional = 4  # E: Cannot set instance variable `optional` from the class
+TD.x = "oops"  # E: Cannot set instance variable `x` from the class  # E: `Literal['oops']` is not assignable to attribute `x` with type `int`
+TD.x = 5  # pyrefly: ignore[instance-var-assign]
+
+class Partial(TypedDict, total=False):
+    x: int
+
+Partial.x = 6  # E: Cannot set instance variable `x` from the class
+
+# Reads and dictionary-item writes are unaffected.
+td: TD = {"x": 1}
+assert_type(td["x"], int)
+td["x"] = 2
+
+class Metadata(TypedDict):
+    __module__: str
+    __doc__: str | None
+    __annotations__: dict[str, object]
+
+Metadata.__module__ = "renamed"
+Metadata.__doc__ = "Documentation"
+Metadata.__annotations__ = {}
+
+class MetadataChild(Metadata):
+    pass
+
+MetadataChild.__module__ = "renamed"
+MetadataChild.__doc__ = None
+MetadataChild.__annotations__ = {}
+"#,
+);
+
 // Non-instance-variable fields must NOT trigger the new kind even when it is
 // enabled: unannotated assignments and ClassVars are class variables,
 // staticmethods become unannotated ClassAttributes, instance-only attributes
@@ -4851,9 +4937,22 @@ E().read_only_use = 2
 testcase!(
     test_instance_var_assign_off_by_default,
     r#"
+from typing import Literal, TypedDict, assert_type
+
 class C:
     instance_var: int
 C.instance_var = 3
+
+class TD(TypedDict):
+    x: int
+
+class Child(TD):
+    pass
+
+TD.x = 1
+Child.x = 2
+assert_type(TD.x, Literal[1])
+assert_type(Child.x, Literal[2])
     "#,
 );
 

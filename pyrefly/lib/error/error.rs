@@ -44,6 +44,7 @@ use yansi::Paint;
 
 use crate::config::error_kind::ErrorKind;
 use crate::config::error_kind::Severity;
+use crate::config::error_kind::ShownSeverity;
 use crate::error::legacy::LegacyError;
 
 /// A secondary annotation that labels a span in the same file as the primary error.
@@ -627,8 +628,9 @@ impl Error {
         }
     }
 
-    /// Create a diagnostic suitable for use in LSP.
-    pub fn to_diagnostic(&self) -> Diagnostic {
+    /// Create a diagnostic suitable for use in LSP, or `None` for an ignored error.
+    pub fn to_diagnostic(&self) -> Option<Diagnostic> {
+        let severity = self.severity().shown()?;
         let code = self.error_kind().to_name().to_owned();
         let code_description = Uri::parse(&self.error_kind().docs_url())
             .ok()
@@ -636,18 +638,15 @@ impl Error {
         let tag = self.editor_tag();
         // TODO: Map secondary_annotations to DiagnosticRelatedInformation for LSP clients.
         // This requires constructing a Uri from the module path, which may not always succeed.
-        Diagnostic {
+        Some(Diagnostic {
             range: self.module.to_lsp_range(self.range()),
-            severity: Some(match self.severity() {
-                Severity::Error => DiagnosticSeverity::Error,
-                Severity::Warn => DiagnosticSeverity::Warning,
-                Severity::Info => DiagnosticSeverity::Information,
-                // Editors show an untagged LSP hint as faint dots at most, so a hint
-                // without its own look is shown like `info`.
-                Severity::Hint if tag.is_some() => DiagnosticSeverity::Hint,
-                Severity::Hint => DiagnosticSeverity::Information,
-                // Ignored errors shouldn't be here
-                Severity::Ignore => DiagnosticSeverity::Information,
+            severity: Some(match severity {
+                ShownSeverity::Error => DiagnosticSeverity::Error,
+                ShownSeverity::Warn => DiagnosticSeverity::Warning,
+                ShownSeverity::Hint if tag.is_some() => DiagnosticSeverity::Hint,
+                // VS Code draws an untagged LSP hint as three small dots under its first
+                // characters, with no underline, so a hint without a tag is shown like `info`.
+                ShownSeverity::Info | ShownSeverity::Hint => DiagnosticSeverity::Information,
             }),
             source: Some("Pyrefly".to_owned()),
             message: self.msg().to_owned().into(),
@@ -655,7 +654,7 @@ impl Error {
             code_description,
             tags: tag.map(|tag| vec![tag]),
             ..Default::default()
-        }
+        })
     }
 
     pub fn get_notebook_cell(&self) -> Option<usize> {
@@ -1132,6 +1131,7 @@ def f(x: None) -> None:
             )
             .with_severity(Severity::Hint)
             .to_diagnostic()
+            .expect("a severity other than ignore is shown")
         };
         let unused = diagnostic(ErrorKind::UnusedImport);
         assert_eq!(unused.severity, Some(DiagnosticSeverity::Hint));
@@ -1141,9 +1141,31 @@ def f(x: None) -> None:
         assert_eq!(assignment.tags, None);
     }
 
+    #[test]
+    fn test_ignored_error_has_no_lsp_diagnostic() {
+        let module_info = Module::new(
+            ModuleName::from_str("test"),
+            ModulePath::filesystem(PathBuf::from("test.py")),
+            Arc::new("x".to_owned()),
+        );
+        let error = Error::new(
+            module_info,
+            TextRange::new(TextSize::new(0), TextSize::new(1)),
+            "message".to_owned(),
+            Vec::new(),
+            ErrorKind::BadAssignment,
+        );
+        assert!(error.to_diagnostic().is_some());
+        assert!(
+            error
+                .with_severity(Severity::Ignore)
+                .to_diagnostic()
+                .is_none(),
+            "an ignored error is never published"
+        );
+    }
+
     // https://github.com/facebook/pyrefly/issues/5113
-    // bug: at their default severity, `deprecated` and `unreachable` are LSP
-    // warnings; the team agreed on 2026-10-29 that they should be hints.
     #[test]
     fn test_deprecated_and_unreachable_in_lsp() {
         let module_info = Module::new(
@@ -1160,12 +1182,13 @@ def f(x: None) -> None:
                 kind,
             )
             .to_diagnostic()
+            .expect("a severity other than ignore is shown")
         };
         let deprecated = diagnostic(ErrorKind::Deprecated);
         assert_eq!(deprecated.severity, Some(DiagnosticSeverity::Warning));
         assert_eq!(deprecated.tags, Some(vec![DiagnosticTag::Deprecated]));
         let unreachable = diagnostic(ErrorKind::Unreachable);
-        assert_eq!(unreachable.severity, Some(DiagnosticSeverity::Warning));
+        assert_eq!(unreachable.severity, Some(DiagnosticSeverity::Hint));
         assert_eq!(unreachable.tags, Some(vec![DiagnosticTag::Unnecessary]));
     }
 }

@@ -2308,9 +2308,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags 2.13.2",
  "getopts",
@@ -2327,7 +2327,7 @@ checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "pyrefly"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anstream 0.6.21",
  "anyhow",
@@ -2400,7 +2400,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_bench_harness"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "pyrefly",
  "pyrefly_config",
@@ -2409,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_build"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anyhow",
  "derive_more",
@@ -2431,7 +2431,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_bundled"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anyhow",
  "sha2",
@@ -2442,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_config"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2478,7 +2478,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_derive"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2487,7 +2487,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_glean_schema"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2496,7 +2496,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_graph"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "dupe",
  "pyrefly_util",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_lsp_test"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anstream 0.6.21",
  "anyhow",
@@ -2520,7 +2520,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_python"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_types"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "compact_str",
  "dupe",
@@ -2569,7 +2569,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_util"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anstream 0.6.21",
  "anyhow",
@@ -2966,9 +2966,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
@@ -3692,7 +3692,7 @@ dependencies = [
 
 [[package]]
 name = "tsp_types"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "lsp-server",
  "serde",

@@ -165,3 +165,45 @@ assert_type(obj.id, str)
 assert_type(obj.pk, str)
 "#,
 );
+
+// Abstract bases without their own pk get a synthesized `id: int`. A child that
+// declares its own `id` primary key should not be flagged as overriding it.
+// https://github.com/meta/pyrefly/issues/4596
+django_testcase!(
+    test_custom_id_pk_overrides_synthesized_id,
+    r#"
+from typing import assert_type
+import uuid
+from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.db import models
+
+class User(AbstractBaseUser, PermissionsMixin):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+class Base(models.Model):
+    class Meta:
+        abstract = True
+
+class Child(Base):
+    id = models.CharField(max_length=36, primary_key=True)
+
+assert_type(User().id, uuid.UUID)
+assert_type(User().pk, uuid.UUID)
+assert_type(Child().id, str)
+assert_type(Child().pk, str)
+"#,
+);
+
+// An `id` that is not the primary key is still checked against the synthesized one.
+django_testcase!(
+    test_non_pk_id_still_checked_against_synthesized_id,
+    r#"
+from django.db import models
+
+class Base(models.Model):
+    pass
+
+class Child(Base):
+    id = models.CharField(max_length=36)  # E: `Child.id` overrides parent class `Base`
+"#,
+);

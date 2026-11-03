@@ -10,6 +10,7 @@ use std::sync::Arc;
 use dupe::Dupe;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_types::callable::Callable;
+use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::class::PrecomputedTParams;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::special_form::SpecialForm;
@@ -258,6 +259,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub fn as_superclass(&self, class: &ClassType, want: &Class) -> Option<ClassType> {
         if class.class_object() == want {
             Some(class.clone())
+        } else if let Some(DjangoClassMetadata::QuerySet { base }) = class.django_metadata()
+            && self.has_superclass(base.class_object(), want)
+        {
+            self.as_superclass(base, want)
         } else if !class.class_object().is_builtin("tuple")
             && let Some(tuple) = self.as_tuple(class)
             && self.has_superclass(self.stdlib.tuple_object(), want)

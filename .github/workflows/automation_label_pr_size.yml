@@ -49,7 +49,7 @@ jobs:
           # The labeler matches these as bash glob patterns.
           files_to_ignore: |
             test/*
-            website/*
+            website/docs/*
             pyrefly/lib/test/*
           ignore_line_deletions: 'true'
           ignore_file_deletions: 'true'
