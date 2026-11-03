@@ -11,11 +11,13 @@ $ mkdir -p $TMPDIR/baseline_levels && \
 [0]
 ```
 
-The configured warning is hidden by the default error threshold.
+With no threshold set, the configured warning is shown, marked as baselined,
+and pyrefly exits with code 0.
 
 ```scrut {output_stream: stdout}
 $ cd $TMPDIR/baseline_levels && \
 > $PYREFLY check matched.py --summary=none --output-format=min-text
+ WARN matched.py:1:10-11: `Literal[1]` is not assignable to `str` [bad-assignment] [baselined]
 [0]
 ```
 
