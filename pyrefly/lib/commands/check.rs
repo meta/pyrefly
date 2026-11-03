@@ -2655,7 +2655,7 @@ def go(w: Widget) -> int:
             "scip-python python demo . main/__init__:"
         );
         let metadata = index.metadata.unwrap();
-        assert_eq!(metadata.tool_info.name, "pyrefly");
+        assert_eq!(metadata.tool_info.name, "scip-pyrefly");
         assert_eq!(metadata.tool_info.version, "test");
         assert!(
             metadata.project_root.starts_with("file://")

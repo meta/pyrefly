@@ -168,7 +168,7 @@ impl<W: Write + Send> ScipWriter<W> {
                     .map(|uri| uri.to_string())
                     .unwrap_or_default(),
                 tool_info: Some(ToolInfo {
-                    name: "pyrefly".to_owned(),
+                    name: "scip-pyrefly".to_owned(),
                     version: version.to_owned(),
                     ..Default::default()
                 })
