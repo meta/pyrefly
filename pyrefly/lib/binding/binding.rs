@@ -993,6 +993,9 @@ pub enum Key {
     SuppressedException(TextRange),
     /// A suppression-only query for a narrow view, separate from normal with completion.
     SuppressionNarrow(TextRange),
+    /// The termination of a merged flow whose live branches each ended in a statement that
+    /// may have type `Never`. Solves to `Never` only if every branch does.
+    FlowTermination(TextRange),
     /// One syntactic exception-class expression from an `except` clause. A clause
     /// listing a tuple of classes has one of these per element.
     ExceptionClass(TextRange),
@@ -1041,6 +1044,7 @@ impl Ranged for Key {
             Self::PatternNarrow(r) => *r,
             Self::Exhaustive(_, r) => *r,
             Self::SuppressedException(r) | Self::SuppressionNarrow(r) => *r,
+            Self::FlowTermination(r) => *r,
             Self::ExceptionClass(r) => *r,
             Self::BranchTest(r) => *r,
             Self::BranchEnd(r) | Self::FunctoolsWrapperMutation(r) => *r,
@@ -1096,6 +1100,7 @@ impl DisplayWith<ModuleInfo> for Key {
                 write!(f, "Key::SuppressedException({})", ctx.display(r))
             }
             Self::SuppressionNarrow(r) => write!(f, "Key::SuppressionNarrow({})", ctx.display(r)),
+            Self::FlowTermination(r) => write!(f, "Key::FlowTermination({})", ctx.display(r)),
             Self::ExceptionClass(r) => write!(f, "Key::ExceptionClass({})", ctx.display(r)),
             Self::BranchTest(r) => write!(f, "Key::BranchTest({})", ctx.display(r)),
             Self::BranchEnd(r) => write!(f, "Key::BranchEnd({})", ctx.display(r)),
