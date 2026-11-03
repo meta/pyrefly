@@ -86,6 +86,21 @@ C().
     assert_eq!(names, ["class", "concat", "escaped", "foo-bar", "x"]);
 }
 
+// BUG: line continuation escapes can supply a nonidentifier field definition range.
+#[test]
+fn completion_setattr_line_continuation_name() {
+    let source = "class C:\n    def __init__(self) -> None:\n        setattr(self, \"\\\ncontinued\", 1)\n\nC().\n";
+    let (handles, state) = mk_multi_file_state(&[("main", source)], Require::Everything, false);
+    let handle = handles.get("main").unwrap();
+    let position = TextSize::try_from(source.rfind("C().").unwrap() + "C().".len()).unwrap();
+    let has_field = state
+        .transaction()
+        .completion(handle, position, ImportFormat::Absolute, true, None)
+        .iter()
+        .any(|item| item.label == "continued");
+    assert!(has_field);
+}
+
 #[test]
 fn completion_magic_methods_in_class() {
     let code = r#"
