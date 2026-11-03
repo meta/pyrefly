@@ -81,6 +81,7 @@ use crate::binding::polars::polars_column_mutation;
 use crate::binding::scope::FlowStyle;
 use crate::binding::scope::LoopExit;
 use crate::binding::scope::Scope;
+use crate::binding::scope::SelfAttrAssignTarget;
 use crate::binding::scope::TerminationKind;
 use crate::config::error_kind::ErrorKind;
 use crate::export::definitions::Definitions;
@@ -2280,6 +2281,11 @@ impl<'a> BindingsBuilder<'a> {
             Stmt::Expr(mut x) => {
                 let mut current = self.declare_current_idx(Key::StmtExpr(x.value.range()));
                 self.ensure_expr(&mut x.value, current.usage());
+                let special_export = if let Expr::Call(ExprCall { func, .. }) = &*x.value {
+                    self.as_special_export(func)
+                } else {
+                    None
+                };
                 // Rebind bare-name receivers after in-place column mutations.
                 let mutated_receiver = if let Expr::Call(call) = &*x.value
                     && let Expr::Attribute(func) = &*call.func
@@ -2331,8 +2337,11 @@ impl<'a> BindingsBuilder<'a> {
                 // Frozen dataclasses commonly use this pattern in `__init__`.
                 if let Expr::Call(call) = x.value.as_ref()
                     && call.arguments.keywords.is_empty()
-                    && let [receiver, Expr::StringLiteral(attr_name), value] = &*call.arguments.args
-                    && !receiver.is_starred_expr()
+                    && let [
+                        receiver @ Expr::Name(_),
+                        Expr::StringLiteral(attr_name),
+                        value,
+                    ] = &*call.arguments.args
                     && !value.is_starred_expr()
                 {
                     let is_object_setattr = matches!(
@@ -2342,8 +2351,7 @@ impl<'a> BindingsBuilder<'a> {
                                 && self.as_special_export(&func.value)
                                     == Some(SpecialExport::BuiltinsObject)
                     );
-                    let is_builtin_setattr =
-                        self.as_special_export(&call.func) == Some(SpecialExport::SetAttr);
+                    let is_builtin_setattr = special_export == Some(SpecialExport::SetAttr);
                     // A field definition must spell the runtime name as an unchanged source identifier.
                     if (is_object_setattr || is_builtin_setattr)
                         && let Some(literal) = attr_name.as_single_part_string()
@@ -2353,27 +2361,22 @@ impl<'a> BindingsBuilder<'a> {
                             Ast::parse_expr(literal.value.as_ref(), TextSize::new(0))
                         && name.id.as_str() == literal.value.as_ref()
                         && !Ast::is_mangled_attr(&name.id)
-                        && self.scopes.record_self_attr_assign_named(
-                            receiver,
-                            &name.id,
-                            literal.content_range(),
+                    {
+                        let name = Identifier::new(name.id, literal.content_range());
+                        if self.scopes.record_self_attr_assign_named(
+                            SelfAttrAssignTarget {
+                                receiver,
+                                name: &name,
+                                instance_only: is_object_setattr,
+                            },
                             ExprOrBinding::Expr(value.clone()),
                             None,
-                            is_object_setattr,
-                        )
-                        && let Some(literals) = &mut self.setattr_name_literals
-                    {
-                        literals.push((
-                            Identifier::new(name.id, literal.content_range()),
-                            receiver.range(),
-                        ));
+                        ) && let Some(literals) = &mut self.setattr_name_literals
+                        {
+                            literals.push((name, receiver.range()));
+                        }
                     }
                 }
-                let special_export = if let Expr::Call(ExprCall { func, .. }) = &*x.value {
-                    self.as_special_export(func)
-                } else {
-                    None
-                };
                 let key = self
                     .insert_binding_current(current, Binding::StmtExpr(x.value, special_export));
                 // Track this StmtExpr as the trailing statement for type-based termination

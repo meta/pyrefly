@@ -1675,6 +1675,13 @@ impl ScopeTreeNode {
     }
 }
 
+/// The receiver, source identifier and receiver policy of a method attribute assignment.
+pub(crate) struct SelfAttrAssignTarget<'a> {
+    pub receiver: &'a Expr,
+    pub name: &'a Identifier,
+    pub instance_only: bool,
+}
+
 /// Scopes keep track of the current stack of the scopes we are in.
 #[derive(Clone, Debug)]
 pub struct Scopes {
@@ -2366,34 +2373,37 @@ impl Scopes {
         annotation: Option<Idx<KeyAnnotation>>,
     ) -> bool {
         self.record_self_attr_assign_named(
-            &x.value,
-            &x.attr.id,
-            x.attr.range(),
+            SelfAttrAssignTarget {
+                receiver: &x.value,
+                name: &x.attr,
+                instance_only: false,
+            },
             value,
             annotation,
-            false,
         )
     }
 
-    /// Like `record_self_attr_assign`, but for initialization via `object.__setattr__`
-    /// / `setattr(self, "attr", value)` where the attribute name is a string literal.
-    /// When `instance_only` is true, classmethod receivers (e.g. `cls`) are ignored.
-    pub fn record_self_attr_assign_named(
+    /// Accumulate assignments to a matching method receiver, retaining the first annotation
+    /// and definition range. Instance-only targets exclude classmethod receivers.
+    /// Returns whether the assignment was recorded.
+    pub(crate) fn record_self_attr_assign_named(
         &mut self,
-        receiver: &Expr,
-        attr_name: &Name,
-        attr_range: TextRange,
+        target: SelfAttrAssignTarget<'_>,
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
-        instance_only: bool,
     ) -> bool {
+        let SelfAttrAssignTarget {
+            receiver,
+            name,
+            instance_only,
+        } = target;
         for scope in self.iter_rev_mut() {
             if let ScopeKind::Method(method_scope) = &mut scope.kind
                 && (!instance_only || method_scope.receiver_kind == MethodSelfKind::Instance)
                 && let Some(self_name) = &method_scope.self_name
                 && matches!(receiver, Expr::Name(name) if name.id == self_name.id)
             {
-                if let Some(attr) = method_scope.instance_attributes.get_mut(attr_name) {
+                if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
                     // Accumulate subsequent assignments in the method.
                     attr.0.push(value);
                     // Keep the first type annotation encountered in the method.
@@ -2403,11 +2413,11 @@ impl Scopes {
                 } else {
                     // First time seeing this attribute in this method: record it.
                     method_scope.instance_attributes.insert(
-                        attr_name.clone(),
+                        name.id.clone(),
                         InstanceAttribute(
                             vec![value],
                             annotation,
-                            attr_range, // Keep the range of the first assignment as the definition location.
+                            name.range,
                             method_scope.receiver_kind,
                         ),
                     );
