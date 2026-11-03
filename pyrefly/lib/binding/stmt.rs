@@ -2344,18 +2344,24 @@ impl<'a> BindingsBuilder<'a> {
                     );
                     let is_builtin_setattr =
                         self.as_special_export(&call.func) == Some(SpecialExport::SetAttr);
-                    if is_object_setattr || is_builtin_setattr {
-                        let name = Name::new(attr_name.value.to_str());
-                        if !Ast::is_mangled_attr(&name) {
-                            self.scopes.record_self_attr_assign_named(
-                                receiver,
-                                &name,
-                                attr_name.range,
-                                ExprOrBinding::Expr(value.clone()),
-                                None,
-                                true,
-                            );
-                        }
+                    // A field definition must spell the runtime name as an unchanged source identifier.
+                    if (is_object_setattr || is_builtin_setattr)
+                        && let Some(literal) = attr_name.as_single_part_string()
+                        && self.module_info.code_at(literal.content_range())
+                            == literal.value.as_ref()
+                        && let Ok(Expr::Name(name)) =
+                            Ast::parse_expr(literal.value.as_ref(), TextSize::new(0))
+                        && name.id.as_str() == literal.value.as_ref()
+                        && !Ast::is_mangled_attr(&name.id)
+                    {
+                        self.scopes.record_self_attr_assign_named(
+                            receiver,
+                            &name.id,
+                            literal.content_range(),
+                            ExprOrBinding::Expr(value.clone()),
+                            None,
+                            true,
+                        );
                     }
                 }
                 let special_export = if let Expr::Call(ExprCall { func, .. }) = &*x.value {

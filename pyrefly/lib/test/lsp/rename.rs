@@ -429,7 +429,6 @@ Rename locations:
     );
 }
 
-// BUG: inferred setattr fields use a quoted definition range, so rename removes the quotes.
 #[test]
 fn test_rename_setattr_inferred_field() {
     for setter in [
@@ -456,7 +455,7 @@ fn test_rename_setattr_inferred_field() {
             for range in ranges.into_iter().rev() {
                 renamed.replace_range(Range::<usize>::from(range), "renamed");
             }
-            assert_eq!(renamed, source.replace(&format!("\"{name}\""), "renamed"));
+            assert_eq!(renamed, source.replace(name, "renamed"));
         }
     }
 }

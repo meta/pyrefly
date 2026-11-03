@@ -57,7 +57,6 @@ fn is_object_attribute(item: &CompletionItem) -> bool {
         .is_some_and(|sort_text| sort_text.starts_with("3a"))
 }
 
-// BUG: setter names that are not plain source identifiers become inferred fields.
 #[test]
 fn completion_setattr_literal_name_boundaries() {
     let source = r#"
@@ -83,10 +82,9 @@ C().
         .filter(|name| ["x", "foo-bar", "class", "concat", "escaped"].contains(&name.as_str()))
         .collect::<Vec<_>>();
     names.sort();
-    assert_eq!(names, ["class", "concat", "escaped", "foo-bar", "x"]);
+    assert_eq!(names, ["x"]);
 }
 
-// BUG: line continuation escapes can supply a nonidentifier field definition range.
 #[test]
 fn completion_setattr_line_continuation_name() {
     let source = "class C:\n    def __init__(self) -> None:\n        setattr(self, \"\\\ncontinued\", 1)\n\nC().\n";
@@ -98,7 +96,7 @@ fn completion_setattr_line_continuation_name() {
         .completion(handle, position, ImportFormat::Absolute, true, None)
         .iter()
         .any(|item| item.label == "continued");
-    assert!(has_field);
+    assert!(!has_field);
 }
 
 #[test]
