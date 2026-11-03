@@ -926,6 +926,10 @@ fn nested_scopes(depth: usize, per_scope: usize, missing: usize) -> String {
         let pad = "    ".repeat(level);
         if level % 4 == 3 && level + 1 < depth {
             let _ = writeln!(source, "{pad}class C{level}:");
+        } else if level > 0 && (level - 1) % 4 == 3 {
+            // Directly under a class inserted above: take `self` so the
+            // missing-receiver check does not inflate the expected error count.
+            let _ = writeln!(source, "{pad}def f{level}(self):");
         } else {
             let _ = writeln!(source, "{pad}def f{level}():");
         }
@@ -943,12 +947,9 @@ fn nested_scopes(depth: usize, per_scope: usize, missing: usize) -> String {
 
 fn suggestion_nested(c: &mut Criterion) {
     let code = Arc::new(FileContents::from_source(nested_scopes(16, 60, 20)));
-    // nested_scopes inserts a class every fourth level; the three `def`s nested
-    // directly under those classes have no `self`, so the missing-receiver check
-    // adds three bad-function-definition errors on top of the 20 missing-name ones.
     assert_eq!(
         check_module(code.dupe(), "bench", BENCH_FILE),
-        23,
+        20,
         "benchmark `suggestion_whole_file/nested_scopes` produced an unexpected error count"
     );
     let mut group = c.benchmark_group("suggestion_whole_file");
