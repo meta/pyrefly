@@ -45,6 +45,7 @@ use pyrefly_util::visit::Visit;
 use regex::Regex;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::CmpOp;
+use ruff_python_ast::Expr;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
@@ -1342,7 +1343,6 @@ fn resolve_hovered_type(
     // `a.b()` is inside the callee range but not on the name, so hovering it must not
     // coerce its type.
     let callee_at_position = || -> Option<(TextRange, TextRange, bool)> {
-        use ruff_python_ast::Expr;
         let ast = ast?;
         let mut result = None;
         ast.visit(&mut |expr: &Expr| {
@@ -1434,19 +1434,37 @@ fn is_constructor_dunder(name: Option<&str>) -> bool {
 }
 
 fn nonempty_docstring(docstring: Docstring) -> Option<Docstring> {
-    (!docstring.resolve().trim().is_empty()).then_some(docstring)
+    docstring.has_content().then_some(docstring)
 }
 
 /// Class docstring for a constructor call whose `__init__` or `__new__` has none.
 ///
-/// `find_definition` follows those methods when the cursor is on a call. This looks up the
-/// class itself instead. A stub docstring wins over the implementation, matching other hover
-/// documentation.
+/// Eligibility comes from the callee's class type. `find_definition` with dunder
+/// resolution disabled reports `Attribute` or `Variable` for `lib.Person()` and
+/// for a class alias, even though the callee type is the class. A stub docstring
+/// wins over the implementation.
 fn class_docstring_for_constructor(
     transaction: &Transaction<'_>,
     handle: &Handle,
     position: TextSize,
 ) -> Option<Docstring> {
+    let ast = transaction.get_ast(handle)?;
+    let mut callee_range = None;
+    ast.visit(&mut |expr: &Expr| {
+        if let Expr::Call(call) = expr
+            && call.func.range().contains(position)
+        {
+            callee_range = Some(call.func.range());
+        }
+    });
+    let callee_range = callee_range?;
+    let callee_type = transaction
+        .get_answers(handle)?
+        .get_type_trace(callee_range)?;
+    if !is_constructor_call(callee_type.clone()) {
+        return None;
+    }
+
     let preferences = [
         FindPreference {
             resolve_call_dunders: false,
@@ -1459,17 +1477,17 @@ fn class_docstring_for_constructor(
             ..FindPreference::default()
         },
     ];
-    preferences.into_iter().find_map(|preference| {
+    let from_definition = preferences.into_iter().find_map(|preference| {
         let item = transaction
             .find_definition(handle, position, preference)
             .ok()
             .and_then(|items| items.into_vec().into_iter().next())?;
-        
-        if item.metadata.symbol_kind() != Some(SymbolKind::Class) {
-            return None;
-        }
         item.docstring_range
             .map(|range| Docstring(range, item.module))
+            .and_then(nonempty_docstring)
+    });
+    from_definition.or_else(|| {
+        docstring_for_class_object_type(transaction, handle, &callee_type)
             .and_then(nonempty_docstring)
     })
 }

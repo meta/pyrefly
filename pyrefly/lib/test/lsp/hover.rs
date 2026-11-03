@@ -2725,6 +2725,65 @@ Person()
 }
 
 #[test]
+fn hover_on_constructor_module_attribute_falls_back_to_class_docstring() {
+    let lib = r#"
+class Person:
+    """Person class docstring from lib."""
+    def __init__(self, name: str) -> None: ...
+"#;
+    let code = r#"
+import lib
+
+lib.Person()
+#   ^
+"#;
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[("main", code), ("lib", lib)],
+        get_test_report,
+    );
+    assert!(
+        report.contains("Person class docstring from lib."),
+        "Expected module-qualified constructor hover to show the class docstring, got: {report}"
+    );
+}
+
+#[test]
+fn hover_on_constructor_class_alias_falls_back_to_class_docstring() {
+    let code = r#"
+class Person:
+    """Person class docstring."""
+    def __init__(self, name: str) -> None: ...
+
+Alias = Person
+Alias()
+#^
+"#;
+    let report = get_batched_lsp_operations_report_allow_error(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("Person class docstring."),
+        "Expected aliased constructor hover to show the class docstring, got: {report}"
+    );
+}
+
+#[test]
+fn hover_on_constructor_ignores_blank_method_docstring() {
+    let code = r#"
+class Person:
+    """Person class docstring."""
+    def __init__(self, name: str) -> None:
+        """   """
+
+Person()
+#^
+"#;
+    let report = get_batched_lsp_operations_report_allow_error(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("Person class docstring."),
+        "Expected a whitespace-only __init__ docstring to fall back to the class docstring, got: {report}"
+    );
+}
+
+#[test]
 fn hover_over_in_operator_shows_contains_dunder() {
     let code = r#"
 class Container:
