@@ -540,7 +540,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // Bind manager-owned methods before inserting the model's Self type.
                     // Only the return changes; parameters and function metadata remain intact.
                     match &mut attribute {
-                        ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => {
+                        ClassAttribute::ReadWrite { read_type: ty, .. }
+                        | ClassAttribute::ReadOnly(ty, _) => {
                             ty.transform_toplevel_callable_signatures(|signature, _| {
                                 signature.ret = self.heap.mk_class_type(queryset.clone());
                             });

@@ -129,9 +129,15 @@ pub enum IsMethod {
 #[derive(Debug, Clone)]
 pub enum ClassAttribute {
     /// A read-write attribute with a read type and an optional distinct assignment type.
-    /// The `IsMethod` flag enables the `method-assign` diagnostic.
-    /// The boolean marks annotated instance-variable declarations for `instance-var-assign`.
-    ReadWrite(Type, IsMethod, bool, Option<Type>),
+    ReadWrite {
+        read_type: Type,
+        /// Enables the `method-assign` diagnostic.
+        is_method: IsMethod,
+        /// Marks annotated instance-variable declarations for `instance-var-assign`.
+        is_instance_var: bool,
+        /// An explicit assignment type. When absent, assignments use `read_type`.
+        write_type: Option<Type>,
+    },
     /// A read-only attribute with a closed form type for get actions.
     ReadOnly(Type, ReadOnlyReason),
     /// A `NoAccess` attribute indicates that the attribute is well-defined, but does
@@ -158,13 +164,23 @@ pub enum ClassAttribute {
 
 impl ClassAttribute {
     pub fn read_write(ty: Type) -> Self {
-        Self::ReadWrite(ty, IsMethod::No, false, None)
+        Self::ReadWrite {
+            read_type: ty,
+            is_method: IsMethod::No,
+            is_instance_var: false,
+            write_type: None,
+        }
     }
 
     /// Like [`read_write`](Self::read_write) but marks the attribute as a
     /// class-body-declared instance variable (annotated, not `ClassVar`).
     pub fn read_write_instance_var(ty: Type) -> Self {
-        Self::ReadWrite(ty, IsMethod::No, true, None)
+        Self::ReadWrite {
+            read_type: ty,
+            is_method: IsMethod::No,
+            is_instance_var: true,
+            write_type: None,
+        }
     }
 
     pub fn read_only(ty: Type, reason: ReadOnlyReason) -> Self {
@@ -208,7 +224,7 @@ impl ClassAttribute {
 
     pub fn read_only_equivalent(self, reason: ReadOnlyReason) -> Self {
         match self {
-            Self::ReadWrite(ty, ..) => Self::ReadOnly(ty, reason),
+            Self::ReadWrite { read_type: ty, .. } => Self::ReadOnly(ty, reason),
             Self::Property(getter, _, cls) => Self::Property(getter, None, cls),
             Self::Descriptor(descriptor, base) => Self::Descriptor(
                 Descriptor {
@@ -242,7 +258,9 @@ impl ClassAttribute {
         match self {
             // TODO(stroxler): ReadWrite attributes are not actually methods but limiting access to
             // ReadOnly breaks unit tests; we should investigate callsites to understand this better.
-            ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => Some(ty),
+            ClassAttribute::ReadWrite { read_type: ty, .. } | ClassAttribute::ReadOnly(ty, _) => {
+                Some(ty)
+            }
             ClassAttribute::NoAccess(..)
             | ClassAttribute::Property(..)
             | ClassAttribute::Descriptor(..)
@@ -3881,7 +3899,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if is_classvar {
                     ClassAttribute::read_only(ty, ReadOnlyReason::ClassVar)
                 } else {
-                    ClassAttribute::ReadWrite(ty, IsMethod::Yes, false, None)
+                    ClassAttribute::ReadWrite {
+                        read_type: ty,
+                        is_method: IsMethod::Yes,
+                        is_instance_var: false,
+                        write_type: None,
+                    }
                 }
             }
             ClassFieldInner::ProxyMethod { target, .. } => {
@@ -3938,7 +3961,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         if let Some(reason) = read_only_reason {
                             ClassAttribute::read_only(ty, reason)
                         } else {
-                            ClassAttribute::ReadWrite(ty, IsMethod::No, false, django_set_type)
+                            ClassAttribute::ReadWrite {
+                                read_type: ty,
+                                is_method: IsMethod::No,
+                                is_instance_var: false,
+                                write_type: django_set_type,
+                            }
                         }
                     }
                 }
@@ -4014,12 +4042,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if let Some(quantified) = self_quantified {
                     ty = self.wrap_with_quantified(ty, quantified);
                 }
-                ClassAttribute::ReadWrite(
-                    make_bound_classmethod(self.heap, cls, ty).into_inner(),
-                    IsMethod::Yes,
-                    false,
-                    None,
-                )
+                ClassAttribute::ReadWrite {
+                    read_type: make_bound_classmethod(self.heap, cls, ty).into_inner(),
+                    is_method: IsMethod::Yes,
+                    is_instance_var: false,
+                    write_type: None,
+                }
             }
             ClassFieldInner::ProxyMethod { .. } => ClassAttribute::no_access(
                 NoAccessReason::ProxyMethodClassAccess(cls.class_object().dupe()),
@@ -4671,7 +4699,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     });
                 };
                 match &mut attr {
-                    ClassAttribute::ReadOnly(ty, _) | ClassAttribute::ReadWrite(ty, ..)
+                    ClassAttribute::ReadOnly(ty, _)
+                    | ClassAttribute::ReadWrite { read_type: ty, .. }
                         if ty.has_toplevel_func_metadata() =>
                     {
                         relax_ty(ty);
@@ -5842,7 +5871,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     None
                 }
             }
-            ClassAttribute::ReadWrite(attr_ty, is_method, is_instance_var, set_type) => {
+            ClassAttribute::ReadWrite {
+                read_type: attr_ty,
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+            } => {
                 if is_method == IsMethod::Yes {
                     self.error_with_context(
                         errors,
@@ -5997,7 +6031,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .with_detail(reason.error_message())
                     .emit();
             }
-            ClassAttribute::ReadWrite(..)
+            ClassAttribute::ReadWrite { .. }
             | ClassAttribute::Property(..)
             | ClassAttribute::Descriptor(..) => {
                 // Allow deleting most attributes for now, for compatibility with mypy.
@@ -6062,9 +6096,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         };
         match attr {
-            ClassAttribute::ReadWrite(ty, is_method, is_instance_var, set_type) => Some(
-                ClassAttribute::ReadWrite(filter_type(ty)?, is_method, is_instance_var, set_type),
-            ),
+            ClassAttribute::ReadWrite {
+                read_type: ty,
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+            } => Some(ClassAttribute::ReadWrite {
+                read_type: filter_type(ty)?,
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+            }),
             ClassAttribute::ReadOnly(ty, reason) => {
                 Some(ClassAttribute::ReadOnly(filter_type(ty)?, reason))
             }
@@ -6115,7 +6157,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Property(got_getter, Some(got_setter), _),
-                ClassAttribute::ReadWrite(want, ..),
+                ClassAttribute::ReadWrite {
+                    read_type: want, ..
+                },
             ) if allow_property_override => {
                 is_subset(
                     got_getter,
@@ -6157,7 +6201,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Property(getter, None, _),
-                ClassAttribute::ReadWrite(..) | ClassAttribute::ReadOnly(..),
+                ClassAttribute::ReadWrite { .. } | ClassAttribute::ReadOnly(..),
             ) if allow_property_override
                 && getter
                     .toplevel_func_metadata()
@@ -6179,17 +6223,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Property(_, _, _),
-                ClassAttribute::ReadOnly(..) | ClassAttribute::ReadWrite(..),
+                ClassAttribute::ReadOnly(..) | ClassAttribute::ReadWrite { .. },
             ) => Err(Box::new(AttrSubsetError::Property)),
             (
                 ClassAttribute::ReadOnly(..),
-                ClassAttribute::Property(_, Some(_), _) | ClassAttribute::ReadWrite(..),
+                ClassAttribute::Property(_, Some(_), _) | ClassAttribute::ReadWrite { .. },
             ) => Err(Box::new(AttrSubsetError::ReadOnly)),
             (
                 // TODO(stroxler): Investigate this case more: methods should be ReadOnly, but
                 // in some cases for unknown reasons they wind up being ReadWrite.
-                ClassAttribute::ReadWrite(got, ..),
-                ClassAttribute::ReadWrite(want, ..),
+                ClassAttribute::ReadWrite { read_type: got, .. },
+                ClassAttribute::ReadWrite {
+                    read_type: want, ..
+                },
             ) if got.has_toplevel_func_metadata() && want.has_toplevel_func_metadata() => {
                 is_subset(got, want).map_err(|subset_error| {
                     Box::new(AttrSubsetError::Covariant {
@@ -6201,7 +6247,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     })
                 })
             }
-            (ClassAttribute::ReadWrite(got, ..), ClassAttribute::ReadWrite(want, ..)) => {
+            (
+                ClassAttribute::ReadWrite { read_type: got, .. },
+                ClassAttribute::ReadWrite {
+                    read_type: want, ..
+                },
+            ) => {
                 // A value matching any branch of an `Overloaded` attribute can be assigned to it.
                 let assignable = match want {
                     Type::Overloaded(branches) => branches
@@ -6224,7 +6275,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             (
-                ClassAttribute::ReadWrite(got, ..) | ClassAttribute::ReadOnly(got, ..),
+                ClassAttribute::ReadWrite { read_type: got, .. }
+                | ClassAttribute::ReadOnly(got, ..),
                 ClassAttribute::ReadOnly(want, _),
             ) => is_subset(got, want).map_err(|subset_error| {
                 Box::new(AttrSubsetError::Covariant {
@@ -6252,7 +6304,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 })
             }
             (
-                ClassAttribute::ReadWrite(got, _, _, got_set_type),
+                ClassAttribute::ReadWrite {
+                    read_type: got,
+                    write_type: got_set_type,
+                    ..
+                },
                 ClassAttribute::Property(want, want_setter, _),
             ) => {
                 is_subset(
@@ -6451,7 +6507,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Descriptor(got_d, got_base),
-                ClassAttribute::ReadWrite(want_ty, ..) | ClassAttribute::ReadOnly(want_ty, _),
+                ClassAttribute::ReadWrite {
+                    read_type: want_ty, ..
+                }
+                | ClassAttribute::ReadOnly(want_ty, _),
             ) if want_ty.has_toplevel_func_metadata() => {
                 let (got_read_ty, _) = self.resolve_descriptor_types(got_d, got_base);
                 is_subset(&got_read_ty, want_ty).map_err(|subset_error| {
@@ -6465,7 +6524,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 })
             }
             (
-                ClassAttribute::ReadWrite(got_ty, ..) | ClassAttribute::ReadOnly(got_ty, _),
+                ClassAttribute::ReadWrite {
+                    read_type: got_ty, ..
+                }
+                | ClassAttribute::ReadOnly(got_ty, _),
                 ClassAttribute::Descriptor(want_d, want_base),
             ) if got_ty.has_toplevel_func_metadata() => {
                 let (want_read_ty, want_setter) = self.resolve_descriptor_types(want_d, want_base);
@@ -6498,7 +6560,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Result<Type, NoAccessReason> {
         match class_attr {
             ClassAttribute::NoAccess(reason) => Err(reason),
-            ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => Ok(ty),
+            ClassAttribute::ReadWrite { read_type: ty, .. } | ClassAttribute::ReadOnly(ty, _) => {
+                Ok(ty)
+            }
             ClassAttribute::Property(getter, ..) => {
                 self.record_property_getter(range, &getter);
                 Ok(self.call_property_getter(getter, range, errors, context))
