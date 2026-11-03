@@ -5274,7 +5274,6 @@ def merged_all(values: tuple[int | None, str | None], flag: bool):
 );
 
 testcase!(
-    bug = "Special-export lookup does not preserve historical callable identity.",
     test_special_export_historical_callees,
     r#"
 from typing import Any, Callable, Iterable, assert_type
@@ -5288,8 +5287,8 @@ def custom_all_alias(values: tuple[int | None], fake: Callable[[Iterable[bool]],
     saved = check
     check = all
     if saved(v is not None for v in values):
-        assert_type(values, tuple[int])
-        return values[0] + 1
+        assert_type(values, tuple[int | None])
+        return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
 
 def custom_any_alias(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
     check = fake
@@ -5297,16 +5296,16 @@ def custom_any_alias(values: tuple[int | None], fake: Callable[[Iterable[bool]],
     check = any
     if saved(v is None for v in values):
         raise ValueError()
-    assert_type(values, tuple[int])
-    return values[0] + 1
+    assert_type(values, tuple[int | None])
+    return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
 
 def custom_all_saved(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
     check = fake
     ok = check(v is not None for v in values)
     check = all
     if ok:
-        assert_type(values, tuple[int])
-        return values[0] + 1
+        assert_type(values, tuple[int | None])
+        return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
 
 def custom_any_saved(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
     check = fake
@@ -5314,50 +5313,50 @@ def custom_any_saved(values: tuple[int | None], fake: Callable[[Iterable[bool]],
     check = any
     if missing:
         raise ValueError()
-    assert_type(values, tuple[int])
-    return values[0] + 1
+    assert_type(values, tuple[int | None])
+    return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
 
 def builtin_all_alias(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
     from builtins import all as check
     saved = check
     check = fake
     if saved(v is not None for v in values):
-        assert_type(values, tuple[int | None])
+        assert_type(values, tuple[int])
 
 def builtin_all_saved(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
     from builtins import all as check
     ok = check(v is not None for v in values)
     check = fake
     if ok:
-        assert_type(values, tuple[int | None])
+        assert_type(values, tuple[int])
 
 def repeated_name(values: tuple[int | None]):
     check = all
     saved = check
     check = saved
     if check(v is not None for v in values):
-        assert_type(values, tuple[int | None])
+        assert_type(values, tuple[int])
 
 def qualified_custom_saved(values: tuple[int | None], fake: Checks):
     b = fake
     ok = b.all(v is not None for v in values)
     import builtins as b
     if ok:
-        assert_type(values, tuple[int])
-        return values[0] + 1
+        assert_type(values, tuple[int | None])
+        return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
 
 def qualified_builtin_saved(values: tuple[int | None], fake: Checks):
     import builtins as b
     ok = b.all(v is not None for v in values)
     b = fake
     if ok:
-        assert_type(values, tuple[int | None])
+        assert_type(values, tuple[int])
 
 def qualified_cast(value: Any):
     import typing as t
     saved = t.cast
     t = value
-    assert_type(saved("int", value), int)  # E: assert_type # E: First argument to `typing.cast` must be a type
+    assert_type(saved("int", value), int)
     "#,
 );
 
@@ -5444,7 +5443,6 @@ def saved_tuple_guard(values: tuple[int | None], xs: list[int]):
 );
 
 testcase!(
-    bug = "Import styles retain builtin recognition across loop rebindings.",
     test_special_export_loop_rebinding,
     r#"
 from typing import Iterable, assert_type
@@ -5456,14 +5454,14 @@ def reassigned(values: tuple[int | None], xs: list[int]):
     from builtins import all as check
     for _ in xs:
         if check(v is not None for v in values):
-            assert_type(values, tuple[int])
+            assert_type(values, tuple[int | None])
         check = fake
 
 def conditional(values: tuple[int | None], xs: list[int], flag: bool):
     from builtins import all as check
     for _ in xs:
         if check(v is not None for v in values):
-            assert_type(values, tuple[int])
+            assert_type(values, tuple[int | None])
         if flag:
             check = fake
 
@@ -5471,7 +5469,7 @@ def walrus(values: tuple[int | None], xs: list[int]):
     from builtins import all as check
     for _ in xs:
         if check(v is not None for v in values):
-            assert_type(values, tuple[int])
+            assert_type(values, tuple[int | None])
         _ = (check := fake)
 
 def loop_target(values: tuple[int | None]):

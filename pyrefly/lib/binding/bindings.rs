@@ -1923,6 +1923,16 @@ impl<'a> BindingsBuilder<'a> {
     ) -> Option<SpecialExport> {
         match e {
             Expr::Name(name) => {
+                if let Some(idx) = self.binding_idx_at_name_read(ShortIdentifier::expr_name(name)) {
+                    // Recorded reads retain their original value even when the name is rebound.
+                    // Binding keys, rather than symbolic names, identify cycles on this path.
+                    return self.special_export_from_binding_idx(
+                        idx,
+                        visited_names,
+                        visited_keys,
+                        resolved,
+                    );
+                }
                 if !visited_names.insert(name.id.clone()) {
                     return None;
                 }
@@ -1939,12 +1949,50 @@ impl<'a> BindingsBuilder<'a> {
             }
             Expr::Attribute(ExprAttribute {
                 value, attr: name, ..
-            }) if let Expr::Name(base_name) = &**value => self.scopes.as_special_export(
-                &name.id,
-                Some(&base_name.id),
-                self.module_info.name(),
-                self.lookup,
-            ),
+            }) if let Expr::Name(base_name) = &**value => {
+                if let Some(idx) =
+                    self.binding_idx_at_name_read(ShortIdentifier::expr_name(base_name))
+                {
+                    let mut idx = idx;
+                    for _ in 0..16 {
+                        let (_, binding) = self.get_original_binding(idx)?;
+                        match binding {
+                            Some(Binding::Module(module)) => {
+                                return self.lookup.is_special_export(
+                                    ModuleName::from_parts(module.1.iter()),
+                                    &name.id,
+                                );
+                            }
+                            Some(Binding::Import(import)) => {
+                                // Match the solver's export-first, then submodule fallback rule.
+                                if import.fallback.is_none()
+                                    || (import.module != self.module_info.name()
+                                        && self.lookup.export_exists(import.module, &import.name))
+                                {
+                                    return None;
+                                }
+                                let module = import.module.append(&import.name);
+                                self.lookup.module_exists(module).finding()?;
+                                return self.lookup.is_special_export(module, &name.id);
+                            }
+                            Some(Binding::Narrow(original_idx, ..)) => {
+                                idx = *original_idx;
+                            }
+                            Some(Binding::PossibleLegacyTParam(tparam_idx, ..)) => {
+                                idx = self.idx_to_binding(*tparam_idx)?.idx();
+                            }
+                            _ => return None,
+                        }
+                    }
+                    return None;
+                }
+                self.scopes.as_special_export(
+                    &name.id,
+                    Some(&base_name.id),
+                    self.module_info.name(),
+                    self.lookup,
+                )
+            }
             _ => None,
         }
     }
@@ -1993,8 +2041,13 @@ impl<'a> BindingsBuilder<'a> {
             match binding {
                 Binding::Forward(inner_idx)
                 | Binding::PromoteForward(inner_idx)
-                | Binding::ForwardToFirstUse(inner_idx) => {
+                | Binding::ForwardToFirstUse(inner_idx)
+                | Binding::Narrow(inner_idx, ..)
+                | Binding::Phi(JoinStyle::NarrowOf(inner_idx), _) => {
                     idx = *inner_idx;
+                }
+                Binding::PossibleLegacyTParam(tparam_idx, ..) => {
+                    idx = self.idx_to_binding(*tparam_idx)?.idx();
                 }
                 Binding::NameAssign(x) => {
                     // Receiver-constrained class assignments rebind a
@@ -2332,6 +2385,13 @@ impl<'a> BindingsBuilder<'a> {
             "a BoundName is deferred only once"
         );
         bound_name_idx
+    }
+
+    /// Return the value binding for an already-bound read, including static and builtin reads.
+    fn binding_idx_at_name_read(&self, name: ShortIdentifier) -> Option<Idx<Key>> {
+        self.deferred_bound_names
+            .get(&name)
+            .map(|read| read.value_idx.unwrap_or(read.lookup_result_idx))
     }
 
     /// Return the unnarrowed value binding captured for this exact name read.
