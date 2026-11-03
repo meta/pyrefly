@@ -2569,46 +2569,41 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.bind_bound_method_type(&m.func, &m.obj, skip_instantiation, is_subset)
     }
 
-    /// Bind `__new__` to `cls`, dropping overloads whose first parameter (`cls`) cannot accept
-    /// the class object. Type parameters are treated as `Any` on both sides, so overloads that
-    /// depend on their own type parameters, or on the free type parameters of a bare generic
-    /// class, are kept. If every overload would be dropped, the original overload is kept so
-    /// that the callable stays usable.
-    pub fn bind_dunder_new(&self, t: &Type, cls: ClassType) -> Option<Type> {
-        let cls_type = self.heap.mk_type_of(self.heap.mk_class_type(cls));
+    /// Drop overloads whose first parameter cannot accept `receiver`. Type parameters on both
+    /// sides are replaced with `Any`, so an overload is dropped only if no specialization of it
+    /// could accept the receiver. If every overload would be dropped, `func` is returned
+    /// unchanged so that the callable stays usable.
+    fn filter_overloads_by_receiver(&self, func: Type, receiver: &Type) -> Type {
+        let Type::Overload(overload) = &func else {
+            return func;
+        };
         let any = self.heap.mk_any_implicit();
         let erase_tparams = |ty: &Type| {
-            let mut qs = SmallSet::new();
-            ty.collect_quantifieds(&mut qs);
-            ty.clone().subst(&qs.iter().map(|q| (*q, &any)).collect())
+            let mut ty = ty.clone();
+            ty.subst_mut_fn(&mut |_| Some(any.clone()));
+            ty
         };
-        let t = match t {
-            Type::Overload(overload) => {
-                let receiver = erase_tparams(&cls_type);
-                let applicable: Vec<_> = overload
-                    .signatures
-                    .iter()
-                    .filter(|sig| {
-                        let func = match sig {
-                            OverloadType::Function(f) => f,
-                            OverloadType::Forall(forall) => &forall.body,
-                        };
-                        func.signature.get_first_param().is_none_or(|cls_param| {
-                            self.is_subset_eq(&receiver, &erase_tparams(cls_param))
-                        })
-                    })
-                    .cloned()
-                    .collect();
-                match Vec1::try_from_vec(applicable) {
-                    Ok(signatures) => self.heap.mk_overload(Overload {
-                        signatures,
-                        metadata: overload.metadata.clone(),
-                    }),
-                    Err(_) => t.clone(),
-                }
-            }
-            _ => t.clone(),
-        };
+        let receiver = erase_tparams(receiver);
+        let signatures = overload.signatures.iter().filter(|sig| {
+            let (OverloadType::Function(f) | OverloadType::Forall(Forall { body: f, .. })) = sig;
+            f.signature
+                .get_first_param()
+                .is_none_or(|param| self.is_subset_eq(&receiver, &erase_tparams(param)))
+        });
+        match Vec1::try_from_vec(signatures.cloned().collect()) {
+            Ok(signatures) => self.heap.mk_overload(Overload {
+                signatures,
+                metadata: overload.metadata.clone(),
+            }),
+            Err(_) => func,
+        }
+    }
+
+    /// Bind `__new__` to `cls`, dropping overloads whose `cls` parameter cannot accept the
+    /// class object.
+    pub fn bind_dunder_new(&self, t: &Type, cls: ClassType) -> Option<Type> {
+        let cls_type = self.heap.mk_type_of(self.heap.mk_class_type(cls));
+        let t = self.filter_overloads_by_receiver(t.clone(), &cls_type);
         self.bind_function(&t, &cls_type, false, &mut |a, b| self.is_subset_eq(a, b))
     }
 
