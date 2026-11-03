@@ -4323,6 +4323,29 @@ def genuinely_live(value: bool, mixed: Literal[False] | Literal[True]) -> None:
 "#,
 );
 
+// The value of a walrus test is the value it assigns.
+testcase!(
+    bug = "A walrus test is not settled by the declared value it assigns",
+    test_unreachable_branch_suite_from_walrus_test,
+    r#"
+from typing import Literal
+
+def falsy(value: Literal[False]) -> None:
+    if x := value:
+        print(1)
+
+def truthy(value: Literal[True]) -> None:
+    if x := value:
+        print(2)
+    else:
+        print(3)
+
+def in_a_bool_op(value: Literal[False], other: bool) -> None:
+    if (x := value) and other:
+        print(4)
+"#,
+);
+
 // A test that consults the runtime environment decides its branch under this configuration only,
 // so neither the branch it guards nor the ones below it may be reported.
 testcase!(
