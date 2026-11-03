@@ -3388,11 +3388,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         || cls.has_qname("django.db.models.manager", "BaseManager"))
                 })
             && let ExprOrBinding::Expr(e) = value
-            && let Some(mut manager) = self.get_django_manager_assignment_type(class, e)
+            && let Some(mut manager) = self.get_django_manager_assignment_type(class, e, errors)
         {
             // Standard manager interfaces allow model rebinding. Explicit custom interfaces
             // retain their declared type and use ordinary assignment checking below.
-            self.expr_infer(e, errors);
             self.expand_mut(&mut manager);
             self.check_unannotated_attribute_type(&manager, e.range(), errors);
             let annotation = inherited_annotation.and_then(|mut ann| {

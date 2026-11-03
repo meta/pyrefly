@@ -404,7 +404,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Bind a generated manager and its initial queryset for a class-body assignment.
     /// The caller checks that the receiving class is a Django model.
-    pub fn get_django_manager_from_queryset_type(
+    fn get_django_manager_from_queryset_type(
         &self,
         model: &Class,
         initial_value_expr: &Expr,
@@ -486,14 +486,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
     }
 
-    /// Bind a constructed manager to its model without changing its nominal class.
+    /// Bind a constructor or `as_manager()` assignment to its receiving model.
     pub(crate) fn get_django_manager_assignment_type(
         &self,
         model: &Class,
         initial_value_expr: &Expr,
+        errors: &ErrorCollector,
     ) -> Option<Type> {
         if let Some(manager) = self.get_django_manager_from_queryset_type(model, initial_value_expr)
         {
+            self.expr_infer(initial_value_expr, errors);
             return Some(manager);
         }
         let call = initial_value_expr.as_call_expr()?;
@@ -512,17 +514,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     || base.has_qname("django.db.models.manager", "BaseManager")
             })?
             .clone();
-        let Type::ClassType(mut manager) =
-            self.expr_infer(initial_value_expr, &self.error_swallower())
+        let [original_model] = base.targs().as_slice() else {
+            return None;
+        };
+        // Tentative diagnostics stay local until this path accepts the constructor result.
+        let inference_errors = self.error_collector();
+        let Type::ClassType(mut manager) = self.expr_infer(initial_value_expr, &inference_errors)
         else {
             return None;
         };
         if manager.class_object() != constructor.class_object() {
             return None;
         }
-        let [original_model] = base.targs().as_slice() else {
-            return None;
-        };
+        errors.extend(inference_errors);
         let model = self.heap.mk_self_type(self.as_class_type_unchecked(model));
         // The model parameter can occur at any position in a custom manager's parameters.
         // Preserve other arguments inferred from the constructor.
