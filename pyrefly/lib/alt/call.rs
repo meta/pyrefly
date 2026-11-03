@@ -269,7 +269,7 @@ impl CallTargetLookup {
     }
 }
 
-/// Result of `construct_{class,typed_dict}_inner`
+/// A constructor outcome whose diagnostics remain local until `take`.
 struct ConstructedInstance {
     ty: Type,
     /// Does the type match the provided hint? False if no hint was provided
@@ -1225,21 +1225,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// Handles union hint decomposition for class and TypedDict construction.
-    /// When the hint is a union, tries each member independently and keeps only
-    /// successful constructions, preferring those assignable to their hint member.
-    /// Falls back to constructing with no hint if all members produce errors or
-    /// the union is too wide.
+    /// Selects a constructor outcome without publishing its diagnostics.
+    /// Prefers the first hint match without hard call errors or specialization failures.
+    /// Otherwise keeps the first outcome without hard call errors, or constructs without a hint.
+    /// Hints wider than `MAX_HINT_WIDTH` are ignored.
     fn construct_with_hint(
         &self,
-        arguments_range: TextRange,
-        errors: &ErrorCollector,
-        arg_errors: &ErrorCollector,
-        return_errors: &ErrorCollector,
-        context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
         construct: impl Fn(Option<&Type>) -> ConstructedInstance,
-    ) -> Type {
+    ) -> ConstructedInstance {
         if let Some(hint) = hint
             && let hints = hint.types()
             && hints.len() <= MAX_HINT_WIDTH
@@ -1254,14 +1248,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // Take the first successful match. We require the result to be assignable to the
                     // hint so that, in a case like `x: list[X] | None = [XChild()]`, we choose the
                     // `list[X]` branch with contextually typed results.
-                    return ret.take(
-                        arguments_range,
-                        errors,
-                        arg_errors,
-                        return_errors,
-                        context,
-                        self,
-                    );
+                    return ret;
                 }
                 if ret_no_match_hint.is_none() {
                     ret_no_match_hint = Some(ret);
@@ -1270,26 +1257,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if let Some(ret) = ret_no_match_hint {
                 // Even if none of the results were assignable to their hints, we still keep the
                 // first contextually typed result if it only produced specialization errors.
-                return ret.take(
-                    arguments_range,
-                    errors,
-                    arg_errors,
-                    return_errors,
-                    context,
-                    self,
-                );
+                return ret;
             }
         }
         // If the hint is too wide or always produces non-specialization errors, don't use it.
-        let ret = construct(None);
-        ret.take(
-            arguments_range,
-            errors,
-            arg_errors,
-            return_errors,
-            context,
-            self,
-        )
+        construct(None)
     }
 
     fn construct_class(
@@ -1349,25 +1321,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             None => (args, keywords),
         };
 
-        self.construct_with_hint(
+        self.construct_with_hint(HintRef::filter_for_constructor(hint, cls.targs()), |hint| {
+            self.construct_class_inner(
+                cls.clone(),
+                constructor_kind.clone(),
+                args,
+                keywords,
+                arguments_range,
+                callee_range,
+                context,
+                hint,
+            )
+        })
+        .take(
             arguments_range,
             errors,
             arg_errors,
             return_errors,
             context,
-            HintRef::filter_for_constructor(hint, cls.targs()),
-            |hint| {
-                self.construct_class_inner(
-                    cls.clone(),
-                    constructor_kind.clone(),
-                    args,
-                    keywords,
-                    arguments_range,
-                    callee_range,
-                    context,
-                    hint,
-                )
-            },
+            self,
         )
     }
 
@@ -1748,11 +1720,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         hint: Option<HintRef>,
     ) -> Type {
         self.construct_with_hint(
-            arguments_range,
-            errors,
-            arg_errors,
-            return_errors,
-            context,
             HintRef::filter_for_constructor(hint, typed_dict.targs()),
             |hint| {
                 self.construct_typed_dict_inner(
@@ -1764,6 +1731,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     hint,
                 )
             },
+        )
+        .take(
+            arguments_range,
+            errors,
+            arg_errors,
+            return_errors,
+            context,
+            self,
         )
     }
 
