@@ -718,10 +718,16 @@ below this threshold are hidden from output. Diagnostics at or above the thresho
 displayed and cause a nonzero exit code — for example, `--min-severity warn` makes
 warnings cause a nonzero exit.
 
+When `min-severity` is not set, `pyrefly check` displays warnings and errors, and only
+errors cause a nonzero exit code. Warnings are also left out of `--suppress-errors`,
+baseline updates and the `junit-xml` report, which lists only diagnostics that cause a
+nonzero exit code.
+
 The lowest threshold, `"hint"`, also shows hint-level diagnostics such as
 [`unused-parameter`](../error-kinds#unused-parameter),
-[`unused-variable`](../error-kinds#unused-variable), and
-[`unused-import`](../error-kinds#unused-import). These are hidden by default, and
+[`unused-variable`](../error-kinds#unused-variable),
+[`unused-import`](../error-kinds#unused-import), and
+[`unreachable`](../error-kinds#unreachable). These are hidden by default, and
 showing them makes them count toward the exit code like any other displayed
 diagnostic.
 
@@ -737,7 +743,7 @@ min-severity = "warn"
 ```
 
 - Type: `"ignore"` | `"hint"` | `"info"` | `"warn"` | `"error"`
-- Default: `"error"`
+- Default: not set (warnings are displayed, and only errors cause a nonzero exit)
 - Flag equivalent: `--min-severity`
 - Notes:
     - `min-severity` is a **project-level setting** and cannot be overridden in
@@ -862,7 +868,7 @@ For most users, we recommend using the `strict` preset and enabling individual a
 for more stability and an opt-in experience for new errors.
 :::
 
-Enables every error kind at `error` severity. Directives like `reveal-type` remain informational, and kinds that default to `hint`, like `unused-parameter`, remain hints.
+Enables every error kind at `error` severity. Directives like `reveal-type` remain informational, and the unused-code kinds (`unused-parameter`, `unused-variable` and `unused-import`) remain hints.
 
 - Sets [`strict-callable-subtyping`](#strict-callable-subtyping) `= true`
 - Enables every error kind at `error` severity

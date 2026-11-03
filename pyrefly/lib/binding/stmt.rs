@@ -1585,6 +1585,11 @@ impl<'a> BindingsBuilder<'a> {
                 let mut contains_environment_test_with_no_else = false;
                 let mut is_first_branch = true;
                 let mut following_runtime_only_branch = false;
+                // Under another configuration, a test of the environment may choose another suite
+                // from its own clause onward, so the definitions in those suites settle no test
+                // outside the suite, and those of the suites the configuration rules out settle
+                // none at all.
+                let mut after_environment_test = false;
                 let mut branches = Ast::if_branches_owned(x);
                 while let Some((range, mut test, body)) = branches.next() {
                     self.start_branch();
@@ -1614,6 +1619,8 @@ impl<'a> BindingsBuilder<'a> {
                         }
                     }
                     is_first_branch = false;
+                    after_environment_test |=
+                        test.as_ref().is_some_and(SysInfo::depends_on_sys_info);
                     let later_branches_are_type_checking = test
                         .as_ref()
                         .is_some_and(SysInfo::is_not_type_checking_guard);
@@ -1634,6 +1641,8 @@ impl<'a> BindingsBuilder<'a> {
                     let new_narrow_ops = if this_branch_chosen == Some(false) {
                         if test_is_environment_independent {
                             self.report_unreachable_body(&body);
+                        } else {
+                            self.record_environment_names(&body);
                         }
                         // Skip the body in this case - it typically means a check (e.g. a sys version,
                         // platform, or TYPE_CHECKING check) where the body is not statically analyzable.
@@ -1678,6 +1687,10 @@ impl<'a> BindingsBuilder<'a> {
                         &Usage::NonPinningValue(None),
                     );
                     negated_prev_ops.and_all(new_narrow_ops.negate());
+                    let outer_environment_suite = self.environment_suite;
+                    if after_environment_test {
+                        self.environment_suite = Some(range);
+                    }
                     if is_type_checking_branch {
                         self.type_checking_depth += 1;
                         self.stmts(body, parent);
@@ -1685,6 +1698,7 @@ impl<'a> BindingsBuilder<'a> {
                     } else {
                         self.stmts(body, parent);
                     }
+                    self.environment_suite = outer_environment_suite;
                     if let Some((test, runs_when)) = decided_by {
                         let end = self.insert_binding(
                             Key::BranchEnd(range),
@@ -1726,6 +1740,8 @@ impl<'a> BindingsBuilder<'a> {
                             });
                             if report_all_remaining || unconditional == Some(false) {
                                 self.report_unreachable_body(&body);
+                            } else {
+                                self.record_environment_names(&body);
                             }
                             report_all_remaining |= unconditional == Some(true);
                             if Ast::body_contains_yield(&body) {

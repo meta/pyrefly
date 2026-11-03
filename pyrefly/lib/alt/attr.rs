@@ -10,6 +10,7 @@ use std::iter;
 use dupe::Dupe;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::literal::LitEnum;
 use pyrefly_types::shaped_array::ShapedArrayType;
@@ -3514,6 +3515,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         res: &mut Vec<AttrInfo>,
     ) {
         self.completions_class(cls.class_object(), expected_attribute_name, res);
+        if let Some(DjangoClassMetadata::Manager { queryset }) = cls.django_metadata() {
+            let mut forwarded = Vec::new();
+            self.completions_class(
+                queryset.class_object(),
+                expected_attribute_name,
+                &mut forwarded,
+            );
+            for info in forwarded {
+                if !res.iter().any(|existing| existing.name == info.name)
+                    && self
+                        .get_django_instance_attribute(cls, &info.name)
+                        .is_some()
+                {
+                    res.push(info);
+                }
+            }
+        }
     }
 
     fn completions_module(

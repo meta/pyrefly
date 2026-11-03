@@ -1538,6 +1538,106 @@ c[idx_var]
 }
 
 #[test]
+fn hover_over_operators_in_subscript() {
+    let code = r#"
+class Container:
+    def __getitem__(self, idx: int) -> str: ...
+
+c = Container()
+i = 0
+c[i + 1]
+#   ^
+c[i and 1]
+#   ^
+c[~i]
+# ^
+c[i < 1]
+#   ^
+c[-1]
+# ^
+"#;
+    let mut test_env = TestEnv::new();
+    test_env.add("main", code);
+    let (state, handle) = test_env.to_state();
+    let handle = handle("main");
+    let expected_ranges = [
+        Some(Range::new(Position::new(6, 2), Position::new(6, 7))),
+        Some(Range::new(Position::new(8, 2), Position::new(8, 9))),
+        None,
+        None,
+        None,
+    ];
+    let expected_contents = ["__add__", "Literal[0]", "__invert__", "bool", "__neg__"];
+    let positions = extract_cursors_for_test(code);
+    assert_eq!(positions.len(), expected_ranges.len());
+    assert_eq!(positions.len(), expected_contents.len());
+    for ((position, expected_range), expected) in positions
+        .into_iter()
+        .zip(expected_ranges)
+        .zip(expected_contents)
+    {
+        let hover = get_hover(&state.transaction(), &handle, position, false)
+            .expect("Expected hover on nested operator");
+        let Contents::MarkupContent(contents) = hover.contents else {
+            panic!("Expected markdown hover contents");
+        };
+        assert!(
+            contents.value.contains(expected) && !contents.value.contains("idx: int"),
+            "Expected nested operator hover containing {expected}, got: {}",
+            contents.value,
+        );
+        assert_eq!(hover.range, expected_range);
+    }
+}
+
+#[test]
+fn hover_over_subscript_preserves_bracket_literal_and_binding_hovers() {
+    let code = r#"
+class Container:
+    def __getitem__(self, idx: int) -> str: ...
+
+container = Container()
+index = 0
+container[index + 1]
+# ^        ^      ^^
+container[0]
+#         ^
+container[index]
+#           ^
+container[-1]
+#          ^
+"#;
+    let mut test_env = TestEnv::new();
+    test_env.add("main", code);
+    let (state, handle) = test_env.to_state();
+    let handle = handle("main");
+    let expected_contents = [
+        "(variable) container: Container",
+        "(variable) index: Literal[0]",
+        "idx: int",
+        "idx: int",
+        "idx: int",
+        "(variable) index: Literal[0]",
+        "idx: int",
+    ];
+    let positions = extract_cursors_for_test(code);
+    assert_eq!(positions.len(), expected_contents.len());
+    for (position, expected) in positions.into_iter().zip(expected_contents) {
+        let hover = get_hover(&state.transaction(), &handle, position, false)
+            .expect("Expected subscript or binding hover");
+        let Contents::MarkupContent(contents) = hover.contents else {
+            panic!("Expected markdown hover contents");
+        };
+        assert!(
+            contents.value.contains(expected),
+            "Expected {expected}, got: {}",
+            contents.value,
+        );
+        assert_eq!(hover.range, None);
+    }
+}
+
+#[test]
 fn hover_over_code_with_ignore_shows_type() {
     let code = r#"
 a: int = "test"  # pyrefly: ignore
@@ -2675,6 +2775,32 @@ y = 1 or 2
                 end: Position::new(3, 10),
             }),
         ]
+    );
+}
+
+#[test]
+fn hover_over_binary_operator_highlights_binary_expression() {
+    let code = r#"
+x = 1 | 2
+#     ^
+"#;
+    let mut test_env = TestEnv::new();
+    test_env.add("main", code);
+    let (state, handle) = test_env
+        .with_default_require_level(Require::Exports)
+        .to_state();
+    let handle = handle("main");
+    let position = extract_cursors_for_test(code)[0];
+    let range = match get_hover(&state.transaction(), &handle, position, false) {
+        Some(hover) => hover.range,
+        None => panic!("Expected hover result for binary operator"),
+    };
+    assert_eq!(
+        range,
+        Some(Range {
+            start: Position::new(1, 4),
+            end: Position::new(1, 9),
+        })
     );
 }
 

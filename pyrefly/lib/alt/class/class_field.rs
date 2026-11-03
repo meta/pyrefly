@@ -463,15 +463,23 @@ impl Display for ClassField {
 }
 
 impl ClassField {
-    fn new(
+    /// Python's metadata attributes are writable on both classes and instances.
+    fn is_class_metadata_attribute(name: &Name) -> bool {
+        matches!(name.as_str(), "__module__" | "__doc__" | "__annotations__")
+    }
+
+    fn new_typed_dict_field(
+        name: &Name,
         ty: Type,
         annotation: Option<Annotation>,
-        initialization: ClassFieldInitialization,
         read_only_reason: Option<ReadOnlyReason>,
-        is_foreign_key: bool,
-        has_choices: bool,
-        is_inherited: IsInherited,
     ) -> Self {
+        let is_instance_var = annotation.is_some() && !Self::is_class_metadata_attribute(name);
+        let initialization = if annotation.is_some() {
+            ClassFieldInitialization::Uninitialized
+        } else {
+            ClassFieldInitialization::Magic
+        };
         Self(
             ClassFieldInner::ClassAttribute {
                 ty,
@@ -480,41 +488,26 @@ impl ClassField {
                 read_only_reason,
                 descriptor_range: None,
                 is_classvar: false,
-                is_instance_var: false,
+                is_instance_var,
                 is_staticmethod: false,
-                is_foreign_key,
-                has_choices,
+                is_foreign_key: false,
+                has_choices: false,
             },
-            is_inherited,
-        )
-    }
-
-    pub fn invalid_typed_dict_field(heap: &TypeHeap) -> Self {
-        ClassField::new(
-            heap.mk_any_error(),
-            None,
-            ClassFieldInitialization::Magic,
-            None,
-            false,
-            false,
             IsInherited::Maybe,
         )
     }
 
+    pub fn invalid_typed_dict_field(name: &Name, heap: &TypeHeap) -> Self {
+        Self::new_typed_dict_field(name, heap.mk_any_error(), None, None)
+    }
+
     pub fn typed_dict_field(
+        name: &Name,
         ty: Type,
         annotation: Annotation,
         read_only_reason: Option<ReadOnlyReason>,
     ) -> Self {
-        Self::new(
-            ty,
-            Some(annotation),
-            ClassFieldInitialization::Uninitialized,
-            read_only_reason,
-            false,
-            false,
-            IsInherited::Maybe,
-        )
+        Self::new_typed_dict_field(name, ty, Some(annotation), read_only_reason)
     }
 
     pub fn for_variance_inference(&self) -> (&Type, Option<&Annotation>, bool) {
@@ -648,7 +641,7 @@ impl ClassField {
         }
     }
 
-    fn instantiate_helper(&self, f: &mut dyn FnMut(&mut Type)) -> Self {
+    pub(crate) fn instantiate_helper(&self, f: &mut dyn FnMut(&mut Type)) -> Self {
         match &self.0 {
             ClassFieldInner::Property { ty, is_abstract } => {
                 let mut ty = ty.clone();
@@ -1408,12 +1401,25 @@ fn make_bound_method(heap: &TypeHeap, instance: &Instance, attr: Type) -> Result
         |meta: &FuncMetadata| !meta.flags.is_staticmethod && !meta.flags.is_classmethod;
     make_bound_method_helper(heap, instance.to_type(heap), attr, &should_bind).map(|mut method| {
         method.transform_toplevel_callable_signatures(|callable, _| {
-            if let InstanceKind::TypeVar(q) = &instance.kind &&
-            matches!(q.restriction(), Restriction::Constraints(_)) &&
-            matches!(&callable.ret, Type::ClassType(cls) if cls.class_object() == instance.class && cls.targs() == instance.targs) {
-                // We're binding this method to a constrained TypeVar, and its return type matches
-                // the currently active constraint. Treat this method as returning the TypeVar.
-                callable.ret = instance.to_type(heap);
+            if let InstanceKind::TypeVar(q) = &instance.kind
+                && matches!(q.restriction(), Restriction::Constraints(_))
+            {
+                let is_constraint = |ty: &Type| {
+                    matches!(ty, Type::ClassType(cls) if cls.class_object() == instance.class && cls.targs() == instance.targs)
+                };
+                // Arguments with the receiver's TypeVar share its active constraint.
+                // Keep the declared type so concrete arguments remain valid.
+                callable.params.visit_mut(&mut |ty| {
+                    if is_constraint(ty)
+                        || matches!(ty, Type::Union(union) if union.members.iter().any(is_constraint))
+                    {
+                        *ty = unions(vec![ty.clone(), q.clone().to_type(heap)], heap);
+                    }
+                });
+                if is_constraint(&callable.ret) {
+                    // A return type that matches the active constraint preserves the TypeVar.
+                    callable.ret = instance.to_type(heap);
+                }
             }
         });
         method
@@ -2610,12 +2616,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     let is_staticmethod =
                         matches!(&ty, Type::ClassType(cls) if cls.is_builtin("staticmethod"));
                     // Classmethod-created fields are exempt unless they inherit an instance declaration.
-                    // Python's metadata attributes are writable on both classes and instances.
                     let is_instance_var = annotation.is_some()
                         && !is_class_var
                         && (initialization != ClassFieldInitialization::ClassMethod
                             || inherited_instance_var)
-                        && !matches!(name.as_str(), "__module__" | "__doc__" | "__annotations__");
+                        && !ClassField::is_class_metadata_attribute(name);
                     ClassField(
                         ClassFieldInner::ClassAttribute {
                             ty,
@@ -2804,6 +2809,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) -> Option<Type> {
+        let initial_value_expr = match field_definition {
+            ClassFieldDefinition::AssignedInBody { value, .. } => {
+                if let ExprOrBinding::Expr(expr) = value.as_ref() {
+                    Some(expr)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
         self.get_enum_class_field_type(
             class,
             name,
@@ -2816,19 +2832,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
         .or_else(|| self.get_property_class_field_type(class, name, field_definition))
         .or_else(|| self.get_pydantic_root_model_class_field_type(class, name))
-        .or_else(|| {
-            let initial_value_expr = match field_definition {
-                ClassFieldDefinition::AssignedInBody { value, .. } => {
-                    if let ExprOrBinding::Expr(expr) = value.as_ref() {
-                        Some(expr)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-            self.get_django_field_type(ty, class, Some(name), initial_value_expr)
-        })
+        .or_else(|| self.get_django_field_type(ty, class, Some(name), initial_value_expr))
     }
 
     /// Recognize `x = property(fget, fset, fdel)` and return the corresponding
@@ -3324,6 +3328,31 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Otherwise, analyze the value to determine the type
         let (inherited_ty, inherited_annotation) =
             self.get_inherited_type_and_annotation(class, name);
+        if !inferred_from_method
+            && direct_annotation.is_none()
+            && self.get_metadata_for_class(class).is_django_model()
+            && inherited_annotation
+                .as_ref()
+                .and_then(|ann| ann.ty.as_ref())
+                .is_none_or(|ty| {
+                    matches!(ty, Type::ClassType(cls) if
+                        cls.has_qname("django.db.models.manager", "Manager")
+                        || cls.has_qname("django.db.models.manager", "BaseManager"))
+                })
+            && let ExprOrBinding::Expr(e) = value
+            && let Some(manager) = self.get_django_manager_from_queryset_type(class, e)
+        {
+            // Standard manager interfaces allow model rebinding. Explicit custom interfaces
+            // retain their declared type and use ordinary assignment checking below.
+            self.attribute_expr_infer(e, None, name, errors);
+            let annotation = inherited_annotation.and_then(|mut ann| {
+                ann.ty = None;
+                ann.qualifiers
+                    .retain(|q| matches!(q, Qualifier::ClassVar | Qualifier::Final));
+                (!ann.qualifiers.is_empty()).then_some(ann)
+            });
+            return (manager, annotation, IsInherited::Maybe);
+        }
         let mut is_inherited = if inherited_ty.is_none() {
             IsInherited::No
         } else {
@@ -3749,7 +3778,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         None
     }
 
-    fn as_instance_attribute(
+    pub(crate) fn as_instance_attribute(
         &self,
         field_name: &Name,
         field: &ClassField,
@@ -3760,7 +3789,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // quantified to capture `cls`. Note that `__new__` is the only method that needs this
         // special case because it's not legal to use `Self` in other static methods.
         let self_quantified =
-            if field_name == &dunder::NEW && matches!(instance.kind, InstanceKind::ClassType) {
+            if field_name == &dunder::NEW && matches!(instance.kind, InstanceKind::ClassType(_)) {
                 Some(self.get_self_quantified(instance.class, instance.to_type(self.heap)))
             } else {
                 None
@@ -4419,6 +4448,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             else {
                 continue;
             };
+            // Django gives a model without its own primary key a synthesized `id: int`,
+            // including abstract bases like `AbstractBaseUser` (stubs omit `Meta.abstract`,
+            // so we can't tell them apart). Django only adds that field to the concrete model
+            // when no pk is declared, so a child declaring `id` as its primary key replaces it
+            // rather than overriding it. An explicitly declared parent `id` is still checked.
+            if field_name.as_str() == "id"
+                && metadata
+                    .django_model_metadata()
+                    .and_then(|dm| dm.custom_primary_key_field.as_ref())
+                    == Some(field_name)
+                && self
+                    .get_non_synthesized_class_member(parent_cls, field_name)
+                    .is_none()
+            {
+                continue;
+            }
             // `__call__` is checked against a Protocol parent only, unless the user
             // opts in with `@override`. Implementing a callable interface is
             // ubiquitous - argparse actions, auth handlers, metaclasses - and
@@ -4483,6 +4528,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         );
                     continue;
                 }
+            }
+            if metadata.is_django_model()
+                && !class_field.has_explicit_annotation()
+                && self.is_django_manager_type(&class_field.ty())
+                && matches!(want_class_field.ty(), Type::ClassType(cls) if
+                    cls.has_qname("django.db.models.manager", "Manager")
+                    || cls.has_qname("django.db.models.manager", "BaseManager"))
+            {
+                // Standard manager interfaces allow rebinding to the receiving model.
+                continue;
             }
             let want_is_static = want_class_field.is_staticmethod();
             let want_is_class = want_class_field.is_classmethod();
@@ -5171,6 +5226,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub fn get_instance_attribute(&self, cls: &ClassType, name: &Name) -> Option<ClassAttribute> {
+        if let Some(attribute) = self.get_django_instance_attribute(cls, name) {
+            return Some(attribute);
+        }
         self.get_class_member(cls.class_object(), name)
             .map(|field| self.as_instance_attribute(name, field.as_ref(), &Instance::of_class(cls)))
     }

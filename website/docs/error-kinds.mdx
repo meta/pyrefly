@@ -2456,12 +2456,13 @@ def f(x: str) -> None:
 
 ## unreachable
 
-Default severity: `warn`
+Default severity: `hint`
 
-This error is raised when code can never execute because it comes after a statement that
+This diagnostic is reported when code can never execute because it comes after a statement that
 always exits the current flow, such as `return`, `raise`, `break`, or `continue`. One
 diagnostic is reported per block, covering everything from the first dead statement to the
-end of the block.
+end of the block. The [`all`](../configuration#preset-all) preset
+reports it as an error.
 
 ```python
 def example():
@@ -2540,6 +2541,72 @@ if sys.version_info < (3, 10):
 
 if sys.platform == "win32":
     print("not reported")   # live on Windows
+```
+
+A constant whose value depends on the platform or Python version doesn't decide a condition
+either. That covers a constant defined inside an `if` that tests `sys.platform`,
+`sys.version_info`, `os.name`, or `TYPE_CHECKING`, and a constant that such an `if` redefines,
+even in a branch the current configuration skips:
+
+```python
+import sys
+from typing import Final
+
+if sys.platform == "win32":
+    IS_WIN: Final = True
+else:
+    IS_WIN: Final = False
+
+if IS_WIN:
+    print("not reported")  # on Windows, `IS_WIN` is `True`
+
+DEBUG: Final = False
+if sys.platform == "win32":
+    DEBUG: Final = True
+
+if DEBUG:
+    print("not reported")  # on Windows, `DEBUG` is `True`
+```
+
+A name imported from another module, or read as an attribute of a module, counts only if the
+module that defines it declares it `Final` with a declared type: `Final[T]`, or a bare `Final`
+assigned a literal. It does not count if a module on the way to it defines or imports it under
+a test of the environment, if the module is read through anything other than an import (such
+as a variable assigned a module), or if a function or class body in the importing module
+declares the name `global`.
+
+```python
+# settings.py
+import sys
+from typing import Final
+
+DEBUG: Final = False
+TRACE: Final = False
+if sys.platform == "win32":
+    VERBOSE: Final = True
+else:
+    VERBOSE: Final = False
+
+# app.py
+import settings
+from settings import DEBUG, TRACE, VERBOSE
+
+if DEBUG:
+    print("dead")  # This code is unreachable [unreachable]
+
+if VERBOSE:
+    print("not reported")  # `settings` defines `VERBOSE` under a platform test
+
+config = settings
+if config.DEBUG:
+    print("not reported")  # `config` is a variable, not an import
+
+def enable_tracing() -> None:
+    global TRACE
+    TRACE = True
+
+if TRACE:
+    print("not reported")  # `enable_tracing` may rebind `TRACE`
 ```
 
 A dead `if` branch is skipped entirely, so nothing inside it is analysed. A `while` body is
