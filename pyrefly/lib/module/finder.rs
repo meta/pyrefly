@@ -2177,7 +2177,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_unmarked_top_level_stub_namespace_takes_precedence() {
+    fn test_find_unmarked_top_level_stub_namespace_does_not_hide_runtime_package() {
         let tempdir = tempfile::tempdir().unwrap();
         let root = tempdir.path();
         TestPath::setup_test_directory(
@@ -2185,6 +2185,8 @@ mod tests {
             vec![
                 TestPath::dir("foo", vec![TestPath::file("__init__.py")]),
                 TestPath::dir("foo-stubs", vec![TestPath::file("bar.pyi")]),
+                TestPath::dir("baz", vec![TestPath::file("qux.py")]),
+                TestPath::dir("baz-stubs", vec![TestPath::file("qux.pyi")]),
             ],
         );
 
@@ -2195,7 +2197,17 @@ mod tests {
                 FindModuleOptions::new(&DirEntryCache::new()),
             )
             .unwrap(),
-            FindingOrError::new_finding(ModulePath::namespace(root.join("foo-stubs"))),
+            FindingOrError::new_finding(ModulePath::filesystem(root.join("foo/__init__.py"))),
+        );
+        // When the runtime package is a namespace package too, the stub still shadows it.
+        assert_eq!(
+            find_module(
+                ModuleName::from_str("baz"),
+                [root.to_path_buf()].iter(),
+                FindModuleOptions::new(&DirEntryCache::new()),
+            )
+            .unwrap(),
+            FindingOrError::new_finding(ModulePath::namespace(root.join("baz-stubs"))),
         );
     }
 
@@ -4015,11 +4027,11 @@ mod tests {
             )
         };
 
-        // BUG: `foo-stubs` provides no `foo` module of its own, so it should not hide
-        // the runtime package `site_packages/foo/__init__.py`.
         assert_eq!(
             find("foo"),
-            FindingOrError::new_finding(ModulePath::namespace(site_packages.join("foo-stubs")))
+            FindingOrError::new_finding(ModulePath::filesystem(
+                site_packages.join("foo/__init__.py")
+            ))
         );
         assert_eq!(
             find("foo.bar"),
