@@ -1148,17 +1148,30 @@ impl ConfigFile {
         ));
         if !self.disable_search_path_heuristics {
             result.push(ImportLookupPathPart::ImportRoot(self.import_root.as_ref()));
-            result.push(ImportLookupPathPart::FallbackSearchPath(
+        }
+        let fallback_search_path = (!self.disable_search_path_heuristics).then(|| {
+            ImportLookupPathPart::FallbackSearchPath(
                 &self.fallback_search_path,
                 origin.and_then(|p| p.parent()),
-            ));
-        }
+            )
+        });
+        // A directory-relative fallback search path is only consulted when everything
+        // else fails, so it comes after the site package path.
+        let (fallback_before_site_packages, fallback_after_site_packages) =
+            match self.fallback_search_path {
+                FallbackSearchPath::DirectoryRelative(_) => (None, fallback_search_path),
+                FallbackSearchPath::Explicit(_) | FallbackSearchPath::Empty => {
+                    (fallback_search_path, None)
+                }
+            };
+        result.extend(fallback_before_site_packages);
         result.push(ImportLookupPathPart::SitePackagePath(
             self.python_environment.site_package_path.as_ref().unwrap(),
         ));
         result.push(ImportLookupPathPart::InterpreterSitePackagePath(
             &self.python_environment.interpreter_site_package_path,
         ));
+        result.extend(fallback_after_site_packages);
         result
     }
 

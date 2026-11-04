@@ -103,7 +103,7 @@ impl FindError {
                 None,
                 vec1![
                     format!(
-                        "Import `{module}` was resolved relative to the importing file because it was not found on the module search path"
+                        "Import `{module}` was resolved relative to the importing file because it was not found on the search path or the site package path"
                     ),
                     "Add the module to the search path/site package path, or use an explicit relative/fully qualified import"
                         .to_owned(),

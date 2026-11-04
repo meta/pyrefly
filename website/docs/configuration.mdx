@@ -360,6 +360,8 @@ directories but that directory isn't listed in [`search-path`](#search-path).
 - Flag equivalent: `--enable-fallback-search-path`
 - Equivalent configs: none
 - Notes:
+    - The fallback is only consulted after the search path, typeshed, and the site
+      package path all fail to find the module, including as a namespace package.
     - Has no effect when [`disable-search-path-heuristics`](#disable-search-path-heuristics)
       is `true` — that flag suppresses all fallback-path consumption.
     - The search is bounded by the config root, so it cannot escape the project.

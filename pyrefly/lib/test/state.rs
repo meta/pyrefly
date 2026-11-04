@@ -95,7 +95,11 @@ fn test_fallback_search_path_relative_import_emits_dedicated_diagnostic() {
         errors[0].error_kind(),
         ErrorKind::FallbackSearchPathRelativeImport
     );
-    assert!(errors[0].msg().contains("module search path"));
+    assert!(
+        errors[0]
+            .msg()
+            .contains("not found on the search path or the site package path")
+    );
 }
 
 #[derive(Debug)]

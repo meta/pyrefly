@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::atomic::Ordering;
@@ -578,6 +579,48 @@ impl ImportLookupMode {
     }
 }
 
+/// Search the directory-relative fallback search path (`enable-fallback-search-path`),
+/// which holds the ancestor directories of the importing file. This is a last resort for
+/// an import that no other search location resolved, so the result always carries a
+/// [`FindError::FallbackSearchPathRelativeImport`] warning.
+///
+/// The search keeps its own list of namespace packages: the caller only runs it when no
+/// other search location found even a namespace package. Like the other search locations,
+/// it prefers a regular package or module in any ancestor over a namespace package, and
+/// only returns a namespace package when there is no style filter.
+fn find_directory_relative_fallback_import(
+    config: &ConfigFile,
+    module: ModuleName,
+    origin_path: Option<&Path>,
+    style_filter: Option<ModuleStyle>,
+    options: &mut FindImportOptions<'_>,
+) -> Option<FindingOrError<ModulePath>> {
+    let FallbackSearchPath::DirectoryRelative(ancestors) = &config.fallback_search_path else {
+        return None;
+    };
+    let directory = origin_path?.parent()?;
+    let mut namespaces = vec![];
+    find_module(
+        module,
+        ancestors.get_ancestors(directory).iter().filter(|path| {
+            !config
+                .site_package_path()
+                .any(|site_package| path.starts_with(site_package))
+        }),
+        options.module_options(style_filter, &mut namespaces),
+    )
+    .or_else(|| {
+        let namespace = namespaces
+            .into_iter()
+            .next()
+            .filter(|_| style_filter.is_none())?;
+        Some(FindingOrError::new_finding(ModulePath::namespace(
+            namespace,
+        )))
+    })
+    .map(|path| path.with_error(FindError::FallbackSearchPathRelativeImport(module)))
+}
+
 // TODO(connernilsen): change things so that we return all entries that match for a given
 // module name across all path components (search path, site package path, ...).
 // Instead, at specific times (`find_module_components`, `find_module`, `find_import_with_mode`),
@@ -677,32 +720,26 @@ pub(crate) fn find_import_with_mode(
     {
         path
     } else if !config.disable_search_path_heuristics
+        // Without a config file, the guessed fallback search path stands in for the project
+        // root, which comes before site packages at runtime, so it is searched here. The
+        // directory-relative fallback search path is a last resort and is searched at the
+        // very end instead.
+        && let FallbackSearchPath::Explicit(fallback_search_path) = &config.fallback_search_path
         && let Some(path) = find_module(
             module,
-            config
-                .fallback_search_path
-                .for_directory(origin_path.and_then(|p| p.parent()))
-                .iter()
-                .filter(|path| {
-                    // A root equal to a site package path entry is searched by the site package
-                    // branch below, where bundled stubs take priority over the packages they stub.
-                    // A root nested deeper inside site packages is not on `sys.path` at runtime, so
-                    // it is dropped rather than demoted.
-                    !config
-                        .site_package_path()
-                        .any(|site_package| path.starts_with(site_package))
-                }),
+            fallback_search_path.iter().filter(|path| {
+                // A root equal to a site package path entry is searched by the site package
+                // branch below, where bundled stubs take priority over the packages they stub.
+                // A root nested deeper inside site packages is not on `sys.path` at runtime, so
+                // it is dropped rather than demoted.
+                !config
+                    .site_package_path()
+                    .any(|site_package| path.starts_with(site_package))
+            }),
             options.module_options(style_filter, &mut namespaces_found),
         )
     {
-        if matches!(
-            config.fallback_search_path,
-            FallbackSearchPath::DirectoryRelative(_)
-        ) {
-            path.with_error(FindError::FallbackSearchPathRelativeImport(module))
-        } else {
-            path
-        }
+        path
     } else if style_filter == Some(ModuleStyle::Executable)
         && lookup_mode.include_interpreter_stdlib()
         && let Some(path) = find_module(
@@ -748,13 +785,27 @@ pub(crate) fn find_import_with_mode(
         })
     {
         FindingOrError::Error(FindError::Ignored)
-    } else if let Some(namespace) = namespaces_found.into_iter().next() &&
+    } else if let Some(namespace) = namespaces_found.first() &&
         // only use namespaces if style filter is none, since otherwise we might be
         // skipping a result that's more preferable, but excluded because of the style
         // filter
     style_filter.is_none()
     {
-        FindingOrError::new_finding(ModulePath::namespace(namespace))
+        FindingOrError::new_finding(ModulePath::namespace(namespace.clone()))
+    } else if !config.disable_search_path_heuristics
+        // The directory-relative fallback only applies to imports that nothing above
+        // resolved, not even as a namespace package. The namespace branch above consumes
+        // `namespaces_found` only without a style filter, so check it explicitly here.
+        && namespaces_found.is_empty()
+        && let Some(path) = find_directory_relative_fallback_import(
+            config,
+            module,
+            origin_path,
+            style_filter,
+            &mut options,
+        )
+    {
+        path
     } else if config.ignore_missing_imports(origin, module) {
         FindingOrError::Error(FindError::Ignored)
     } else {
@@ -2836,11 +2887,11 @@ mod tests {
         );
         let config = directory_relative_fallback_config(root, &[], &["site_packages"]);
 
-        // BUG: the installed `site_packages/foo/__init__.py` should win, since the
-        // fallback is only meant for imports that are otherwise unresolved.
         assert_eq!(
             find_import_from(&config, "foo", &root.join("integrations/foo/main.py")),
-            fallback_finding(root.join("integrations/foo/__init__.py"), "foo"),
+            FindingOrError::new_finding(ModulePath::filesystem(
+                root.join("site_packages/foo/__init__.py")
+            )),
         );
     }
 
@@ -2875,11 +2926,37 @@ mod tests {
         );
         let config = directory_relative_fallback_config(root, &["src"], &[]);
 
-        // BUG: `foo.bar` is the namespace package `src/foo/bar`, which is found on the
-        // search path, so the fallback should not be consulted.
         assert_eq!(
             find_import_from(&config, "foo.bar", &root.join("tests/foo/bar/test_baz.py")),
-            fallback_finding(root.join("tests/foo/bar/__init__.py"), "foo.bar"),
+            FindingOrError::new_finding(ModulePath::namespace(root.join("src/foo/bar"))),
+        );
+    }
+
+    #[test]
+    fn test_directory_relative_fallback_namespace_package() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir(
+                "scripts",
+                vec![
+                    TestPath::file("main.py"),
+                    TestPath::dir("foo", vec![TestPath::file("bar.py")]),
+                ],
+            )],
+        );
+        let config = directory_relative_fallback_config(root, &[], &[]);
+
+        // A namespace package found only through the fallback is still a fallback result.
+        assert_eq!(
+            find_import_from(&config, "foo", &root.join("scripts/main.py")),
+            FindingOrError::Finding(Finding {
+                finding: ModulePath::namespace(root.join("scripts/foo")),
+                error: Some(FindError::FallbackSearchPathRelativeImport(
+                    ModuleName::from_str("foo"),
+                )),
+            }),
         );
     }
 
