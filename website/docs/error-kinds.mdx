@@ -1896,51 +1896,82 @@ Default severity: `ignore`
 
 The `strict` preset enables this check as an error.
 
-Pyrefly reports an attribute that the class body or a recognized initialization method assigns on some, but not all, paths that complete normally.
-Recognized methods include `__init__`, `__new__`, `__post_init__`, `__init_subclass__`, and supported test setup methods.
-An explicit `return` completes the method normally.
-Paths that raise or end in a `Never` or `NoReturn` call do not require an assignment.
-Deleting an attribute removes its initialization guarantee.
+Pyrefly reports an attribute that the class body or an initialization method assigns on some paths but not others, so an instance may be created without it.
 
 ```python
 class C:
     if enabled():
         flag = True  # possibly-uninitialized-attribute
-        # The class body can complete without assigning flag.
 
-    def __init__(self, value: int | None, early: bool) -> None:
+    def __init__(self, value: int | None) -> None:
         if value is not None:
             self.value = value  # possibly-uninitialized-attribute
-        # The path where value is None completes without assigning self.value.
+```
+
+The check covers the class body and the methods that initialize an instance: `__init__`, `__new__`, `__post_init__`, `__init_subclass__`, and supported test setup methods.
+Every path that completes normally must assign the attribute, including one that ends in an early `return`.
+A path that raises, or ends in a call to a `Never` or `NoReturn` function, does not need to:
+
+```python
+class Checked:
+    def __init__(self, value: int | None, early: bool) -> None:
+        if value is None:
+            raise ValueError()
+        self.value = value  # OK: the other path raises
         if early:
             return
         self.ready = True  # possibly-uninitialized-attribute
-        # The early return completes __init__ without assigning self.ready.
 ```
 
-The check permits an inherited attribute when any base class, including `object`, defines the same name.
-Classes with an unresolved or `Any` base class are also exempt, because that base may define the attribute.
-An instance `__getattr__` fallback also suppresses this error for instance attributes.
-Pyrefly combines assignments from different methods leniently: one method that initializes the attribute on every completing path suffices.
-This includes ordinary helper methods, even when Pyrefly cannot prove that the constructor calls them.
-Class-body assignments are checked separately, even when a method assigns the same name.
-Assignments inside nested functions do not initialize the enclosing method's attributes.
-In `__new__`, assignments through the first parameter (`cls.x = ...`) are checked like other method assignments.
-An assignment to the instance that `__new__` creates, such as `obj = super().__new__(cls)` followed by `obj.x = ...`, counts as initializing a bare class-body annotation `x: int`, even when the assignment is conditional.
-Other assignments to that instance are not tracked.
+Another method also counts if it assigns the attribute on every path, even when Pyrefly cannot tell whether the constructor calls it:
 
-Pyrefly reports this error at the attribute definition, even if the attribute is never read.
-A later `hasattr` guard does not suppress this check.
-A method or nested class defined under a condition in the class body is not reported, unless the name is also bound another way in the class body.
-The attributes that such a method assigns are still checked.
-Stub (`.pyi`) files are excluded.
+```python
+class Delegating:
+    def __init__(self, cfg: int | None) -> None:
+        if cfg is None:
+            self._load_defaults()
+        else:
+            self.cfg = cfg  # OK: _load_defaults always assigns cfg
 
-An unconditional bare class-body annotation, such as `x: int`, is checked against the methods that assign it.
-Dataclasses, including attrs classes and pydantic models, and named tuples are excluded because they initialize annotated fields themselves, except for a plain `@dataclass(init=False)`.
-Protocols, whose members are declarations, and `ClassVar` annotations are also excluded.
-If no recognized method assigns the annotation, the separate [`uninitialized-instance-variable`](#uninitialized-instance-variable) check reports it instead.
-A bare annotation under a condition in the class body is checked like any other conditional class-body definition, even when a method assigns it.
-An annotation in a method without a value, such as `self.value: int`, declares the attribute without initializing it, so this check reports it.
+    def _load_defaults(self) -> None:
+        self.cfg = 0
+```
+
+These do not initialize an attribute:
+
+```python
+class NotInitialized:
+    def __init__(self) -> None:
+        def later() -> None:
+            self.a = 1  # possibly-uninitialized-attribute: later may never run
+        self.b: int  # possibly-uninitialized-attribute: an annotation is not a value
+        self.c = 1  # possibly-uninitialized-attribute
+        del self.c
+```
+
+A bare class-body annotation is checked against the methods that assign it.
+If no initialization method assigns it, [`uninitialized-instance-variable`](#uninitialized-instance-variable) reports it instead.
+
+```python
+class Annotated:
+    x: int  # possibly-uninitialized-attribute
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.x = 1
+```
+
+Pyrefly does not report an attribute when:
+
+- a base class, including `object`, defines it, or a base class is unresolved or `Any`;
+- the class has an instance `__getattr__`;
+- it is an annotation in a class that initializes annotated fields itself: a dataclass (except a plain `@dataclass(init=False)`), an attrs class, a pydantic model, a named tuple, or a protocol;
+- it is a `ClassVar` annotation, or an annotation on a metaclass;
+- it is a bare annotation `x: int` that `__new__` assigns on the instance it creates, such as `obj = super().__new__(cls)` followed by `obj.x = ...`;
+- it is a method or nested class defined under a condition in the class body, unless the name is also bound another way (the attributes such a method assigns are still checked);
+- it is in a stub (`.pyi`) file.
+
+A conditional class-body assignment is reported even when a method also assigns the name.
+The error is reported at the attribute's definition, even if the attribute is never read, and a later `hasattr` check does not suppress it.
 
 To disable this check while keeping other strict checks, use:
 
