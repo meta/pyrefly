@@ -7,6 +7,7 @@
 
 // @lint-ignore-every SPELL deliberately testing bad spelling
 
+use crate::state::require::Require;
 use crate::test::util::TestEnv;
 use crate::testcase;
 
@@ -5376,5 +5377,51 @@ class A:
 a = A()
 _ = a.phantom  # E: Object of class `A` has no attribute `phantom`
 _ = a.real
+"#,
+);
+
+testcase!(
+    bug = "Explicit staticmethod disables the __new__ receiver",
+    test_explicit_staticmethod_new_receiver,
+    r#"
+class C:
+    @staticmethod
+    def __new__(cls) -> "C":
+        cls.x: int = 0  # E: Cannot annotate non-self attribute `cls.x`
+        return super().__new__(cls)
+
+_ = C().x  # E: Object of class `C` has no attribute `x`
+"#,
+);
+
+testcase!(
+    bug = "Skipped explicitly static __new__ loses inferred attributes",
+    test_explicit_staticmethod_new_no_type_check,
+    r#"
+from typing import no_type_check
+
+class C:
+    @no_type_check
+    @staticmethod
+    def __new__(cls) -> "C":
+        cls.x = 1
+        return super().__new__(cls)
+
+_ = C().x  # E: Object of class `C` has no attribute `x`
+"#,
+);
+
+testcase!(
+    bug = "Batch-skipped explicitly static __new__ loses inferred attributes",
+    test_explicit_staticmethod_new_batch_skipped,
+    TestEnv::new_skip_check_no_infer().with_run_require(Require::Errors),
+    r#"
+class C:
+    @staticmethod
+    def __new__(cls):
+        cls.x = 1
+        return super().__new__(cls)
+
+_ = C().x  # E: Object of class `C` has no attribute `x`
 "#,
 );
