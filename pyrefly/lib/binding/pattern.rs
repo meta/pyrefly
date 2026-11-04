@@ -935,35 +935,41 @@ impl<'a> BindingsBuilder<'a> {
             // match subject. This is required for cases like `match self.a`, where the
             // carried narrow is stored as a facet on `self` but the branch-local subject
             // is already the projected `self.a` expression.
-            let case_subject_idx = if let Some(narrowing_subject) = match_subject.as_single()
+            let (case_subject_idx, prev_case_negations) = if let Some(narrowing_subject) =
+                match_subject.as_single()
                 && let Some((narrow_op, op_range)) =
                     negated_prev_ops.0.get(narrowing_subject.name())
                 && let Some(projected_narrow_op) = narrow_op.rebase_onto_subject(narrowing_subject)
             {
-                self.insert_binding(
+                let prev_case_negations = Some(Box::new((projected_narrow_op.clone(), *op_range)));
+                let case_subject_idx = self.insert_binding(
                     Key::PatternNarrow(case_range),
                     Binding::Narrow(
                         subject_idx,
                         Box::new(projected_narrow_op),
                         NarrowUseLocation::Start(*op_range),
                     ),
-                )
+                );
+                (case_subject_idx, prev_case_negations)
             } else if let Some((narrow_op, op_range)) = &negated_prev_subject {
-                self.insert_binding(
+                let prev_case_negations = Some(Box::new((narrow_op.clone(), *op_range)));
+                let case_subject_idx = self.insert_binding(
                     Key::PatternNarrow(case_range),
                     Binding::Narrow(
                         subject_idx,
                         Box::new(narrow_op.clone()),
                         NarrowUseLocation::Start(*op_range),
                     ),
-                )
+                );
+                (case_subject_idx, prev_case_negations)
             } else if match_subject.as_single().is_some() && !negated_prev_ops.0.is_empty() {
-                self.insert_binding(
+                let case_subject_idx = self.insert_binding(
                     Key::PatternNarrow(case_range),
                     Binding::Expr(None, Box::new(*subject_expr.clone())),
-                )
+                );
+                (case_subject_idx, None)
             } else {
-                subject_idx
+                (subject_idx, None)
             };
             let mut new_narrow_ops =
                 self.bind_pattern(match_subject.clone(), pattern, case_subject_idx);
@@ -1000,7 +1006,8 @@ impl<'a> BindingsBuilder<'a> {
                     BindingExpect::MatchCaseReachability {
                         subject_idx: case_subject_idx,
                         narrowing_subject,
-                        narrow_ops_for_case: (Box::new(op), range),
+                        narrow_ops_for_case: Box::new((op, range)),
+                        prev_case_negations,
                         case_range,
                     },
                 );

@@ -198,6 +198,69 @@ def no_cascade_after_wildcard(x: int) -> None:
 );
 
 testcase!(
+    test_match_case_unreachable_subsumed_by_sibling_pattern,
+    r#"
+from typing import Any
+
+def shadowed_after_parent_any(x: Any) -> None:
+    match x:
+        case int():
+            pass
+        case bool():  # E: Case pattern can never match subject of type
+            pass
+
+def ok_subclass_first_any(x: Any) -> None:
+    match x:
+        case bool():
+            pass
+        case int():
+            pass
+
+def ok_guarded_predecessor_any(x: Any, flag: bool) -> None:
+    match x:
+        case int() if flag:
+            pass
+        case bool():
+            pass
+
+class A:
+    x: int
+
+class B(A):
+    pass
+
+def ok_object_subclass_order(x: object) -> None:
+    match x:
+        case int():
+            pass
+        case bool():
+            pass
+
+# A partial class pattern does not subsume its subclass pattern.
+def ok_partial_class_predecessor_any(x: Any) -> None:
+    match x:
+        case A(x=1):
+            pass
+        case B():
+            pass
+
+def duplicate_literal_any(x: Any) -> None:
+    match x:
+        case 1:
+            pass
+        case 1:  # E: Case pattern can never match subject of type
+            pass
+
+def or_pattern_any(x: Any) -> None:
+    match x:
+        case int() | str():
+            pass
+        case bool():  # E: Case pattern can never match subject of type
+            pass
+"#,
+);
+
+testcase!(
     test_pattern_dict_key_enum,
     r#"
 from enum import StrEnum

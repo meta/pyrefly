@@ -1325,7 +1325,12 @@ pub enum BindingExpect {
     MatchCaseReachability {
         subject_idx: Idx<Key>,
         narrowing_subject: Option<NarrowingSubject>,
-        narrow_ops_for_case: (Box<NarrowOp>, TextRange),
+        narrow_ops_for_case: Box<(NarrowOp, TextRange)>,
+        /// Negations from earlier unguarded cases in the same match, in the
+        /// same subject coordinates as `narrow_ops_for_case`. Reachability
+        /// narrows by the current pattern first, then applies these, so an
+        /// `Any` subject can first become `bool` and then subtract `int`.
+        prev_case_negations: Option<Box<(NarrowOp, TextRange)>>,
         case_range: TextRange,
     },
     /// Code following one or more points in a suite that control passes only conditionally, such
