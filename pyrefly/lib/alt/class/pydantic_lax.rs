@@ -10,6 +10,7 @@ use pyrefly_types::class::ClassType;
 use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::keywords::ConverterMap;
 use pyrefly_types::literal::Lit;
+use pyrefly_types::quantified::Quantified;
 use pyrefly_types::tuple::Tuple;
 use ruff_python_ast::name::Name;
 use starlark_map::ordered_map::OrderedMap;
@@ -278,20 +279,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     return self.union(ty.clone(), mapping);
                 }
                 let targs = cls.targs().as_slice();
-                if targs.is_empty() {
-                    // Enums and namedtuples have built-in schemas that accept more than instances,
-                    // as do some stdlib classes whose lax conversions we don't model precisely, so
-                    // we map all stdlib classes to `Any` as a conservative approximation. Pydantic
-                    // validates other classes with `isinstance`.
-                    return if metadata.is_enum()
-                        || metadata.named_tuple_metadata().is_some()
-                        || typeshed().is_ok_and(|ts| ts.has_module(class_obj.module_name()))
-                    {
-                        self.heap.mk_any_explicit()
-                    } else {
-                        ty.clone()
-                    };
-                }
 
                 // Special handling for dict and Mapping: don't expand key type
                 // (Mapping is invariant in key, so expanding it would make
@@ -326,7 +313,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     return converted;
                 }
-                self.heap.mk_any_explicit()
+
+                // Enums and namedtuples have built-in schemas that accept more than instances,
+                // as do some stdlib classes whose lax conversions we don't model precisely, so
+                // we map all stdlib classes to `Any` as a conservative approximation. Pydantic
+                // validates other classes with `isinstance`.
+                if metadata.is_enum()
+                    || metadata.named_tuple_metadata().is_some()
+                    || typeshed().is_ok_and(|ts| ts.has_module(class_obj.module_name()))
+                {
+                    return self.heap.mk_any_explicit();
+                }
+                let mut instance_ty = cls.clone();
+                for (param, targ) in instance_ty.targs_mut().iter_paired_mut() {
+                    *targ = Quantified::as_gradual_type_helper(param.kind(), None);
+                }
+                self.heap.mk_class_type(instance_ty)
             }
             Type::Union(f) => {
                 let expanded_members = self.expand_types(&f.members);

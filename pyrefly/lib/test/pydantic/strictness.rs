@@ -435,6 +435,25 @@ assert_type(m.point, Point)
 );
 
 pydantic_testcase!(
+    test_lax_mode_generic_class_inputs,
+    r#"
+from collections import defaultdict
+from pydantic import BaseModel, ConfigDict
+
+class Box[T]:
+    pass
+
+class Model(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    box: Box[int]
+    counts: defaultdict[str, int]
+
+Model(box=Box[str](), counts={})
+Model(box=5, counts={})  # E: is not assignable to parameter `box`
+    "#,
+);
+
+pydantic_testcase!(
     test_lax_mode_list_and_set_invariance,
     r#"
 from pydantic import BaseModel
