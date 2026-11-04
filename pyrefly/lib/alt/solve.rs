@@ -137,6 +137,7 @@ use crate::binding::binding::ReturnImplicit;
 use crate::binding::binding::ReturnType;
 use crate::binding::binding::ReturnTypeKind;
 use crate::binding::binding::SizeExpectation;
+use crate::binding::binding::SuiteGate;
 use crate::binding::binding::SuperStyle;
 use crate::binding::binding::TypeAliasParams;
 use crate::binding::binding::TypeParameter;
@@ -3197,7 +3198,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             BindingExpect::GatedSuiteReachability { gates, end } => {
                 // Everything from the first gate that cannot be passed is dead, so report from
                 // there; later gates describe code that region already covers.
-                if let Some(gate) = gates.iter().find(|gate| match &gate.condition {
+                let closed = |gate: &SuiteGate| match &gate.condition {
                     GateCondition::ManagerSuppresses { contexts, kind } => {
                         contexts.iter().all(|context| {
                             self.context_manager_definitely_does_not_suppress(
@@ -3206,14 +3207,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             )
                         })
                     }
-                    GateCondition::ExpressionReturns { result } => {
-                        self.get_idx(*result).ty().is_never()
-                            && self.statement_is_a_diverging_call(*result)
-                    }
+                    GateCondition::ExpressionReturns { result } => self.statement_diverges(*result),
                     GateCondition::SomePathReturns { last_exprs } => last_exprs
                         .iter()
                         .any(|xs| self.all_paths_diverge(xs, DivergenceQuestion::DeadCode)),
-                }) {
+                };
+                // A dead region never begins with a divergence marker, an expression of type
+                // `Never` such as `assert_never(x)`. The marker is judged by its type alone:
+                // whether the `Never` is the call's own or came in through an argument, as for
+                // `assert_type(x, Never)`, the statement says the same thing. A marker opens the
+                // next gate, whose start is the statement after it, so the region begins there
+                // instead, whether or not that gate is closed on its own; a marker that nothing
+                // follows leaves nothing to report.
+                let is_marker = |gate: &SuiteGate| {
+                    gate.expr_at_start
+                        .is_some_and(|result| self.get_idx(result).ty().is_never())
+                };
+                if let Some(first) = gates.iter().position(closed)
+                    && let Some(gate) = gates[first..].iter().find(|gate| !is_marker(gate))
+                {
                     errors
                         .error_builder(
                             TextRange::new(gate.start, *end),
@@ -5132,6 +5144,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    /// Whether control never gets past this expression statement: its result is `Never`, and the
+    /// call that produced it is the reason. This is what makes the statement a divergence marker
+    /// and the code after it dead.
+    fn statement_diverges(&self, result: Idx<Key>) -> bool {
+        self.get_idx(result).ty().is_never() && self.statement_is_a_diverging_call(result)
+    }
+
     /// Whether this expression statement is a call to something that never returns.
     ///
     /// A `Never` result does not say so on its own. A call whose receiver was narrowed away has
@@ -5204,9 +5223,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         self.context_manager_definitely_does_not_suppress(e.ty(), *kind)
                     }
                 },
+                // A `match` with no irrefutable case is passed only when some value escapes
+                // every pattern. That is the proof behind `unreachable-match-case` and the
+                // function's implicit return, and it holds for dead code too; the `assert_never`
+                // that relies on it is exempt as a divergence marker, not by refusing the proof.
                 LastStmt::Exhaustive(_) => e.ty().is_never(),
                 // Code is reported dead only by the suite's test, never by the narrowing that
-                // also makes a fall-through dead, since that would condemn `assert_never`.
+                // also makes a fall-through dead. An `if` test can be settled by a value the
+                // check does not trust, an inferred `keep = True` for one, and the narrowing
+                // of the fall-through would report what the test itself does not.
                 LastStmt::BranchEnd(_) => match question {
                     DivergenceQuestion::ImplicitReturn => e.ty().is_never(),
                     DivergenceQuestion::DeadCode => dead_by_test(k),

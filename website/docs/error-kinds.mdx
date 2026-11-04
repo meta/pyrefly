@@ -2476,6 +2476,40 @@ def loop_example():
         return 1  # This code is unreachable [unreachable]
 ```
 
+Code after a call that never returns, such as `sys.exit()` or a function annotated `NoReturn`,
+is reported too, as is code after an `if` or `match` whose every branch ends that way. A `match`
+with no catch-all case counts when narrowing proves it exhaustive, so a `raise` in every case of a
+`match` over a union leaves the code after it dead. The statement right after such a proof is
+often there to enforce it, `assert_never(x)`, a `raise` or an `assert False`, so a dead region
+never begins with one of those; the code after the enforcing statement is still reported.
+
+```python
+from typing import assert_never
+
+class Dog: ...
+class Cat: ...
+
+def after_match(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            raise ValueError()
+        case Cat():
+            raise ValueError()
+    print("dead")  # This code is unreachable [unreachable]
+
+def idiom(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    assert_never(pet)  # Not reported: this is what checks the exhaustiveness
+    print("dead")  # This code is unreachable [unreachable]
+```
+
+An `if` chain with no `else` is not reported this way, even when its tests narrow the value to
+nothing, since a test can turn on a value the check does not trust (see below).
+
 A dead region consisting only of `yield`s is not reported. That is how a generator
 is written: the `yield` is what makes the function a generator. A dead
 `yield` alongside any other dead statement is ordinary dead code and is still reported.
