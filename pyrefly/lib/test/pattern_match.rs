@@ -197,6 +197,21 @@ def no_cascade_after_wildcard(x: int) -> None:
 "#,
 );
 
+// Reachability is not checked on `object` subjects, because structural patterns can narrow
+// `object` to `Never` incorrectly.
+testcase!(
+    bug = "`case bool()` after `case int()` on an `object` subject is not reported",
+    test_match_case_unreachable_subsumed_object,
+    r#"
+def f(x: object) -> None:
+    match x:
+        case int():
+            pass
+        case bool():
+            pass
+"#,
+);
+
 testcase!(
     test_match_case_unreachable_subsumed_by_sibling_pattern,
     r#"
@@ -228,13 +243,6 @@ class A:
 
 class B(A):
     pass
-
-def ok_object_subclass_order(x: object) -> None:
-    match x:
-        case int():
-            pass
-        case bool():
-            pass
 
 # A partial class pattern does not subsume its subclass pattern.
 def ok_partial_class_predecessor_any(x: Any) -> None:
