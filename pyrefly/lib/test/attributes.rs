@@ -133,7 +133,6 @@ class ClassBody(Base):
 );
 
 testcase!(
-    bug = "Paths that end in an explicit return are not checked",
     test_attribute_initialization_trailing_noreturn,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -176,7 +175,7 @@ class EarlyReturn:
     def __init__(self, flag: bool) -> None:
         if flag:
             return
-        self.value = 1
+        self.value = 1  # E: Attribute `value` may be uninitialized
         stop()
 "#,
 );
@@ -215,7 +214,6 @@ class NotCutOff:
 );
 
 testcase!(
-    bug = "Paths that end in an explicit return are not checked",
     test_attribute_initialization_while_true_return,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -235,7 +233,7 @@ class EarlyReturn:
         while True:
             if flag:
                 return
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
             return
 
 class ReturnOrBreak:
@@ -423,6 +421,7 @@ class C:
 );
 
 testcase!(
+    bug = "Return snapshots do not include assignments from finally",
     test_attribute_initialization_finally_after_return,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -431,7 +430,7 @@ class C:
         try:
             return
         finally:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
 "#,
 );
 
@@ -1013,7 +1012,6 @@ assert_type(LoopElse([]).value, int)
 );
 
 testcase!(
-    bug = "Paths that end in an explicit return are not checked",
     test_attribute_initialization_deferred_return_paths,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -1041,7 +1039,7 @@ class EarlyPathContinues:
     def __init__(self, early: bool, flag: bool) -> None:
         if early:
             if flag:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
             else:
                 proceed()
             return
@@ -5457,5 +5455,37 @@ class LoopReturnsInBranch:
                 return
         else:
             self.value = 2
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_combines_every_return,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+
+class LaterReturnMisses:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            self.value = 1  # E: Attribute `value` may be uninitialized
+            return
+        if b:
+            return
+        self.value = 2
+
+class EveryReturnCutOff:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            if b:
+                self.value = 1
+            else:
+                stop()
+            return
+        if b:
+            self.value = 2
+        else:
+            stop()
 "#,
 );

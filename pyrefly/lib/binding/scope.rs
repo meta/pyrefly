@@ -1252,6 +1252,9 @@ struct ScopeMethod {
     new_instance_names: SmallSet<Name>,
     instance_attributes: SmallMap<Name, InstanceAttribute>,
     nn_module_registrations: NNModuleRegistrations,
+    /// Attribute initialization combined over the reachable `return`s so far, or `None` before
+    /// the first one. An absent name is uninitialized at some `return`.
+    return_attribute_initialization: Option<SmallMap<Name, InitializationStatus>>,
     parameters: SmallMap<Name, ParameterUsage>,
     yields_and_returns: YieldsAndReturns,
     is_async: bool,
@@ -1325,6 +1328,7 @@ impl ScopeMethod {
             new_instance_names: SmallSet::new(),
             instance_attributes: SmallMap::new(),
             nn_module_registrations: SmallMap::new(),
+            return_attribute_initialization: None,
             parameters: SmallMap::new(),
             yields_and_returns: Default::default(),
             is_async,
@@ -2375,12 +2379,20 @@ impl Scopes {
                             .then_some(&scope.flow);
                         let initialized = InitializationStatus::merge(
                             &mut self.unset_nodes,
-                            final_flow.into_iter().map(|flow| {
-                                (
-                                    flow.instance_attribute_initialization.get(&name),
-                                    flow.last_stmt_expr,
-                                )
-                            }),
+                            final_flow
+                                .into_iter()
+                                .map(|flow| {
+                                    (
+                                        flow.instance_attribute_initialization.get(&name),
+                                        flow.last_stmt_expr,
+                                    )
+                                })
+                                .chain(
+                                    method_scope
+                                        .return_attribute_initialization
+                                        .iter()
+                                        .map(|flow| (flow.get(&name), None)),
+                                ),
                         );
                         (
                             name,
@@ -3493,15 +3505,52 @@ impl Scopes {
         x: StmtReturn,
         is_unreachable: bool,
     ) -> Result<(), (CurrentIdx, StmtReturn)> {
-        match self.current_yields_and_returns_mut() {
-            Some(yields_and_returns) => {
-                yields_and_returns
-                    .returns
-                    .push((ret.into_idx(), x, is_unreachable));
-                Ok(())
+        let unset_nodes = &mut self.unset_nodes;
+        for scope in self.scopes.iter_mut().map(|node| &mut node.scope).rev() {
+            match &mut scope.kind {
+                ScopeKind::Function(function) => {
+                    function
+                        .yields_and_returns
+                        .returns
+                        .push((ret.into_idx(), x, is_unreachable));
+                    return Ok(());
+                }
+                ScopeKind::Method(method) => {
+                    if !is_unreachable {
+                        let current = &scope.flow.instance_attribute_initialization;
+                        // A name that is uninitialized at a `return` stays uninitialized, so
+                        // it is dropped instead of being merged again at later ones.
+                        match &mut method.return_attribute_initialization {
+                            None => {
+                                method.return_attribute_initialization = Some(
+                                    current
+                                        .iter()
+                                        .filter(|(_, status)| {
+                                            !matches!(status, InitializationStatus::Uninitialized)
+                                        })
+                                        .map(|(name, status)| (name.clone(), status.clone()))
+                                        .collect(),
+                                );
+                            }
+                            Some(previous) => previous.retain(|name, status| {
+                                *status = InitializationStatus::merge(
+                                    unset_nodes,
+                                    [(Some(&*status), None), (current.get(name), None)],
+                                );
+                                !matches!(status, InitializationStatus::Uninitialized)
+                            }),
+                        }
+                    }
+                    method
+                        .yields_and_returns
+                        .returns
+                        .push((ret.into_idx(), x, is_unreachable));
+                    return Ok(());
+                }
+                _ => {}
             }
-            None => Err((ret, x)),
         }
+        Err((ret, x))
     }
 
     /// Record a yield in the enclosing function body there is one.

@@ -1865,7 +1865,7 @@ def f():
 
 // https://github.com/facebook/pyrefly/issues/4318
 testcase!(
-    bug = "Explicit returns and `__getattr__` fallbacks are not handled",
+    bug = "Instance attributes ignore a `__getattr__` fallback",
     test_conditionally_defined_class_member,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -1921,7 +1921,7 @@ class PartialWithReturn:
     def __init__(self) -> None:
         if coin():
             return
-        self.value = 1
+        self.value = 1  # E: Attribute `value` may be uninitialized
 
 class BareAnnotation:
     def __init__(self) -> None:

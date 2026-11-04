@@ -1898,7 +1898,7 @@ The `strict` preset enables this check as an error.
 
 Pyrefly reports an attribute that the class body or a recognized initialization method assigns on some, but not all, paths that complete normally.
 Recognized methods include `__init__`, `__new__`, `__post_init__`, `__init_subclass__`, and supported test setup methods.
-Paths that end in an explicit `return` are not checked.
+An explicit `return` completes the method normally.
 Paths that raise or end in a `Never` or `NoReturn` call do not require an assignment.
 
 ```python
@@ -1907,10 +1907,14 @@ class C:
         flag = True  # possibly-uninitialized-attribute
         # The class body can complete without assigning flag.
 
-    def __init__(self, value: int | None) -> None:
+    def __init__(self, value: int | None, early: bool) -> None:
         if value is not None:
             self.value = value  # possibly-uninitialized-attribute
         # The path where value is None completes without assigning self.value.
+        if early:
+            return
+        self.ready = True  # possibly-uninitialized-attribute
+        # The early return completes __init__ without assigning self.ready.
 ```
 
 The check permits an inherited attribute when a base class other than `object` defines the same name.
