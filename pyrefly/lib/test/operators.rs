@@ -464,6 +464,33 @@ def f(flag: bool, value: object | None, other: bool) -> None:
 "#,
 );
 
+// `x or y` returns `x` only when `x` is truthy, so a falsy result is always `y`.
+testcase!(
+    bug = "The truthy part of `x or y` survives a falsy narrow of the result",
+    test_boolean_or_result_falsy_narrow,
+    r#"
+from typing import assert_type
+
+class Config: ...
+
+class Settings: ...
+
+def assigned(override: Config | None, default: Settings) -> None:
+    config = override or default
+    if not config:
+        assert_type(config, Config | Settings)
+
+def walrus(override: Config | None, default: Settings) -> None:
+    if not (config := override or default):
+        assert_type(config, Config | Settings)
+
+def container(items: list[int], default: Settings) -> None:
+    value = items or default
+    if not value:
+        assert_type(value, list[int] | Settings)
+"#,
+);
+
 // Regression test: generic function calls in `and` expressions should not
 // have the narrowed type from earlier branches used as a hint for type variable
 // inference. The narrowing of `bool` to `Literal[False]` is for the result of
