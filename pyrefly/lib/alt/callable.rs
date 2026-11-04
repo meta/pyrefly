@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::mem;
 
@@ -42,6 +44,7 @@ use starlark_map::small_set::SmallSet;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::answers_solver::TypeCheckOptions;
+use crate::alt::expr::ArgumentCache;
 use crate::alt::expr::ExprOptions;
 use crate::alt::expr::TypeOrExpr;
 use crate::alt::map_int_tuples::MapIntTuplesPatternArgument;
@@ -116,6 +119,73 @@ fn nests_calls_to_depth_with(x: &Expr, depth: u32, container: fn(&Expr) -> bool)
 /// Implemented by keeping an `Owner` to hand out references to `Type`.
 pub struct CallWithTypes(Owner<Type>);
 
+/// Owns argument caches for contextual attempts made by one constructor invocation.
+/// The arena stays off the call stack and is allocated only for eligible arguments.
+pub struct ConstructorArguments(Option<OnceCell<Box<Owner<ArgumentCache>>>>);
+
+/// Lambda and comprehension bindings must be checked again under each parameter context.
+fn contains_argument_bindings(expr: &Expr) -> bool {
+    if matches!(
+        expr,
+        Expr::Lambda(_)
+            | Expr::ListComp(_)
+            | Expr::SetComp(_)
+            | Expr::DictComp(_)
+            | Expr::Generator(_)
+    ) {
+        return true;
+    }
+    let mut found = false;
+    expr.recurse(&mut |child: &Expr| found = found || contains_argument_bindings(child));
+    found
+}
+
+impl ConstructorArguments {
+    pub fn new(hint: Option<HintRef>) -> Self {
+        Self(hint.map(|_| OnceCell::new()))
+    }
+
+    /// Retains expressions and shares only closed inference of nested calls.
+    pub fn prepare<'a, 'b: 'a>(
+        &'a self,
+        args: &'a [CallArg<'b>],
+        keywords: &'a [CallKeyword<'b>],
+    ) -> (Cow<'a, [CallArg<'a>]>, Cow<'a, [CallKeyword<'a>]>) {
+        let Some(caches) = &self.0 else {
+            return (Cow::Borrowed(args), Cow::Borrowed(keywords));
+        };
+        let prepare = |value| match value {
+            TypeOrExpr::Expr(expr @ Expr::Call(_)) if !contains_argument_bindings(expr) => {
+                let caches = caches.get_or_init(|| Box::new(Owner::new()));
+                Some(TypeOrExpr::Prepared(
+                    expr,
+                    caches.push(ArgumentCache::default()),
+                ))
+            }
+            _ => None,
+        };
+        let mut args: Cow<'a, [CallArg<'a>]> = Cow::Borrowed(args);
+        for i in 0..args.len() {
+            let prepared = match &args[i] {
+                CallArg::Arg(value) => prepare(*value).map(CallArg::Arg),
+                CallArg::Star(value, range) => {
+                    prepare(*value).map(|value| CallArg::Star(value, *range))
+                }
+            };
+            if let Some(prepared) = prepared {
+                args.to_mut()[i] = prepared;
+            }
+        }
+        let mut keywords: Cow<'a, [CallKeyword<'a>]> = Cow::Borrowed(keywords);
+        for i in 0..keywords.len() {
+            if let Some(prepared) = prepare(keywords[i].value) {
+                keywords.to_mut()[i].value = prepared;
+            }
+        }
+        (args, keywords)
+    }
+}
+
 impl CallWithTypes {
     pub fn new() -> Self {
         Self(Owner::new())
@@ -128,29 +198,33 @@ impl CallWithTypes {
         errors: &ErrorCollector,
     ) -> TypeOrExpr<'a> {
         match x {
-            TypeOrExpr::Expr(e @ Expr::Lambda(_)) => TypeOrExpr::Expr(e),
+            TypeOrExpr::Expr(Expr::Lambda(_)) | TypeOrExpr::Prepared(Expr::Lambda(_), _) => x,
             TypeOrExpr::Expr(e @ (Expr::ListComp(_) | Expr::SetComp(_) | Expr::DictComp(_)))
-                if solver.preserves_contextual_comprehensions()
-                    && !nests_calls_to_depth_with(e, MIN_FLATTEN_CALL_DEPTH, |arg| {
-                        is_non_empty_container_literal(arg)
-                            || matches!(
-                                arg,
-                                Expr::ListComp(_) | Expr::SetComp(_) | Expr::DictComp(_)
-                            )
-                    }) =>
+            | TypeOrExpr::Prepared(
+                e @ (Expr::ListComp(_) | Expr::SetComp(_) | Expr::DictComp(_)),
+                _,
+            ) if solver.preserves_contextual_comprehensions()
+                && !nests_calls_to_depth_with(e, MIN_FLATTEN_CALL_DEPTH, |arg| {
+                    is_non_empty_container_literal(arg)
+                        || matches!(
+                            arg,
+                            Expr::ListComp(_) | Expr::SetComp(_) | Expr::DictComp(_)
+                        )
+                }) =>
             {
-                TypeOrExpr::Expr(e)
+                x
             }
             TypeOrExpr::Expr(e @ (Expr::Dict(_) | Expr::List(_) | Expr::Set(_)))
+            | TypeOrExpr::Prepared(e @ (Expr::Dict(_) | Expr::List(_) | Expr::Set(_)), _)
                 if !nests_calls_to_depth(e, MIN_FLATTEN_CALL_DEPTH) =>
             {
                 // Hack: keep mutable builtin containers as expressions, since they often need to be
                 // contextually typed against the function's parameter types, unless nesting depth
                 // reaches or exceeds `MIN_FLATTEN_CALL_DEPTH` to avoid exponential blowup.
-                TypeOrExpr::Expr(e)
+                x
             }
-            TypeOrExpr::Expr(e) => {
-                let t = solver.expr_infer(e, errors);
+            TypeOrExpr::Expr(e) | TypeOrExpr::Prepared(e, _) => {
+                let t = x.infer(solver, errors);
                 TypeOrExpr::Type(self.0.push(t), e.range())
             }
             TypeOrExpr::Type(t, r) => TypeOrExpr::Type(t, r),
@@ -350,11 +424,14 @@ impl<'a> CallArg<'a> {
     ) -> CallArgPreEval<'_> {
         match self {
             Self::Arg(TypeOrExpr::Type(ty, _)) => CallArgPreEval::Type(ty, false),
-            Self::Arg(TypeOrExpr::Expr(e)) => CallArgPreEval::Expr(e, false),
+            Self::Arg(TypeOrExpr::Expr(e)) => CallArgPreEval::Expr(e, None, false),
+            Self::Arg(TypeOrExpr::Prepared(e, cache)) => {
+                CallArgPreEval::Expr(e, Some(cache), false)
+            }
             Self::Star(e, _range) => {
                 // Special-case list/set/tuple literals with statically known element count.
                 // Only do this if there are no starred elements inside the literal.
-                if let TypeOrExpr::Expr(expr) = e {
+                if let TypeOrExpr::Expr(expr) | TypeOrExpr::Prepared(expr, _) = e {
                     let literal_elts: Option<&[Expr]> = match expr {
                         Expr::List(list_expr) => Some(&list_expr.elts),
                         Expr::Set(set_expr) => Some(&set_expr.elts),
@@ -434,7 +511,7 @@ impl<'a> CallArg<'a> {
 #[derive(Clone, Debug)]
 enum CallArgPreEval<'a> {
     Type(&'a Type, bool),
-    Expr(&'a Expr, bool),
+    Expr(&'a Expr, Option<&'a ArgumentCache>, bool),
     Star {
         prefix: Vec<Type>,
         middle: Type,
@@ -449,7 +526,7 @@ enum CallArgPreEval<'a> {
 impl CallArgPreEval<'_> {
     fn step(&self) -> bool {
         match self {
-            Self::Type(_, done) | Self::Expr(_, done) | Self::Star { done, .. } => !*done,
+            Self::Type(_, done) | Self::Expr(_, _, done) | Self::Star { done, .. } => !*done,
             Self::Fixed(tys, i) => *i < tys.len(),
         }
     }
@@ -485,7 +562,9 @@ impl CallArgPreEval<'_> {
     ) -> Type {
         match self {
             Self::Type(ty, _) => (*ty).clone(),
-            Self::Expr(expr, _) => solver.expr_infer(expr, arg_errors),
+            Self::Expr(expr, cache, _) => solver
+                .expr_with_argument_cache(expr, ExprOptions::infer(arg_errors, None), *cache)
+                .into_ty(),
             Self::Star {
                 prefix,
                 middle,
@@ -500,7 +579,7 @@ impl CallArgPreEval<'_> {
     /// Advance past one matched parameter without changing how its argument is interpreted.
     fn advance_after_match(&mut self, vararg: bool) {
         match self {
-            Self::Type(_, done) | Self::Expr(_, done) => *done = true,
+            Self::Type(_, done) | Self::Expr(_, _, done) => *done = true,
             Self::Star {
                 prefix,
                 consumed,
@@ -550,7 +629,7 @@ impl CallArgPreEval<'_> {
         if let Some(pattern) = map_int_tuples_parameter_pattern(hint) {
             let argument = match self {
                 Self::Type(ty, _) => MapIntTuplesPatternArgument::Type((*ty).clone()),
-                Self::Expr(expr, _) => MapIntTuplesPatternArgument::Expr(expr),
+                Self::Expr(expr, _, _) => MapIntTuplesPatternArgument::Expr(expr),
                 Self::Star {
                     prefix,
                     middle,
@@ -598,8 +677,9 @@ impl CallArgPreEval<'_> {
                 solver.maybe_error_any_argument_type(&ty, range, arg_errors);
                 Some(ty)
             }
-            Self::Expr(x, _) => {
+            Self::Expr(x, cache, _) => {
                 let x = *x;
+                let cache = *cache;
                 self.advance_after_match(vararg);
                 // PEP 747: when the parameter type is TypeForm, evaluate
                 // string literal arguments as forward-reference type forms.
@@ -633,9 +713,10 @@ impl CallArgPreEval<'_> {
                     return Some(ty);
                 }
                 let ty = solver
-                    .expr_with_options(
+                    .expr_with_argument_cache(
                         x,
                         ExprOptions::check(hint, arg_errors, call_errors, tcc, Some(call_context)),
+                        cache,
                     )
                     .into_ty();
                 solver.maybe_error_any_argument_type(&ty, range, arg_errors);
@@ -691,7 +772,7 @@ impl CallArgPreEval<'_> {
     // Intended for arguments matched to unpack-annotated *args, which are typechecked separately later
     fn post_skip(&mut self) {
         match self {
-            Self::Type(_, done) | Self::Expr(_, done) | Self::Star { done, .. } => {
+            Self::Type(_, done) | Self::Expr(_, _, done) | Self::Star { done, .. } => {
                 *done = true;
             }
             Self::Fixed(_, i) => {
@@ -703,7 +784,7 @@ impl CallArgPreEval<'_> {
     // Similar to post_skip but it skips to the end of any fixed length arguments.
     fn mark_done(&mut self) {
         match self {
-            Self::Type(_, done) | Self::Expr(_, done) | Self::Star { done, .. } => {
+            Self::Type(_, done) | Self::Expr(_, _, done) | Self::Star { done, .. } => {
                 *done = true;
             }
             Self::Fixed(tys, i) => {
@@ -718,8 +799,8 @@ impl CallArgPreEval<'_> {
         arg_errors: &ErrorCollector,
     ) {
         match self {
-            Self::Expr(x, _) => {
-                solver.expr_infer(x, arg_errors);
+            Self::Expr(x, cache, _) => {
+                solver.expr_with_argument_cache(x, ExprOptions::infer(arg_errors, None), *cache);
             }
             _ => {}
         }
@@ -1034,7 +1115,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 continue;
             }
             match kw.value {
-                TypeOrExpr::Expr(Expr::Dict(dict)) => {
+                TypeOrExpr::Expr(Expr::Dict(dict)) | TypeOrExpr::Prepared(Expr::Dict(dict), _) => {
                     for item in &dict.items {
                         let Some(Expr::StringLiteral(lit)) = item.key.as_ref() else {
                             continue;
@@ -1042,9 +1123,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         keyword_arg_names.insert(Name::new(lit.value.to_str()));
                     }
                 }
-                TypeOrExpr::Expr(expr) => {
+                TypeOrExpr::Expr(expr) | TypeOrExpr::Prepared(expr, _) => {
                     for (key, _) in self
-                        .expr_with_options(expr, ExprOptions::infer(arg_errors, None))
+                        .expr_with_argument_cache(
+                            expr,
+                            ExprOptions::infer(arg_errors, None),
+                            kw.value.argument_cache(),
+                        )
                         .key_facets_at(&[])
                     {
                         keyword_arg_names.insert(Name::new(key.as_str()));
@@ -1190,7 +1275,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             .map(|_| arg_pre.inferred_type(self, arg_errors));
                         let arg_ty = if bound_args.is_none()
                             && match arg_pre {
-                                CallArgPreEval::Expr(Expr::Lambda(_), _) => true,
+                                CallArgPreEval::Expr(Expr::Lambda(_), _, _) => true,
                                 CallArgPreEval::Expr(..) | CallArgPreEval::Type(..) => {
                                     matches!(ty, Type::Callable(_))
                                         && ty.any(|ty| matches!(ty, Type::TypeLevelDslCall(_)))
@@ -1326,9 +1411,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             for (arg, range) in unpacked_vararg_matched_args {
                 let ty = match arg {
                     CallArgPreEval::Type(ty, _) => ty.clone(),
-                    CallArgPreEval::Expr(e, _) => {
+                    CallArgPreEval::Expr(e, cache, _) => {
                         let before = arg_errors.len_hard();
-                        let ty = self.expr_infer(e, arg_errors);
+                        let ty = self
+                            .expr_with_argument_cache(
+                                e,
+                                ExprOptions::infer(arg_errors, None),
+                                cache,
+                            )
+                            .into_ty();
                         if map_pattern.is_some() && arg_errors.len_hard() > before {
                             self.heap.mk_any_error()
                         } else {
@@ -1860,7 +1951,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .and_then(|(_, hint)| map_int_tuples_parameter_pattern(hint))
                     {
                         let argument = match kw.value {
-                            TypeOrExpr::Expr(expr) => MapIntTuplesPatternArgument::Expr(expr),
+                            TypeOrExpr::Expr(expr) | TypeOrExpr::Prepared(expr, _) => {
+                                MapIntTuplesPatternArgument::Expr(expr)
+                            }
                             TypeOrExpr::Type(ty, _) => {
                                 MapIntTuplesPatternArgument::Type((*ty).clone())
                             }
@@ -1877,8 +1970,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         )
                     } else {
                         match kw.value {
-                            TypeOrExpr::Expr(x) => self
-                                .expr_with_options(
+                            TypeOrExpr::Expr(x) | TypeOrExpr::Prepared(x, _) => self
+                                .expr_with_argument_cache(
                                     x,
                                     match hint {
                                         Some((_, ty)) => ExprOptions::check(
@@ -1890,6 +1983,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                         ),
                                         None => ExprOptions::infer(arg_errors, None),
                                     },
+                                    kw.value.argument_cache(),
                                 )
                                 .into_ty(),
                             TypeOrExpr::Type(x, range) => {

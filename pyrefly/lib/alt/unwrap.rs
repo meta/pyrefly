@@ -65,6 +65,11 @@ impl<'a, 'b> HintRef<'a, 'b> {
         self.1
     }
 
+    /// Retains the hint members while directing diagnostics to another attempt.
+    pub fn with_errors<'c>(self, errors: Option<&'c ErrorCollector>) -> HintRef<'c, 'b> {
+        HintRef(self.0, errors)
+    }
+
     pub fn filter_for_call(hint: Option<Self>, tparams: Option<&TParams>) -> Option<Self> {
         // Function return hints only affect calls whose type parameters can be contextually instantiated.
         // Note that by invariant, constructor calls get hint=None, so we only have to care about the

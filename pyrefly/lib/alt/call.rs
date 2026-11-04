@@ -45,6 +45,7 @@ use crate::alt::attr::NoAccessReason;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
 use crate::alt::callable::CallWithTypes;
+use crate::alt::callable::ConstructorArguments;
 use crate::alt::callable::ReturnTypeResolutionError;
 use crate::alt::class::class_field::ClassAttribute;
 use crate::alt::class::class_field::DescriptorBase;
@@ -1284,8 +1285,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self.get_dunder_new(cls, preserve_self).is_some()
                 && self.get_dunder_init(cls, false).is_some()
         };
-        let is_deeply_nested =
-            |x: &TypeOrExpr| matches!(x, TypeOrExpr::Expr(e) if nests_calls(e, FLATTEN_CALL_DEPTH));
+        let is_deeply_nested = |x: &TypeOrExpr| {
+            matches!(
+                x,
+                TypeOrExpr::Expr(e) | TypeOrExpr::Prepared(e, _)
+                    if nests_calls(e, FLATTEN_CALL_DEPTH)
+            )
+        };
 
         // Infer deeply nested arguments once, up front. Shallower nesting costs only a constant
         // factor, and flattening it would discard the parameter hint for no benefit.
@@ -1321,12 +1327,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             None => (args, keywords),
         };
 
-        self.construct_with_hint(HintRef::filter_for_constructor(hint, cls.targs()), |hint| {
+        let hint = HintRef::filter_for_constructor(hint, cls.targs());
+        let prepared = ConstructorArguments::new(hint);
+        let (args, keywords) = prepared.prepare(args, keywords);
+
+        self.construct_with_hint(hint, |hint| {
             self.construct_class_inner(
                 cls.clone(),
                 constructor_kind.clone(),
-                args,
-                keywords,
+                &args,
+                &keywords,
                 arguments_range,
                 callee_range,
                 context,
@@ -1675,10 +1685,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         };
 
         let infer_type_or_expr = |toe: TypeOrExpr, errors: &ErrorCollector| -> Type {
-            let ty = match toe {
-                TypeOrExpr::Type(ty, _) => ty.clone(),
-                TypeOrExpr::Expr(e) => self.expr_infer(e, errors),
-            };
+            let ty = toe.infer(self, errors);
             // NNModule fields carry captured constructor args (e.g., padding=Literal[1]) that DSL
             // forward functions need as literals to compute output shapes.
             ty.with_literal_style(LitStyle::Explicit)
@@ -1719,19 +1726,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
     ) -> Type {
-        self.construct_with_hint(
-            HintRef::filter_for_constructor(hint, typed_dict.targs()),
-            |hint| {
-                self.construct_typed_dict_inner(
-                    typed_dict.clone(),
-                    args,
-                    keywords,
-                    arguments_range,
-                    context,
-                    hint,
-                )
-            },
-        )
+        let hint = HintRef::filter_for_constructor(hint, typed_dict.targs());
+        let prepared = ConstructorArguments::new(hint);
+        let (args, keywords) = prepared.prepare(args, keywords);
+        self.construct_with_hint(hint, |hint| {
+            self.construct_typed_dict_inner(
+                typed_dict.clone(),
+                &args,
+                &keywords,
+                arguments_range,
+                context,
+                hint,
+            )
+        })
         .take(
             arguments_range,
             errors,
