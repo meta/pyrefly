@@ -6,6 +6,7 @@
  */
 
 use std::cell::LazyCell;
+use std::cell::RefCell;
 use std::fmt;
 use std::fmt::Display;
 use std::iter::once;
@@ -87,6 +88,7 @@ use vec1::vec1;
 
 use crate::alt::answers::AttributeReferenceKind;
 use crate::alt::answers::LookupAnswer;
+use crate::alt::answers::TraceSideEffects;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::answers_solver::TypeCheckOptions;
 use crate::alt::call::CallStyle;
@@ -100,6 +102,7 @@ use crate::alt::shape_extension::is_int_tuple_bound;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::solve::UntypeContext;
 use crate::alt::unwrap::HintRef;
+use crate::alt::unwrap::MAX_HINT_WIDTH;
 use crate::binding::binding::Binding;
 use crate::binding::binding::BindingClass;
 use crate::binding::binding::Key;
@@ -143,6 +146,23 @@ pub enum TypeOrExpr<'a> {
     /// Bundles a `Type` with a `TextRange`, allowing us to give good errors.
     Type(&'a Type, TextRange),
     Expr(&'a Expr),
+    /// Retains contextual checking while sharing inference within one constructor call.
+    Prepared(&'a Expr, &'a ArgumentCache),
+}
+
+/// Inference under concrete hints, owned by one constructor argument.
+/// The key preserves hint member order and distinguishes inference without a hint.
+#[derive(Debug, Default)]
+pub struct ArgumentCache {
+    outcomes: RefCell<SmallMap<Option<Vec<Type>>, CachedArgument>>,
+}
+
+#[derive(Debug)]
+struct CachedArgument {
+    ty: TypeInfo,
+    errors: ErrorCollector,
+    hint_errors: ErrorCollector,
+    traces: Option<TraceSideEffects>,
 }
 
 pub(crate) enum PreparedExprCall<'a> {
@@ -213,7 +233,7 @@ impl Ranged for TypeOrExpr<'_> {
     fn range(&self) -> TextRange {
         match self {
             TypeOrExpr::Type(_, range) => *range,
-            TypeOrExpr::Expr(expr) => expr.range(),
+            TypeOrExpr::Expr(expr) | TypeOrExpr::Prepared(expr, _) => expr.range(),
         }
     }
 }
@@ -221,6 +241,13 @@ impl Ranged for TypeOrExpr<'_> {
 static ANONYMOUS_TYPED_DICT_MAX_ITEMS: usize = 20;
 
 impl<'a> TypeOrExpr<'a> {
+    pub(crate) fn argument_cache(self) -> Option<&'a ArgumentCache> {
+        match self {
+            Self::Prepared(_, cache) => Some(cache),
+            Self::Type(..) | Self::Expr(_) => None,
+        }
+    }
+
     pub fn infer<Ans: LookupAnswer>(
         self,
         solver: &AnswersSolver<Ans>,
@@ -229,6 +256,9 @@ impl<'a> TypeOrExpr<'a> {
         match self {
             TypeOrExpr::Type(ty, _) => ty.clone(),
             TypeOrExpr::Expr(x) => solver.expr_infer(x, errors),
+            TypeOrExpr::Prepared(x, cache) => solver
+                .expr_with_argument_cache(x, ExprOptions::infer(errors, None), Some(cache))
+                .into_ty(),
         }
     }
 
@@ -840,6 +870,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Infer a type for an expression, with options to influence the inference and control whether
     /// and how the type is checked against an expected type.
     pub fn expr_with_options(&self, x: &Expr, options: ExprOptions<'_, '_, '_>) -> TypeInfo {
+        self.expr_with_argument_cache(x, options, None)
+    }
+
+    /// Checks the argument in its current context and reuses only compatible cached inference.
+    pub(crate) fn expr_with_argument_cache(
+        &self,
+        x: &Expr,
+        options: ExprOptions<'_, '_, '_>,
+        cache: Option<&ArgumentCache>,
+    ) -> TypeInfo {
         match options.expectation {
             ExprExpectation::Check {
                 want,
@@ -847,11 +887,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 context,
                 call_context,
             } if !want.is_any() => {
-                let got = self.expr_infer_impl(
+                let got = self.expr_infer_argument(
                     x,
                     Some(HintRef::new(want, Some(errors))),
                     options.errors,
                     options.type_form_context,
+                    cache,
                 );
                 let check_options = match call_context {
                     Some(call_context) => {
@@ -869,12 +910,73 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             ExprExpectation::Check { .. } => {
-                self.expr_infer_impl(x, None, options.errors, options.type_form_context)
+                self.expr_infer_argument(x, None, options.errors, options.type_form_context, cache)
             }
             ExprExpectation::Infer(hint) => {
-                self.expr_infer_impl(x, hint, options.errors, options.type_form_context)
+                self.expr_infer_argument(x, hint, options.errors, options.type_form_context, cache)
             }
         }
+    }
+
+    /// Shares successful inference under the same closed hint, excluding first-use state.
+    fn expr_infer_argument(
+        &self,
+        x: &Expr,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+        type_form_context: Option<TypeFormContext<'_>>,
+        cache: Option<&ArgumentCache>,
+    ) -> TypeInfo {
+        let Some(cache) = cache.filter(|_| {
+            type_form_context.is_none()
+                && hint.is_none_or(|hint| {
+                    hint.errors().is_some()
+                        && !hint.types().iter().any(Type::may_contain_placeholder_var)
+                })
+                && self.active_first_use_types().is_empty()
+        }) else {
+            return self.expr_infer_impl(x, hint, errors, type_form_context);
+        };
+        let key = hint.map(|hint| hint.types().to_vec());
+        if let Some(cached) = cache.outcomes.borrow().get(&key)
+            && (cached.traces.is_some() || !self.current().tracing_enabled())
+        {
+            errors.extend_from(&cached.errors);
+            if let Some(errors) = hint.as_ref().and_then(HintRef::errors) {
+                errors.extend_from(&cached.hint_errors);
+            }
+            if let Some(traces) = &cached.traces {
+                self.trace_state().replay_traces(traces);
+            }
+            return cached.ty.clone();
+        }
+        let local_errors = self.error_collector();
+        let local_hint_errors = self.error_collector();
+        let local_hint = hint.map(|hint| hint.with_errors(Some(&local_hint_errors)));
+        let (ty, traces) = self.trace_state().capture_traces(|| {
+            self.expr_infer_impl(x, local_hint, &local_errors, type_form_context)
+        });
+        errors.extend_from(&local_errors);
+        if let Some(errors) = hint.as_ref().and_then(HintRef::errors) {
+            errors.extend_from(&local_hint_errors);
+        }
+        if !ty.has_facets()
+            && !ty.ty().may_contain_placeholder_var()
+            && !local_errors.has_hard()
+            && !local_hint_errors.has_hard()
+            && cache.outcomes.borrow().len() < MAX_HINT_WIDTH
+        {
+            cache.outcomes.borrow_mut().insert(
+                key,
+                CachedArgument {
+                    ty: ty.clone(),
+                    errors: local_errors,
+                    hint_errors: local_hint_errors,
+                    traces,
+                },
+            );
+        }
+        ty
     }
 
     /// The core logic for inferring a type for an expression.

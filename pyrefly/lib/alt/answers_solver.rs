@@ -2022,6 +2022,32 @@ impl ThreadState {
         result
     }
 
+    /// Captures expression traces and also retains them in the current calculation.
+    pub(crate) fn capture_traces<T>(&self, f: impl FnOnce() -> T) -> (T, Option<TraceSideEffects>) {
+        if self.trace_sink.borrow().is_none() {
+            return (f(), None);
+        }
+        self.install_trace_sink();
+        let result = f();
+        let traces = self.take_trace_sink();
+        if let Some(traces) = &traces {
+            self.replay_traces(traces);
+        }
+        (result, traces)
+    }
+
+    /// Replays cached expression traces into the current calculation.
+    pub(crate) fn replay_traces(&self, traces: &TraceSideEffects) {
+        if let Some(sink) = self.trace_sink.borrow_mut().as_mut() {
+            sink.types.extend(traces.types.clone());
+            sink.overloaded_callees
+                .extend(traces.overloaded_callees.clone());
+            sink.invoked_properties
+                .extend(traces.invoked_properties.clone());
+            sink.expected_types.extend(traces.expected_types.clone());
+        }
+    }
+
     /// Append a type trace to the active sink. No-op if no sink is installed.
     pub(crate) fn record_type_trace(&self, loc: TextRange, ty: Arc<Type>) {
         if let Some(sink) = self.trace_sink.borrow_mut().as_mut() {

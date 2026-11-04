@@ -1108,7 +1108,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             todo_ctx,
         );
         if setters.iter().all(Option::is_none)
-            && let TypeOrExpr::Expr(e) = got
+            && let TypeOrExpr::Expr(e) | TypeOrExpr::Prepared(e, _) = got
         {
             // Nothing checks `got`, so infer it to catch any errors in the expression.
             self.expr_infer(e, errors);
@@ -1124,7 +1124,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // A value matching any branch of an `Overloaded` attribute can be assigned to it.
                 let ty = if let Type::Overloaded(branches) = &ty
                     && let Some(branch) = branches.iter().find(|branch| match got {
-                        TypeOrExpr::Expr(got) => {
+                        TypeOrExpr::Expr(got) | TypeOrExpr::Prepared(got, _) => {
                             let branch_errors = self.error_collector();
                             self.expr_check(
                                 got,
@@ -1140,7 +1140,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ty
                 };
                 let got_ty = match got {
-                    TypeOrExpr::Expr(got) => {
+                    TypeOrExpr::Expr(got) | TypeOrExpr::Prepared(got, _) => {
                         self.expr_check(got, Some((&ty, &type_check_context)), errors)
                     }
                     TypeOrExpr::Type(got, _) => {

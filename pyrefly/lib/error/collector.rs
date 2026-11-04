@@ -188,6 +188,14 @@ impl ErrorCollector {
         }
     }
 
+    /// Copies diagnostics from cached inference into the current attempt.
+    pub(crate) fn extend_from(&self, other: &ErrorCollector) {
+        if self.is_active() {
+            let errors = other.errors.lock().clone();
+            self.errors.lock().extend(errors);
+        }
+    }
+
     /// Add the errors from another collector that satisfy `keep`.
     pub(crate) fn extend_filtered(
         &self,

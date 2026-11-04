@@ -5,7 +5,79 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::test::util::TestEnv;
 use crate::testcase;
+
+testcase!(
+    test_constructor_prepared_argument_contexts,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable, TypedDict, assert_type
+
+class Base: ...
+class Child(Base): ...
+
+class Box[T]:
+    def __init__(self, value: T) -> None: ...
+
+class Receiver[T]:
+    def __init__(self, value: T) -> None: ...
+
+class Fields[T](TypedDict):
+    value: T
+
+def f() -> None:
+    # Each hint gives the nested call a different type argument.
+    nested: Receiver[Box[str]] | Receiver[Box[Base]] = Receiver(Box(Child()))
+    keyword: Receiver[Box[str]] | Receiver[Box[Base]] = Receiver(value=Box(Child()))
+    field: Fields[str] | Fields[Base] = Fields(value=Child())
+    callbacks: Receiver[Callable[[int], None]] = Receiver(lambda arg: None)
+    nested_callbacks: Receiver[Box[Callable[[int], None]]] = Receiver(Box(lambda arg: None))
+    containers: Receiver[list[Base]] = Receiver([Child()])
+    comprehensions: Receiver[list[Base]] = Receiver([Child() for _ in range(1)])
+    assert_type(nested, Receiver[Box[str]] | Receiver[Box[Base]])
+    assert_type(keyword, Receiver[Box[str]] | Receiver[Box[Base]])
+    assert_type(field, Fields[str] | Fields[Base])
+"#,
+);
+
+testcase!(
+    test_constructor_prepared_argument_diagnostics,
+    r#"
+from typing import cast
+from typing_extensions import deprecated
+
+class Receiver[T]:
+    def __init__(self, value: T, other: object) -> None: ...
+
+class Old[T]:
+    @deprecated("old constructor")
+    def __init__(self, value: T) -> None: ...
+
+@deprecated("old factory")
+def factory(value: int) -> int: ...
+
+def f(value: int) -> None:
+    constructor: Receiver[str] | Receiver[int] = Receiver(value, Old(value))  # E: `Old.__init__` is deprecated
+    result: Receiver[str] | Receiver[int] = Receiver(value, factory(value))  # E: `factory` is deprecated
+    keyword: Receiver[str] | Receiver[int] = Receiver(value, other=cast(int, value))  # E: Redundant cast
+    invalid: Receiver[str] | Receiver[int] = Receiver(value, factory("bad"))  # E: `factory` is deprecated # E: is not assignable to parameter `value`
+"#,
+);
+
+testcase!(
+    test_deeply_nested_init_only_constructor_hints,
+    r#"
+from typing import assert_type
+
+class Node[T]:
+    def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+
+def f(value: str) -> None:
+    root: Node[int] | Node[str] = Node(value, Node(value, Node(value, Node(value, Node(value, Node(value, Node(value, Node(value))))))))
+    assert_type(root, Node[int] | Node[str])
+"#,
+);
 
 testcase!(
     test_generic_decorator_on_dunder_new,

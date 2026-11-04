@@ -25,6 +25,7 @@ use pyrefly_util::display::count;
 use pyrefly_util::gas::Gas;
 use pyrefly_util::owner::Owner;
 use pyrefly_util::prelude::VecExt;
+use ruff_python_ast::Expr;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use starlark_map::small_set::SmallSet;
@@ -148,7 +149,25 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
                 return None;
             }
         };
-        let expanded_types = self.expand_type(value.infer(self.solver, errors));
+        // These expressions need parameter context and cannot produce an expandable type.
+        let expanded_types = match value {
+            TypeOrExpr::Expr(expr) | TypeOrExpr::Prepared(expr, _)
+                if matches!(
+                    expr,
+                    Expr::Lambda(_)
+                        | Expr::List(_)
+                        | Expr::Dict(_)
+                        | Expr::Set(_)
+                        | Expr::ListComp(_)
+                        | Expr::DictComp(_)
+                        | Expr::SetComp(_)
+                        | Expr::Generator(_)
+                ) =>
+            {
+                Vec::new()
+            }
+            _ => self.expand_type(value.infer(self.solver, errors)),
+        };
         if expanded_types.is_empty() {
             // Nothing to expand here, try the next argument.
             self.expand(errors, owner)

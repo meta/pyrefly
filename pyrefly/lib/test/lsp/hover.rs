@@ -3854,6 +3854,31 @@ Box[str]("hello")
     );
 }
 
+#[test]
+fn hover_on_prepared_constructor_argument() {
+    let code = r#"
+class Base: ...
+class Child(Base): ...
+
+class Box[T]:
+    def __init__(self, value: T) -> None: ...
+
+class Receiver[T]:
+    def __init__(self, value: T, other: object) -> None: ...
+
+def identity[T](value: T) -> T:
+    return value
+
+result: Receiver[str] | Receiver[int] = Receiver(1, Box(identity(Child())))
+#                                                          ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("def identity[T](value: T) -> T"),
+        "got: {report}"
+    );
+}
+
 // Regression test for https://github.com/facebook/pyrefly/issues/3240
 #[test]
 fn hover_on_generic_metaclass_constructor_does_not_show_inference_var() {
