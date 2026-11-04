@@ -236,6 +236,42 @@ impl UnsetNodes {
     pub fn get(&self, id: UnsetNodeId) -> &UnsetNode {
         &self.0[id.0 as usize]
     }
+
+    /// Whether some path on which a name is unset continues past every merge it passes through,
+    /// through a branch whose termination key is not `Never`. `latest` holds the latest merges
+    /// on those paths.
+    pub fn some_path_continues(
+        &self,
+        latest: &[UnsetNodeId],
+        is_never: impl Fn(Idx<Key>) -> bool,
+    ) -> bool {
+        let mut reachable = SmallSet::new();
+        let mut stack = latest.to_vec();
+        while let Some(id) = stack.pop() {
+            if reachable.insert(id) {
+                stack.extend(self.get(id).previous.iter().copied());
+            }
+        }
+        // A path continues past a node if one of the node's keys is not `Never` and the path
+        // continued past one of the earlier nodes, unless the name became unset at this node.
+        // Earlier nodes have smaller ids, so visiting in id order decides them first.
+        let mut ids = reachable.into_iter().collect::<Vec<_>>();
+        ids.sort_unstable();
+        let mut continuing = SmallSet::new();
+        for id in ids {
+            let node = self.get(id);
+            if (node.previous.is_empty()
+                || node
+                    .previous
+                    .iter()
+                    .any(|previous| continuing.contains(previous)))
+                && node.keys.iter().any(|key| !is_never(*key))
+            {
+                continuing.insert(id);
+            }
+        }
+        latest.iter().any(|id| continuing.contains(id))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +314,59 @@ pub enum InitializationStatus {
 }
 
 impl InitializationStatus {
+    /// Combine the flows that reach a merge, each with the termination key of its last
+    /// statement. Flows that miss the assignment start new paths at this merge, and paths that
+    /// already miss it continue through the flows that carry them, so every such flow must
+    /// end in a `Never` call for the attribute to be initialized.
+    pub fn merge<'a>(
+        unset_nodes: &mut UnsetNodes,
+        flows: impl IntoIterator<Item = (Option<&'a Self>, Option<Idx<Key>>)>,
+    ) -> Self {
+        let mut missing_keys = Vec::new();
+        // The keys of the flows that carry each set of earlier nodes, or `None` once one of
+        // those flows has no key.
+        let mut carried: SmallMap<Vec<UnsetNodeId>, Option<Vec<Idx<Key>>>> = SmallMap::new();
+        for (initialized, termination_key) in flows {
+            match initialized {
+                Some(Self::Initialized) => {}
+                Some(Self::Deferred(previous)) => {
+                    let keys = carried
+                        .entry(previous.clone())
+                        .or_insert_with(|| Some(Vec::new()));
+                    *keys = keys
+                        .take()
+                        .zip(termination_key)
+                        .map(|(mut carried_keys, key)| {
+                            carried_keys.push(key);
+                            carried_keys
+                        });
+                }
+                None | Some(Self::Uninitialized) => match termination_key {
+                    Some(key) => missing_keys.push(key),
+                    None => return Self::Uninitialized,
+                },
+            }
+        }
+        let mut latest = Vec::new();
+        if !missing_keys.is_empty() {
+            latest.push(unset_nodes.push_start(missing_keys));
+        }
+        for (previous, keys) in carried {
+            match keys {
+                Some(keys) => latest.push(unset_nodes.push_merge(keys, previous)),
+                // A flow without a key reaches the merge, so its paths continue unconditionally.
+                None => latest.extend(previous),
+            }
+        }
+        if latest.is_empty() {
+            Self::Initialized
+        } else {
+            latest.sort_unstable();
+            latest.dedup();
+            Self::Deferred(latest)
+        }
+    }
+
     pub fn is_initialized(&self, some_path_continues: impl Fn(&[UnsetNodeId]) -> bool) -> bool {
         match self {
             Self::Initialized => true,
@@ -3631,5 +3720,96 @@ impl BindingsBuilder<'_> {
             ShortIdentifier::new(&def.name),
             class_key,
         );
+    }
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use pyrefly_graph::index::Idx;
+
+    use super::InitializationStatus;
+    use super::UnsetNodes;
+
+    fn is_initialized(
+        unset_nodes: &UnsetNodes,
+        status: &InitializationStatus,
+        never: &[usize],
+    ) -> bool {
+        status.is_initialized(|latest| {
+            unset_nodes.some_path_continues(latest, |key| never.contains(&key.idx()))
+        })
+    }
+
+    #[test]
+    fn test_attribute_initialization_merge_without_deferral() {
+        let mut nodes = UnsetNodes::default();
+        let initialized = InitializationStatus::Initialized;
+        assert!(matches!(
+            InitializationStatus::merge(&mut nodes, [(Some(&initialized), None)]),
+            InitializationStatus::Initialized
+        ));
+        assert!(matches!(
+            InitializationStatus::merge(&mut nodes, [(Some(&initialized), None), (None, None)]),
+            InitializationStatus::Uninitialized
+        ));
+    }
+
+    // Paths that share their earlier merges share one node per merge, so the state stays one
+    // node and every key on the path is still checked exactly.
+    #[test]
+    fn test_attribute_initialization_merge_is_exact_through_many_joins() {
+        let mut nodes = UnsetNodes::default();
+        let mut status = InitializationStatus::merge(&mut nodes, [(None, Some(Idx::new(0)))]);
+        for join in 0..1000 {
+            status = InitializationStatus::merge(
+                &mut nodes,
+                [
+                    (Some(&status), Some(Idx::new(2 * join + 1))),
+                    (Some(&status), Some(Idx::new(2 * join + 2))),
+                ],
+            );
+            let InitializationStatus::Deferred(latest) = &status else {
+                panic!("conditional paths must remain deferred");
+            };
+            assert_eq!(latest.len(), 1);
+        }
+        assert!(!is_initialized(&nodes, &status, &[]));
+        assert!(
+            is_initialized(&nodes, &status, &[0]),
+            "the start is cut off"
+        );
+        assert!(
+            is_initialized(&nodes, &status, &[1001, 1002]),
+            "both flows of one join are cut off"
+        );
+        assert!(
+            !is_initialized(&nodes, &status, &[1001]),
+            "one flow of a join still continues"
+        );
+    }
+
+    #[test]
+    fn test_attribute_initialization_merge_keeps_flows_apart() {
+        let mut nodes = UnsetNodes::default();
+        let first = InitializationStatus::merge(&mut nodes, [(None, Some(Idx::new(0)))]);
+        let second = InitializationStatus::merge(&mut nodes, [(None, Some(Idx::new(1)))]);
+        let merged = InitializationStatus::merge(
+            &mut nodes,
+            [
+                (Some(&first), Some(Idx::new(2))),
+                (Some(&second), Some(Idx::new(3))),
+            ],
+        );
+        assert!(is_initialized(&nodes, &merged, &[0, 3]));
+        assert!(is_initialized(&nodes, &merged, &[2, 1]));
+        assert!(
+            !is_initialized(&nodes, &merged, &[0, 2]),
+            "the second start continues through its own flow"
+        );
+
+        // A flow without a key reaches the merge, so only earlier keys can cut its paths off.
+        let passed = InitializationStatus::merge(&mut nodes, [(Some(&first), None)]);
+        assert!(is_initialized(&nodes, &passed, &[0]));
+        assert!(!is_initialized(&nodes, &passed, &[]));
     }
 }

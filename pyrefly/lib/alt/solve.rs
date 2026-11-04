@@ -5276,36 +5276,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// through a branch that does not terminate due to Never/NoReturn. The nodes are the latest
     /// merges on those paths.
     fn some_unset_path_continues(&self, latest: &[UnsetNodeId]) -> bool {
-        let nodes = self.bindings().unset_nodes();
-        let mut reachable = SmallSet::new();
-        let mut stack = latest.to_vec();
-        while let Some(id) = stack.pop() {
-            if reachable.insert(id) {
-                stack.extend(nodes.get(id).previous.iter().copied());
-            }
-        }
-        // A path continues past a node if one of the node's keys is not `Never` and the path
-        // continued past one of the earlier nodes, unless the name became unset at this node.
-        // Earlier nodes have smaller ids, so visiting in id order decides them first.
-        let mut ids = reachable.into_iter().collect::<Vec<_>>();
-        ids.sort_unstable();
-        let mut continuing = SmallSet::new();
-        for id in ids {
-            let node = nodes.get(id);
-            if (node.previous.is_empty()
-                || node
-                    .previous
-                    .iter()
-                    .any(|previous| continuing.contains(previous)))
-                && node
-                    .keys
-                    .iter()
-                    .any(|key| !self.get_idx(*key).ty().is_never())
-            {
-                continuing.insert(id);
-            }
-        }
-        latest.iter().any(|id| continuing.contains(id))
+        self.bindings()
+            .unset_nodes()
+            .some_path_continues(latest, |key| self.get_idx(key).ty().is_never())
     }
 
     /// Handle `Binding::ReturnImplicit` - compute the implicit return type.
