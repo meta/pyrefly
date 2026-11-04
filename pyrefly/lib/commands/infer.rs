@@ -412,12 +412,7 @@ impl InferArgs {
                     &|cls| {
                         transaction
                             .ad_hoc_solve(&handle, "infer_enum_metadata", |solver| {
-                                let meta = solver.get_metadata_for_class(cls);
-                                if meta.is_enum() {
-                                    Some(solver.get_enum_members(cls).len())
-                                } else {
-                                    None
-                                }
+                                solver.get_expandable_enum_member_count(cls)
                             })
                             .flatten()
                     },

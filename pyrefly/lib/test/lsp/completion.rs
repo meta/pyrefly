@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::slice;
+
 use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::CompletionItemTag;
@@ -55,6 +57,55 @@ fn is_object_attribute(item: &CompletionItem) -> bool {
     item.sort_text
         .as_deref()
         .is_some_and(|sort_text| sort_text.starts_with("3a"))
+}
+
+#[test]
+fn completion_setattr_literal_name_boundaries() {
+    let source = r#"
+class C:
+    def __init__(self) -> None:
+        setattr(self, "x", 1)
+        setattr(self, "foo-bar", 1)
+        setattr(self, "class", 1)
+        setattr(self, "con" "cat", 1)
+        setattr(self, "esca\x70ed", 1)
+        setattr(self, "K", 1)
+        setattr(self, "match", 1)
+
+C().
+"#;
+    let (state, handle) = TestEnv::one("main", source).to_state();
+    let handle = handle("main");
+    let mut transaction = state.transaction();
+    transaction.run(slice::from_ref(&handle), Require::Everything, None);
+    let position = TextSize::try_from(source.rfind("C().").unwrap() + "C().".len()).unwrap();
+    let mut names = transaction
+        .completion(&handle, position, ImportFormat::Absolute, true, None)
+        .into_iter()
+        .map(|item| item.label)
+        .filter(|name| {
+            [
+                "x", "foo-bar", "class", "concat", "escaped", "K", "K", "match",
+            ]
+            .contains(&name.as_str())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["match", "x"]);
+}
+
+#[test]
+fn completion_setattr_line_continuation_name() {
+    let source = "class C:\n    def __init__(self) -> None:\n        setattr(self, \"\\\ncontinued\", 1)\n\nC().\n";
+    let (handles, state) = mk_multi_file_state(&[("main", source)], Require::Everything, false);
+    let handle = handles.get("main").unwrap();
+    let position = TextSize::try_from(source.rfind("C().").unwrap() + "C().".len()).unwrap();
+    let has_field = state
+        .transaction()
+        .completion(handle, position, ImportFormat::Absolute, true, None)
+        .iter()
+        .any(|item| item.label == "continued");
+    assert!(!has_field);
 }
 
 #[test]

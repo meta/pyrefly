@@ -70,6 +70,14 @@ impl Docstring {
     pub fn resolve(&self) -> String {
         Self::clean(self.1.code_at(self.0))
     }
+
+    /// Whether the literal contains non-whitespace text, before Markdown rendering.
+    ///
+    /// `resolve` turns leftover spaces into `&nbsp;`, so a whitespace-only
+    /// docstring looks nonempty after rendering.
+    pub fn has_content(&self) -> bool {
+        !normalize_literal(self.1.code_at(self.0)).trim().is_empty()
+    }
 }
 
 /// Render cleaned docstring lines into markdown, adding fences for code blocks.

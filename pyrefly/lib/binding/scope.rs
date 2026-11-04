@@ -1347,14 +1347,22 @@ struct Loop {
     exits: Vec<(LoopExit, Flow)>,
     /// For PEP 765: The depth of finally-blocks that this loop was created in
     finally_depth: usize,
+    /// Phi keys that this loop's back edge can reach: its own loop-head phis, and the phis of
+    /// nested loops whose entering value is one of them.
+    carried_phis: SmallSet<Idx<Key>>,
+    /// Names read through a key in `carried_phis`. A plain assignment to one of them inside
+    /// this loop may be read on the next iteration.
+    carried_reads: SmallSet<Name>,
 }
 
 impl Loop {
-    pub fn new(base: Flow, finally_depth: usize) -> Self {
+    pub fn new(base: Flow, finally_depth: usize, carried_phis: SmallSet<Idx<Key>>) -> Self {
         Self {
             base,
             exits: Default::default(),
             finally_depth,
+            carried_phis,
+            carried_reads: SmallSet::new(),
         }
     }
 }
@@ -1665,6 +1673,13 @@ impl ScopeTreeNode {
             collector.insert(key);
         });
     }
+}
+
+/// The receiver, source identifier and receiver policy of a method attribute assignment.
+pub(crate) struct SelfAttrAssignTarget<'a> {
+    pub receiver: &'a Expr,
+    pub name: &'a Identifier,
+    pub instance_only: bool,
 }
 
 /// Scopes keep track of the current stack of the scopes we are in.
@@ -2436,16 +2451,44 @@ impl Scopes {
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
     ) -> bool {
-        let Expr::Name(receiver) = &*x.value else {
+        self.record_self_attr_assign_named(
+            SelfAttrAssignTarget {
+                receiver: &x.value,
+                name: &x.attr,
+                instance_only: false,
+            },
+            value,
+            annotation,
+        )
+    }
+
+    /// Accumulate assignments to a matching method receiver, retaining the first annotation
+    /// and definition range. Instance-only targets exclude classmethod receivers.
+    /// Returns whether the assignment was recorded.
+    pub(crate) fn record_self_attr_assign_named(
+        &mut self,
+        target: SelfAttrAssignTarget<'_>,
+        value: ExprOrBinding,
+        annotation: Option<Idx<KeyAnnotation>>,
+    ) -> bool {
+        let SelfAttrAssignTarget {
+            receiver,
+            name,
+            instance_only,
+        } = target;
+        let Expr::Name(receiver_name) = receiver else {
             return false;
         };
-        let Some((method_idx, _)) = self.find_receiver_method_index(&receiver.id) else {
+        let Some((method_idx, _)) = self.find_receiver_method_index(&receiver_name.id) else {
             return false;
         };
         let ScopeKind::Method(method_scope) = &mut self.scopes[method_idx].scope.kind else {
             return false;
         };
-        if let Some(attr) = method_scope.instance_attributes.get_mut(&x.attr.id) {
+        if instance_only && method_scope.receiver_kind != MethodSelfKind::Instance {
+            return false;
+        }
+        if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
             // Accumulate subsequent assignments in the method.
             attr.0.push(value);
             // Keep the first type annotation encountered in the method.
@@ -2455,11 +2498,11 @@ impl Scopes {
         } else {
             // First time seeing this attribute in this method: record it.
             method_scope.instance_attributes.insert(
-                x.attr.id.clone(),
+                name.id.clone(),
                 InstanceAttribute(
                     vec![value],
                     annotation,
-                    x.attr.range(), // Keep the range of the first assignment as the definition location.
+                    name.range,
                     method_scope.receiver_kind,
                 ),
             );
@@ -3186,7 +3229,12 @@ impl Scopes {
                 .variables
                 .get(&name.id)
                 .is_some_and(|usage| usage.used)
-                || self.is_parameter_used(&name.id);
+                || self.is_parameter_used(&name.id)
+                || self
+                    .current()
+                    .loops
+                    .iter()
+                    .any(|active| active.carried_reads.contains(&name.id));
             self.current_mut().variables.insert(
                 name.id.clone(),
                 VariableUsage {
@@ -3197,11 +3245,19 @@ impl Scopes {
         }
     }
 
-    pub fn mark_variable_used(&mut self, name: &Name) {
+    /// `value_idx` is the value the read resolved to in the current flow, if any.
+    pub fn mark_variable_used(&mut self, name: &Name, value_idx: Option<Idx<Key>>) {
         for scope in self.iter_rev_mut() {
             if let Some(info) = scope.variables.get_mut(name) {
                 info.used = true;
                 break;
+            }
+            if let Some(idx) = value_idx {
+                for active in scope.loops.iter_mut() {
+                    if active.carried_phis.contains(&idx) {
+                        active.carried_reads.insert(name.clone());
+                    }
+                }
             }
         }
     }
@@ -4842,15 +4898,48 @@ impl<'a> BindingsBuilder<'a> {
         mut flow: Flow,
         range: TextRange,
         exclude_names: &SmallSet<Name>,
-    ) -> Flow {
+    ) -> (Flow, SmallSet<Idx<Key>>) {
         // Sequential facts do not establish invariants across loop backedges.
         flow.excluded_none_pairs = ExcludedNonePairs::default();
+        let mut phis = SmallSet::new();
         for (name, info) in flow.info.iter_mut() {
             if exclude_names.contains(name) {
                 continue;
             }
+            // Import identities with no local writes across the loop need no speculative value
+            // join. Keep their available bindings; narrowing joins still happen at teardown.
+            let stable_import = info.value.as_ref().is_some_and(|value| {
+                matches!(
+                    value.style,
+                    FlowStyle::Import(..) | FlowStyle::ImportAs(_) | FlowStyle::MergeableImport(_)
+                ) && self.scopes.current().stat.0.get(name).is_none_or(|decl| {
+                    let eligible = match decl.style {
+                        StaticStyle::SingleDef(_) | StaticStyle::ImplicitBuiltinImport(_) => true,
+                        // Wildcard symbols also have this static style, but their declaration
+                        // ranges can collapse multiple imports. Only real module values qualify.
+                        StaticStyle::MergeableImport => {
+                            matches!(value.style, FlowStyle::MergeableImport(_))
+                        }
+                        _ => false,
+                    };
+                    eligible && decl.last_range.end() <= range.start()
+                })
+            });
+            if stable_import {
+                continue;
+            }
             // We are promising to insert a binding for this key when we merge the flow
             let phi_idx = self.idx_for_promise(Key::Phi(Box::new((name.clone(), range))));
+            // An enclosing loop's back edge also reaches this phi when it reaches the value
+            // entering this loop.
+            if let Some(value) = &info.value {
+                for enclosing in self.scopes.current_mut().loops.iter_mut() {
+                    if enclosing.carried_phis.contains(&value.idx) {
+                        enclosing.carried_phis.insert(phi_idx);
+                    }
+                }
+            }
+            phis.insert(phi_idx);
             match &mut info.value {
                 Some(value) => {
                     value.idx = phi_idx;
@@ -4866,7 +4955,7 @@ impl<'a> BindingsBuilder<'a> {
                 }
             }
         }
-        flow
+        (flow, phis)
     }
 
     /// Set up a loop: preserve the base flow and push the loop to the current
@@ -4880,12 +4969,12 @@ impl<'a> BindingsBuilder<'a> {
         let base = mem::take(&mut self.scopes.current_mut().flow);
         // To account for possible assignments to existing names in a loop, we
         // speculatively insert phi keys upfront.
-        self.scopes.current_mut().flow =
-            self.insert_phi_keys(base.clone(), range, loop_header_targets);
+        let (flow, phis) = self.insert_phi_keys(base.clone(), range, loop_header_targets);
+        self.scopes.current_mut().flow = flow;
         self.scopes
             .current_mut()
             .loops
-            .push(Loop::new(base, finally_depth));
+            .push(Loop::new(base, finally_depth, phis));
     }
 
     pub fn teardown_loop(

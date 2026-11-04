@@ -22,6 +22,7 @@ use pyrefly_build::handle::Handle;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::docstring::parse_parameter_documentation;
+use pyrefly_python::dunder;
 use pyrefly_python::ignore::Ignore;
 use pyrefly_python::ignore::Tool;
 use pyrefly_python::ignore::TypeIgnoreUnknownTagBehavior;
@@ -40,10 +41,10 @@ use pyrefly_types::type_var::Variance;
 use pyrefly_types::types::Type;
 use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::lined_buffer::LineNumber;
-use pyrefly_util::visit::Visit;
 use regex::Regex;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::CmpOp;
+use ruff_python_ast::Expr;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
@@ -535,22 +536,47 @@ fn docstring_for_class_object_type(
     );
     let module = transaction.get_module_info(&definition_handle)?;
     // Exported classes retain their docstring range after their AST is evicted.
-    if let Some(ExportLocation::ThisModule(export)) =
+    let range = if let Some(ExportLocation::ThisModule(export)) =
         transaction.get_exports(&definition_handle).get(qname.id())
         && export.location == qname.range()
     {
-        return export.docstring_range.map(|range| Docstring(range, module));
-    }
-    let ast = transaction.get_ast_or_parse_module(handle, &module);
-    let range = Ast::locate_node(&ast, qname.range().start())
-        .into_iter()
-        .find_map(|node| match node {
-            AnyNodeRef::StmtClassDef(class) if class.name.range() == qname.range() => {
-                Docstring::range_from_stmts(&class.body)
+        export.docstring_range
+    } else {
+        let ast = transaction.get_ast_or_parse_module(handle, &module);
+        Ast::locate_node(&ast, qname.range().start())
+            .into_iter()
+            .find_map(|node| match node {
+                AnyNodeRef::StmtClassDef(class) if class.name.range() == qname.range() => {
+                    Docstring::range_from_stmts(&class.body)
+                }
+                _ => None,
+            })
+    };
+    range
+        .map(|range| Docstring(range, module))
+        .and_then(nonempty_docstring)
+        .or_else(|| {
+            // A module export must not stand in for a nested class with the same name.
+            if !qname.module_path().is_interface() || !qname.parent().is_toplevel() {
+                return None;
             }
-            _ => None,
-        })?;
-    Some(Docstring(range, module))
+            let (implementation_handle, _, export) = transaction.resolve_named_import(
+                handle,
+                qname.module_name(),
+                qname.id().clone(),
+                FindPreference {
+                    prefer_pyi: false,
+                    include_interpreter_stdlib: true,
+                    ..FindPreference::default()
+                },
+            )?;
+            if export.symbol_kind != Some(SymbolKind::Class) {
+                return None;
+            }
+            let range = export.docstring_range?;
+            let module = transaction.get_module_info(&implementation_handle)?;
+            nonempty_docstring(Docstring(range, module))
+        })
 }
 
 fn collect_typed_dict_fields_for_hover<'a>(
@@ -1322,6 +1348,44 @@ fn in_keyword_hover(
     })
 }
 
+/// Find the innermost call enclosing the cursor, if the cursor is in its callee.
+/// The returned ranges identify the callee and arguments; the flag excludes receivers and indices.
+fn callee_at_position(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    ast: &ModModule,
+    position: TextSize,
+) -> Option<(TextRange, TextRange, bool)> {
+    let call = Ast::locate_node(ast, position)
+        .into_iter()
+        .find_map(|node| match node {
+            AnyNodeRef::ExprCall(call) => Some(call),
+            _ => None,
+        })?;
+    // An inner call's argument must not be mistaken for part of an outer callee.
+    if !call.func.range().contains_inclusive(position) {
+        return None;
+    }
+    let mut name = call.func.as_ref();
+    // Class specialization names a constructor; ordinary indexing names a receiver.
+    while let Expr::Subscript(subscript) = name {
+        if !transaction
+            .get_answers(handle)?
+            .get_type_trace(subscript.value.range())
+            .is_some_and(is_constructor_call)
+        {
+            break;
+        }
+        name = subscript.value.as_ref();
+    }
+    let on_name = match name {
+        Expr::Name(name) => name.range().contains_inclusive(position),
+        Expr::Attribute(attr) => attr.attr.range().contains_inclusive(position),
+        _ => false,
+    };
+    Some((call.func.range(), call.arguments.range, on_name))
+}
+
 /// Resolve the type under the cursor, coercing it to a callable when hovering over a
 /// call's callee (or to the constructor's return type for a constructor call).
 fn resolve_hovered_type(
@@ -1335,42 +1399,20 @@ fn resolve_hovered_type(
         .or_else(|| transaction.get_type_at(handle, position))
         .or_else(|| transaction.operator_type_at(handle, position))?;
 
-    // Find the innermost call whose callee (func) encloses the cursor, returning the
-    // callee and argument ranges and whether the cursor is on the callee's own name —
-    // the attribute in `a.b()`, or the whole callee otherwise. A receiver like `a` in
-    // `a.b()` is inside the callee range but not on the name, so hovering it must not
-    // coerce its type.
-    let callee_at_position = || -> Option<(TextRange, TextRange, bool)> {
-        use ruff_python_ast::Expr;
-        let ast = ast?;
-        let mut result = None;
-        ast.visit(&mut |expr: &Expr| {
-            if let Expr::Call(call) = expr
-                && call.func.range().contains(position)
-            {
-                let on_callee_name = match &*call.func {
-                    Expr::Attribute(attr) => attr.attr.range(),
-                    _ => call.func.range(),
-                }
-                .contains(position);
-                result = Some((call.func.range(), call.arguments.range, on_callee_name));
-            }
-        });
-        result
-    };
-
-    // Prefer the enclosing call found from the argument list; only walk the AST for a
-    // callee hover when the cursor is not inside an argument. Hovering inside arguments
-    // is never "on the callee", so coercion stays disabled there.
+    // A nested callee takes precedence over the surrounding call's argument list.
+    // Receivers and other argument expressions retain their own types.
     let (callee_range_opt, call_arguments_range, hovering_over_callee) =
-        match transaction.get_callables_from_call(handle, position) {
-            Some(info) => (Some(info.callee_range), None, false),
-            None => match callee_at_position() {
-                Some((callee_range, arguments_range, on_name)) => {
-                    (Some(callee_range), Some(arguments_range), on_name)
-                }
-                None => (None, None, false),
-            },
+        match ast.and_then(|ast| callee_at_position(transaction, handle, ast, position)) {
+            Some((callee_range, arguments_range, on_name)) => {
+                (Some(callee_range), Some(arguments_range), on_name)
+            }
+            None => (
+                transaction
+                    .get_callables_from_call(handle, position)
+                    .map(|info| info.callee_range),
+                None,
+                false,
+            ),
         };
 
     if let Some(callee_range) = callee_range_opt {
@@ -1426,6 +1468,61 @@ fn resolve_hover_parameter_doc(
     }
 
     None
+}
+
+fn is_constructor_dunder(name: Option<&str>) -> bool {
+    name.is_some_and(|name| name == dunder::INIT.as_str() || name == dunder::NEW.as_str())
+}
+
+fn nonempty_docstring(docstring: Docstring) -> Option<Docstring> {
+    docstring.has_content().then_some(docstring)
+}
+
+/// Class docstring for a constructor call whose `__init__` or `__new__` has none.
+///
+/// Eligibility comes from the callee's class type. `find_definition` with dunder
+/// resolution disabled reports `Attribute` or `Variable` for `lib.Person()` and
+/// for a class alias, even though the callee type is the class. A stub docstring
+/// wins over the implementation.
+fn class_docstring_for_constructor(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    position: TextSize,
+) -> Option<Docstring> {
+    let ast = transaction.get_ast(handle)?;
+    let (callee_range, _, on_name) = callee_at_position(transaction, handle, &ast, position)?;
+    if !on_name {
+        return None;
+    }
+    let callee_type = transaction
+        .get_answers(handle)?
+        .get_type_trace(callee_range)?;
+    if !is_constructor_call(callee_type.clone()) {
+        return None;
+    }
+
+    let preferences = [
+        FindPreference {
+            resolve_call_dunders: false,
+            ..FindPreference::default()
+        },
+        FindPreference {
+            prefer_pyi: false,
+            include_interpreter_stdlib: true,
+            resolve_call_dunders: false,
+            ..FindPreference::default()
+        },
+    ];
+    let from_definition = preferences.into_iter().find_map(|preference| {
+        let item = transaction
+            .find_definition(handle, position, preference)
+            .ok()
+            .and_then(|items| items.into_vec().into_iter().next())?;
+        item.docstring_range
+            .map(|range| Docstring(range, item.module))
+            .and_then(nonempty_docstring)
+    });
+    from_definition.or_else(|| docstring_for_class_object_type(transaction, handle, &callee_type))
 }
 
 pub fn get_hover(
@@ -1556,6 +1653,9 @@ pub fn get_hover_with_verbosity(
                     && executable.display_name == interface.display_name
             })
     });
+    let hover_constructor_dunder = definition
+        .as_ref()
+        .is_some_and(|item| is_constructor_dunder(item.display_name.as_deref()));
     let (kind, name, fallback_docstring) = if let Some(FindDefinitionItemWithDocstring {
         metadata,
         definition_range: definition_location,
@@ -1580,9 +1680,15 @@ pub fn get_hover_with_verbosity(
             item.docstring_range
                 .map(|range| Docstring(range, item.module))
         })
-        .filter(|docstring| !docstring.resolve().trim().is_empty())
-        .or(fallback_docstring)
+        .and_then(nonempty_docstring)
+        .or_else(|| fallback_docstring.and_then(nonempty_docstring))
         .or_else(|| docstring_for_class_object_type(transaction, handle, &type_));
+
+    let docstring = if hover_constructor_dunder {
+        docstring.or_else(|| class_docstring_for_constructor(transaction, handle, position))
+    } else {
+        docstring
+    };
 
     let name = name.or_else(|| identifier_text_at(transaction, handle, position));
 

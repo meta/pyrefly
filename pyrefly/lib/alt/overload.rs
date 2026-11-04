@@ -200,18 +200,12 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
                     Lit::Bool(false).to_implicit_type(),
                 ]
             }
-            Type::ClassType(cls)
-                if self
-                    .solver
-                    .get_metadata_for_class(cls.class_object())
-                    .is_enum() =>
-            {
-                self.solver
-                    .get_enum_members(cls.class_object())
-                    .into_iter()
-                    .map(Lit::to_implicit_type)
-                    .collect()
-            }
+            Type::ClassType(cls) if self.solver.is_expandable_enum(cls.class_object()) => self
+                .solver
+                .get_enum_members(cls.class_object())
+                .into_iter()
+                .map(Lit::to_implicit_type)
+                .collect(),
             Type::Type(f) if matches!(&*f, Type::Union(_)) => {
                 // Repeated match because pattern guards cannot move out of bindings.
                 let Type::Union(u) = *f else {

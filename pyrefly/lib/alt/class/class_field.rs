@@ -52,6 +52,7 @@ use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
+use crate::alt::attr::AttrNarrowing;
 use crate::alt::attr::AttrSetter;
 use crate::alt::attr::AttrSubsetError;
 use crate::alt::attr::ClassBase;
@@ -127,10 +128,16 @@ pub enum IsMethod {
 /// class access, and possibly through a special case lookup such as a type var with a bound).
 #[derive(Debug, Clone)]
 pub enum ClassAttribute {
-    /// A read-write attribute with a closed form type for both get and set actions.
-    /// The `IsMethod` flag enables the `method-assign` diagnostic.
-    /// The boolean marks annotated instance-variable declarations for `instance-var-assign`.
-    ReadWrite(Type, IsMethod, bool),
+    /// A read-write attribute with a read type and an optional distinct assignment type.
+    ReadWrite {
+        read_type: Type,
+        /// Enables the `method-assign` diagnostic.
+        is_method: IsMethod,
+        /// Marks annotated instance-variable declarations for `instance-var-assign`.
+        is_instance_var: bool,
+        /// An explicit assignment type. When absent, assignments use `read_type`.
+        write_type: Option<Type>,
+    },
     /// A read-only attribute with a closed form type for get actions.
     ReadOnly(Type, ReadOnlyReason),
     /// A `NoAccess` attribute indicates that the attribute is well-defined, but does
@@ -157,13 +164,23 @@ pub enum ClassAttribute {
 
 impl ClassAttribute {
     pub fn read_write(ty: Type) -> Self {
-        Self::ReadWrite(ty, IsMethod::No, false)
+        Self::ReadWrite {
+            read_type: ty,
+            is_method: IsMethod::No,
+            is_instance_var: false,
+            write_type: None,
+        }
     }
 
     /// Like [`read_write`](Self::read_write) but marks the attribute as a
     /// class-body-declared instance variable (annotated, not `ClassVar`).
     pub fn read_write_instance_var(ty: Type) -> Self {
-        Self::ReadWrite(ty, IsMethod::No, true)
+        Self::ReadWrite {
+            read_type: ty,
+            is_method: IsMethod::No,
+            is_instance_var: true,
+            write_type: None,
+        }
     }
 
     pub fn read_only(ty: Type, reason: ReadOnlyReason) -> Self {
@@ -207,7 +224,7 @@ impl ClassAttribute {
 
     pub fn read_only_equivalent(self, reason: ReadOnlyReason) -> Self {
         match self {
-            Self::ReadWrite(ty, ..) => Self::ReadOnly(ty, reason),
+            Self::ReadWrite { read_type: ty, .. } => Self::ReadOnly(ty, reason),
             Self::Property(getter, _, cls) => Self::Property(getter, None, cls),
             Self::Descriptor(descriptor, base) => Self::Descriptor(
                 Descriptor {
@@ -241,7 +258,9 @@ impl ClassAttribute {
         match self {
             // TODO(stroxler): ReadWrite attributes are not actually methods but limiting access to
             // ReadOnly breaks unit tests; we should investigate callsites to understand this better.
-            ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => Some(ty),
+            ClassAttribute::ReadWrite { read_type: ty, .. } | ClassAttribute::ReadOnly(ty, _) => {
+                Some(ty)
+            }
             ClassAttribute::NoAccess(..)
             | ClassAttribute::Property(..)
             | ClassAttribute::Descriptor(..)
@@ -405,6 +424,8 @@ enum ClassFieldInner {
     /// should succeed.
     ClassAttribute {
         ty: Type,
+        /// Django fields can accept values with a different type from their read type.
+        django_set_type: Option<Type>,
         annotation: Option<Annotation>,
         initialization: ClassFieldInitialization,
         read_only_reason: Option<ReadOnlyReason>,
@@ -483,6 +504,7 @@ impl ClassField {
         Self(
             ClassFieldInner::ClassAttribute {
                 ty,
+                django_set_type: None,
                 annotation,
                 initialization,
                 read_only_reason,
@@ -596,6 +618,7 @@ impl ClassField {
             ClassField(
                 ClassFieldInner::ClassAttribute {
                     ty,
+                    django_set_type: None,
                     annotation: None,
                     initialization: ClassFieldInitialization::ClassBody(None),
                     read_only_reason: None,
@@ -615,6 +638,7 @@ impl ClassField {
         Self(
             ClassFieldInner::ClassAttribute {
                 ty: heap.mk_any_implicit(),
+                django_set_type: None,
                 annotation: None,
                 initialization: ClassFieldInitialization::recursive(),
                 read_only_reason: None,
@@ -709,6 +733,7 @@ impl ClassField {
             }
             ClassFieldInner::ClassAttribute {
                 ty,
+                django_set_type,
                 annotation,
                 initialization,
                 read_only_reason,
@@ -721,9 +746,14 @@ impl ClassField {
             } => {
                 let mut ty = ty.clone();
                 f(&mut ty);
+                let mut django_set_type = django_set_type.clone();
+                if let Some(ty) = &mut django_set_type {
+                    f(ty);
+                }
                 Self(
                     ClassFieldInner::ClassAttribute {
                         ty,
+                        django_set_type,
                         annotation: annotation.clone(),
                         initialization: initialization.clone(),
                         read_only_reason: read_only_reason.clone(),
@@ -2045,38 +2075,39 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 has_instance_write: _,
             } => {
                 let direct_annotation = annot.map(|a| self.get_idx(a).annotation.clone());
-                // Check if there's an inherited property or descriptor field from a parent class.
-                // If so, use the parent's field instead of creating a new field.
-                if !Ast::is_mangled_attr(name) {
-                    // Use get_field_from_ancestors to only look at parent classes, not the current class
-                    if let Some(parent_field) = self.get_field_from_ancestors(
+                // Inherited properties and descriptors keep their setters. Django fields do so
+                // only for unannotated writes; annotations retain normal declaration checks.
+                if !Ast::is_mangled_attr(name)
+                    && let Some(parent_field) = self.get_field_from_ancestors(
                         class,
                         self.get_mro_for_class(class).ancestors(self.stdlib),
                         name,
                         &|cls, name| self.get_field_from_current_class_only(cls, name),
-                    ) {
-                        match parent_field.value.as_ref() {
-                            ClassField(
-                                ClassFieldInner::Property { .. }
-                                | ClassFieldInner::Descriptor { .. },
-                                _,
-                            ) => {
-                                // The child is using the inherited property/descriptor setter,
-                                // not redefining the field. Return the parent's field with
-                                // IsInherited::No so the override check skips it.
-                                let ClassField(inner, _) = parent_field.value.into_owned();
-                                return ClassField(inner, IsInherited::No);
-                            }
-                            ClassField(
-                                ClassFieldInner::ClassAttribute {
-                                    is_instance_var, ..
-                                },
-                                _,
-                            ) => inherited_instance_var = *is_instance_var,
-                            _ => {
-                                // For non-property fields, continue with normal processing
-                            }
+                    )
+                {
+                    let inherits_setter = match parent_field.value.as_ref() {
+                        ClassField(
+                            ClassFieldInner::Property { .. } | ClassFieldInner::Descriptor { .. },
+                            _,
+                        ) => true,
+                        ClassField(
+                            ClassFieldInner::ClassAttribute {
+                                django_set_type,
+                                is_instance_var,
+                                ..
+                            },
+                            _,
+                        ) => {
+                            inherited_instance_var = *is_instance_var;
+                            django_set_type.is_some() && direct_annotation.is_none()
                         }
+                        _ => false,
+                    };
+                    if inherits_setter {
+                        // The child uses the inherited setter. IsInherited::No skips
+                        // the override check because the field is not redefined.
+                        let ClassField(inner, _) = parent_field.value.into_owned();
+                        return ClassField(inner, IsInherited::No);
                     }
                 }
 
@@ -2396,7 +2427,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             false
         };
 
-        let ty = if let Some(special_ty) = self.get_special_class_field_type(
+        let (ty, django_set_type) = if let Some(special_types) = self.get_special_class_field_type(
             class,
             name,
             direct_annotation.as_ref(),
@@ -2410,9 +2441,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Don't use the descriptor, since we've set a custom type instead.
             descriptor_methods = None;
             descriptor_range = None;
-            special_ty
+            special_types
         } else {
-            ty
+            (ty, None)
         };
 
         // Pin any vars in the type: leaking a var in a class field is particularly
@@ -2421,6 +2452,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // TODO(stroxler): Ideally we would implement some simple heuristics, similar to
         // first-use based inference we use with assignments, to get more useful types here.
         let ty = self.solver().force(ty);
+        let django_set_type = django_set_type.map(|ty| self.solver().force(ty));
         let descriptor = match (descriptor_methods, &ty) {
             (Some((getter, setter, deleter)), Type::ClassType(cls)) => Some(Descriptor {
                 range,
@@ -2624,6 +2656,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ClassField(
                         ClassFieldInner::ClassAttribute {
                             ty,
+                            django_set_type,
                             annotation,
                             initialization,
                             read_only_reason,
@@ -2760,43 +2793,54 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             (None, _) => self.expr_infer(x, errors),
         };
         self.expand_mut(&mut ty);
-        // An unannotated attribute whose value has a bare `Any` type is reported separately from
-        // the `None`/empty-tuple sentinel cases above, under the kind for the style of that `Any`:
-        // an untyped call gives an implicit `Any`, a failed import an error `Any`, and a library
-        // function annotated `-> Any` an explicit `Any`.
         if annotation.is_none() {
-            match &ty {
-                Type::Any(AnyStyle::Implicit) => {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::UnknownAttributeType,
-                        "This expression is implicitly inferred to be `Any`. Please provide an explicit type annotation.".to_owned(),
-                    );
-                }
-                Type::Any(AnyStyle::Error) => {
-                    self.error_unknown_from_error(errors, x.range(), "The type of this attribute")
-                }
-                Type::Any(AnyStyle::Explicit) => {
-                    self.error_explicit_any_use(errors, x.range(), "The type of this attribute")
-                }
-                _ if ty.contains_implicit_any() => {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::PartiallyUnknownType,
-                        "This expression's type is partially unknown; it contains an implicit `Any`. Please provide an explicit type annotation.".to_owned(),
-                    );
-                }
-                _ => {}
-            }
+            self.check_unannotated_attribute_type(&ty, x.range(), errors);
         }
         ty
     }
 
+    /// Diagnose the effective attribute type after inference and specialization.
+    fn check_unannotated_attribute_type(
+        &self,
+        ty: &Type,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) {
+        // An unannotated attribute whose value has a bare `Any` type is reported separately from
+        // the `None`/empty-tuple sentinel cases above, under the kind for the style of that `Any`:
+        // an untyped call gives an implicit `Any`, a failed import an error `Any`, and a library
+        // function annotated `-> Any` an explicit `Any`.
+        match ty {
+            Type::Any(AnyStyle::Implicit) => {
+                self.error(
+                    errors,
+                    range,
+                    ErrorKind::UnknownAttributeType,
+                    "This expression is implicitly inferred to be `Any`. Please provide an explicit type annotation.".to_owned(),
+                );
+            }
+            Type::Any(AnyStyle::Error) => {
+                self.error_unknown_from_error(errors, range, "The type of this attribute")
+            }
+            Type::Any(AnyStyle::Explicit) => {
+                self.error_explicit_any_use(errors, range, "The type of this attribute")
+            }
+            _ if ty.contains_implicit_any() => {
+                self.error(
+                    errors,
+                    range,
+                    ErrorKind::PartiallyUnknownType,
+                    "This expression's type is partially unknown; it contains an implicit `Any`. Please provide an explicit type annotation.".to_owned(),
+                );
+            }
+            _ => {}
+        }
+    }
+
     /// Apply any class-specific logic for postprocessing the type of a class field. Hook into this
     /// function if you need to modify the type of an existing field. If you need to add a new
-    /// field, see ClassSynthesizedField instead.
+    /// field, see ClassSynthesizedField instead. The result contains the read type and an optional
+    /// Django assignment type.
     fn get_special_class_field_type(
         &self,
         class: &Class,
@@ -2808,7 +2852,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         is_descriptor: bool,
         range: TextRange,
         errors: &ErrorCollector,
-    ) -> Option<Type> {
+    ) -> Option<(Type, Option<Type>)> {
         let initial_value_expr = match field_definition {
             ClassFieldDefinition::AssignedInBody { value, .. } => {
                 if let ExprOrBinding::Expr(expr) = value.as_ref() {
@@ -2832,7 +2876,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
         .or_else(|| self.get_property_class_field_type(class, name, field_definition))
         .or_else(|| self.get_pydantic_root_model_class_field_type(class, name))
-        .or_else(|| self.get_django_field_type(ty, class, Some(name), initial_value_expr))
+        .map(|ty| (ty, None))
+        .or_else(|| {
+            self.get_django_field_types(ty, class, Some(name), initial_value_expr)
+                .map(|(get_type, set_type)| (get_type, Some(set_type)))
+        })
     }
 
     /// Recognize `x = property(fget, fset, fdel)` and return the corresponding
@@ -3340,11 +3388,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         || cls.has_qname("django.db.models.manager", "BaseManager"))
                 })
             && let ExprOrBinding::Expr(e) = value
-            && let Some(manager) = self.get_django_manager_from_queryset_type(class, e)
+            && let Some(mut manager) = self.get_django_manager_assignment_type(class, e, errors)
         {
             // Standard manager interfaces allow model rebinding. Explicit custom interfaces
             // retain their declared type and use ordinary assignment checking below.
-            self.attribute_expr_infer(e, None, name, errors);
+            self.expand_mut(&mut manager);
+            self.check_unannotated_attribute_type(&manager, e.range(), errors);
             let annotation = inherited_annotation.and_then(|mut ann| {
                 ann.ty = None;
                 ann.qualifiers
@@ -3861,7 +3910,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if is_classvar {
                     ClassAttribute::read_only(ty, ReadOnlyReason::ClassVar)
                 } else {
-                    ClassAttribute::ReadWrite(ty, IsMethod::Yes, false)
+                    ClassAttribute::ReadWrite {
+                        read_type: ty,
+                        is_method: IsMethod::Yes,
+                        is_instance_var: false,
+                        write_type: None,
+                    }
                 }
             }
             ClassFieldInner::ProxyMethod { target, .. } => {
@@ -3881,6 +3935,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             ClassFieldInner::ClassAttribute {
                 mut ty,
+                django_set_type,
                 is_classvar,
                 read_only_reason,
                 descriptor_range,
@@ -3917,7 +3972,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         if let Some(reason) = read_only_reason {
                             ClassAttribute::read_only(ty, reason)
                         } else {
-                            ClassAttribute::read_write(ty)
+                            ClassAttribute::ReadWrite {
+                                read_type: ty,
+                                is_method: IsMethod::No,
+                                is_instance_var: false,
+                                write_type: django_set_type,
+                            }
                         }
                     }
                 }
@@ -3993,11 +4053,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if let Some(quantified) = self_quantified {
                     ty = self.wrap_with_quantified(ty, quantified);
                 }
-                ClassAttribute::ReadWrite(
-                    make_bound_classmethod(self.heap, cls, ty).into_inner(),
-                    IsMethod::Yes,
-                    false,
-                )
+                ClassAttribute::ReadWrite {
+                    read_type: make_bound_classmethod(self.heap, cls, ty).into_inner(),
+                    is_method: IsMethod::Yes,
+                    is_instance_var: false,
+                    write_type: None,
+                }
             }
             ClassFieldInner::ProxyMethod { .. } => ClassAttribute::no_access(
                 NoAccessReason::ProxyMethodClassAccess(cls.class_object().dupe()),
@@ -4530,14 +4591,27 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             if metadata.is_django_model()
-                && !class_field.has_explicit_annotation()
                 && self.is_django_manager_type(&class_field.ty())
-                && matches!(want_class_field.ty(), Type::ClassType(cls) if
-                    cls.has_qname("django.db.models.manager", "Manager")
-                    || cls.has_qname("django.db.models.manager", "BaseManager"))
+                && self.is_django_manager_type(&want_class_field.ty())
             {
-                // Standard manager interfaces allow rebinding to the receiving model.
-                continue;
+                // Qualifier-only annotations do not declare a manager interface.
+                let parent_is_inferred = matches!(
+                    &want_class_field.0,
+                    ClassFieldInner::Descriptor { annotation, .. }
+                        | ClassFieldInner::ClassAttribute { annotation, .. }
+                        | ClassFieldInner::InstanceAttribute { annotation, .. }
+                        if annotation.as_ref().is_none_or(|ann| ann.ty.is_none())
+                );
+                let parent_is_standard = matches!(want_class_field.ty(), Type::ClassType(cls) if
+                    cls.has_qname("django.db.models.manager", "Manager")
+                    || cls.has_qname("django.db.models.manager", "BaseManager"));
+                // Inferred interfaces allow replacements; declared standard interfaces only
+                // permit implicit rebinding. Other declared interfaces keep ordinary checks.
+                if parent_is_inferred
+                    || (parent_is_standard && !cls_fields.is_field_annotated(field_name))
+                {
+                    continue;
+                }
             }
             let want_is_static = want_class_field.is_staticmethod();
             let want_is_class = want_class_field.is_classmethod();
@@ -4649,7 +4723,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     });
                 };
                 match &mut attr {
-                    ClassAttribute::ReadOnly(ty, _) | ClassAttribute::ReadWrite(ty, ..)
+                    ClassAttribute::ReadOnly(ty, _)
+                    | ClassAttribute::ReadWrite { read_type: ty, .. }
                         if ty.has_toplevel_func_metadata() =>
                     {
                         relax_ty(ty);
@@ -5806,7 +5881,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     Some(AttrSetter::Declared {
                         ty: attr_ty,
-                        narrow: true,
+                        narrow: AttrNarrowing::Always,
                     })
                 } else {
                     errors
@@ -5820,7 +5895,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     None
                 }
             }
-            ClassAttribute::ReadWrite(attr_ty, is_method, is_instance_var) => {
+            ClassAttribute::ReadWrite {
+                read_type: attr_ty,
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+            } => {
                 if is_method == IsMethod::Yes {
                     self.error_with_context(
                         errors,
@@ -5866,9 +5946,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if let Some(class_object) = class_object {
                     self.check_dataclass_field_final(class_object, attr_name, errors, range);
                 }
-                Some(AttrSetter::Declared {
-                    ty: attr_ty,
-                    narrow: true,
+                Some(match set_type {
+                    Some(ty) => AttrSetter::Declared {
+                        ty,
+                        narrow: AttrNarrowing::IfAssignable(attr_ty),
+                    },
+                    None => AttrSetter::Declared {
+                        ty: attr_ty,
+                        narrow: AttrNarrowing::Always,
+                    },
                 })
             }
             ClassAttribute::Property(getter, None, cls) => {
@@ -5878,7 +5964,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if is_cached_property {
                     Some(AttrSetter::Declared {
                         ty: self.call_property_getter(getter, range, errors, context),
-                        narrow: false,
+                        narrow: AttrNarrowing::Never,
                     })
                 } else {
                     let e = NoAccessReason::SettingReadOnlyProperty(cls);
@@ -5924,7 +6010,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // that the value is assignable to the descriptor type.
                     Some(AttrSetter::Declared {
                         ty: self.heap.mk_class_type(x.cls.clone()),
-                        narrow: false,
+                        narrow: AttrNarrowing::Never,
                     })
                 }
             },
@@ -5969,7 +6055,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .with_detail(reason.error_message())
                     .emit();
             }
-            ClassAttribute::ReadWrite(..)
+            ClassAttribute::ReadWrite { .. }
             | ClassAttribute::Property(..)
             | ClassAttribute::Descriptor(..) => {
                 // Allow deleting most attributes for now, for compatibility with mypy.
@@ -6034,9 +6120,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         };
         match attr {
-            ClassAttribute::ReadWrite(ty, is_method, is_instance_var) => Some(
-                ClassAttribute::ReadWrite(filter_type(ty)?, is_method, is_instance_var),
-            ),
+            ClassAttribute::ReadWrite {
+                read_type: ty,
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+            } => Some(ClassAttribute::ReadWrite {
+                read_type: filter_type(ty)?,
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+            }),
             ClassAttribute::ReadOnly(ty, reason) => {
                 Some(ClassAttribute::ReadOnly(filter_type(ty)?, reason))
             }
@@ -6087,7 +6181,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Property(got_getter, Some(got_setter), _),
-                ClassAttribute::ReadWrite(want, ..),
+                ClassAttribute::ReadWrite {
+                    read_type: want, ..
+                },
             ) if allow_property_override => {
                 is_subset(
                     got_getter,
@@ -6129,7 +6225,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Property(getter, None, _),
-                ClassAttribute::ReadWrite(..) | ClassAttribute::ReadOnly(..),
+                ClassAttribute::ReadWrite { .. } | ClassAttribute::ReadOnly(..),
             ) if allow_property_override
                 && getter
                     .toplevel_func_metadata()
@@ -6151,17 +6247,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Property(_, _, _),
-                ClassAttribute::ReadOnly(..) | ClassAttribute::ReadWrite(..),
+                ClassAttribute::ReadOnly(..) | ClassAttribute::ReadWrite { .. },
             ) => Err(Box::new(AttrSubsetError::Property)),
             (
                 ClassAttribute::ReadOnly(..),
-                ClassAttribute::Property(_, Some(_), _) | ClassAttribute::ReadWrite(..),
+                ClassAttribute::Property(_, Some(_), _) | ClassAttribute::ReadWrite { .. },
             ) => Err(Box::new(AttrSubsetError::ReadOnly)),
             (
                 // TODO(stroxler): Investigate this case more: methods should be ReadOnly, but
                 // in some cases for unknown reasons they wind up being ReadWrite.
-                ClassAttribute::ReadWrite(got, ..),
-                ClassAttribute::ReadWrite(want, ..),
+                ClassAttribute::ReadWrite { read_type: got, .. },
+                ClassAttribute::ReadWrite {
+                    read_type: want, ..
+                },
             ) if got.has_toplevel_func_metadata() && want.has_toplevel_func_metadata() => {
                 is_subset(got, want).map_err(|subset_error| {
                     Box::new(AttrSubsetError::Covariant {
@@ -6173,7 +6271,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     })
                 })
             }
-            (ClassAttribute::ReadWrite(got, ..), ClassAttribute::ReadWrite(want, ..)) => {
+            (
+                ClassAttribute::ReadWrite { read_type: got, .. },
+                ClassAttribute::ReadWrite {
+                    read_type: want, ..
+                },
+            ) => {
                 // A value matching any branch of an `Overloaded` attribute can be assigned to it.
                 let assignable = match want {
                     Type::Overloaded(branches) => branches
@@ -6196,7 +6299,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             (
-                ClassAttribute::ReadWrite(got, ..) | ClassAttribute::ReadOnly(got, ..),
+                ClassAttribute::ReadWrite { read_type: got, .. }
+                | ClassAttribute::ReadOnly(got, ..),
                 ClassAttribute::ReadOnly(want, _),
             ) => is_subset(got, want).map_err(|subset_error| {
                 Box::new(AttrSubsetError::Covariant {
@@ -6224,7 +6328,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 })
             }
             (
-                ClassAttribute::ReadWrite(got, ..),
+                ClassAttribute::ReadWrite {
+                    read_type: got,
+                    write_type: got_set_type,
+                    ..
+                },
                 ClassAttribute::Property(want, want_setter, _),
             ) => {
                 is_subset(
@@ -6250,10 +6358,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         && let Some(rest) = setter_sig.strip_first_param()
                         && let Some(setter_value_type) = rest.get_first_param()
                     {
-                        is_subset(setter_value_type, got).map_err(|subset_error| {
+                        let got_set_type = got_set_type.as_ref().unwrap_or(got);
+                        is_subset(setter_value_type, got_set_type).map_err(|subset_error| {
                             Box::new(AttrSubsetError::Contravariant {
                                 want: want_setter.clone(),
-                                got: got.clone(),
+                                got: got_set_type.clone(),
                                 got_is_property: false,
                                 want_is_property: true,
                                 subset_error,
@@ -6422,7 +6531,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (
                 ClassAttribute::Descriptor(got_d, got_base),
-                ClassAttribute::ReadWrite(want_ty, ..) | ClassAttribute::ReadOnly(want_ty, _),
+                ClassAttribute::ReadWrite {
+                    read_type: want_ty, ..
+                }
+                | ClassAttribute::ReadOnly(want_ty, _),
             ) if want_ty.has_toplevel_func_metadata() => {
                 let (got_read_ty, _) = self.resolve_descriptor_types(got_d, got_base);
                 is_subset(&got_read_ty, want_ty).map_err(|subset_error| {
@@ -6436,7 +6548,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 })
             }
             (
-                ClassAttribute::ReadWrite(got_ty, ..) | ClassAttribute::ReadOnly(got_ty, _),
+                ClassAttribute::ReadWrite {
+                    read_type: got_ty, ..
+                }
+                | ClassAttribute::ReadOnly(got_ty, _),
                 ClassAttribute::Descriptor(want_d, want_base),
             ) if got_ty.has_toplevel_func_metadata() => {
                 let (want_read_ty, want_setter) = self.resolve_descriptor_types(want_d, want_base);
@@ -6469,7 +6584,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Result<Type, NoAccessReason> {
         match class_attr {
             ClassAttribute::NoAccess(reason) => Err(reason),
-            ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => Ok(ty),
+            ClassAttribute::ReadWrite { read_type: ty, .. } | ClassAttribute::ReadOnly(ty, _) => {
+                Ok(ty)
+            }
             ClassAttribute::Property(getter, ..) => {
                 self.record_property_getter(range, &getter);
                 Ok(self.call_property_getter(getter, range, errors, context))

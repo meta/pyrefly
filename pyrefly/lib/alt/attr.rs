@@ -299,15 +299,22 @@ pub enum NoAccessReason {
 
 /// How to check the value assigned to an attribute on one member of the base.
 pub enum AttrSetter {
-    /// Check the value against a declared type. If `narrow` is true, the checked type of the
-    /// value may be used to narrow the attribute.
-    Declared { ty: Type, narrow: bool },
+    /// Check the value against a declared type and apply the specified narrowing rule.
+    Declared { ty: Type, narrow: AttrNarrowing },
     /// Call `__setattr__` with the value.
     SetAttr(Type),
     /// Call a property setter with the value.
     PropertySetter(Type),
     /// Call a descriptor's `__set__` with the value.
     DescriptorSetter(Type, DescriptorBase),
+}
+
+/// When an assignment can narrow the attribute's read type.
+pub enum AttrNarrowing {
+    Always,
+    Never,
+    /// Narrow only when the assigned value fits the read type.
+    IfAssignable(Type),
 }
 
 #[derive(Debug)]
@@ -375,6 +382,18 @@ impl NoAccessReason {
                     "Proxy method `{attr_name}` of class `{class_name}` cannot resolve target method `{target}`"
                 )
             }
+        }
+    }
+
+    pub fn error_kind(&self, default: ErrorKind) -> ErrorKind {
+        match self {
+            NoAccessReason::SuperMethodNeedsImplementation(_) => ErrorKind::AbstractMethodCall,
+            NoAccessReason::ClassUseOfInstanceAttribute(_)
+            | NoAccessReason::ClassAttributeIsGeneric(_)
+            | NoAccessReason::SettingReadOnlyProperty(_)
+            | NoAccessReason::SettingReadOnlyDescriptor(_)
+            | NoAccessReason::ProxyMethodClassAccess(_)
+            | NoAccessReason::ProxyMethodTargetInvalid { .. } => default,
         }
     }
 }
@@ -641,7 +660,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             |attr_base| self.lookup_attr(attr_base, attr_name),
         );
         let mut types = Vec::new();
-        let mut error_messages = Vec::new();
+        let mut access_errors: Vec<(ErrorKind, String)> = Vec::new();
         let mut success = true;
         let (found, not_found, error) = lookup_result.decompose();
         if found.is_empty()
@@ -666,13 +685,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Ok(ty) => types.push(ty),
                 Err(err) => {
                     can_narrow_none = false;
-                    error_messages.push(err.to_error_msg(attr_name));
+                    access_errors.push((err.error_kind(error_kind), err.to_error_msg(attr_name)));
                     success = false;
                 }
             }
         }
         for err in not_found {
-            error_messages.push(err.to_error_msg(attr_name));
+            access_errors.push((error_kind, err.to_error_msg(attr_name)));
             success = false;
         }
         for err in error {
@@ -686,19 +705,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // `.register` on a singledispatch dispatcher needs the fallback's first param, only
             // available here; the tagging logic lives in `singledispatch.rs`.
             self.tag_singledispatch_register(base, attr_name, self.unions(types))
-        } else if !error_messages.is_empty() {
-            error_messages.sort();
-            error_messages.dedup();
-            let (header, mut details) = if error_messages.len() > 1 {
+        } else if !access_errors.is_empty() {
+            access_errors.sort();
+            access_errors.dedup();
+            let (kind, header, mut details) = if access_errors.len() > 1 {
                 (
+                    error_kind,
                     format!(
                         "Object of type `{}` has no attribute `{attr_name}`",
                         self.for_display(base.clone())
                     ),
-                    error_messages,
+                    access_errors.into_iter().map(|(_, msg)| msg).collect(),
                 )
             } else {
-                (error_messages.remove(0), Vec::new())
+                let (kind, msg) = access_errors.remove(0);
+                (kind, msg, Vec::new())
             };
             // Skip suggestions when we have a partial union failure to avoid suggesting
             // attributes from the types that have them when the problem is that some types
@@ -711,7 +732,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 details.push(format!("Did you mean `{suggestion}`?"));
             }
             let mut builder = errors
-                .error_builder(range, error_kind, header)
+                .error_builder(range, kind, header)
                 .with_details(details)
                 .with_context(context);
             if can_narrow_none {
@@ -1127,7 +1148,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         got.clone()
                     }
                 };
-                narrow.then_some(got_ty)
+                match narrow {
+                    AttrNarrowing::Always => Some(got_ty),
+                    AttrNarrowing::Never => None,
+                    AttrNarrowing::IfAssignable(read_type) => {
+                        self.is_subset_eq(&got_ty, &read_type).then_some(got_ty)
+                    }
+                }
             }
             AttrSetter::SetAttr(setattr_ty) => {
                 self.call_setattr(
@@ -1226,7 +1253,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Attribute::Simple(attr_ty) => {
                     setters.push(Some(AttrSetter::Declared {
                         ty: attr_ty,
-                        narrow: true,
+                        narrow: AttrNarrowing::Always,
                     }));
                 }
                 Attribute::ClassAttribute(class_attr) => {
@@ -1465,7 +1492,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return None;
         };
         let ty = match class_attr {
-            ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => ty,
+            ClassAttribute::ReadWrite { read_type: ty, .. } | ClassAttribute::ReadOnly(ty, _) => ty,
             _ => return None,
         };
         let Type::BoundMethod(bound_method) = ty else {
@@ -1488,9 +1515,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         new_bound_method.func = BoundMethodType::Overload(filtered_overload);
         let new_method = self.heap.mk_bound_method(new_bound_method);
         Some(Attribute::ClassAttribute(match class_attr {
-            ClassAttribute::ReadWrite(_, is_method, is_instance_var) => {
-                ClassAttribute::ReadWrite(new_method, *is_method, *is_instance_var)
-            }
+            ClassAttribute::ReadWrite {
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+                ..
+            } => ClassAttribute::ReadWrite {
+                read_type: new_method,
+                is_method: *is_method,
+                is_instance_var: *is_instance_var,
+                write_type: set_type.clone(),
+            },
             ClassAttribute::ReadOnly(_, reason) => {
                 ClassAttribute::ReadOnly(new_method, reason.clone())
             }
@@ -1538,7 +1573,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 let want_is_dunder_method = attr_name.starts_with("__")
                     && attr_name.ends_with("__")
-                    && matches!(want, ClassAttribute::ReadWrite(_, IsMethod::Yes, _));
+                    && matches!(
+                        want,
+                        ClassAttribute::ReadWrite {
+                            is_method: IsMethod::Yes,
+                            ..
+                        }
+                    );
                 for (got_attr, _) in got_attrs.iter() {
                     // A `__getattr__` fallback is not evidence that the missing member exists
                     // when Python would not consult `__getattr__` for it: `__getattr__` governs
@@ -1741,6 +1782,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let found_on = found_on.clone();
 
         let mut types = Vec::with_capacity(candidates.len());
+        let mut write_types = None;
         let mut read_only_reason = None;
         let mut is_class_attribute = false;
         let mut is_method = IsMethod::No;
@@ -1749,29 +1791,36 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let [(attribute, _)] = base_results.as_slice() else {
                 return None;
             };
-            let ty = match attribute {
-                Attribute::Simple(ty) => ty,
-                Attribute::ClassAttribute(ClassAttribute::ReadWrite(
-                    ty,
-                    base_is_method,
-                    base_is_instance_var,
-                )) => {
+            let (ty, set_type) = match attribute {
+                Attribute::Simple(ty) => (ty, None),
+                Attribute::ClassAttribute(ClassAttribute::ReadWrite {
+                    read_type: ty,
+                    is_method: base_is_method,
+                    is_instance_var: base_is_instance_var,
+                    write_type: set_type,
+                }) => {
                     is_class_attribute = true;
                     if *base_is_method == IsMethod::Yes {
                         is_method = IsMethod::Yes;
                     }
                     is_instance_var |= *base_is_instance_var;
-                    ty
+                    (ty, set_type.as_ref())
                 }
                 Attribute::ClassAttribute(ClassAttribute::ReadOnly(ty, reason)) => {
                     is_class_attribute = true;
                     // A write has to be valid for every base, so the result is read-only if any of
                     // them are.
                     read_only_reason.get_or_insert_with(|| reason.clone());
-                    ty
+                    (ty, None)
                 }
                 _ => return None,
             };
+            if set_type.is_some() && write_types.is_none() {
+                write_types = Some(types.clone());
+            }
+            if let Some(write_types) = &mut write_types {
+                write_types.push(set_type.unwrap_or(ty).clone());
+            }
             types.push(ty.clone());
         }
         let combined = match combine {
@@ -1783,11 +1832,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Some(reason) => {
                     Attribute::class_attribute(ClassAttribute::read_only(combined, reason))
                 }
-                None => Attribute::class_attribute(ClassAttribute::ReadWrite(
-                    combined,
+                None => Attribute::class_attribute(ClassAttribute::ReadWrite {
+                    read_type: combined,
                     is_method,
                     is_instance_var,
-                )),
+                    write_type: write_types.map(|types| self.intersect_guarantees(&types)),
+                }),
             }
         } else {
             Attribute::simple(combined)
@@ -3618,7 +3668,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .into_iter()
                     .filter_map(|(attr, _)| {
                         match &attr {
-                            Attribute::ClassAttribute(ClassAttribute::ReadWrite(ty, ..))
+                            Attribute::ClassAttribute(ClassAttribute::ReadWrite {
+                                read_type: ty,
+                                ..
+                            })
                             | Attribute::ClassAttribute(ClassAttribute::ReadOnly(ty, _))
                             | Attribute::Simple(ty)
                             | Attribute::ClassAttribute(ClassAttribute::Property(ty, _, _))

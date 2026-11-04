@@ -300,6 +300,8 @@ pub struct Bindings {
     unused_imports: Vec<UnusedImport>,
     unused_variables: Vec<UnusedVariable>,
     pytest_info: Option<PytestBindingInfo>,
+    /// Literal setter names and their receiver ranges, retained only for IDE operations.
+    setattr_name_literals: Vec<(Identifier, TextRange)>,
     promote_ranges: SmallSet<TextRange>,
     /// Immutable module-wide wrapping uncertainty, read as a solver dependency by `inspect.unwrap`.
     functools_wrapper_mutation: Idx<Key>,
@@ -417,6 +419,8 @@ pub struct BindingsBuilder<'a> {
     /// Lambda parameters, grouped by their lambdas' owners.
     owned_lambda_params: SmallMap<Idx<Key>, Vec<LambdaParamId>>,
     next_lambda_param_id: u32,
+    /// See `Bindings::setattr_name_literals`; batch checking does not retain these references.
+    pub(super) setattr_name_literals: Option<Vec<(Identifier, TextRange)>>,
     /// Class body ranges paired with class indices, populated as
     /// `class_def_inner` enters each class body. The solver uses this to
     /// recover the enclosing class for a given expression range without
@@ -542,6 +546,7 @@ impl Bindings {
             unused_imports: Vec::new(),
             unused_variables: Vec::new(),
             pytest_info: None,
+            setattr_name_literals: Vec::new(),
             lambda_yield_keys: Vec::new(),
             owned_lambda_params: SmallMap::new(),
             lambda_parameter_derived: OnceLock::new(),
@@ -634,6 +639,10 @@ impl Bindings {
 
     pub fn unused_variables(&self) -> &[UnusedVariable] {
         &self.unused_variables
+    }
+
+    pub(crate) fn setattr_name_literals(&self) -> &[(Identifier, TextRange)] {
+        &self.setattr_name_literals
     }
 
     pub(crate) fn pytest_info(&self) -> Option<&PytestBindingInfo> {
@@ -966,6 +975,7 @@ impl Bindings {
             lambda_yield_keys: Vec::new(),
             owned_lambda_params: SmallMap::new(),
             next_lambda_param_id: 0,
+            setattr_name_literals: enable_trace.then(Vec::new),
             class_scopes: Vec::new(),
             call_base_classes: Vec::new(),
             class_field_definitions: SmallMap::new(),
@@ -1121,6 +1131,7 @@ impl Bindings {
             unused_imports: builder.unused_imports,
             unused_variables: builder.unused_variables,
             pytest_info: builder.pytest_info,
+            setattr_name_literals: builder.setattr_name_literals.unwrap_or_default(),
             lambda_yield_keys: builder.lambda_yield_keys,
             owned_lambda_params: builder.owned_lambda_params,
             lambda_parameter_derived: OnceLock::new(),
@@ -1882,12 +1893,14 @@ impl<'a> BindingsBuilder<'a> {
         }
     }
 
-    // Only works for things with `Foo`, or `source.Foo`, or `F` where `from module import Foo as F`.
-    // Does not work for things with nested modules - but no SpecialExport's have that.
+    /// Recognize a special export referenced by a name or a single module attribute.
+    /// Recorded reads use their original bindings; an unresolved recorded read never falls
+    /// back to the current scope. Reads not yet bound are resolved from the current scope.
     pub fn as_special_export(&self, e: &Expr) -> Option<SpecialExport> {
         let mut visited_names: SmallSet<Name> = SmallSet::new();
         let mut visited_keys: SmallSet<Idx<Key>> = SmallSet::new();
-        self.as_special_export_inner(e, &mut visited_names, &mut visited_keys)
+        let mut resolved = SmallMap::new();
+        self.as_special_export_inner(e, &mut visited_names, &mut visited_keys, &mut resolved)
     }
 
     pub fn class_object_is_generic(&self, idx: Idx<Key>) -> bool {
@@ -1907,26 +1920,103 @@ impl<'a> BindingsBuilder<'a> {
         e: &Expr,
         visited_names: &mut SmallSet<Name>,
         visited_keys: &mut SmallSet<Idx<Key>>,
+        resolved: &mut SmallMap<Idx<Key>, SpecialExport>,
     ) -> Option<SpecialExport> {
         match e {
             Expr::Name(name) => {
+                if let Some(idx) = self.binding_idx_at_name_read(ShortIdentifier::expr_name(name)) {
+                    // Recorded reads retain their original value even when the name is rebound.
+                    // Binding keys, rather than symbolic names, identify cycles on this path.
+                    return self.special_export_from_binding_idx(
+                        idx,
+                        visited_names,
+                        visited_keys,
+                        resolved,
+                    );
+                }
                 if !visited_names.insert(name.id.clone()) {
                     return None;
                 }
                 self.scopes
                     .as_special_export(&name.id, None, self.module_info.name(), self.lookup)
                     .or_else(|| {
-                        self.special_export_via_alias(&name.id, visited_names, visited_keys)
+                        self.special_export_via_alias(
+                            &name.id,
+                            visited_names,
+                            visited_keys,
+                            resolved,
+                        )
                     })
             }
             Expr::Attribute(ExprAttribute {
                 value, attr: name, ..
-            }) if let Expr::Name(base_name) = &**value => self.scopes.as_special_export(
-                &name.id,
-                Some(&base_name.id),
-                self.module_info.name(),
-                self.lookup,
-            ),
+            }) if let Expr::Name(base_name) = &**value => {
+                if let Some(idx) =
+                    self.binding_idx_at_name_read(ShortIdentifier::expr_name(base_name))
+                {
+                    let mut idx = idx;
+                    for _ in 0..16 {
+                        let (_, Some(binding)) = self.get_original_binding(idx)? else {
+                            return None;
+                        };
+                        if let Some(parent) = self.special_export_identity_parent(binding) {
+                            idx = parent;
+                            continue;
+                        }
+                        match binding {
+                            Binding::Module(module) => {
+                                return self.lookup.is_special_export(
+                                    ModuleName::from_parts(module.1.iter()),
+                                    &name.id,
+                                );
+                            }
+                            Binding::Import(import) => {
+                                return self.lookup.is_special_export(
+                                    self.from_import_submodule(import)?,
+                                    &name.id,
+                                );
+                            }
+                            _ => return None,
+                        }
+                    }
+                    return None;
+                }
+                self.scopes.as_special_export(
+                    &name.id,
+                    Some(&base_name.id),
+                    self.module_info.name(),
+                    self.lookup,
+                )
+            }
+            _ => None,
+        }
+    }
+
+    /// Return the fallback submodule using the solver's export-first import precedence.
+    /// Imports whose names were already verified are exports, not fallback submodules.
+    fn from_import_submodule(&self, import: &ImportBinding) -> Option<ModuleName> {
+        if import.fallback.is_none()
+            || (import.module != self.module_info.name()
+                && self.lookup.export_exists(import.module, &import.name))
+        {
+            return None;
+        }
+        let module = import.module.append(&import.name);
+        self.lookup.module_exists(module).finding()?;
+        Some(module)
+    }
+
+    /// Return an available parent binding when a wrapper preserves runtime identity.
+    fn special_export_identity_parent(&self, binding: &Binding) -> Option<Idx<Key>> {
+        match binding {
+            Binding::Forward(idx)
+            | Binding::PromoteForward(idx)
+            | Binding::ForwardToFirstUse(idx)
+            | Binding::Narrow(idx, ..)
+            | Binding::Phi(JoinStyle::NarrowOf(idx), _) => Some(*idx),
+            Binding::PossibleLegacyTParam(tparam_idx, ..) => {
+                self.idx_to_binding(*tparam_idx).map(|tparam| tparam.idx())
+            }
             _ => None,
         }
     }
@@ -1936,6 +2026,7 @@ impl<'a> BindingsBuilder<'a> {
         name: &Name,
         visited_names: &mut SmallSet<Name>,
         visited_keys: &mut SmallSet<Idx<Key>>,
+        resolved: &mut SmallMap<Idx<Key>, SpecialExport>,
     ) -> Option<SpecialExport> {
         let (idx, style) = self.scopes.binding_idx_for_name(name)?;
         match style {
@@ -1944,7 +2035,7 @@ impl<'a> BindingsBuilder<'a> {
             | FlowStyle::PossiblyUninitialized
             | FlowStyle::MaybeInitialized(_)
             | FlowStyle::Uninitialized => {
-                self.special_export_from_binding_idx(idx, visited_names, visited_keys)
+                self.special_export_from_binding_idx(idx, visited_names, visited_keys, resolved)
             }
             FlowStyle::MergeableImport(_)
             | FlowStyle::Import(..)
@@ -1964,18 +2055,18 @@ impl<'a> BindingsBuilder<'a> {
         mut idx: Idx<Key>,
         visited_names: &mut SmallSet<Name>,
         visited_keys: &mut SmallSet<Idx<Key>>,
+        resolved: &mut SmallMap<Idx<Key>, SpecialExport>,
     ) -> Option<SpecialExport> {
         for _ in 0..16 {
             if !visited_keys.insert(idx) {
                 return None;
             }
             let binding = self.idx_to_binding(idx)?;
+            if let Some(parent) = self.special_export_identity_parent(binding) {
+                idx = parent;
+                continue;
+            }
             match binding {
-                Binding::Forward(inner_idx)
-                | Binding::PromoteForward(inner_idx)
-                | Binding::ForwardToFirstUse(inner_idx) => {
-                    idx = *inner_idx;
-                }
                 Binding::NameAssign(x) => {
                     // Receiver-constrained class assignments rebind a
                     // class-shaped name; the receiver semantics keep the
@@ -1984,7 +2075,12 @@ impl<'a> BindingsBuilder<'a> {
                     if x.receiver_idx.is_some() {
                         return None;
                     }
-                    return self.as_special_export_inner(&x.expr, visited_names, visited_keys);
+                    return self.as_special_export_inner(
+                        &x.expr,
+                        visited_names,
+                        visited_keys,
+                        resolved,
+                    );
                 }
                 Binding::Import(x) => {
                     return self.lookup.is_special_export(x.module, &x.name);
@@ -1998,20 +2094,33 @@ impl<'a> BindingsBuilder<'a> {
                     return SpecialExport::new(name);
                 }
                 Binding::Phi(_, branches) => {
-                    // Check all branches for a consistent special export (e.g. try/except
-                    // importing Literal from typing vs typing_extensions).
+                    // Every branch must resolve to the same special export (e.g. try/except
+                    // importing Literal from typing vs typing_extensions). A branch that is
+                    // not a special export means the name may be an ordinary object.
                     let mut result = None;
                     for branch in branches {
-                        let branch_result = self.special_export_from_binding_idx(
-                            branch.value_key,
-                            visited_names,
-                            visited_keys,
-                        );
-                        match (&result, &branch_result) {
-                            (None, _) => result = branch_result,
-                            (_, None) => {}
-                            (Some(a), Some(b)) if a == b => {}
-                            _ => return None,
+                        let branch_result = if let Some(export) = resolved.get(&branch.value_key) {
+                            *export
+                        } else {
+                            // Siblings may share ancestors without forming a cycle. Each branch
+                            // inherits only the bindings and names on the current traversal path.
+                            let mut branch_names = visited_names.clone();
+                            let mut branch_keys = visited_keys.clone();
+                            let export = self.special_export_from_binding_idx(
+                                branch.value_key,
+                                &mut branch_names,
+                                &mut branch_keys,
+                                resolved,
+                            )?;
+                            // Only successful resolutions are reusable: failures can depend on
+                            // the current path, whereas a resolved branch has checked every leaf.
+                            resolved.insert(branch.value_key, export);
+                            export
+                        };
+                        match result {
+                            None => result = Some(branch_result),
+                            Some(expected) if expected == branch_result => {}
+                            Some(_) => return None,
                         }
                     }
                     return result;
@@ -2165,7 +2274,7 @@ impl<'a> BindingsBuilder<'a> {
                 // Mark as used (this must happen during traversal for unused-variable detection)
                 self.scopes.mark_parameter_used(name.key());
                 self.scopes.mark_import_used(name.key());
-                self.scopes.mark_variable_used(name.key());
+                self.scopes.mark_variable_used(name.key(), value_idx);
                 if !usage.is_static()
                     && matches!(
                         initialized,
@@ -2200,7 +2309,7 @@ impl<'a> BindingsBuilder<'a> {
             } => {
                 self.scopes.mark_parameter_used(name.key());
                 self.scopes.mark_import_used(name.key());
-                self.scopes.mark_variable_used(name.key());
+                self.scopes.mark_variable_used(name.key(), None);
                 let idx = self.idx_for_promise(key);
                 if let Some(module) = implicit_builtin_module {
                     self.insert_implicit_builtin_binding(idx, module, name.key());
@@ -2296,6 +2405,14 @@ impl<'a> BindingsBuilder<'a> {
             "a BoundName is deferred only once"
         );
         bound_name_idx
+    }
+
+    /// Return the binding captured for an already-bound read.
+    /// Static and implicit-builtin reads use their lookup binding when no flow value was recorded.
+    fn binding_idx_at_name_read(&self, name: ShortIdentifier) -> Option<Idx<Key>> {
+        self.deferred_bound_names
+            .get(&name)
+            .map(|read| read.value_idx.unwrap_or(read.lookup_result_idx))
     }
 
     /// Return the unnarrowed value binding captured for this exact name read.
