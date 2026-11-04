@@ -1075,6 +1075,10 @@ pub enum Type {
     ///
     /// See https://typing.python.org/en/latest/spec/glossary.html#term-materialize.
     Materialization,
+    /// Every value that is always falsy. It appears only as a member of an intersection: the left
+    /// operand `x: A` of `x and y` is returned only when it is falsy, so it contributes `A & Falsy`
+    /// to the result, and a later truthy narrow removes that member.
+    Falsy,
     None,
 }
 
@@ -1129,7 +1133,7 @@ impl Visit for Type {
             Type::KwargsValue(x) => x.visit(f),
             Type::Type(x) => x.visit(f),
             Type::TypeForm(x) => x.visit(f),
-            Type::Ellipsis => {}
+            Type::Ellipsis | Type::Falsy => {}
             Type::Any(x) => x.visit(f),
             Type::Never(x) => x.visit(f),
             Type::TypeAlias(x) => x.visit(f),
@@ -1193,7 +1197,7 @@ impl VisitMut for Type {
             Type::KwargsValue(x) => x.visit_mut(f),
             Type::Type(x) => x.visit_mut(f),
             Type::TypeForm(x) => x.visit_mut(f),
-            Type::Ellipsis => {}
+            Type::Ellipsis | Type::Falsy => {}
             Type::Any(x) => x.visit_mut(f),
             Type::Never(x) => x.visit_mut(f),
             Type::TypeAlias(x) => x.visit_mut(f),
@@ -2316,6 +2320,28 @@ impl Type {
         self
     }
 
+    /// Whether this type only records the truthiness of a boolean operand for narrowing. Such a
+    /// type is hidden from users and from `assert_type`.
+    pub fn is_truthiness_marker(&self) -> bool {
+        matches!(self, Type::Falsy)
+    }
+
+    /// Remove truthiness markers from every intersection.
+    pub fn without_truthiness_markers(self) -> Type {
+        self.transform(&mut |t| {
+            if let Type::Intersect(x) = t
+                && x.0.iter().any(Type::is_truthiness_marker)
+            {
+                let mut members = x.0.clone();
+                members.retain(|m| !m.is_truthiness_marker());
+                *t = match members.as_slice() {
+                    [member] => member.clone(),
+                    _ => Type::Intersect(Box::new((members, x.1.clone()))),
+                };
+            }
+        })
+    }
+
     /// Replace every DataFrame and Series schema with its plain underlying class. The schema forms
     /// (`DataFrame[a: Int64, ...]`, `Series[Int64]`) are not valid annotation syntax, so a surface
     /// that emits a type as source must strip them first.
@@ -2404,7 +2430,7 @@ impl Type {
             Type::Literal(lit) if let Lit::Bytes(x) = &lit.value => Some(!x.is_empty()),
             Type::Literal(lit) if let Lit::Str(x) = &lit.value => Some(!x.is_empty()),
             Type::Type(_) => Some(true),
-            Type::None => Some(false),
+            Type::None | Type::Falsy => Some(false),
             Type::Sentinel(_) => Some(true),
             Type::Tuple(Tuple::Concrete(elements)) => Some(!elements.is_empty()),
             Type::Union(u) => {
@@ -2420,6 +2446,10 @@ impl Type {
                 }
                 answer
             }
+            // Every value of an intersection is a value of each member, so one member with a known
+            // truthiness decides it. If two members disagree, the intersection has no values, and
+            // either answer is correct.
+            Type::Intersect(x) => x.0.iter().find_map(Type::as_bool),
             Type::ClassType(cls) => {
                 // `Never` containers cannot hold any items; they are always empty; they are always falsy.
                 const CONTAINER_NAMES: &[&str] = &["set", "frozenset", "list", "dict"];
@@ -2508,6 +2538,7 @@ impl Type {
             | Type::SelfType(_)
             | Type::KwCall(_)
             | Type::Materialization
+            | Type::Falsy
             | Type::None => false,
         })
     }

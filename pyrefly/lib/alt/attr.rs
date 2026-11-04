@@ -3003,6 +3003,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             | Type::Concatenate(_, _)
             | Type::ParamSpecValue(_)
             | Type::Materialization
+            | Type::Falsy
             | Type::Ellipsis => {}
         }
     }

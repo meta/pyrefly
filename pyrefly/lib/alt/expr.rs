@@ -2679,6 +2679,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
+    /// Intersect each class instance in `ty` whose truthiness is not statically known with
+    /// `Falsy`. `x and y` returns `x` only when it is falsy, so this lets a truthy narrow of the
+    /// result remove `x`.
+    fn mark_falsy(&self, ty: &Type, range: TextRange) -> Type {
+        let swallow = self.error_swallower();
+        self.distribute_over_union(ty, |t| match t {
+            Type::ClassType(_) if self.as_bool(t, range, &swallow).is_none() => self
+                .heap
+                .mk_intersect(vec![t.clone(), Type::Falsy], t.clone()),
+            _ => t.clone(),
+        })
+    }
+
     // Helper method for inferring the type of a boolean operation over a sequence of values.
     fn boolop(
         &self,
@@ -2732,7 +2745,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         Some(acc) => self.union(acc, t.clone()),
                     });
                     let t = if i != last_index {
-                        self.atomic_narrow(&t, &result_narrow, value.range(), errors)
+                        let t = self.atomic_narrow(&t, &result_narrow, value.range(), errors);
+                        if target {
+                            t
+                        } else {
+                            self.mark_falsy(&t, value.range())
+                        }
                     } else {
                         t
                     };

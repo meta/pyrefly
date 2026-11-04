@@ -142,7 +142,11 @@ pub fn unions_with_literals(
 }
 
 pub fn intersect(ts: Vec<Type>, fallback: Type, heap: &TypeHeap) -> Type {
-    let has_non_object = ts.iter().any(|t| !t.is_object());
+    // A truthiness marker appears only as a member of an intersection, so `object & Falsy` must keep
+    // `object`.
+    let has_non_object = ts
+        .iter()
+        .any(|t| !t.is_object() && !t.is_truthiness_marker());
     let mut flattened = Vec::new();
     for t in ts {
         match t {

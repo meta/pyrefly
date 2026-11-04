@@ -810,6 +810,29 @@ Example(42)
     }
 
     #[test]
+    fn test_return_intersection() -> anyhow::Result<()> {
+        // `Author & Falsy` has no annotation syntax, so its fallback type `Author` is written.
+        assert_annotations(
+            r#"
+class Genre: ...
+class Author:
+    genre: Genre | None
+def f(author: Author | None):
+    return author and author.genre
+"#,
+            r#"
+class Genre: ...
+class Author:
+    genre: Genre | None
+def f(author: Author | None) -> Author | Genre | None:
+    return author and author.genre
+"#,
+            None,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_return_none() -> anyhow::Result<()> {
         assert_annotations(
             r#"
