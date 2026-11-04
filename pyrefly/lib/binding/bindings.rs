@@ -392,9 +392,24 @@ impl From<InitializedInFlow> for InitializationStatus {
 pub enum InitializedInClass {
     Yes,
     /// Any of these flows can establish initialization.
-    /// Class-body definitions are checked separately and never merge with methods.
+    /// Class-body definitions are checked separately and never merge with methods, except for
+    /// bare annotations, which the methods that assign them initialize.
     /// An empty list means no flow guarantees initialization.
     IfAny(Vec<InitializationStatus>),
+}
+
+impl InitializedInClass {
+    /// Combine with another method's initialization using OR.
+    pub fn or(&mut self, other: InitializationStatus) {
+        match (&mut *self, other) {
+            (Self::Yes, _) => {}
+            (_, InitializationStatus::Initialized) => *self = Self::Yes,
+            (Self::IfAny(groups), deferred @ InitializationStatus::Deferred(_)) => {
+                groups.push(deferred)
+            }
+            (Self::IfAny(_), InitializationStatus::Uninitialized) => {}
+        }
+    }
 }
 
 impl From<InitializationStatus> for InitializedInClass {

@@ -646,6 +646,154 @@ class MixedDefinitions:
 );
 
 testcase!(
+    test_class_annotation_initialized_in_method,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from dataclasses import dataclass
+from typing import ClassVar, NoReturn, Protocol, Self
+
+def enabled() -> bool: ...
+def stop() -> NoReturn: ...
+def proceed() -> None: ...
+
+class Conditional:
+    x: int  # E: Attribute `x` may be uninitialized
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class Complete:
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+        else:
+            self.x = 2
+
+class InitializedByHelper:
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+    def reset(self) -> None:
+        self.x = 0
+
+class NeverAssigned:
+    x: int
+
+@dataclass
+class Data:
+    x: int
+    def __post_init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class Proto(Protocol):
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+@dataclass(init=False)
+class DataWithoutInit:
+    x: int  # E: Attribute `x` may be uninitialized
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class Terminates:
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+        else:
+            stop()
+
+class Proceeds:
+    x: int  # E: Attribute `x` may be uninitialized
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+        else:
+            proceed()
+
+class WithGetattr:
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+    def __getattr__(self, name: str) -> int: ...
+
+class Base:
+    x: int
+    def __init__(self) -> None:
+        self.x = 0
+
+class Derived(Base):
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class ClassLevel:
+    x: ClassVar[int]
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # E: Cannot set field `x`
+
+class InitializedInNew:
+    x: int
+    def __new__(cls) -> Self:
+        instance = super().__new__(cls)
+        instance.x = 0
+        return instance
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+# Subclass bodies usually fill a metaclass's annotated attributes.
+class Meta(type):
+    key: str
+    def __init__(cls, name: str, bases: tuple[type, ...], ns: dict[str, object]) -> None:
+        if "key" not in ns:
+            cls.key = name
+"#,
+);
+
+testcase!(
+    bug = "A base class or Protocol that only declares an attribute exempts subclasses",
+    test_attribute_initialization_declared_only_in_base,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import Protocol
+
+def enabled() -> bool: ...
+
+class Base:
+    x: int
+
+class Derived(Base):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # Should report `x`
+
+class DerivedRedeclare(Base):
+    x: int  # Should report `x`
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class P(Protocol):
+    x: int
+
+class Impl(P):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # Should report `x`
+"#,
+);
+
+testcase!(
     test_conditional_method_assignment_initialization,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"

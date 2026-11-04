@@ -1922,14 +1922,24 @@ The check permits an inherited attribute when a base class other than `object` d
 An instance `__getattr__` fallback also suppresses this error for instance attributes.
 Pyrefly combines assignments from different methods leniently: one method that initializes the attribute on every completing path suffices.
 This includes ordinary helper methods, even when Pyrefly cannot prove that the constructor calls them.
-Class-body definitions are checked separately, even when a method assigns the same name.
+Class-body assignments are checked separately, even when a method assigns the same name.
 Assignments inside nested functions do not initialize the enclosing method's attributes.
+In `__new__`, assignments through the first parameter (`cls.x = ...`) are checked like other method assignments.
+An assignment to the instance that `__new__` creates, such as `obj = super().__new__(cls)` followed by `obj.x = ...`, counts as initializing a bare class-body annotation `x: int`, even when the assignment is conditional.
+Other assignments to that instance are not tracked.
 
 Pyrefly reports this error at the attribute definition, even if the attribute is never read.
 A later `hasattr` guard does not suppress this check.
-Conditionally defined methods and nested classes, and stub (`.pyi`) files, are excluded.
+A method or nested class defined under a condition in the class body is not reported, unless the name is also bound another way in the class body.
+The attributes that such a method assigns are still checked.
+Stub (`.pyi`) files are excluded.
+
+An unconditional bare class-body annotation, such as `x: int`, is checked against the methods that assign it.
+Dataclasses, including attrs classes and pydantic models, and named tuples are excluded because they initialize annotated fields themselves, except for a plain `@dataclass(init=False)`.
+Protocols, whose members are declarations, and `ClassVar` annotations are also excluded.
+If no recognized method assigns the annotation, the separate [`uninitialized-instance-variable`](#uninitialized-instance-variable) check reports it instead.
+A bare annotation under a condition in the class body is checked like any other conditional class-body definition, even when a method assigns it.
 An annotation in a method without a value, such as `self.value: int`, declares the attribute without initializing it, so this check reports it.
-A class-body annotation without a value, such as `value: int`, is checked by [`uninitialized-instance-variable`](#uninitialized-instance-variable) instead.
 
 To disable this check while keeping other strict checks, use:
 

@@ -534,13 +534,20 @@ impl<'a> BindingsBuilder<'a> {
                 && !defined_in_helper
                 && let InitializedInClass::IfAny(initializations) = initialized
             {
-                let is_instance = matches!(
-                    &definition,
-                    ClassFieldDefinition::DefinedInMethod {
-                        receiver_kind: MethodSelfKind::Instance,
-                        ..
+                let declared_annotation = match &definition {
+                    ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => {
+                        Some(*annotation)
                     }
-                );
+                    _ => None,
+                };
+                let is_instance = declared_annotation.is_some()
+                    || matches!(
+                        &definition,
+                        ClassFieldDefinition::DefinedInMethod {
+                            receiver_kind: MethodSelfKind::Instance,
+                            ..
+                        }
+                    );
                 self.insert_binding(
                     KeyExpect::UninitializedAttributeCheck(range),
                     BindingExpect::UninitializedAttributeCheck {
@@ -548,6 +555,7 @@ impl<'a> BindingsBuilder<'a> {
                         range,
                         class: class_indices.class_idx,
                         is_instance,
+                        declared_annotation,
                         initializations,
                     },
                 );

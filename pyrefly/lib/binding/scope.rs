@@ -3756,12 +3756,28 @@ impl Scopes {
                         }
                         _ => InitializedInFlow::Yes,
                     };
+                    // A bare annotation is initialized by the methods that assign it, which
+                    // are merged below. If no recognized method assigns it,
+                    // `uninitialized-instance-variable` reports it instead. Any assignment
+                    // to the instance created in `__new__` counts as initializing it.
+                    let initialized = if matches!(
+                        definition,
+                        ClassFieldDefinition::DeclaredByAnnotation {
+                            initialized_in_recognized_method: true,
+                            initialized_on_new_instance: false,
+                            ..
+                        }
+                    ) {
+                        InitializationStatus::Uninitialized
+                    } else {
+                        InitializationStatus::from(initialized)
+                    };
                     field_definitions.insert_hashed(
                         name.owned(),
                         (
                             definition,
                             static_info.range,
-                            InitializationStatus::from(initialized).into(),
+                            InitializedInClass::from(initialized),
                         ),
                     );
                 }
@@ -3817,17 +3833,15 @@ impl Scopes {
                     }
                     // Initialization is merged independently of definition priority.
                     // Any method can establish initialization, so combine their requirements with OR.
-                    match (&mut *existing_initialized, initialized) {
-                        (InitializedInClass::Yes, _) => {}
-                        (_, InitializationStatus::Initialized) => {
-                            *existing_initialized = InitializedInClass::Yes;
-                        }
-                        (
-                            InitializedInClass::IfAny(groups),
-                            deferred @ InitializationStatus::Deferred(_),
-                        ) => groups.push(deferred),
-                        (InitializedInClass::IfAny(_), InitializationStatus::Uninitialized) => {}
-                    }
+                    existing_initialized.or(initialized);
+                } else if let Some((
+                    ClassFieldDefinition::DeclaredByAnnotation { .. },
+                    _,
+                    existing_initialized,
+                )) = field_definitions.get_mut(name.key())
+                {
+                    // Methods initialize a bare class-body annotation without changing its definition.
+                    existing_initialized.or(initialized);
                 } else if !field_definitions.contains_key_hashed(name.as_ref()) {
                     field_definitions.insert_hashed(
                         name,

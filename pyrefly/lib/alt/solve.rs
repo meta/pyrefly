@@ -3288,6 +3288,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 range,
                 class,
                 is_instance,
+                declared_annotation,
                 initializations,
             } => {
                 let initialized = initializations.iter().any(|initialized| {
@@ -3295,7 +3296,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 });
                 let inherited_or_dynamic = !initialized
                     && self.get_idx(*class).0.as_ref().is_some_and(|cls| {
-                        (*is_instance && self.get_class_member(cls, &dunder::GETATTR).is_some())
+                        // Some classes initialize annotated fields themselves, and subclass
+                        // bodies usually fill a metaclass's annotated attributes. A `ClassVar`
+                        // declaration is not an instance attribute, and assigning it through
+                        // `self` is reported separately.
+                        declared_annotation.is_some_and(|annot| {
+                            let metadata = self.get_metadata_for_class(cls);
+                            metadata.initializes_annotated_fields()
+                                || metadata.is_metaclass()
+                                || self
+                                    .get_idx(annot)
+                                    .annotation
+                                    .has_qualifier(&Qualifier::ClassVar)
+                        }) || (*is_instance
+                            && self.get_class_member(cls, &dunder::GETATTR).is_some())
                             || self
                                 .get_mro_for_class(cls)
                                 .ancestors_no_object()
