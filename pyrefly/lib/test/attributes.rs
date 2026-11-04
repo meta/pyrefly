@@ -801,7 +801,6 @@ def f(a: A):
 );
 
 testcase!(
-    bug = "Only the first method that assigns an attribute is checked for initialization",
     test_conditional_attribute_initialized_in_helper,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -812,7 +811,7 @@ class DelegatingInit:
         if cfg is None:
             self._load_defaults()
         else:
-            self.cfg = cfg  # E: Attribute `cfg` may be uninitialized
+            self.cfg = cfg
 
     def _load_defaults(self) -> None:
         self.cfg = 0
@@ -824,7 +823,7 @@ class HelperFirst:
 
     def __init__(self, cfg: int | None = None) -> None:
         if cfg is not None:
-            self.cfg = cfg  # E: Attribute `cfg` may be uninitialized
+            self.cfg = cfg
 
 class ConditionalHelper:
     def __init__(self, cfg: int | None = None) -> None:
@@ -839,7 +838,7 @@ class ConditionalHelper:
 class IncompatibleHelper:
     def __init__(self, cfg: int | None = None) -> None:
         if cfg is not None:
-            self.cfg = cfg  # E: Attribute `cfg` may be uninitialized
+            self.cfg = cfg
 
     def _load_defaults(self) -> None:
         self.cfg = "bad"  # E: `Literal['bad']` is not assignable to attribute `cfg` with type `int`
@@ -864,7 +863,6 @@ def f(a: A):
 );
 
 testcase!(
-    bug = "Only the first method that assigns an attribute is checked for initialization",
     test_attribute_initialization_deferred_methods,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -891,7 +889,7 @@ class ConstructorTerminates:
 class HelperTerminates:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1  # E: Attribute `value` may be uninitialized
+            self.value = 1
         else:
             proceed()
 
@@ -928,7 +926,7 @@ class ConditionalHelper:
 class ConditionalConstructor:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1  # E: Attribute `value` may be uninitialized
+            self.value = 1
 
     def initialize(self, flag: bool) -> None:
         if flag:

@@ -3717,7 +3717,7 @@ impl Scopes {
                         has_instance_write: existing_instance_write,
                     },
                     _,
-                    _,
+                    existing_initialized,
                 )) = field_definitions.get_mut(name.key())
                 {
                     if matches!(receiver_kind, MethodSelfKind::Instance) {
@@ -3729,8 +3729,8 @@ impl Scopes {
                     if existing_method.recognized_attribute_defining_method
                         && !method.recognized_attribute_defining_method
                     {
-                        // Prioritization: Existing is from a recognized constructor, new is from an
-                        // unrecognized helper method. The constructor wins, so ignore the new assignment.
+                        // The constructor determines the attribute type, so the helper's values,
+                        // annotation, and receiver kind do not affect the definition.
                     } else {
                         // Merge: Either both are constructors (e.g. __new__ and __init__), or both are
                         // helper methods. We combine all their assignments.
@@ -3743,6 +3743,19 @@ impl Scopes {
                         if matches!(receiver_kind, MethodSelfKind::Class) {
                             *existing_receiver = MethodSelfKind::Class;
                         }
+                    }
+                    // Initialization is merged independently of definition priority.
+                    // Any method can establish initialization, so combine their requirements with OR.
+                    match (&mut *existing_initialized, initialized) {
+                        (InitializedInClass::Yes, _) => {}
+                        (_, InitializationStatus::Initialized) => {
+                            *existing_initialized = InitializedInClass::Yes;
+                        }
+                        (
+                            InitializedInClass::IfAny(groups),
+                            deferred @ InitializationStatus::Deferred(_),
+                        ) => groups.push(deferred),
+                        (InitializedInClass::IfAny(_), InitializationStatus::Uninitialized) => {}
                     }
                 } else if !field_definitions.contains_key_hashed(name.as_ref()) {
                     field_definitions.insert_hashed(
