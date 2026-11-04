@@ -2772,6 +2772,180 @@ mod tests {
         );
     }
 
+    /// A config file at `root` with the directory-relative fallback search path
+    /// enabled, as `enable-fallback-search-path = true` produces.
+    fn directory_relative_fallback_config(
+        root: &Path,
+        search_path: &[&str],
+        site_package_path: &[&str],
+    ) -> ConfigFile {
+        let mut config = get_config(ConfigSource::File(root.join("pyrefly.toml")));
+        config.search_path_from_file = search_path.iter().map(|p| root.join(p)).collect();
+        config.python_environment.site_package_path =
+            Some(site_package_path.iter().map(|p| root.join(p)).collect());
+        config.fallback_search_path = FallbackSearchPath::DirectoryRelative(
+            DirectoryRelativeFallbackSearchPathCache::new(Some(root.to_path_buf())),
+        );
+        config
+    }
+
+    fn find_import_from(
+        config: &ConfigFile,
+        module: &str,
+        origin: &Path,
+    ) -> FindingOrError<ModulePath> {
+        let origin = ModulePath::filesystem(origin.to_path_buf());
+        find_import(
+            config,
+            ModuleName::from_str(module),
+            FindImportOptions {
+                origin: Some(&origin),
+                ..FindImportOptions::new(&DirEntryCache::new())
+            },
+        )
+    }
+
+    fn fallback_finding(path: PathBuf, module: &str) -> FindingOrError<ModulePath> {
+        FindingOrError::Finding(Finding {
+            finding: ModulePath::filesystem(path),
+            error: Some(FindError::FallbackSearchPathRelativeImport(
+                ModuleName::from_str(module),
+            )),
+        })
+    }
+
+    #[test]
+    fn test_site_packages_precede_directory_relative_fallback() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![
+                TestPath::dir(
+                    "integrations",
+                    vec![TestPath::dir(
+                        "foo",
+                        vec![TestPath::file("__init__.py"), TestPath::file("main.py")],
+                    )],
+                ),
+                TestPath::dir(
+                    "site_packages",
+                    vec![TestPath::dir("foo", vec![TestPath::file("__init__.py")])],
+                ),
+            ],
+        );
+        let config = directory_relative_fallback_config(root, &[], &["site_packages"]);
+
+        // BUG: the installed `site_packages/foo/__init__.py` should win, since the
+        // fallback is only meant for imports that are otherwise unresolved.
+        assert_eq!(
+            find_import_from(&config, "foo", &root.join("integrations/foo/main.py")),
+            fallback_finding(root.join("integrations/foo/__init__.py"), "foo"),
+        );
+    }
+
+    #[test]
+    fn test_namespace_package_precedes_directory_relative_fallback() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![
+                TestPath::dir(
+                    "src",
+                    vec![TestPath::dir(
+                        "foo",
+                        vec![
+                            TestPath::file("__init__.py"),
+                            TestPath::dir("bar", vec![TestPath::file("baz.py")]),
+                        ],
+                    )],
+                ),
+                TestPath::dir(
+                    "tests",
+                    vec![TestPath::dir(
+                        "foo",
+                        vec![TestPath::dir(
+                            "bar",
+                            vec![TestPath::file("__init__.py"), TestPath::file("test_baz.py")],
+                        )],
+                    )],
+                ),
+            ],
+        );
+        let config = directory_relative_fallback_config(root, &["src"], &[]);
+
+        // BUG: `foo.bar` is the namespace package `src/foo/bar`, which is found on the
+        // search path, so the fallback should not be consulted.
+        assert_eq!(
+            find_import_from(&config, "foo.bar", &root.join("tests/foo/bar/test_baz.py")),
+            fallback_finding(root.join("tests/foo/bar/__init__.py"), "foo.bar"),
+        );
+    }
+
+    #[test]
+    fn test_directory_relative_fallback_inside_site_package_path() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir(
+                "tests",
+                vec![TestPath::file("helper.py"), TestPath::file("test_foo.py")],
+            )],
+        );
+        // An editable install puts the project root on the site package path.
+        let config = directory_relative_fallback_config(root, &[], &["."]);
+
+        // BUG: the fallback should find `tests/helper.py`, as it does when the project
+        // root is not a site package path.
+        assert!(matches!(
+            find_import_from(&config, "helper", &root.join("tests/test_foo.py")),
+            FindingOrError::Error(FindError::MissingImport(..)),
+        ));
+    }
+
+    #[test]
+    fn test_directory_relative_fallback_and_regular_packages() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![
+                TestPath::dir(
+                    "pkg",
+                    vec![
+                        TestPath::file("__init__.py"),
+                        TestPath::dir(
+                            "foo",
+                            vec![TestPath::file("__init__.py"), TestPath::file("bar.py")],
+                        ),
+                        TestPath::file("baz.py"),
+                    ],
+                ),
+                TestPath::dir("scripts", vec![TestPath::file("qux.py")]),
+            ],
+        );
+        let config = directory_relative_fallback_config(root, &[], &[]);
+
+        // BUG: a directory inside a regular package is never a root at runtime, so
+        // the fallback should not resolve `foo` to the enclosing package or `baz` to
+        // the importing file itself.
+        assert_eq!(
+            find_import_from(&config, "foo", &root.join("pkg/foo/bar.py")),
+            fallback_finding(root.join("pkg/foo/__init__.py"), "foo"),
+        );
+        assert_eq!(
+            find_import_from(&config, "baz", &root.join("pkg/baz.py")),
+            fallback_finding(root.join("pkg/baz.py"), "baz"),
+        );
+        // A directory outside any package can be a root, e.g. when running a script.
+        assert_eq!(
+            find_import_from(&config, "qux", &root.join("scripts/qux.py")),
+            fallback_finding(root.join("scripts/qux.py"), "qux"),
+        );
+    }
+
     /// A first-party root plus a site package directory holding representative
     /// package layouts for testing untyped import handling.
     fn untyped_imports_config(root: &Path, replace_untyped: &[&str]) -> ConfigFile {
@@ -3689,6 +3863,130 @@ mod tests {
         } else {
             panic!("Expected Finding, got: {:?}", result);
         }
+    }
+
+    #[test]
+    fn test_py_typed_package_and_bundled_stub() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir(
+                "site_packages",
+                vec![TestPath::dir(
+                    "requests",
+                    vec![TestPath::file("py.typed"), TestPath::file("__init__.py")],
+                )],
+            )],
+        );
+
+        for source in [ConfigSource::File("".into()), ConfigSource::Synthetic(None)] {
+            let mut config = get_config(source);
+            config.python_environment.site_package_path = Some(vec![root.join("site_packages")]);
+            config.configure();
+
+            let result = find_import(
+                &config,
+                ModuleName::from_str("requests"),
+                FindImportOptions::new(&DirEntryCache::new()),
+            );
+
+            // BUG: PEP 561 orders a package that ships `py.typed` before typeshed's
+            // stubs, so `site_packages/requests/__init__.py` should be found.
+            let FindingOrError::Finding(finding) = &result else {
+                panic!("Expected a finding, got: {result:?}");
+            };
+            assert!(
+                matches!(
+                    finding.finding.details(),
+                    ModulePathDetails::BundledTypeshedThirdParty(_)
+                ),
+                "got: {result:?}"
+            );
+            assert_eq!(finding.error, None);
+        }
+    }
+
+    #[test]
+    fn test_stub_package_without_init_and_runtime_package() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir(
+                "site_packages",
+                vec![
+                    TestPath::dir(
+                        "foo",
+                        vec![
+                            TestPath::file("py.typed"),
+                            TestPath::file("__init__.py"),
+                            TestPath::file("bar.py"),
+                        ],
+                    ),
+                    TestPath::dir("foo-stubs", vec![TestPath::file("bar.pyi")]),
+                ],
+            )],
+        );
+        let site_packages = root.join("site_packages");
+        let mut config = get_config(ConfigSource::File("".into()));
+        config.python_environment.site_package_path = Some(vec![site_packages.clone()]);
+        config.configure();
+        let find = |module| {
+            find_import(
+                &config,
+                ModuleName::from_str(module),
+                FindImportOptions::new(&DirEntryCache::new()),
+            )
+        };
+
+        // BUG: `foo-stubs` provides no `foo` module of its own, so it should not hide
+        // the runtime package `site_packages/foo/__init__.py`.
+        assert_eq!(
+            find("foo"),
+            FindingOrError::new_finding(ModulePath::namespace(site_packages.join("foo-stubs")))
+        );
+        assert_eq!(
+            find("foo.bar"),
+            FindingOrError::new_finding(ModulePath::filesystem(
+                site_packages.join("foo-stubs/bar.pyi")
+            ))
+        );
+    }
+
+    #[test]
+    fn test_untyped_import_for_stubs_on_search_path() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir(
+                "typings",
+                vec![TestPath::dir(
+                    "requests",
+                    vec![TestPath::file("__init__.pyi")],
+                )],
+            )],
+        );
+        let mut config = get_config(ConfigSource::File(root.join("pyrefly.toml")));
+        config.search_path_from_file = vec![root.join("typings")];
+
+        let module = ModuleName::from_str("requests");
+        // BUG: the module is a stub, so it should not be reported as untyped.
+        assert_eq!(
+            find_import(
+                &config,
+                module,
+                FindImportOptions::new(&DirEntryCache::new())
+            ),
+            FindingOrError::Finding(Finding {
+                finding: ModulePath::filesystem(root.join("typings/requests/__init__.pyi")),
+                error: Some(FindError::UntypedImport(
+                    module,
+                    Arc::new("types-requests".to_owned())
+                )),
+            })
+        );
     }
 
     #[test]
