@@ -1002,21 +1002,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub fn compare_infer(&self, x: &ExprCompare, errors: &ErrorCollector) -> Type {
         // For chained comparisons like `a < b < c`, Python evaluates as `(a < b) and (b < c)`.
         // We need to track the current left operand as we iterate through the chain.
-        let mut current_left = self.expr_infer(x.first_operand(), errors);
-        let mut current_left_range = x.first_operand().range();
+        let mut current_left_expr = x.first_operand();
+        let mut current_left = self.expr_infer(current_left_expr, errors);
         let mut results = Vec::new();
         for (op, comparator) in x.ops.iter().zip(x.comparators()) {
             let right = self.expr_infer(comparator, errors);
 
-            // Check for unnecessary identity comparisons (is/is not) BEFORE distribute_over_union
-            // to avoid false positives with union types.
-            self.check_unnecessary_comparison(
-                &current_left,
-                &right,
-                *op,
-                comparator.range(),
-                errors,
-            );
+            self.check_unnecessary_comparison(current_left_expr, comparator, *op, errors);
             self.check_incompatible_comparison(
                 &current_left,
                 &right,
@@ -1031,14 +1023,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 *op,
                 &current_left,
                 &right,
-                current_left_range,
+                current_left_expr.range(),
                 right_range,
                 errors,
             );
             results.push(result);
             // For next comparison, the current right becomes the new left
             current_left = right;
-            current_left_range = comparator.range();
+            current_left_expr = comparator;
         }
         self.unions(results)
     }
@@ -1292,23 +1284,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.unop_types(x, &t, errors)
     }
 
-    /// Checks for unnecessary identity comparisons.
+    /// Checks for identity comparisons (`is` or `is not`) whose result is statically known.
     ///
-    /// Only emits warnings for identity comparisons (`is` or `is not`) whose result is
-    /// statically known.
-    /// Returns early without warnings for other comparison operators.
+    /// The result is known only when declarations settle both operands' types, as described in
+    /// [`Self::declared_type`]. Flow narrowing does not settle it, because it does not see a
+    /// reassignment through `global` or `nonlocal` in a function that a call runs. The check
+    /// uses the whole declared types rather than distributing over unions, so a union operand
+    /// never warns.
     fn check_unnecessary_comparison(
         &self,
-        left: &Type,
-        right: &Type,
+        left: &Expr,
+        right: &Expr,
         op: CmpOp,
-        range: TextRange,
         errors: &ErrorCollector,
     ) {
-        // Only check identity comparisons
         if !matches!(op, CmpOp::Is | CmpOp::IsNot) {
             return;
         }
+        let range = right.range();
+        let (Some(left), Some(right)) = (self.declared_type(left), self.declared_type(right))
+        else {
+            return;
+        };
 
         let is_op = matches!(op, CmpOp::Is);
         let is_bool_literal = |lit: &Lit| matches!(lit, Lit::Bool(_));
@@ -1346,7 +1343,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .emit();
         };
 
-        match (left, right) {
+        match (&left, &right) {
             // If both are literals/None, check for predictable results
             (Type::Literal(l1), Type::Literal(l2)) => {
                 // Explicit/implicit literal style is typing metadata, not runtime identity.

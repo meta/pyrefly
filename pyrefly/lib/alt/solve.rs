@@ -2766,38 +2766,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
-    /// The truth value of a branch test according to declarations alone: annotations, `def`
-    /// and `class` statements, literals, and the declared types of attributes and call returns.
-    /// A value that only inference or flow narrowing supplies is `None`, because a variable
-    /// assigned `False` may be reassigned in ways flow analysis does not see (through `global`,
-    /// `nonlocal`, an exception edge, or another module), and narrowing an operand to `Never`
-    /// inside `x == a and x != b` fixes the `and` without saying anything about the program.
-    /// For the same reason, an attribute without a declared type, and a call or `__bool__` whose
-    /// return type is inferred, settle nothing: a subclass, a monkeypatch, or an assignment the
-    /// inference does not see can make the inferred type wrong.
+    /// The truth value of a branch test according to declarations alone: see
+    /// [`Self::declared_type`]. `not`, `and`, and `or` combine their operands' values, and a
+    /// `__bool__` whose return type is inferred settles nothing. Narrowing an operand to `Never`
+    /// inside `x == a and x != b` fixes the `and` without saying anything about the program, so
+    /// operands are never narrowed.
     fn declared_bool_value(&self, x: &Expr) -> Option<bool> {
         let swallow = self.error_swallower();
-        let returns_inferred = |callee: &Type| {
-            // An overloaded function carries its implementation's metadata, but a call returns
-            // what one of the overloads declares.
-            let overload = match callee {
-                Type::Overload(overload) => Some(overload),
-                Type::BoundMethod(method) => match &method.func {
-                    BoundMethodType::Overload(overload) => Some(overload),
-                    _ => None,
-                },
-                _ => None,
-            };
-            match overload {
-                Some(overload) => overload.signatures.iter().any(|signature| match signature {
-                    OverloadType::Function(func) => func.metadata.flags.is_return_inferred,
-                    OverloadType::Forall(forall) => forall.body.metadata.flags.is_return_inferred,
-                }),
-                None => callee
-                    .toplevel_func_metadata()
-                    .is_some_and(|meta| meta.flags.is_return_inferred),
-            }
-        };
         let value_of_type = |ty: &Type| {
             let value = self.check_bool_type_and_get_value(x, ty, &swallow)?;
             // Each member of a union has its own `__bool__`, and one inferred return leaves the
@@ -2832,6 +2807,39 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 all_settled.then_some(!decisive)
             }
+            Expr::Call(call) => {
+                // When no signature's return type can settle, and none has type variables, the
+                // call is ruled out without inferring it, which would repeat the argument checks
+                // of nearly every call test.
+                let callees = self.declared_callees(call)?;
+                let mut signatures = callees
+                    .iter()
+                    .flat_map(|callee| callee.toplevel_callable_signatures())
+                    .peekable();
+                if signatures.peek().is_some()
+                    && signatures.all(|(signature, _)| {
+                        !signature.ret.contains_type_variable()
+                            && value_of_type(&signature.ret).is_none()
+                    })
+                {
+                    return None;
+                }
+                value_of_type(&self.expr_infer(x, &swallow))
+            }
+            _ => value_of_type(&self.declared_type(x)?),
+        }
+    }
+
+    /// The type of `x` according to declarations alone: annotations, `def` and `class`
+    /// statements, literals, and the declared types of attributes and call returns. A type that
+    /// only inference or flow narrowing supplies is `None`, because a variable assigned `False`
+    /// may be reassigned in ways flow analysis does not see (through `global`, `nonlocal`, an
+    /// exception edge, or another module). For the same reason, an attribute without a declared
+    /// type and a call whose return type is inferred settle nothing: a subclass, a monkeypatch,
+    /// or an assignment the inference does not see can make the inferred type wrong.
+    pub(crate) fn declared_type(&self, x: &Expr) -> Option<Type> {
+        let swallow = self.error_swallower();
+        match x {
             Expr::Name(name) => {
                 // A name settles only through its declaration, before any narrowing: an annotated
                 // parameter or assignment, `def`, `class`, or `type`. A bare `Final` declares no
@@ -2850,7 +2858,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         let annotation = &self.get_idx(annotation).annotation;
                         if annotation.ty.is_none() {
                             return if annotation.is_final() {
-                                self.declared_bool_value(&assign.expr)
+                                self.declared_type(&assign.expr)
                             } else {
                                 None
                             };
@@ -2870,114 +2878,88 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // the like all carry an inferred type.
                     _ => return None,
                 }
-                value_of_type(self.get_idx(idx).ty())
+                Some(self.get_idx(idx).ty().clone())
             }
             Expr::Attribute(attr) => {
                 let base = self.expr_infer(&attr.value, &swallow);
-                // A module attribute settles only if it is a `Final` with a declared type, as for
-                // an imported name, read from a module that the environment does not choose.
-                if let Type::Module(module) = &base {
-                    return (!self.module_chosen_by_environment(&attr.value)
-                        && self.export_settles(
-                            ModuleName::from_parts(module.parts()),
-                            &attr.attr.id,
-                        ))
-                    .then(|| {
-                        value_of_type(&self.attr_infer_for_type(
-                            &base,
-                            &attr.attr.id,
-                            attr.range,
-                            &swallow,
-                            None,
-                        ))
+                let declared = if let Type::Module(module) = &base {
+                    // A module attribute settles only if it is a `Final` with a declared type, as
+                    // for an imported name, read from a module that the environment does not
+                    // choose.
+                    !self.module_chosen_by_environment(&attr.value)
+                        && self
+                            .export_settles(ModuleName::from_parts(module.parts()), &attr.attr.id)
+                } else {
+                    // Only a class or instance attribute can be looked up as a declaration. A read
+                    // through a descriptor returns what its `__get__` returns. An enum member's
+                    // `value` is the type of the expression assigned to the member, which is
+                    // inferred.
+                    let classes = self.attribute_lookup_classes(&base)?;
+                    if matches!(attr.attr.id.as_str(), "value" | "_value_")
+                        && classes
+                            .iter()
+                            .any(|cls| self.get_metadata_for_class(cls).is_enum())
+                    {
+                        return None;
+                    }
+                    classes.iter().all(|cls| {
+                        self.get_class_member(cls, &attr.attr.id)
+                            .is_some_and(|field| match field.descriptor_getter_class() {
+                                Some(descriptor) => self
+                                    .get_class_member(descriptor.class_object(), &dunder::GET)
+                                    .is_some_and(|getter| !returns_inferred(&getter.ty())),
+                                None => field.has_declared_type(),
+                            })
                     })
-                    .flatten();
-                }
-                // Only a class or instance attribute can be looked up as a declaration. A read
-                // through a descriptor returns what its `__get__` returns. An enum member's
-                // `value` is the type of the expression assigned to the member, which is
-                // inferred.
-                let classes = self.attribute_lookup_classes(&base)?;
-                if matches!(attr.attr.id.as_str(), "value" | "_value_")
-                    && classes
-                        .iter()
-                        .any(|cls| self.get_metadata_for_class(cls).is_enum())
-                {
-                    return None;
-                }
-                let declared = classes.iter().all(|cls| {
-                    self.get_class_member(cls, &attr.attr.id)
-                        .is_some_and(|field| match field.descriptor_getter_class() {
-                            Some(descriptor) => self
-                                .get_class_member(descriptor.class_object(), &dunder::GET)
-                                .is_some_and(|getter| !returns_inferred(&getter.ty())),
-                            None => field.has_declared_type(),
-                        })
-                });
-                if !declared {
-                    return None;
-                }
-                value_of_type(&self.attr_infer_for_type(
-                    &base,
-                    &attr.attr.id,
-                    attr.range,
-                    &swallow,
-                    None,
-                ))
+                };
+                declared.then(|| {
+                    self.attr_infer_for_type(&base, &attr.attr.id, attr.range, &swallow, None)
+                })
             }
+            // A call returns the declared return type of one of the callee's signatures. A class
+            // or a generic function is settled by the inferred type of the call.
             Expr::Call(call) => {
-                if let Expr::Name(name) = &*call.func
-                    && self.name_chosen_by_environment(name, self.binding_before_narrowing(name))
-                {
-                    return None;
-                }
-                // Each member of a union is called separately, and an instance, including one
-                // whose type is a type variable, is called through its `__call__` method.
-                let mut callees = Vec::new();
-                self.map_over_union(&self.expr_infer(&call.func, &swallow), |callee| {
-                    callees.push(match callee {
-                        Type::ClassType(_) | Type::SelfType(_) | Type::Quantified(_) => self
-                            .type_of_magic_dunder_attr(
-                                callee,
-                                &dunder::CALL,
-                                x.range(),
-                                &swallow,
-                                None,
-                                "__call__",
-                                false,
-                            ),
-                        _ => Some(callee.clone()),
-                    })
-                });
-                let callees = callees.into_iter().collect::<Option<Vec<_>>>()?;
-                // A call returns the declared return type of one of the callee's signatures, so
-                // when no signature's return type can settle, and none has type variables, the
-                // call is ruled out without inferring it, which would repeat the argument checks
-                // of nearly every call test. A class or a generic function is settled by the
-                // inferred type of the call.
-                let mut signatures = callees
-                    .iter()
-                    .flat_map(|callee| callee.toplevel_callable_signatures())
-                    .peekable();
-                if callees.iter().any(returns_inferred)
-                    || (signatures.peek().is_some()
-                        && signatures.all(|(signature, _)| {
-                            !signature.ret.contains_type_variable()
-                                && value_of_type(&signature.ret).is_none()
-                        }))
-                {
-                    return None;
-                }
-                value_of_type(&self.expr_infer(x, &swallow))
+                self.declared_callees(call)?;
+                Some(self.expr_infer(x, &swallow))
             }
             Expr::StringLiteral(_)
             | Expr::BytesLiteral(_)
             | Expr::NumberLiteral(_)
             | Expr::BooleanLiteral(_)
             | Expr::NoneLiteral(_)
-            | Expr::EllipsisLiteral(_) => value_of_type(&self.expr_infer(x, &swallow)),
+            | Expr::EllipsisLiteral(_) => Some(self.expr_infer(x, &swallow)),
             _ => None,
         }
+    }
+
+    /// The callees of `call`, or `None` if the environment chooses the callee or any callee has
+    /// an inferred return type. Each member of a union is called separately, and an instance,
+    /// including one whose type is a type variable, is called through its `__call__` method.
+    fn declared_callees(&self, call: &ExprCall) -> Option<Vec<Type>> {
+        if let Expr::Name(name) = &*call.func
+            && self.name_chosen_by_environment(name, self.binding_before_narrowing(name))
+        {
+            return None;
+        }
+        let swallow = self.error_swallower();
+        let mut callees = Vec::new();
+        self.map_over_union(&self.expr_infer(&call.func, &swallow), |callee| {
+            callees.push(match callee {
+                Type::ClassType(_) | Type::SelfType(_) | Type::Quantified(_) => self
+                    .type_of_magic_dunder_attr(
+                        callee,
+                        &dunder::CALL,
+                        call.range(),
+                        &swallow,
+                        None,
+                        "__call__",
+                        false,
+                    ),
+                _ => Some(callee.clone()),
+            })
+        });
+        let callees = callees.into_iter().collect::<Option<Vec<_>>>()?;
+        (!callees.iter().any(returns_inferred)).then_some(callees)
     }
 
     /// Whether a suite is dead by its test: control never evaluates the [`Binding::BranchTest`]
@@ -8570,5 +8552,27 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             TypeCheckOptions::new(errors, tcc).with_call_context(call_context),
         );
         Some(typeform_ty)
+    }
+}
+
+/// Whether a call to `callee` returns an inferred type. An overloaded function carries its
+/// implementation's metadata, but a call returns what one of the overloads declares.
+fn returns_inferred(callee: &Type) -> bool {
+    let overload = match callee {
+        Type::Overload(overload) => Some(overload),
+        Type::BoundMethod(method) => match &method.func {
+            BoundMethodType::Overload(overload) => Some(overload),
+            _ => None,
+        },
+        _ => None,
+    };
+    match overload {
+        Some(overload) => overload.signatures.iter().any(|signature| match signature {
+            OverloadType::Function(func) => func.metadata.flags.is_return_inferred,
+            OverloadType::Forall(forall) => forall.body.metadata.flags.is_return_inferred,
+        }),
+        None => callee
+            .toplevel_func_metadata()
+            .is_some_and(|meta| meta.flags.is_return_inferred),
     }
 }
