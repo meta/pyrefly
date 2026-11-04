@@ -5381,21 +5381,19 @@ _ = a.real
 );
 
 testcase!(
-    bug = "Explicit staticmethod disables the __new__ receiver",
     test_explicit_staticmethod_new_receiver,
     r#"
 class C:
     @staticmethod
     def __new__(cls) -> "C":
-        cls.x: int = 0  # E: Cannot annotate non-self attribute `cls.x`
+        cls.x: int = 0
         return super().__new__(cls)
 
-_ = C().x  # E: Object of class `C` has no attribute `x`
+_ = C().x
 "#,
 );
 
 testcase!(
-    bug = "Skipped explicitly static __new__ loses inferred attributes",
     test_explicit_staticmethod_new_no_type_check,
     r#"
 from typing import no_type_check
@@ -5407,12 +5405,11 @@ class C:
         cls.x = 1
         return super().__new__(cls)
 
-_ = C().x  # E: Object of class `C` has no attribute `x`
+_ = C().x
 "#,
 );
 
 testcase!(
-    bug = "Batch-skipped explicitly static __new__ loses inferred attributes",
     test_explicit_staticmethod_new_batch_skipped,
     TestEnv::new_skip_check_no_infer().with_run_require(Require::Errors),
     r#"
@@ -5422,6 +5419,6 @@ class C:
         cls.x = 1
         return super().__new__(cls)
 
-_ = C().x  # E: Object of class `C` has no attribute `x`
+_ = C().x
 "#,
 );

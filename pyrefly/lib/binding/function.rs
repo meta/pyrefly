@@ -322,12 +322,12 @@ impl<'a> BindingsBuilder<'a> {
         undecorated_idx: Idx<KeyUndecoratedFunction>,
         class_key: Option<Idx<KeyClass>>,
         method_self_kind: MethodSelfKind,
-        is_staticmethod: bool,
+        has_receiver: bool,
         ignore_annotations: bool,
     ) {
         let mut self_name = None;
         for x in x.iter_non_variadic_params() {
-            if class_key.is_some() && !is_staticmethod && self_name.is_none() {
+            if has_receiver && self_name.is_none() {
                 self_name = Some(x.parameter.name.clone());
             }
             self.bind_function_param(
@@ -519,7 +519,7 @@ impl<'a> BindingsBuilder<'a> {
         class_key: Option<Idx<KeyClass>>,
         is_async: bool,
         method_self_kind: MethodSelfKind,
-        is_staticmethod: bool,
+        has_receiver: bool,
     ) -> (
         YieldsAndReturns,
         Option<SelfAssignments>,
@@ -533,7 +533,7 @@ impl<'a> BindingsBuilder<'a> {
             undecorated_idx,
             class_key,
             method_self_kind,
-            is_staticmethod,
+            has_receiver,
             false,
         );
         self.init_static_scope(&body, false);
@@ -578,7 +578,7 @@ impl<'a> BindingsBuilder<'a> {
         class_key: Option<Idx<KeyClass>>,
         is_async: bool,
         method_self_kind: MethodSelfKind,
-        is_staticmethod: bool,
+        has_receiver: bool,
         ignore_annotations: bool,
     ) -> Option<SelfAssignments> {
         // Push a scope to create the parameter keys (but do nothing else with it).
@@ -589,12 +589,12 @@ impl<'a> BindingsBuilder<'a> {
             undecorated_idx,
             class_key,
             method_self_kind,
-            is_staticmethod,
+            has_receiver,
             ignore_annotations,
         );
         self.scopes.pop();
-        // If we are in a class, use a simple visitor to find `self.<attr>` assignments.
-        if class_key.is_some() && !is_staticmethod {
+        // Receiver methods use a simple visitor to find `self.<attr>` assignments.
+        if has_receiver {
             SelfAttrNames::find(func_name, parameters, body)
         } else {
             None
@@ -904,6 +904,9 @@ impl<'a> BindingsBuilder<'a> {
             || decorators.is_overload
             || decorators.is_override
             || decorators.is_abstract_method;
+        // `__new__` receives the class even when explicitly decorated as a staticmethod.
+        let has_receiver =
+            class_key.is_some() && (!decorators.is_staticmethod || func_name.id == dunder::NEW);
         let method_self_kind = if class_key.is_some()
             && (decorators.is_classmethod
                 || func_name.id == dunder::INIT_SUBCLASS
@@ -929,7 +932,7 @@ impl<'a> BindingsBuilder<'a> {
                 class_key,
                 is_async,
                 method_self_kind,
-                decorators.is_staticmethod,
+                has_receiver,
                 decorators.has_no_type_check,
             );
             (false, self_assignments)
@@ -945,7 +948,7 @@ impl<'a> BindingsBuilder<'a> {
                 class_key,
                 is_async,
                 method_self_kind,
-                decorators.is_staticmethod,
+                has_receiver,
             );
             self.analyze_return_type(
                 func_name,
@@ -973,7 +976,7 @@ impl<'a> BindingsBuilder<'a> {
                     class_key,
                     is_async,
                     method_self_kind,
-                    decorators.is_staticmethod,
+                    has_receiver,
                 );
             if !ignore_unused_parameters {
                 self.record_unused_parameters(unused_parameters);
