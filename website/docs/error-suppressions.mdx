@@ -39,6 +39,34 @@ def foo() -> int:
   return "this is a type error" # pyrefly: ignore[bad-return]
 ```
 
+To suppress the `unused-ignore` diagnostic for a suppression comment, include
+`unused-ignore` in that comment's error codes:
+
+```python
+x: int = 1  # pyrefly: ignore[bad-assignment, unused-ignore]
+```
+
+This also suppresses the diagnostic when `unused-ignore` is the only listed code.
+Other suppression comments still produce unused-ignore diagnostics.
+Explicit cleanup with `pyrefly suppress --remove-unused` still removes unused
+suppressions, including comments that contain `unused-ignore`.
+
+If a comment still suppresses an error, cleanup keeps its used codes and removes
+its unused codes. For example, cleanup rewrites:
+
+```python
+x: int = ""  # pyrefly: ignore[bad-assignment, unused-ignore]
+```
+
+to:
+
+```python
+x: int = ""  # pyrefly: ignore[bad-assignment]
+```
+
+The comment still suppresses `bad-assignment`, but cleanup removes its
+`unused-ignore` opt-out.
+
 We respect the specification and allow `type: ignore` to be used:
 
 ```python
