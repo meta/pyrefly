@@ -170,8 +170,9 @@ pub struct TypeDisplayContext<'a> {
     always_display_builtins_module_name: bool,
     always_display_expanded_unions: bool,
     render_self_type_as_self: bool,
-    /// Render a `DataFrame` as its plain underlying class rather than the schema form.
-    strip_library_schemas: bool,
+    /// Render a type that has no annotation syntax as one that does: a schema form as its plain
+    /// class.
+    use_annotation_syntax: bool,
     /// Render types as source annotations: valid Python that references every name it uses.
     render_source_annotation: bool,
     /// Optional stdlib reference for resolving builtin type locations
@@ -253,9 +254,9 @@ impl<'a> TypeDisplayContext<'a> {
         self.always_display_expanded_unions = true;
     }
 
-    /// Emit schema types as their plain class, for surfaces that write a type back as source.
-    pub fn strip_library_schemas(&mut self) {
-        self.strip_library_schemas = true;
+    /// Emit only annotation syntax, for surfaces that write a type back as source.
+    pub fn use_annotation_syntax(&mut self) {
+        self.use_annotation_syntax = true;
     }
 
     pub fn render_self_type_as_self(&mut self) {
@@ -1107,7 +1108,7 @@ impl<'a> TypeDisplayContext<'a> {
                 // Display as the class name (e.g., MaxPool2d)
                 self.fmt_helper_generic(&Type::ClassType(module.class.clone()), false, output)
             }
-            Type::DataFrame(schema) if self.strip_library_schemas => {
+            Type::DataFrame(schema) if self.use_annotation_syntax => {
                 self.fmt_helper_generic(&schema.underlying_type(), false, output)
             }
             Type::DataFrame(schema) => {
@@ -1130,7 +1131,7 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_str("]")?;
                 Ok(())
             }
-            Type::Series(schema) if self.strip_library_schemas => {
+            Type::Series(schema) if self.use_annotation_syntax => {
                 self.fmt_helper_generic(&schema.underlying_type(), false, output)
             }
             Type::Series(schema) => {
@@ -1899,7 +1900,7 @@ impl Display for Type {
 fn annotation_context<'a>(ty: &'a Type, stdlib: Option<&'a Stdlib>) -> TypeDisplayContext<'a> {
     let mut ctx = TypeDisplayContext::new(&[ty]);
     ctx.render_self_type_as_self();
-    ctx.strip_library_schemas();
+    ctx.use_annotation_syntax();
     if let Some(stdlib) = stdlib {
         ctx.set_stdlib(stdlib);
     }
