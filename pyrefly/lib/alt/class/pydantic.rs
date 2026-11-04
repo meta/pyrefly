@@ -105,7 +105,8 @@ impl PydanticRangeConstraints {
 #[derive(Clone)]
 struct PydanticParamConstraint {
     field_name: Name,
-    constraints: PydanticRangeConstraints,
+    range: Option<PydanticRangeConstraints>,
+    lax_type: Option<Type>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -975,7 +976,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         None
     }
 
-    pub fn check_pydantic_argument_range_constraints(
+    pub fn check_pydantic_argument_constraints(
         &self,
         cls: &Class,
         dataclass: &DataclassMetadata,
@@ -1196,7 +1197,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 &value_ty,
                                 &PydanticParamConstraint {
                                     field_name: name,
-                                    constraints,
+                                    range: Some(constraints),
+                                    lax_type: None,
                                 },
                                 value.range(),
                                 errors,
@@ -1225,18 +1227,31 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut constraints = SmallMap::new();
         let mut position = 0;
         let kw_only_by_class = self.compute_kw_only_fields_by_class(cls);
-        for (field_name, _field, keywords) in
+        for (field_name, field, keywords) in
             self.iter_fields(cls, dataclass, true, &kw_only_by_class)
         {
             if !keywords.init {
                 continue;
             }
-            let Some(constraint) = PydanticRangeConstraints::from_keywords(&keywords) else {
-                continue;
+            let range = PydanticRangeConstraints::from_keywords(&keywords);
+            let lax_type = if !keywords.strict.unwrap_or(dataclass.kws.strict)
+                && !keywords.pydantic_has_custom_schema
+                && keywords.converter_param.is_none()
+                && !dataclass
+                    .pydantic_before_validator_fields
+                    .contains(&field_name)
+            {
+                Some(field.ty())
+            } else {
+                None
             };
+            if range.is_none() && lax_type.is_none() {
+                continue;
+            }
             let info = PydanticParamConstraint {
                 field_name: field_name.clone(),
-                constraints: constraint,
+                range,
+                lax_type,
             };
             if keywords.init_by_name {
                 constraints.insert(PydanticParamKey::Name(field_name), info.clone());
@@ -1269,14 +1284,34 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             return;
         }
+        // The signature checks input types. This check enforces value restrictions on literals.
+        if let Some(field_ty) = &info.lax_type
+            && matches!(value_ty, Type::Literal(_))
+            && self.is_subset_eq(value_ty, &self.expand_type_for_lax_mode(field_ty))
+            && !self.pydantic_lax_accepts_literal(field_ty, value_ty)
+        {
+            self.error(
+                errors,
+                range,
+                ErrorKind::BadArgumentType,
+                format!(
+                    "Argument value `{}` is not valid for Pydantic `bool` field `{}`",
+                    self.for_display(value_ty.clone()),
+                    info.field_name
+                ),
+            );
+        }
+        let Some(constraints) = &info.range else {
+            return;
+        };
         let Some(value_lit) = int_literal_from_type(value_ty) else {
             return;
         };
         let checks = [
-            ("gt", info.constraints.gt.as_ref()),
-            ("ge", info.constraints.ge.as_ref()),
-            ("lt", info.constraints.lt.as_ref()),
-            ("le", info.constraints.le.as_ref()),
+            ("gt", constraints.gt.as_ref()),
+            ("ge", constraints.ge.as_ref()),
+            ("lt", constraints.lt.as_ref()),
+            ("le", constraints.le.as_ref()),
         ];
         for (label, constraint_ty) in checks {
             let Some(constraint_ty) = constraint_ty else {
