@@ -1918,7 +1918,7 @@ class C:
         # The early return completes __init__ without assigning self.ready.
 ```
 
-The check permits an inherited attribute when a base class other than `object` defines the same name.
+The check permits an inherited attribute when any base class, including `object`, defines the same name.
 Classes with an unresolved or `Any` base class are also exempt, because that base may define the attribute.
 An instance `__getattr__` fallback also suppresses this error for instance attributes.
 Pyrefly combines assignments from different methods leniently: one method that initializes the attribute on every completing path suffices.

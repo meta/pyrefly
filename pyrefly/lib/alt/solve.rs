@@ -3312,12 +3312,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                     .has_qualifier(&Qualifier::ClassVar)
                         }) || (*is_instance
                             && self.get_class_member(cls, &dunder::GETATTR).is_some())
+                            // Check each ancestor's own fields, including `object`, so the
+                            // result does not depend on whether the class has other bases.
                             || self
                                 .get_mro_for_class(cls)
-                                .ancestors_no_object()
-                                .iter()
+                                .ancestors(self.stdlib)
                                 .any(|base| {
-                                    self.get_class_member(base.class_object(), name).is_some()
+                                    self.get_field_from_current_class_only(
+                                        base.class_object(),
+                                        name,
+                                    )
+                                    .is_some()
                                 })
                     });
                 if !initialized && !inherited_or_dynamic {

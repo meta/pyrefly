@@ -872,6 +872,43 @@ class Known:
 );
 
 testcase!(
+    test_attribute_initialization_inherited_from_object,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def coin() -> bool: ...
+def custom_repr(self: object) -> str: ...
+
+class Base: ...
+
+class GrandBase:
+    value = 0
+
+class Middle(GrandBase): ...
+
+class NoBase:
+    if coin():
+        __repr__ = custom_repr
+
+class WithBase(Base):
+    if coin():
+        __repr__ = custom_repr
+
+class Module:
+    def __init__(self) -> None:
+        if coin():
+            self.__module__ = "other"
+
+class NotInherited(Base):
+    if coin():
+        other = 1  # E: Attribute `other` may be uninitialized
+
+class InheritedFromGrandparent(Middle):
+    if coin():
+        value = 1
+"#,
+);
+
+testcase!(
     test_conditional_method_assignment_initialization,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
