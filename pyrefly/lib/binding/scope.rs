@@ -2381,83 +2381,58 @@ impl Scopes {
         self.scopes.iter_mut().map(|node| &mut node.scope).rev()
     }
 
-    /// In methods, we track assignments to `self` attribute targets so that we can
-    /// be aware of class fields implicitly defined in methods.
-    ///
-    /// We currently apply this logic in all methods, although downstream code will
-    /// often complain if an attribute is implicitly defined outside of methods
-    /// (like constructors) that we recognize as always being called.
-    ///
     /// Finds the method scope in `self.scopes` that owns `receiver` as its receiver parameter.
-    /// Returns `Some((method_index, is_nested))` where:
-    /// - `method_index` is the index in `self.scopes` of the `ScopeKind::Method`
-    /// - `is_nested` is true if the receiver was reached across a nested method boundary
+    /// Returns `Some((method_index, crossed_method))` where:
+    /// - `method_index` is the index in `self.scopes` of the `ScopeKind::Method`.
+    /// - `crossed_method` is true if the receiver was reached across a nested method boundary
     ///   (plain closures do not count).
     ///
     /// Returns `None` if `receiver` is not attributed to any method's receiver (including when
     /// shadowed by a local variable or non-receiver parameter in an inner scope).
     fn find_receiver_method_index(&self, receiver: &Name) -> Option<(usize, bool)> {
-        let mut crossed_nested = false;
+        let mut crossed_method = false;
         for (i, node) in self.scopes.iter().enumerate().rev() {
             let scope = &node.scope;
+            // Only function-like scopes provide receiver bindings. A `nonlocal` capture
+            // refers to the enclosing binding instead of shadowing it.
+            let binds_receiver = matches!(
+                &scope.kind,
+                ScopeKind::Method(_) | ScopeKind::Function(_) | ScopeKind::Comprehension { .. }
+            ) && scope.stat.0.get(receiver).is_some_and(|info| {
+                !matches!(
+                    info.style,
+                    StaticStyle::MutableCapture(MutableCapture {
+                        kind: MutableCaptureKind::Nonlocal,
+                        ..
+                    })
+                )
+            });
             match &scope.kind {
                 ScopeKind::Class(_) | ScopeKind::Annotation { .. } | ScopeKind::TypeAlias => {
                     // Intervening class namespaces and annotation/typealias scopes do not shadow
                     // lexical receiver variables in enclosed methods.
                 }
+                ScopeKind::Method(method_scope) if binds_receiver => {
+                    // The receiver is a parameter, and every parameter is in the method's static
+                    // scope, so a method's own receiver only matches here. Any other binding (e.g.
+                    // a staticmethod parameter named `self`, or a secondary parameter) shadows
+                    // outer receivers.
+                    return method_scope
+                        .self_name
+                        .as_ref()
+                        .is_some_and(|name| &name.id == receiver)
+                        .then_some((i, crossed_method));
+                }
+                ScopeKind::Function(_) | ScopeKind::Comprehension { .. } if binds_receiver => {
+                    return None;
+                }
                 ScopeKind::Function(_) | ScopeKind::Comprehension { .. } => {
-                    if let Some(static_info) = scope.stat.0.get(receiver) {
-                        if matches!(
-                            static_info.style,
-                            StaticStyle::MutableCapture(MutableCapture {
-                                kind: MutableCaptureKind::Nonlocal,
-                                ..
-                            })
-                        ) {
-                            // Genuine `nonlocal receiver` capture: continues to outer scope.
-                            // Plain closures keep the enclosing method's permissions.
-                        } else {
-                            // The name is bound locally in this function/comprehension (as a parameter
-                            // or local variable), so it shadows the enclosing receiver.
-                            return None;
-                        }
-                    }
                     // A plain closure is not a method boundary: it keeps the enclosing
                     // method's permissions (e.g. assigning `Final` fields from a helper
                     // defined inside `__init__`, which mypy also allows).
                 }
-                ScopeKind::Method(method_scope) => {
-                    if let Some(static_info) = scope.stat.0.get(receiver) {
-                        if matches!(
-                            static_info.style,
-                            StaticStyle::MutableCapture(MutableCapture {
-                                kind: MutableCaptureKind::Nonlocal,
-                                ..
-                            })
-                        ) {
-                            // Genuine `nonlocal receiver` capture: continues to outer scope.
-                            crossed_nested = true;
-                        } else if method_scope
-                            .self_name
-                            .as_ref()
-                            .is_some_and(|name| &name.id == receiver)
-                        {
-                            return Some((i, crossed_nested));
-                        } else {
-                            // The name is a non-receiver parameter (e.g. a staticmethod parameter named
-                            // self, or a secondary parameter) or a local binding in this method. It
-                            // shadows any outer receiver.
-                            return None;
-                        }
-                    } else if method_scope
-                        .self_name
-                        .as_ref()
-                        .is_some_and(|name| &name.id == receiver)
-                    {
-                        return Some((i, crossed_nested));
-                    } else {
-                        crossed_nested = true;
-                    }
+                ScopeKind::Method(_) => {
+                    crossed_method = true;
                 }
                 ScopeKind::Module => {
                     return None;
@@ -2467,9 +2442,12 @@ impl Scopes {
         None
     }
 
-    /// Returns `true` if the attribute was a self attribute.
-    /// Record a self attribute assignment (e.g., `self.x = value`) inside the owning method scope.
-    /// We accumulate all assignments to the same attribute within the method so they can later be unioned.
+    /// Record a receiver-attribute assignment inside its owning method scope.
+    /// Returns whether the target was a receiver attribute.
+    ///
+    /// Repeated assignments accumulate values and retain the first annotation.
+    /// Every method participates; field merging prioritizes recognized initializer
+    /// methods and downstream checks diagnose unsupported implicit definitions.
     pub fn record_self_attr_assign(
         &mut self,
         x: &ExprAttribute,
@@ -2508,7 +2486,7 @@ impl Scopes {
             return false;
         };
         let ScopeKind::Method(method_scope) = &mut self.scopes[method_idx].scope.kind else {
-            return false;
+            unreachable!("`find_receiver_method_index` returns the index of a method scope");
         };
         if instance_only && method_scope.receiver_kind != MethodSelfKind::Instance {
             return false;
@@ -2608,13 +2586,13 @@ impl Scopes {
         let Expr::Name(receiver) = &*x.value else {
             return None;
         };
-        let (method_idx, is_nested) = self.find_receiver_method_index(&receiver.id)?;
-        if is_nested {
+        let (method_idx, crossed_method) = self.find_receiver_method_index(&receiver.id)?;
+        if crossed_method {
             // Permissions to write Final fields must not cross a nested-method boundary.
             return None;
         }
         let ScopeKind::Method(method_scope) = &self.scopes[method_idx].scope.kind else {
-            return None;
+            unreachable!("`find_receiver_method_index` returns the index of a method scope");
         };
         for node in self.scopes[..method_idx].iter().rev() {
             if let ScopeKind::Class(class_scope) = &node.scope.kind {
