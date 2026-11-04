@@ -36,8 +36,28 @@ fn rename_paired_symbol(
     shadowing_source: Option<&str>,
     position: usize,
 ) -> Vec<(String, String)> {
+    replace_paired_references(
+        source,
+        stub,
+        consumer,
+        shadowing_source,
+        position,
+        ReferenceOptions::textual_only(true),
+    )
+}
+
+/// Replaces every reference that `options` finds with `renamed`, in the same files as
+/// `rename_paired_symbol`. Rename and find references share this lookup and differ in `options`.
+fn replace_paired_references(
+    source: &str,
+    stub: &str,
+    consumer: &str,
+    shadowing_source: Option<&str>,
+    position: usize,
+    options: ReferenceOptions,
+) -> Vec<(String, String)> {
     let root = TempDir::new().unwrap();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().enable_infer_param_types_from_docstring();
     for (name, file, code) in [
         ("lib", "lib.py", source),
         ("lib", "lib.pyi", stub),
@@ -82,7 +102,7 @@ fn rename_paired_symbol(
             *source_handle.sys_info(),
             definition.metadata.clone(),
             TextRangeWithModule::new(definition.module.clone(), definition.definition_range),
-            ReferenceOptions::textual_only(true),
+            options,
         )
         .unwrap();
     let mut result = Vec::new();
@@ -158,6 +178,64 @@ fn test_rename_source_updates_stub_and_consumers() {
                 ("lib.py".to_owned(), source.replace(name, "renamed")),
                 ("lib.pyi".to_owned(), stub.replace(name, "renamed")),
             ],
+        );
+    }
+}
+
+#[test]
+fn test_references_ignore_docstring_types_in_other_modules() {
+    let source = "class Item:\n    pass\n";
+    let stub = "class Item: ...\n";
+    for (consumer, expected) in [
+        (
+            "from lib import Item\n\n\ndef f(x):\n    \"\"\"\n    :type x: Item\n    \"\"\"\n",
+            "from lib import renamed\n\n\ndef f(x):\n    \"\"\"\n    :type x: Item\n    \"\"\"\n",
+        ),
+        (
+            "import lib\n\ny: lib.Item\n\n\ndef f(x):\n    \"\"\"\n    :type x: lib.Item\n    \"\"\"\n",
+            "import lib\n\ny: lib.renamed\n\n\ndef f(x):\n    \"\"\"\n    :type x: lib.Item\n    \"\"\"\n",
+        ),
+    ] {
+        for options in [
+            ReferenceOptions::textual_only(true),
+            ReferenceOptions::all(true),
+        ] {
+            let references = replace_paired_references(
+                source,
+                stub,
+                consumer,
+                None,
+                source.find("Item").unwrap(),
+                options,
+            );
+            assert_eq!(
+                references.iter().find(|(path, _)| path == "consumer.py"),
+                Some(&("consumer.py".to_owned(), expected.to_owned())),
+            );
+        }
+    }
+}
+
+/// A docstring type in the defining module is left alone, like one in any other module.
+#[test]
+fn test_references_ignore_docstring_types_in_the_same_module() {
+    let source = "class Item:\n    pass\n\n\ndef f(x):\n    \"\"\"\n    :type x: Item\n    \"\"\"\n\n\ny: Item\n";
+    let expected = "class renamed:\n    pass\n\n\ndef f(x):\n    \"\"\"\n    :type x: Item\n    \"\"\"\n\n\ny: renamed\n";
+    for options in [
+        ReferenceOptions::textual_only(true),
+        ReferenceOptions::all(true),
+    ] {
+        let references = replace_paired_references(
+            source,
+            "class Item: ...\n",
+            "x = 1\n",
+            None,
+            source.find("Item").unwrap(),
+            options,
+        );
+        assert_eq!(
+            references.iter().find(|(path, _)| path == "lib.py"),
+            Some(&("lib.py".to_owned(), expected.to_owned())),
         );
     }
 }

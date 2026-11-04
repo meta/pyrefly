@@ -431,6 +431,7 @@ impl<'a> BindingsBuilder<'a> {
                     continue;
                 }
                 self.ensure_type(&mut expr, Some(&mut *legacy));
+                self.docstring_type_ranges.push(expr.range());
                 bound_types.insert(start, expr.clone());
                 expr
             };

@@ -232,6 +232,8 @@ pub struct Bindings {
     module_ranges: Arc<ModuleRanges>,
     /// Ranges of `Annotated` metadata, sorted and non-overlapping.
     annotated_metadata_ranges: Vec<TextRange>,
+    /// Ranges of the types that were read from docstrings, sorted and non-overlapping.
+    docstring_type_ranges: Vec<TextRange>,
     scope_trace: Option<ScopeTrace>,
     /// Names `del`eted at module scope; retained outside the LSP `scope_trace`.
     module_deletes: SmallSet<Name>,
@@ -315,6 +317,8 @@ pub struct BindingsBuilder<'a> {
     pub module_info: ModuleInfo,
     /// Ranges of `Annotated` metadata, inside which bindings only report name resolution errors.
     pub(crate) annotated_metadata_ranges: Vec<TextRange>,
+    /// Ranges of the types that were read from docstrings.
+    pub(crate) docstring_type_ranges: Vec<TextRange>,
     pub lookup: &'a dyn LookupExport,
     pub sys_info: SysInfo,
     pub metadata: BindingsMetadata,
@@ -407,6 +411,12 @@ fn merge_ranges(mut ranges: Vec<TextRange>) -> Vec<TextRange> {
     merged
 }
 
+/// Whether `range` lies inside one of `ranges`, which must come from `merge_ranges`.
+fn ranges_contain(ranges: &[TextRange], range: TextRange) -> bool {
+    let idx = ranges.partition_point(|r| r.start() <= range.start());
+    idx > 0 && ranges[idx - 1].contains_range(range)
+}
+
 /// Bind a constant summary so adding or removing a mutator invalidates dependent unwrap answers.
 fn bind_functools_wrapper_mutation(
     table: &mut BindingTable,
@@ -463,6 +473,7 @@ impl Bindings {
                 misplaced_ignore_all: Vec::new(),
             }),
             annotated_metadata_ranges: Vec::new(),
+            docstring_type_ranges: Vec::new(),
             scope_trace: None,
             module_deletes: SmallSet::new(),
             unused_imports: Vec::new(),
@@ -516,10 +527,13 @@ impl Bindings {
     /// of metadata, like jaxtyping shapes or pydantic's `Field(...)`, report while solving the
     /// annotation.
     pub fn in_annotated_metadata(&self, range: TextRange) -> bool {
-        let idx = self
-            .annotated_metadata_ranges
-            .partition_point(|r| r.start() <= range.start());
-        idx > 0 && self.annotated_metadata_ranges[idx - 1].contains_range(range)
+        ranges_contain(&self.annotated_metadata_ranges, range)
+    }
+
+    /// Whether `range` lies inside a type that was read from a docstring. Such a type is not part
+    /// of the AST, so IDE features that find references by scanning the AST do not see it.
+    pub fn in_docstring_type(&self, range: TextRange) -> bool {
+        ranges_contain(&self.docstring_type_ranges, range)
     }
 
     /// Look up pre-computed class fields by `ClassDefIndex`. O(1) Vec index.
@@ -841,6 +855,7 @@ impl Bindings {
         let mut builder = BindingsBuilder {
             module_info: module_info.dupe(),
             annotated_metadata_ranges: Vec::new(),
+            docstring_type_ranges: Vec::new(),
             lookup,
             sys_info,
             errors,
@@ -1009,6 +1024,7 @@ impl Bindings {
             metadata: Arc::new(builder.metadata),
             module_ranges,
             annotated_metadata_ranges: merge_ranges(builder.annotated_metadata_ranges),
+            docstring_type_ranges: merge_ranges(builder.docstring_type_ranges),
             scope_trace: if enable_trace {
                 Some(scope_trace)
             } else {

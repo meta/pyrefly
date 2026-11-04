@@ -1448,6 +1448,10 @@ impl Answers {
                     };
 
                 let reference_range = bindings.idx_to_key(idx).range();
+                // Docstring types are not found by AST scans, so they are not indexed either.
+                if bindings.in_docstring_type(reference_range) {
+                    continue;
+                }
                 // Sanity check: the reference should have the same text as the definition.
                 // This check helps to filter out synthetic bindings.
                 if bindings.module().code_at(reference_range) == imported_name.as_str() {
@@ -1771,6 +1775,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         attribute_reference_range: TextRange,
         reference_kind: AttributeReferenceKind,
     ) {
+        if self.bindings().in_docstring_type(attribute_reference_range) {
+            return;
+        }
         if let Some(index) = &self.current().index {
             for AttrInfo {
                 name: _,
