@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use pyrefly_config::args::ConfigOverrideArgs;
 use pyrefly_config::file_kind::ConfigFileKind;
+use pyrefly_config::migration::run::MigrationResult;
 use pyrefly_config::migration::run::MigrationSource;
 use pyrefly_config::migration::run::PYREFLY_BASELINE_FILE;
 use pyrefly_config::migration::run::config_migration;
@@ -31,25 +32,6 @@ use crate::config::config::ConfigFile;
 use crate::error::error::Error as CheckError;
 
 const MAX_ERRORS_TO_PROMPT_SUPPRESSION: usize = 100;
-
-/// Outcome of writing, or previewing, the Pyrefly config.
-struct CreatedConfig {
-    status: CommandExitStatus,
-    config_path: Option<PathBuf>,
-    /// A basedpyright baseline file was found. The Pyrefly `baseline` key is
-    /// added only if the user agrees to create the new file.
-    migrated_baseline: bool,
-}
-
-impl CreatedConfig {
-    fn new(status: CommandExitStatus, config_path: Option<PathBuf>) -> Self {
-        Self {
-            status,
-            config_path,
-            migrated_baseline: false,
-        }
-    }
-}
 
 /// Initialize a new pyrefly config in the given directory. Can also be used to run pyrefly config-migration on a given project.
 #[deny(clippy::missing_docs_in_private_items)]
@@ -133,52 +115,64 @@ impl InitArgs {
         thread_count: ThreadCount,
     ) -> anyhow::Result<CommandExitStatus> {
         // 1. Create Pyrefly Config
-        let create_config_result = self.create_config();
+        let (status, migrated) = self.create_config()?;
+        if status != CommandExitStatus::Success || self.dry_run || self.print_config {
+            // Dry-run writes nothing, so the follow-on check and suppression
+            // prompt would violate that. Print-config reserves stdout for the
+            // TOML, so a y/N prompt would break that too.
+            return Ok(status);
+        }
+        let Some(migrated) = migrated else {
+            return Ok(status);
+        };
 
-        match create_config_result {
-            Err(e) => Err(e),
-            Ok(created) if created.status != CommandExitStatus::Success => Ok(created.status),
-            // Dry-run: no config was actually written, so running check + the
-            // suppression prompt (which writes `pyrefly: ignore` comments into
-            // .py files) would either be misleading or itself violate the
-            // "don't write" contract.
-            //
-            // Print-config: stdout is reserved for the machine-readable TOML.
-            // The follow-on suppression prompt would write a y/N question to
-            // stdout and block on stdin, breaking the contract for the
-            // automation use case the flag exists to support.
-            Ok(created) if self.dry_run || self.print_config => Ok(created.status),
-            Ok(CreatedConfig {
-                config_path: Some(config_path),
-                migrated_baseline: true,
-                ..
-            }) => self.prompt_migrated_baseline(config_path, version, wrapper, thread_count),
-            Ok(created) => {
-                let config_path = created.config_path;
-                // 2. Run pyrefly check
-                let check_result =
-                    self.run_check(config_path.clone(), version, wrapper.clone(), thread_count);
+        // A yes creates the baseline and stops. A no, including
+        // `--non-interactive`, falls through to the normal check and
+        // suppression prompt without writing a baseline file.
+        if migrated.migrated_baseline
+            && self.prompt_user_confirmation(&format!(
+                "Found a basedpyright baseline. Generate a pyrefly baseline at {PYREFLY_BASELINE_FILE} for existing errors? (y/N): "
+            ))
+        {
+            write_pyrefly_baseline(&migrated.config_path)?;
+            info!("Running pyrefly check with --update-baseline...");
+            // Those reported errors are the ones just recorded in the new
+            // baseline, so a completed run is still a successful init.
+            if let Err(e) = self.run_configured_check(
+                Some(migrated.config_path),
+                version,
+                wrapper,
+                thread_count,
+                &["--update-baseline"],
+            ) {
+                error!("Failed to run pyrefly check with --update-baseline: {e}");
+            }
+            return Ok(CommandExitStatus::Success);
+        }
 
-                // Check if there are errors and if there are fewer than 100
-                if let Ok((_, errors)) = check_result {
-                    let error_count = errors.len();
-                    if error_count == 0 {
-                        return Ok(CommandExitStatus::Success);
-                    }
-                    // 3a. Prompt error suppression if there are less than the maximum number of errors
-                    else if error_count <= MAX_ERRORS_TO_PROMPT_SUPPRESSION {
-                        return self.prompt_error_suppression(
-                            config_path,
-                            error_count,
-                            version,
-                            wrapper,
-                            thread_count,
-                        );
-                    }
-                }
-                Ok(CommandExitStatus::Success)
+        let config_path = Some(migrated.config_path);
+        // 2. Run pyrefly check
+        let check_result =
+            self.run_check(config_path.clone(), version, wrapper.clone(), thread_count);
+
+        // Check if there are errors and if there are fewer than 100
+        if let Ok((_, errors)) = check_result {
+            let error_count = errors.len();
+            if error_count == 0 {
+                return Ok(CommandExitStatus::Success);
+            }
+            // 3a. Prompt error suppression if there are less than the maximum number of errors
+            else if error_count <= MAX_ERRORS_TO_PROMPT_SUPPRESSION {
+                return self.prompt_error_suppression(
+                    config_path,
+                    error_count,
+                    version,
+                    wrapper,
+                    thread_count,
+                );
             }
         }
+        Ok(CommandExitStatus::Success)
     }
 
     /// Run `pyrefly check` against the config init just wrote.
@@ -252,48 +246,7 @@ impl InitArgs {
         Ok(CommandExitStatus::Success)
     }
 
-    /// Ask whether to fill a new Pyrefly baseline. The config key and the file
-    /// are written only when the answer is yes. Declining, including
-    /// `--non-interactive`, prints how to do it later and does not run the
-    /// suppression prompt.
-    ///
-    /// A completed `--update-baseline` run is success even when check reports
-    /// errors. Those errors are the ones just recorded in the new baseline, so
-    /// they are not a failed init.
-    fn prompt_migrated_baseline(
-        &self,
-        config_path: PathBuf,
-        version: &str,
-        wrapper: Option<ConfigConfigurerWrapper>,
-        thread_count: ThreadCount,
-    ) -> anyhow::Result<CommandExitStatus> {
-        let prompt = format!(
-            "Found a basedpyright baseline. Generate a pyrefly baseline at {PYREFLY_BASELINE_FILE} for existing errors? (y/N): "
-        );
-        if !self.prompt_user_confirmation(&prompt) {
-            info!(
-                "Add `baseline = \"{PYREFLY_BASELINE_FILE}\"` to your config, then run `pyrefly check --update-baseline`."
-            );
-            return Ok(CommandExitStatus::Success);
-        }
-        write_pyrefly_baseline(&config_path)?;
-        info!("Running pyrefly check with --update-baseline...");
-        match self.run_configured_check(
-            Some(config_path),
-            version,
-            wrapper,
-            thread_count,
-            &["--update-baseline"],
-        ) {
-            Ok(_) => Ok(CommandExitStatus::Success),
-            Err(e) => {
-                error!("Failed to run pyrefly check with --update-baseline: {e}");
-                Ok(CommandExitStatus::Success)
-            }
-        }
-    }
-
-    fn create_config(&self) -> anyhow::Result<CreatedConfig> {
+    fn create_config(&self) -> anyhow::Result<(CommandExitStatus, Option<MigrationResult>)> {
         let path = self.path.absolutize();
 
         let dir: Option<&Path> = if path.is_dir() {
@@ -314,14 +267,14 @@ impl InitArgs {
                     "Project at `{}` is already initialized for pyrefly. Re-initialization requires confirmation, which is incompatible with --dry-run/--print-config.",
                     dir.display()
                 );
-                return Ok(CreatedConfig::new(CommandExitStatus::UserError, None));
+                return Ok((CommandExitStatus::UserError, None));
             }
             let prompt = format!(
                 "The project at `{}` has already been initialized for pyrefly. Run `pyrefly check` to see type errors. Re-initialize and write a new section? (y/N): ",
                 dir.display()
             );
             if !self.prompt_user_confirmation(&prompt) {
-                return Ok(CreatedConfig::new(CommandExitStatus::UserError, None));
+                return Ok((CommandExitStatus::UserError, None));
             }
         }
 
@@ -335,11 +288,7 @@ impl InitArgs {
             info!("Found an existing type checking configuration - setting up pyrefly ...");
             let migrated =
                 config_migration(&path, self.migrate_from, self.dry_run, self.print_config)?;
-            return Ok(CreatedConfig {
-                status: CommandExitStatus::Success,
-                config_path: Some(migrated.config_path),
-                migrated_baseline: migrated.migrated_baseline,
-            });
+            return Ok((CommandExitStatus::Success, Some(migrated)));
         }
 
         // Generate a basic config with a couple sensible defaults.
@@ -362,7 +311,7 @@ impl InitArgs {
                     && !parent.exists()
                 {
                     error!("Path `{}` does not exist", parent.display());
-                    return Ok(CreatedConfig::new(CommandExitStatus::UserError, None));
+                    return Ok((CommandExitStatus::UserError, None));
                 }
                 let serialized = toml::to_string_pretty(&cfg)?;
                 info!(
@@ -374,7 +323,7 @@ impl InitArgs {
                     print!("{serialized}");
                     std::io::stdout().flush().ok();
                 }
-                return Ok(CreatedConfig::new(CommandExitStatus::Success, None));
+                return Ok((CommandExitStatus::Success, None));
             }
             if self.print_config {
                 let serialized = toml::to_string_pretty(&cfg)?;
@@ -383,9 +332,12 @@ impl InitArgs {
             }
             PyProject::update(&config_path, cfg)?;
             info!("Config written to `{}`", config_path.display());
-            return Ok(CreatedConfig::new(
+            return Ok((
                 CommandExitStatus::Success,
-                Some(config_path),
+                Some(MigrationResult {
+                    config_path,
+                    migrated_baseline: false,
+                }),
             ));
         }
 
@@ -396,13 +348,13 @@ impl InitArgs {
             path
         } else if !path.exists() {
             error!("Path `{}` does not exist", path.display());
-            return Ok(CreatedConfig::new(CommandExitStatus::UserError, None));
+            return Ok((CommandExitStatus::UserError, None));
         } else {
             error!(
                 "Pyrefly configs must reside in `pyrefly.toml` or `pyproject.toml`, not `{}`",
                 path.display()
             );
-            return Ok(CreatedConfig::new(CommandExitStatus::UserError, None));
+            return Ok((CommandExitStatus::UserError, None));
         };
         let serialized = toml::to_string_pretty(&cfg)?;
         if self.dry_run {
@@ -411,7 +363,7 @@ impl InitArgs {
                 && !parent.exists()
             {
                 error!("Path `{}` does not exist", parent.display());
-                return Ok(CreatedConfig::new(CommandExitStatus::UserError, None));
+                return Ok((CommandExitStatus::UserError, None));
             }
             info!(
                 "Dry run: would write new config to `{}`:\n{}",
@@ -422,7 +374,7 @@ impl InitArgs {
                 print!("{serialized}");
                 std::io::stdout().flush().ok();
             }
-            return Ok(CreatedConfig::new(CommandExitStatus::Success, None));
+            return Ok((CommandExitStatus::Success, None));
         }
         if self.print_config {
             print!("{serialized}");
@@ -430,9 +382,12 @@ impl InitArgs {
         }
         fs_anyhow::write(&config_path, serialized)?;
         info!("New config written to `{}`", config_path.display());
-        Ok(CreatedConfig::new(
+        Ok((
             CommandExitStatus::Success,
-            Some(config_path),
+            Some(MigrationResult {
+                config_path,
+                migrated_baseline: false,
+            }),
         ))
     }
 

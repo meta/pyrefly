@@ -32,7 +32,8 @@ $ mkdir -p $TMPDIR/init_baseline/.basedpyright && \
 > ! grep -q 'baseline = "pyrefly_baseline.json"' $TMPDIR/init_baseline/pyproject.toml
  INFO Found an existing type checking configuration - setting up pyrefly ...
 * (glob*)
- INFO Add `baseline = "pyrefly_baseline.json"` to your config, then run `pyrefly check --update-baseline`.
+ INFO Running pyrefly check...
+* (glob*)
 [0]
 ```
 

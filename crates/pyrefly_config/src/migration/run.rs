@@ -12,7 +12,6 @@
 // - match up the error configurations (best-effort)
 // This script does not otherwise invoke pyrefly. This gives the user time to change anything by hand if needed.
 
-use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -257,7 +256,7 @@ pub fn write_pyrefly_baseline(config_path: &Path) -> anyhow::Result<()> {
     let mut doc = original
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("Failed to parse `{}` as TOML", config_path.display()))?;
-    let table = if config_path.file_name() == Some(OsStr::new(ConfigFile::PYPROJECT_FILE_NAME)) {
+    let table = if config_path.ends_with(ConfigFile::PYPROJECT_FILE_NAME) {
         doc.get_mut("tool")
             .and_then(|tool| tool.get_mut("pyrefly"))
             .and_then(|pyrefly| pyrefly.as_table_mut())
