@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crossbeam_channel::Receiver;
 use lsp_server::RequestId;
 use lsp_types::Definition;
 use lsp_types::DefinitionResponse;
@@ -25,6 +26,7 @@ use pyrefly_lsp_test::Request;
 use pyrefly_lsp_test::object_model::InitializeSettings;
 use pyrefly_lsp_test::object_model::LspInteraction;
 use pyrefly_lsp_test::object_model::LspInteractionArgs;
+use pyrefly_lsp_test::object_model::RecordedTelemetryEvent;
 use pyrefly_lsp_test::object_model::TestTelemetry;
 use pyrefly_util::telemetry::TelemetryEventKind;
 use serde_json::json;
@@ -315,6 +317,24 @@ fn goto_definition_preserves_unsaved_destination() {
     interaction.shutdown().unwrap();
 }
 
+/// Waits until the background disk invalidation that a definition request queues when it finds
+/// a stale destination has committed.
+fn wait_for_disk_invalidation(telemetry_events: &Receiver<Arc<RecordedTelemetryEvent>>) {
+    loop {
+        let event = telemetry_events
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+        if matches!(event.event.kind, TelemetryEventKind::InvalidateDisk) {
+            assert!(
+                event.error.is_none(),
+                "Disk refresh failed: {:?}",
+                event.error
+            );
+            return;
+        }
+    }
+}
+
 #[test]
 fn goto_definition_refreshes_disk_copy_of_open_destination() {
     let root = TempDir::with_prefix("pyrefly_goto_def_open_disk").unwrap();
@@ -325,7 +345,12 @@ fn goto_definition_refreshes_disk_copy_of_open_destination() {
     .unwrap();
     fs::write(root.path().join("bar.py"), "target = 1\n").unwrap();
 
-    let mut interaction = LspInteraction::new();
+    let telemetry = TestTelemetry::new();
+    let telemetry_events = telemetry.subscribe();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        telemetry: Box::new(telemetry),
+        ..Default::default()
+    });
     interaction.set_root(root.path().to_path_buf());
     interaction.initialize(Default::default()).unwrap();
     interaction.client.did_open("foo.py");
@@ -350,6 +375,11 @@ fn goto_definition_refreshes_disk_copy_of_open_destination() {
         .definition("bar.py", 1, 2)
         .expect_definition_response_from_root("bar.py", 1, 0, 1, 6)
         .unwrap();
+
+    // Let the background invalidation queued by the first refresh commit. A `didChange` that
+    // arrives while it is in flight saves a non-committable transaction, and the next request
+    // can then resolve against stale state.
+    wait_for_disk_invalidation(&telemetry_events);
 
     // Disk imports and the unsaved destination buffer have independent contents.
     interaction
@@ -413,19 +443,7 @@ fn goto_definition_disk_refresh_survives_source_edits() {
         .unwrap();
 
     // Wait for the disk update to commit before testing a fresh editor transaction.
-    loop {
-        let event = telemetry_events
-            .recv_timeout(Duration::from_secs(30))
-            .unwrap();
-        if matches!(event.event.kind, TelemetryEventKind::InvalidateDisk) {
-            assert!(
-                event.error.is_none(),
-                "Disk refresh failed: {:?}",
-                event.error
-            );
-            break;
-        }
-    }
+    wait_for_disk_invalidation(&telemetry_events);
     interaction
         .client
         .did_change("foo.py", &format!("{source}# unsaved\n"));
