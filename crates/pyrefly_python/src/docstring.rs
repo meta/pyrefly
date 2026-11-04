@@ -121,7 +121,12 @@ impl DocstringRenderState {
 
     /// Process one normalized docstring line, updating fence state and output.
     fn handle_line(&mut self, line: &str, is_first: bool, min_indent: usize) {
-        let raw_leading_spaces = leading_space_count(line);
+        // The first line starts right after the quotes, but it sits at the indent of the body.
+        let raw_leading_spaces = if is_first {
+            min_indent
+        } else {
+            leading_space_count(line)
+        };
         let base_line = dedent_docstring_line(line, min_indent, is_first);
         let mut current = base_line.to_owned();
 
@@ -947,8 +952,9 @@ mod tests {
     #[test]
     fn test_docstring_code_block_line_less_indented_than_fence_starts_with_multibyte_char() {
         assert_eq!(
-            Docstring::clean("\"\"\"Tree::\n\n      root\n    ├── a\"\"\"").as_str(),
-            "Tree:  \n  \n```  \nroot  \n├── a  \n```"
+            Docstring::clean("\"\"\"Summary\n\n    Tree::\n\n          root\n        ├── a\"\"\"")
+                .as_str(),
+            "Summary  \n  \nTree:  \n  \n```  \nroot  \n├── a  \n```"
         );
     }
 
@@ -1068,6 +1074,17 @@ The code above replaces it.
         assert_eq!(
             Docstring::clean(docstring).replace("  \n", "\n"),
             "A:\n\n```\nx = 1\n```\n\n```python\ny = 2\n```"
+        );
+    }
+
+    #[test]
+    fn test_docstring_literal_block_marker_on_first_line() {
+        // The first line starts right after the quotes, but it sits at the indent of the body, so
+        // a body line at that indent ends the block.
+        let docstring = "\"\"\"Summary::\n\n        code\n\n    after\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Summary:\n\n```\ncode\n\n```\nafter"
         );
     }
 
