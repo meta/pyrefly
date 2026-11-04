@@ -54,8 +54,9 @@ pub mod state;
 mod stubgen;
 #[cfg(test)]
 mod test;
-#[cfg(not(target_arch = "wasm32"))]
-mod tsp;
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+#[doc(hidden)]
+pub mod tsp;
 
 pub(crate) use compat::*;
 
