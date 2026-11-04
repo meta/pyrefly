@@ -133,7 +133,7 @@ class ClassBody(Base):
 );
 
 testcase!(
-    bug = "`Never` calls in methods do not end paths, and paths that end in an explicit return are not checked",
+    bug = "Paths that end in an explicit return are not checked",
     test_attribute_initialization_trailing_noreturn,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -147,7 +147,7 @@ def proceed() -> None: ...
 class TrailingCall:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1  # E: Attribute `value` may be uninitialized
+            self.value = 1
         stop()
 
 class TrailingRaise:
@@ -159,7 +159,7 @@ class TrailingRaise:
 class DeferredThenStop:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1  # E: Attribute `value` may be uninitialized
+            self.value = 1
         else:
             proceed()
         stop()
@@ -167,7 +167,7 @@ class DeferredThenStop:
 class DeferredThenProceed:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1  # E: Attribute `value` may be uninitialized
+            self.value = 1
         else:
             stop()
         proceed()
@@ -286,7 +286,7 @@ class NestedReturn:
 );
 
 testcase!(
-    bug = "`Never` calls in methods do not end paths, and deleting an attribute does not remove its initialization",
+    bug = "Deleting an attribute does not remove its initialization",
     test_attribute_initialization_control_flow,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -329,7 +329,7 @@ class Match:
     def __init__(self, kind: Literal["a", "b"]) -> None:
         match kind:
             case "a":
-                self.value = 1  # E: Attribute `value` may be uninitialized
+                self.value = 1
             case "b":
                 self.value = 2
 
@@ -865,7 +865,7 @@ def f(a: A):
 );
 
 testcase!(
-    bug = "`Never` calls in methods do not end paths, and only the first method that assigns an attribute is checked",
+    bug = "Only the first method that assigns an attribute is checked for initialization",
     test_attribute_initialization_deferred_methods,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -879,7 +879,7 @@ def proceed() -> None: ...
 class ConstructorTerminates:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1  # E: Attribute `value` may be uninitialized
+            self.value = 1
         else:
             stop()
 
@@ -918,7 +918,7 @@ class NeitherTerminates:
 class ConditionalHelper:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1  # E: Attribute `value` may be uninitialized
+            self.value = 1
         else:
             stop()
 
@@ -940,7 +940,7 @@ class ConditionalConstructor:
 );
 
 testcase!(
-    bug = "`Never` calls in methods do not end paths, and loops that may run zero times are treated as running",
+    bug = "Loops that may run zero times are treated as running",
     test_attribute_initialization_loops,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -996,7 +996,7 @@ class LoopElse:
 class DeferredBeforeLoop:
     def __init__(self, flag: bool, values: list[int]) -> None:
         if flag:
-            self.value = 1  # E: Attribute `value` may be uninitialized
+            self.value = 1
         else:
             stop()
         for value in values:
@@ -1006,7 +1006,7 @@ class DeferredInLoop:
     def __init__(self, flag: bool) -> None:
         for value in [1]:
             if flag:
-                self.value = value  # E: Attribute `value` may be uninitialized
+                self.value = value
             else:
                 stop()
 
@@ -1017,7 +1017,7 @@ assert_type(LoopElse([]).value, int)
 );
 
 testcase!(
-    bug = "`Never` calls in methods do not end paths, and paths that end in an explicit return are not checked",
+    bug = "Paths that end in an explicit return are not checked",
     test_attribute_initialization_deferred_return_paths,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -1032,7 +1032,7 @@ class AllPathsTerminate:
     def __init__(self, early: bool, flag: bool) -> None:
         if early:
             if flag:
-                self.value = 1  # E: Attribute `value` may be uninitialized
+                self.value = 1
             else:
                 stop()
             return
@@ -1045,7 +1045,7 @@ class EarlyPathContinues:
     def __init__(self, early: bool, flag: bool) -> None:
         if early:
             if flag:
-                self.value = 1  # E: Attribute `value` may be uninitialized
+                self.value = 1
             else:
                 proceed()
             return

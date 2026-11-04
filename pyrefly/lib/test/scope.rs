@@ -1865,7 +1865,7 @@ def f():
 
 // https://github.com/facebook/pyrefly/issues/4318
 testcase!(
-    bug = "`Never` calls in methods do not end paths; bare annotations, explicit returns, and `__getattr__` fallbacks are not handled",
+    bug = "Bare annotations, explicit returns, and `__getattr__` fallbacks are not handled",
     test_conditionally_defined_class_member,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -1930,7 +1930,7 @@ class BareAnnotation:
 class CompleteWithNever:
     def __init__(self) -> None:
         if coin():
-            self.value = 1  # E: Attribute `value` may be uninitialized
+            self.value = 1
         else:
             stop()
 

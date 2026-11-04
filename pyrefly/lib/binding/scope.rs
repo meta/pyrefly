@@ -2376,7 +2376,10 @@ impl Scopes {
                         let initialized = InitializationStatus::merge(
                             &mut self.unset_nodes,
                             final_flow.into_iter().map(|flow| {
-                                (flow.instance_attribute_initialization.get(&name), None)
+                                (
+                                    flow.instance_attribute_initialization.get(&name),
+                                    flow.last_stmt_expr,
+                                )
                             }),
                         );
                         (
@@ -4875,16 +4878,18 @@ impl<'a> BindingsBuilder<'a> {
                 })
         };
 
-        // Each reachable path must initialize an attribute.
+        // Each reachable path must initialize an attribute. A missing assignment can
+        // instead be justified by a Never-returning call on that path.
         // If no loop path survives, retain the pre-loop state as the local flow does.
         // A flow can be definitely unreachable without having terminated, such as after a loop
         // that always runs and always exits through `return`.
         let attribute_flows = flows
             .iter()
             .filter(|flow| !flow.is_definitely_unreachable)
-            .chain((merge_style.is_loop() && flows.is_empty()).then_some(&base));
+            .map(|flow| (flow, flow.last_stmt_expr))
+            .chain((merge_style.is_loop() && flows.is_empty()).then_some((&base, None)));
         let mut attribute_names = SmallSet::new();
-        for flow in attribute_flows.clone() {
+        for (flow, _) in attribute_flows.clone() {
             for name in flow.instance_attribute_initialization.keys() {
                 attribute_names.insert(name.clone());
             }
@@ -4893,9 +4898,12 @@ impl<'a> BindingsBuilder<'a> {
         for name in attribute_names {
             let initialized = InitializationStatus::merge(
                 &mut self.scopes.unset_nodes,
-                attribute_flows
-                    .clone()
-                    .map(|flow| (flow.instance_attribute_initialization.get(&name), None)),
+                attribute_flows.clone().map(|(flow, termination_key)| {
+                    (
+                        flow.instance_attribute_initialization.get(&name),
+                        termination_key,
+                    )
+                }),
             );
             instance_attribute_initialization.insert(name, initialized);
         }
