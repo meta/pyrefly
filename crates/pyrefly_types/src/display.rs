@@ -600,13 +600,22 @@ impl<'a> TypeDisplayContext<'a> {
         }
     }
 
+    /// The members of an intersection that are shown to users: every member except truthiness
+    /// markers.
+    fn displayed_intersection_members(x: &(Vec<Type>, Type)) -> Vec<&Type> {
+        x.0.iter().filter(|t| !t.is_truthiness_marker()).collect()
+    }
+
     /// Whether a type has to be parenthesized for display in a sequence of types, such as a union
     /// written with the `|` syntax.
     fn needs_parens_in_sequence(&self, t: &Type) -> bool {
         match t {
             Type::Callable(_) | Type::Function(_) => true,
             Type::Intersect(x) if self.use_annotation_syntax => self.needs_parens_in_sequence(&x.1),
-            Type::Intersect(_) => true,
+            Type::Intersect(x) => match Self::displayed_intersection_members(x).as_slice() {
+                [member] => self.needs_parens_in_sequence(member),
+                _ => true,
+            },
             // Overloads are already wrapped in `Overload[...]`, and query mode wraps bound methods in `BoundMethod[...]`.
             Type::BoundMethod(m) => {
                 !matches!(m.func, BoundMethodType::Overload(_))
@@ -1569,7 +1578,10 @@ impl<'a> TypeDisplayContext<'a> {
             Type::Intersect(x) if self.use_annotation_syntax => {
                 self.fmt_helper_generic(&x.1, false, output)
             }
-            Type::Intersect(x) => self.fmt_type_sequence(x.0.iter(), " & ", true, output),
+            Type::Intersect(x) => match Self::displayed_intersection_members(x).as_slice() {
+                [member] => self.fmt_helper_generic(member, false, output),
+                members => self.fmt_type_sequence(members.iter().copied(), " & ", true, output),
+            },
             Type::Tuple(t) => {
                 if self.always_display_builtins_module_name {
                     output.write_str("builtins.")?;
@@ -1768,6 +1780,7 @@ impl<'a> TypeDisplayContext<'a> {
             }
             Type::SpecialForm(x) => write!(output, "{x}"),
             Type::Ellipsis => output.write_str("..."),
+            Type::Falsy => output.write_str("Falsy"),
             Type::Any(style) => match style {
                 AnyStyle::Explicit => self.maybe_fmt_with_module("typing", "Any", output),
                 AnyStyle::Implicit | AnyStyle::Error if self.render_source_annotation => {

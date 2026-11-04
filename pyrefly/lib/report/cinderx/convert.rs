@@ -424,6 +424,7 @@ pub(crate) fn type_to_structured(
         // typing.Any in the report. This is fine for the initial version but may
         // hide unsupported types; tighten this as CinderX coverage expands.
         Type::Materialization
+        | Type::Falsy
         | Type::Var(_)
         | Type::Intersect(_)
         | Type::SpecialForm(_)

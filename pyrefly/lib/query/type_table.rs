@@ -333,6 +333,10 @@ pub(super) fn type_to_indexed_shape(
             type_to_indexed_shape(context, &body_type, table)
         }
         Type::Union(union) => union_to_indexed_shape(context, union, table),
+        // Truthiness markers are hidden from users, so clients see the marked type itself.
+        Type::Intersect(intersection) if intersection.0.iter().any(Type::is_truthiness_marker) => {
+            type_to_indexed_shape(context, &ty.clone().without_truthiness_markers(), table)
+        }
         Type::Intersect(intersection) => {
             let (members, _fallback) = &**intersection;
             let args = members
@@ -472,6 +476,7 @@ pub(super) fn type_to_indexed_shape(
         Type::SpecialForm(special_form) => indexed_named_leaf(table, special_form.to_string()),
         Type::Ellipsis => indexed_named_leaf(table, "..."),
         Type::Materialization => indexed_named_leaf(table, "Materialization"),
+        Type::Falsy => indexed_named_leaf(table, "Falsy"),
         Type::Var(_) => indexed_named_leaf(table, "typing.Any"),
         Type::ShapedArray(_) => indexed_named_leaf(table, "Tensor"),
         Type::IntTuple(_) => indexed_named_leaf(table, "IntTuple"),

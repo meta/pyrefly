@@ -419,10 +419,9 @@ def f(x: int, y: str | Literal[False]):
 
 // `x and y` returns `x` only when `x` is falsy, so a truthy result is always `y`.
 testcase!(
-    bug = "The falsy part of `x and y` survives a truthy narrow of the result",
     test_boolean_and_result_truthy_narrow,
     r#"
-from typing import assert_type
+from typing import assert_type, reveal_type
 
 class Genre: ...
 
@@ -432,22 +431,36 @@ class Author:
 def assigned(author: Author | None) -> None:
     genre = author and author.genre
     if genre:
-        assert_type(genre, Author | Genre)
+        assert_type(genre, Genre)
 
 def walrus(author: Author | None) -> None:
     if genre := (author and author.genre):
-        assert_type(genre, Author | Genre)
+        assert_type(genre, Genre)
 
 def container(d: dict[str, int] | None) -> None:
     value = d and d["a"]
     if value:
-        assert_type(value, dict[str, int] | int)
+        assert_type(value, int)
 
 # A subclass can define a falsy `__bool__`, so a falsy `Author` stays in the result.
 def not_none(author: Author | None) -> None:
     genre = author and author.genre
+    reveal_type(genre)  # E: revealed type: Author | Genre | None
     if genre is not None:
         assert_type(genre, Author | Genre)
+"#,
+);
+
+// `object & Falsy` keeps `object`, so the `__bool__` lookup on the result has a class to search.
+testcase!(
+    test_boolean_and_object_operand,
+    r#"
+from typing import reveal_type
+
+def f(flag: bool, value: object | None, other: bool) -> None:
+    if flag or (value and other):
+        pass
+    reveal_type(value and other)  # E: revealed type: object | bool | None
 "#,
 );
 
