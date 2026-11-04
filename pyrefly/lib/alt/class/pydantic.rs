@@ -1234,17 +1234,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 continue;
             }
             let range = PydanticRangeConstraints::from_keywords(&keywords);
-            let lax_type = if !keywords.strict.unwrap_or(dataclass.kws.strict)
-                && !keywords.pydantic_has_custom_schema
-                && keywords.converter_param.is_none()
-                && !dataclass
-                    .pydantic_before_validator_fields
-                    .contains(&field_name)
-            {
-                Some(field.ty())
-            } else {
-                None
-            };
+            let lax_type = dataclass
+                .is_pydantic_lax_field(&field_name, &keywords)
+                .then(|| field.ty());
             if range.is_none() && lax_type.is_none() {
                 continue;
             }
