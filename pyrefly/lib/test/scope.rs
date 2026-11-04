@@ -1865,7 +1865,7 @@ def f():
 
 // https://github.com/facebook/pyrefly/issues/4318
 testcase!(
-    bug = "Bare annotations, explicit returns, and `__getattr__` fallbacks are not handled",
+    bug = "Explicit returns and `__getattr__` fallbacks are not handled",
     test_conditionally_defined_class_member,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -1925,7 +1925,7 @@ class PartialWithReturn:
 
 class BareAnnotation:
     def __init__(self) -> None:
-        self.value: int
+        self.value: int  # E: Attribute `value` may be uninitialized
 
 class CompleteWithNever:
     def __init__(self) -> None:

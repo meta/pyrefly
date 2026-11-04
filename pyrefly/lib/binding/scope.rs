@@ -2492,6 +2492,7 @@ impl Scopes {
         x: &ExprAttribute,
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
+        has_value: bool,
     ) -> bool {
         self.record_self_attr_assign_named(
             SelfAttrAssignTarget {
@@ -2501,6 +2502,7 @@ impl Scopes {
             },
             value,
             annotation,
+            has_value,
         )
     }
 
@@ -2512,6 +2514,7 @@ impl Scopes {
         target: SelfAttrAssignTarget<'_>,
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
+        has_value: bool,
     ) -> bool {
         let SelfAttrAssignTarget {
             receiver,
@@ -2537,7 +2540,7 @@ impl Scopes {
         if instance_only && method_scope.receiver_kind != MethodSelfKind::Instance {
             return false;
         }
-        if !in_nested_function {
+        if has_value && !in_nested_function {
             scope
                 .flow
                 .instance_attribute_initialization
