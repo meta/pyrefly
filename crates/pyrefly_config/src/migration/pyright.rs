@@ -558,13 +558,10 @@ impl RuleOverrides {
             self.report_implicit_override,
             ErrorKind::MissingOverrideDecorator,
         );
-        // Unannotated overrides can report either kind: narrowing stays
-        // `bad-override-mutable-attribute`, while widening and incompatible
-        // pairs report plain `bad-override`.
-        add(
-            self.report_incompatible_unannotated_override,
-            ErrorKind::BadOverride,
-        );
+        // Narrowing unannotated overrides report
+        // `bad-override-mutable-attribute`. Widening and incompatible pairs
+        // report plain `bad-override`, but that kind also covers method
+        // overrides and parameter names, so this knob must not touch it.
         add(
             self.report_incompatible_unannotated_override,
             ErrorKind::BadOverrideMutableAttribute,
@@ -867,16 +864,21 @@ include = ["basedpyright.py"]
     }
 
     #[test]
-    fn test_incompatible_unannotated_override_maps_to_both_override_kinds() {
+    fn test_incompatible_unannotated_override_maps_to_mutable_attribute_only() {
         let overrides = RuleOverrides {
-            report_incompatible_unannotated_override: Some(Severity::Error),
+            report_incompatible_unannotated_override: Some(Severity::Warn),
             ..Default::default()
         };
         let errors = overrides.to_config().expect("expected error config");
-        assert_eq!(errors.severity(ErrorKind::BadOverride), Severity::Error);
         assert_eq!(
             errors.severity(ErrorKind::BadOverrideMutableAttribute),
-            Severity::Error
+            Severity::Warn
+        );
+        // Plain `bad-override` also covers method overrides and parameter
+        // names, so this knob must leave it at its default.
+        assert_eq!(
+            errors.severity(ErrorKind::BadOverride),
+            ErrorKind::BadOverride.default_severity()
         );
     }
 

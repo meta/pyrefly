@@ -4763,12 +4763,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     )
                 })
             };
-            let mut is_subset = |got: &Type, want: &Type| self.is_subset_eq_with_reason(got, want);
             let attr_check = self.is_class_attribute_subset(
                 got_attribute,
                 &want_attribute,
                 true,
-                &mut is_subset,
+                &mut |got, want| self.is_subset_eq_with_reason(got, want),
             );
             let error = match attr_check {
                 Err(ref e)
@@ -4830,23 +4829,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // An Invariant failure is only about mutability when the override
                     // narrows: the read direction holds and only the write direction
                     // fails. Widening and mutually incompatible pairs fail the read
-                    // direction too, so report those as plain `bad-override` with a
-                    // covariant message. The engine records no direction flag, so
-                    // re-derive it here; this runs only on the error path.
+                    // direction too (as recorded by the engine, using the same
+                    // any-branch overload semantics as the original check), so
+                    // report those as plain `bad-override` with a covariant message.
                     let error = match *error {
                         AttrSubsetError::Invariant {
                             got,
                             want,
                             subset_error,
-                        } if is_subset(&got, &want).is_err() => {
-                            Box::new(AttrSubsetError::Covariant {
-                                got,
-                                want,
-                                got_is_property: false,
-                                want_is_property: false,
-                                subset_error,
-                            })
-                        }
+                            read_failed: true,
+                        } => Box::new(AttrSubsetError::Covariant {
+                            got,
+                            want,
+                            got_is_property: false,
+                            want_is_property: false,
+                            subset_error,
+                        }),
                         error => Box::new(error),
                     };
                     // A surviving Invariant is a narrowing ReadWrite vs ReadWrite
@@ -6309,6 +6307,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .expect("`Overloaded` has at least one branch"),
                     _ => is_subset(got, want),
                 };
+                let read_failed = assignable.is_err();
                 let subset_error = assignable
                     .map_or_else(Some, |_| is_subset(want, got).map_or_else(Some, |_| None));
                 if let Some(subset_error) = subset_error {
@@ -6316,6 +6315,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         got: got.clone(),
                         want: want.clone(),
                         subset_error,
+                        read_failed,
                     }))
                 } else {
                     Ok(())

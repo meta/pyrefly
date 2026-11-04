@@ -2740,6 +2740,33 @@ class B(A):
  "#,
 );
 
+// A narrowing override of an overloaded attribute keeps the mutable-attribute
+// kind: the read check accepts any matching branch, so the direction recorded
+// by the engine (not a plain all-branches recheck) decides the classification.
+testcase!(
+    test_override_narrowed_overloaded_attribute_keeps_mutable_kind,
+    r#"
+from typing import Callable, overload
+
+def project[A, R](f: Callable[[A], R]) -> tuple[A, R]: ...
+
+@overload
+def f(x: int) -> str: ...
+@overload
+def f(x: str) -> int: ...
+def f(x) -> str | int: ...
+
+class A:
+    x = project(f)
+
+class B(A):
+    x: tuple[bool, str] = (True, "s")  # E: (the type of read-write attributes cannot be changed)
+
+class C(A):
+    x: tuple[bool, str] = (True, "s")  # pyrefly: ignore[bad-override-mutable-attribute]
+ "#,
+);
+
 // Kind probes for #4720: the parent kind suppresses the reclassified cases,
 // but the mutable-attribute sub-kind must not.
 testcase!(
