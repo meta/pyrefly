@@ -2721,28 +2721,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return;
         }
         let ignore_errors = self.error_swallower();
-        let mut has_never_trigger_facet = false;
-        let mut resolved_facet_chain = None;
-        let mut narrowed_info = match narrowing_subject {
-            None | Some(NarrowingSubject::Name(_)) => {
-                let narrowed = self.narrow(&subject_info, op, *narrow_range, &ignore_errors);
-                has_never_trigger_facet =
-                    self.has_never_match_trigger_facet(&narrowed, op, *case_range);
-                narrowed
-            }
-            Some(NarrowingSubject::Facets(_, facets)) => {
-                let Some(resolved_chain) = self.resolve_facet_chain(facets.chain.clone()) else {
-                    return;
-                };
-                let type_info = TypeInfo::of_ty(self.heap.mk_any_implicit());
-                let narrowing_subject_info =
-                    type_info.with_narrow(resolved_chain.facets(), subject_ty.clone());
-                let narrowed =
-                    self.narrow(&narrowing_subject_info, op, *narrow_range, &ignore_errors);
-                resolved_facet_chain = Some(resolved_chain);
-                narrowed
-            }
-        };
+        let (mut narrowed_info, resolved_facet_chain, has_never_trigger_facet) =
+            match narrowing_subject {
+                None | Some(NarrowingSubject::Name(_)) => {
+                    let narrowed = self.narrow(&subject_info, op, *narrow_range, &ignore_errors);
+                    let has_never_trigger_facet =
+                        self.has_never_match_trigger_facet(&narrowed, op, *case_range);
+                    (narrowed, None, has_never_trigger_facet)
+                }
+                Some(NarrowingSubject::Facets(_, facets)) => {
+                    let Some(resolved_chain) = self.resolve_facet_chain(facets.chain.clone())
+                    else {
+                        return;
+                    };
+                    let type_info = TypeInfo::of_ty(self.heap.mk_any_implicit());
+                    let narrowing_subject_info =
+                        type_info.with_narrow(resolved_chain.facets(), subject_ty.clone());
+                    let narrowed =
+                        self.narrow(&narrowing_subject_info, op, *narrow_range, &ignore_errors);
+                    // No sub-facet check needed: the narrowed type already represents
+                    // the facet's type directly, so `is_never()` below is sufficient.
+                    (narrowed, Some(resolved_chain), false)
+                }
+            };
         // Narrow by the current pattern first, then apply the earlier cases'
         // negations. On an `Any` subject this lets `bool` become `bool` before
         // subtracting an earlier `int`, which yields `Never`.
@@ -2751,8 +2752,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
         let mut narrowed_ty = match resolved_facet_chain {
             Some(resolved_chain) => {
-                // No sub-facet check needed: the narrowed type already represents
-                // the facet's type directly, so `is_never()` below is sufficient.
                 self.get_facet_chain_type(&narrowed_info, &resolved_chain, *case_range)
             }
             None => narrowed_info.ty().clone(),
