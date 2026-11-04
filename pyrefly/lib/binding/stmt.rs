@@ -986,10 +986,12 @@ impl<'a> BindingsBuilder<'a> {
                         delete_idx,
                         Binding::Delete(Box::new(target.clone())),
                     );
-                    if let Expr::Attribute(_) = target
-                        && let Some((identifier, _)) = identifier_and_chain_prefix_for_expr(&target)
-                    {
-                        self.narrow_if_name_is_defined(identifier, idx);
+                    if let Expr::Attribute(attribute) = &target {
+                        self.scopes.record_self_attr_delete(attribute);
+                        if let Some((identifier, _)) = identifier_and_chain_prefix_for_expr(&target)
+                        {
+                            self.narrow_if_name_is_defined(identifier, idx);
+                        }
                     }
                 }
             }

@@ -2620,6 +2620,27 @@ impl Scopes {
         }
     }
 
+    /// A deletion in the method body removes its initialization guarantee.
+    pub fn record_self_attr_delete(&mut self, x: &ExprAttribute) {
+        for scope in self.iter_rev_mut() {
+            match &scope.kind {
+                ScopeKind::Function(_) => return,
+                ScopeKind::Method(method) => {
+                    if method.self_name.as_ref().is_some_and(|self_name| {
+                        matches!(&*x.value, Expr::Name(name) if name.id == self_name.id)
+                    }) {
+                        scope.flow.instance_attribute_initialization.insert(
+                            x.attr.id.clone(),
+                            InitializationStatus::Uninitialized,
+                        );
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Record the value of `self.register_buffer(...)` or `self.register_parameter(...)`.
     /// The enclosing class is checked for `torch.nn.Module` ancestry during solving.
     pub fn record_nn_module_registration(

@@ -283,7 +283,6 @@ class NestedReturn:
 );
 
 testcase!(
-    bug = "Deleting an attribute does not remove its initialization",
     test_attribute_initialization_control_flow,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -338,12 +337,12 @@ class MatchMissing:
 
 class Deleted:
     def __init__(self) -> None:
-        self.value = 1
+        self.value = 1  # E: Attribute `value` may be uninitialized
         del self.value
 
 class DeletedConditionally:
     def __init__(self, flag: bool) -> None:
-        self.value = 1
+        self.value = 1  # E: Attribute `value` may be uninitialized
         if flag:
             del self.value
 

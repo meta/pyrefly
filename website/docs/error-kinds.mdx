@@ -1900,6 +1900,7 @@ Pyrefly reports an attribute that the class body or a recognized initialization 
 Recognized methods include `__init__`, `__new__`, `__post_init__`, `__init_subclass__`, and supported test setup methods.
 An explicit `return` completes the method normally.
 Paths that raise or end in a `Never` or `NoReturn` call do not require an assignment.
+Deleting an attribute removes its initialization guarantee.
 
 ```python
 class C:
