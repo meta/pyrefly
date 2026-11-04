@@ -118,7 +118,7 @@ fn extend_facet_chain(resolved_chain: Option<&FacetChain>, facet: FacetKind) -> 
 /// keyword binding, and gradual signatures are handled conservatively.
 fn keyword_binds_first_param(func: &Type, kw: &Name) -> bool {
     fn first_param_name(params: &Params, skip_self: bool) -> Option<&Name> {
-        let Params::List(list) | Params::Partial(list) = params else {
+        let (Params::List(list) | Params::Partial(list)) = params else {
             // `...`, materializations, and ParamSpecs are gradual: don't narrow.
             return None;
         };

@@ -364,12 +364,12 @@ impl AtomicNarrowOp {
             Self::IsNotSequence => Some(format!("not isinstance({subject}, Sequence)")),
             Self::IsMapping => Some(format!("isinstance({subject}, Mapping)")),
             Self::IsNotMapping => Some(format!("not isinstance({subject}, Mapping)")),
-            Self::Call(expr, arguments) => {
+            Self::Call(expr, arguments, _) => {
                 let func = snippet(expr.range())?;
                 let args = snippet(arguments.range()).unwrap_or_default();
                 Some(format!("{func}{args}"))
             }
-            Self::NotCall(expr, arguments) => {
+            Self::NotCall(expr, arguments, _) => {
                 let func = snippet(expr.range())?;
                 let args = snippet(arguments.range()).unwrap_or_default();
                 Some(format!("not {func}{args}"))
