@@ -1596,7 +1596,7 @@ def guard_po(x: str | None, /) -> TypeGuard[str]:
     return x is not None
 
 def kw_po(x: str | None) -> None:
-    if guard_po(x=x):  # E: Unexpected keyword argument `x` for function `guard_po`
+    if guard_po(x=x):  # E: Expected argument `x` to be positional
         need_str(x)  # E: Argument `str | None` is not assignable to parameter `x` with type `str` in function `need_str`
 
 # Methods: the bound `self` is skipped when finding the first parameter.
