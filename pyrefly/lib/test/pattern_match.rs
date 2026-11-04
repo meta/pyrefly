@@ -257,6 +257,17 @@ def or_pattern_any(x: Any) -> None:
             pass
         case bool():  # E: Case pattern can never match subject of type
             pass
+
+class Holder:
+    a: Any
+
+def attribute_any(h: Holder) -> None:
+    match h.a:
+        case int():
+            pass
+        case bool():  # E: Case pattern can never match subject of type
+            pass
+
 "#,
 );
 

@@ -941,7 +941,8 @@ impl<'a> BindingsBuilder<'a> {
                     negated_prev_ops.0.get(narrowing_subject.name())
                 && let Some(projected_narrow_op) = narrow_op.rebase_onto_subject(narrowing_subject)
             {
-                let prev_case_negations = Some(Box::new((projected_narrow_op.clone(), *op_range)));
+                // Unprojected, to match the coordinates of `narrow_ops_for_case`.
+                let prev_case_negations = Some(Box::new((narrow_op.clone(), *op_range)));
                 let case_subject_idx = self.insert_binding(
                     Key::PatternNarrow(case_range),
                     Binding::Narrow(
