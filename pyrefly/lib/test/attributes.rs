@@ -5488,3 +5488,24 @@ class EveryReturnCutOff:
             stop()
 "#,
 );
+
+testcase!(
+    test_attribute_initialization_inherited_getattr_fallback,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def coin() -> bool: ...
+
+class Fallback:
+    def __getattr__(self, name: str) -> int: ...
+
+class Derived(Fallback):
+    def __init__(self) -> None:
+        if coin():
+            self.value = 1
+
+class NoFallback:
+    def __init__(self) -> None:
+        if coin():
+            self.value = 1  # E: Attribute `value` may be uninitialized
+"#,
+);

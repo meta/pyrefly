@@ -73,6 +73,7 @@ use crate::binding::binding::KeyClassSynthesizedFields;
 use crate::binding::binding::KeyExpect;
 use crate::binding::binding::KeyTParams;
 use crate::binding::binding::KeyVariance;
+use crate::binding::binding::MethodSelfKind;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::InitializedInClass;
@@ -533,12 +534,20 @@ impl<'a> BindingsBuilder<'a> {
                 && check_initialization
                 && let InitializedInClass::IfAny(initializations) = initialized
             {
+                let is_instance = matches!(
+                    &definition,
+                    ClassFieldDefinition::DefinedInMethod {
+                        receiver_kind: MethodSelfKind::Instance,
+                        ..
+                    }
+                );
                 self.insert_binding(
                     KeyExpect::UninitializedAttributeCheck(range),
                     BindingExpect::UninitializedAttributeCheck {
                         name: name.key().clone(),
                         range,
                         class: class_indices.class_idx,
+                        is_instance,
                         initializations,
                     },
                 );

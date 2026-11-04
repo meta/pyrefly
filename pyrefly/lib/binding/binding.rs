@@ -1382,6 +1382,8 @@ pub enum BindingExpect {
         name: Name,
         range: TextRange,
         class: Idx<KeyClass>,
+        /// Instance attributes can also be provided by `__getattr__`.
+        is_instance: bool,
         /// Any of these flows can establish initialization.
         initializations: Vec<InitializationStatus>,
     },
@@ -1560,14 +1562,16 @@ impl DisplayWith<Bindings> for BindingExpect {
                 name,
                 range,
                 class,
+                is_instance,
                 initializations,
             } => {
                 write!(
                     f,
-                    "UninitializedAttributeCheck({}, {}, {:?}, {:?})",
+                    "UninitializedAttributeCheck({}, {}, {:?}, {}, {:?})",
                     name,
                     ctx.module().display(range),
                     class,
+                    is_instance,
                     initializations
                 )
             }
