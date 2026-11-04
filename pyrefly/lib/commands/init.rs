@@ -13,7 +13,9 @@ use clap::Parser;
 use pyrefly_config::args::ConfigOverrideArgs;
 use pyrefly_config::file_kind::ConfigFileKind;
 use pyrefly_config::migration::run::MigrationSource;
+use pyrefly_config::migration::run::PYREFLY_BASELINE_FILE;
 use pyrefly_config::migration::run::config_migration;
+use pyrefly_config::migration::run::write_pyrefly_baseline;
 use pyrefly_config::pyproject::PyProject;
 use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::fs_anyhow;
@@ -34,8 +36,9 @@ const MAX_ERRORS_TO_PROMPT_SUPPRESSION: usize = 100;
 struct CreatedConfig {
     status: CommandExitStatus,
     config_path: Option<PathBuf>,
-    /// Relative path recorded when a basedpyright baseline was found on disk.
-    migrated_baseline: Option<PathBuf>,
+    /// A basedpyright baseline file was found. The Pyrefly `baseline` key is
+    /// added only if the user agrees to create the new file.
+    migrated_baseline: bool,
 }
 
 impl CreatedConfig {
@@ -43,7 +46,7 @@ impl CreatedConfig {
         Self {
             status,
             config_path,
-            migrated_baseline: None,
+            migrated_baseline: false,
         }
     }
 }
@@ -147,15 +150,9 @@ impl InitArgs {
             Ok(created) if self.dry_run || self.print_config => Ok(created.status),
             Ok(CreatedConfig {
                 config_path: Some(config_path),
-                migrated_baseline: Some(baseline),
+                migrated_baseline: true,
                 ..
-            }) => self.prompt_migrated_baseline(
-                config_path,
-                &baseline,
-                version,
-                wrapper,
-                thread_count,
-            ),
+            }) => self.prompt_migrated_baseline(config_path, version, wrapper, thread_count),
             Ok(created) => {
                 let config_path = created.config_path;
                 // 2. Run pyrefly check
@@ -184,6 +181,30 @@ impl InitArgs {
         }
     }
 
+    /// Run `pyrefly check` against the config init just wrote.
+    /// `extra_args` are flags beyond `--output-format omit-errors`.
+    fn run_configured_check(
+        &self,
+        config_path: Option<PathBuf>,
+        version: &str,
+        wrapper: Option<ConfigConfigurerWrapper>,
+        thread_count: ThreadCount,
+        extra_args: &[&str],
+    ) -> anyhow::Result<(CommandExitStatus, Vec<CheckError>)> {
+        let mut args = vec!["check", "--output-format", "omit-errors"];
+        args.extend_from_slice(extra_args);
+        let check_args = check::CheckArgs::parse_from(args);
+        let (globs, config_finder, upsell) = FilesArgs::get(
+            Vec::new(),
+            config_path,
+            ConfigOverrideArgs::default(),
+            wrapper,
+        )?;
+        check_args
+            .run_once(version, globs, config_finder, upsell, thread_count)
+            .map(|(status, errors, _check_result)| (status, errors))
+    }
+
     fn run_check(
         &self,
         config_path: Option<PathBuf>,
@@ -192,24 +213,11 @@ impl InitArgs {
         thread_count: ThreadCount,
     ) -> anyhow::Result<(CommandExitStatus, Vec<CheckError>)> {
         info!("Running pyrefly check...");
-
-        // Create check args by parsing arguments with output-format set to omit-errors
-        let check_args = check::CheckArgs::parse_from(["check", "--output-format", "omit-errors"]);
-
-        // Use get to get the filtered globs and config finder
-        let (filtered_globs, config_finder, upsell) = FilesArgs::get(
-            Vec::new(),
-            config_path,
-            ConfigOverrideArgs::default(),
-            wrapper,
-        )?;
-
-        // Run the check directly
-        let res = check_args.run_once(version, filtered_globs, config_finder, upsell, thread_count);
+        let res = self.run_configured_check(config_path, version, wrapper, thread_count, &[]);
         if let Err(e) = &res {
             error!("Failed to run pyrefly check: {}", e);
         }
-        res.map(|(status, errors, _check_result)| (status, errors))
+        res
     }
 
     fn prompt_error_suppression(
@@ -226,31 +234,12 @@ impl InitArgs {
 
         if self.prompt_user_confirmation(&prompt) {
             info!("Running pyrefly check with suppress-errors flag...");
-
-            // Create check args with suppress-errors flag
-            let suppress_args = check::CheckArgs::parse_from([
-                "check",
-                "--suppress-errors",
-                "--output-format",
-                "omit-errors",
-                "--summary=none",
-            ]);
-
-            // Use get to get the filtered globs and config finder
-            let (suppress_globs, suppress_config_finder, suppress_upsell) = FilesArgs::get(
-                Vec::new(),
+            match self.run_configured_check(
                 config_path,
-                ConfigOverrideArgs::default(),
-                wrapper,
-            )?;
-
-            // Run the check with suppress-errors flag
-            match suppress_args.run_once(
                 version,
-                suppress_globs,
-                suppress_config_finder,
-                suppress_upsell,
+                wrapper,
                 thread_count,
+                &["--suppress-errors", "--summary=none"],
             ) {
                 Ok(_) => return Ok(CommandExitStatus::Success),
                 Err(e) => {
@@ -263,40 +252,40 @@ impl InitArgs {
         Ok(CommandExitStatus::Success)
     }
 
-    /// Ask whether to fill the new Pyrefly baseline. The file is created only
-    /// when the answer is yes. Declining, including `--non-interactive`, prints
-    /// the command to create it later and does not run the suppression prompt.
+    /// Ask whether to fill a new Pyrefly baseline. The config key and the file
+    /// are written only when the answer is yes. Declining, including
+    /// `--non-interactive`, prints how to do it later and does not run the
+    /// suppression prompt.
+    ///
+    /// A completed `--update-baseline` run is success even when check reports
+    /// errors. Those errors are the ones just recorded in the new baseline, so
+    /// they are not a failed init.
     fn prompt_migrated_baseline(
         &self,
         config_path: PathBuf,
-        baseline: &Path,
         version: &str,
         wrapper: Option<ConfigConfigurerWrapper>,
         thread_count: ThreadCount,
     ) -> anyhow::Result<CommandExitStatus> {
         let prompt = format!(
-            "Found a basedpyright baseline. Generate a pyrefly baseline at {} for existing errors? (y/N): ",
-            baseline.display()
+            "Found a basedpyright baseline. Generate a pyrefly baseline at {PYREFLY_BASELINE_FILE} for existing errors? (y/N): "
         );
         if !self.prompt_user_confirmation(&prompt) {
-            info!("Run `pyrefly check --update-baseline` to create it.");
+            info!(
+                "Add `baseline = \"{PYREFLY_BASELINE_FILE}\"` to your config, then run `pyrefly check --update-baseline`."
+            );
             return Ok(CommandExitStatus::Success);
         }
+        write_pyrefly_baseline(&config_path)?;
         info!("Running pyrefly check with --update-baseline...");
-        let check_args = check::CheckArgs::parse_from([
-            "check",
-            "--update-baseline",
-            "--output-format",
-            "omit-errors",
-        ]);
-        let (globs, config_finder, upsell) = FilesArgs::get(
-            Vec::new(),
+        match self.run_configured_check(
             Some(config_path),
-            ConfigOverrideArgs::default(),
+            version,
             wrapper,
-        )?;
-        match check_args.run_once(version, globs, config_finder, upsell, thread_count) {
-            Ok((status, _, _)) => Ok(status),
+            thread_count,
+            &["--update-baseline"],
+        ) {
+            Ok(_) => Ok(CommandExitStatus::Success),
             Err(e) => {
                 error!("Failed to run pyrefly check with --update-baseline: {e}");
                 Ok(CommandExitStatus::Success)
@@ -1023,82 +1012,6 @@ files = [\"from_mypy.py\"]
         assert_user_error(status);
         let unchanged = fs_anyhow::read_to_string(&tmp.path().join("pyrefly.toml"))?;
         assert_eq!(unchanged, "# sentinel\n");
-        Ok(())
-    }
-
-    fn write_baseline(dir: &Path, relative: &str) -> anyhow::Result<()> {
-        let path = dir.join(relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        fs_anyhow::write(&path, b"{}\n")
-    }
-
-    #[test]
-    fn test_non_interactive_basedpyright_baseline_sets_config_and_skips_file() -> anyhow::Result<()>
-    {
-        let tmp = tempfile::tempdir()?;
-        create_file_in(tmp.path(), "pyproject.toml", Some(b"[tool.basedpyright]\n"))?;
-        write_baseline(tmp.path(), ".basedpyright/baseline.json")?;
-
-        let status = run_init_non_interactive(&tmp)?;
-        assert_success(status);
-        check_file_in(
-            tmp.path(),
-            "pyproject.toml",
-            &["[tool.pyrefly]", "baseline = \"pyrefly_baseline.json\""],
-        )?;
-        assert!(!tmp.path().join("pyrefly_baseline.json").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn test_custom_baseline_file_is_honored() -> anyhow::Result<()> {
-        let tmp = tempfile::tempdir()?;
-        create_file_in(
-            tmp.path(),
-            "pyproject.toml",
-            Some(b"[tool.basedpyright]\nbaselineFile = \"custom/baseline.json\"\n"),
-        )?;
-        write_baseline(tmp.path(), "custom/baseline.json")?;
-
-        let status = run_init_non_interactive(&tmp)?;
-        assert_success(status);
-        check_file_in(
-            tmp.path(),
-            "pyproject.toml",
-            &["baseline = \"pyrefly_baseline.json\""],
-        )?;
-        assert!(!tmp.path().join("pyrefly_baseline.json").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn test_basedpyright_without_baseline_file_omits_key() -> anyhow::Result<()> {
-        let tmp = tempfile::tempdir()?;
-        create_file_in(tmp.path(), "pyproject.toml", Some(b"[tool.basedpyright]\n"))?;
-
-        let status = run_init_non_interactive(&tmp)?;
-        assert_success(status);
-        let written = fs_anyhow::read_to_string(&tmp.path().join("pyproject.toml"))?;
-        assert!(written.contains("[tool.pyrefly]"));
-        assert!(!written.contains("baseline ="));
-        assert!(!tmp.path().join("pyrefly_baseline.json").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn test_dry_run_basedpyright_baseline_writes_nothing() -> anyhow::Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let original = "[tool.basedpyright]\n";
-        create_file_in(tmp.path(), "pyproject.toml", Some(original.as_bytes()))?;
-        write_baseline(tmp.path(), ".basedpyright/baseline.json")?;
-
-        let status = run_init_dry_run(&tmp)?;
-        assert_success(status);
-        let unchanged = fs_anyhow::read_to_string(&tmp.path().join("pyproject.toml"))?;
-        assert_eq!(unchanged, original);
-        assert!(!tmp.path().join("pyrefly_baseline.json").exists());
         Ok(())
     }
 }

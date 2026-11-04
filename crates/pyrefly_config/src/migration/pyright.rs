@@ -633,20 +633,13 @@ pub struct PyrightNotFoundError {}
 #[error("Both `[tool.pyright]` and `[tool.basedpyright]` sections are not supported.")]
 pub struct BothPyrightSectionsError {}
 
-/// Migrate the pyright or basedpyright section of a `pyproject.toml`.
+/// Parse the pyright or basedpyright section of a `pyproject.toml`.
 ///
 /// Exactly one of `[tool.pyright]` and `[tool.basedpyright]` must be present:
 /// this is the parse boundary that enforces that invariant, so callers do not
-/// have to check for the sections themselves before calling.
-pub fn parse_pyproject_toml(raw_file: &str) -> anyhow::Result<ConfigFile> {
-    Ok(parse_pyproject_section(raw_file)?.0)
-}
-
-/// Parse a pyright or basedpyright `pyproject.toml` section.
-///
-/// The path is `baselineFile` when that setting is present. Callers that only
-/// need the converted config should use `parse_pyproject_toml`.
-pub fn parse_pyproject_section(raw_file: &str) -> anyhow::Result<(ConfigFile, Option<PathBuf>)> {
+/// have to check for the sections themselves before calling. Callers that want
+/// a Pyrefly config call [`PyrightConfig::convert`].
+pub fn parse_pyproject_toml(raw_file: &str) -> anyhow::Result<PyrightConfig> {
     #[derive(Deserialize)]
     struct Tool {
         pyright: Option<PyrightConfig>,
@@ -662,7 +655,7 @@ pub fn parse_pyproject_section(raw_file: &str) -> anyhow::Result<(ConfigFile, Op
         .tool
         .ok_or(anyhow::anyhow!(PyrightNotFoundError {}))?;
 
-    let config = match (tool.pyright, tool.basedpyright) {
+    match (tool.pyright, tool.basedpyright) {
         (Some(pyright), None) => Ok(pyright),
         (None, Some(mut basedpyright)) => {
             basedpyright.is_basedpyright = true;
@@ -670,10 +663,7 @@ pub fn parse_pyproject_section(raw_file: &str) -> anyhow::Result<(ConfigFile, Op
         }
         (Some(_), Some(_)) => Err(anyhow::anyhow!(BothPyrightSectionsError {})),
         (None, None) => Err(anyhow::anyhow!(PyrightNotFoundError {})),
-    }?;
-
-    let baseline_file = config.baseline_file.clone();
-    Ok((PyrightConfig::convert(config), baseline_file))
+    }
 }
 
 #[cfg(test)]
@@ -791,40 +781,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_baseline_file() -> anyhow::Result<()> {
-        let raw_file = r#"
-            {
-                "baselineFile": "baseline.json"
-            }
-            "#;
-        let pyr = serde_json::from_str::<PyrightConfig>(raw_file)?;
-        assert_eq!(pyr.baseline_file, Some(PathBuf::from("baseline.json")));
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_baseline_file_from_pyproject() -> anyhow::Result<()> {
-        let src = r#"
-[tool.basedpyright]
-baselineFile = "custom-baseline.json"
-"#;
-        #[derive(Deserialize)]
-        struct Tool {
-            basedpyright: PyrightConfig,
-        }
-        #[derive(Deserialize)]
-        struct PyProject {
-            tool: Tool,
-        }
-        let parsed = toml::from_str::<PyProject>(src)?;
-        assert_eq!(
-            parsed.tool.basedpyright.baseline_file,
-            Some(PathBuf::from("custom-baseline.json"))
-        );
-        Ok(())
-    }
-
-    #[test]
     fn test_convert_from_pyproject() {
         // From https://microsoft.github.io/pyright/#/configuration?id=sample-pyprojecttoml-file
         let src = r#"[tool.pyright]
@@ -851,7 +807,7 @@ executionEnvironments = [
   { root = "src" }
 ]
 "#;
-        let result = parse_pyproject_toml(src).unwrap();
+        let result = parse_pyproject_toml(src).unwrap().convert();
         assert_eq!(result.preset, None);
     }
 
@@ -859,7 +815,7 @@ executionEnvironments = [
     fn test_convert_from_pyproject_basedpyright() {
         let src = r#"[tool.basedpyright]
 "#;
-        let result = parse_pyproject_toml(src).unwrap();
+        let result = parse_pyproject_toml(src).unwrap().convert();
         assert_eq!(result.preset, Some(Preset::All));
     }
 
@@ -868,7 +824,7 @@ executionEnvironments = [
         let src = r#"[tool.basedpyright]
 typeCheckingMode = "basic"
 "#;
-        let result = parse_pyproject_toml(src).unwrap();
+        let result = parse_pyproject_toml(src).unwrap().convert();
         assert_eq!(result.preset, None);
     }
 
