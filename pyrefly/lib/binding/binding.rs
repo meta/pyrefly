@@ -1316,7 +1316,7 @@ pub enum BindingExpect {
     MatchExhaustiveness {
         subject_idx: Idx<Key>,
         narrowing_subject: Option<NarrowingSubject>,
-        narrow_ops_for_fall_through: (Box<NarrowOp>, TextRange),
+        narrow_ops_for_fall_through: Box<(NarrowOp, TextRange)>,
         subject_range: TextRange,
         // Should we show the raw expression of the match subject instead of the name?
         show_subject_expr: bool,

@@ -2641,7 +2641,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         subject_idx: &Idx<Key>,
         narrowing_subject: Option<&NarrowingSubject>,
-        narrow_ops_for_fall_through: &(Box<NarrowOp>, TextRange),
+        narrow_ops_for_fall_through: &(NarrowOp, TextRange),
         subject_range: &TextRange,
         show_subject_expr: bool,
         errors: &ErrorCollector,
@@ -2657,7 +2657,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Get the narrowed type of the match subject when none of the cases match
         let mut remaining_ty = match narrowing_subject {
             None | Some(NarrowingSubject::Name(_)) => self
-                .narrow(&subject_info, op.as_ref(), *narrow_range, &ignore_errors)
+                .narrow(&subject_info, op, *narrow_range, &ignore_errors)
                 .ty()
                 .clone(),
             Some(NarrowingSubject::Facets(_, facets)) => {
@@ -2669,12 +2669,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let type_info = TypeInfo::of_ty(self.heap.mk_any_implicit());
                 let narrowing_subject_info =
                     type_info.with_narrow(resolved_chain.facets(), subject_info.ty().clone());
-                let narrowed = self.narrow(
-                    &narrowing_subject_info,
-                    op.as_ref(),
-                    *narrow_range,
-                    &ignore_errors,
-                );
+                let narrowed =
+                    self.narrow(&narrowing_subject_info, op, *narrow_range, &ignore_errors);
                 self.get_facet_chain_type(&narrowed, &resolved_chain, *subject_range)
             }
         };

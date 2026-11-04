@@ -1091,7 +1091,7 @@ impl<'a> BindingsBuilder<'a> {
                     BindingExpect::MatchExhaustiveness {
                         subject_idx,
                         narrowing_subject,
-                        narrow_ops_for_fall_through: (Box::new(op), range),
+                        narrow_ops_for_fall_through: Box::new((op, range)),
                         subject_range: match_subject.subject_range(x.subject.range()),
                         show_subject_expr: match_subject.is_synthetic(),
                     },

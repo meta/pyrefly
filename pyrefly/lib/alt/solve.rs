@@ -3175,7 +3175,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             } => self.check_match_exhaustiveness(
                 subject_idx,
                 narrowing_subject.as_ref(),
-                narrow_ops_for_fall_through,
+                narrow_ops_for_fall_through.as_ref(),
                 subject_range,
                 *show_subject_expr,
                 errors,
