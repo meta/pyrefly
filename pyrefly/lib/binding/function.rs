@@ -73,12 +73,14 @@ use crate::binding::binding::ReturnImplicit;
 use crate::binding::binding::ReturnType;
 use crate::binding::binding::ReturnTypeKind;
 use crate::binding::bindings::BindingsBuilder;
+use crate::binding::bindings::InitializationStatus;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::classmethod::FunctionDecorators;
 use crate::binding::expr::Usage;
 use crate::binding::pattern::match_case_always_matches;
 use crate::binding::scope::FlowStyle;
 use crate::binding::scope::InstanceAttribute;
+use crate::binding::scope::MethodAttribute;
 use crate::binding::scope::NameReadInfo;
 use crate::binding::scope::Scope;
 use crate::binding::scope::UnusedParameter;
@@ -179,7 +181,7 @@ impl<'a, 'b> SourceOrderVisitor<'a> for SuperMethodCallFinder<'b> {
 
 pub struct SelfAssignments {
     pub method_name: Name,
-    pub instance_attributes: SmallMap<Name, InstanceAttribute>,
+    pub instance_attributes: SmallMap<Name, MethodAttribute>,
     pub nn_module_registrations: NNModuleRegistrations,
 }
 
@@ -298,12 +300,15 @@ impl<'a> SelfAttrNames<'a> {
             .map(|(n, r)| {
                 (
                     n,
-                    InstanceAttribute(
-                        vec![ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))],
-                        None,
-                        r,
-                        MethodSelfKind::Instance,
-                    ),
+                    MethodAttribute {
+                        attribute: InstanceAttribute(
+                            vec![ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))],
+                            None,
+                            r,
+                            MethodSelfKind::Instance,
+                        ),
+                        initialized: InitializationStatus::Initialized,
+                    },
                 )
             })
             .collect();

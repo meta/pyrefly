@@ -1099,8 +1099,8 @@ pub struct ClassIndices {
 struct ScopeClass {
     name: Identifier,
     indices: ClassIndices,
-    attributes_from_recognized_methods: SmallMap<Name, SmallMap<Name, InstanceAttribute>>,
-    attributes_from_other_methods: SmallMap<Name, SmallMap<Name, InstanceAttribute>>,
+    attributes_from_recognized_methods: SmallMap<Name, SmallMap<Name, MethodAttribute>>,
+    attributes_from_other_methods: SmallMap<Name, SmallMap<Name, MethodAttribute>>,
     classmethod_receivers: Option<Box<ClassmethodReceiverState>>,
     /// Attributes that `__new__` assigns on the instance it creates.
     attributes_set_on_new_instance: SmallSet<Name>,
@@ -1132,7 +1132,7 @@ impl ScopeClass {
     pub fn add_attributes_defined_by_method(
         &mut self,
         method_name: Name,
-        attributes: SmallMap<Name, InstanceAttribute>,
+        attributes: SmallMap<Name, MethodAttribute>,
         nn_module_registrations: NNModuleRegistrations,
     ) {
         if is_attribute_defining_method(&method_name, &self.name.id) {
@@ -1161,27 +1161,27 @@ impl ScopeClass {
     /// unrecognized methods, and that constructors take precedence.
     pub fn method_defined_attributes(
         self,
-    ) -> impl Iterator<Item = (Hashed<Name>, MethodThatSetsAttr, InstanceAttribute)> {
+    ) -> impl Iterator<Item = (Hashed<Name>, MethodThatSetsAttr, MethodAttribute)> {
         Self::iter_attributes(self.attributes_from_recognized_methods, true).chain(
             Self::iter_attributes(self.attributes_from_other_methods, false),
         )
     }
 
     fn iter_attributes(
-        attrs: SmallMap<Name, SmallMap<Name, InstanceAttribute>>,
+        attrs: SmallMap<Name, SmallMap<Name, MethodAttribute>>,
         recognized_attribute_defining_method: bool,
-    ) -> impl Iterator<Item = (Hashed<Name>, MethodThatSetsAttr, InstanceAttribute)> {
+    ) -> impl Iterator<Item = (Hashed<Name>, MethodThatSetsAttr, MethodAttribute)> {
         {
             attrs.into_iter().flat_map(move |(method_name, attrs)| {
-                attrs.into_iter_hashed().map(move |(name, attr)| {
+                attrs.into_iter_hashed().map(move |(name, attribute)| {
                     (
                         name,
                         MethodThatSetsAttr {
                             method_name: method_name.clone(),
                             recognized_attribute_defining_method,
-                            instance_or_class: attr.3,
+                            instance_or_class: attribute.attribute.3,
                         },
-                        attr,
+                        attribute,
                     )
                 })
             })
@@ -1232,6 +1232,13 @@ pub struct InstanceAttribute(
     pub TextRange,
     pub MethodSelfKind,
 );
+
+/// An attribute assigned in a method, with its initialization at the end of the method.
+#[derive(Clone, Debug)]
+pub struct MethodAttribute {
+    pub attribute: InstanceAttribute,
+    pub initialized: InitializationStatus,
+}
 
 #[derive(Clone, Debug)]
 struct ScopeMethod {
@@ -1881,7 +1888,7 @@ impl Scopes {
             &mut class_scope.attributes_from_other_methods,
         ] {
             if let Some(attributes) = attributes.get_mut(method_name) {
-                for attribute in attributes.values_mut() {
+                for MethodAttribute { attribute, .. } in attributes.values_mut() {
                     if method_range.contains_range(attribute.2) {
                         attribute.3 = MethodSelfKind::Class;
                     }
@@ -2355,16 +2362,31 @@ impl Scopes {
         let scope = self.pop();
         let unused_variables = Self::collect_unused_variables(scope.variables.clone());
         match scope.kind {
-            ScopeKind::Method(method_scope) => (
-                method_scope.yields_and_returns,
-                Some(SelfAssignments {
-                    method_name: method_scope.name.id,
-                    instance_attributes: method_scope.instance_attributes,
-                    nn_module_registrations: method_scope.nn_module_registrations,
-                }),
-                Self::collect_unused_parameters(method_scope.parameters),
-                unused_variables,
-            ),
+            ScopeKind::Method(method_scope) => {
+                let instance_attributes = method_scope
+                    .instance_attributes
+                    .into_iter()
+                    .map(|(name, attribute)| {
+                        (
+                            name,
+                            MethodAttribute {
+                                attribute,
+                                initialized: InitializationStatus::Initialized,
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    method_scope.yields_and_returns,
+                    Some(SelfAssignments {
+                        method_name: method_scope.name.id,
+                        instance_attributes,
+                        nn_module_registrations: method_scope.nn_module_registrations,
+                    }),
+                    Self::collect_unused_parameters(method_scope.parameters),
+                    unused_variables,
+                )
+            }
             ScopeKind::Function(function_scope) => (
                 function_scope.yields_and_returns,
                 None,
@@ -3647,7 +3669,14 @@ impl Scopes {
         // followed by other helper methods.
         let mut redefinitions = Vec::new();
         method_attrs.into_iter().for_each(
-            |(name, method, InstanceAttribute(values, annotation, range, receiver_kind))| {
+            |(
+                name,
+                method,
+                MethodAttribute {
+                    attribute: InstanceAttribute(values, annotation, range, receiver_kind),
+                    ..
+                },
+            )| {
                 if let Some((
                     ClassFieldDefinition::DefinedInMethod {
                         values: existing_values,
@@ -3699,7 +3728,7 @@ impl Scopes {
                                 ),
                             },
                             range,
-                            // Method assignments are not checked for initialization.
+                            // Method assignments are not checked for initialization yet.
                             InitializedInClass::Yes,
                         ),
                     );
