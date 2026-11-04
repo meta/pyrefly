@@ -43,7 +43,13 @@ fn flatten_and_dedup(xs: Vec<Type>, heap: &TypeHeap) -> Vec<Type> {
     // `Never`s (by replacing absorbed intersection types), so dropping them in place here
     // suffices and we don't need a second flatten pass.
     flattened.retain(|x| !x.is_never());
-    flattened.sort();
+    // A member marked with its truthiness sorts as the unmarked type, so the marker changes neither
+    // the display order of the union nor the order in which its members are solved.
+    flattened.sort_by(|x, y| {
+        x.ignoring_truthiness_marker()
+            .cmp(y.ignoring_truthiness_marker())
+            .then_with(|| x.cmp(y))
+    });
     flattened.dedup();
     // Keep only the strongest `Any` style, matching `AnyStyle::merge`.
     if let Some(strongest) = flattened

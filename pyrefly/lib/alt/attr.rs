@@ -3004,6 +3004,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             | Type::ParamSpecValue(_)
             | Type::Materialization
             | Type::Falsy
+            | Type::Truthy
             | Type::Ellipsis => {}
         }
     }

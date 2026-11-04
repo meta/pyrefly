@@ -2187,7 +2187,11 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 self.is_subset_type_to_int_tuple(got, want)
             }
             (_, Type::Quantified(_)) => Err(SubsetError::Other),
-            (l, Type::Intersect(u)) => all(u.0.iter(), |u| self.is_subset_eq(l, u)),
+            // A truthiness marker only records when a boolean operand is returned, for narrowing.
+            // It does not restrict which values are assignable.
+            (l, Type::Intersect(u)) => all(u.0.iter().filter(|u| !u.is_truthiness_marker()), |u| {
+                self.is_subset_eq(l, u)
+            }),
             (l, Type::Union(u_union)) => {
                 let ordered_us = self.solver.partial_sort_by_vars(&u_union.members);
                 let mut error = None;
