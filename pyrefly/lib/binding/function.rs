@@ -95,6 +95,7 @@ struct Decorators {
     is_abstract_method: bool,
     is_override: bool,
     is_classmethod: bool,
+    is_staticmethod: bool,
     decorator_kind: FunctionDecorators,
     decorators: Box<[Idx<KeyDecorator>]>,
 }
@@ -321,11 +322,12 @@ impl<'a> BindingsBuilder<'a> {
         undecorated_idx: Idx<KeyUndecoratedFunction>,
         class_key: Option<Idx<KeyClass>>,
         method_self_kind: MethodSelfKind,
+        is_staticmethod: bool,
         ignore_annotations: bool,
     ) {
         let mut self_name = None;
         for x in x.iter_non_variadic_params() {
-            if class_key.is_some() && self_name.is_none() {
+            if class_key.is_some() && !is_staticmethod && self_name.is_none() {
                 self_name = Some(x.parameter.name.clone());
             }
             self.bind_function_param(
@@ -517,6 +519,7 @@ impl<'a> BindingsBuilder<'a> {
         class_key: Option<Idx<KeyClass>>,
         is_async: bool,
         method_self_kind: MethodSelfKind,
+        is_staticmethod: bool,
     ) -> (
         YieldsAndReturns,
         Option<SelfAssignments>,
@@ -530,6 +533,7 @@ impl<'a> BindingsBuilder<'a> {
             undecorated_idx,
             class_key,
             method_self_kind,
+            is_staticmethod,
             false,
         );
         self.init_static_scope(&body, false);
@@ -574,6 +578,7 @@ impl<'a> BindingsBuilder<'a> {
         class_key: Option<Idx<KeyClass>>,
         is_async: bool,
         method_self_kind: MethodSelfKind,
+        is_staticmethod: bool,
         ignore_annotations: bool,
     ) -> Option<SelfAssignments> {
         // Push a scope to create the parameter keys (but do nothing else with it).
@@ -584,11 +589,12 @@ impl<'a> BindingsBuilder<'a> {
             undecorated_idx,
             class_key,
             method_self_kind,
+            is_staticmethod,
             ignore_annotations,
         );
         self.scopes.pop();
         // If we are in a class, use a simple visitor to find `self.<attr>` assignments.
-        if class_key.is_some() {
+        if class_key.is_some() && !is_staticmethod {
             SelfAttrNames::find(func_name, parameters, body)
         } else {
             None
@@ -777,6 +783,7 @@ impl<'a> BindingsBuilder<'a> {
         let mut has_no_type_check = false;
         let mut is_abstract_method = false;
         let mut is_classmethod = false;
+        let mut is_staticmethod = false;
         let mut decorator_kind = FunctionDecorators::Undecorated;
         let mut all_receiver_overload = true;
         for d in &decorator_list {
@@ -806,6 +813,8 @@ impl<'a> BindingsBuilder<'a> {
                     special_export,
                     Some(SpecialExport::ClassMethod | SpecialExport::AbstractClassMethod)
                 );
+            is_staticmethod =
+                is_staticmethod || matches!(special_export, Some(SpecialExport::StaticMethod));
         }
         if is_overload {
             decorator_kind = if all_receiver_overload {
@@ -823,6 +832,7 @@ impl<'a> BindingsBuilder<'a> {
             is_abstract_method,
             is_override,
             is_classmethod,
+            is_staticmethod,
             decorator_kind,
             decorators,
         }
@@ -919,6 +929,7 @@ impl<'a> BindingsBuilder<'a> {
                 class_key,
                 is_async,
                 method_self_kind,
+                decorators.is_staticmethod,
                 decorators.has_no_type_check,
             );
             (false, self_assignments)
@@ -934,6 +945,7 @@ impl<'a> BindingsBuilder<'a> {
                 class_key,
                 is_async,
                 method_self_kind,
+                decorators.is_staticmethod,
             );
             self.analyze_return_type(
                 func_name,
@@ -961,6 +973,7 @@ impl<'a> BindingsBuilder<'a> {
                     class_key,
                     is_async,
                     method_self_kind,
+                    decorators.is_staticmethod,
                 );
             if !ignore_unused_parameters {
                 self.record_unused_parameters(unused_parameters);

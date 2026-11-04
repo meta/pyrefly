@@ -2388,8 +2388,87 @@ impl Scopes {
     /// often complain if an attribute is implicitly defined outside of methods
     /// (like constructors) that we recognize as always being called.
     ///
+    /// Finds the method scope in `self.scopes` that owns `receiver` as its receiver parameter.
+    /// Returns `Some((method_index, is_nested))` where:
+    /// - `method_index` is the index in `self.scopes` of the `ScopeKind::Method`
+    /// - `is_nested` is true if the receiver was reached across a nested method boundary
+    ///   (plain closures do not count).
+    ///
+    /// Returns `None` if `receiver` is not attributed to any method's receiver (including when
+    /// shadowed by a local variable or non-receiver parameter in an inner scope).
+    fn find_receiver_method_index(&self, receiver: &Name) -> Option<(usize, bool)> {
+        let mut crossed_nested = false;
+        for (i, node) in self.scopes.iter().enumerate().rev() {
+            let scope = &node.scope;
+            match &scope.kind {
+                ScopeKind::Class(_) | ScopeKind::Annotation { .. } | ScopeKind::TypeAlias => {
+                    // Intervening class namespaces and annotation/typealias scopes do not shadow
+                    // lexical receiver variables in enclosed methods.
+                }
+                ScopeKind::Function(_) | ScopeKind::Comprehension { .. } => {
+                    if let Some(static_info) = scope.stat.0.get(receiver) {
+                        if matches!(
+                            static_info.style,
+                            StaticStyle::MutableCapture(MutableCapture {
+                                kind: MutableCaptureKind::Nonlocal,
+                                ..
+                            })
+                        ) {
+                            // Genuine `nonlocal receiver` capture: continues to outer scope.
+                            // Plain closures keep the enclosing method's permissions.
+                        } else {
+                            // The name is bound locally in this function/comprehension (as a parameter
+                            // or local variable), so it shadows the enclosing receiver.
+                            return None;
+                        }
+                    }
+                    // A plain closure is not a method boundary: it keeps the enclosing
+                    // method's permissions (e.g. assigning `Final` fields from a helper
+                    // defined inside `__init__`, which mypy also allows).
+                }
+                ScopeKind::Method(method_scope) => {
+                    if let Some(static_info) = scope.stat.0.get(receiver) {
+                        if matches!(
+                            static_info.style,
+                            StaticStyle::MutableCapture(MutableCapture {
+                                kind: MutableCaptureKind::Nonlocal,
+                                ..
+                            })
+                        ) {
+                            // Genuine `nonlocal receiver` capture: continues to outer scope.
+                            crossed_nested = true;
+                        } else if method_scope
+                            .self_name
+                            .as_ref()
+                            .is_some_and(|name| &name.id == receiver)
+                        {
+                            return Some((i, crossed_nested));
+                        } else {
+                            // The name is a non-receiver parameter (e.g. a staticmethod parameter named
+                            // self, or a secondary parameter) or a local binding in this method. It
+                            // shadows any outer receiver.
+                            return None;
+                        }
+                    } else if method_scope
+                        .self_name
+                        .as_ref()
+                        .is_some_and(|name| &name.id == receiver)
+                    {
+                        return Some((i, crossed_nested));
+                    } else {
+                        crossed_nested = true;
+                    }
+                }
+                ScopeKind::Module => {
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
     /// Returns `true` if the attribute was a self attribute.
-    /// Record a self attribute assignment (e.g., `self.x = value`) inside the current method scope.
+    /// Record a self attribute assignment (e.g., `self.x = value`) inside the owning method scope.
     /// We accumulate all assignments to the same attribute within the method so they can later be unioned.
     pub fn record_self_attr_assign(
         &mut self,
@@ -2422,35 +2501,38 @@ impl Scopes {
             name,
             instance_only,
         } = target;
-        for scope in self.iter_rev_mut() {
-            if let ScopeKind::Method(method_scope) = &mut scope.kind
-                && (!instance_only || method_scope.receiver_kind == MethodSelfKind::Instance)
-                && let Some(self_name) = &method_scope.self_name
-                && matches!(receiver, Expr::Name(name) if name.id == self_name.id)
-            {
-                if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
-                    // Accumulate subsequent assignments in the method.
-                    attr.0.push(value);
-                    // Keep the first type annotation encountered in the method.
-                    if attr.1.is_none() {
-                        attr.1 = annotation;
-                    }
-                } else {
-                    // First time seeing this attribute in this method: record it.
-                    method_scope.instance_attributes.insert(
-                        name.id.clone(),
-                        InstanceAttribute(
-                            vec![value],
-                            annotation,
-                            name.range,
-                            method_scope.receiver_kind,
-                        ),
-                    );
-                }
-                return true;
-            }
+        let Expr::Name(receiver_name) = receiver else {
+            return false;
+        };
+        let Some((method_idx, _)) = self.find_receiver_method_index(&receiver_name.id) else {
+            return false;
+        };
+        let ScopeKind::Method(method_scope) = &mut self.scopes[method_idx].scope.kind else {
+            return false;
+        };
+        if instance_only && method_scope.receiver_kind != MethodSelfKind::Instance {
+            return false;
         }
-        false
+        if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
+            // Accumulate subsequent assignments in the method.
+            attr.0.push(value);
+            // Keep the first type annotation encountered in the method.
+            if attr.1.is_none() {
+                attr.1 = annotation;
+            }
+        } else {
+            // First time seeing this attribute in this method: record it.
+            method_scope.instance_attributes.insert(
+                name.id.clone(),
+                InstanceAttribute(
+                    vec![value],
+                    annotation,
+                    name.range,
+                    method_scope.receiver_kind,
+                ),
+            );
+        }
+        true
     }
 
     /// Record a local bound to the result of a `__new__` call inside `__new__`, such as
@@ -2523,33 +2605,27 @@ impl Scopes {
     }
 
     pub fn method_that_sets_attr(&self, x: &ExprAttribute) -> Option<MethodThatSetsAttr> {
-        let mut method_name: Option<Name> = None;
-        let mut receiver_kind = MethodSelfKind::Instance;
-        for scope in self.iter_rev() {
-            match &scope.kind {
-                ScopeKind::Method(method_scope) if method_name.is_none() => {
-                    if let Some(self_name) = &method_scope.self_name
-                        && matches!(&*x.value, Expr::Name(name) if name.id == self_name.id)
-                    {
-                        method_name = Some(method_scope.name.id.clone());
-                        receiver_kind = method_scope.receiver_kind;
-                    } else {
-                        return None;
-                    }
-                }
-                ScopeKind::Class(class_scope) => {
-                    if let Some(method_name) = &method_name {
-                        return Some(MethodThatSetsAttr {
-                            method_name: method_name.clone(),
-                            recognized_attribute_defining_method: is_attribute_defining_method(
-                                method_name,
-                                &class_scope.name.id,
-                            ),
-                            instance_or_class: receiver_kind,
-                        });
-                    }
-                }
-                _ => {}
+        let Expr::Name(receiver) = &*x.value else {
+            return None;
+        };
+        let (method_idx, is_nested) = self.find_receiver_method_index(&receiver.id)?;
+        if is_nested {
+            // Permissions to write Final fields must not cross a nested-method boundary.
+            return None;
+        }
+        let ScopeKind::Method(method_scope) = &self.scopes[method_idx].scope.kind else {
+            return None;
+        };
+        for node in self.scopes[..method_idx].iter().rev() {
+            if let ScopeKind::Class(class_scope) = &node.scope.kind {
+                return Some(MethodThatSetsAttr {
+                    method_name: method_scope.name.id.clone(),
+                    recognized_attribute_defining_method: is_attribute_defining_method(
+                        &method_scope.name.id,
+                        &class_scope.name.id,
+                    ),
+                    instance_or_class: method_scope.receiver_kind,
+                });
             }
         }
         None
@@ -3460,6 +3536,7 @@ impl Scopes {
         SmallMap<Name, (ClassFieldDefinition, TextRange)>,
         NNModuleRegistrations,
         SmallMap<Name, Option<Vec<UnsetNodeId>>>,
+        Vec<(Name, Idx<KeyAnnotation>, Idx<KeyAnnotation>)>,
     ) {
         let mut field_definitions = SmallMap::new();
         let mut uninitialized_fields = SmallMap::new();
@@ -3588,6 +3665,7 @@ impl Scopes {
         // Merge assignments from different methods.
         // `method_attrs` yields attributes from recognized constructor methods first (e.g. __init__),
         // followed by other helper methods.
+        let mut redefinitions = Vec::new();
         method_attrs.into_iter().for_each(
             |(name, method, InstanceAttribute(values, annotation, range, receiver_kind))| {
                 if let Some((
@@ -3603,6 +3681,9 @@ impl Scopes {
                 {
                     if matches!(receiver_kind, MethodSelfKind::Instance) {
                         *existing_instance_write = true;
+                    }
+                    if let (Some(new_ann), Some(existing_ann)) = (annotation, *existing_annot) {
+                        redefinitions.push((name.key().clone(), new_ann, existing_ann));
                     }
                     if existing_method.recognized_attribute_defining_method
                         && !method.recognized_attribute_defining_method
@@ -3646,6 +3727,7 @@ impl Scopes {
             field_definitions,
             nn_module_registrations,
             uninitialized_fields,
+            redefinitions,
         )
     }
 

@@ -472,8 +472,18 @@ impl<'a> BindingsBuilder<'a> {
             &NestingContext::class(ShortIdentifier::new(&x.name), parent.dupe()),
         );
         self.finish_classmethod_receivers();
-        let (field_definitions, nn_module_registrations, uninitialized_fields) =
+        let (field_definitions, nn_module_registrations, uninitialized_fields, redefinitions) =
             self.scopes.finish_class_and_get_field_definitions();
+        for (name, new, existing) in redefinitions {
+            self.insert_binding(
+                KeyExpect::Redefinition(self.idx_to_key(new).range()),
+                BindingExpect::Redefinition {
+                    new,
+                    existing,
+                    name,
+                },
+            );
+        }
         self.track_classmethod_uses = previous_tracking;
         self.insert_binding_idx(
             class_indices.synthesized_fields_idx,
