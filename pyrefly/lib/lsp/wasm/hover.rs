@@ -79,11 +79,15 @@ use crate::state::state::TransactionHandle;
 
 /// Matches Sphinx cross-references like `:meth:`target``, `:class:`MyClass``, or `:py:func:`f``.
 /// The first group is the role name without its optional domain, and the second is the body.
-/// The pattern also matches fenced code blocks and double-backtick literals, which set neither
-/// group, so that a role inside them is left as written.
+/// The pattern also matches external hyperlinks like `` `text <https://example.com>`_ ``, whose
+/// text and target are the third and fourth groups. It matches fenced code blocks and
+/// double-backtick literals too, which set no group, so that a role or link inside them is left
+/// as written.
 static SPHINX_REFERENCE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)```.*?```|``.+?``|:(?:[a-zA-Z0-9_-]+:)?([a-zA-Z0-9_-]+):`([^`]+)`")
-        .expect("invalid regex")
+    Regex::new(
+        r"(?s)```.*?```|``.+?``|:(?:[a-zA-Z0-9_-]+:)?([a-zA-Z0-9_-]+):`([^`]+)`|`([^`<]+?)\s*<([^>`\s]+)>`__?",
+    )
+    .expect("invalid regex")
 });
 
 /// Roles that point to a section or document rather than a Python object. They show their label
@@ -161,7 +165,8 @@ impl HoverValue {
         }
     }
 
-    /// Replace `:role:`target`` patterns in docstring text with markdown links or inline code.
+    /// Replace `:role:`target`` patterns in docstring text with markdown links or inline code,
+    /// and external hyperlinks with markdown links.
     /// A body of the form `title <target>` shows the title, a leading `~` on the target shows only
     /// its last dotted component, and a leading `!` shows the target without resolving a link.
     /// Roles in `SPHINX_LINK_ROLES` show their label as plain text.
@@ -175,6 +180,15 @@ impl HoverValue {
     ) -> String {
         SPHINX_REFERENCE_PATTERN
             .replace_all(&text, |caps: &regex::Captures| {
+                if let (Some(text), Some(target)) = (caps.get(3), caps.get(4)) {
+                    // Only an external address can be linked. `text <name>`_ names another
+                    // target in the document.
+                    return if target.as_str().contains("://") {
+                        format!("[{}]({})", text.as_str().trim(), target.as_str())
+                    } else {
+                        caps[0].to_owned()
+                    };
+                }
                 let (Some(role), Some(body)) = (caps.get(1), caps.get(2)) else {
                     return caps[0].to_owned();
                 };

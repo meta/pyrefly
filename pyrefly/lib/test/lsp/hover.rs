@@ -4281,6 +4281,37 @@ documented
 }
 
 #[test]
+fn hover_sphinx_external_hyperlinks() {
+    let code = r#"
+def documented() -> None:
+    """See `the docs <https://example.com/docs>`_ and `anon <https://example.org>`__.
+
+    An internal `target <other_section>`_ and ``literal `a <https://x.y>`_`` stay.
+
+    .. code-block:: rst
+
+        `kept <https://example.net>`_
+    """
+
+documented
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+
+    assert!(
+        report.contains("[the docs](https://example.com/docs)"),
+        "{report}"
+    );
+    assert!(report.contains("[anon](https://example.org)"), "{report}");
+    assert!(report.contains("`target <other_section>`_"), "{report}");
+    assert!(
+        report.contains("``literal `a <https://x.y>`_``"),
+        "{report}"
+    );
+    assert!(report.contains("`kept <https://example.net>`_"), "{report}");
+}
+
+#[test]
 fn hover_does_not_mix_unrelated_interface_constructor_docstring() {
     let mut test_env = TestEnv::new();
     test_env.add_with_path(
