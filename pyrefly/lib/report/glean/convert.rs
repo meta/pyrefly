@@ -233,9 +233,13 @@ impl GleanNaming {
 }
 
 /// The module name made from a repository-relative source path, e.g. `a.b` for `a/b.py` and for
-/// `a/b/__init__.pyi`.
+/// `a/b/__init__.pyi`. Only the file name's extension is dropped, so a directory such as `1.4.0`
+/// is kept whole.
 fn path_module_name(path: &str) -> ModuleName {
-    let module = path.rsplit_once('.').map_or(path, |(module, _)| module);
+    let file_start = path.rfind('/').map_or(0, |slash| slash + 1);
+    let module = path[file_start..]
+        .rfind('.')
+        .map_or(path, |dot| &path[..file_start + dot]);
     let module = module.strip_suffix("/__init__").unwrap_or(module);
     ModuleName::from_str(&module.replace('/', "."))
 }
@@ -2307,6 +2311,23 @@ mod tests {
         assert_eq!(
             compute_scope("mymod.foo.bar", true, &ScopeType::Nonlocal, "mymod"),
             "mymod.foo"
+        );
+    }
+
+    #[test]
+    fn test_path_module_name() {
+        let name = |path| path_module_name(path).to_string();
+        assert_eq!(name("a/b.py"), "a.b");
+        assert_eq!(name("a/b/__init__.pyi"), "a.b");
+        assert_eq!(
+            name("a/1.4.0/b.py"),
+            "a.1.4.0.b",
+            "A dot in a directory is not an extension"
+        );
+        assert_eq!(
+            name("a/1.4.0/b"),
+            "a.1.4.0.b",
+            "A file without an extension keeps its whole path"
         );
     }
 
