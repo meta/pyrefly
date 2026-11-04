@@ -935,6 +935,74 @@ def foo(x: int | None) -> None:
 );
 
 testcase!(
+    test_type_eq_excludes_subclasses,
+    r#"
+import datetime
+from enum import Enum
+from typing import Literal, reveal_type
+
+class A: ...
+class B(A): ...
+class C(B): ...
+
+def exact(x: A | B | C):
+    if type(x) is B:
+        reveal_type(x)  # E: revealed type: B
+    else:
+        reveal_type(x)  # E: revealed type: A | B | C
+    if type(x) == A:
+        reveal_type(x)  # E: revealed type: A
+
+def from_supertype(x: object):
+    if type(x) is B:
+        reveal_type(x)  # E: revealed type: B
+
+def stdlib(x: datetime.datetime | datetime.date):
+    if type(x) is datetime.date:
+        reveal_type(x)  # E: revealed type: date
+
+def bool_is_not_int(x: Literal[True] | bool | int | str):
+    if type(x) is int:
+        reveal_type(x)  # E: revealed type: int
+
+class Color(Enum):
+    RED = 1
+
+def enum_literal(x: Literal[Color.RED] | int):
+    if type(x) is Color:
+        reveal_type(x)  # E: revealed type: Color
+
+class MyList[T](list[T]): ...
+
+def generic(x: MyList[int] | list[int]):
+    if type(x) is list:
+        reveal_type(x)  # E: revealed type: list[int]
+    "#,
+);
+
+testcase!(
+    test_type_eq_keeps_subclasses_when_unsure,
+    r#"
+from typing import NewType, reveal_type
+
+class A: ...
+class B(A): ...
+
+def class_object(x: A | B, cls: type[A]):
+    # `cls` may hold `B` at runtime.
+    if type(x) is cls:
+        reveal_type(x)  # E: revealed type: A | B
+
+UserId = NewType("UserId", int)
+
+def new_type(x: UserId | str):
+    # At runtime, `type(UserId(1))` is `int`.
+    if type(x) is int:
+        reveal_type(x)  # E: revealed type: UserId
+    "#,
+);
+
+testcase!(
     test_type_not_eq_final,
     r#"
 from typing import assert_type

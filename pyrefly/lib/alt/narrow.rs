@@ -1059,6 +1059,38 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
+    /// Narrow `type(X) == Y`. This is `isinstance(X, Y)` narrowing, except that when `Y` is a
+    /// class (rather than, say, a `type[Y]` value that may hold a subclass), X's class must be
+    /// exactly `Y`, so members whose class is a proper subclass of `Y` are impossible.
+    fn narrow_type_eq(&self, left: &Type, right_expr: &Expr, errors: &ErrorCollector) -> Type {
+        let right = self.expr_infer(right_expr, errors);
+        let narrowed = self.narrow_isinstance(left, &right, right_expr.range(), errors);
+        let Type::ClassDef(cls) = &right else {
+            return narrowed;
+        };
+        self.distribute_over_union(&narrowed, |t| {
+            let member = match t {
+                Type::ClassType(c) => Some(c.class_object()),
+                Type::Literal(lit) => {
+                    Some(lit.value.general_class_type(self.stdlib).class_object())
+                }
+                _ => None,
+            };
+            match member {
+                // The runtime class of a `NewType` value is the underlying class, so we can't
+                // rule it out by its declared subclass relationship.
+                Some(member)
+                    if member != cls
+                        && !self.get_metadata_for_class(member).is_new_type()
+                        && self.has_superclass(member, cls) =>
+                {
+                    self.heap.mk_never()
+                }
+                _ => t.clone(),
+            }
+        })
+    }
+
     /// Narrow `type(X) != Y`. We can only do negative narrowing if Y is final,
     /// because otherwise X could still be a subclass of Y.
     fn narrow_type_not_eq(&self, left: &Type, right_expr: &Expr, errors: &ErrorCollector) -> Type {
@@ -1903,12 +1935,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             AtomicNarrowOp::IsNotInstance(v, source) => {
                 self.narrow_is_not_instance(ty, v, *source, errors)
             }
-            AtomicNarrowOp::TypeEq(v) => {
-                // If type(X) == Y then X has to be exactly Y, not a subclass of Y
-                // We can't model that, so we narrow it exactly like isinstance(X, Y)
-                let right = self.expr_infer(v, errors);
-                self.narrow_isinstance(ty, &right, v.range(), errors)
-            }
+            AtomicNarrowOp::TypeEq(v) => self.narrow_type_eq(ty, v, errors),
             // If type(X) != Y, X can still be a subclass of Y so we can't do negative refinement
             // unless Y is final, in which case X cannot be a subclass of Y
             AtomicNarrowOp::TypeNotEq(v) => self.narrow_type_not_eq(ty, v, errors),
