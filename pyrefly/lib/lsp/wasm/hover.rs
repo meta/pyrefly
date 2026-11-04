@@ -77,10 +77,15 @@ use crate::state::lsp::attribute_symbol_kind_from_type;
 use crate::state::state::Transaction;
 use crate::state::state::TransactionHandle;
 
-/// Matches Sphinx cross-references like `:meth:`target``, `:class:`MyClass``, etc.
-/// The role name is captured but ignored — all roles resolve uniformly.
-static SPHINX_REFERENCE_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r":([a-zA-Z0-9_-]+):`([^`]+)`").expect("invalid regex"));
+/// Matches Sphinx cross-references like `:meth:`target``, `:class:`MyClass``, or `:py:func:`f``.
+/// The first group is the role name without its optional domain, and the second is the body.
+static SPHINX_REFERENCE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r":(?:[a-zA-Z0-9_-]+:)?([a-zA-Z0-9_-]+):`([^`]+)`").expect("invalid regex")
+});
+
+/// Roles that point to a section or document rather than a Python object. They show their label
+/// as plain text, whereas every other role resolves its target as code.
+const SPHINX_LINK_ROLES: [&str; 3] = ["ref", "doc", "term"];
 
 pub struct HoverValue {
     pub kind: Option<SymbolKind>,
@@ -154,6 +159,9 @@ impl HoverValue {
     }
 
     /// Replace `:role:`target`` patterns in docstring text with markdown links or inline code.
+    /// A body of the form `title <target>` shows the title, a leading `~` on the target shows only
+    /// its last dotted component, and a leading `!` shows the target without resolving a link.
+    /// Roles in `SPHINX_LINK_ROLES` show their label as plain text.
     /// On non-WASM, attempts to resolve targets as same-class attributes to clickable links.
     /// On WASM, all targets become inline code since file:// URLs aren't supported.
     fn resolve_sphinx_references(
@@ -164,32 +172,54 @@ impl HoverValue {
     ) -> String {
         SPHINX_REFERENCE_PATTERN
             .replace_all(&text, |caps: &regex::Captures| {
-                let target = &caps[2];
-                Self::format_sphinx_target(target, transaction, handle, context_type)
+                let body = &caps[2];
+                let (title, target) = match body.strip_suffix('>').and_then(|b| b.rsplit_once(" <"))
+                {
+                    Some((title, target)) => (Some(title.trim()), target),
+                    None => (None, body),
+                };
+                if SPHINX_LINK_ROLES.contains(&&caps[1]) {
+                    return title.unwrap_or(target).to_owned();
+                }
+                if let Some(target) = target.strip_prefix('!') {
+                    return format!("`{}`", title.unwrap_or(target));
+                }
+                let (target, shorten) = match target.strip_prefix('~') {
+                    Some(target) => (target, true),
+                    None => (target, false),
+                };
+                let label = title.unwrap_or(if shorten {
+                    target.rsplit_once('.').map_or(target, |(_, last)| last)
+                } else {
+                    target
+                });
+                Self::format_sphinx_target(label, target, transaction, handle, context_type)
             })
             .into_owned()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn format_sphinx_target(
+        label: &str,
         target: &str,
         transaction: &Transaction,
         handle: &Handle,
         context_type: &Type,
     ) -> String {
         Self::try_resolve_sphinx_target(target, transaction, handle, context_type)
-            .map(|url| format!("[{target}]({url})"))
-            .unwrap_or_else(|| format!("`{target}`"))
+            .map(|url| format!("[{label}]({url})"))
+            .unwrap_or_else(|| format!("`{label}`"))
     }
 
     #[cfg(target_arch = "wasm32")]
     fn format_sphinx_target(
-        target: &str,
+        label: &str,
+        _target: &str,
         _transaction: &Transaction,
         _handle: &Handle,
         _context_type: &Type,
     ) -> String {
-        format!("`{target}`")
+        format!("`{label}`")
     }
 
     /// Resolve a Sphinx target to a file URL by looking up the attribute on the

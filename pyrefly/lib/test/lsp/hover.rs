@@ -4210,6 +4210,40 @@ method
 }
 
 #[test]
+fn hover_sphinx_role_syntax() {
+    let code = r#"
+class MyClass:
+    def helper(self) -> None:
+        """Helper."""
+
+    def method(self) -> None:
+        """Roles: :meth:`~MyClass.helper`, :meth:`!helper`, :meth:`the helper <helper>`,
+        :py:meth:`helper`, :func:`~os.path.join`, :func:`print <builtins.print>`,
+        :ref:`Where to patch <python:where-to-patch>`, :doc:`Guide <guide/index>`,
+        and :ref:`where-to-patch`.
+        """
+
+MyClass().method
+#         ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+
+    // A same-class target resolves to a link, with the title or shortened name as its label.
+    assert!(report.contains("[the helper](file://"), "{report}");
+    assert!(report.contains("[helper](file://"), "{report}");
+    // `!` disables the link, and a dotted `~` target that cannot be resolved falls back to code.
+    assert!(report.contains("`helper`"), "{report}");
+    assert!(report.contains("`join`"), "{report}");
+    assert!(report.contains("`print`"), "{report}");
+    // Link roles show their label and never the target or the raw syntax.
+    assert!(report.contains("Where to patch,"), "{report}");
+    assert!(report.contains("Guide,"), "{report}");
+    assert!(report.contains("and where-to-patch."), "{report}");
+    assert!(!report.contains(":py:meth:"), "{report}");
+    assert!(!report.contains("python:where-to-patch"), "{report}");
+}
+
+#[test]
 fn hover_does_not_mix_unrelated_interface_constructor_docstring() {
     let mut test_env = TestEnv::new();
     test_env.add_with_path(
