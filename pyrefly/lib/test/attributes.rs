@@ -5338,6 +5338,30 @@ class Outer:
 );
 
 testcase!(
+    test_receiver_ownership_global_comprehension_and_nonlocal_method,
+    r#"
+from typing import Final
+class Other:
+    x: int
+    y: int
+self = Other()
+class A:
+    z: Final[int]
+    def __init__(self) -> None:
+        self.z = 0
+        def uses_global() -> None:
+            global self
+            self.x: int = 1  # E: Cannot annotate non-self attribute `self.x`
+        _ = [0 for self in [Other()] for self.y in [1]]
+        class Inner:
+            def method(other) -> None:
+                nonlocal self
+                self.z = 2  # E: Cannot set field `z`
+_ = A().y  # E: Object of class `A` has no attribute `y`
+"#,
+);
+
+testcase!(
     test_final_attribute_nested_permissions,
     r#"
 from typing import Final
