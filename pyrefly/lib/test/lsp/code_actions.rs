@@ -2736,7 +2736,16 @@ x = x
 }
 
 fn unused_import_action_after(code: &str, cursor_offset: usize) -> Option<String> {
-    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    unused_import_action_after_with_env(TestEnv::new(), code, cursor_offset)
+}
+
+fn unused_import_action_after_with_env(
+    env: TestEnv,
+    code: &str,
+    cursor_offset: usize,
+) -> Option<String> {
+    let (handles, state) =
+        mk_multi_file_state_with_env(env, &[("main", code)], Require::Exports, false);
     let handle = handles.get("main")?;
     let transaction = state.transaction();
     let module_info = transaction.get_module_info(handle)?;
@@ -2763,6 +2772,27 @@ fn unused_import_action_after(code: &str, cursor_offset: usize) -> Option<String
     }
     let (_before, after) = apply_patch(&module_info, range, patch);
     Some(after)
+}
+
+/// An import used only by a docstring type is not unused when docstring types are inferred, so
+/// the quick fix must not offer to remove it.
+#[test]
+fn remove_unused_import_quickfix_keeps_import_used_by_docstring_type() {
+    let code = "from collections import OrderedDict\n\n\ndef f(x):\n    \"\"\"\n    :type x: OrderedDict\n    \"\"\"\n    return x\n";
+    let cursor_offset = code.find("OrderedDict").unwrap();
+    let env = TestEnv::new().enable_infer_param_types_from_docstring();
+    assert_eq!(
+        None,
+        unused_import_action_after_with_env(env, code, cursor_offset)
+    );
+    // Without the option, the docstring is only text, so the import is unused.
+    assert_eq!(
+        Some(
+            "\n\ndef f(x):\n    \"\"\"\n    :type x: OrderedDict\n    \"\"\"\n    return x\n"
+                .to_owned()
+        ),
+        unused_import_action_after(code, cursor_offset)
+    );
 }
 
 #[test]
