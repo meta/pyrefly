@@ -31,6 +31,7 @@ mod delayed_inference;
 mod descriptors;
 mod dict;
 mod django;
+mod docstring_param_types;
 mod enums;
 mod explicit_any;
 mod factory_boy;

@@ -1378,14 +1378,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     || field_flags.pydantic_has_custom_schema
                 {
                     Some(self.heap.mk_any_explicit())
+                } else if dataclass.is_pydantic_lax_field(&name, &field_flags) {
+                    converter_table.get(&field.ty()).cloned()
                 } else {
-                    field_flags.converter_param.clone().or_else(|| {
-                        if !strict {
-                            converter_table.get(&field.ty()).cloned()
-                        } else {
-                            None
-                        }
-                    })
+                    field_flags.converter_param.clone()
                 };
 
                 if field_flags.init_by_name {

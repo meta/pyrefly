@@ -55,6 +55,7 @@ use thin_vec::ThinVec;
 use vec1::Vec1;
 
 use crate::module::module_info::ModuleInfo;
+use crate::module::typeshed::typeshed;
 use crate::report::glean::facts::*;
 use crate::report::glean::schema::*;
 use crate::state::lsp::FindDefinitionItemWithDocstring;
@@ -179,10 +180,64 @@ fn file_fact(module_info: &ModuleInfo) -> src::File {
 #[derive(Default)]
 pub struct GleanNaming {
     /// Module names by repository-relative file path (`--glean-module-names`).
-    pub module_names: HashMap<String, String>,
+    module_names: HashMap<String, String>,
+    /// The values of `module_names`.
+    mapped_modules: HashSet<ModuleName>,
     /// Repository-relative directory holding the stdlib sources that Pyrefly's bundled typeshed
     /// stdlib stubs describe (`--glean-stdlib-root`), e.g. `third-party/python/3.12/Lib`.
-    pub stdlib_root: Option<String>,
+    stdlib_root: Option<String>,
+}
+
+impl GleanNaming {
+    pub fn new(module_names: HashMap<String, String>, stdlib_root: Option<String>) -> Self {
+        let mapped_modules = module_names
+            .values()
+            .map(|name| ModuleName::from_str(name))
+            .collect();
+        Self {
+            module_names,
+            mapped_modules,
+            stdlib_root,
+        }
+    }
+
+    /// The module name written to Glean for a module that Pyrefly resolves as `resolved`, given
+    /// its source file, if it is a source file of the repository:
+    /// - the file's entry in `module_names`, if it has one;
+    /// - otherwise, if `resolved` is also the name of a module in `module_names` or of a stdlib
+    ///   module, the name made from the file's path. Pyrefly can name a file that no import root
+    ///   covers after its file name alone, so a vendored copy `vendor/cpython/Lib/typing.py`
+    ///   resolves as `typing`. Its declaration of `typing.Optional` would then match every
+    ///   reference to the stdlib's `typing.Optional`, so it is named `vendor.cpython.Lib.typing`
+    ///   instead. The stdlib sources under `stdlib_root` keep their names;
+    /// - otherwise `resolved`.
+    fn emitted_module_name(&self, file: Option<&src::File>, resolved: ModuleName) -> ModuleName {
+        let Some(file) = file else {
+            return resolved;
+        };
+        if let Some(name) = self.module_names.get(file.key.as_str()) {
+            return ModuleName::from_str(name);
+        }
+        let is_stdlib_source = self
+            .stdlib_root
+            .as_ref()
+            .is_some_and(|root| Path::new(&*file.key).starts_with(root));
+        let is_taken = self.mapped_modules.contains(&resolved)
+            || typeshed().is_ok_and(|stdlib| stdlib.has_module(resolved));
+        if is_taken && !is_stdlib_source {
+            path_module_name(&file.key)
+        } else {
+            resolved
+        }
+    }
+}
+
+/// The module name made from a repository-relative source path, e.g. `a.b` for `a/b.py` and for
+/// `a/b/__init__.pyi`.
+fn path_module_name(path: &str) -> ModuleName {
+    let module = path.rsplit_once('.').map_or(path, |(module, _)| module);
+    let module = module.strip_suffix("/__init__").unwrap_or(module);
+    ModuleName::from_str(&module.replace('/', "."))
 }
 
 /// The file fact of the module that defines a cross-module reference target, or `None` if that
@@ -373,9 +428,9 @@ struct GleanState<'a> {
     transaction: &'a Transaction<'a>,
     handle: &'a Handle,
     module: ModuleInfo,
-    /// The module name written to Glean for this file: its entry in `naming.module_names` if any,
-    /// otherwise `module.name()`. Pyrefly itself keeps using `module.name()` to resolve
-    /// imports, so the two differ for files in Buck targets with a `base_module`.
+    /// The module name written to Glean for this file (see `GleanNaming::emitted_module_name`).
+    /// Pyrefly itself keeps using `module.name()` to resolve imports, so the two differ, for
+    /// example, for files in Buck targets with a `base_module`.
     emitted_module_name: ModuleName,
     naming: &'a GleanNaming,
     facts: Facts,
@@ -431,10 +486,7 @@ impl GleanState<'_> {
     ) -> GleanState<'a> {
         let module_info = &transaction.get_module_info(handle).unwrap();
         let file = file_fact(module_info);
-        let module_name = naming
-            .module_names
-            .get(file.key.as_str())
-            .map_or(module_info.name(), |name| ModuleName::from_str(name));
+        let module_name = naming.emitted_module_name(Some(&file), module_info.name());
         GleanState {
             transaction,
             handle,
@@ -715,10 +767,7 @@ impl GleanState<'_> {
         // declarations its own file emits.
         let module_name = module.name();
         let file = definition_file_fact(module, self.naming.stdlib_root.as_deref());
-        let emitted_name = file
-            .as_ref()
-            .and_then(|file| self.naming.module_names.get(file.key.as_str()))
-            .map_or(module_name.as_str(), String::as_str);
+        let emitted_name = self.naming.emitted_module_name(file.as_ref(), module_name);
         let type_name = base_type.and_then(|ty| ty.qname());
         let local_name = module.code_at(def_range);
 
@@ -745,7 +794,7 @@ impl GleanState<'_> {
             if module_name == ModuleName::builtins() {
                 vec![DefinitionLocation { name: fqname, file }]
             } else {
-                let name = join_names(emitted_name, &fqname);
+                let name = join_names(emitted_name.as_str(), &fqname);
                 let mut definitions = vec![DefinitionLocation {
                     name: name.clone(),
                     file,
@@ -1426,11 +1475,10 @@ impl GleanState<'_> {
 
         let file = definition
             .and_then(|def| definition_file_fact(&def.module, self.naming.stdlib_root.as_deref()));
-        let name = file
-            .as_ref()
-            .and_then(|file| self.naming.module_names.get(file.key.as_str()))
-            .cloned()
-            .unwrap_or_else(|| module.to_string());
+        let name = self
+            .naming
+            .emitted_module_name(file.as_ref(), module)
+            .to_string();
 
         DefinitionLocation { name, file }
     }
@@ -2259,6 +2307,52 @@ mod tests {
         assert_eq!(
             compute_scope("mymod.foo.bar", true, &ScopeType::Nonlocal, "mymod"),
             "mymod.foo"
+        );
+    }
+
+    #[test]
+    fn test_emitted_module_name() {
+        let naming = GleanNaming::new(
+            HashMap::from([("fbcode/base/foo.py".to_owned(), "foo".to_owned())]),
+            Some("third-party/python/3.12/Lib".to_owned()),
+        );
+        let emitted = |path: Option<&str>, resolved: &str| {
+            naming
+                .emitted_module_name(
+                    path.map(|path| src::File::new(path.to_owned())).as_ref(),
+                    ModuleName::from_str(resolved),
+                )
+                .to_string()
+        };
+        assert_eq!(
+            emitted(Some("fbcode/base/foo.py"), "base.foo"),
+            "foo",
+            "A file in the module map takes its name from the map"
+        );
+        assert_eq!(
+            emitted(Some("fbcode/scripts/bar.py"), "bar"),
+            "bar",
+            "A free name is kept"
+        );
+        assert_eq!(
+            emitted(Some("fbcode/vendor/Lib/typing.py"), "typing"),
+            "fbcode.vendor.Lib.typing",
+            "A stdlib module's name is taken"
+        );
+        assert_eq!(
+            emitted(Some("fbcode/copy/foo/__init__.py"), "foo"),
+            "fbcode.copy.foo",
+            "A name in the module map is taken"
+        );
+        assert_eq!(
+            emitted(Some("third-party/python/3.12/Lib/typing.py"), "typing"),
+            "typing",
+            "The stdlib sources keep their names"
+        );
+        assert_eq!(
+            emitted(None, "typing"),
+            "typing",
+            "A module without a source file keeps its name"
         );
     }
 }

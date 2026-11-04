@@ -418,6 +418,14 @@ pub struct ConfigOverrideArgs {
         num_args = 0..=1
     )]
     treat_all_caps_as_final: Option<bool>,
+    /// Use the parameter types declared in docstrings for unannotated parameters.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        require_equals = true,
+        num_args = 0..=1
+    )]
+    infer_param_types_from_docstring: Option<bool>,
 }
 
 impl ConfigOverrideArgs {
@@ -450,6 +458,7 @@ impl ConfigOverrideArgs {
             spec_compliant_overloads,
             legacy_overload_expansion,
             treat_all_caps_as_final,
+            infer_param_types_from_docstring,
         } = self;
 
         environment.has_overrides()
@@ -478,6 +487,7 @@ impl ConfigOverrideArgs {
             || spec_compliant_overloads.is_some()
             || legacy_overload_expansion.is_some()
             || treat_all_caps_as_final.is_some()
+            || infer_param_types_from_docstring.is_some()
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -652,6 +662,9 @@ impl ConfigOverrideArgs {
         }
         if let Some(x) = &self.treat_all_caps_as_final {
             config.root.treat_all_caps_as_final = Some(*x);
+        }
+        if let Some(x) = &self.infer_param_types_from_docstring {
+            config.root.infer_param_types_from_docstring = Some(*x);
         }
         let apply_error_settings = |error_config: &mut ErrorDisplayConfig| {
             for error_kind in &self.error {

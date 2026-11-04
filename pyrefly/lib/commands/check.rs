@@ -2329,13 +2329,13 @@ impl CheckArgs {
             )?;
         }
         if let Some(glean) = &self.output.report_glean {
-            let naming = report::glean::GleanNaming {
-                module_names: match &self.output.glean_module_names {
+            let naming = report::glean::GleanNaming::new(
+                match &self.output.glean_module_names {
                     Some(path) => serde_json::from_str(&fs_anyhow::read_to_string(path)?)?,
                     None => Default::default(),
                 },
-                stdlib_root: self.output.glean_stdlib_root.clone(),
-            };
+                self.output.glean_stdlib_root.clone(),
+            );
             fs_anyhow::create_dir_all(glean)?;
             for handle in handles {
                 // Generate a safe filename using hash to avoid OS filename length limits

@@ -37,6 +37,7 @@ use crate::error::collector::ErrorCollector;
 use crate::types::class::Class;
 use crate::types::class::ClassType;
 use crate::types::display::ClassDisplayContext;
+use crate::types::keywords::DataclassFieldKeywords;
 use crate::types::keywords::DataclassKeywords;
 use crate::types::keywords::DataclassTransformMetadata;
 use crate::types::stdlib::Stdlib;
@@ -753,6 +754,14 @@ impl DataclassMetadata {
 
     pub fn is_instance_field(&self, name: &Name) -> bool {
         self.fields.contains_key(name) && !self.pseudo_field_names.contains(name)
+    }
+
+    /// Whether Pydantic lax mode converts the `__init__` input for this field.
+    pub fn is_pydantic_lax_field(&self, name: &Name, keywords: &DataclassFieldKeywords) -> bool {
+        !keywords.strict.unwrap_or(self.kws.strict)
+            && keywords.converter_param.is_none()
+            && !keywords.pydantic_has_custom_schema
+            && !self.pydantic_before_validator_fields.contains(name)
     }
 }
 

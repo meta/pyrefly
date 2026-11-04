@@ -2938,7 +2938,24 @@ def parse(x: int) -> int:
 
 Default severity: `warn`
 
-The inferred variance of a type variable does not match its declared variance. This warning is raised for protocols where the way a type variable is used implies a different variance than what was declared. For example, if a protocol only uses `T` in covariant positions but `T` is declared as invariant, this warning suggests declaring `T` as covariant.
+This warning suggests covariance or contravariance for an invariant protocol
+`TypeVar` when its structural usage permits it. For example, if a protocol
+only returns `T`, the warning suggests declaring `T` as covariant. Incorrect usage
+of an explicitly covariant or contravariant `TypeVar` is reported as
+[`invalid-variance`](#invalid-variance) instead.
+
+Constrained `TypeVar`s, such as `TypeVar("T", str, bytes)`, are exempt from this
+warning. Constraints commonly describe a fixed set of unrelated alternatives, so
+invariance is often sufficient and narrower-variance suggestions are noisy. This
+is a diagnostic policy, not a prohibition on declaring variance: covariance and
+contravariance remain valid and can affect subtyping when constraints overlap,
+such as `int` and `float`. The exemption intentionally differs from the typing
+conformance suite, which includes a constrained protocol parameter that is
+expected to warn.
+
+Bounded `TypeVar`s, such as `TypeVar("T", bound=float)`, are still checked. An upper
+bound allows arbitrary subtypes of the bound rather than a fixed set of constraint
+choices.
 
 ```python
 from typing import Protocol, TypeVar

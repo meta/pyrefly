@@ -719,6 +719,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     annotation: ann,
                 }
             }
+            BindingAnnotation::DocstringParam(name, x) => {
+                let silent = ErrorCollector::new(errors.module().dupe(), ErrorStyle::Delayed);
+                let annotation =
+                    self.expr_annotation(x, TypeFormContext::ParameterAnnotation, &silent);
+                AnnotationWithTarget {
+                    target: AnnotationTarget::Param(name.clone()),
+                    annotation: if silent.has_hard() {
+                        Annotation::default()
+                    } else {
+                        annotation
+                    },
+                }
+            }
             BindingAnnotation::SpecialForm(target, sf) => AnnotationWithTarget {
                 target: target.clone(),
                 annotation: Annotation::new_type(sf.to_type(self.heap)),
@@ -3109,9 +3122,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             } => {
                 let ann_new = self.get_idx(*new);
                 let ann_existing = self.get_idx(*existing);
+                // Deferred alias references retain their defining identity. Compare annotations
+                // containing them with the solver's recursive equivalence check instead.
                 if let Some(t_new) = ann_new.ty(self.heap, self.stdlib)
                     && let Some(t_existing) = ann_existing.ty(self.heap, self.stdlib)
                     && t_new != t_existing
+                    && !((t_new.any(|ty| matches!(ty, Type::UntypedAlias(_)))
+                        || t_existing.any(|ty| matches!(ty, Type::UntypedAlias(_))))
+                        && self.is_equivalent(&t_new, &t_existing))
                 {
                     let t_new = self.for_display(t_new.clone());
                     let t_existing = self.for_display(t_existing.clone());
@@ -3157,7 +3175,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             } => self.check_match_exhaustiveness(
                 subject_idx,
                 narrowing_subject.as_ref(),
-                narrow_ops_for_fall_through,
+                narrow_ops_for_fall_through.as_ref(),
                 subject_range,
                 *show_subject_expr,
                 errors,
@@ -3166,11 +3184,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 subject_idx,
                 narrowing_subject,
                 narrow_ops_for_case,
+                prev_case_negations,
                 case_range,
             } => self.check_match_case_reachability(
                 subject_idx,
                 narrowing_subject.as_ref(),
-                narrow_ops_for_case,
+                narrow_ops_for_case.as_ref(),
+                prev_case_negations.as_deref(),
                 case_range,
                 errors,
             ),
@@ -3982,16 +4002,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // with a narrower variance. We only check invariant TypeVars here
         // because wrong variance on covariant/contravariant TypeVars is
         // already caught by InvalidVariance at the usage site.
+        // Constraints often enumerate unrelated alternatives, making narrower-variance
+        // suggestions noisy. Explicit variance still matters for overlapping constraints
+        // and is validated above. This exemption intentionally differs from the
+        // constrained protocol case in protocols_variance.py.
         let metadata = self.get_metadata_for_class(class);
         if metadata.is_protocol()
-            && tparams
-                .as_vec()
-                .iter()
-                .any(|p| p.is_type_var() && p.variance() == PreInferenceVariance::Invariant)
+            && tparams.as_vec().iter().any(|p| {
+                p.is_type_var()
+                    && p.variance() == PreInferenceVariance::Invariant
+                    && !matches!(p.restriction(), Restriction::Constraints(_))
+            })
         {
             let inferred = self.infer_variance_ignoring_declared(class);
             for tparam in tparams.as_vec() {
-                if !tparam.is_type_var() || tparam.variance() != PreInferenceVariance::Invariant {
+                if !tparam.is_type_var()
+                    || tparam.variance() != PreInferenceVariance::Invariant
+                    || matches!(tparam.restriction(), Restriction::Constraints(_))
+                {
                     continue;
                 }
                 let inferred_v = inferred.get(tparam.name());
@@ -4451,7 +4479,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Returns `None` for special forms which don't have a source expression.
     pub(crate) fn annotation_range(&self, key: Idx<KeyAnnotation>) -> Option<TextRange> {
         match self.bindings().get(key) {
-            BindingAnnotation::AnnotateExpr(_, expr, _) => Some(expr.range()),
+            BindingAnnotation::AnnotateExpr(_, expr, _)
+            | BindingAnnotation::DocstringParam(_, expr) => Some(expr.range()),
             BindingAnnotation::SpecialForm(..) => None,
         }
     }
@@ -6012,7 +6041,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         finalize(&annotation.target, self.heap.mk_any_implicit())
                     })
             }
-            FunctionParameter::Unannotated(function_idx, target, param_name) => {
+            FunctionParameter::Unannotated(function_idx, target, param_name, _) => {
                 // Get the resolved UndecoratedFunction - this ensures the function has been solved
                 // and resolved_param_types has been populated.
                 let undecorated = self.get_idx(*function_idx);

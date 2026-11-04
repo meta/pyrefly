@@ -1316,7 +1316,7 @@ pub enum BindingExpect {
     MatchExhaustiveness {
         subject_idx: Idx<Key>,
         narrowing_subject: Option<NarrowingSubject>,
-        narrow_ops_for_fall_through: (Box<NarrowOp>, TextRange),
+        narrow_ops_for_fall_through: Box<(NarrowOp, TextRange)>,
         subject_range: TextRange,
         // Should we show the raw expression of the match subject instead of the name?
         show_subject_expr: bool,
@@ -1325,7 +1325,12 @@ pub enum BindingExpect {
     MatchCaseReachability {
         subject_idx: Idx<Key>,
         narrowing_subject: Option<NarrowingSubject>,
-        narrow_ops_for_case: (Box<NarrowOp>, TextRange),
+        narrow_ops_for_case: Box<(NarrowOp, TextRange)>,
+        /// Negations from earlier unguarded cases in the same match, in the
+        /// same subject coordinates as `narrow_ops_for_case`. Reachability
+        /// narrows by the current pattern first, then applies these, so an
+        /// `Any` subject can first become `bool` and then subtract `int`.
+        prev_case_negations: Option<Box<(NarrowOp, TextRange)>>,
         case_range: TextRange,
     },
     /// Code following one or more points in a suite that control passes only conditionally, such
@@ -2067,7 +2072,13 @@ impl IsAsync {
 #[derive(Clone, Debug)]
 pub enum FunctionParameter {
     Annotated(Idx<KeyAnnotation>),
-    Unannotated(Idx<KeyUndecoratedFunction>, AnnotationTarget, Name),
+    /// The final field is the type that the docstring declares for the parameter, if any.
+    Unannotated(
+        Idx<KeyUndecoratedFunction>,
+        AnnotationTarget,
+        Name,
+        Option<Idx<KeyAnnotation>>,
+    ),
 }
 
 #[derive(Clone, Debug)]
@@ -3103,7 +3114,7 @@ impl DisplayWith<Bindings> for Binding {
                 "FunctionParameter({})",
                 match x.as_ref() {
                     FunctionParameter::Annotated(k) => ctx.display(*k).to_string(),
-                    FunctionParameter::Unannotated(k, _, _) => ctx.display(*k).to_string(),
+                    FunctionParameter::Unannotated(k, _, _, _) => ctx.display(*k).to_string(),
                 }
             ),
             Self::SuperInstance(x) => match &x.0 {
@@ -3477,6 +3488,9 @@ pub enum BindingAnnotation {
     /// The type is annotated to be this key, will have the outer type removed.
     /// Optionally occurring within a class, in which case Self refers to this class.
     AnnotateExpr(AnnotationTarget, Expr, Option<Idx<KeyClass>>),
+    /// The type that a docstring declares for the unannotated parameter with this name.
+    /// Docstrings are informal, so a type that does not check is dropped without an error.
+    DocstringParam(Name, Expr),
     /// A special form declaration like `Literal: _SpecialForm`.
     SpecialForm(AnnotationTarget, SpecialForm),
 }
@@ -3493,6 +3507,9 @@ impl DisplayWith<Bindings> for BindingAnnotation {
                     Some(t) => ctx.display(*t).to_string(),
                 }
             ),
+            Self::DocstringParam(name, x) => {
+                write!(f, "DocstringParam({name}, {})", ctx.module().display(x))
+            }
             Self::SpecialForm(target, sf) => write!(f, "SpecialForm({target}, {sf})"),
         }
     }

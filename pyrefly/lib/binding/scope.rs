@@ -1104,10 +1104,16 @@ struct ScopeClass {
     attributes_set_on_new_instance: SmallSet<Name>,
     nn_module_registrations: NNModuleRegistrations,
     has_protocol_base: bool,
+    docstring_range: Option<TextRange>,
 }
 
 impl ScopeClass {
-    pub fn new(name: Identifier, indices: ClassIndices, has_protocol_base: bool) -> Self {
+    pub fn new(
+        name: Identifier,
+        indices: ClassIndices,
+        has_protocol_base: bool,
+        docstring_range: Option<TextRange>,
+    ) -> Self {
         Self {
             name,
             indices,
@@ -1117,6 +1123,7 @@ impl ScopeClass {
             attributes_set_on_new_instance: SmallSet::new(),
             nn_module_registrations: SmallMap::new(),
             has_protocol_base,
+            docstring_range,
         }
     }
 
@@ -1347,14 +1354,22 @@ struct Loop {
     exits: Vec<(LoopExit, Flow)>,
     /// For PEP 765: The depth of finally-blocks that this loop was created in
     finally_depth: usize,
+    /// Phi keys that this loop's back edge can reach: its own loop-head phis, and the phis of
+    /// nested loops whose entering value is one of them.
+    carried_phis: SmallSet<Idx<Key>>,
+    /// Names read through a key in `carried_phis`. A plain assignment to one of them inside
+    /// this loop may be read on the next iteration.
+    carried_reads: SmallSet<Name>,
 }
 
 impl Loop {
-    pub fn new(base: Flow, finally_depth: usize) -> Self {
+    pub fn new(base: Flow, finally_depth: usize, carried_phis: SmallSet<Idx<Key>>) -> Self {
         Self {
             base,
             exits: Default::default(),
             finally_depth,
+            carried_phis,
+            carried_reads: SmallSet::new(),
         }
     }
 }
@@ -1547,11 +1562,17 @@ impl Scope {
         indices: ClassIndices,
         name: Identifier,
         has_protocol_base: bool,
+        docstring_range: Option<TextRange>,
     ) -> Self {
         Self::new(
             range,
             FlowBarrier::AllowFlowChecked,
-            ScopeKind::Class(ScopeClass::new(name, indices, has_protocol_base)),
+            ScopeKind::Class(ScopeClass::new(
+                name,
+                indices,
+                has_protocol_base,
+                docstring_range,
+            )),
         )
     }
 
@@ -1601,6 +1622,13 @@ impl Scope {
     fn class_key(&self) -> Option<Idx<KeyClass>> {
         match &self.kind {
             ScopeKind::Class(class_scope) => Some(class_scope.indices.class_idx),
+            _ => None,
+        }
+    }
+
+    fn class_docstring_range(&self) -> Option<TextRange> {
+        match &self.kind {
+            ScopeKind::Class(class_scope) => class_scope.docstring_range,
             _ => None,
         }
     }
@@ -1665,6 +1693,13 @@ impl ScopeTreeNode {
             collector.insert(key);
         });
     }
+}
+
+/// The receiver, source identifier and receiver policy of a method attribute assignment.
+pub(crate) struct SelfAttrAssignTarget<'a> {
+    pub receiver: &'a Expr,
+    pub name: &'a Identifier,
+    pub instance_only: bool,
 }
 
 /// Scopes keep track of the current stack of the scopes we are in.
@@ -2004,6 +2039,11 @@ impl Scopes {
         self.iter_rev().filter_map(Scope::class_key).collect()
     }
 
+    /// The range of the docstring of the class whose body we are directly in, if it has one.
+    pub fn current_class_docstring_range(&self) -> Option<TextRange> {
+        self.current().class_docstring_range()
+    }
+
     /// Are we anywhere inside a class? If so, return the class object idx.
     /// This function looks at enclosing scopes.
     pub fn enclosing_class_object_idx(&self) -> Option<Idx<Key>> {
@@ -2341,50 +2381,136 @@ impl Scopes {
         self.scopes.iter_mut().map(|node| &mut node.scope).rev()
     }
 
-    /// In methods, we track assignments to `self` attribute targets so that we can
-    /// be aware of class fields implicitly defined in methods.
+    /// Finds the method scope in `self.scopes` that owns `receiver` as its receiver parameter.
+    /// Returns `Some((method_index, crossed_method))` where:
+    /// - `method_index` is the index in `self.scopes` of the `ScopeKind::Method`.
+    /// - `crossed_method` is true if the receiver was reached across a nested method boundary
+    ///   (plain closures do not count).
     ///
-    /// We currently apply this logic in all methods, although downstream code will
-    /// often complain if an attribute is implicitly defined outside of methods
-    /// (like constructors) that we recognize as always being called.
+    /// Returns `None` if `receiver` is not attributed to any method's receiver (including when
+    /// shadowed by a local variable or non-receiver parameter in an inner scope).
+    fn find_receiver_method_index(&self, receiver: &Name) -> Option<(usize, bool)> {
+        let mut crossed_method = false;
+        for (i, node) in self.scopes.iter().enumerate().rev() {
+            let scope = &node.scope;
+            // Only function-like scopes provide receiver bindings. A `nonlocal` capture
+            // refers to the enclosing binding instead of shadowing it.
+            let binds_receiver = matches!(
+                &scope.kind,
+                ScopeKind::Method(_) | ScopeKind::Function(_) | ScopeKind::Comprehension { .. }
+            ) && scope.stat.0.get(receiver).is_some_and(|info| {
+                !matches!(
+                    info.style,
+                    StaticStyle::MutableCapture(MutableCapture {
+                        kind: MutableCaptureKind::Nonlocal,
+                        ..
+                    })
+                )
+            });
+            match &scope.kind {
+                ScopeKind::Class(_) | ScopeKind::Annotation { .. } | ScopeKind::TypeAlias => {
+                    // Intervening class namespaces and annotation/typealias scopes do not shadow
+                    // lexical receiver variables in enclosed methods.
+                }
+                ScopeKind::Method(method_scope) if binds_receiver => {
+                    // The receiver is a parameter, and every parameter is in the method's static
+                    // scope, so a method's own receiver only matches here. Any other binding (e.g.
+                    // a staticmethod parameter named `self`, or a secondary parameter) shadows
+                    // outer receivers.
+                    return method_scope
+                        .self_name
+                        .as_ref()
+                        .is_some_and(|name| &name.id == receiver)
+                        .then_some((i, crossed_method));
+                }
+                ScopeKind::Function(_) | ScopeKind::Comprehension { .. } if binds_receiver => {
+                    return None;
+                }
+                ScopeKind::Function(_) | ScopeKind::Comprehension { .. } => {
+                    // A plain closure is not a method boundary: it keeps the enclosing
+                    // method's permissions (e.g. assigning `Final` fields from a helper
+                    // defined inside `__init__`, which mypy also allows).
+                }
+                ScopeKind::Method(_) => {
+                    crossed_method = true;
+                }
+                ScopeKind::Module => {
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// Record a receiver-attribute assignment inside its owning method scope.
+    /// Returns whether the target was a receiver attribute.
     ///
-    /// Returns `true` if the attribute was a self attribute.
-    /// Record a self attribute assignment (e.g., `self.x = value`) inside the current method scope.
-    /// We accumulate all assignments to the same attribute within the method so they can later be unioned.
+    /// Repeated assignments accumulate values and retain the first annotation.
+    /// Every method participates; field merging prioritizes recognized initializer
+    /// methods and downstream checks diagnose unsupported implicit definitions.
     pub fn record_self_attr_assign(
         &mut self,
         x: &ExprAttribute,
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
     ) -> bool {
-        for scope in self.iter_rev_mut() {
-            if let ScopeKind::Method(method_scope) = &mut scope.kind
-                && let Some(self_name) = &method_scope.self_name
-                && matches!(&*x.value, Expr::Name(name) if name.id == self_name.id)
-            {
-                if let Some(attr) = method_scope.instance_attributes.get_mut(&x.attr.id) {
-                    // Accumulate subsequent assignments in the method.
-                    attr.0.push(value);
-                    // Keep the first type annotation encountered in the method.
-                    if attr.1.is_none() {
-                        attr.1 = annotation;
-                    }
-                } else {
-                    // First time seeing this attribute in this method: record it.
-                    method_scope.instance_attributes.insert(
-                        x.attr.id.clone(),
-                        InstanceAttribute(
-                            vec![value],
-                            annotation,
-                            x.attr.range(), // Keep the range of the first assignment as the definition location.
-                            method_scope.receiver_kind,
-                        ),
-                    );
-                }
-                return true;
-            }
+        self.record_self_attr_assign_named(
+            SelfAttrAssignTarget {
+                receiver: &x.value,
+                name: &x.attr,
+                instance_only: false,
+            },
+            value,
+            annotation,
+        )
+    }
+
+    /// Accumulate assignments to a matching method receiver, retaining the first annotation
+    /// and definition range. Instance-only targets exclude classmethod receivers.
+    /// Returns whether the assignment was recorded.
+    pub(crate) fn record_self_attr_assign_named(
+        &mut self,
+        target: SelfAttrAssignTarget<'_>,
+        value: ExprOrBinding,
+        annotation: Option<Idx<KeyAnnotation>>,
+    ) -> bool {
+        let SelfAttrAssignTarget {
+            receiver,
+            name,
+            instance_only,
+        } = target;
+        let Expr::Name(receiver_name) = receiver else {
+            return false;
+        };
+        let Some((method_idx, _)) = self.find_receiver_method_index(&receiver_name.id) else {
+            return false;
+        };
+        let ScopeKind::Method(method_scope) = &mut self.scopes[method_idx].scope.kind else {
+            unreachable!("`find_receiver_method_index` returns the index of a method scope");
+        };
+        if instance_only && method_scope.receiver_kind != MethodSelfKind::Instance {
+            return false;
         }
-        false
+        if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
+            // Accumulate subsequent assignments in the method.
+            attr.0.push(value);
+            // Keep the first type annotation encountered in the method.
+            if attr.1.is_none() {
+                attr.1 = annotation;
+            }
+        } else {
+            // First time seeing this attribute in this method: record it.
+            method_scope.instance_attributes.insert(
+                name.id.clone(),
+                InstanceAttribute(
+                    vec![value],
+                    annotation,
+                    name.range,
+                    method_scope.receiver_kind,
+                ),
+            );
+        }
+        true
     }
 
     /// Record a local bound to the result of a `__new__` call inside `__new__`, such as
@@ -2457,33 +2583,27 @@ impl Scopes {
     }
 
     pub fn method_that_sets_attr(&self, x: &ExprAttribute) -> Option<MethodThatSetsAttr> {
-        let mut method_name: Option<Name> = None;
-        let mut receiver_kind = MethodSelfKind::Instance;
-        for scope in self.iter_rev() {
-            match &scope.kind {
-                ScopeKind::Method(method_scope) if method_name.is_none() => {
-                    if let Some(self_name) = &method_scope.self_name
-                        && matches!(&*x.value, Expr::Name(name) if name.id == self_name.id)
-                    {
-                        method_name = Some(method_scope.name.id.clone());
-                        receiver_kind = method_scope.receiver_kind;
-                    } else {
-                        return None;
-                    }
-                }
-                ScopeKind::Class(class_scope) => {
-                    if let Some(method_name) = &method_name {
-                        return Some(MethodThatSetsAttr {
-                            method_name: method_name.clone(),
-                            recognized_attribute_defining_method: is_attribute_defining_method(
-                                method_name,
-                                &class_scope.name.id,
-                            ),
-                            instance_or_class: receiver_kind,
-                        });
-                    }
-                }
-                _ => {}
+        let Expr::Name(receiver) = &*x.value else {
+            return None;
+        };
+        let (method_idx, crossed_method) = self.find_receiver_method_index(&receiver.id)?;
+        if crossed_method {
+            // Permissions to write Final fields must not cross a nested-method boundary.
+            return None;
+        }
+        let ScopeKind::Method(method_scope) = &self.scopes[method_idx].scope.kind else {
+            unreachable!("`find_receiver_method_index` returns the index of a method scope");
+        };
+        for node in self.scopes[..method_idx].iter().rev() {
+            if let ScopeKind::Class(class_scope) = &node.scope.kind {
+                return Some(MethodThatSetsAttr {
+                    method_name: method_scope.name.id.clone(),
+                    recognized_attribute_defining_method: is_attribute_defining_method(
+                        &method_scope.name.id,
+                        &class_scope.name.id,
+                    ),
+                    instance_or_class: method_scope.receiver_kind,
+                });
             }
         }
         None
@@ -3112,7 +3232,12 @@ impl Scopes {
                 .variables
                 .get(&name.id)
                 .is_some_and(|usage| usage.used)
-                || self.is_parameter_used(&name.id);
+                || self.is_parameter_used(&name.id)
+                || self
+                    .current()
+                    .loops
+                    .iter()
+                    .any(|active| active.carried_reads.contains(&name.id));
             self.current_mut().variables.insert(
                 name.id.clone(),
                 VariableUsage {
@@ -3123,11 +3248,19 @@ impl Scopes {
         }
     }
 
-    pub fn mark_variable_used(&mut self, name: &Name) {
+    /// `value_idx` is the value the read resolved to in the current flow, if any.
+    pub fn mark_variable_used(&mut self, name: &Name, value_idx: Option<Idx<Key>>) {
         for scope in self.iter_rev_mut() {
             if let Some(info) = scope.variables.get_mut(name) {
                 info.used = true;
                 break;
+            }
+            if let Some(idx) = value_idx {
+                for active in scope.loops.iter_mut() {
+                    if active.carried_phis.contains(&idx) {
+                        active.carried_reads.insert(name.clone());
+                    }
+                }
             }
         }
     }
@@ -3381,6 +3514,7 @@ impl Scopes {
         SmallMap<Name, (ClassFieldDefinition, TextRange)>,
         NNModuleRegistrations,
         SmallMap<Name, Option<Vec<UnsetNodeId>>>,
+        Vec<(Name, Idx<KeyAnnotation>, Idx<KeyAnnotation>)>,
     ) {
         let mut field_definitions = SmallMap::new();
         let mut uninitialized_fields = SmallMap::new();
@@ -3509,6 +3643,7 @@ impl Scopes {
         // Merge assignments from different methods.
         // `method_attrs` yields attributes from recognized constructor methods first (e.g. __init__),
         // followed by other helper methods.
+        let mut redefinitions = Vec::new();
         method_attrs.into_iter().for_each(
             |(name, method, InstanceAttribute(values, annotation, range, receiver_kind))| {
                 if let Some((
@@ -3524,6 +3659,9 @@ impl Scopes {
                 {
                     if matches!(receiver_kind, MethodSelfKind::Instance) {
                         *existing_instance_write = true;
+                    }
+                    if let (Some(new_ann), Some(existing_ann)) = (annotation, *existing_annot) {
+                        redefinitions.push((name.key().clone(), new_ann, existing_ann));
                     }
                     if existing_method.recognized_attribute_defining_method
                         && !method.recognized_attribute_defining_method
@@ -3567,6 +3705,7 @@ impl Scopes {
             field_definitions,
             nn_module_registrations,
             uninitialized_fields,
+            redefinitions,
         )
     }
 
@@ -4762,15 +4901,48 @@ impl<'a> BindingsBuilder<'a> {
         mut flow: Flow,
         range: TextRange,
         exclude_names: &SmallSet<Name>,
-    ) -> Flow {
+    ) -> (Flow, SmallSet<Idx<Key>>) {
         // Sequential facts do not establish invariants across loop backedges.
         flow.excluded_none_pairs = ExcludedNonePairs::default();
+        let mut phis = SmallSet::new();
         for (name, info) in flow.info.iter_mut() {
             if exclude_names.contains(name) {
                 continue;
             }
+            // Import identities with no local writes across the loop need no speculative value
+            // join. Keep their available bindings; narrowing joins still happen at teardown.
+            let stable_import = info.value.as_ref().is_some_and(|value| {
+                matches!(
+                    value.style,
+                    FlowStyle::Import(..) | FlowStyle::ImportAs(_) | FlowStyle::MergeableImport(_)
+                ) && self.scopes.current().stat.0.get(name).is_none_or(|decl| {
+                    let eligible = match decl.style {
+                        StaticStyle::SingleDef(_) | StaticStyle::ImplicitBuiltinImport(_) => true,
+                        // Wildcard symbols also have this static style, but their declaration
+                        // ranges can collapse multiple imports. Only real module values qualify.
+                        StaticStyle::MergeableImport => {
+                            matches!(value.style, FlowStyle::MergeableImport(_))
+                        }
+                        _ => false,
+                    };
+                    eligible && decl.last_range.end() <= range.start()
+                })
+            });
+            if stable_import {
+                continue;
+            }
             // We are promising to insert a binding for this key when we merge the flow
             let phi_idx = self.idx_for_promise(Key::Phi(Box::new((name.clone(), range))));
+            // An enclosing loop's back edge also reaches this phi when it reaches the value
+            // entering this loop.
+            if let Some(value) = &info.value {
+                for enclosing in self.scopes.current_mut().loops.iter_mut() {
+                    if enclosing.carried_phis.contains(&value.idx) {
+                        enclosing.carried_phis.insert(phi_idx);
+                    }
+                }
+            }
+            phis.insert(phi_idx);
             match &mut info.value {
                 Some(value) => {
                     value.idx = phi_idx;
@@ -4786,7 +4958,7 @@ impl<'a> BindingsBuilder<'a> {
                 }
             }
         }
-        flow
+        (flow, phis)
     }
 
     /// Set up a loop: preserve the base flow and push the loop to the current
@@ -4800,12 +4972,12 @@ impl<'a> BindingsBuilder<'a> {
         let base = mem::take(&mut self.scopes.current_mut().flow);
         // To account for possible assignments to existing names in a loop, we
         // speculatively insert phi keys upfront.
-        self.scopes.current_mut().flow =
-            self.insert_phi_keys(base.clone(), range, loop_header_targets);
+        let (flow, phis) = self.insert_phi_keys(base.clone(), range, loop_header_targets);
+        self.scopes.current_mut().flow = flow;
         self.scopes
             .current_mut()
             .loops
-            .push(Loop::new(base, finally_depth));
+            .push(Loop::new(base, finally_depth, phis));
     }
 
     pub fn teardown_loop(

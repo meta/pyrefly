@@ -7,8 +7,79 @@
 
 // @lint-ignore-every SPELL deliberately testing bad spelling
 
+use crate::state::require::Require;
 use crate::test::util::TestEnv;
 use crate::testcase;
+
+testcase!(
+    test_setattr_inferred_instance_attributes,
+    r#"
+from typing import Final, assert_type
+
+class Plain:
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", 1)
+        setattr(self, "y", "hello")
+
+assert_type(Plain().x, int)
+assert_type(Plain().y, str)
+
+class FinalField:
+    x: Final[int]
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", 1)
+
+assert_type(FinalField().x, int)
+
+class Starred:
+    def __init__(self) -> None:
+        object.__setattr__(self, "x", *[1])
+        setattr(self, "y", *[1])
+
+_ = Starred().x  # E: Object of class `Starred` has no attribute `x`
+_ = Starred().y  # E: Object of class `Starred` has no attribute `y`
+"#,
+);
+
+testcase!(
+    test_setattr_classmethod_attribute_parity,
+    r#"
+from typing import assert_type
+
+class TestDirect:
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.x = 1
+
+class TestSetattr:
+    @classmethod
+    def setUpClass(cls) -> None:
+        setattr(cls, "x", 1)
+
+assert_type(TestDirect.x, int)
+assert_type(TestDirect().x, int)
+assert_type(TestSetattr.x, int)
+assert_type(TestSetattr().x, int)
+"#,
+);
+
+testcase!(
+    test_setattr_classmethod_attribute_boundaries,
+    TestEnv::new().enable_implicitly_defined_attribute_error(),
+    r#"
+from typing import assert_type
+
+class ClsSetattr:
+    @classmethod
+    def setup(cls) -> None:
+        setattr(cls, "x", 1)  # E: Attribute `x` is implicitly defined by assignment in method `setup`, which is not a constructor
+        object.__setattr__(cls, "y", 1)
+
+def check(c: ClsSetattr) -> None:
+    assert_type(c.x, int)
+    _ = c.y  # E: Object of class `ClsSetattr` has no attribute `y`
+"#,
+);
 
 testcase!(
     test_class_body_initialization_is_independent_of_methods,
@@ -1292,6 +1363,17 @@ class A:
         self.x: int = x  # E: `str` is not assignable to attribute `x` with type `int`
 def f(a: A):
     assert_type(a.x, int)
+    "#,
+);
+
+testcase!(
+    test_self_attribute_redefinition_across_methods,
+    r#"
+class A:
+    def __init__(self) -> None:
+        self.foo: int | None = None
+    def calc_foo(self) -> None:
+        self.foo: int = 1  # E: `foo` cannot be annotated with `int`, it is already defined with type `int | None`
     "#,
 );
 
@@ -5142,5 +5224,225 @@ C.readonly = 1
 assert_type(C.cached, int)
 C.cached = 1  # E: Cannot set instance variable `cached` from the class
 assert_type(C.cached, Literal[1])
+"#,
+);
+
+testcase!(
+    test_self_attribute_repeated_compatible_annotation,
+    r#"
+class A:
+    x: int
+    def __init__(self) -> None:
+        self.x: int = 0
+    def reset(self) -> None:
+        self.x: int = 1
+class B:
+    def __init__(self) -> None:
+        self.y: int = 0
+    def reset(self) -> None:
+        self.y: int = 1
+    "#,
+);
+
+testcase!(
+    test_self_attribute_redefinition_ignores_other_receivers,
+    r#"
+class Other:
+    x: str
+class A:
+    def __init__(self) -> None:
+        self.x: int = 0
+    @staticmethod
+    def build(other: Other) -> None:
+        other.x: str = ""  # E: Cannot annotate non-self attribute `other.x`
+    def nested(self) -> None:
+        def inner(self: Other) -> None:
+            self.x: str = ""  # E: Cannot annotate non-self attribute `self.x`
+    "#,
+);
+
+testcase!(
+    test_self_attribute_redefinition_constructor_ordering,
+    r#"
+class A:
+    def reset(self) -> None:
+        self.x: int = 1  # E: `x` cannot be annotated with `int`, it is already defined with type `int | None`
+    def __init__(self) -> None:
+        self.x: int | None = None
+"#,
+);
+
+testcase!(
+    test_self_attribute_compatible_unions_and_aliases,
+    r#"
+type AliasInt = int
+class A:
+    def __init__(self) -> None:
+        self.x: int | str = 0
+        self.y: AliasInt = 0
+    def reset(self) -> None:
+        self.x: str | int = ""
+        self.y: int = 1
+"#,
+);
+
+testcase!(
+    test_self_attribute_scoped_type_alias_redefinition,
+    r#"
+class T1: ...
+class T2: ...
+class A:
+    def __init__(self) -> None:
+        T = T1
+        self.x: T
+    def reset(self) -> None:
+        T = T2
+        self.x: T  # E: `x` cannot be annotated with `T2`, it is already defined with type `T1`
+"#,
+);
+
+testcase!(
+    test_self_attribute_class_body_reannotation_and_literal_narrowing,
+    r#"
+from typing import Literal
+class A:
+    x: int
+    y: Literal[0] | Literal[1]
+    def __init__(self) -> None:
+        self.x: int = 0
+        self.y: Literal[1] = 1
+    def reset(self) -> None:
+        self.x: int = 1
+        self.y: Literal[0] = 0
+"#,
+);
+
+testcase!(
+    test_nested_method_receiver_ownership,
+    r#"
+class Outer:
+    def __init__(self) -> None:
+        self.x: int = 0
+        class Inner:
+            @staticmethod
+            def static_helper(self: str) -> None:
+                self.x = ""  # E: Object of class `str` has no attribute `x`
+            def second_param(other, self: str) -> None:
+                self.x = ""  # E: Object of class `str` has no attribute `x`
+            def captured(other) -> None:
+                self.x = 1
+        def local_capture() -> None:
+            nonlocal self
+            self.x = 2
+"#,
+);
+
+testcase!(
+    test_receiver_ownership_global_comprehension_and_nonlocal_method,
+    r#"
+from typing import Final
+class Other:
+    x: int
+    y: int
+self = Other()
+class A:
+    z: Final[int]
+    def __init__(self) -> None:
+        self.z = 0
+        def uses_global() -> None:
+            global self
+            self.x: int = 1  # E: Cannot annotate non-self attribute `self.x`
+        _ = [0 for self in [Other()] for self.y in [1]]
+        class Inner:
+            def method(other) -> None:
+                nonlocal self
+                self.z = 2  # E: Cannot set field `z`
+_ = A().y  # E: Object of class `A` has no attribute `y`
+"#,
+);
+
+testcase!(
+    test_final_attribute_nested_permissions,
+    r#"
+from typing import Final
+class A:
+    x: Final[int]
+    def __init__(self) -> None:
+        self.x = 0
+        def helper() -> None:
+            self.x = 1
+        def helper_nonlocal() -> None:
+            nonlocal self
+            self.x = 2
+        class Inner:
+            def method(inner_self) -> None:
+                def f() -> None:
+                    self.x = 4  # E: Cannot set field `x`
+                f()
+            @staticmethod
+            def static_fn(self: A) -> None:
+                self.x = 3  # E: Cannot set field `x`
+"#,
+);
+
+testcase!(
+    test_no_type_check_staticmethod_skipped_body,
+    r#"
+from typing import no_type_check
+class A:
+    @no_type_check
+    @staticmethod
+    def static_func(self) -> None:
+        self.phantom = 1
+    @no_type_check
+    def normal_func(self) -> None:
+        self.real = 2
+
+a = A()
+_ = a.phantom  # E: Object of class `A` has no attribute `phantom`
+_ = a.real
+"#,
+);
+
+testcase!(
+    test_explicit_staticmethod_new_receiver,
+    r#"
+class C:
+    @staticmethod
+    def __new__(cls) -> "C":
+        cls.x: int = 0
+        return super().__new__(cls)
+
+_ = C().x
+"#,
+);
+
+testcase!(
+    test_explicit_staticmethod_new_no_type_check,
+    r#"
+from typing import no_type_check
+
+class C:
+    @no_type_check
+    @staticmethod
+    def __new__(cls) -> "C":
+        cls.x = 1
+        return super().__new__(cls)
+
+_ = C().x
+"#,
+);
+
+testcase!(
+    test_explicit_staticmethod_new_batch_skipped,
+    TestEnv::new_skip_check_no_infer().with_run_require(Require::Errors),
+    r#"
+class C:
+    @staticmethod
+    def __new__(cls):
+        cls.x = 1
+        return super().__new__(cls)
+
+_ = C().x
 "#,
 );

@@ -384,6 +384,11 @@ pub struct ConfigBase {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub treat_all_caps_as_final: Option<bool>,
 
+    /// Whether to use the parameter types declared in Sphinx style docstrings for unannotated
+    /// parameters. Off by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub infer_param_types_from_docstring: Option<bool>,
+
     /// Any unknown config items
     #[serde(flatten)]
     pub(crate) extras: ExtraConfigs,
@@ -516,6 +521,10 @@ impl ConfigBase {
 
     pub fn get_treat_all_caps_as_final(base: &Self) -> Option<bool> {
         base.treat_all_caps_as_final
+    }
+
+    pub fn get_infer_param_types_from_docstring(base: &Self) -> Option<bool> {
+        base.infer_param_types_from_docstring
     }
 
     /// Set `replace-imports-with-any` from module patterns such as `["pandas"]`.

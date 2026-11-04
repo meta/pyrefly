@@ -81,6 +81,7 @@ use crate::binding::polars::polars_column_mutation;
 use crate::binding::scope::FlowStyle;
 use crate::binding::scope::LoopExit;
 use crate::binding::scope::Scope;
+use crate::binding::scope::SelfAttrAssignTarget;
 use crate::binding::scope::TerminationKind;
 use crate::config::error_kind::ErrorKind;
 use crate::export::definitions::Definitions;
@@ -2280,6 +2281,11 @@ impl<'a> BindingsBuilder<'a> {
             Stmt::Expr(mut x) => {
                 let mut current = self.declare_current_idx(Key::StmtExpr(x.value.range()));
                 self.ensure_expr(&mut x.value, current.usage());
+                let special_export = if let Expr::Call(ExprCall { func, .. }) = &*x.value {
+                    self.as_special_export(func)
+                } else {
+                    None
+                };
                 // Rebind bare-name receivers after in-place column mutations.
                 let mutated_receiver = if let Expr::Call(call) = &*x.value
                     && let Expr::Attribute(func) = &*call.func
@@ -2326,11 +2332,51 @@ impl<'a> BindingsBuilder<'a> {
                         );
                     }
                 }
-                let special_export = if let Expr::Call(ExprCall { func, .. }) = &*x.value {
-                    self.as_special_export(func)
-                } else {
-                    None
-                };
+                // `object.__setattr__(self, "attr", value)` and `setattr(self, "attr", value)`
+                // initialize instance attributes the same way `self.attr = value` does.
+                // Frozen dataclasses commonly use this pattern in `__init__`.
+                if let Expr::Call(call) = x.value.as_ref()
+                    && call.arguments.keywords.is_empty()
+                    && let [
+                        receiver @ Expr::Name(_),
+                        Expr::StringLiteral(attr_name),
+                        value,
+                    ] = &*call.arguments.args
+                    && !value.is_starred_expr()
+                {
+                    let is_object_setattr = matches!(
+                        call.func.as_ref(),
+                        Expr::Attribute(func)
+                            if func.attr.id.as_str() == "__setattr__"
+                                && self.as_special_export(&func.value)
+                                    == Some(SpecialExport::BuiltinsObject)
+                    );
+                    let is_builtin_setattr = special_export == Some(SpecialExport::SetAttr);
+                    // A field definition must spell the runtime name as an unchanged source identifier.
+                    if (is_object_setattr || is_builtin_setattr)
+                        && let Some(literal) = attr_name.as_single_part_string()
+                        && self.module_info.code_at(literal.content_range())
+                            == literal.value.as_ref()
+                        && let Ok(Expr::Name(name)) =
+                            Ast::parse_expr(literal.value.as_ref(), TextSize::new(0))
+                        && name.id.as_str() == literal.value.as_ref()
+                        && !Ast::is_mangled_attr(&name.id)
+                    {
+                        let name = Identifier::new(name.id, literal.content_range());
+                        if self.scopes.record_self_attr_assign_named(
+                            SelfAttrAssignTarget {
+                                receiver,
+                                name: &name,
+                                instance_only: is_object_setattr,
+                            },
+                            ExprOrBinding::Expr(value.clone()),
+                            None,
+                        ) && let Some(literals) = &mut self.setattr_name_literals
+                        {
+                            literals.push((name, receiver.range()));
+                        }
+                    }
+                }
                 let key = self
                     .insert_binding_current(current, Binding::StmtExpr(x.value, special_export));
                 // Track this StmtExpr as the trailing statement for type-based termination

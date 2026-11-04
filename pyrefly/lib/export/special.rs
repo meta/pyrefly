@@ -44,9 +44,12 @@ pub enum SpecialExport {
     Quit,
     OsExit,
     Len,
+    Any,
+    All,
     Range,
     Bool,
     BuiltinsType,
+    BuiltinsObject,
     TypingType,
     NoTypeCheck,
     NotImplemented,
@@ -64,6 +67,7 @@ pub enum SpecialExport {
     PydanticToSnake,
     HasAttr,
     GetAttr,
+    SetAttr,
     Callable,
     BuiltinsDict,
     TypingDict,
@@ -137,6 +141,8 @@ impl SpecialExport {
             "quit" => Some(Self::Quit),
             "_exit" => Some(Self::OsExit),
             "len" => Some(Self::Len),
+            "any" => Some(Self::Any),
+            "all" => Some(Self::All),
             "range" => Some(Self::Range),
             "bool" => Some(Self::Bool),
             "type" => Some(Self::BuiltinsType),
@@ -155,6 +161,8 @@ impl SpecialExport {
             "to_snake" => Some(Self::PydanticToSnake),
             "hasattr" => Some(Self::HasAttr),
             "getattr" => Some(Self::GetAttr),
+            "setattr" => Some(Self::SetAttr),
+            "object" => Some(Self::BuiltinsObject),
             "TypeAliasType" => Some(Self::TypeAliasType),
             "Callable" => Some(Self::Callable),
             "dict" => Some(Self::BuiltinsDict),
@@ -237,12 +245,16 @@ impl SpecialExport {
             Self::Enum | Self::StrEnum | Self::IntEnum => matches!(m.as_str(), "enum"),
             Self::Super
             | Self::Len
+            | Self::Any
+            | Self::All
             | Self::Range
             | Self::Quit
             | Self::Bool
             | Self::BuiltinsType
+            | Self::BuiltinsObject
             | Self::HasAttr
             | Self::GetAttr
+            | Self::SetAttr
             | Self::ClassMethod
             | Self::StaticMethod
             | Self::BuiltinsDict
