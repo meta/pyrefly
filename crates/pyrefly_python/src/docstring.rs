@@ -414,17 +414,22 @@ const ADMONITIONS: [(&str, &str); 11] = [
 ];
 
 /// The titles of Sphinx directives that mark a version, which take the version as their argument.
-const VERSION_DIRECTIVES: [(&str, &str); 3] = [
+const VERSION_DIRECTIVES: [(&str, &str); 4] = [
     ("versionadded", "New in version"),
     ("versionchanged", "Changed in version"),
+    ("versionremoved", "Removed in version"),
     ("deprecated", "Deprecated since version"),
 ];
 
-/// If this line is an admonition such as `.. note::` or `.. versionadded:: 1.2`, return the
-/// Markdown heading to show in its place.
+/// If this line is an admonition such as `.. note::`, `.. admonition:: Title` or
+/// `.. versionadded:: 1.2`, return the Markdown heading to show in its place.
 fn admonition_heading(line: &str) -> Option<String> {
     let (name, argument) = line.trim_start().strip_prefix(".. ")?.split_once("::")?;
     let (name, argument) = (name.trim(), argument.trim());
+    // The generic admonition takes its title as the argument.
+    if name == "admonition" && !argument.is_empty() {
+        return Some(format!("**{argument}**"));
+    }
     if let Some((_, title)) = ADMONITIONS.iter().find(|(directive, _)| *directive == name) {
         return Some(if argument.is_empty() {
             format!("**{title}**")
@@ -1194,6 +1199,7 @@ The code above replaces it.
         for (directive, heading) in [
             (".. versionadded:: 1.2", "**New in version 1.2**"),
             (".. versionchanged:: 2.0", "**Changed in version 2.0**"),
+            (".. versionremoved:: 4.0", "**Removed in version 4.0**"),
             (".. deprecated:: 3.1", "**Deprecated since version 3.1**"),
         ] {
             let docstring = format!("\"\"\"Summary.\n\n{directive}\n    Use `new` instead.\"\"\"");
@@ -1203,6 +1209,16 @@ The code above replaces it.
                 "{directive}"
             );
         }
+    }
+
+    #[test]
+    fn test_docstring_generic_admonition_uses_its_title() {
+        let docstring =
+            "\"\"\"Summary.\n\n.. admonition:: Custom title\n\n    Body text.\n\nAfter.\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Summary.\n\n**Custom title**\n\nBody text.\n\nAfter."
+        );
     }
 
     #[test]
