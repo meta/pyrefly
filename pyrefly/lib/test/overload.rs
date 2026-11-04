@@ -11,6 +11,24 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_overload_expansion_keeps_lambda_context,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable, overload, assert_type
+
+@overload
+def f(callback: Callable[[int], None], value: int) -> int: ...
+@overload
+def f(callback: Callable[[str], None], value: str) -> str: ...
+def f(callback, value) -> int | str: ...
+
+def g(value: int | str) -> None:
+    assert_type(f(lambda arg: None, value), int | str)
+    assert_type(f(value=value, callback=lambda arg: None), int | str)
+"#,
+);
+
+testcase!(
     test_py,
     r#"
 from typing import overload, assert_type
