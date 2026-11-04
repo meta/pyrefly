@@ -460,13 +460,12 @@ from typing import reveal_type
 def f(flag: bool, value: object | None, other: bool) -> None:
     if flag or (value and other):
         pass
-    reveal_type(value and other)  # E: revealed type: object | bool | None
+    reveal_type(value and other)  # E: revealed type: bool | object | None
 "#,
 );
 
 // `x or y` returns `x` only when `x` is truthy, so a falsy result is always `y`.
 testcase!(
-    bug = "The truthy part of `x or y` survives a falsy narrow of the result",
     test_boolean_or_result_falsy_narrow,
     r#"
 from typing import assert_type
@@ -478,16 +477,72 @@ class Settings: ...
 def assigned(override: Config | None, default: Settings) -> None:
     config = override or default
     if not config:
-        assert_type(config, Config | Settings)
+        assert_type(config, Settings)
 
 def walrus(override: Config | None, default: Settings) -> None:
     if not (config := override or default):
-        assert_type(config, Config | Settings)
+        assert_type(config, Settings)
 
 def container(items: list[int], default: Settings) -> None:
     value = items or default
     if not value:
-        assert_type(value, list[int] | Settings)
+        assert_type(value, Settings)
+"#,
+);
+
+// `str` is not marked, so the literal default `""` collapses into it.
+testcase!(
+    test_boolean_or_literal_default,
+    r#"
+from typing import reveal_type
+
+def f(name: str | None) -> None:
+    reveal_type(name or "")  # E: revealed type: str
+"#,
+);
+
+// A marked operand still accepts every value of its type when it is the inferred type of an
+// attribute or a container element.
+testcase!(
+    test_boolean_or_inferred_attribute_type,
+    r#"
+from typing import Any, assert_type
+
+class Base: ...
+class Sub(Base): ...
+
+class C:
+    def __init__(self, base: Base | None) -> None:
+        self.base = base or Sub()
+
+    def reset(self, base: Base) -> None:
+        self.base = base
+
+def scores(x: float | None) -> None:
+    d = {"a": x or 0}
+    d["b"] = 1.5
+
+def first_use(a: list[Any], b: list[bytes]) -> None:
+    out = []
+    out.extend(a or b)
+    assert_type(out, list[bytes])
+"#,
+);
+
+// A unary operator on a marked operand looks up the dunder method of the unmarked type.
+testcase!(
+    test_boolean_or_unary_operator,
+    r#"
+from enum import Flag
+from typing import assert_type
+
+class C(Flag):
+    NONE = 0
+    A = 1
+
+def f(x: C | None, y: C, z: C) -> None:
+    assert_type(~(x or y), C)
+    assert_type(~(y and z), C)
 "#,
 );
 

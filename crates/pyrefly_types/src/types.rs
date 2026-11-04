@@ -1079,6 +1079,10 @@ pub enum Type {
     /// operand `x: A` of `x and y` is returned only when it is falsy, so it contributes `A & Falsy`
     /// to the result, and a later truthy narrow removes that member.
     Falsy,
+    /// Every value that is always truthy. It appears only as a member of an intersection: the left
+    /// operand `x: A` of `x or y` is returned only when it is truthy, so it contributes
+    /// `A & Truthy` to the result, and a later falsy narrow removes that member.
+    Truthy,
     None,
 }
 
@@ -1133,7 +1137,7 @@ impl Visit for Type {
             Type::KwargsValue(x) => x.visit(f),
             Type::Type(x) => x.visit(f),
             Type::TypeForm(x) => x.visit(f),
-            Type::Ellipsis | Type::Falsy => {}
+            Type::Ellipsis | Type::Falsy | Type::Truthy => {}
             Type::Any(x) => x.visit(f),
             Type::Never(x) => x.visit(f),
             Type::TypeAlias(x) => x.visit(f),
@@ -1197,7 +1201,7 @@ impl VisitMut for Type {
             Type::KwargsValue(x) => x.visit_mut(f),
             Type::Type(x) => x.visit_mut(f),
             Type::TypeForm(x) => x.visit_mut(f),
-            Type::Ellipsis | Type::Falsy => {}
+            Type::Ellipsis | Type::Falsy | Type::Truthy => {}
             Type::Any(x) => x.visit_mut(f),
             Type::Never(x) => x.visit_mut(f),
             Type::TypeAlias(x) => x.visit_mut(f),
@@ -2323,7 +2327,23 @@ impl Type {
     /// Whether this type only records the truthiness of a boolean operand for narrowing. Such a
     /// type is hidden from users and from `assert_type`.
     pub fn is_truthiness_marker(&self) -> bool {
-        matches!(self, Type::Falsy)
+        matches!(self, Type::Falsy | Type::Truthy)
+    }
+
+    /// For an intersection of a type and a truthiness marker, the type users see: the type without
+    /// the marker. For any other type, the type itself.
+    pub fn ignoring_truthiness_marker(&self) -> &Type {
+        if let Type::Intersect(x) = self
+            && let [a, b] = x.0.as_slice()
+        {
+            if b.is_truthiness_marker() {
+                return a;
+            }
+            if a.is_truthiness_marker() {
+                return b;
+            }
+        }
+        self
     }
 
     /// Remove truthiness markers from every intersection.
@@ -2429,7 +2449,7 @@ impl Type {
             Type::Literal(lit) if let Lit::Int(x) = &lit.value => Some(x.as_bool()),
             Type::Literal(lit) if let Lit::Bytes(x) = &lit.value => Some(!x.is_empty()),
             Type::Literal(lit) if let Lit::Str(x) = &lit.value => Some(!x.is_empty()),
-            Type::Type(_) => Some(true),
+            Type::Type(_) | Type::Truthy => Some(true),
             Type::None | Type::Falsy => Some(false),
             Type::Sentinel(_) => Some(true),
             Type::Tuple(Tuple::Concrete(elements)) => Some(!elements.is_empty()),
@@ -2539,6 +2559,7 @@ impl Type {
             | Type::KwCall(_)
             | Type::Materialization
             | Type::Falsy
+            | Type::Truthy
             | Type::None => false,
         })
     }

@@ -477,6 +477,7 @@ pub(super) fn type_to_indexed_shape(
         Type::Ellipsis => indexed_named_leaf(table, "..."),
         Type::Materialization => indexed_named_leaf(table, "Materialization"),
         Type::Falsy => indexed_named_leaf(table, "Falsy"),
+        Type::Truthy => indexed_named_leaf(table, "Truthy"),
         Type::Var(_) => indexed_named_leaf(table, "typing.Any"),
         Type::ShapedArray(_) => indexed_named_leaf(table, "Tensor"),
         Type::IntTuple(_) => indexed_named_leaf(table, "IntTuple"),

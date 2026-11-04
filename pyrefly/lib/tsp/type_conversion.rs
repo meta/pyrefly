@@ -495,8 +495,8 @@ impl TypeConverter<'_> {
             // --- Materialization is a solver artifact ---
             PyreflyType::Materialization => builtin("unknown"),
 
-            // --- `Falsy` only appears inside an intersection, which converts to its fallback ---
-            PyreflyType::Falsy => builtin("unknown"),
+            // --- `Falsy` and `Truthy` only appear inside an intersection, which converts to its fallback ---
+            PyreflyType::Falsy | PyreflyType::Truthy => builtin("unknown"),
 
             // --- Type-level DSL calls are forced at function-call return boundaries ---
             PyreflyType::TypeLevelDslCall(_) => builtin("unknown"),

@@ -1781,6 +1781,7 @@ impl<'a> TypeDisplayContext<'a> {
             Type::SpecialForm(x) => write!(output, "{x}"),
             Type::Ellipsis => output.write_str("..."),
             Type::Falsy => output.write_str("Falsy"),
+            Type::Truthy => output.write_str("Truthy"),
             Type::Any(style) => match style {
                 AnyStyle::Explicit => self.maybe_fmt_with_module("typing", "Any", output),
                 AnyStyle::Implicit | AnyStyle::Error if self.render_source_annotation => {
