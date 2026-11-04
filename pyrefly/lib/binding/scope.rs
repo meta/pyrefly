@@ -2524,6 +2524,12 @@ impl Scopes {
         let Some((method_idx, _)) = self.find_receiver_method_index(&receiver_name.id) else {
             return false;
         };
+        let in_nested_function = self.scopes.iter().skip(method_idx + 1).any(|node| {
+            matches!(
+                node.scope.kind,
+                ScopeKind::Function(_) | ScopeKind::Method(_)
+            )
+        });
         let scope = &mut self.scopes[method_idx].scope;
         let ScopeKind::Method(method_scope) = &mut scope.kind else {
             unreachable!("`find_receiver_method_index` returns the index of a method scope");
@@ -2531,10 +2537,12 @@ impl Scopes {
         if instance_only && method_scope.receiver_kind != MethodSelfKind::Instance {
             return false;
         }
-        scope
-            .flow
-            .instance_attribute_initialization
-            .insert(name.id.clone(), InitializationStatus::Initialized);
+        if !in_nested_function {
+            scope
+                .flow
+                .instance_attribute_initialization
+                .insert(name.id.clone(), InitializationStatus::Initialized);
+        }
         if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
             // Accumulate subsequent assignments in the method.
             attr.0.push(value);

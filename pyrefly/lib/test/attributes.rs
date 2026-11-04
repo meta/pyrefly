@@ -249,19 +249,18 @@ class ReturnOrBreak:
 );
 
 testcase!(
-    bug = "Assignments in nested functions initialize the enclosing method's attributes",
     test_attribute_initialization_nested_function,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
 class NestedOnly:
     def __init__(self) -> None:
         def later() -> None:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
 
 class ConditionalOuter:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         def later() -> None:
             self.value = 2
 
@@ -275,7 +274,7 @@ class NestedMethod:
     def __init__(self) -> None:
         class Inner:
             def later(inner) -> None:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
 
 class NestedReturn:
     def __init__(self) -> None:
