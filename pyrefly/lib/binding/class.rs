@@ -524,14 +524,14 @@ impl<'a> BindingsBuilder<'a> {
             let attrs_field_specifier =
                 self.attrs_field_specifier(&definition, name.key(), range, &attrs_decorators);
 
-            let check_initialization = !matches!(
+            let defined_in_helper = matches!(
                 &definition,
                 ClassFieldDefinition::DefinedInMethod { method, .. }
                     if !method.recognized_attribute_defining_method
             );
             // Stub files declare attributes without runtime initialization.
             if !self.module_info.path().is_interface()
-                && check_initialization
+                && !defined_in_helper
                 && let InitializedInClass::IfAny(initializations) = initialized
             {
                 let is_instance = matches!(

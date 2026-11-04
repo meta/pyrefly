@@ -3301,10 +3301,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 .ancestors_no_object()
                                 .iter()
                                 .any(|base| {
-                                    base.class_object() != cls
-                                        && self
-                                            .get_class_member(base.class_object(), name)
-                                            .is_some()
+                                    self.get_class_member(base.class_object(), name).is_some()
                                 })
                     });
                 if !initialized && !inherited_or_dynamic {

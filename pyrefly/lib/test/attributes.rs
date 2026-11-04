@@ -479,8 +479,7 @@ C(True).missing  # pyrefly: ignore[possibly-uninitialized-attribute]  # E: Objec
 "#,
 );
 
-testcase!(
-    test_possibly_uninitialized_attribute_stub,
+fn env_with_conditional_stub_attribute() -> TestEnv {
     TestEnv::one_with_path(
         "foo",
         "foo.pyi",
@@ -497,7 +496,12 @@ class Stub:
             self.instance_value = 1
 "#,
     )
-    .enable_possibly_uninitialized_attribute_error(),
+    .enable_possibly_uninitialized_attribute_error()
+}
+
+testcase!(
+    test_possibly_uninitialized_attribute_stub,
+    env_with_conditional_stub_attribute(),
     r#"
 from typing import assert_type
 from foo import Stub

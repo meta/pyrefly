@@ -1868,10 +1868,10 @@ testcase!(
     test_conditionally_defined_class_member,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
+from typing import Any, Never
+
 def coin() -> bool:
     return True
-
-from typing import Any, Never
 
 def stop() -> Never:
     raise Exception()
