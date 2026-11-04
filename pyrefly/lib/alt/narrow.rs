@@ -2703,7 +2703,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         subject_idx: &Idx<Key>,
         narrowing_subject: Option<&NarrowingSubject>,
-        narrow_ops_for_case: &(Box<NarrowOp>, TextRange),
+        narrow_ops_for_case: &(NarrowOp, TextRange),
+        prev_case_negations: Option<&(NarrowOp, TextRange)>,
         case_range: &TextRange,
         errors: &ErrorCollector,
     ) {
@@ -2713,17 +2714,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
         let subject_info = self.with_type_for_exhaustiveness_check(self.get_idx(*subject_idx));
         let subject_ty = subject_info.ty().clone();
-        if subject_ty.is_any() || subject_ty.is_object() {
+        // #3338 is limited to `Any`. Keep the existing `object` behavior:
+        // structural patterns such as tuples can narrow `object` to `Never`
+        // spuriously.
+        if subject_ty.is_object() {
             return;
         }
         let ignore_errors = self.error_swallower();
-        let (mut narrowed_ty, has_never_trigger_facet) = match narrowing_subject {
+        let mut has_never_trigger_facet = false;
+        let mut resolved_facet_chain = None;
+        let mut narrowed_info = match narrowing_subject {
             None | Some(NarrowingSubject::Name(_)) => {
-                let narrowed =
-                    self.narrow(&subject_info, op.as_ref(), *narrow_range, &ignore_errors);
-                let has_never_trigger_facet =
+                let narrowed = self.narrow(&subject_info, op, *narrow_range, &ignore_errors);
+                has_never_trigger_facet =
                     self.has_never_match_trigger_facet(&narrowed, op, *case_range);
-                (narrowed.ty().clone(), has_never_trigger_facet)
+                narrowed
             }
             Some(NarrowingSubject::Facets(_, facets)) => {
                 let Some(resolved_chain) = self.resolve_facet_chain(facets.chain.clone()) else {
@@ -2732,19 +2737,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let type_info = TypeInfo::of_ty(self.heap.mk_any_implicit());
                 let narrowing_subject_info =
                     type_info.with_narrow(resolved_chain.facets(), subject_ty.clone());
-                let narrowed = self.narrow(
-                    &narrowing_subject_info,
-                    op.as_ref(),
-                    *narrow_range,
-                    &ignore_errors,
-                );
+                let narrowed =
+                    self.narrow(&narrowing_subject_info, op, *narrow_range, &ignore_errors);
+                resolved_facet_chain = Some(resolved_chain);
+                narrowed
+            }
+        };
+        // Narrow by the current pattern first, then apply the earlier cases'
+        // negations. On an `Any` subject this lets `bool` become `bool` before
+        // subtracting an earlier `int`, which yields `Never`.
+        if let Some((prev_op, prev_range)) = prev_case_negations {
+            narrowed_info = self.narrow(&narrowed_info, prev_op, *prev_range, &ignore_errors);
+        }
+        let mut narrowed_ty = match resolved_facet_chain {
+            Some(resolved_chain) => {
                 // No sub-facet check needed: the narrowed type already represents
                 // the facet's type directly, so `is_never()` below is sufficient.
-                (
-                    self.get_facet_chain_type(&narrowed, &resolved_chain, *case_range),
-                    false,
-                )
+                self.get_facet_chain_type(&narrowed_info, &resolved_chain, *case_range)
             }
+            None => narrowed_info.ty().clone(),
         };
         self.expand_mut(&mut narrowed_ty);
         if !narrowed_ty.is_never() && !has_never_trigger_facet {
