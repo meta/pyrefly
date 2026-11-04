@@ -252,6 +252,15 @@ impl ErrorCollector {
         self.errors.lock().is_empty()
     }
 
+    /// Whether the collector holds an error of the given kind.
+    pub(crate) fn has_error_kind(&self, kind: ErrorKind) -> bool {
+        self.errors
+            .lock()
+            .items
+            .iter()
+            .any(|error| error.error_kind() == kind)
+    }
+
     pub fn len(&self) -> usize {
         self.errors.lock().len()
     }

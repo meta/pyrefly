@@ -1071,6 +1071,7 @@ impl<'a> BindingsBuilder<'a> {
                         AnnotationTarget::ClassMember(member_name.clone()),
                         annotation_expr,
                         None,
+                        None,
                     ),
                 )
             });
