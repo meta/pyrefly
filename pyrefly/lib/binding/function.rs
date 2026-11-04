@@ -660,6 +660,7 @@ impl<'a> BindingsBuilder<'a> {
         implicit_return: Option<Idx<Key>>,
         should_infer_return_type: bool,
         is_stub: bool,
+        check_never_return: bool,
     ) {
         let is_generator = yields_and_returns.is_generator;
         let return_ann = return_ann_with_range.as_ref().map(|(_, key)| *key);
@@ -730,6 +731,7 @@ impl<'a> BindingsBuilder<'a> {
                             is_generator,
                             returns: return_keys,
                             function,
+                            check_never_return,
                         },
                     );
                     ReturnTypeKind::ShouldTrustAnnotation {
@@ -891,16 +893,21 @@ impl<'a> BindingsBuilder<'a> {
         } else {
             body.as_slice()
         };
-        let body_kind = match body_no_docstring {
-            // raise NotImplementedError(...)
-            [Stmt::Raise(StmtRaise { exc: Some(exc), .. })]
-                if self.as_special_export(match &**exc {
+        let raises_not_implemented = match body_no_docstring.last() {
+            Some(Stmt::Raise(StmtRaise { exc: Some(exc), .. })) => {
+                self.as_special_export(match &**exc {
                     Expr::Call(ExprCall { func, .. }) => func,
                     other => other,
-                }) == Some(SpecialExport::NotImplementedError) =>
-            {
-                BodyKind::RaiseNotImplementedError
+                }) == Some(SpecialExport::NotImplementedError)
             }
+            _ => false,
+        };
+        // A raise-only body or a terminal NotImplementedError can stand in for an implementation.
+        let check_never_return =
+            !raises_not_implemented && !matches!(body_no_docstring, [Stmt::Raise(_)]);
+        let body_kind = match body_no_docstring {
+            // raise NotImplementedError(...)
+            [Stmt::Raise(_)] if raises_not_implemented => BodyKind::RaiseNotImplementedError,
             // return NotImplemented
             [
                 Stmt::Return(StmtReturn {
@@ -994,6 +1001,7 @@ impl<'a> BindingsBuilder<'a> {
                 implicit_return,
                 false,
                 facts.is_stub(),
+                check_never_return,
             );
             (false, self_assignments)
         } else {
@@ -1032,6 +1040,7 @@ impl<'a> BindingsBuilder<'a> {
                 implicit_return,
                 should_infer,
                 facts.is_stub(),
+                check_never_return,
             );
             // Mirror the `ReturnTypeKind::ShouldInferType` arm in `analyze_return_type`:
             // we infer iff there's no return annotation and inference was requested.

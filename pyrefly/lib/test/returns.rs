@@ -376,7 +376,15 @@ def calls_fatal() -> int:  # E: Function declared to return `int` but can never 
 def returns_fatal() -> str:  # E: Function declared to return `str` but can never return
     return fatal()
 
-def raises() -> int:  # E: Function declared to return `int` but can never return
+def raises() -> int:
+    raise ValueError
+
+def raises_with_docstring() -> int:
+    """This operation is unsupported."""
+    raise ValueError
+
+def raises_after_work() -> int:  # E: Function declared to return `int` but can never return
+    print("starting")
     raise ValueError
 
 def raises_none() -> None:
@@ -408,6 +416,10 @@ def gradual() -> Any:  # E: Function declared to return `Any` but can never retu
 def placeholder() -> int:
     """Implementation belongs in a subclass."""
     raise NotImplementedError("not implemented")
+
+def placeholder_with_checks(x: int) -> int:
+    assert_type(x, int)
+    raise NotImplementedError
 
 def stub() -> int: ...
 
@@ -534,7 +546,7 @@ testcase!(
     r#"
 from typing import assert_type
 
-def f() -> int:  # E: Function declared to return `int` but can never return
+def f() -> int:
    raise Exception()
 assert_type(f(), int)
 "#,

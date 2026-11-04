@@ -3189,6 +3189,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 is_generator,
                 returns,
                 function,
+                check_never_return,
             } => {
                 let annotation = self.get_idx(*annotation).annotation.get_type().clone();
                 let implicit_return = self.get_idx(*implicit_return);
@@ -3201,7 +3202,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     range,
                     errors,
                 );
-                if !is_generator
+                if *check_never_return
+                    && !is_generator
                     && !annotation.is_never()
                     && !annotation.is_none()
                     && implicit_return.ty().is_never()

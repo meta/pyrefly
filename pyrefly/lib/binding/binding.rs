@@ -1310,6 +1310,7 @@ pub enum BindingExpect {
         is_generator: bool,
         returns: Box<[Idx<Key>]>,
         function: Idx<KeyUndecoratedFunction>,
+        check_never_return: bool,
     },
     /// Expression used in a boolean context (`bool()`, `if`, or `while`)
     Bool(Expr),
