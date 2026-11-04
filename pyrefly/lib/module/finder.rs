@@ -599,10 +599,17 @@ fn find_directory_relative_fallback_import(
         return None;
     };
     let directory = origin_path?.parent()?;
+    let dir_cache = options.dir_cache;
     let mut namespaces = vec![];
     find_module(
         module,
-        ancestors.get_ancestors(directory).iter(),
+        ancestors.get_ancestors(directory).iter().filter(|root| {
+            // A directory inside a regular package is never an import root at runtime,
+            // since it would truncate the package's module names.
+            !["__init__.py", "__init__.pyi"]
+                .iter()
+                .any(|init| dir_cache.file_exists(&root.join(init)))
+        }),
         options.module_options(style_filter, &mut namespaces),
     )
     .or_else(|| {
@@ -2999,17 +3006,17 @@ mod tests {
         );
         let config = directory_relative_fallback_config(root, &[], &[]);
 
-        // BUG: a directory inside a regular package is never a root at runtime, so
-        // the fallback should not resolve `foo` to the enclosing package or `baz` to
-        // the importing file itself.
-        assert_eq!(
+        // A directory inside a regular package is never a root at runtime, so the
+        // fallback resolves neither `foo` to the enclosing package nor `baz` to the
+        // importing file itself.
+        assert!(matches!(
             find_import_from(&config, "foo", &root.join("pkg/foo/bar.py")),
-            fallback_finding(root.join("pkg/foo/__init__.py"), "foo"),
-        );
-        assert_eq!(
+            FindingOrError::Error(FindError::MissingImport(..)),
+        ));
+        assert!(matches!(
             find_import_from(&config, "baz", &root.join("pkg/baz.py")),
-            fallback_finding(root.join("pkg/baz.py"), "baz"),
-        );
+            FindingOrError::Error(FindError::MissingImport(..)),
+        ));
         // A directory outside any package can be a root, e.g. when running a script.
         assert_eq!(
             find_import_from(&config, "qux", &root.join("scripts/qux.py")),

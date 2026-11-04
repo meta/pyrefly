@@ -351,7 +351,9 @@ See more on [how Pyrefly does import resolution](import-resolution.mdx).
 
 When enabled, Pyrefly resolves an otherwise-unresolved import by searching each
 directory from the importing file up to the directory that contains your
-config, using the first match it finds. This is a best-effort way to make
+config, using the first match it finds. Directories that belong to a regular
+package (that is, contain an `__init__.py` or `__init__.pyi`) are skipped, since
+they cannot be import roots without truncating the package's module names. This is a best-effort way to make
 imports resolve when a module is importable relative to one of its parent
 directories but that directory isn't listed in [`search-path`](#search-path).
 
