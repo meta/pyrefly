@@ -18,6 +18,7 @@ use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::types::class_metadata::DataclassKind;
 use crate::binding::pydantic::GET_PYDANTIC_CORE_SCHEMA;
+use crate::module::typeshed::typeshed;
 use crate::types::class::Class;
 use crate::types::types::Type;
 
@@ -274,7 +275,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 let targs = cls.targs().as_slice();
                 if targs.is_empty() {
-                    return ty.clone();
+                    // Enums and namedtuples have built-in schemas that accept more than instances,
+                    // as do some stdlib classes whose lax conversions we don't model precisely, so
+                    // we map all stdlib classes to `Any` as a conservative approximation. Pydantic
+                    // validates other classes with `isinstance`.
+                    return if metadata.is_enum()
+                        || metadata.named_tuple_metadata().is_some()
+                        || typeshed().is_ok_and(|ts| ts.has_module(class_obj.module_name()))
+                    {
+                        self.heap.mk_any_explicit()
+                    } else {
+                        ty.clone()
+                    };
                 }
 
                 // Special handling for dict and Mapping: don't expand key type

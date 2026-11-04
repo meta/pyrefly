@@ -406,6 +406,35 @@ assert_type(m.custom_model, CustomModel)
 );
 
 pydantic_testcase!(
+    test_lax_mode_builtin_schema_inputs,
+    r#"
+from enum import Enum, IntEnum
+from ipaddress import IPv4Address
+from typing import NamedTuple, assert_type
+from pydantic import BaseModel
+
+class Color(Enum):
+    RED = "red"
+
+class Level(IntEnum):
+    LOW = 1
+
+class Point(NamedTuple):
+    x: int
+
+class Model(BaseModel):
+    color: Color
+    level: Level
+    point: Point
+    ip: IPv4Address
+
+m = Model(color="red", level=1, point=(1,), ip="1.2.3.4")
+assert_type(m.color, Color)
+assert_type(m.point, Point)
+    "#,
+);
+
+pydantic_testcase!(
     test_lax_mode_list_and_set_invariance,
     r#"
 from pydantic import BaseModel
