@@ -79,6 +79,8 @@ pub struct PyrightConfig {
     pub errors: RuleOverrides,
     #[serde(default, rename = "executionEnvironments")]
     pub execution_environments: Vec<ExecEnv>,
+    #[serde(rename = "baselineFile")]
+    pub baseline_file: Option<PathBuf>,
     #[serde(skip, default)]
     pub is_basedpyright: bool,
 }
@@ -631,12 +633,13 @@ pub struct PyrightNotFoundError {}
 #[error("Both `[tool.pyright]` and `[tool.basedpyright]` sections are not supported.")]
 pub struct BothPyrightSectionsError {}
 
-/// Migrate the pyright or basedpyright section of a `pyproject.toml`.
+/// Parse the pyright or basedpyright section of a `pyproject.toml`.
 ///
 /// Exactly one of `[tool.pyright]` and `[tool.basedpyright]` must be present:
 /// this is the parse boundary that enforces that invariant, so callers do not
-/// have to check for the sections themselves before calling.
-pub fn parse_pyproject_toml(raw_file: &str) -> anyhow::Result<ConfigFile> {
+/// have to check for the sections themselves before calling. Callers that want
+/// a Pyrefly config call [`PyrightConfig::convert`].
+pub fn parse_pyproject_toml(raw_file: &str) -> anyhow::Result<PyrightConfig> {
     #[derive(Deserialize)]
     struct Tool {
         pyright: Option<PyrightConfig>,
@@ -652,7 +655,7 @@ pub fn parse_pyproject_toml(raw_file: &str) -> anyhow::Result<ConfigFile> {
         .tool
         .ok_or(anyhow::anyhow!(PyrightNotFoundError {}))?;
 
-    let config = match (tool.pyright, tool.basedpyright) {
+    match (tool.pyright, tool.basedpyright) {
         (Some(pyright), None) => Ok(pyright),
         (None, Some(mut basedpyright)) => {
             basedpyright.is_basedpyright = true;
@@ -660,9 +663,7 @@ pub fn parse_pyproject_toml(raw_file: &str) -> anyhow::Result<ConfigFile> {
         }
         (Some(_), Some(_)) => Err(anyhow::anyhow!(BothPyrightSectionsError {})),
         (None, None) => Err(anyhow::anyhow!(PyrightNotFoundError {})),
-    }?;
-
-    Ok(PyrightConfig::convert(config))
+    }
 }
 
 #[cfg(test)]
@@ -806,7 +807,7 @@ executionEnvironments = [
   { root = "src" }
 ]
 "#;
-        let result = parse_pyproject_toml(src).unwrap();
+        let result = parse_pyproject_toml(src).unwrap().convert();
         assert_eq!(result.preset, None);
     }
 
@@ -814,7 +815,7 @@ executionEnvironments = [
     fn test_convert_from_pyproject_basedpyright() {
         let src = r#"[tool.basedpyright]
 "#;
-        let result = parse_pyproject_toml(src).unwrap();
+        let result = parse_pyproject_toml(src).unwrap().convert();
         assert_eq!(result.preset, Some(Preset::All));
     }
 
@@ -823,7 +824,7 @@ executionEnvironments = [
         let src = r#"[tool.basedpyright]
 typeCheckingMode = "basic"
 "#;
-        let result = parse_pyproject_toml(src).unwrap();
+        let result = parse_pyproject_toml(src).unwrap().convert();
         assert_eq!(result.preset, None);
     }
 
