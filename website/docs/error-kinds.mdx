@@ -2878,7 +2878,9 @@ Default severity: `warn`
 
 Type information for some third-party libraries is shipped in a stubs package separate from the
 library's source code. This error is emitted when we detect that a library is being used without
-the recommended stubs package being installed.
+the recommended stubs package being installed. It only applies to libraries found on the site package
+path that do not ship a `py.typed` file; modules found on the search path, such as local stubs in a
+`typings/` directory or your own code, are never reported.
 
 ## untyped-namedtuple
 

@@ -159,7 +159,7 @@ fn combine_normal_and_stub_results(
     normal_result: Option<FindResult>,
     namespaces_found: Option<&mut Vec<PathBuf>>,
     dir_cache: &DirEntryCache,
-    replace_untyped: bool,
+    site_package_policy: Option<&SitePackagePolicy>,
 ) -> Option<FindingOrError<ModulePath>> {
     match (normal_result, stub_result) {
         // A partial stub that resolved only to a bare namespace does not itself
@@ -192,8 +192,14 @@ fn combine_normal_and_stub_results(
             None
         }
         (Some(normal_result), None) => {
+            let Some(SitePackagePolicy {
+                replace_untyped, ..
+            }) = site_package_policy
+            else {
+                return Some(find_result_module_path(normal_result));
+            };
             let recommended_stubs = recommended_stubs_package(module);
-            if replace_untyped || recommended_stubs.is_some() {
+            if *replace_untyped || recommended_stubs.is_some() {
                 // We look up `py.typed` only after we've checked that we actually need it because
                 // this does a filesystem walk.
                 let untyped = !package_has_py_typed(module, &normal_result, dir_cache);
@@ -203,7 +209,7 @@ fn combine_normal_and_stub_results(
                 } else {
                     None
                 };
-                if untyped && replace_untyped {
+                if untyped && *replace_untyped {
                     Some(FindingOrError::from_error_opt(hint))
                 } else {
                     Some(find_result_module_path(normal_result).with_error_opt(hint))
@@ -216,9 +222,7 @@ fn combine_normal_and_stub_results(
     }
 }
 
-/// How to treat installed distributions. Only meaningful when searching site
-/// package roots.
-#[derive(Default)]
+/// How to treat installed distributions when searching site package roots.
 struct SitePackagePolicy {
     /// The stub Pyrefly bundles for this module, if it ships one.
     typeshed_third_party_stub: Option<FindingOrError<ModulePath>>,
@@ -243,9 +247,10 @@ struct FindModuleOptions<'a> {
     /// found that matches wins; if nothing matches we return `None` even when
     /// there were other results.
     style_filter: Option<ModuleStyle>,
-    /// How to treat installed distributions. Only meaningful when `include` is a
-    /// list of site package roots.
-    site_package_policy: SitePackagePolicy,
+    /// How to treat installed distributions. Set exactly when `include` is a list
+    /// of site package roots: whether a package is typed (PEP 561) is a property of
+    /// installed distributions, so modules found elsewhere are never untyped.
+    site_package_policy: Option<SitePackagePolicy>,
     /// A [`FindResult::ImplicitNamespacePackage`] is appended here rather than
     /// returned, since a higher-priority [`FindResult`] variant may still turn up
     /// in a later search location. It is the caller's responsibility to recognize
@@ -264,7 +269,7 @@ impl<'a> FindModuleOptions<'a> {
     fn new(dir_cache: &'a DirEntryCache) -> Self {
         Self {
             style_filter: None,
-            site_package_policy: SitePackagePolicy::default(),
+            site_package_policy: None,
             namespaces_found: None,
             phantom_paths: None,
             dir_cache,
@@ -294,13 +299,15 @@ where
         options.dir_cache,
         observer(options.timing),
     );
-    if let Some(result) = resolve_third_party_stub(
-        module,
-        results.stub_result.as_ref(),
-        results.normal_result.as_ref(),
-        &options.site_package_policy,
-        options.dir_cache,
-    ) {
+    if let Some(policy) = &options.site_package_policy
+        && let Some(result) = resolve_third_party_stub(
+            module,
+            results.stub_result.as_ref(),
+            results.normal_result.as_ref(),
+            policy,
+            options.dir_cache,
+        )
+    {
         return Some(result);
     }
     combine_normal_and_stub_results(
@@ -309,7 +316,7 @@ where
         results.normal_result,
         options.namespaces_found,
         options.dir_cache,
-        options.site_package_policy.replace_untyped,
+        options.site_package_policy.as_ref(),
     )
 }
 
@@ -760,7 +767,7 @@ pub(crate) fn find_import_with_mode(
         module,
         config.site_package_path(),
         FindModuleOptions {
-            site_package_policy: SitePackagePolicy {
+            site_package_policy: Some(SitePackagePolicy {
                 typeshed_third_party_stub: find_third_party_stub(module, style_filter),
                 from_real_config_file,
                 // A style-filtered search asks where a module's implementation file
@@ -768,7 +775,7 @@ pub(crate) fn find_import_with_mode(
                 // resolving to the real source.
                 replace_untyped: style_filter.is_none()
                     && config.replace_untyped_imports_with_any(origin, module),
-            },
+            }),
             ..options.module_options(style_filter, &mut namespaces_found)
         },
     ) {
@@ -4042,37 +4049,48 @@ mod tests {
     }
 
     #[test]
-    fn test_untyped_import_for_stubs_on_search_path() {
+    fn test_no_untyped_import_on_search_path() {
         let tempdir = tempfile::tempdir().unwrap();
         let root = tempdir.path();
         TestPath::setup_test_directory(
             root,
-            vec![TestPath::dir(
-                "typings",
-                vec![TestPath::dir(
-                    "requests",
-                    vec![TestPath::file("__init__.pyi")],
-                )],
-            )],
+            vec![
+                TestPath::dir(
+                    "typings",
+                    vec![TestPath::dir(
+                        "requests",
+                        vec![TestPath::file("__init__.pyi")],
+                    )],
+                ),
+                TestPath::dir(
+                    "src",
+                    vec![TestPath::dir("django", vec![TestPath::file("__init__.py")])],
+                ),
+            ],
         );
         let mut config = get_config(ConfigSource::File(root.join("pyrefly.toml")));
-        config.search_path_from_file = vec![root.join("typings")];
-
-        let module = ModuleName::from_str("requests");
-        // BUG: the module is a stub, so it should not be reported as untyped.
-        assert_eq!(
+        config.search_path_from_file = vec![root.join("typings"), root.join("src")];
+        let find = |module| {
             find_import(
                 &config,
-                module,
-                FindImportOptions::new(&DirEntryCache::new())
-            ),
-            FindingOrError::Finding(Finding {
-                finding: ModulePath::filesystem(root.join("typings/requests/__init__.pyi")),
-                error: Some(FindError::UntypedImport(
-                    module,
-                    Arc::new("types-requests".to_owned())
-                )),
-            })
+                ModuleName::from_str(module),
+                FindImportOptions::new(&DirEntryCache::new()),
+            )
+        };
+
+        // Only installed distributions can be untyped (PEP 561), so neither local
+        // stubs nor first-party code on the search path is reported.
+        assert_eq!(
+            find("requests"),
+            FindingOrError::new_finding(ModulePath::filesystem(
+                root.join("typings/requests/__init__.pyi")
+            ))
+        );
+        assert_eq!(
+            find("django"),
+            FindingOrError::new_finding(ModulePath::filesystem(
+                root.join("src/django/__init__.py")
+            ))
         );
     }
 
