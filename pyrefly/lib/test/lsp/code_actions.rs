@@ -9,20 +9,31 @@ use std::fs;
 
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
+use pyrefly_python::ast::Ast;
 use pyrefly_python::module::Module;
+use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::sys_info::PythonVersion;
+use ruff_python_ast::PySourceType;
+use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
+use crate::config::error_kind::ErrorKind;
 use crate::module::module_info::ModuleInfo;
+use crate::state::ide::import_regular_import_edit;
+use crate::state::ide::insert_from_import_edit;
+use crate::state::ide::insert_import_edit;
 use crate::state::lsp::ImportFormat;
 use crate::state::lsp::LocalRefactorCodeAction;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
+use crate::test::util::UNUSED_SUPPRESSION_TEST_CASES;
 use crate::test::util::extract_cursors_for_test;
 use crate::test::util::get_batched_lsp_operations_report_allow_error;
 use crate::test::util::mk_multi_file_state;
 use crate::test::util::mk_multi_file_state_assert_no_errors;
+use crate::test::util::mk_multi_file_state_with_env;
 
 fn apply_patch(info: &ModuleInfo, range: TextRange, patch: String) -> (String, String) {
     let before = info.contents().as_str().to_owned();
@@ -645,6 +656,29 @@ fn compute_extract_superclass_actions(
     })
 }
 
+fn compute_implement_abstract_actions(
+    code: &str,
+    assert_zero_errors: bool,
+) -> (
+    ModuleInfo,
+    Vec<Vec<(Module, TextRange, String)>>,
+    Vec<String>,
+) {
+    let (handles, state) =
+        mk_multi_file_state(&[("main", code)], Require::Everything, assert_zero_errors);
+    let handle = handles.get("main").unwrap();
+    let transaction = state.transaction();
+    let module_info = transaction.get_module_info(handle).unwrap();
+    let selection = find_marked_range_with(code, "# ACTION-START", "# ACTION-END");
+    let actions = transaction
+        .implement_abstract_members_code_actions(handle, selection, ImportFormat::Absolute)
+        .unwrap_or_default();
+    let edit_sets: Vec<Vec<(Module, TextRange, String)>> =
+        actions.iter().map(|action| action.edits.clone()).collect();
+    let titles = actions.iter().map(|action| action.title.clone()).collect();
+    (module_info, edit_sets, titles)
+}
+
 #[test]
 fn basic_test() {
     let report = get_batched_lsp_operations_report_allow_error(
@@ -818,6 +852,156 @@ BytesIO
 }
 
 #[test]
+fn import_edits_with_non_future_imports() {
+    let (handles, _) = mk_multi_file_state(
+        &[("main", ""), ("my_module", "x = 1\n")],
+        Require::Exports,
+        false,
+    );
+    for (docstring, body) in [
+        ("", "from .__future__ import annotations\n"),
+        (
+            "\"\"\"Módulo.\"\"\"\n",
+            "from .__future__ import annotations\n",
+        ),
+        ("", "import __future__\n"),
+        ("", "value = 0\n"),
+        ("\"\"\"Módulo.\"\"\"\n", "value = 0\n"),
+    ] {
+        let source = format!("{docstring}{body}");
+        let (ast, errors, _) = Ast::parse(&source, PySourceType::Python);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let (position, _, _) = import_regular_import_edit(&ast, handles["my_module"].clone(), None);
+        let from_edit = insert_from_import_edit(&ast, handles["my_module"].module(), "x");
+        assert_eq!(position.to_usize(), docstring.len());
+        assert_eq!(from_edit.range.start().to_usize(), docstring.len());
+    }
+}
+
+#[test]
+fn import_edits_with_future_imports() {
+    let (handles, _) = mk_multi_file_state(
+        &[("main", ""), ("my_module", "x = 1\n")],
+        Require::Exports,
+        false,
+    );
+    for (header, body) in [
+        ("from __future__ import annotations\n", "value = 0\n"),
+        (
+            "\"\"\"Module docstring.\"\"\"\nfrom __future__ import annotations\n",
+            "value = 0\n",
+        ),
+        (
+            "# Header comment\nfrom __future__ import annotations  # Keep this comment\n\n",
+            "value = 0\n",
+        ),
+        (
+            "from __future__ import annotations\nfrom __future__ import division\n",
+            "value = 0\n",
+        ),
+        (
+            "from __future__ import (\n    annotations,\n)\n",
+            "value = 0\n",
+        ),
+        ("from __future__ import annotations\n", ""),
+        ("from __future__ import annotations", ""),
+        ("from __future__ import annotations  # Final comment", ""),
+    ] {
+        let source = format!("{header}{body}");
+        let (ast, errors, _) = Ast::parse(&source, PySourceType::Python);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let (position, text, _) =
+            import_regular_import_edit(&ast, handles["my_module"].clone(), None);
+        let (alias_position, alias_text, _) =
+            import_regular_import_edit(&ast, handles["my_module"].clone(), Some("m"));
+        let from_edit = insert_from_import_edit(&ast, handles["my_module"].module(), "x");
+        for (position, text) in [
+            (position, text),
+            (alias_position, alias_text),
+            (from_edit.range.start(), from_edit.insert_text),
+        ] {
+            assert_eq!(position.to_usize(), header.len());
+            assert_eq!(text.starts_with('\n'), body.is_empty());
+            let after = format!(
+                "{}{}{}",
+                &source[..position.to_usize()],
+                text,
+                &source[position.to_usize()..],
+            );
+            let (_, errors, _) = Ast::parse(&after, PySourceType::Python);
+            assert!(errors.is_empty(), "{after}: {errors:?}");
+            let (fixed_handles, fixed_state) = mk_multi_file_state(
+                &[("main", &after), ("my_module", "x = 1\n")],
+                Require::Exports,
+                false,
+            );
+            let errors = fixed_state
+                .transaction()
+                .get_errors(vec![&fixed_handles["main"]])
+                .collect_errors()
+                .ordinary;
+            assert!(
+                errors
+                    .iter()
+                    .all(|error| error.error_kind() != ErrorKind::InvalidSyntax),
+                "{after}",
+            );
+        }
+    }
+}
+
+#[test]
+fn code_action_imports_with_future_imports() {
+    for newline in ["\n", "\r\n"] {
+        let header = format!(
+            "\"\"\"Module docstring.\"\"\"{newline}from __future__ import annotations{newline}"
+        );
+        for (name, title) in [
+            ("my_module", "Insert import: `import my_module`"),
+            ("x", "Insert import: `from my_module import x`"),
+            ("np", "Use common alias: `import numpy as np`"),
+        ] {
+            let code = format!("{header}{name}{newline}");
+            let (handles, state) = mk_multi_file_state(
+                &[("main", &code), ("my_module", "x = 1\n"), ("numpy", "")],
+                Require::Exports,
+                false,
+            );
+            let transaction = state.transaction();
+            let actions = transaction
+                .local_quickfix_code_actions_sorted(
+                    &handles["main"],
+                    TextRange::empty(TextSize::try_from(header.len()).unwrap()),
+                    ImportFormat::Absolute,
+                    None,
+                )
+                .unwrap();
+            let (_, edits) = actions.iter().find(|(name, _)| name == title).unwrap();
+            let after = apply_refactor_edits_for_module(&edits[0].0, edits);
+            assert_eq!(edits[0].1.start().to_usize(), header.len());
+            assert!(edits[0].2.ends_with(newline));
+            assert!(after.starts_with(&header));
+        }
+        let code = format!("{header}value = {{\"x\": 1}}{newline}");
+        let (handles, state) = mk_multi_file_state(&[("main", &code)], Require::Exports, false);
+        let actions = state
+            .transaction()
+            .convert_dict_code_actions(
+                &handles["main"],
+                TextRange::empty(TextSize::try_from(code.find('{').unwrap()).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(actions.len(), 3);
+        for action in actions {
+            let import_edit = &action.edits[0];
+            assert_eq!(import_edit.1.start().to_usize(), header.len());
+            let after = apply_refactor_edits_for_module(&import_edit.0, &action.edits);
+            assert!(after.starts_with(&header));
+        }
+    }
+}
+
+#[test]
 fn insertion_test_module_import() {
     let report = get_batched_lsp_operations_report_allow_error(
         &[("my_module", "my_export = 3\n"), ("b", "my_module\n# ^")],
@@ -885,6 +1069,148 @@ my_module
 }
 
 #[test]
+fn insertion_test_implicit_import() {
+    for (code, after) in [
+        (
+            "import foo\nx = foo.bar.x\n",
+            Some("import foo.bar\nx = foo.bar.x\n"),
+        ),
+        ("import foo as f\nx = f.bar.x\n", None),
+        ("import foo.bar as foo\nx = foo.baz.x\n", None),
+        (
+            "import foo.bar\nx = foo.bar.baz.x\n",
+            Some("import foo.bar.baz\nx = foo.bar.baz.x\n"),
+        ),
+        ("from foo import bar\nx = bar.baz.x\n", None),
+        (
+            "import foo\r\nx = foo.bar.x\r\n",
+            Some("import foo.bar\r\nx = foo.bar.x\r\n"),
+        ),
+        (
+            "def f():\n    import foo\n    return foo.bar.x\n",
+            Some("def f():\n    import foo.bar\n    return foo.bar.x\n"),
+        ),
+        (
+            "import foo\ny = foo\ndef f():\n    import foo\n    return foo.bar.x\n",
+            Some("import foo\ny = foo\ndef f():\n    import foo.bar\n    return foo.bar.x\n"),
+        ),
+        (
+            "def f(): import foo; return foo.bar.x\n",
+            Some("def f(): import foo.bar; return foo.bar.x\n"),
+        ),
+        ("def f():\n    import foo as f\n    return f.bar.x\n", None),
+        ("import str as s\ny = str(1)\nx = s.bar.x\n", None),
+        (
+            "def f(flag: bool):\n    if flag:\n        import foo\n    else:\n        import foo\n    return foo.bar.x\n",
+            None,
+        ),
+        (
+            "def f(items: list[int]):\n    import foo\n    for _ in items:\n        import foo\n    return foo.bar.x\n",
+            None,
+        ),
+        (
+            "def f(items: list[int]):\n    import foo\n    for _ in items:\n        print(foo.bar.x)\n        import foo\n",
+            None,
+        ),
+    ] {
+        let env = || {
+            let mut env = TestEnv::new();
+            env.add_with_path("foo", "foo/__init__.py", "");
+            env.add_with_path("foo.bar", "foo/bar/__init__.py", "x = 1\n");
+            env.add_with_path("foo.bar.baz", "foo/bar/baz.py", "x = 2\n");
+            env.add_with_path("str", "str/__init__.py", "");
+            env.add_with_path("str.bar", "str/bar.py", "x = 1\n");
+            env
+        };
+        let (handles, state) =
+            mk_multi_file_state_with_env(env(), &[("main", code)], Require::Exports, false);
+        let handle = &handles["main"];
+        let transaction = state.transaction();
+        let errors = transaction
+            .get_errors(vec![handle])
+            .collect_errors()
+            .ordinary;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].error_kind(), ErrorKind::ImplicitImport);
+        let position = errors[0].range().start();
+        let actions = transaction
+            .local_quickfix_code_actions_sorted(
+                handle,
+                TextRange::empty(position),
+                ImportFormat::Absolute,
+                None,
+            )
+            .unwrap_or_default();
+        let Some(after) = after else {
+            assert!(
+                !actions
+                    .iter()
+                    .any(|(title, _)| title.starts_with("Insert import:"))
+            );
+            assert!(
+                transaction
+                    .get_answers(handle)
+                    .unwrap()
+                    .bindings()
+                    .unused_imports()
+                    .is_empty()
+            );
+            continue;
+        };
+        let (_, edits) = actions
+            .iter()
+            .find(|(title, _)| title.starts_with("Insert import:"))
+            .unwrap_or_else(|| panic!("expected import action for {code}"));
+        assert_eq!(apply_refactor_edits_for_module(&edits[0].0, edits), after);
+        let (fixed_handles, fixed_state) =
+            mk_multi_file_state_with_env(env(), &[("main", after)], Require::Exports, true);
+        assert!(
+            fixed_state
+                .transaction()
+                .get_answers(&fixed_handles["main"])
+                .unwrap()
+                .bindings()
+                .unused_imports()
+                .is_empty()
+        );
+
+        let unrelated_actions = transaction
+            .local_quickfix_code_actions_sorted(
+                handle,
+                TextRange::empty(TextSize::new(0)),
+                ImportFormat::Absolute,
+                None,
+            )
+            .unwrap_or_default();
+        assert!(
+            !unrelated_actions
+                .iter()
+                .any(|(title, _)| title.starts_with("Insert import:"))
+        );
+    }
+}
+#[test]
+fn insertion_test_module_import_after_future_import() {
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[
+            ("my_module", "my_export = 3\n"),
+            ("b", "from __future__ import annotations\nmy_module\n# ^"),
+        ],
+        get_test_report,
+    );
+    assert!(
+        report.contains(
+            r#"## After:
+from __future__ import annotations
+import my_module
+my_module
+# ^"#
+        ),
+        "{report}",
+    );
+}
+
+#[test]
 fn insertion_test_common_alias_module_import() {
     let code = r#"
 np
@@ -943,6 +1269,31 @@ fn insert_import_uses_file_line_ending() {
         edits[0].2, "from a import my_export\r\n",
         "import inserted into a CRLF file should use CRLF line endings"
     );
+}
+
+#[test]
+fn insert_import_after_future_imports() {
+    for (unknown, import) in [
+        ("my_export", "from a import my_export"),
+        ("np", "import numpy as np"),
+    ] {
+        let code = format!(
+            "\"\"\"Module documentation.\"\"\"\n\
+             from __future__ import annotations\n\
+             from __future__ import generator_stop\n\
+             {unknown}\n# ^\n"
+        );
+        let report = get_batched_lsp_operations_report_allow_error(
+            &[("a", "my_export = 3\n"), ("numpy", ""), ("main", &code)],
+            get_test_report,
+        );
+        assert!(
+            report.contains(&format!(
+                "from __future__ import generator_stop\n{import}\n{unknown}"
+            )),
+            "{report}"
+        );
+    }
 }
 
 #[test]
@@ -1224,6 +1575,616 @@ def f(x: T | None) -> None:
 }
 
 #[test]
+fn quickfix_deprecated_contextmanager_return() {
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[(
+            "main",
+            r#"from contextlib import contextmanager
+from typing import Iterator
+
+@contextmanager
+# ^
+def managed() -> Iterator[int]:
+    yield 1
+"#,
+        )],
+        get_test_report,
+    );
+    assert!(
+        report.contains("# Title: Replace `Iterator` with `Generator`"),
+        "{report}"
+    );
+    assert!(report.contains("from typing import Generator"), "{report}");
+    assert!(
+        report.contains("def managed() -> Generator[int]:"),
+        "{report}"
+    );
+}
+
+fn apply_contextmanager_fix(code: &str, minor: u32) -> Option<String> {
+    let (handles, state) = mk_multi_file_state_with_env(
+        TestEnv::new_with_version(PythonVersion::new(3, minor, 0)),
+        &[
+            ("api", "Generator = int\nAsyncGenerator = int\n"),
+            ("main", code),
+        ],
+        Require::Exports,
+        false,
+    );
+    let transaction = state.transaction();
+    let handle = &handles["main"];
+    for position in extract_cursors_for_test(code) {
+        let actions = transaction
+            .local_quickfix_code_actions_sorted(
+                handle,
+                TextRange::empty(position),
+                ImportFormat::Absolute,
+                None,
+            )
+            .unwrap_or_default();
+        if let Some((_, edits)) = actions.iter().find(|(title, _)| {
+            title == "Replace `Iterator` with `Generator`"
+                || title == "Replace `AsyncIterator` with `AsyncGenerator`"
+        }) {
+            let module = transaction.get_module_info(handle).unwrap();
+            let after = apply_refactor_edits_for_module(&module, edits);
+            let (_, errors, _) = Ast::parse(&after, PySourceType::Python);
+            assert!(errors.is_empty(), "{errors:?}\n{after}");
+            return Some(after);
+        }
+    }
+    None
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_preserves_annotation_source() {
+    for (decorator, iterator, generator, async_prefix, defaults) in [
+        (
+            "contextmanager",
+            "Iterator",
+            "Generator",
+            "",
+            ", None, None",
+        ),
+        (
+            "asynccontextmanager",
+            "AsyncIterator",
+            "AsyncGenerator",
+            "async ",
+            ", None",
+        ),
+    ] {
+        for minor in [12, 13] {
+            for newline in ["\n", "\r\n"] {
+                for annotation in [
+                    "ITERATOR[int@@]",
+                    "ITERATOR[int@@,]",
+                    "ITERATOR[\n    Literal[\n        'first',\n        'second',\n    ]@@, # Keep the trailing comma.\n]",
+                    "ITERATOR[\n    ((Literal[\n        'first',\n        'second',\n    ]))@@, # Keep the parentheses.\n]",
+                    "(ITERATOR # Keep the name comment.\n)[(Literal['''first\nsecond'''])@@,]",
+                    "ITERATOR[(int # Keep the argument comment.\n)@@,]",
+                    "ITERATOR[(int@@,)]",
+                ] {
+                    let prefix = format!(
+                        "from contextlib import {decorator}\n\
+                         from typing import {iterator}, {generator}, Literal, Any\n\n\
+                         @{decorator}\n# ^\n{async_prefix}def managed(value: Any) -> "
+                    );
+                    let suffix = ":\n    yield value\n";
+                    let before = format!(
+                        "{prefix}{}{suffix}",
+                        annotation.replace("ITERATOR", iterator).replace("@@", "")
+                    )
+                    .replace('\n', newline);
+                    let expected = format!(
+                        "{prefix}{}{suffix}",
+                        annotation
+                            .replace("ITERATOR", generator)
+                            .replace("@@", if minor < 13 { defaults } else { "" })
+                    )
+                    .replace('\n', newline);
+                    let after = apply_contextmanager_fix(&before, minor)
+                        .unwrap_or_else(|| panic!("No fix for Python 3.{minor}: {before}"));
+                    assert_eq!(after, expected, "Python 3.{minor}");
+                    assert!(!after.contains("\r\r\n"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_block_wildcard_imports() {
+    for block in [
+        "if True:\n    from api import *\n",
+        "try:\n    from api import *\nexcept ImportError:\n    pass\n",
+        "for item in [1]:\n    from api import *\n",
+        "while False:\n    from api import *\n",
+    ] {
+        for (decorator, iterator, async_prefix) in [
+            ("contextmanager", "Iterator", ""),
+            ("asynccontextmanager", "AsyncIterator", "async "),
+        ] {
+            let code = format!(
+                "from contextlib import {decorator}\nfrom typing import {iterator}\n\
+                 {block}\n@{decorator}\n# ^\n{async_prefix}def managed() -> {iterator}[int]:\n    yield 1\n"
+            );
+            assert!(apply_contextmanager_fix(&code, 13).is_none(), "{code}");
+        }
+    }
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_normalized_binding_names() {
+    for (decorator, iterator, generator, normalized_collision, async_prefix) in [
+        ("contextmanager", "Iterator", "Generator", "Ｇenerator", ""),
+        (
+            "asynccontextmanager",
+            "AsyncIterator",
+            "AsyncGenerator",
+            "ＡsyncGenerator",
+            "async ",
+        ),
+    ] {
+        for (scope, indent) in [
+            (format!("{normalized_collision} = int\n"), ""),
+            (format!("def {normalized_collision}():\n    pass\n"), ""),
+            (format!("class {normalized_collision}:\n    pass\n"), ""),
+            (format!("def outer({normalized_collision}: int):\n"), "    "),
+            (
+                format!("def outer():\n    {normalized_collision} = int\n"),
+                "    ",
+            ),
+        ] {
+            let code = format!(
+                "from contextlib import {decorator}\nfrom typing import {iterator}\n\
+                 {scope}{indent}@{decorator}\n#{indent} ^\n\
+                 {indent}{async_prefix}def managed() -> {iterator}[int]:\n{indent}    yield 1\n"
+            );
+            let after = apply_contextmanager_fix(&code, 13).unwrap();
+            assert!(
+                after.contains(&format!(
+                    "from typing import {generator} as {generator}_1\n"
+                )),
+                "{after}"
+            );
+            assert!(
+                after.contains(&format!("def managed() -> {generator}_1[int]:")),
+                "{after}"
+            );
+        }
+    }
+    let code = "from contextlib import contextmanager\n\
+                from typing import Iterator, AsyncGenerator\n\
+                # Generator and Generator_1 in comments do not bind names.\n\
+                GeneratorExit = int\n\n\
+                @contextmanager\n# ^\ndef managed() -> Iterator[int]:\n    yield 1\n";
+    let after = apply_contextmanager_fix(code, 13).unwrap();
+    assert!(
+        after.starts_with("from typing import Generator\n"),
+        "{after}"
+    );
+    assert!(
+        after.contains("def managed() -> Generator[int]:"),
+        "{after}"
+    );
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_requires_own_yield() {
+    for body in [
+        "    return iter([1])\n",
+        "    def nested():\n        yield 1\n    return iter([1])\n",
+        "    class Nested:\n        def values(self):\n            yield 1\n    return iter([1])\n",
+        "    nested = lambda: (yield 1)\n    return iter([1])\n",
+    ] {
+        let code = format!(
+            "from contextlib import contextmanager\nfrom typing import Iterator\n\n\
+             @contextmanager\n# ^\ndef managed() -> Iterator[int]:\n{body}"
+        );
+        assert!(apply_contextmanager_fix(&code, 13).is_none(), "{code}");
+    }
+    let code = "from contextlib import asynccontextmanager\nfrom typing import AsyncIterator\n\
+                async def producer() -> AsyncIterator[int]:\n    yield 1\n\n\
+                @asynccontextmanager\n# ^\ndef managed() -> AsyncIterator[int]:\n    return producer()\n";
+    assert!(apply_contextmanager_fix(code, 13).is_none());
+    let code = "from contextlib import asynccontextmanager\nfrom typing import AsyncIterator\n\n\
+                @asynccontextmanager\n# ^\ndef managed() -> AsyncIterator[int]:\n    yield 1\n";
+    assert!(apply_contextmanager_fix(code, 13).is_none());
+    let code = "from contextlib import contextmanager\nfrom typing import Iterator\n\n\
+                @contextmanager\n# ^\ndef managed() -> Iterator[int]:\n    yield from [1]\n";
+    assert!(apply_contextmanager_fix(code, 13).is_some());
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_reuses_imports_on_repeated_fixes() {
+    for (decorator, iterator, generator, async_prefix) in [
+        ("contextmanager", "Iterator", "Generator", ""),
+        (
+            "asynccontextmanager",
+            "AsyncIterator",
+            "AsyncGenerator",
+            "async ",
+        ),
+    ] {
+        for module in ["typing", "collections.abc"] {
+            for (import, binding) in [
+                (
+                    format!("from {module} import {iterator}\n"),
+                    generator.to_owned(),
+                ),
+                (
+                    format!("from {module} import {iterator}, {generator}\n"),
+                    generator.to_owned(),
+                ),
+                (
+                    format!("from {module} import {iterator}\n{generator} = int\n"),
+                    format!("{generator}_1"),
+                ),
+            ] {
+                let before = format!(
+                    "from contextlib import {decorator}\n{import}\n\
+                     @{decorator}\n# ^\n{async_prefix}def first() -> {iterator}[int]:\n    yield 1\n\n\
+                     @{decorator}\n# ^\n{async_prefix}def second() -> {iterator}[int]:\n    yield 2\n"
+                );
+                let first = apply_contextmanager_fix(&before, 13).unwrap();
+                let second = apply_contextmanager_fix(&first, 13).unwrap();
+                assert!(
+                    second.contains(&format!("def first() -> {binding}[int]:")),
+                    "{second}"
+                );
+                assert!(
+                    second.contains(&format!("def second() -> {binding}[int]:")),
+                    "{second}"
+                );
+                assert_eq!(
+                    first.matches(" import ").count(),
+                    second.matches(" import ").count()
+                );
+                assert!(apply_contextmanager_fix(&second, 13).is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_generator_import_aliases() {
+    for (decorator, iterator, generator, async_prefix, defaults) in [
+        (
+            "contextmanager",
+            "Iterator",
+            "Generator",
+            "",
+            ", None, None",
+        ),
+        (
+            "asynccontextmanager",
+            "AsyncIterator",
+            "AsyncGenerator",
+            "async ",
+            ", None",
+        ),
+    ] {
+        for module in ["typing", "collections.abc"] {
+            for minor in [12, 13] {
+                for (alias, binding) in [("G", "G"), ("__G__", "__G__"), ("__G", generator)] {
+                    let before = format!(
+                        "from contextlib import {decorator}\n\
+                         from {module} import {iterator}, {generator} as {alias}\n\n\
+                         class C:\n    @{decorator}\n#     ^\n    {async_prefix}def managed(self) -> {iterator}[int]:\n        yield 1\n"
+                    );
+                    let after = apply_contextmanager_fix(&before, minor).unwrap();
+                    let defaults = if minor < 13 { defaults } else { "" };
+                    assert!(
+                        after.contains(&format!("def managed(self) -> {binding}[int{defaults}]:")),
+                        "{after}"
+                    );
+                    let new_import = usize::from(binding == generator);
+                    assert_eq!(
+                        before.matches(" import ").count() + new_import,
+                        after.matches(" import ").count()
+                    );
+                    if new_import != 0 {
+                        assert!(
+                            after.starts_with(&format!("from typing import {generator}\n")),
+                            "{after}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_does_not_reuse_late_import() {
+    for (decorator, iterator, generator, async_prefix) in [
+        ("contextmanager", "Iterator", "Generator", ""),
+        (
+            "asynccontextmanager",
+            "AsyncIterator",
+            "AsyncGenerator",
+            "async ",
+        ),
+    ] {
+        let code = format!(
+            "from contextlib import {decorator}\nfrom typing import {iterator}\n\n\
+             @{decorator}\n# ^\n{async_prefix}def managed() -> {iterator}[int]:\n    yield 1\n\n\
+             from typing import {generator}\n"
+        );
+        let after = apply_contextmanager_fix(&code, 13).unwrap();
+        assert!(
+            after.starts_with(&format!(
+                "from typing import {generator} as {generator}_1\n"
+            )),
+            "{after}"
+        );
+        assert!(
+            after.contains(&format!("def managed() -> {generator}_1[int]:")),
+            "{after}"
+        );
+    }
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_qualified_and_async_returns() {
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[
+            (
+                "sync",
+                r#"import typing
+from contextlib import contextmanager
+
+@contextmanager
+# ^
+def managed() -> typing.Iterator[int]:
+    yield 1
+"#,
+            ),
+            (
+                "async",
+                r#"from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
+@asynccontextmanager
+# ^
+async def managed() -> AsyncIterator[int]:
+    yield 1
+"#,
+            ),
+        ],
+        get_test_report,
+    );
+    assert!(
+        report.contains("def managed() -> typing.Generator[int]:"),
+        "{report}"
+    );
+    assert!(
+        !report.contains("from typing import Generator\n"),
+        "{report}"
+    );
+    assert!(
+        report.contains("# Title: Replace `AsyncIterator` with `AsyncGenerator`"),
+        "{report}"
+    );
+    assert!(
+        report.contains("from typing import AsyncGenerator"),
+        "{report}"
+    );
+    assert!(
+        report.contains("async def managed() -> AsyncGenerator[int]:"),
+        "{report}"
+    );
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_python_versions() {
+    for minor in [10, 11, 12, 13] {
+        for (decorator, iterator, generator, async_prefix, defaults) in [
+            (
+                "contextmanager",
+                "Iterator",
+                "Generator",
+                "",
+                ", None, None",
+            ),
+            (
+                "asynccontextmanager",
+                "AsyncIterator",
+                "AsyncGenerator",
+                "async ",
+                ", None",
+            ),
+        ] {
+            let code = format!(
+                "from contextlib import {decorator}\nfrom typing import {iterator}\n\n\
+                 @{decorator}\n# ^\n{async_prefix}def managed() -> {iterator}[int]:\n    yield 1\n"
+            );
+            let (handles, state) = mk_multi_file_state_with_env(
+                TestEnv::new_with_version(PythonVersion::new(3, minor, 0)),
+                &[("main", &code)],
+                Require::Exports,
+                false,
+            );
+            let report =
+                get_test_report(&state, &handles["main"], extract_cursors_for_test(&code)[0]);
+            let defaults = if minor < 13 { defaults } else { "" };
+            assert!(
+                report.contains(&format!(
+                    "{async_prefix}def managed() -> {generator}[int{defaults}]:"
+                )),
+                "Python 3.{minor}: {report}"
+            );
+        }
+    }
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_preserves_future_imports() {
+    for line_ending in ["\n", "\r\n"] {
+        let code = r#""""Module documentation."""
+from __future__ import annotations
+from __future__ import generator_stop
+from contextlib import contextmanager
+from typing import Iterator
+
+@contextmanager
+# ^
+def managed() -> Iterator[int]:
+    yield 1
+"#
+        .replace('\n', line_ending);
+        let report =
+            get_batched_lsp_operations_report_allow_error(&[("main", &code)], get_test_report);
+        assert!(
+            report.contains(&format!(
+                "from __future__ import generator_stop{line_ending}\
+                 from typing import Generator{line_ending}\
+                 from contextlib import contextmanager"
+            )),
+            "{report}"
+        );
+        assert!(
+            report.contains("def managed() -> Generator[int]:"),
+            "{report}"
+        );
+    }
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_explicit_call_not_offered() {
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[(
+            "main",
+            r#"from contextlib import contextmanager
+from typing import Iterator
+
+def producer() -> Iterator[int]:
+    yield 1
+
+def wrapper() -> int:
+    contextmanager(producer)
+#                  ^
+    return 1
+"#,
+        )],
+        get_test_report_with_error_count,
+    );
+    assert!(report.contains("Error count: 1"), "{report}");
+    assert!(!report.contains("# Title: Replace `Iterator`"), "{report}");
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_wrappers_and_bound_aliases_not_offered() {
+    for annotation in [
+        "Annotated[Iterator[int], 'tag']",
+        "Bound",
+        "BoundAlias",
+        "Alias[int]",
+    ] {
+        let code = format!(
+            "from contextlib import contextmanager\n\
+             from typing import Annotated, Iterator, TypeAlias, TypeVar\n\
+             T = TypeVar('T')\n\
+             Bound = Iterator[int]\n\
+             BoundAlias: TypeAlias = Iterator[int]\n\
+             Alias = Iterator[T]\n\n\
+             @contextmanager\n# ^\ndef managed() -> {annotation}:\n    yield 1\n"
+        );
+        let report = get_batched_lsp_operations_report_allow_error(
+            &[("main", &code)],
+            get_test_report_with_error_count,
+        );
+        assert!(report.contains("Error count: 1"), "{report}");
+        assert!(!report.contains("# Title: Replace `Iterator`"), "{report}");
+    }
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_reexport_and_shadowed_binding() {
+    for (annotation, imports, binding) in [
+        ("api.Iterator[int]", "import api", "Generator"),
+        (
+            "It[int]",
+            "from typing import Iterator as It\nGenerator = int",
+            "Generator_1",
+        ),
+        (
+            "It[int]",
+            "from typing import Iterator as It, Generator\nGenerator = int",
+            "Generator_1",
+        ),
+    ] {
+        let code = format!(
+            "from contextlib import contextmanager\n{imports}\n\n\
+             @contextmanager\n# ^\ndef managed() -> {annotation}:\n    yield 1\n"
+        );
+        let report = get_batched_lsp_operations_report_allow_error(
+            &[
+                ("api", "from typing import Iterator as Iterator\n"),
+                ("main", &code),
+            ],
+            get_test_report,
+        );
+        assert!(
+            report.contains(&format!("def managed() -> {binding}[int]:")),
+            "{report}"
+        );
+        let import = if binding == "Generator" {
+            "from typing import Generator\n"
+        } else {
+            "from typing import Generator as Generator_1\n"
+        };
+        assert!(report.contains(import), "{report}");
+        assert!(!report.contains("api.Generator"), "{report}");
+    }
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_nested_shadowed_binding() {
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[(
+            "main",
+            r#"from contextlib import contextmanager
+from typing import Iterator
+
+def wrapper(Generator: type[int]) -> None:
+    @contextmanager
+#     ^
+    def managed() -> Iterator[int]:
+        yield 1
+"#,
+        )],
+        get_test_report,
+    );
+    assert!(
+        report.contains("from typing import Generator as Generator_1\n"),
+        "{report}"
+    );
+    assert!(
+        report.contains("def managed() -> Generator_1[int]:"),
+        "{report}"
+    );
+}
+
+#[test]
+fn quickfix_deprecated_contextmanager_qualified_module_aliases() {
+    for module in ["typing", "collections.abc"] {
+        let code = format!(
+            "import {module} as abc\nfrom contextlib import contextmanager\n\n\
+             @contextmanager\n# ^\ndef managed() -> abc.Iterator[tuple[int, str]]:\n    yield (1, 'a')\n"
+        );
+        let report =
+            get_batched_lsp_operations_report_allow_error(&[("main", &code)], get_test_report);
+        assert!(
+            report.contains("def managed() -> abc.Generator[tuple[int, str]]:"),
+            "{report}"
+        );
+        assert!(!report.contains("from typing import Generator"), "{report}");
+    }
+}
+
+#[test]
 fn quickfix_add_pyrefly_ignore_code_with_existing_comment() {
     let report = get_batched_lsp_operations_report_allow_error(
         &[(
@@ -1283,6 +2244,27 @@ x: int = "hello"  # pyrefly: ignore[bad-assignment, bad-return]
 }
 
 #[test]
+fn insertion_test_named_import_after_future_import() {
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[
+            ("a", "my_export = 3\n"),
+            ("b", "from __future__ import annotations\nmy_export\n# ^"),
+        ],
+        get_test_report,
+    );
+    assert!(
+        report.contains(
+            r#"## After:
+from __future__ import annotations
+from a import my_export
+my_export
+# ^"#
+        ),
+        "{report}",
+    );
+}
+
+#[test]
 fn quickfix_merge_pyrefly_ignore_codes_comment_line_above() {
     let report = get_batched_lsp_operations_report_allow_error(
         &[(
@@ -1311,6 +2293,129 @@ Code Actions Results:
         .trim(),
         report.trim()
     );
+}
+
+fn remove_unused_ignore_results(
+    mut env: TestEnv,
+    code: &str,
+    position: TextSize,
+) -> Vec<(String, String)> {
+    env.add("main", code);
+    let (state, handle_for_module) = env.enable_unused_ignore_errors().to_state();
+    let handle = handle_for_module("main");
+    let transaction = state.transaction();
+    let module_info = transaction.get_module_info(&handle).unwrap();
+    transaction
+        .local_quickfix_code_actions_sorted(
+            &handle,
+            TextRange::new(position, position),
+            ImportFormat::Absolute,
+            None,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(title, _)| title.starts_with("Remove"))
+        .map(|(title, edits)| (title, apply_refactor_edits_for_module(&module_info, &edits)))
+        .collect()
+}
+
+fn remove_unused_ignore_quickfix(code: &str, suppression: &str) -> (String, String) {
+    let position = TextSize::try_from(code.find(suppression).unwrap()).unwrap();
+    let mut actions = remove_unused_ignore_results(TestEnv::new(), code, position).into_iter();
+    let action = actions
+        .next()
+        .expect("expected remove-suppression quick fix");
+    assert!(actions.next().is_none(), "expected exactly one removal fix");
+    action
+}
+
+#[test]
+fn quickfix_remove_unused_suppression_shared_cases() {
+    for case in UNUSED_SUPPRESSION_TEST_CASES {
+        let (title, after) = remove_unused_ignore_quickfix(case.code, "# pyrefly: ignore");
+        assert_eq!(title, "Remove suppression comment", "{}", case.name);
+        assert_eq!(after, case.expected, "{}", case.name);
+    }
+}
+
+#[test]
+fn quickfix_remove_unused_type_ignore_line() {
+    let code = "# type: ignore\nx = 1\n";
+    let (title, after) = remove_unused_ignore_quickfix(code, "# type: ignore");
+    assert_eq!(title, "Remove suppression comment");
+    assert_eq!(after, "x = 1\n");
+}
+
+#[test]
+fn quickfix_remove_unused_pyre_suppression() {
+    let code = "x = 1  # pyre-fixme[7]\n";
+    let position = TextSize::try_from(code.find("# pyre-fixme[7]").unwrap()).unwrap();
+    let actions =
+        remove_unused_ignore_results(TestEnv::new().enable_pyre_ignores(), code, position);
+    assert_eq!(
+        actions,
+        vec![(
+            "Remove suppression comment".to_owned(),
+            "x = 1\n".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn quickfix_remove_partially_unused_pyrefly_ignore_codes() {
+    let code = "x: int = \"bad\"  # pyrefly: ignore [bad-assignment, unknown-name]\n";
+    let (title, after) = remove_unused_ignore_quickfix(code, "# pyrefly: ignore");
+    assert_eq!(title, "Remove unused suppression codes");
+    assert_eq!(
+        after,
+        "x: int = \"bad\"  # pyrefly: ignore [bad-assignment]\n"
+    );
+}
+
+#[test]
+fn quickfix_remove_partially_unused_unclosed_codes_preserves_next_comment() {
+    let code = "x: int = \"bad\"  # pyrefly: ignore [bad-assignment, unknown-name  # noqa\n";
+    let (title, after) = remove_unused_ignore_quickfix(code, "# pyrefly: ignore");
+    assert_eq!(title, "Remove unused suppression codes");
+    assert_eq!(
+        after,
+        "x: int = \"bad\"  # pyrefly: ignore [bad-assignment  # noqa\n"
+    );
+}
+
+#[test]
+fn quickfix_remove_each_of_two_unused_suppressions() {
+    let code = "x = 1  # type: ignore  # pyrefly: ignore\n";
+    let (_, after_type) = remove_unused_ignore_quickfix(code, "# type: ignore");
+    assert_eq!(after_type, "x = 1  # pyrefly: ignore\n");
+
+    let (_, after_pyrefly) = remove_unused_ignore_quickfix(code, "# pyrefly: ignore");
+    assert_eq!(after_pyrefly, "x = 1  # type: ignore\n");
+}
+
+#[test]
+fn quickfix_remove_unused_suppression_not_offered_on_next_line() {
+    let code = "# pyrefly: ignore\nx = 1\n";
+    let actions =
+        remove_unused_ignore_results(TestEnv::new(), code, TextSize::of("# pyrefly: ignore\n"));
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn quickfix_remove_unused_suppression_offered_at_line_end() {
+    let code = "x = 1  # pyrefly: ignore";
+    let actions = remove_unused_ignore_results(TestEnv::new(), code, TextSize::of(code));
+    assert_eq!(
+        actions,
+        vec![("Remove suppression comment".to_owned(), "x = 1".to_owned())]
+    );
+}
+
+#[test]
+fn quickfix_remove_unused_suppression_not_offered_in_generated_file() {
+    let code = "# @generated\nx = 1  # pyrefly: ignore\n";
+    let position = TextSize::try_from(code.find("# pyrefly: ignore").unwrap()).unwrap();
+    assert!(remove_unused_ignore_results(TestEnv::new(), code, position).is_empty());
 }
 
 #[test]
@@ -1395,6 +2500,109 @@ my_export
 }
 
 #[test]
+fn insertion_test_preserves_distinct_merge_choices() {
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[
+            ("a", "marker = 1\nclass Thing: pass\n"),
+            ("b", "marker = 2\nclass Thing: pass\n"),
+            (
+                "main",
+                "from a import marker\nfrom b import marker\nThing()\n# ^",
+            ),
+        ],
+        get_test_report,
+    );
+    for module in ["a", "b"] {
+        assert!(
+            report.contains(&format!(
+                "# Title: Insert import: `from {module} import Thing`"
+            )),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!("from {module} import marker, Thing\n")),
+            "{report}"
+        );
+    }
+}
+
+#[test]
+fn insertion_test_import_merge_styles() {
+    for (input, expected) in [
+        (
+            "from a import marker as m\n",
+            "from a import marker as m, Foo\n",
+        ),
+        (
+            "from a import (\n    marker,\n)\n",
+            "from a import (\n    marker, Foo,\n)\n",
+        ),
+        (
+            "from a import Foo as Alias\n",
+            "from a import Foo as Alias, Foo\n",
+        ),
+        (
+            "from a import marker as Foo\n",
+            "from a import Foo\nfrom a import marker as Foo\n",
+        ),
+        (
+            "from a import marker\nfrom a import Foo\n",
+            "from a import marker\nfrom a import Foo\n",
+        ),
+        ("from a import Foo as Foo\n", "from a import Foo as Foo\n"),
+        ("from a import *\n", "from a import Foo\nfrom a import *\n"),
+        ("from a import marker\r\n", "from a import marker, Foo\r\n"),
+    ] {
+        let (handles, state) = mk_multi_file_state_assert_no_errors(
+            &[("a", "marker = 1\nclass Foo: pass\n"), ("b", input)],
+            Require::Exports,
+        );
+        let transaction = state.transaction();
+        let target = handles.get("b").unwrap();
+        let ast = transaction.get_ast(target).unwrap();
+        let edit = insert_import_edit(
+            &ast,
+            state.config_finder(),
+            target.clone(),
+            handles.get("a").unwrap().clone(),
+            "Foo",
+            ImportFormat::Absolute,
+        );
+        let mut actual = input.to_owned();
+        actual.replace_range(
+            edit.range.start().to_usize()..edit.range.end().to_usize(),
+            &edit.insert_text,
+        );
+        assert_eq!(actual, expected, "input: {input:?}");
+    }
+}
+
+#[test]
+fn import_merge_binding_order() {
+    for prefix in [
+        "from a import marker as Foo\n",
+        "from other import Foo\n",
+        "import other as Foo\n",
+        "import Foo.bar\n",
+        "from other import *\n",
+    ] {
+        let source = format!("{prefix}from a import make\n");
+        let (ast, errors, _) = Ast::parse(&source, PySourceType::Python);
+        assert!(errors.is_empty(), "{errors:?}");
+        let edit = insert_from_import_edit(&ast, ModuleName::from_str("a"), "Foo");
+        let mut actual = source;
+        actual.replace_range(
+            edit.range.start().to_usize()..edit.range.end().to_usize(),
+            &edit.insert_text,
+        );
+        assert_eq!(
+            actual,
+            format!("from a import Foo\n{prefix}from a import make\n")
+        );
+    }
+}
+
+#[test]
 fn insertion_test_duplicate_imports() {
     let report = get_batched_lsp_operations_report_allow_error(
         &[
@@ -1403,8 +2611,7 @@ fn insertion_test_duplicate_imports() {
         ],
         get_test_report,
     );
-    // The insertion won't attempt to merge imports from the same module.
-    // It's not illegal, but it would be nice if we do merge.
+    // Merge with existing imports from the same module when possible.
     assert_eq!(
         r#"
 # a.py
@@ -1420,8 +2627,7 @@ from a import another_thing
 my_export
 # ^
 ## After:
-from a import my_export
-from a import another_thing
+from a import another_thing, my_export
 my_export
 # ^
 # Title: Generate variable `my_export`
@@ -1832,6 +3038,254 @@ fn redundant_cast_action_after(code: &str, cursor_offset: usize) -> Option<Strin
     }
     let (_before, after) = apply_patch(&module_info, range, patch);
     Some(after)
+}
+
+fn remove_unused_variable_action(code: &str, cursor_offset: usize) -> Option<(String, String)> {
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let handle = handles.get("main")?;
+    let transaction = state.transaction();
+    let module_info = transaction.get_module_info(handle)?;
+    let position = TextSize::try_from(cursor_offset).ok()?;
+    let actions = transaction
+        .local_quickfix_code_actions_sorted(
+            handle,
+            TextRange::new(position, position),
+            ImportFormat::Absolute,
+            None,
+        )
+        .unwrap_or_default();
+    let (title, edits) = actions
+        .into_iter()
+        .find(|(title, _)| title.starts_with("Remove unused variable `"))?;
+    let (module, range, patch) = edits.into_iter().next()?;
+    if module.path() != module_info.path() {
+        return None;
+    }
+    let (_before, after) = apply_patch(&module_info, range, patch);
+    Some((title, after))
+}
+
+#[test]
+fn remove_unused_variable_quickfix() {
+    let code = "def f() -> int:\n    unused = 1\n    return 2\n";
+    let (title, after) = remove_unused_variable_action(code, code.find("unused").unwrap()).unwrap();
+    assert_eq!("Remove unused variable `unused`", title);
+    assert_eq!("def f() -> int:\n    return 2\n", after);
+}
+
+#[test]
+fn remove_unused_variable_inserts_pass_for_empty_body() {
+    let code = "def f() -> None:\n    unused = 1\n";
+    let (_title, after) =
+        remove_unused_variable_action(code, code.find("unused").unwrap()).unwrap();
+    assert_eq!("def f() -> None:\n    pass\n", after);
+}
+
+#[test]
+fn remove_unused_variable_skips_unpacking_assignment() {
+    let code = "def f(pair):\n    unused, used = pair\n    return used\n";
+    assert!(remove_unused_variable_action(code, code.find("unused").unwrap()).is_none());
+}
+
+#[test]
+fn remove_unused_variable_keeps_required_evaluation() {
+    for code in [
+        "def f():\n    unused = print('important')\n",
+        "def f():\n    unused = yield 1\n",
+        "def f():\n    unused = yield from [1]\n",
+        "async def f():\n    unused = await compute()\n",
+        "def f() -> int:\n    unused = (used := 1)\n    return used\n",
+        "def f():\n    unused = 1 / 0\n",
+        "def f():\n    unused = f'{print(1)}'\n",
+        "def f():\n    unused: int = print('important')\n",
+    ] {
+        assert!(
+            remove_unused_variable_action(code, code.find("unused").unwrap()).is_none(),
+            "Unexpected deletion for {code:?}"
+        );
+    }
+}
+
+#[test]
+fn remove_unused_variable_skips_shared_lines() {
+    for code in [
+        "def f() -> int:\n    unused = 1; return 2\n",
+        "def f() -> int:\n    print(1); unused = 1\n    return 2\n",
+        "def f() -> None: unused = 1\n",
+        "def f():\n    unused = 1;\n",
+        "def f():\n    print(1); \\\n        unused = 1\n",
+    ] {
+        assert!(
+            remove_unused_variable_action(code, code.find("unused").unwrap()).is_none(),
+            "Unexpected deletion for {code:?}"
+        );
+    }
+}
+
+#[test]
+fn remove_unused_variable_keeps_referenced_names() {
+    for code in [
+        "def f():\n    def g(): return unused\n    unused = 1\n    return g\n",
+        "def f():\n    for i in range(2):\n        if i:\n            print(unused)\n        unused = 1\n",
+        "def f():\n    g = lambda: unused\n    unused = 1\n    return g\n",
+        "def f():\n    del unused\n    unused = 1\n",
+    ] {
+        let cursor = code.rfind("unused =").unwrap();
+        assert!(
+            remove_unused_variable_action(code, cursor).is_none(),
+            "Unexpected deletion for {code:?}"
+        );
+    }
+}
+
+#[test]
+fn remove_unused_variable_keeps_nonlocal_binding() {
+    for code in [
+        "def f():\n    unused = 1\n    def g():\n        nonlocal unused\n    return g\n",
+        "def f():\n    unused = 1\n    other = 2\n    def g():\n        if True:\n            nonlocal other, unused\n    return g\n",
+    ] {
+        assert!(
+            remove_unused_variable_action(code, code.find("unused").unwrap()).is_none(),
+            "Unexpected deletion for {code:?}"
+        );
+    }
+}
+
+#[test]
+fn remove_unused_variable_allows_unrelated_nonlocal() {
+    let code = "def f():\n    unused = 1\n    other = 2\n    def g():\n        nonlocal other\n    return g\n";
+    let (_, after) = remove_unused_variable_action(code, code.find("unused").unwrap()).unwrap();
+    assert_eq!(
+        "def f():\n    other = 2\n    def g():\n        nonlocal other\n    return g\n",
+        after
+    );
+}
+
+#[test]
+fn remove_unused_variable_skips_intentionally_unused_names() {
+    for name in ["_", "_unused", "__tracebackhide__"] {
+        let code = format!("def f():\n    {name} = 1\n");
+        assert!(remove_unused_variable_action(&code, code.find(name).unwrap()).is_none());
+    }
+}
+
+#[test]
+fn remove_unused_variable_standalone_lines() {
+    for (code, expected) in [
+        ("def f():\n    unused: int = 1\n", "def f():\n    pass\n"),
+        (
+            "def f():\n    unused = (\n        1\n    )\n",
+            "def f():\n    pass\n",
+        ),
+        (
+            "def f():\n    unused = 1 # comment\n",
+            "def f():\n    pass\n",
+        ),
+        ("def f():\n    unused = 1", "def f():\n    pass\n"),
+        ("def f():\r\n    unused = 1\r\n", "def f():\r\n    pass\r\n"),
+    ] {
+        let (_, after) = remove_unused_variable_action(code, code.find("unused").unwrap()).unwrap();
+        assert_eq!(expected, after);
+    }
+}
+
+#[test]
+fn remove_unused_variable_parameter_overwrites() {
+    for parameters in ["unused, /", "unused", "*unused", "*, unused", "**unused"] {
+        let code = format!("def f({parameters}):\n    unused = None\n    yield 'tick'\n");
+        assert!(remove_unused_variable_action(&code, code.find("unused =").unwrap()).is_none());
+    }
+    for code in [
+        "def f(unused):\n    if True:\n        unused = None\n    yield 'tick'\n",
+        "class C:\n    def f(self, unused):\n        unused: object = None\n        yield 'tick'\n",
+        "def outer():\n    def inner(unused):\n        unused = None\n        yield 'tick'\n    return inner\n",
+    ] {
+        assert!(remove_unused_variable_action(code, code.rfind("unused").unwrap()).is_none());
+    }
+}
+
+#[test]
+fn remove_unused_variable_uses_innermost_function_parameters() {
+    let code = "def outer(unused):\n    def inner():\n        unused = 1\n        return 2\n    return inner\n";
+    let (_, after) = remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+    assert_eq!(
+        "def outer(unused):\n    def inner():\n        return 2\n    return inner\n",
+        after,
+    );
+}
+
+#[test]
+fn remove_unused_variable_docstring_position() {
+    for (code, expected) in [
+        (
+            "def f():\n    unused = 1\n    'not a docstring'\n    return 2\n",
+            "def f():\n    pass\n    'not a docstring'\n    return 2\n",
+        ),
+        (
+            "def f():\r\n    unused = 1\r\n    'not a docstring'\r\n    return 2\r\n",
+            "def f():\r\n    pass\r\n    'not a docstring'\r\n    return 2\r\n",
+        ),
+        (
+            "class C:\n    def f(self):\n        unused = 1\n        'not a docstring'\n        return 2\n",
+            "class C:\n    def f(self):\n        pass\n        'not a docstring'\n        return 2\n",
+        ),
+        (
+            "def outer():\n    def inner():\n        unused = 1\n        'not a docstring'\n        return 2\n    return inner\n",
+            "def outer():\n    def inner():\n        pass\n        'not a docstring'\n        return 2\n    return inner\n",
+        ),
+    ] {
+        let (_, after) =
+            remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+        assert_eq!(expected, after);
+    }
+}
+
+#[test]
+fn remove_unused_variable_preserves_existing_docstring_and_nested_suites() {
+    for (code, expected) in [
+        (
+            "def f():\n    'existing docstring'\n    unused = 1\n    return 2\n",
+            "def f():\n    'existing docstring'\n    return 2\n",
+        ),
+        (
+            "def f(flag):\n    if flag:\n        unused = 1\n        'ordinary expression'\n        return 2\n",
+            "def f(flag):\n    if flag:\n        'ordinary expression'\n        return 2\n",
+        ),
+        (
+            "def f(flag):\n    if flag:\n        unused = 1\n",
+            "def f(flag):\n    if flag:\n        pass\n",
+        ),
+        (
+            "def f():\n    try:\n        unused = 1\n    finally:\n        pass\n",
+            "def f():\n    try:\n        pass\n    finally:\n        pass\n",
+        ),
+    ] {
+        let (_, after) =
+            remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+        assert_eq!(expected, after);
+    }
+}
+
+#[test]
+fn remove_unused_variable_unrelated_scopes() {
+    for (code, expected) in [
+        (
+            "def f():\n    unused = 1\n    return 2\ndef g():\n    unused = 2\n    return 3\n",
+            "def f():\n    return 2\ndef g():\n    unused = 2\n    return 3\n",
+        ),
+        (
+            "def outer(unused):\n    def inner():\n        unused = 1\n        return 2\n    print(unused)\n    return inner\n",
+            "def outer(unused):\n    def inner():\n        return 2\n    print(unused)\n    return inner\n",
+        ),
+        (
+            "class C:\n    def f(self):\n        unused = 1\n        return 2\n    def g(self):\n        unused = 2\n        return 3\n",
+            "class C:\n    def f(self):\n        return 2\n    def g(self):\n        unused = 2\n        return 3\n",
+        ),
+    ] {
+        let (_, after) =
+            remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+        assert_eq!(expected, after);
+    }
 }
 
 #[test]
@@ -3343,6 +4797,34 @@ class Child(Base):
 }
 
 #[test]
+fn push_member_down_into_pass_sharing_a_line() {
+    let code = r#"
+class Base:
+    # MOVE-START
+    def foo(self):
+        pass
+    # MOVE-END
+
+class Child(Base):
+    """Child doc."""; pass
+"#;
+    let (module_info, actions, _) = compute_push_down_actions(code);
+    let updated = apply_refactor_edits_for_module(&module_info, &actions[0]);
+    let expected = r#"
+class Base:
+    # MOVE-START
+    pass
+    # MOVE-END
+
+class Child(Base):
+    """Child doc."""; pass
+    def foo(self):
+        pass
+"#;
+    assert_eq!(expected, updated);
+}
+
+#[test]
 fn extract_superclass_basic() {
     let code = r#"
 class Foo:
@@ -3803,6 +5285,51 @@ def foo():
     assert_eq!(expected_b.trim(), updated_b.trim());
 }
 
+// Known bug: Unopened sibling files are not offered as move destinations.
+#[test]
+#[should_panic(expected = "expected an action for the unopened sibling")]
+fn move_module_member_to_unopened_sibling() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = "def foo():\n    return 1\n";
+    let target = "existing = 42\n";
+    let source_path = temp.path().join("a.py");
+    let target_path = temp.path().join("b.py");
+    fs::write(&source_path, source).unwrap();
+    fs::write(&target_path, target).unwrap();
+
+    let mut env = TestEnv::new();
+    env.add_real_path("a", source_path);
+    let (state, handle_for_module) = env.to_state();
+    let handle = handle_for_module("a");
+    let transaction = state.transaction();
+    let actions = transaction
+        .move_module_member_code_actions(
+            &handle,
+            TextRange::empty(TextSize::new(4)),
+            ImportFormat::Absolute,
+        )
+        .expect("expected an action for the unopened sibling");
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].title, "Move `foo` to `b`");
+    let target_info = &actions[0]
+        .edits
+        .iter()
+        .find(|(module, _, _)| module.path().as_path() == target_path)
+        .unwrap()
+        .0;
+    assert_eq!(
+        apply_refactor_edits_for_module(target_info, &actions[0].edits),
+        "existing = 42\ndef foo():\n    return 1\n"
+    );
+    assert_eq!(
+        apply_refactor_edits_for_module(
+            &transaction.get_module_info(&handle).unwrap(),
+            &actions[0].edits,
+        ),
+        "from b import foo\n"
+    );
+}
+
 #[test]
 fn move_module_member_to_sibling_keeps_consumer_import_pointing_to_source() {
     let temp = tempfile::tempdir().unwrap();
@@ -3882,6 +5409,712 @@ x = foo()
     assert_eq!(expected_a.trim(), updated_a.trim());
     assert_eq!(expected_b.trim(), updated_b.trim());
     assert_eq!(expected_c.trim(), updated_c.trim());
+}
+
+#[test]
+fn implement_abstract_members_preserves_class_body() {
+    let base = "from abc import ABC, abstractmethod\nclass Base(ABC):\n    @abstractmethod\n    def foo(self) -> int: ...\n";
+    // A suite on the header line has no line to insert into.
+    for child in [
+        "class Child(Base): pass",
+        "class Child(Base): pass;",
+        "class Child(Base): \"\"\"Child doc.\"\"\"",
+        "class Child(Base): pass; value = 1",
+        "class Child(\n    Base,\n): pass",
+    ] {
+        let code = format!("{base}{child}\n");
+        let after =
+            implement_abstract_members_at(TestEnv::new(), &[("main", &code)], "class Child");
+        assert_eq!(after, None, "{code}");
+    }
+    for (body, expected) in [
+        (
+            "    \"\"\"Child doc.\"\"\"",
+            "    \"\"\"Child doc.\"\"\"\n\n",
+        ),
+        (
+            "    \"\"\"Child doc.\"\"\"\n    pass",
+            "    \"\"\"Child doc.\"\"\"\n",
+        ),
+        (
+            "    \"\"\"Child doc.\"\"\"; pass",
+            "    \"\"\"Child doc.\"\"\"; pass\n\n",
+        ),
+    ] {
+        let code = format!("{base}class Child(Base):\n{body}");
+        let after =
+            implement_abstract_members_at(TestEnv::new(), &[("main", &code)], "class Child")
+                .unwrap();
+        assert!(
+            after.ends_with(&format!(
+                "class Child(Base):\n{expected}    def foo(self) -> int:\n        raise NotImplementedError\n"
+            )),
+            "{after}"
+        );
+        mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
+    }
+}
+
+#[test]
+fn implement_abstract_members_indentation_and_decorators() {
+    let code = r#"
+from abc import ABC, abstractmethod
+class Base(ABC):
+    @classmethod
+    @abstractmethod
+    def create(cls, /, value: int = 0, *, flag: bool = False) -> int: ...
+    @staticmethod
+    @abstractmethod
+    def parse(value: str, scale: float = 1.5) -> int: ...
+class Outer:
+    # ACTION-START
+    class Child(Base):
+        @staticmethod
+        def existing() -> None: pass
+    # ACTION-END
+"#
+    .replace("    ", "\t")
+    .replace('\n', "\r\n");
+    let (info, actions, _) = compute_implement_abstract_actions(&code, false);
+    let after = apply_refactor_edits_for_module(&info, &actions[0]);
+    let normalized = after.replace("\r\n", "\n");
+    for expected in [
+        "\t\t@classmethod\n\t\tdef create(cls, /, value: int = 0, *, flag: bool = False) -> int:",
+        "\t\t@staticmethod\n\t\tdef parse(value: str, scale: float = 1.5) -> int:",
+        "\t\t@staticmethod\n\t\tdef existing() -> None: pass",
+    ] {
+        assert!(normalized.contains(expected), "{after}");
+    }
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_preserves_contracts_and_imports() {
+    let base = r#"
+from abc import ABC, abstractmethod
+from typing import Callable, Protocol, Self, overload
+
+class Payload: pass
+
+class Callback(Protocol):
+    def __call__(self, value: int, *, flag: bool) -> str: ...
+
+class Base[T](ABC):
+    @abstractmethod
+    def callback(self, cb: Callable[[int], str], *args: int, flag: bool) -> Self: ...
+
+    @abstractmethod
+    def callback_protocol(self, cb: Callback) -> None: ...
+
+    @abstractmethod
+    def unknown(self, value = object()): ...
+
+    @abstractmethod
+    async def fetch(self, value: Payload) -> T: ...
+
+    @abstractmethod
+    def identity[U: Payload](self, value: U) -> U: ...
+
+    @overload
+    @abstractmethod
+    def convert(self, value: int) -> str: ...
+    @overload
+    @abstractmethod
+    def convert(self, value: str) -> int: ...
+
+    @property
+    @abstractmethod
+    def value(self) -> int: ...
+    @value.setter
+    @abstractmethod
+    def value(self, value: int) -> None: ...
+"#;
+    let code = "from __future__ import annotations\nfrom base import Base\n# ACTION-START\nclass Child(Base[int]):\n    pass\n# ACTION-END\n";
+    let (handles, state) = mk_multi_file_state(
+        &[("base", base), ("main", code)],
+        Require::Everything,
+        false,
+    );
+    let transaction = state.transaction();
+    let handle = &handles["main"];
+    let info = transaction.get_module_info(handle).unwrap();
+    let actions = transaction
+        .implement_abstract_members_code_actions(
+            handle,
+            find_marked_range_with(code, "# ACTION-START", "# ACTION-END"),
+            ImportFormat::Absolute,
+        )
+        .unwrap();
+    let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
+    for expected in [
+        "cb: Callable[[int], str], *args: int, flag: bool) -> Self",
+        "def callback_protocol(self, cb: Callback) -> None:",
+        "async def fetch(self, value: Payload) -> int:",
+        "def identity[U: Payload](self, value: U) -> U:",
+        "def convert(self, value: int) -> str:",
+        "def convert(self, value: str) -> int:",
+        "@value.setter\n    def value(self, value: int) -> None:",
+        "from base import Base, Callback, Payload",
+    ] {
+        assert!(after.contains(expected), "Missing {expected:?}:\n{after}");
+    }
+    assert!(!after.contains("Unknown"), "{after}");
+    assert!(!after.contains("Self@"), "{after}");
+    mk_multi_file_state_assert_no_errors(&[("base", base), ("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_preserves_import_edit_positions() {
+    let base = r#"
+from abc import ABC, abstractmethod
+from typing import Callable
+class Input: pass
+class Output: pass
+class Base(ABC):
+    @abstractmethod
+    def foo(self, cb: Callable[[Input], Output]) -> Output: ...
+"#;
+    let header = "\"\"\"Child module.\"\"\"\nfrom __future__ import annotations\n";
+    for (imports, expected) in [
+        (
+            "from base import Base # Base comment\n",
+            "from typing import Callable\nfrom base import Base, Input, Output # Base comment\n",
+        ),
+        (
+            "from typing import Any # typing comment\nfrom base import Base # Base comment\n",
+            "from typing import Any, Callable # typing comment\nfrom base import Base, Input, Output # Base comment\n",
+        ),
+        (
+            "from typing import (\n    Any, # typing comment\n)\nfrom base import (\n    Base, # Base comment\n)\n",
+            "from typing import (\n    Any, Callable, # typing comment\n)\nfrom base import (\n    Base, Input, Output, # Base comment\n)\n",
+        ),
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let code = format!(
+                "{header}{imports}# ACTION-START\nclass Child(Base):\n    pass\n# ACTION-END\n"
+            )
+            .replace('\n', newline);
+            let (handles, state) = mk_multi_file_state(
+                &[("base", base), ("main", &code)],
+                Require::Everything,
+                false,
+            );
+            let transaction = state.transaction();
+            let handle = &handles["main"];
+            let info = transaction.get_module_info(handle).unwrap();
+            let actions = transaction
+                .implement_abstract_members_code_actions(
+                    handle,
+                    find_marked_range_with(&code, "# ACTION-START", "# ACTION-END"),
+                    ImportFormat::Absolute,
+                )
+                .unwrap();
+            let edits = &actions[0].edits;
+            for (index, (_, range, _)) in edits.iter().enumerate() {
+                assert!(
+                    edits[index + 1..]
+                        .iter()
+                        .all(|(_, other, _)| range != other),
+                    "Edits at the same range must be combined: {edits:?}"
+                );
+            }
+            let after = apply_refactor_edits_for_module(&info, edits);
+            let normalized = after.replace("\r\n", "\n");
+            assert!(
+                normalized.starts_with(&format!("{header}{expected}# ACTION-START\n")),
+                "{after}"
+            );
+            assert!(
+                normalized.contains("def foo(self, cb: Callable[[Input], Output]) -> Output:"),
+                "{after}"
+            );
+            mk_multi_file_state_assert_no_errors(
+                &[("base", base), ("main", &after)],
+                Require::Everything,
+            );
+        }
+    }
+}
+
+#[test]
+fn implement_abstract_members_resolves_import_aliases_and_collisions() {
+    let base = "from abc import ABC, abstractmethod\nclass Payload: pass\nclass Base(ABC):\n    @abstractmethod\n    def foo(self, value: Payload) -> Payload: ...\n";
+    for (imports, annotation) in [
+        ("from base import Payload as P\n", "P"),
+        ("import base as b\n", "b.Payload"),
+        ("class Payload: pass\n", "base.Payload"),
+    ] {
+        let code = format!(
+            "from base import Base\n{imports}# ACTION-START\nclass Child(Base):\n    pass\n# ACTION-END\n"
+        );
+        let (handles, state) = mk_multi_file_state(
+            &[("base", base), ("main", &code)],
+            Require::Everything,
+            false,
+        );
+        let transaction = state.transaction();
+        let handle = &handles["main"];
+        let info = transaction.get_module_info(handle).unwrap();
+        let actions = transaction
+            .implement_abstract_members_code_actions(
+                handle,
+                find_marked_range_with(&code, "# ACTION-START", "# ACTION-END"),
+                ImportFormat::Absolute,
+            )
+            .unwrap();
+        let after = apply_refactor_edits_for_module(&info, &actions[0].edits);
+        assert!(
+            after.contains(&format!(
+                "def foo(self, value: {annotation}) -> {annotation}:"
+            )),
+            "{after}"
+        );
+        mk_multi_file_state_assert_no_errors(
+            &[("base", base), ("main", &after)],
+            Require::Everything,
+        );
+    }
+}
+
+#[test]
+fn implement_abstract_members_preserves_protocol_attributes() {
+    let code = r#"
+from typing import ClassVar, Protocol
+class Proto(Protocol):
+    count: ClassVar[int]
+    name: str
+# ACTION-START
+class Child(Proto):
+    pass
+# ACTION-END
+"#;
+    let (info, actions, _) = compute_implement_abstract_actions(code, false);
+    let after = apply_refactor_edits_for_module(&info, &actions[0]);
+    assert!(
+        after.contains("class Child(Proto):\n    count: ClassVar[int]\n"),
+        "{after}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_inserts_stubs() {
+    let code = r#"
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    @abstractmethod
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        ...
+
+    @property
+    @abstractmethod
+    def bar(self) -> int:
+        """Bar doc."""
+        ...
+
+# ACTION-START
+class Child(Base):
+    pass
+# ACTION-END
+"#;
+    let (module_info, actions, titles) = compute_implement_abstract_actions(code, true);
+    assert_eq!(vec!["Implement abstract members"], titles);
+    let edits = actions.first().expect("missing abstract member edits");
+    let after = apply_refactor_edits_for_module(&module_info, edits);
+    assert_eq!(
+        r#"
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    @abstractmethod
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        ...
+
+    @property
+    @abstractmethod
+    def bar(self) -> int:
+        """Bar doc."""
+        ...
+
+# ACTION-START
+class Child(Base):
+    @property
+    def bar(self) -> int:
+        """Bar doc."""
+        raise NotImplementedError
+
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        raise NotImplementedError
+# ACTION-END
+"#,
+        after
+    );
+}
+
+#[test]
+fn implement_protocol_members_inserts_stubs() {
+    let code = r#"
+from typing import Protocol
+
+class Proto(Protocol):
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        ...
+
+    @property
+    def bar(self) -> int:
+        """Bar doc."""
+        ...
+
+# ACTION-START
+class Impl(Proto):
+    pass
+# ACTION-END
+"#;
+    let (module_info, actions, titles) = compute_implement_abstract_actions(code, false);
+    assert_eq!(vec!["Implement abstract members"], titles);
+    let edits = actions.first().expect("missing protocol member edits");
+    let after = apply_refactor_edits_for_module(&module_info, edits);
+    assert_eq!(
+        r#"
+from typing import Protocol
+
+class Proto(Protocol):
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        ...
+
+    @property
+    def bar(self) -> int:
+        """Bar doc."""
+        ...
+
+# ACTION-START
+class Impl(Proto):
+    @property
+    def bar(self) -> int:
+        """Bar doc."""
+        raise NotImplementedError
+
+    def foo(self, x: int) -> str:
+        """Foo doc."""
+        raise NotImplementedError
+# ACTION-END
+"#,
+        after
+    );
+}
+
+/// Applies "Implement abstract members" with the cursor at the start of `cursor` in
+/// `main`, or returns `None` when the action is not offered.
+fn implement_abstract_members_at(
+    env: TestEnv,
+    files: &[(&'static str, &str)],
+    cursor: &str,
+) -> Option<String> {
+    let (handles, state) = mk_multi_file_state_with_env(env, files, Require::Everything, false);
+    let handle = &handles["main"];
+    let (_, code) = files.iter().find(|(name, _)| *name == "main").unwrap();
+    let position = TextSize::try_from(code.find(cursor).unwrap()).unwrap();
+    let transaction = state.transaction();
+    let info = transaction.get_module_info(handle).unwrap();
+    let actions = transaction.implement_abstract_members_code_actions(
+        handle,
+        TextRange::empty(position),
+        ImportFormat::Absolute,
+    )?;
+    Some(apply_refactor_edits_for_module(&info, &actions[0].edits))
+}
+
+#[test]
+fn implement_abstract_members_param_spec_signature() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import Callable
+class Base(ABC):
+    @abstractmethod
+    def run[**P, R](self, fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R: ...
+    @abstractmethod
+    def named[**P](self, args: int, *rest: P.args, **kw: P.kwargs) -> None: ...
+    @abstractmethod
+    def other(self) -> int: ...
+class Child(Base):
+    pass
+"#;
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    assert!(
+        after.ends_with(
+            "class Child(Base):\n    def named[**P](self, args: int, *args_1: P.args, **kwargs: P.kwargs) -> None:\n        raise NotImplementedError\n\n    def other(self) -> int:\n        raise NotImplementedError\n\n    def run[**P, R](self, fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> R:\n        raise NotImplementedError\n"
+        ),
+        "{after}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_specialized_param_spec() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import Callable, Concatenate, Generic, ParamSpec
+P = ParamSpec("P")
+class Base(ABC, Generic[P]):
+    @abstractmethod
+    def run(self, *args: P.args, **kwargs: P.kwargs) -> None: ...
+    @abstractmethod
+    def wrap(self, fn: Callable[Concatenate[int, P], None]) -> None: ...
+    @abstractmethod
+    def wrap_named(self, arg2: int, *args: P.args, **kwargs: P.kwargs) -> None: ...
+class Child(Base[[int, str]]):
+    pass
+class Child2(Base[...]):
+    pass
+"#;
+    let child =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child(").unwrap();
+    assert!(
+        child.contains(
+            "class Child(Base[[int, str]]):\n    def run(self, *args: Any, **kwargs: Any) -> None:\n        raise NotImplementedError\n\n    def wrap(self, fn: Callable[..., None]) -> None:\n"
+        ),
+        "{child}"
+    );
+    assert!(
+        child.contains("    def wrap_named(self, arg2: int, *args: Any, **kwargs: Any) -> None:\n"),
+        "{child}"
+    );
+    let child2 =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child2").unwrap();
+    assert!(
+        child2.contains(
+            "class Child2(Base[...]):\n    def run(self, *args: Any, **kwargs: Any) -> None:\n        raise NotImplementedError\n\n    def wrap(self, fn: Callable[Concatenate[int, ...], None]) -> None:\n"
+        ),
+        "{child2}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &child)], Require::Everything);
+    mk_multi_file_state_assert_no_errors(&[("main", &child2)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_specialized_param_spec_after_default() {
+    let code = r#"
+from abc import ABC, abstractmethod
+class Base[**P](ABC):
+    @abstractmethod
+    def f(self, x: int = 0, *args: P.args, **kwargs: P.kwargs) -> None: ...
+class Child(Base[[str]]):
+    pass
+"#;
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    // Python cannot write the required `str` parameter after the optional `x`.
+    assert!(
+        after.contains("    def f(self, x: int = 0, *args: Any, **kwargs: Any) -> None:\n"),
+        "{after}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_legacy_type_var_before_python_3_12() {
+    let base = r#"
+from abc import ABC, abstractmethod
+from typing import Callable, ParamSpec, TypeVar
+P = ParamSpec("P")
+T = TypeVar("T")
+class Base(ABC):
+    @abstractmethod
+    def f(self, x: T) -> T: ...
+    @abstractmethod
+    def g(self, fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T: ...
+"#;
+    let code = "from base import Base\nclass Child(Base):\n    pass\n";
+    let after = implement_abstract_members_at(
+        TestEnv::new_with_version(PythonVersion::new(3, 11, 0)),
+        &[("base", base), ("main", code)],
+        "class Child",
+    )
+    .unwrap();
+    assert_eq!(
+        after,
+        "from typing import Any\nfrom typing import Callable\nfrom base import Base\nclass Child(Base):\n    def f(self, x: Any) -> Any:\n        raise NotImplementedError\n\n    def g(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:\n        raise NotImplementedError\n"
+    );
+    mk_multi_file_state_with_env(
+        TestEnv::new_with_version(PythonVersion::new(3, 11, 0)),
+        &[("base", base), ("main", &after)],
+        Require::Everything,
+        true,
+    );
+    // Python 3.12 and later can declare the type parameters.
+    let after = implement_abstract_members_at(
+        TestEnv::new_with_version(PythonVersion::new(3, 12, 0)),
+        &[("base", base), ("main", code)],
+        "class Child",
+    )
+    .unwrap();
+    assert!(
+        after.ends_with(
+            "class Child(Base):\n    def f[T](self, x: T) -> T:\n        raise NotImplementedError\n\n    def g[**P, T](self, fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:\n        raise NotImplementedError\n"
+        ),
+        "{after}"
+    );
+}
+
+#[test]
+fn implement_abstract_members_async_generator() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import AsyncIterator
+class Base(ABC):
+    @abstractmethod
+    async def items(self) -> AsyncIterator[int]:
+        yield 1
+class Child(Base):
+    pass
+"#;
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    assert!(
+        after.ends_with(
+            "class Child(Base):\n    def items(self) -> AsyncIterator[int]:\n        raise NotImplementedError\n"
+        ),
+        "{after}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_type_params_only_in_return() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import Callable
+class Base(ABC):
+    @abstractmethod
+    def factory[T](self) -> Callable[[T], T]: ...
+    @abstractmethod
+    def mixed[T, U = int](self, value: U) -> Callable[[T], T]: ...
+    @abstractmethod
+    def nested[T](self) -> Callable[[], Callable[[T], T]]: ...
+class Child(Base):
+    pass
+"#;
+    // A stub cannot declare type parameters that the solver moved onto a returned callable,
+    // so they become `Any`.
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    assert!(
+        after.ends_with(
+            "class Child(Base):\n    def factory(self) -> Callable[[Any], Any]:\n        raise NotImplementedError\n\n    def mixed(self, value: Any) -> Callable[[Any], Any]:\n        raise NotImplementedError\n\n    def nested(self) -> Callable[[], Callable[[Any], Any]]:\n        raise NotImplementedError\n"
+        ),
+        "{after}"
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &after)], Require::Everything);
+}
+
+#[test]
+fn implement_abstract_members_module_name_bound_locally() {
+    let base = r#"
+from abc import ABC, abstractmethod
+class Payload: pass
+class Base(ABC):
+    @abstractmethod
+    def foo(self, value: Payload) -> None: ...
+    @abstractmethod
+    def bar(self) -> int: ...
+"#;
+    let code =
+        "from base import Base\nclass Payload: pass\nbase = 42\nclass Child(Base):\n    pass\n";
+    let after = implement_abstract_members_at(
+        TestEnv::new(),
+        &[("base", base), ("main", code)],
+        "class Child",
+    );
+    // The fallback `import base` would be shadowed by `base = 42`, and `Payload` is bound locally.
+    assert_eq!(after, None);
+}
+
+#[test]
+fn implement_abstract_members_layout() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import overload
+class Base(ABC):
+    @overload
+    @classmethod
+    @abstractmethod
+    def make(cls, x: int) -> int: ...
+    @overload
+    @classmethod
+    @abstractmethod
+    def make(cls, x: str) -> str: ...
+    @property
+    @abstractmethod
+    def value(self) -> int:
+        """Value doc."""
+    @value.setter
+    @abstractmethod
+    def value(self, value: int) -> None: ...
+class Child(Base):
+    existing = 1
+"#;
+    let after =
+        implement_abstract_members_at(TestEnv::new(), &[("main", code)], "class Child").unwrap();
+    let child = &after[after.find("class Child").unwrap()..];
+    assert_eq!(
+        child,
+        r#"class Child(Base):
+    existing = 1
+
+    @overload
+    @classmethod
+    def make(cls, x: int) -> int:
+        ...
+
+    @overload
+    @classmethod
+    def make(cls, x: str) -> str:
+        ...
+
+    @classmethod
+    def make(cls, *args, **kwargs) -> Any:
+        raise NotImplementedError
+
+    @property
+    def value(self) -> int:
+        """Value doc."""
+        raise NotImplementedError
+
+    @value.setter
+    def value(self, value: int) -> None:
+        raise NotImplementedError
+"#
+    );
+}
+
+#[test]
+fn implement_abstract_members_cursor_scope() {
+    let code = r#"
+from abc import ABC, abstractmethod
+from typing import Protocol
+class Base(ABC):
+    @abstractmethod
+    def foo(self) -> int: ...
+class Child(Base):
+    value = 1
+class Proto(Protocol):
+    def bar(self) -> int: ...
+class SubProto(Proto, Protocol):
+    pass
+"#;
+    let offered =
+        |cursor| implement_abstract_members_at(TestEnv::new(), &[("main", code)], cursor).is_some();
+    assert!(offered("class Child"));
+    assert!(offered("(Base)"));
+    assert!(!offered("value = 1"));
+    assert!(!offered("class SubProto"));
 }
 
 #[test]
@@ -5012,6 +7245,135 @@ def compute():
 }
 
 #[test]
+fn inline_variable_preserves_following_statement_on_same_line() {
+    let code = r#"
+def compute():
+    value = 1; result = value + 1
+#                       ^
+    return result
+"#;
+    let updated =
+        apply_first_inline_variable_action(code).expect("expected inline variable action");
+    let expected = r#"
+def compute():
+    result = 1 + 1
+#                       ^
+    return result
+"#;
+    assert_eq!(expected, updated);
+}
+
+#[test]
+fn inline_variable_removes_statement_after_semicolon() {
+    let code = r#"
+def compute():
+    prefix = 1; value = 2
+    result = prefix + value
+#                     ^
+    return result
+"#;
+    let updated =
+        apply_first_inline_variable_action(code).expect("expected inline variable action");
+    let expected = r#"
+def compute():
+    prefix = 1
+    result = prefix + 2
+#                     ^
+    return result
+"#;
+    assert_eq!(expected, updated);
+}
+
+#[test]
+fn inline_variable_removes_trailing_semicolon_before_comment() {
+    let code = r#"
+def compute():
+    prefix = 1; value = 2; # keep
+    result = prefix + value
+#                     ^
+    return result
+"#;
+    let updated =
+        apply_first_inline_variable_action(code).expect("expected inline variable action");
+    let expected = r#"
+def compute():
+    prefix = 1# keep
+    result = prefix + 2
+#                     ^
+    return result
+"#;
+    assert_eq!(expected, updated);
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+}
+
+#[test]
+fn inline_variable_removes_line_with_trailing_semicolon_before_comment() {
+    let code = r#"
+value = 2;# keep
+result = value + 1
+#        ^
+"#;
+    let updated =
+        apply_first_inline_variable_action(code).expect("expected inline variable action");
+    let expected = r#"
+result = 2 + 1
+#        ^
+"#;
+    assert_eq!(expected, updated);
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+}
+
+#[test]
+fn inline_variable_removes_trailing_semicolon_comment_with_cr_line_endings() {
+    for suffix in [";# keep", ";"] {
+        let code = format!("def compute():\r    value = 2{suffix}\r    return value + 1\r");
+        let (handles, state) =
+            mk_multi_file_state_assert_no_errors(&[("main", &code)], Require::Everything);
+        let handle = handles.get("main").unwrap();
+        let transaction = state.transaction();
+        let module_info = transaction.get_module_info(handle).unwrap();
+        let position = TextSize::try_from(code.rfind("value").unwrap()).unwrap();
+        let actions = transaction
+            .inline_variable_code_actions(handle, TextRange::new(position, position))
+            .expect("expected inline variable action");
+        let updated = apply_refactor_edits_for_module(&module_info, &actions[0].edits);
+
+        assert_eq!("def compute():\r    return 2 + 1\r", updated);
+        mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+    }
+}
+
+#[test]
+fn inline_variable_rejects_single_line_class_assignment_before_comment() {
+    let code = r#"
+class Constants: value = 2;# keep
+result = Constants.value + 1
+#                  ^
+"#;
+    assert!(apply_first_inline_variable_action(code).is_none());
+}
+
+#[test]
+fn inline_variable_removes_line_with_trailing_semicolon() {
+    let code = r#"
+def compute():
+    value = 1;
+    result = value + 1
+#            ^
+    return result
+"#;
+    let updated =
+        apply_first_inline_variable_action(code).expect("expected inline variable action");
+    let expected = r#"
+def compute():
+    result = 1 + 1
+#            ^
+    return result
+"#;
+    assert_eq!(expected, updated);
+}
+
+#[test]
 fn inline_variable_parens_for_bin_op_in_attribute() {
     let code = r#"
 value = 1 + 3
@@ -5501,6 +7863,42 @@ class Child(Base):
         return 2
 "#;
     assert!(apply_first_safe_delete_action(code).is_none());
+}
+
+#[test]
+fn pytest_fixture_annotation_import_binding_order() {
+    let dependency = "class Foo: pass\nmarker = 17\ndef make() -> Foo:\n    return Foo()\n";
+    let code = "import pytest\nfrom file_two import marker as Foo\nfrom file_two import make\n\n@pytest.fixture\ndef item():\n    return make()\n\nassert Foo == 17\n";
+    let (handles, state) = mk_multi_file_state_assert_no_errors(
+        &[
+            ("main", code),
+            ("file_two", dependency),
+            ("pytest", "def fixture(f):\n    return f\n"),
+        ],
+        Require::Everything,
+    );
+    let handle = handles.get("main").unwrap();
+    let transaction = state.transaction();
+    let module_info = transaction.get_module_info(handle).unwrap();
+    let cursor = TextSize::try_from(code.find("def item").unwrap()).unwrap();
+    let actions = transaction
+        .pytest_fixture_type_annotation_code_actions(
+            handle,
+            TextRange::empty(cursor),
+            ImportFormat::Absolute,
+        )
+        .unwrap_or_default();
+    let action = actions
+        .iter()
+        .find(|action| action.title == "Add pytest fixture type annotation")
+        .expect("missing fixture annotation action");
+    let actual = apply_refactor_edits_for_module(&module_info, &action.edits);
+    // BUG: The annotation still refers to `marker`; only import binding order is preserved.
+    let expected = format!(
+        "from file_two import Foo\n{}",
+        code.replace("def item():", "def item() -> Foo:")
+    );
+    assert_eq!(actual, expected);
 }
 
 #[test]

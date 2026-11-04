@@ -376,3 +376,49 @@ from typing import Protocol
 class P(Protocol, Protocol): ...  # E: Duplicate base class `Protocol`
 "#,
 );
+
+// https://github.com/facebook/pyrefly/issues/5219
+testcase!(
+    test_explicit_object_base_constructor,
+    r#"
+class Base:
+    def __init__(self, x: int = 0) -> None:
+        self.x = x
+
+class Mixin(object):
+    pass
+
+class C(Mixin, Base):
+    pass
+
+C(x=1)
+"#,
+);
+
+// Both classes raise `TypeError` at runtime: a duplicate base, and no consistent MRO.
+testcase!(
+    test_explicit_object_before_another_base,
+    r#"
+class Base: ...
+class A(object, object): ...  # E: Class `A` has a nonlinearizable inheritance chain detected at `object`
+class C(object, Base): ...  # E: Class `C` has a nonlinearizable inheritance chain detected at `object`
+"#,
+);
+
+testcase!(
+    test_explicit_object_base_order,
+    r#"
+from typing import Any, Generic, TypeVar
+import random
+T = TypeVar("T")
+class Base: ...
+class Other: ...
+class F(Base, object, Other): ...  # E: Class `F` has a nonlinearizable inheritance chain detected at `object`
+class D(Base, object): ...
+class H(Generic[T], object): ...
+dynamic: Any = Base
+class E1(object, dynamic): ...
+maybe = Base if random.random() else dynamic
+class E2(object, maybe): ...  # E: Class `E2` has a nonlinearizable inheritance chain detected at `object`
+"#,
+);

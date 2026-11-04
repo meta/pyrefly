@@ -385,6 +385,129 @@ def f():
     assert_eq!(report, "No unused variables");
 }
 
+// A plain reassignment in a loop is used when the next iteration reads it, even if the name
+// was first bound by unpacking, `with`, `for` or a walrus.
+#[test]
+fn test_loop_reassignment_read_on_next_iteration() {
+    let code = r#"
+def unpacked(fetch):
+    t_unpack, _ = None, None
+    for _ in range(3):
+        t_unpack = fetch(t_unpack)
+
+def with_target(open_, fetch):
+    with open_() as t_with:
+        for _ in range(3):
+            t_with = fetch(t_with)
+
+def for_target(items, fetch):
+    for t_for in items:
+        pass
+    for _ in range(3):
+        t_for = fetch(t_for)
+
+def walrus(fetch):
+    if (t_walrus := fetch(None)) is None:
+        return
+    for _ in range(3):
+        t_walrus = fetch(t_walrus)
+
+def nested_loops(fetch):
+    t_nested, _ = fetch(None)
+    for _ in range(3):
+        for _ in range(2):
+            print(t_nested)
+        t_nested = fetch(None)
+
+def write_in_inner_loop(fetch):
+    t_inner, _ = fetch(None)
+    for _ in range(3):
+        print(t_inner)
+        for _ in range(2):
+            t_inner = fetch(None)
+
+def comprehension(fetch):
+    t_comprehension, _ = fetch(None)
+    for _ in range(3):
+        print([t_comprehension for _ in range(2)])
+        t_comprehension = fetch(None)
+
+def paginate(pages, fetch):
+    for page in pages:
+        t_cursor, _ = page
+        for _ in range(2):
+            t_cursor = fetch(t_cursor)
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, true);
+    let handle = handles.get("main").unwrap();
+    let report = get_unused_variable_diagnostics(&state, handle);
+    assert_eq!(report, "No unused variables");
+}
+
+// A dead store is reported when no read in the loop sees the value it stores.
+#[test]
+fn test_unused_variable_reassignment_not_read_by_loop() {
+    let code = r#"
+def in_loop():
+    for _ in range(3):
+        unused_in_loop = 1
+
+def parameter_in_loop(x):
+    for _ in range(3):
+        x = 1
+
+def loop_target_read(items):
+    for target in items:
+        print(target)
+        target = 1
+
+def unpacked_in_loop(rows):
+    for row in rows:
+        in_body, _ = row
+        print(in_body)
+        in_body = None
+
+def except_in_loop(items):
+    for _ in items:
+        try:
+            pass
+        except Exception as caught:
+            print(caught)
+        caught = 1
+
+def rebound_before_inner_loop(rows):
+    for row in rows:
+        rebound, _ = row
+        for _ in range(2):
+            print(rebound)
+        rebound = None
+
+def shadowed_in_comprehension(items):
+    for _ in range(3):
+        print([shadowed for shadowed in items])
+        shadowed = 1
+
+def read_in_earlier_loop(fetch):
+    later_loop, _ = fetch(None)
+    for _ in range(3):
+        print(later_loop)
+    for _ in range(3):
+        later_loop = 1
+
+def unpacked_without_loop(fetch):
+    no_loop, _ = fetch(None)
+    print(no_loop)
+    no_loop = 1
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, true);
+    let handle = handles.get("main").unwrap();
+    let report = get_unused_variable_diagnostics(&state, handle);
+    assert_eq!(
+        report,
+        "Variable `unused_in_loop` is unused, Variable `x` is unused, Variable `target` is unused, Variable `in_body` is unused, Variable `caught` is unused, Variable `rebound` is unused, Variable `shadowed` is unused, Variable `later_loop` is unused, Variable `no_loop` is unused"
+    );
+}
+
 #[test]
 fn test_fstring_format_specifier_counts_as_variable_use() {
     let code = r#"

@@ -17,6 +17,7 @@ use pyrefly_derive::VisitMut;
 use pyrefly_util::assert_bytes;
 use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
+use ruff_python_ast::name::Name;
 use starlark_map::small_map::SmallMap;
 use starlark_map::smallmap;
 use vec1::Vec1;
@@ -347,6 +348,21 @@ impl TypeInfo {
         } else {
             None
         }
+    }
+
+    /// Top-level attribute facets that store a narrowed value.
+    pub fn narrowed_attribute_types(&self) -> Vec<(&Name, &Type)> {
+        let Some(facets) = &self.facets else {
+            return Vec::new();
+        };
+        facets
+            .0
+            .iter()
+            .filter_map(|(kind, _)| match kind {
+                FacetKind::Attribute(name) => self.type_at_facet(kind).map(|ty| (name, ty)),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -834,19 +850,26 @@ impl NarrowedFacet {
             }
         }
         let ty = ty_branches.map(|tys| {
-            join_types(
-                tys,
-                union_types,
-                is_subset_eq,
-                join_style.flat_map(|base_facet| {
-                    base_facet.as_ref().and_then(|facet| match facet {
-                        NarrowedFacet::WithRoot(ty, _) | NarrowedFacet::Leaf(ty) => {
-                            Some(ty.clone())
-                        }
-                        NarrowedFacet::WithoutRoot { .. } => None,
-                    })
-                }),
-            )
+            let join_style = join_style.flat_map(|base_facet| {
+                base_facet.as_ref().and_then(|facet| match facet {
+                    NarrowedFacet::WithRoot(ty, _) | NarrowedFacet::Leaf(ty) => Some(ty.clone()),
+                    NarrowedFacet::WithoutRoot { .. } => None,
+                })
+            });
+            // Assigning a facet does not rebind its root name. A merge of root narrows
+            // can therefore contain facet reassignments that widen the base type.
+            // Such facets must not simplify back to the type before the branch.
+            let join_style = match join_style {
+                JoinStyle::NarrowOf(base_ty)
+                    if tys
+                        .iter()
+                        .any(|ty| ty != &base_ty && !is_subset_eq(ty, &base_ty)) =>
+                {
+                    JoinStyle::ReassignmentOf(base_ty)
+                }
+                style => style,
+            };
+            join_types(tys, union_types, is_subset_eq, join_style)
         });
         let facets = facets_branches.and_then(|branches| {
             NarrowedFacets::join(
@@ -923,7 +946,7 @@ fn join_types_impl(
         && types.iter().any(|t| t.is_any())
     {
         base_ty
-    } else if is_narrow {
+    } else if is_narrow && !base_ty.is_any() {
         // Check for the case where `base_ty` is directly in the merge before doing
         // a subset check. We do this to avoid the possibility of pinning a `Var` to
         // itself inside the join (which at one point caused a stack overflow).

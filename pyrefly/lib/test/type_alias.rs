@@ -161,6 +161,77 @@ def f(x: X[int]):
 );
 
 testcase!(
+    test_generic_alias_union_with_enum_literal,
+    r#"
+from enum import Enum
+from typing import Literal, TypeAlias, TypeVar, assert_type
+
+T = TypeVar("T")
+
+class Unset(Enum):
+    _UNSET = "UNSET"
+
+UNSET: Literal[Unset._UNSET] = Unset._UNSET
+UnsetType: TypeAlias = Literal[Unset._UNSET]
+Missing: TypeAlias = UnsetType | T | None
+
+def takes(x: Missing[Literal["a", "b"]]) -> None: ...
+
+def or_unset[U](v: U | None) -> U | Literal[Unset._UNSET]:
+    return UNSET if v is None else v
+
+def f(s: Literal["a"] | None) -> None:
+    assert_type(or_unset(s), Literal["a"] | Literal[Unset._UNSET])
+    takes(or_unset(s))
+"#,
+);
+
+testcase!(
+    test_generic_alias_union_with_enum_literal_direct_argument,
+    r#"
+from enum import Enum
+from typing import Literal, TypeAlias, TypeVar
+
+T = TypeVar("T")
+
+class Unset(Enum):
+    _UNSET = "UNSET"
+
+UnsetType: TypeAlias = Literal[Unset._UNSET]
+Missing: TypeAlias = UnsetType | T | None
+
+def takes(x: Missing[Literal["a", "b"]]) -> None: ...
+
+def f(x: Literal["a"] | Literal[Unset._UNSET] | None) -> None:
+    takes(x)
+"#,
+);
+
+testcase!(
+    test_generic_alias_union_with_inline_enum_literal,
+    r#"
+from enum import Enum
+from typing import Literal, TypeAlias, TypeVar
+
+T = TypeVar("T")
+
+class Unset(Enum):
+    _UNSET = "UNSET"
+
+UNSET: Literal[Unset._UNSET] = Unset._UNSET
+Missing: TypeAlias = Literal[Unset._UNSET] | T | None
+
+def takes(x: Missing[Literal["a", "b"]]) -> None: ...
+
+def or_unset[U](v: U | None) -> U | Literal[Unset._UNSET]:
+    return UNSET if v is None else v
+
+def f(s: Literal["a"] | None) -> None:
+    takes(or_unset(s))
+"#,
+);
+
+testcase!(
     test_ordinary_alias_union_retains_precise_members,
     r#"
 from collections.abc import Iterable, Mapping
@@ -989,6 +1060,58 @@ x5: TA | C = val1
 x6: TA | C = val2
 x7: TA | C = C()
 c2: Callable[[int], int] = f2  # E: `(x: C | int | str) -> C | int | str` is not assignable to `(int) -> int`
+    "#,
+);
+
+testcase!(
+    bug = "Union alias names are lost when additional members are merged",
+    test_alias_display_repeated_composition,
+    r#"
+from typing import assert_type, reveal_type
+
+type Alias = int | str | bytes
+
+def grow(x: Alias | float, y: complex, flag: bool) -> None:
+    value = [x if flag else y]
+    assert_type(value, list[int | str | bytes | float | complex])
+    reveal_type(value)  # E: revealed type: list[bytes | complex | float | int | str]
+    result: list[None] = value  # E: `list[bytes | complex | float | int | str]` is not assignable to `list[None]`
+    "#,
+);
+
+testcase!(
+    test_alias_display_collapsed_generic_extra,
+    r#"
+from typing import assert_type, reveal_type
+
+type Alias = int | str | bytes
+
+def pair[T](x: T) -> list[Alias | T]:
+    return [x]
+
+def probe(x: Alias) -> None:
+    value = pair(x)
+    assert_type(value, list[Alias])
+    reveal_type(value)  # E: revealed type: list[bytes | int | str]
+    "#,
+);
+
+fn env_with_shared_display_alias() -> TestEnv {
+    let mut env = TestEnv::new();
+    env.add("a", "type TA = int | str | bytes");
+    env.add("b", "from a import TA\ndef need(x: list[TA]) -> None: ...");
+    env.add("c", "from a import TA\ndef make() -> set[TA]: ...");
+    env
+}
+
+testcase!(
+    test_alias_display_imported_identity,
+    env_with_shared_display_alias(),
+    r#"
+from b import need
+from c import make
+
+need(make())  # E: Argument `set[TA]` is not assignable to parameter `x` with type `list[TA]` in function `b.need`
     "#,
 );
 

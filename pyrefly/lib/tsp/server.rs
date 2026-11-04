@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use lsp_server::ErrorCode;
 use lsp_server::RequestId;
@@ -33,6 +34,7 @@ use tsp_types::TSPNotificationMethods;
 use tsp_types::TSPRequests;
 
 use crate::commands::lsp::IndexingMode;
+use crate::lsp::non_wasm::initial_configuration::InitialConfigurationEvents;
 use crate::lsp::non_wasm::lsp::new_response;
 use crate::lsp::non_wasm::protocol::Message;
 use crate::lsp::non_wasm::protocol::Notification;
@@ -41,13 +43,14 @@ use crate::lsp::non_wasm::protocol::Response;
 use crate::lsp::non_wasm::queue::LspEvent;
 use crate::lsp::non_wasm::queue::QueuedEvent;
 use crate::lsp::non_wasm::server::Connection;
-use crate::lsp::non_wasm::server::InitializeInfo;
 use crate::lsp::non_wasm::server::MessageReader;
 use crate::lsp::non_wasm::server::ProcessEvent;
 use crate::lsp::non_wasm::server::ServerCapabilitiesWithTypeHierarchy;
 use crate::lsp::non_wasm::server::TspInterface;
 use crate::lsp::non_wasm::server::capabilities;
 use crate::lsp::non_wasm::transaction_manager::TransactionManager;
+use crate::tsp::type_facts::TYPE_FACTS_METHOD;
+use crate::tsp::type_facts::TypeFactsParams;
 use crate::tsp::validation::internal_error;
 use crate::tsp::validation::invalid_params_error;
 use crate::tsp::validation::snapshot_outdated_error;
@@ -297,6 +300,31 @@ impl<T: TspInterface> TspServer<T> {
         }
     }
 
+    /// Answer a `pyrefly/typeFacts` request at the snapshot it names.
+    fn handle_type_facts<'a>(
+        &'a self,
+        ide_transaction_manager: &mut TransactionManager<'a>,
+        telemetry_event: &mut TelemetryEvent,
+        request: &Request,
+        reply: Reply,
+    ) {
+        let params = match serde_json::from_value::<TypeFactsParams>(request.params.clone()) {
+            Ok(params) => params,
+            Err(e) => {
+                reply.err(request.id.clone(), invalid_params_error(&e.to_string()));
+                return;
+            }
+        };
+        self.answer_at_snapshot(request.id.clone(), reply, params.snapshot, || {
+            Ok(self.inner().type_facts(
+                ide_transaction_manager,
+                telemetry_event,
+                &params.uri,
+                &params.queries,
+            ))
+        });
+    }
+
     /// Deserialize `serde_json::Value` params into [`GetTypeParams`], call the
     /// handler at the snapshot that the params name, and send the response.
     /// Shared by getDeclaredType, getComputedType, and getExpectedType.
@@ -339,12 +367,21 @@ impl<T: TspInterface> TspServer<T> {
     ) -> anyhow::Result<ProcessEvent> {
         // For TSP requests, handle them specially
         let tsp_request = match event.event() {
-            LspEvent::LspRequest(request) => Some(request),
-            LspEvent::TspExtraRequest { request, .. } => Some(request),
+            LspEvent::LspRequest(request) | LspEvent::TspExtraRequest { request, .. } => {
+                Some((request, parse_tsp_request(request)))
+            }
             _ => None,
         };
-        let result = if let Some(request) = tsp_request {
-            match parse_tsp_request(request) {
+        let result = if let Some((request, parsed)) = tsp_request
+            && (parsed.is_some()
+                || request.method == TYPE_FACTS_METHOD
+                || matches!(event.event(), LspEvent::TspExtraRequest { .. }))
+        {
+            if request.method == TYPE_FACTS_METHOD {
+                self.handle_type_facts(ide_transaction_manager, telemetry_event, request, reply);
+                return Ok(ProcessEvent::Continue);
+            }
+            match parsed {
                 Some(TSPRequests::ConnectionRequest { params, .. }) => {
                     self.handle_connection_request(request.id.clone(), params, reply);
                 }
@@ -637,7 +674,7 @@ fn parse_tsp_request(request: &Request) -> Option<TSPRequests> {
 pub fn tsp_loop(
     lsp_server: impl TspInterface,
     mut reader: MessageReader,
-    _initialization: InitializeInfo,
+    initial_configuration_request: Option<(RequestId, Instant)>,
     telemetry: &impl Telemetry,
 ) -> anyhow::Result<()> {
     let server = TspServer::new(lsp_server);
@@ -655,8 +692,12 @@ pub fn tsp_loop(
         let mut canceled_requests = HashSet::new();
         let mut next_task_id = 0_usize;
 
-        while let Ok(event) = server.inner.lsp_queue().recv() {
-            let subsequent_mutation = server.inner.lsp_queue().has_subsequent_mutation(&event);
+        let mut events = InitialConfigurationEvents::new(
+            server.inner.lsp_queue(),
+            initial_configuration_request,
+        );
+        while let Ok(event) = events.recv() {
+            let subsequent_mutation = events.has_subsequent_mutation(&event);
             let task_id = next_task_id;
             next_task_id += 1;
             let (mut event_telemetry, queue_duration) = TelemetryEvent::new_dequeued(

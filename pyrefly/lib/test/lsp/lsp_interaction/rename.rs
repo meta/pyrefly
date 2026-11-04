@@ -260,6 +260,149 @@ fn test_rename_editable_package_symbols_is_allowed() {
 }
 
 #[test]
+fn test_rename_editable_source_with_third_party_stub() {
+    // `mylib` is an editable install, but imports of it resolve to a third-party `mylib-stubs`
+    // package.
+    let root = TempDir::new().unwrap();
+    let site_packages = root.path().join("venv/lib/python3.12/site-packages");
+    let source = root.path().join("editable_src/mylib/__init__.py");
+    let stub = site_packages.join("mylib-stubs/__init__.pyi");
+    let dist_info = site_packages.join("mylib-0.1.dist-info");
+    let user_code = root.path().join("user.py");
+    for dir in [source.parent().unwrap(), stub.parent().unwrap(), &dist_info] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(
+        root.path().join("pyrefly.toml"),
+        "site_package_path = [\"venv/lib/python3.12/site-packages\", \"editable_src\"]\n",
+    )
+    .unwrap();
+    std::fs::write(&source, "def item():\n    return 1\n").unwrap();
+    std::fs::write(&stub, "def item() -> int: ...\n").unwrap();
+    std::fs::write(
+        dist_info.join("direct_url.json"),
+        json!({
+            "url": Uri::from_file_path(root.path().join("editable_src")).unwrap().to_string(),
+            "dir_info": {"editable": true},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(&user_code, "from mylib import item\n\nitem()\n").unwrap();
+
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![(
+                "test".to_owned(),
+                Uri::from_file_path(root.path()).unwrap(),
+            )]),
+            configuration: Some(Some(json!([{ "indexing_mode": "lazy_blocking" }]))),
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.client.did_open("user.py");
+    interaction
+        .client
+        .did_open("editable_src/mylib/__init__.py");
+
+    // Renaming `item` would require editing the third-party stub, so it is not allowed.
+    let position = json!({
+        "textDocument": {"uri": Uri::from_file_path(&source).unwrap().to_string()},
+        "position": {"line": 0, "character": 4},
+    });
+    interaction
+        .client
+        .send_request::<PrepareRenameRequest>(position.clone())
+        .expect_response(serde_json::Value::Null)
+        .unwrap();
+    let mut rename = position;
+    rename["newName"] = json!("renamed");
+    interaction
+        .client
+        .send_request::<RenameRequest>(rename)
+        .expect_response_error(json!({
+            "code": -32600,
+            "message": "Third-party symbols cannot be renamed",
+            "data": null,
+        }))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_rename_editable_source_with_bundled_stub() {
+    // `requests` is an editable install without `py.typed`, so imports of it resolve to the
+    // typeshed stubs bundled with Pyrefly.
+    let root = TempDir::new().unwrap();
+    let site_packages = root.path().join("venv/lib/python3.12/site-packages");
+    let source = root.path().join("editable_src/requests/api.py");
+    let dist_info = site_packages.join("requests-0.1.dist-info");
+    let user_code = root.path().join("user.py");
+    for dir in [source.parent().unwrap(), &dist_info] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(
+        root.path().join("pyrefly.toml"),
+        "site_package_path = [\"venv/lib/python3.12/site-packages\", \"editable_src\"]\n",
+    )
+    .unwrap();
+    std::fs::write(root.path().join("editable_src/requests/__init__.py"), "").unwrap();
+    std::fs::write(&source, "def get(url):\n    return url\n").unwrap();
+    std::fs::write(
+        dist_info.join("direct_url.json"),
+        json!({
+            "url": Uri::from_file_path(root.path().join("editable_src")).unwrap().to_string(),
+            "dir_info": {"editable": true},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(&user_code, "from requests.api import get\n\nget(\"\")\n").unwrap();
+
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![(
+                "test".to_owned(),
+                Uri::from_file_path(root.path()).unwrap(),
+            )]),
+            configuration: Some(Some(json!([{ "indexing_mode": "lazy_blocking" }]))),
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.client.did_open("user.py");
+    interaction.client.did_open("editable_src/requests/api.py");
+
+    // Renaming `get` would require editing the bundled stub, so it is not allowed.
+    let position = json!({
+        "textDocument": {"uri": Uri::from_file_path(&source).unwrap().to_string()},
+        "position": {"line": 0, "character": 4},
+    });
+    interaction
+        .client
+        .send_request::<PrepareRenameRequest>(position.clone())
+        .expect_response(serde_json::Value::Null)
+        .unwrap();
+    let mut rename = position;
+    rename["newName"] = json!("renamed");
+    interaction
+        .client
+        .send_request::<RenameRequest>(rename)
+        .expect_response_error(json!({
+            "code": -32600,
+            "message": "Third-party symbols cannot be renamed",
+            "data": null,
+        }))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
 fn test_rename_kwarg_in_unopened_file() {
     let root = get_test_files_root();
     let root_path = root.path().join("rename_kwargs_across_files");
@@ -456,6 +599,105 @@ fn test_rename() {
                         "newText":"Baz",
                         "range":{"start":{"line":10,"character":0},"end":{"character":3,"line":10}}
                     },
+                ]
+            }
+        }))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_rename_cross_file_attribute_assignment_and_deletion() {
+    let root = TempDir::new().unwrap();
+    let a_path = root.path().join("a.py");
+    let b_path = root.path().join("b.py");
+
+    std::fs::write(
+        &a_path,
+        r#"class R:
+    history: list[int]
+    def __init__(self):
+        self.history = []
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        &b_path,
+        r#"from a import R
+
+def f(r: R, h: list[int]):
+    r.history = h
+    del r.history
+    print(r.history)
+"#,
+    )
+    .unwrap();
+
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![(
+                "test".to_owned(),
+                Uri::from_file_path(root.path()).unwrap(),
+            )]),
+            configuration: Some(Some(json!([{ "indexing_mode": "lazy_blocking" }]))),
+            ..Default::default()
+        })
+        .unwrap();
+
+    interaction.client.did_open("a.py");
+    interaction.client.did_open("b.py");
+
+    interaction
+        .client
+        .send_request::<RenameRequest>(json!({
+            "textDocument": {"uri": Uri::from_file_path(&a_path).unwrap().to_string()},
+            "position": {"line": 1, "character": 5},
+            "newName": "zz"
+        }))
+        .expect_response(json!({
+            "changes": {
+                Uri::from_file_path(&a_path).unwrap().to_string(): [
+                    {
+                        "newText": "zz",
+                        "range": {
+                            "start": {"line": 1, "character": 4},
+                            "end": {"line": 1, "character": 11}
+                        }
+                    },
+                    {
+                        "newText": "zz",
+                        "range": {
+                            "start": {"line": 3, "character": 13},
+                            "end": {"line": 3, "character": 20}
+                        }
+                    }
+                ],
+                Uri::from_file_path(&b_path).unwrap().to_string(): [
+                    {
+                        "newText": "zz",
+                        "range": {
+                            "start": {"line": 3, "character": 6},
+                            "end": {"line": 3, "character": 13}
+                        }
+                    },
+                    {
+                        "newText": "zz",
+                        "range": {
+                            "start": {"line": 4, "character": 10},
+                            "end": {"line": 4, "character": 17}
+                        }
+                    },
+                    {
+                        "newText": "zz",
+                        "range": {
+                            "start": {"line": 5, "character": 12},
+                            "end": {"line": 5, "character": 19}
+                        }
+                    }
                 ]
             }
         }))

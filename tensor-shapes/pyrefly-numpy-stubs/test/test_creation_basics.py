@@ -184,12 +184,12 @@ def test_diag_vector_default_and_offsets() -> None:
     assert_shape(np.diag(off_diagonal, k=-2).shape, (6, 6))
 
 
-def check_diag_symbolic[N: IntVar, DType](
-    vector: np.ndarray[[N], DType], k: int
+def check_diag_symbolic[N: IntVar, K: IntVar, DType](
+    vector: np.ndarray[[N], DType], k: Int[K]
 ) -> None:
     assert_type(np.diag(vector), np.ndarray[[N, N], DType])
     assert_type(np.diag(vector, k=-2), np.ndarray[[N + 2, N + 2], DType])
-    assert_type(np.diag(vector, k), np.ndarray[[int, int], DType])
+    assert_type(np.diag(vector, k), np.ndarray[[N + abs(K), N + abs(K)], DType])
 
 
 def check_diag_gradual_dtype(vector: np.ndarray[[4], Any]) -> None:
@@ -207,7 +207,9 @@ def test_diag_dtype_and_broad_offset() -> None:
 
 
 def check_diag_general_rank[DType](matrix: np.ndarray[[2, 3], DType]) -> None:
-    assert_type(np.diag(matrix), np.ndarray[[int], DType])
+    assert_type(np.diag(matrix), np.ndarray[[2], DType])
+    assert_type(np.diag(matrix, k=2), np.ndarray[[1], DType])
+    assert_type(np.diag(matrix, k=-1), np.ndarray[[1], DType])
 
 
 def check_diag_unknown_rank[DType](array: np.ndarray[IntTuple, DType]) -> None:
@@ -228,8 +230,10 @@ def check_diag_rank_three_falls_back[DType](
 
 def test_diag_matrix_runtime_shape() -> None:
     result = np.diag(np.ones((2, 3)))
-    assert_type(result, np.ndarray[[int], np.dtype[np.float64]])
-    assert_shape(result.shape, (int,), runtime=(2,))
+    assert_type(result, np.ndarray[[2], np.dtype[np.float64]])
+    assert_shape(result.shape, (2,))
+    assert_shape(np.diag(np.ones((2, 3)), k=2).shape, (1,))
+    assert_shape(np.diag(np.ones((2, 3)), k=-2).shape, (0,))
 
 
 def test_stack_axis0() -> None:

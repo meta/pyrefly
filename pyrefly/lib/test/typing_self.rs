@@ -674,7 +674,6 @@ class Child(Parent):
 // `ClassType(Child) & SelfType(Parent[int])` when the upcast back to `Parent`
 // preserves the same inherited instantiation.
 testcase!(
-    bug = "After `issubclass(cls, Child)` narrowing, `cls()` of type `Child` should be assignable to `Self@Parent` since `Child` is a subclass of `Parent`",
     test_classmethod_self_return_with_generic_issubclass_narrowing,
     r#"
 from typing import Self, assert_type
@@ -683,7 +682,7 @@ class Parent[T]:
     @classmethod
     def decode(cls) -> Self:
         if issubclass(cls, Child):
-            return cls()  # E: Returned type `Child` is not assignable to declared return type `Self@Parent`
+            return cls()
         return cls()
 
     def __init__(self) -> None:
@@ -772,7 +771,7 @@ class A: ...
 class D:
     def __init__(self: A): pass  # E: `__init__` method self type `A` is not a superclass of class `D`
     def f(self: A): pass  # E: `f` method self type `A` is not a superclass of class `D`
-    def g(self: type[A]): pass  # E: `g` method self type `type[A]` is not a superclass of class `D`
+    def g(self: type[A]): pass  # E: `g` method self type `type[A]` refers to class `A`, which is not a superclass of class `D`
     def h(self: D): pass # Ok
     "#,
 );
@@ -808,10 +807,25 @@ class D:
     @classmethod
     def f(cls: A): pass  # E: `f` method cls type `A` is not a valid `type[...]` annotation
     @classmethod
-    def g(cls: type[A]): pass  # E: `g` method cls type `type[A]` is not a superclass of class `D`
+    def g(cls: type[A]): pass  # E: `g` method cls type `type[A]` refers to class `A`, which is not a superclass of class `D`
     @classmethod
     def h(cls: type[D]): pass # Ok
 "#,
+);
+
+testcase!(
+    test_classmethod_subclass_cls_diagnostic_wording,
+    r#"
+# Regression for https://github.com/facebook/pyrefly/issues/4703:
+# the diagnostic names the class `Child` that the superclass check compares with `Base`.
+class Base:
+    @classmethod
+    def method(cls: type[Child]) -> None:  # E: `method` method cls type `type[Child]` refers to class `Child`, which is not a superclass of class `Base`
+        pass
+
+class Child(Base):
+    pass
+    "#,
 );
 
 testcase!(

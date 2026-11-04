@@ -109,7 +109,7 @@ pub enum Preset {
     /// Enables additional error codes on top of the default for stricter checking.
     Strict,
     /// Enables every error kind at `Error` severity. Directives like
-    /// `reveal-type` keep their default severity.
+    /// `reveal-type` and the unused-code kinds keep their default severity.
     All,
 }
 
@@ -156,6 +156,9 @@ impl Preset {
                     (ErrorKind::UnexpectedPositionalArgument, Severity::Error),
                     (ErrorKind::UnknownName, Severity::Error),
                     (ErrorKind::UnusedCoroutine, Severity::Error),
+                    (ErrorKind::UnusedImport, Severity::Hint),
+                    (ErrorKind::UnusedParameter, Severity::Hint),
+                    (ErrorKind::UnusedVariable, Severity::Hint),
                 ]);
                 // Silence every other error kind. Explicitly setting each one
                 // (rather than relying on `severity()`'s default fallback) is
@@ -197,8 +200,11 @@ impl Preset {
                 let errors = HashMap::from([
                     (ErrorKind::DirectAbstractBaseInstantiation, Severity::Error),
                     (ErrorKind::ImplicitAny, Severity::Error),
+                    (ErrorKind::InstanceVarAssign, Severity::Error),
+                    (ErrorKind::MethodAssign, Severity::Error),
                     (ErrorKind::MissingOverrideDecorator, Severity::Error),
                     (ErrorKind::OpenUnpacking, Severity::Error),
+                    (ErrorKind::PossiblyUninitializedAttribute, Severity::Error),
                     (ErrorKind::PotentialBadKeywordArgument, Severity::Error),
                     (ErrorKind::UnusedIgnore, Severity::Error),
                 ]);
@@ -212,11 +218,20 @@ impl Preset {
             Preset::All => {
                 // Promote every non-Error kind to Error. Directives (e.g.
                 // RevealType) are left at their default severity so they
-                // remain informational rather than becoming hard errors.
+                // remain informational rather than becoming hard errors, and
+                // the unused-code kinds stay IDE hints. Unreachable also
+                // defaults to Hint, but is still promoted.
                 let errors: HashMap<ErrorKind, Severity> = all::<ErrorKind>()
                     .filter_map(|kind| {
-                        (!kind.is_directive() && kind.default_severity() != Severity::Error)
-                            .then_some((kind, Severity::Error))
+                        (!kind.is_directive()
+                            && kind.default_severity() != Severity::Error
+                            && !matches!(
+                                kind,
+                                ErrorKind::UnusedImport
+                                    | ErrorKind::UnusedParameter
+                                    | ErrorKind::UnusedVariable
+                            ))
+                        .then_some((kind, Severity::Error))
                     })
                     .collect();
                 ConfigBase {
@@ -764,6 +779,27 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // https://github.com/facebook/pyrefly/issues/5113
+    #[test]
+    fn test_deprecated_and_unreachable_severity() {
+        let severity = |preset: Preset, kind| match preset.apply().errors {
+            Some(errors) => errors.severity(kind),
+            None => kind.default_severity(),
+        };
+        assert_eq!(
+            severity(Preset::Default, ErrorKind::Deprecated),
+            Severity::Warn
+        );
+        assert_eq!(
+            severity(Preset::Default, ErrorKind::Unreachable),
+            Severity::Hint
+        );
+        for kind in [ErrorKind::Deprecated, ErrorKind::Unreachable] {
+            assert_eq!(severity(Preset::Basic, kind), Severity::Ignore);
+            assert_eq!(severity(Preset::All, kind), Severity::Error);
         }
     }
 }

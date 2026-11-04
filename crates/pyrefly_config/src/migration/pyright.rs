@@ -208,6 +208,8 @@ pub struct RuleOverrides {
     pub report_invalid_type_form: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_explicit_any: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_any: Option<Severity>,
 
     // Abstract/instantiation rules
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
@@ -327,6 +329,8 @@ pub struct RuleOverrides {
     pub report_untyped_class_decorator: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_untyped_function_decorator: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_untyped_named_tuple: Option<Severity>,
 
     // Name/redeclaration rules
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
@@ -379,6 +383,7 @@ impl RuleOverrides {
         add(self.report_invalid_type_form, ErrorKind::InvalidTypeAlias);
         add(self.report_invalid_type_form, ErrorKind::NotAType);
         add(self.report_explicit_any, ErrorKind::ExplicitAny);
+        add(self.report_any, ErrorKind::ExplicitAnyUse);
         add(self.report_abstract_usage, ErrorKind::BadInstantiation);
         add(self.report_argument_type, ErrorKind::BadArgumentType);
         add(self.report_argument_type, ErrorKind::InvalidArgument);
@@ -418,7 +423,7 @@ impl RuleOverrides {
         add(self.report_operator_issue, ErrorKind::NotCallable);
         add(self.report_return_type, ErrorKind::BadReturn);
         add(self.report_return_type, ErrorKind::InvalidYield);
-        add(self.report_private_usage, ErrorKind::NoAccess);
+        add(self.report_private_usage, ErrorKind::ProtectedAccess);
         add(self.report_deprecated, ErrorKind::Deprecated);
         add(
             self.report_incompatible_method_override,
@@ -449,8 +454,20 @@ impl RuleOverrides {
             ErrorKind::UnknownArgumentType,
         );
         add(
+            self.report_unknown_argument_type,
+            ErrorKind::UnknownFromError,
+        );
+        add(
             self.report_unknown_variable_type,
             ErrorKind::UnknownVariableType,
+        );
+        add(
+            self.report_unknown_variable_type,
+            ErrorKind::UnknownReturnType,
+        );
+        add(
+            self.report_unknown_variable_type,
+            ErrorKind::UnknownFromError,
         );
         add(
             self.report_unknown_member_type,
@@ -460,10 +477,16 @@ impl RuleOverrides {
             self.report_unknown_member_type,
             ErrorKind::UnknownAttributeAccess,
         );
+        add(self.report_unknown_member_type, ErrorKind::UnknownFromError);
         add(
             self.report_unknown_lambda_type,
             ErrorKind::ImplicitAnyLambda,
         );
+        add(
+            self.report_unknown_lambda_type,
+            ErrorKind::UnknownReturnType,
+        );
+        add(self.report_unknown_lambda_type, ErrorKind::UnknownFromError);
         add(self.report_invalid_type_var_use, ErrorKind::InvalidTypeVar);
         add(self.report_unnecessary_cast, ErrorKind::RedundantCast);
         add(self.report_undefined_variable, ErrorKind::UnknownName);
@@ -549,6 +572,10 @@ impl RuleOverrides {
             self.report_untyped_function_decorator,
             ErrorKind::UntypedFunctionDecorator,
         );
+        add(
+            self.report_untyped_named_tuple,
+            ErrorKind::UntypedNamedtuple,
+        );
 
         // Name/redeclaration rules
         add(self.report_redeclaration, ErrorKind::Redefinition);
@@ -566,6 +593,10 @@ impl RuleOverrides {
         add(
             self.report_implicit_relative_import,
             ErrorKind::MissingImport,
+        );
+        add(
+            self.report_implicit_relative_import,
+            ErrorKind::FallbackSearchPathRelativeImport,
         );
 
         // Type argument rules
@@ -815,6 +846,20 @@ include = ["basedpyright.py"]
     }
 
     #[test]
+    fn test_implicit_relative_import_maps_to_import_error_kinds() -> anyhow::Result<()> {
+        let raw_file = r#"{"reportImplicitRelativeImport": "none"}"#;
+        let config = serde_json::from_str::<PyrightConfig>(raw_file)?.convert();
+        let errors = config.root.errors.as_ref().unwrap();
+
+        assert_eq!(
+            errors.severity(ErrorKind::FallbackSearchPathRelativeImport),
+            Severity::Ignore
+        );
+        assert_eq!(errors.severity(ErrorKind::MissingImport), Severity::Ignore);
+        Ok(())
+    }
+
+    #[test]
     fn test_report_trailing_commas() -> anyhow::Result<()> {
         let raw_file = r#"
             {
@@ -829,6 +874,16 @@ include = ["basedpyright.py"]
         let pyr = serde_jsonrc::from_str::<PyrightConfig>(raw_file)?;
         let config = pyr.convert();
         assert!(!config.project_includes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_report_private_usage_mapping() -> anyhow::Result<()> {
+        let pyr = serde_json::from_str::<PyrightConfig>(r#"{"reportPrivateUsage": "warning"}"#)?;
+        let config = pyr.convert();
+        let errors = config.root.errors.expect("expected a diagnostic override");
+        assert_eq!(errors.severity(ErrorKind::ProtectedAccess), Severity::Warn);
+        assert_eq!(errors.severity(ErrorKind::NoAccess), Severity::Error);
         Ok(())
     }
 }

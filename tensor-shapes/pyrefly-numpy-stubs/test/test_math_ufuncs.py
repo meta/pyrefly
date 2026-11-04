@@ -23,8 +23,17 @@ def test_exponential_and_log_preserve_shape() -> None:
     assert_shape(np.log(a).shape, (4,))
     assert_shape(np.log2(a).shape, (4,))
     assert_shape(np.log10(a).shape, (4,))
-    assert_shape(np.sqrt(b).shape, (3, 4))
     assert_shape(np.power(b, 2).shape, (3, 4))
+
+
+def test_unary_ufuncs_type_arraylike_inputs() -> None:
+    matrix = np.ones((3, 4))
+    sqrt_array = np.sqrt(matrix)
+    assert_type(sqrt_array, np.ndarray[[3, 4], Any])
+    assert_shape(sqrt_array.shape, (3, 4))
+    # Shared _UnaryUFunc sequence overload (not sqrt-specific).
+    assert_type(np.sqrt([1.0, 4.0]), np.ndarray)
+    assert_type(np.sin([0.0, 1.0]), np.ndarray)
 
 
 def test_unary_ufuncs_preserve_shape() -> None:
@@ -234,5 +243,7 @@ def test_rounding_preserves_shape() -> None:
     assert_shape(np.floor(a).shape, (5,))
     assert_shape(np.ceil(a).shape, (5,))
     assert_shape(np.round(a).shape, (5,))
+    assert_shape(np.round(a, 2).shape, (5,))
+    assert_shape(np.round(a=a, decimals=-1).shape, (5,))
     assert_shape(np.trunc(a).shape, (5,))
     assert_shape(np.clip(a, -1.0, 2.0).shape, (5,))

@@ -45,6 +45,7 @@ use ruff_python_ast::visitor;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::visitor::source_order::SourceOrderVisitor;
 use ruff_python_ast::visitor::source_order::TraversalSignal;
+use ruff_python_ast::visitor::source_order::walk_node;
 use ruff_python_ast::visitor::source_order::walk_stmt;
 use ruff_python_parser::ParseError;
 use ruff_python_parser::ParseOptions;
@@ -234,14 +235,15 @@ impl Ast {
         )
     }
 
-    /// Iterates over the branches of an if statement, returning the test and body.
-    /// A test on `None` is an `else` branch that is always taken.
-    pub fn if_branches(x: &StmtIf) -> impl Iterator<Item = (Option<&Expr>, &[Stmt])> {
-        let first = iter::once((Some(&*x.test), x.body.as_slice()));
+    /// The clauses of an `if` statement: each clause's range, test, and body. A test of `None`
+    /// is an `else` clause, which is always taken. The first clause's range is the whole
+    /// statement's.
+    pub fn if_branches(x: &StmtIf) -> impl Iterator<Item = (TextRange, Option<&Expr>, &[Stmt])> {
+        let first = iter::once((x.range, Some(&*x.test), x.body.as_slice()));
         let elses = x
             .elif_else_clauses
             .iter()
-            .map(|x| (x.test.as_ref(), x.body.as_slice()));
+            .map(|x| (x.range, x.test.as_ref(), x.body.as_slice()));
         first.chain(elses)
     }
 
@@ -507,6 +509,15 @@ impl Ast {
         covering_nodes
     }
 
+    /// Like `locate_node`, but searches the subtree rooted at `root`, including `root` itself.
+    pub fn locate_node_in<'a>(root: AnyNodeRef<'a>, position: TextSize) -> Vec<AnyNodeRef<'a>> {
+        let mut visitor = CoveringNodeVisitor::new(position);
+        walk_node(&mut visitor, root);
+        let mut covering_nodes = visitor.covering_nodes;
+        covering_nodes.reverse();
+        covering_nodes
+    }
+
     /// The tightest AST node that strictly contains `target` — i.e. the parent
     /// of the node whose range is `target`, or `None` at module top level.
     pub fn parent_node(module: &ModModule, target: TextRange) -> Option<AnyNodeRef<'_>> {
@@ -611,6 +622,10 @@ impl Ast {
         name.starts_with("__") && !name.ends_with("__")
     }
 
+    pub fn is_protected_attr(name: &Name) -> bool {
+        name.len() > 1 && name.starts_with('_') && !name.starts_with("__")
+    }
+
     // Parameters and variables that are prefixed (but not suffixed) with a single underscore
     // are potentially unused, so we should skip some diagnostics/errors.
     // Examples: `_`, `_x`
@@ -682,9 +697,9 @@ impl Ast {
 
     /// Whether `pattern` always matches a `match` whose subject expression is `subject`.
     /// Beyond ruff's syntactic `is_irrefutable`, a sequence pattern over a fixed-arity
-    /// tuple subject (e.g. `case _, _` for `match x, y`) is irrefutable when its arity
-    /// matches and every element is irrefutable: the subject is always a tuple of exactly
-    /// that length, so the pattern is a catch-all.
+    /// tuple subject (e.g. `case _, _` for `match x, y`) is irrefutable when every
+    /// non-star element fits the tuple and every element is irrefutable. A star absorbs
+    /// the remaining elements, so it makes the sequence a catch-all at any compatible arity.
     ///
     /// This is the single source of truth for match-case irrefutability. It must be used
     /// by every "is this match exhaustive?" judgment (binding-step exhaustive-fork handling
@@ -707,12 +722,18 @@ impl Ast {
                 .patterns
                 .iter()
                 .any(|p| matches!(p, Pattern::MatchStar(_)));
-            return !has_star
-                && seq.patterns.len() == subject_tuple.elts.len()
-                && seq
-                    .patterns
-                    .iter()
-                    .all(|p| p.is_wildcard() || p.is_irrefutable());
+            let num_non_star_patterns = seq
+                .patterns
+                .iter()
+                .filter(|p| !matches!(p, Pattern::MatchStar(_)))
+                .count();
+            return (if has_star {
+                num_non_star_patterns <= subject_tuple.elts.len()
+            } else {
+                num_non_star_patterns == subject_tuple.elts.len()
+            }) && seq.patterns.iter().all(|p| {
+                matches!(p, Pattern::MatchStar(_)) || p.is_wildcard() || p.is_irrefutable()
+            });
         }
         false
     }

@@ -49,11 +49,13 @@ use crate::alt::callable::ReturnTypeResolutionError;
 use crate::alt::class::class_field::ClassAttribute;
 use crate::alt::class::class_field::DescriptorBase;
 use crate::alt::class::dataclass::ReplaceKind;
+use crate::alt::expr::ExprCallee;
 use crate::alt::expr::TypeOrExpr;
 use crate::alt::nn_module_specials::is_nn_sequential;
 use crate::alt::unwrap::HintRef;
 use crate::alt::unwrap::MAX_HINT_WIDTH;
 use crate::binding::binding::Key;
+use crate::binding::binding::LambdaParamId;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorContext;
@@ -146,8 +148,18 @@ pub enum CallTarget {
     BoundMethodOverload(Type, Vec1<TargetWithTParams<Function>>, FuncMetadata),
     /// A union of call targets.
     Union(Vec<CallTarget>),
+    /// Dispatched intersection members, with constructor return witnesses kept separately.
+    Intersect(Vec1<IntersectionCallTarget>),
     /// Any, as a call target.
     Any(AnyStyle),
+}
+
+/// One callable view and the return identities justified by its constructor.
+#[derive(Debug, Clone)]
+pub struct IntersectionCallTarget {
+    pub(crate) ty: Type,
+    pub(crate) target: CallTarget,
+    pub(crate) constructor_witnesses: Vec<Type>,
 }
 
 /// The inferred type of a call and the correlated overload solutions used to build it.
@@ -163,6 +175,15 @@ impl CallOutcome {
             overload_table: OverloadTable::default(),
         }
     }
+}
+
+struct AcceptedIntersectionCall {
+    index: usize,
+    ty: Type,
+    arg_errors: ErrorCollector,
+    call_errors: ErrorCollector,
+    return_errors: ErrorCollector,
+    lambda_types: Vec<(LambdaParamId, Option<Type>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -248,12 +269,14 @@ impl CallTargetLookup {
     }
 }
 
-/// Result of `construct_{class,typed_dict}_inner`
+/// A constructor outcome whose diagnostics remain local until `take`.
 struct ConstructedInstance {
     ty: Type,
     /// Does the type match the provided hint? False if no hint was provided
     matched_hint: bool,
     errors: ErrorCollector,
+    arg_errors: ErrorCollector,
+    return_errors: ErrorCollector,
     specialization_errors: Option<Vec1<TypeVarSpecializationError>>,
 }
 
@@ -262,10 +285,14 @@ impl ConstructedInstance {
         self,
         arguments_range: TextRange,
         errors: &ErrorCollector,
+        arg_errors: &ErrorCollector,
+        return_errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
         answers: &AnswersSolver<Ans>,
     ) -> Type {
         errors.extend(self.errors);
+        arg_errors.extend(self.arg_errors);
+        return_errors.extend(self.return_errors);
         if let Some(specialization_errors) = self.specialization_errors {
             answers.add_specialization_errors(
                 specialization_errors,
@@ -464,6 +491,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.as_call_target_impl(union_of_types, quantified)
                     .with_error_type(|_| original)
             }
+            Type::Type(f) if matches!(&*f, Type::Intersect(_)) => {
+                let Type::Intersect(intersection) = *f else {
+                    unreachable!("guarded by matches! above")
+                };
+                let original = Type::Type(Box::new(Type::Intersect(intersection.clone())));
+                let (members, fallback) = *intersection;
+                let constructors = self.heap.mk_intersect(
+                    members
+                        .into_iter()
+                        .map(|member| self.heap.mk_type_of(member))
+                        .collect(),
+                    self.heap.mk_type_of(fallback),
+                );
+                self.as_call_target_impl(constructors, quantified)
+                    .with_error_type(|_| original)
+            }
             Type::Type(f) if matches!(&*f, Type::SelfType(_)) => {
                 let Type::SelfType(cls) = *f else {
                     unreachable!("guarded by matches! above")
@@ -660,10 +703,65 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .with_error_type(|_| original)
             }
             Type::Intersect(intersect) => {
-                // TODO(rechen): implement calling `A & B`
-                let (types, fallback) = *intersect;
-                self.as_call_target_impl(fallback, quantified)
-                    .with_error_type(|fallback| Type::Intersect(Box::new((types, fallback))))
+                let original = Type::Intersect(intersect.clone());
+                let targets = intersect
+                    .0
+                    .into_iter()
+                    .filter_map(|ty| {
+                        match self.as_call_target_impl(ty.clone(), quantified.clone()) {
+                            CallTargetLookup::Ok(target) => Some((ty, *target)),
+                            CallTargetLookup::Error(..) | CallTargetLookup::CircularCall(..) => {
+                                None
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let mut witnesses = vec![Vec::new(); targets.len()];
+                let mut return_only = SmallSet::new();
+                for (witness_index, (ty, _)) in targets.iter().enumerate() {
+                    let Type::Type(witness) = ty else {
+                        continue;
+                    };
+                    if !matches!(&**witness, Type::Quantified(_) | Type::SelfType(_)) {
+                        continue;
+                    }
+                    for (index, (_, target)) in targets.iter().enumerate() {
+                        if let CallTarget::Class(
+                            class,
+                            ConstructorKind::TypeOfClass | ConstructorKind::BareClassName,
+                            None,
+                        ) = target
+                            && self.constructor_witness_matches(witness, class)
+                        {
+                            witnesses[index].push((**witness).clone());
+                            return_only.insert(witness_index);
+                        }
+                    }
+                }
+                let targets = targets
+                    .into_iter()
+                    .zip(witnesses)
+                    .enumerate()
+                    .filter_map(|(index, ((ty, target), constructor_witnesses))| {
+                        (!return_only.contains(&index)).then_some(IntersectionCallTarget {
+                            ty,
+                            target,
+                            constructor_witnesses,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                match Vec1::try_from_vec(targets) {
+                    Ok(targets)
+                        if targets.len() == 1
+                            && targets.first().constructor_witnesses.is_empty() =>
+                    {
+                        CallTargetLookup::Ok(Box::new(
+                            targets.into_iter().next().expect("length checked").target,
+                        ))
+                    }
+                    Ok(targets) => CallTargetLookup::Ok(Box::new(CallTarget::Intersect(targets))),
+                    Err(_) => CallTargetLookup::Error(original, Vec::new()),
+                }
             }
             Type::Any(style) => CallTargetLookup::Ok(Box::new(CallTarget::Any(style))),
             Type::TypeAlias(ta) => {
@@ -763,21 +861,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     None,
                 )))
             }
-            Type::Type(f) if matches!(&*f, Type::Intersect(_)) => {
-                // TODO(rechen): implement calling `type[A & B]`
-                let Type::Intersect(intersect) = *f else {
-                    unreachable!("guarded by matches! above")
-                };
-                let (types, fallback) = *intersect;
-                self.as_call_target_impl(self.heap.mk_type_of(fallback), quantified)
-                    .with_error_type(|fallback| {
-                        let Type::Type(fallback) = fallback else {
-                            unreachable!("the rejected fallback remains wrapped in Type")
-                        };
-                        self.heap
-                            .mk_type_of(Type::Intersect(Box::new((types, *fallback))))
-                    })
-            }
             Type::Quantified(q) if q.is_type_var() => match q.restriction() {
                 Restriction::Unrestricted => CallTargetLookup::Error(Type::Quantified(q), vec![]),
                 Restriction::Bound(bound) => match bound {
@@ -856,6 +939,49 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    fn report_call_deprecation(
+        &self,
+        target: &CallTarget,
+        range: TextRange,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+    ) {
+        let Some(metadata) = target.function_metadata() else {
+            return;
+        };
+        // A callback's deprecated `__call__` applies to calls, not references to the callback.
+        let callback = if metadata.flags.deprecation.is_none()
+            && let FunctionKind::CallbackProtocol(cls) = &metadata.kind
+        {
+            self.instance_as_dunder_call(cls)
+        } else {
+            None
+        };
+        if let Some(deprecation) = metadata
+            .flags
+            .deprecation
+            .as_deref()
+            .or_else(|| callback.as_ref().and_then(Type::function_deprecation))
+        {
+            let header = format!(
+                "`{}` is deprecated",
+                metadata.kind.format(self.module().name())
+            );
+            let mut builder = if let Some(ctx) = context {
+                errors
+                    .error_builder(range, ErrorKind::Deprecated, ctx().format())
+                    .with_detail(header)
+                    .without_deprecated_tag()
+            } else {
+                errors.error_builder(range, ErrorKind::Deprecated, header)
+            };
+            if let Some(detail) = deprecation.as_error_detail() {
+                builder = builder.with_detail(detail);
+            }
+            builder.emit();
+        }
+    }
+
     pub fn as_call_target_or_error(
         &self,
         ty: Type,
@@ -864,35 +990,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
     ) -> CallTarget {
+        let target = self.resolve_call_target_or_error(ty, call_style, range, errors, context);
+        self.report_call_deprecation(&target, range, errors, context);
+        target
+    }
+
+    fn resolve_call_target_or_error(
+        &self,
+        ty: Type,
+        call_style: CallStyle,
+        range: TextRange,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+    ) -> CallTarget {
         match self.as_call_target(ty) {
-            CallTargetLookup::Ok(target) => {
-                let metadata = target.function_metadata();
-                if let Some(m) = metadata
-                    && let Some(deprecation) = &m.flags.deprecation
-                {
-                    // We manually construct an error using the message from the context but a
-                    // Deprecated error kind so that the error is shown at the Deprecated severity
-                    // (default: WARN) rather than the severity of the context's error kind.
-                    let header = format!(
-                        "`{}` is deprecated",
-                        m.kind.format(self.module().name())
-                    );
-                    let detail = deprecation.as_error_detail();
-                    let mut builder = if let Some(ctx) = context {
-                        errors
-                            .error_builder(range, ErrorKind::Deprecated, ctx().format())
-                            .with_detail(header)
-                            .without_deprecated_tag()
-                    } else {
-                        errors.error_builder(range, ErrorKind::Deprecated, header)
-                    };
-                    if let Some(detail) = detail {
-                        builder = builder.with_detail(detail);
-                    }
-                    builder.emit();
-                }
-                *target
-            }
+            CallTargetLookup::Ok(target) => *target,
             CallTargetLookup::Error(ty, ..) => {
                 // Re-query `__call__` only on the error path so ordinary calls don't pay for
                 // preserving the original access error through call target resolution.
@@ -1042,6 +1154,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         args: &[CallArg],
         keywords: &[CallKeyword],
         errors: &ErrorCollector,
+        arg_errors: &ErrorCollector,
+        return_errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
     ) -> Option<Type> {
@@ -1049,7 +1163,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Clone targs because we don't want instantiations from metaclass __call__
         let mut ctor_targs = cls.targs().clone();
         let mut ret = self
-            .call_infer(
+            .call_infer_with_callee_range(
                 self.as_call_target_or_error(
                     dunder_call,
                     CallStyle::Method(&dunder::CALL),
@@ -1060,7 +1174,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 args,
                 keywords,
                 arguments_range,
+                None,
+                arg_errors,
                 errors,
+                return_errors,
                 context,
                 hint,
                 Some(&mut ctor_targs),
@@ -1108,19 +1225,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// Handles union hint decomposition for class and TypedDict construction.
-    /// When the hint is a union, tries each member independently and keeps only
-    /// successful constructions, preferring those assignable to their hint member.
-    /// Falls back to constructing with no hint if all members produce errors or
-    /// the union is too wide.
+    /// Selects a constructor outcome without publishing its diagnostics.
+    /// Prefers the first hint match without hard call errors or specialization failures.
+    /// Otherwise keeps the first outcome without hard call errors, or constructs without a hint.
+    /// Hints wider than `MAX_HINT_WIDTH` are ignored.
     fn construct_with_hint(
         &self,
-        arguments_range: TextRange,
-        errors: &ErrorCollector,
-        context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
         construct: impl Fn(Option<&Type>) -> ConstructedInstance,
-    ) -> Type {
+    ) -> ConstructedInstance {
         if let Some(hint) = hint
             && let hints = hint.types()
             && hints.len() <= MAX_HINT_WIDTH
@@ -1135,7 +1248,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // Take the first successful match. We require the result to be assignable to the
                     // hint so that, in a case like `x: list[X] | None = [XChild()]`, we choose the
                     // `list[X]` branch with contextually typed results.
-                    return ret.take(arguments_range, errors, context, self);
+                    return ret;
                 }
                 if ret_no_match_hint.is_none() {
                     ret_no_match_hint = Some(ret);
@@ -1144,12 +1257,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if let Some(ret) = ret_no_match_hint {
                 // Even if none of the results were assignable to their hints, we still keep the
                 // first contextually typed result if it only produced specialization errors.
-                return ret.take(arguments_range, errors, context, self);
+                return ret;
             }
         }
         // If the hint is too wide or always produces non-specialization errors, don't use it.
-        let ret = construct(None);
-        ret.take(arguments_range, errors, context, self)
+        construct(None)
     }
 
     fn construct_class(
@@ -1161,6 +1273,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         arguments_range: TextRange,
         callee_range: Option<TextRange>,
         errors: &ErrorCollector,
+        arg_errors: &ErrorCollector,
+        return_errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
     ) -> Type {
@@ -1189,13 +1303,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             (
                 args.map(|a| match a {
                     CallArg::Arg(x) | CallArg::Star(x, _) if is_deeply_nested(x) => {
-                        call.call_arg(a, self, errors)
+                        call.call_arg(a, self, arg_errors)
                     }
                     _ => a.clone(),
                 }),
                 keywords.map(|k| {
                     if is_deeply_nested(&k.value) {
-                        call.call_keyword(k, self, errors)
+                        call.call_keyword(k, self, arg_errors)
                     } else {
                         k.clone()
                     }
@@ -1207,23 +1321,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             None => (args, keywords),
         };
 
-        self.construct_with_hint(
+        self.construct_with_hint(HintRef::filter_for_constructor(hint, cls.targs()), |hint| {
+            self.construct_class_inner(
+                cls.clone(),
+                constructor_kind.clone(),
+                args,
+                keywords,
+                arguments_range,
+                callee_range,
+                context,
+                hint,
+            )
+        })
+        .take(
             arguments_range,
             errors,
+            arg_errors,
+            return_errors,
             context,
-            HintRef::filter_for_constructor(hint, cls.targs()),
-            |hint| {
-                self.construct_class_inner(
-                    cls.clone(),
-                    constructor_kind.clone(),
-                    args,
-                    keywords,
-                    arguments_range,
-                    callee_range,
-                    context,
-                    hint,
-                )
-            },
+            self,
         )
     }
 
@@ -1244,9 +1360,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .solver()
                 .freshen_class_targs(cls.targs_mut(), self.uniques);
 
+            // Argument matching, not the hint, solves the enclosing call's type parameters.
+            let call_vars = hint
+                .collect_maybe_placeholder_vars()
+                .into_iter()
+                .filter(|v| self.solver().var_is_quantified(*v))
+                .collect::<Vec<_>>();
+            let snapshot = self.solver().snapshot_exact_vars(&call_vars);
             let matched_hint = self.is_subset_eq(&self.heap.mk_class_type(cls.clone()), hint);
             self.solver()
                 .generalize_class_targs_for_constructor_hint(cls.targs_mut(), &SmallSet::new());
+            self.solver().restore_vars(snapshot);
             (vs, matched_hint)
         } else {
             (QuantifiedHandle::empty(), false)
@@ -1258,6 +1382,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut recorded_trace = false;
         let prefer_init_trace = self.constructor_prefers_init_over_inherited_new(&cls);
         let errors = self.error_collector();
+        let arg_errors = self.error_collector();
+        let return_errors = self.error_collector();
         // The solutions the constructor call settled on.
         let mut ctor_table = None;
         if let Some(ret) = self.call_metaclass(
@@ -1266,6 +1392,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             args,
             keywords,
             &errors,
+            &arg_errors,
+            &return_errors,
             context,
             hint,
         ) {
@@ -1298,6 +1426,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 return ConstructedInstance {
                     ty,
                     matched_hint,
+                    arg_errors,
+                    return_errors,
                     errors,
                     specialization_errors,
                 };
@@ -1310,6 +1440,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 return ConstructedInstance {
                     ty: ret,
                     matched_hint,
+                    arg_errors,
+                    return_errors,
                     errors,
                     specialization_errors,
                 };
@@ -1331,7 +1463,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let CallOutcome {
                     ty: ret,
                     overload_table,
-                } = self.call_infer(
+                } = self.call_infer_with_callee_range(
                     self.dunder_new_call_target(
                         new_method.clone(),
                         &cls,
@@ -1343,7 +1475,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     &full_args,
                     keywords,
                     arguments_range,
+                    None,
+                    &arg_errors,
                     &dunder_new_errors,
+                    &return_errors,
                     context,
                     hint,
                     Some(cls.targs_mut()),
@@ -1351,7 +1486,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if !overload_table.is_empty() {
                     ctor_table = Some(overload_table);
                 }
-                let has_errors = !dunder_new_errors.is_empty();
+                let has_errors = dunder_new_errors.has_hard();
                 errors.extend(dunder_new_errors);
                 if let Some(callee_range) = callee_range {
                     self.record_attribute_definition_index(
@@ -1384,6 +1519,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     return ConstructedInstance {
                         ty: ret.subst(&cls.targs().substitution_map()),
                         matched_hint,
+                        arg_errors,
+                        return_errors,
                         errors,
                         specialization_errors,
                     };
@@ -1401,7 +1538,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let CallOutcome {
                 overload_table: init_table,
                 ..
-            } = self.call_infer(
+            } = self.call_infer_with_callee_range(
                 self.as_call_target_or_error(
                     init_method.clone(),
                     CallStyle::Method(&dunder::INIT),
@@ -1412,7 +1549,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 args,
                 keywords,
                 arguments_range,
+                None,
+                &arg_errors,
                 &dunder_init_errors,
+                &return_errors,
                 context,
                 hint,
                 Some(cls.targs_mut()),
@@ -1420,7 +1560,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if !init_table.is_empty() {
                 ctor_table = Some(init_table);
             }
-            // Report `__init__` errors only when there are no `__new__` errors, to avoid redundant errors.
+            // Report `__init__` errors only when `__new__` has no hard errors, to avoid redundant errors.
             if !dunder_new_has_errors {
                 errors.extend(dunder_init_errors);
             }
@@ -1479,6 +1619,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ConstructedInstance {
                 ty,
                 matched_hint,
+                arg_errors,
+                return_errors,
                 errors,
                 specialization_errors,
             }
@@ -1490,10 +1632,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     &ct.clone(),
                     args,
                     keywords,
-                    &errors,
+                    &arg_errors,
                     Type::ClassType(ct),
                 ),
                 matched_hint,
+                arg_errors,
+                return_errors,
                 errors,
                 specialization_errors,
             }
@@ -1501,6 +1645,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ConstructedInstance {
                 ty: result,
                 matched_hint,
+                arg_errors,
+                return_errors,
                 errors,
                 specialization_errors,
             }
@@ -1568,13 +1714,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         keywords: &[CallKeyword],
         arguments_range: TextRange,
         errors: &ErrorCollector,
+        arg_errors: &ErrorCollector,
+        return_errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
     ) -> Type {
         self.construct_with_hint(
-            arguments_range,
-            errors,
-            context,
             HintRef::filter_for_constructor(hint, typed_dict.targs()),
             |hint| {
                 self.construct_typed_dict_inner(
@@ -1586,6 +1731,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     hint,
                 )
             },
+        )
+        .take(
+            arguments_range,
+            errors,
+            arg_errors,
+            return_errors,
+            context,
+            self,
         )
     }
 
@@ -1614,7 +1767,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let hint = None; // discard hint
         let init_method = self.get_typed_dict_dunder_init(&typed_dict);
         let errors = self.error_collector();
-        self.call_infer(
+        let arg_errors = self.error_collector();
+        let return_errors = self.error_collector();
+        self.call_infer_with_callee_range(
             self.as_call_target_or_error(
                 init_method,
                 CallStyle::Method(&dunder::INIT),
@@ -1625,7 +1780,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             args,
             keywords,
             arguments_range,
+            None,
+            &arg_errors,
             &errors,
+            &return_errors,
             context,
             hint,
             Some(typed_dict.targs_mut()),
@@ -1638,6 +1796,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ConstructedInstance {
             ty: Type::TypedDict(TypedDict::TypedDict(typed_dict)),
             matched_hint,
+            arg_errors,
+            return_errors,
             errors,
             specialization_errors,
         }
@@ -1756,7 +1916,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    fn call_infer_with_callee_range(
+    pub(crate) fn call_infer_with_callee_range(
         &self,
         call_target: CallTarget,
         args: &[CallArg],
@@ -1764,6 +1924,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         arguments_range: TextRange,
         callee_range: Option<TextRange>,
         errors: &ErrorCollector,
+        call_errors: &ErrorCollector,
         return_errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
@@ -1772,7 +1933,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let metadata = call_target.function_metadata();
         if let Some(meta) = metadata
             && meta.flags.is_abstract_method
-            && matches!(meta.flags.body_kind, BodyKind::Ellipsis | BodyKind::Trivial)
+            && matches!(
+                meta.flags.body_kind,
+                BodyKind::Ellipsis | BodyKind::Trivial | BodyKind::RaiseNotImplementedError
+            )
             && meta.flags.module_style == ModuleStyle::Executable
             && self.should_error_for_abstract_call(&call_target)
         {
@@ -1801,11 +1965,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 None
             }
         };
+        let wrapped_arg = self.functools_wrapped_arg(metadata, args, keywords, errors);
         let outcome = match call_target {
             CallTarget::Class(cls, constructor_kind, as_quantified_bound) => {
                 if cls.has_qname("typing", "Any") {
                     return CallOutcome::of_ty(self.error_with_context(
-                        errors,
+                        call_errors,
                         arguments_range,
                         ErrorKind::BadInstantiation,
                         format!("`{}` cannot be instantiated", cls.name()),
@@ -1815,7 +1980,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let metadata = self.get_metadata_for_class(cls.class_object());
                 if metadata.is_protocol() && constructor_kind == ConstructorKind::BareClassName {
                     self.error_with_context(
-                        errors,
+                        call_errors,
                         arguments_range,
                         ErrorKind::BadInstantiation,
                         format!(
@@ -1832,7 +1997,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         && !unimplemented_abstract_methods.is_empty()
                     {
                         self.error_with_context(
-                            errors,
+                            call_errors,
                             arguments_range,
                             ErrorKind::BadInstantiation,
                             format!(
@@ -1850,7 +2015,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         && metadata.is_explicitly_abstract()
                     {
                         self.error_with_context(
-                            errors,
+                            call_errors,
                             arguments_range,
                             ErrorKind::DirectAbstractBaseInstantiation,
                             format!(
@@ -1878,7 +2043,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     keywords,
                     arguments_range,
                     callee_range,
+                    call_errors,
                     errors,
+                    return_errors,
                     context,
                     hint,
                 );
@@ -1900,7 +2067,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 args,
                 keywords,
                 arguments_range,
+                call_errors,
                 errors,
+                return_errors,
                 context,
                 hint,
             )),
@@ -1923,7 +2092,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 keywords,
                 arguments_range,
                 errors,
-                errors,
+                call_errors,
                 return_errors,
                 context,
                 hint,
@@ -1939,7 +2108,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 keywords,
                 arguments_range,
                 errors,
-                errors,
+                call_errors,
                 return_errors,
                 context,
                 hint,
@@ -1961,7 +2130,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 keywords,
                 arguments_range,
                 errors,
-                errors,
+                call_errors,
                 return_errors,
                 context,
                 hint,
@@ -1977,6 +2146,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     keywords,
                     arguments_range,
                     errors,
+                    call_errors,
                     return_errors,
                     context,
                     hint,
@@ -1994,6 +2164,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     keywords,
                     arguments_range,
                     errors,
+                    call_errors,
                     return_errors,
                     context,
                     hint,
@@ -2014,6 +2185,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         arguments_range,
                         callee_range,
                         errors,
+                        call_errors,
                         return_errors,
                         context,
                         hint,
@@ -2023,6 +2195,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }));
                 CallOutcome::of_ty(ty)
             }
+            CallTarget::Intersect(targets) => self.call_intersection(
+                targets,
+                args,
+                keywords,
+                arguments_range,
+                callee_range,
+                errors,
+                call_errors,
+                return_errors,
+                context,
+                hint,
+                ctor_targs,
+            ),
             CallTarget::Any(style) => {
                 // Make sure we still catch errors in the arguments.
                 for arg in args {
@@ -2042,7 +2227,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ty: res,
             overload_table,
         } = outcome;
-        let res = if let Some(func_metadata) = kw_metadata {
+        let res = if let Some((func_metadata, wrapped)) = wrapped_arg.as_ref()
+            && func_metadata.kind == FunctionKind::FunctoolsWraps
+        {
+            let mut kws = TypeMap::new();
+            kws.0
+                .insert(Name::new_static("__wrapped__"), wrapped.clone());
+            self.heap.mk_kw_call(KwCall {
+                func_metadata: func_metadata.clone(),
+                keywords: kws,
+                return_ty: res,
+            })
+        } else if let Some(func_metadata) = kw_metadata {
             // The call form `dataclass(C)` transforms `C` in place, so reject the same
             // class kinds as the `@dataclass` decorator (see `report_forbidden_dataclass_target`).
             // The decorator path never reaches here: a bare decorator is not a call.
@@ -2082,10 +2278,319 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             res
         };
+        // Keep ordinary functions as functions so descriptor binding and function flags survive.
+        let res = if let Some((metadata, wrapped)) = wrapped_arg
+            && metadata.kind == FunctionKind::FunctoolsUpdateWrapper
+            && let Some(mut wrapper) = self
+                .positional_arg_type(args, 0, errors)
+                .or_else(|| self.keyword_arg_type(keywords, "wrapper", errors))
+            && wrapper.set_wrapped(wrapped)
+        {
+            wrapper
+        } else {
+            res
+        };
         CallOutcome {
             ty: res,
             overload_table,
         }
+    }
+
+    fn constructor_witness_matches(&self, witness: &Type, class: &ClassType) -> bool {
+        match witness {
+            Type::ClassType(bound) | Type::SelfType(bound) => {
+                if self
+                    .get_metadata_for_class(bound.class_object())
+                    .is_protocol()
+                {
+                    let actual = self.heap.mk_class_type(class.clone());
+                    let expected = self.heap.mk_class_type(bound.clone());
+                    let snapshot = self.solver().snapshot_reachable_vars(&[&actual, &expected]);
+                    let matches = self.is_subset_eq(&actual, &expected);
+                    self.solver().restore_vars(snapshot);
+                    matches
+                } else {
+                    self.has_superclass(class.class_object(), bound.class_object())
+                }
+            }
+            Type::Union(union) => union
+                .members
+                .iter()
+                .any(|bound| self.constructor_witness_matches(bound, class)),
+            Type::Quantified(quantified) => match quantified.restriction() {
+                Restriction::Unrestricted => true,
+                Restriction::Bound(bound) => self.constructor_witness_matches(bound, class),
+                Restriction::Constraints(bounds) => bounds
+                    .iter()
+                    .any(|bound| self.constructor_witness_matches(bound, class)),
+                Restriction::ShapeExtension(extension) => extension
+                    .upper_bound_members(self.stdlib)
+                    .iter()
+                    .any(|bound| self.constructor_witness_matches(bound, class)),
+            },
+            Type::Any(_) => true,
+            Type::Tuple(_) => self.has_superclass(class.class_object(), self.stdlib.tuple_object()),
+            _ => false,
+        }
+    }
+
+    /// Probe each callable constituent independently, then retain every applicable return contract.
+    fn call_intersection(
+        &self,
+        targets: Vec1<IntersectionCallTarget>,
+        args: &[CallArg],
+        keywords: &[CallKeyword],
+        arguments_range: TextRange,
+        callee_range: Option<TextRange>,
+        errors: &ErrorCollector,
+        call_errors: &ErrorCollector,
+        return_errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+        hint: Option<HintRef>,
+        ctor_targs: Option<&mut TArgs>,
+    ) -> CallOutcome {
+        let solver = self.for_intersection_arguments();
+        let call = CallWithTypes::new();
+        let args = call.vec_call_arg(args, &solver, errors);
+        let keywords = call.vec_call_keyword(keywords, &solver, errors);
+        let add_constructor_witnesses = |ty: Type, index: usize| {
+            let CallTarget::Class(class, _, _) = &targets[index].target else {
+                return ty;
+            };
+            if targets[index].constructor_witnesses.is_empty()
+                || !self.is_compatible_constructor_return(&ty, class.class_object())
+            {
+                return ty;
+            }
+            let mut guarantees = vec![ty];
+            guarantees.extend(targets[index].constructor_witnesses.iter().cloned());
+            self.intersect_guarantees(&guarantees)
+        };
+        let hint_ty = hint.map(|hint| self.unions(hint.types().to_vec()));
+        let mut roots = targets.iter().map(|member| &member.ty).collect::<Vec<_>>();
+        roots.extend(
+            targets
+                .iter()
+                .flat_map(|member| &member.constructor_witnesses),
+        );
+        for arg in &args {
+            let (CallArg::Arg(value) | CallArg::Star(value, _)) = arg;
+            if let TypeOrExpr::Type(ty, _) = value {
+                roots.push(ty);
+            }
+        }
+        for keyword in &keywords {
+            if let TypeOrExpr::Type(ty, _) = &keyword.value {
+                roots.push(ty);
+            }
+        }
+        roots.extend(hint_ty.as_ref());
+        // Deferred containers can capture the unpinned answer whose first use is this call.
+        let first_use_types = self.active_first_use_types();
+        roots.extend(first_use_types.iter());
+        let lambda_snapshot = self.snapshot_lambda_param_types();
+        roots.extend(lambda_snapshot.iter().filter_map(|(_, ty)| ty.as_ref()));
+        let mut accepted = Vec::new();
+        let mut failures = Vec::new();
+        for (index, member) in targets.iter().enumerate() {
+            let _lambda_context = self.enter_lambda_binding_context([]);
+            let snapshot = self.solver().snapshot_reachable_vars(&roots);
+            let arg_errors = self.error_collector();
+            let attempt_errors = self.error_collector();
+            let attempt_return_errors = self.error_collector();
+            let mut attempt_targs = ctor_targs.as_ref().map(|targs| (**targs).clone());
+            let outcome = solver.call_infer_with_callee_range(
+                member.target.clone(),
+                &args,
+                &keywords,
+                arguments_range,
+                callee_range,
+                &arg_errors,
+                &attempt_errors,
+                &attempt_return_errors,
+                context,
+                hint_ty.as_ref().map(HintRef::soft),
+                attempt_targs.as_mut(),
+            );
+            if attempt_errors.has_hard() {
+                failures.push((index, arg_errors, attempt_errors, attempt_return_errors));
+            } else {
+                // Materialize each correlated world before its variable state is rolled back.
+                let results = self.solver().per_row(&outcome.overload_table, || {
+                    add_constructor_witnesses(self.solver().expand(outcome.ty.clone()), index)
+                });
+                let ty = Type::combine_overload_results(results.into_vec(), self.heap)
+                    .expect("an applicable call has at least one result");
+                let lambda_types = self
+                    .snapshot_lambda_param_types()
+                    .into_iter()
+                    .map(|(id, ty)| (id, ty.map(|ty| self.solver().expand(ty))))
+                    .collect::<Vec<_>>();
+                accepted.push(AcceptedIntersectionCall {
+                    index,
+                    ty,
+                    arg_errors,
+                    call_errors: attempt_errors,
+                    return_errors: attempt_return_errors,
+                    lambda_types,
+                });
+            }
+            self.solver().restore_vars(snapshot);
+            self.restore_lambda_param_types(&lambda_snapshot);
+        }
+        let Some((representative, first)) = accepted
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, attempt)| attempt.arg_errors.len_hard())
+        else {
+            let mut builder = call_errors
+                .error_builder(
+                    arguments_range,
+                    ErrorKind::NoMatchingOverload,
+                    "No intersection member accepts this call".to_owned(),
+                )
+                .with_context(context);
+            for (index, arg_errors, attempt_errors, attempt_return_errors) in failures {
+                builder = builder
+                    .with_detail(format!("  {}", self.for_display(targets[index].ty.clone())))
+                    .with_errors_as_details(attempt_errors);
+                errors.extend(arg_errors);
+                return_errors.extend(attempt_return_errors);
+            }
+            builder.emit();
+            return CallOutcome::of_ty(self.heap.mk_any_error());
+        };
+        let first_index = first.index;
+        let fewest_arg_errors = first.arg_errors.len_hard();
+        if accepted.len() == 1 {
+            self.report_call_deprecation(
+                &targets[first_index].target,
+                callee_range.unwrap_or(arguments_range),
+                errors,
+                context,
+            );
+            let mut outcome = solver.call_infer_with_callee_range(
+                targets[first_index].target.clone(),
+                &args,
+                &keywords,
+                arguments_range,
+                callee_range,
+                errors,
+                call_errors,
+                return_errors,
+                context,
+                hint,
+                ctor_targs,
+            );
+            if !targets[first_index].constructor_witnesses.is_empty() {
+                let results = self.solver().per_row(&outcome.overload_table, || {
+                    add_constructor_witnesses(self.solver().expand(outcome.ty.clone()), first_index)
+                });
+                outcome.ty = Type::combine_overload_results(results.into_vec(), self.heap)
+                    .expect("an applicable constructor has at least one result");
+            }
+            return outcome;
+        }
+        // Commit one applicable signature's ordinary inference, without letting it reject siblings.
+        let ignored = self.error_swallower();
+        let first = solver.call_infer_with_callee_range(
+            targets[first_index].target.clone(),
+            &args,
+            &keywords,
+            arguments_range,
+            callee_range,
+            &ignored,
+            &ignored,
+            &ignored,
+            context,
+            hint_ty.as_ref().map(HintRef::soft),
+            ctor_targs,
+        );
+        let first_results = self.solver().per_row(&first.overload_table, || {
+            add_constructor_witnesses(self.solver().expand(first.ty.clone()), first_index)
+        });
+        accepted[representative].ty =
+            Type::combine_overload_results(first_results.into_vec(), self.heap)
+                .expect("an applicable call has at least one result");
+        let mut results = Vec::new();
+        let mut lambda_types = SmallMap::new();
+        for AcceptedIntersectionCall {
+            index,
+            ty,
+            arg_errors,
+            call_errors: attempt_errors,
+            return_errors: attempt_return_errors,
+            lambda_types: params,
+        } in accepted
+        {
+            self.report_call_deprecation(
+                &targets[index].target,
+                callee_range.unwrap_or(arguments_range),
+                errors,
+                context,
+            );
+            results.push(ty);
+            let publish_context = arg_errors.len_hard() == fewest_arg_errors;
+            if index == first_index {
+                errors.extend(arg_errors);
+            }
+            call_errors.extend(attempt_errors);
+            return_errors.extend(attempt_return_errors);
+            if publish_context {
+                for (id, ty) in params {
+                    if let Some(ty) = ty {
+                        lambda_types.entry(id).or_insert_with(Vec::new).push(ty);
+                    }
+                }
+            }
+        }
+        for (id, types) in lambda_types {
+            self.set_lambda_param_type(id, self.unions(types));
+        }
+        CallOutcome::of_ty(self.intersect_guarantees(&results))
+    }
+
+    fn functools_wrapped_arg(
+        &self,
+        metadata: Option<&FuncMetadata>,
+        args: &[CallArg],
+        keywords: &[CallKeyword],
+        errors: &ErrorCollector,
+    ) -> Option<(FuncMetadata, Type)> {
+        let metadata = metadata?;
+        let wrapped = match metadata.kind {
+            FunctionKind::FunctoolsWraps => self
+                .positional_arg_type(args, 0, errors)
+                .or_else(|| self.keyword_arg_type(keywords, "wrapped", errors)),
+            FunctionKind::FunctoolsUpdateWrapper => self
+                .positional_arg_type(args, 1, errors)
+                .or_else(|| self.keyword_arg_type(keywords, "wrapped", errors)),
+            _ => None,
+        }?;
+        Some((metadata.clone(), wrapped))
+    }
+
+    fn positional_arg_type(
+        &self,
+        args: &[CallArg],
+        index: usize,
+        errors: &ErrorCollector,
+    ) -> Option<Type> {
+        match args.get(index)? {
+            CallArg::Arg(value) => Some((*value).infer(self, errors)),
+            CallArg::Star(..) => None,
+        }
+    }
+
+    fn keyword_arg_type(
+        &self,
+        keywords: &[CallKeyword],
+        name: &str,
+        errors: &ErrorCollector,
+    ) -> Option<Type> {
+        keywords.iter().find_map(|kw| {
+            (kw.arg.is_some_and(|id| id.as_str() == name)).then(|| kw.value.infer(self, errors))
+        })
     }
 
     /// Wrapper for `callable_infer` that handles trying a call with and without a contextual hint.
@@ -2217,6 +2722,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             None,
             errors,
             errors,
+            errors,
             context,
             hint,
             ctor_targs,
@@ -2241,6 +2747,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             keywords,
             arguments_range,
             None,
+            errors,
             errors,
             return_errors,
             context,
@@ -2542,77 +3049,88 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub fn expr_call_infer(
         &self,
-        x: &ExprCall,
-        mut callee_ty: Type,
+        mut callee: ExprCallee,
         hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> Type {
         // nn.Sequential chain: thread input through each module's forward method.
         // Must be checked before generic Module forward dispatch, which would erase shapes.
-        if let Type::ClassType(cls) = &callee_ty
+        if let Type::ClassType(cls) = &callee.ty
             && is_nn_sequential(cls)
-            && x.arguments.args.len() == 1
-            && x.arguments.keywords.is_empty()
+            && callee.expr.arguments.args.len() == 1
+            && callee.expr.arguments.keywords.is_empty()
         {
-            let input_ty = self.expr_infer(&x.arguments.args[0], errors);
+            let input_ty = self.expr_infer(&callee.expr.arguments.args[0], errors);
             if let Some(result) =
-                self.try_nn_sequential_chain_forward(cls, input_ty, x.range(), errors)
+                self.try_nn_sequential_chain_forward(cls, input_ty, callee.expr.range(), errors)
             {
                 return result;
             }
         }
 
-        let django_annotate_call = self.infer_django_annotate_call(&callee_ty, &x.arguments);
-        let polars_call = self.infer_polars_call_specialization(&callee_ty, &x.arguments, errors);
+        let django_annotate_call =
+            self.infer_django_annotate_call(&callee.ty, &callee.expr.arguments);
+        let polars_call =
+            self.infer_polars_call_specialization(&callee.ty, &callee.expr.arguments, errors);
 
-        let result = if matches!(&callee_ty, Type::ClassDef(cls) if cls.is_builtin("super")) {
+        let result = if matches!(&callee.ty, Type::ClassDef(cls) if cls.is_builtin("super")) {
             // Because we have to construct a binding for super in order to fill in implicit arguments,
             // we can't handle things like local aliases to super. If we hit a case where the binding
             // wasn't constructed, fall back to `Any`.
-            self.get_hashed_opt(Hashed::new(&Key::SuperInstance(x.range())))
+            self.get_hashed_opt(Hashed::new(&Key::SuperInstance(callee.expr.range())))
                 .map_or_else(
                     || self.heap.mk_any_implicit(),
                     |type_info| type_info.ty().clone(),
                 )
         } else {
-            self.expand_mut(&mut callee_ty);
-            self.check_unittest_mock_patch_target(&callee_ty, &x.arguments, errors);
+            self.expand_mut(&mut callee.ty);
+            self.check_unittest_mock_patch_target(&callee.ty, &callee.expr.arguments, errors);
 
             let call = CallWithTypes::new();
-            let (args, kws) = if callee_ty.is_union() {
+            let (args, kws) = if callee.ty.is_union() {
                 // If we have a union we will distribute over it, and end up duplicating each function call.
                 (
-                    x.arguments
+                    callee
+                        .expr
+                        .arguments
                         .args
                         .map(|x| call.call_arg(&CallArg::expr_maybe_starred(x), self, errors)),
-                    x.arguments
+                    callee
+                        .expr
+                        .arguments
                         .keywords
                         .map(|x| call.call_keyword(&CallKeyword::new(x), self, errors)),
                 )
             } else {
                 (
-                    x.arguments.args.map(CallArg::expr_maybe_starred),
-                    x.arguments.keywords.map(CallKeyword::new),
+                    callee.expr.arguments.args.map(CallArg::expr_maybe_starred),
+                    callee.expr.arguments.keywords.map(CallKeyword::new),
                 )
             };
 
-            let result = self.distribute_over_union(&callee_ty, |ty| {
+            let result = self.distribute_over_union(&callee.ty, |ty| {
                 // NotImplemented is a singleton constant, not a callable class.
                 if matches!(ty, Type::ClassType(cls) if cls.is_builtin("_NotImplementedType") || cls.has_qname("types", "NotImplementedType"))
                 {
                     return self.error(
                         errors,
-                        x.func.range(),
+                        callee.expr.func.range(),
                         ErrorKind::NotCallable,
                         "`NotImplemented` is not callable. Did you mean `NotImplementedError`?".to_owned(),
                     );
                 }
+                self.check_pydantic_model_validate_constraints(
+                    ty,
+                    &callee.expr.arguments.args,
+                    &callee.expr.arguments.keywords,
+                    errors,
+                );
                 match ty.callee_kind() {
                 Some(CalleeKind::Function(FunctionKind::AssertType)) => self
                     .call_assert_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
@@ -2621,17 +3139,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }) => self
                     .call_assert_shape(
                         ty,
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
                 Some(CalleeKind::Function(FunctionKind::RevealType)) => self
                     .call_reveal_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
@@ -2639,11 +3157,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // For typing.cast, we have to hard-code a check for whether the first argument
                     // is a type, so it's simplest to special-case the entire call.
                     self.call_typing_cast(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         errors,
                     )
+                }
+                Some(CalleeKind::Function(FunctionKind::InspectUnwrap))
+                    if let Some(ret) = self.call_inspect_unwrap(callee.expr, errors) =>
+                {
+                    ret
                 }
                 // `attr.evolve` validates kwargs like `dataclasses.replace`; `attr.assoc` validates
                 // against attribute names, including `init=False` fields. Both require an attrs class.
@@ -2666,8 +3189,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range,
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     )
@@ -2677,8 +3200,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range,
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     )
@@ -2691,8 +3214,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range,
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     )
@@ -2703,51 +3226,61 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ) =>
                 {
                     self.call_typeform(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         errors,
                     )
                 }
-                // Treat assert_type and reveal_type like pseudo-builtins for convenience. Note that we still
-                // log a name-not-found error, but we also assert/reveal the type as requested.
-                None if ty.is_error() && is_special_name(&x.func, "assert_type") => self
-                    .call_assert_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                Some(CalleeKind::Function(FunctionKind::SqlAlchemyMappedColumn(_))) => self
+                    .call_sqlalchemy_mapped_column(
+                        ty.clone(),
+                        &args,
+                        &kws,
+                        callee.expr.func.range(),
+                        &callee.expr.arguments,
                         hint,
                         errors,
                     ),
-                None if ty.is_error() && is_special_name(&x.func, "reveal_type") => self
+                // Treat assert_type and reveal_type like pseudo-builtins for convenience. Note that we still
+                // log a name-not-found error, but we also assert/reveal the type as requested.
+                None if ty.is_error() && is_special_name(&callee.expr.func, "assert_type") => self
+                    .call_assert_type(
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
+                        hint,
+                        errors,
+                    ),
+                None if ty.is_error() && is_special_name(&callee.expr.func, "reveal_type") => self
                     .call_reveal_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
                 Some(CalleeKind::Function(FunctionKind::IsInstance))
-                    if self.has_exactly_two_posargs(&x.arguments) =>
+                    if self.has_exactly_two_posargs(&callee.expr.arguments) =>
                 {
-                    self.call_isinstance(&x.arguments.args[0], &x.arguments.args[1], errors)
+                    self.call_isinstance(&callee.expr.arguments.args[0], &callee.expr.arguments.args[1], errors)
                 }
                 Some(CalleeKind::Function(FunctionKind::IsSubclass))
-                    if self.has_exactly_two_posargs(&x.arguments) =>
+                    if self.has_exactly_two_posargs(&callee.expr.arguments) =>
                 {
-                    self.call_issubclass(&x.arguments.args[0], &x.arguments.args[1], errors)
+                    self.call_issubclass(&callee.expr.arguments.args[0], &callee.expr.arguments.args[1], errors)
                 }
                 Some(CalleeKind::Function(FunctionKind::Len))
-                    if x.arguments.args.len() == 1
-                        && x.arguments.keywords.is_empty()
-                        && !matches!(&x.arguments.args[0], Expr::Starred(_)) =>
+                    if callee.expr.arguments.args.len() == 1
+                        && callee.expr.arguments.keywords.is_empty()
+                        && !matches!(&callee.expr.arguments.args[0], Expr::Starred(_)) =>
                 {
                     self.call_len(
                         &args,
                         ty.clone(),
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     )
@@ -2755,16 +3288,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // `f.register(C)(impl)`: applying the tagged factory decorator by call.
                 _ if let Type::KwCall(kw) = ty
                     && matches!(&kw.func_metadata.kind, FunctionKind::SingleDispatchRegister(_))
-                    && x.arguments.args.len() == 1
-                    && x.arguments.keywords.is_empty() =>
+                    && callee.expr.arguments.args.len() == 1
+                    && callee.expr.arguments.keywords.is_empty() =>
                 {
                     self.apply_singledispatch_register(
                         ty,
-                        &x.arguments.args[0],
+                        &callee.expr.arguments.args[0],
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     )
@@ -2773,30 +3306,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .call_singledispatch_register(
                         fallback_first,
                         ty,
-                        &x.arguments,
+                        &callee.expr.arguments,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     ),
                 _ if matches!(ty, Type::ClassDef(cls) if cls == self.stdlib.builtins_type().class_object())
-                    && x.arguments.args.len() == 1 && x.arguments.keywords.is_empty() =>
+                    && callee.expr.arguments.args.len() == 1 && callee.expr.arguments.keywords.is_empty() =>
                 {
                     // We may be able to provide a more precise type when the constructor for `builtins.type`
                     // is called with a single argument.
-                    let arg_ty = self.expr_infer(&x.arguments.args[0], errors);
+                    let arg_ty = self.expr_infer(&callee.expr.arguments.args[0], errors);
                     self.type_of(arg_ty)
                 }
                 _ if matches!(ty, Type::ClassDef(cls) if cls == self.stdlib.builtins_type().class_object())
-                    && x.arguments.args.len() == 3 =>
+                    && callee.expr.arguments.args.len() == 3 =>
                 {
-                    self.check_dynamic_type_bases(&x.arguments.args[1], errors);
-                    self.freeform_call_infer(ty.clone(), &args, &kws, x.func.range(), x.arguments.range(), hint, errors)
+                    self.check_dynamic_type_bases(&callee.expr.arguments.args[1], errors);
+                    self.freeform_call_infer(ty.clone(), &args, &kws, callee.expr.func.range(), callee.expr.arguments.range(), hint, errors)
                         .ty
                 }
-                _ if let Some(ret) = self.call_builtin_enumerate(ty, x, errors) => ret,
+                _ if let Some(ret) = self.call_builtin_enumerate(ty, callee.expr, errors) => ret,
                 // `functools.partial(func, ...)` synthesizes the remaining callable instead of the
                 // opaque stub, so calls on the result are checked (see `alt::functools`).
                 _ if matches!(ty, Type::ClassDef(cls) if cls.has_toplevel_qname("functools", "partial")) =>
@@ -2805,8 +3338,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     )
@@ -2826,12 +3359,48 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.widen_singledispatch_dispatch_param(ty.clone()),
                     &args,
                     &kws,
-                    x.func.range(),
-                    x.arguments.range(),
+                    callee.expr.func.range(),
+                    callee.expr.arguments.range(),
                     hint,
                     errors,
                 ).ty,
-                _ => self.freeform_call_infer(ty.clone(), &args, &kws, x.func.range(), x.arguments.range(), hint, errors).ty,
+                _ => {
+                    // Match expression inference so deprecation warnings share the value's range.
+                    let mut callee_func = &*callee.expr.func;
+                    while let Expr::Named(named) = callee_func {
+                        callee_func = &named.value;
+                    }
+                    let target = self.resolve_call_target_or_error(
+                        ty.clone(),
+                        CallStyle::FreeForm,
+                        callee_func.range(),
+                        errors,
+                        None,
+                    );
+                    // Match check_for_deprecated_call's function reference check: each
+                    // branch reports it at its own range. Property and `__call__`
+                    // deprecations still need call-site checks, and call inference
+                    // separately reports deprecated overloads.
+                    let reference_already_checked = matches!(callee_func, Expr::If(..) | Expr::BoolOp(..))
+                        && ty.function_deprecation().is_some()
+                        && ty.property_metadata().is_none();
+                    if !reference_already_checked {
+                        self.report_call_deprecation(&target, callee_func.range(), errors, None);
+                    }
+                    self.call_infer_with_callee_range(
+                        target,
+                        &args,
+                        &kws,
+                        callee.expr.arguments.range(),
+                        Some(callee_func.range()),
+                        errors,
+                        errors,
+                        errors,
+                        None,
+                        hint,
+                        None,
+                    ).ty
+                }
             }});
             // TypeIs and TypeGuard functions return bool at runtime
             match result {
@@ -2923,6 +3492,81 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    fn call_inspect_unwrap(&self, x: &ExprCall, errors: &ErrorCollector) -> Option<Type> {
+        if x.arguments.args.len() != 1 || matches!(x.arguments.args[0], Expr::Starred(_)) {
+            return None;
+        }
+        if !x.arguments.keywords.iter().all(|kw| {
+            kw.arg.as_ref().is_some_and(|id| id.as_str() == "stop")
+                && matches!(kw.value, Expr::NoneLiteral(_))
+        }) {
+            return None;
+        }
+
+        let arg = &x.arguments.args[0];
+        let ty = self.expr_infer(arg, errors);
+        let has_mutation = self
+            .get_idx(self.bindings().functools_wrapper_mutation())
+            .ty()
+            .as_bool();
+        if has_mutation != Some(false) {
+            // Depth-limited solving can return a placeholder even for this constant binding.
+            // Runtime accepts arbitrary objects; the callable-only stub would reject valid calls.
+            return Some(self.heap.mk_any_explicit());
+        }
+        Some(self.inspect_unwrapped_type(&ty, arg.range(), &mut SmallSet::new(), false))
+    }
+
+    /// Follow each wrapped chain independently, retaining uncertainty about hidden attributes.
+    fn inspect_unwrapped_type(
+        &self,
+        ty: &Type,
+        range: TextRange,
+        seen: &mut SmallSet<Type>,
+        followed_wrapped: bool,
+    ) -> Type {
+        const MAX_WRAPPED_DEPTH: usize = 32;
+        self.distribute_over_union(ty, |ty| {
+            // Recursive class annotations can change type arguments at every wrapped edge.
+            if seen.len() >= MAX_WRAPPED_DEPTH
+                || matches!(ty, Type::ClassType(cls) if seen.iter().any(|previous| {
+                    matches!(previous, Type::ClassType(previous) if previous.class_object() == cls.class_object())
+                }))
+                || !seen.insert(ty.clone())
+            {
+                return self.heap.mk_any_explicit();
+            }
+            let wrapped_attr = Name::new_static("__wrapped__");
+            let result = if !self.has_attr(ty, &wrapped_attr) {
+                // A callable annotation or an in-place mutation can hide `__wrapped__`.
+                // Preserve only a terminal function reached through a known wrapped edge.
+                if followed_wrapped && ty.toplevel_func_metadata().is_some() {
+                    ty.clone()
+                } else {
+                    self.heap.mk_any_explicit()
+                }
+            } else {
+                let attr_errors = self.error_swallower();
+                let next = self.type_of_attr_get(
+                    ty,
+                    &wrapped_attr,
+                    range,
+                    &attr_errors,
+                    ErrorKind::MissingAttribute,
+                    None,
+                    "__wrapped__ lookup for inspect.unwrap",
+                );
+                if attr_errors.is_empty() {
+                    self.inspect_unwrapped_type(&next, range, seen, true)
+                } else {
+                    self.heap.mk_any_explicit()
+                }
+            };
+            seen.shift_remove(ty);
+            result
+        })
+    }
+
     pub fn freeform_call_infer(
         &self,
         ty: Type,
@@ -2941,6 +3585,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             kws,
             arg_range,
             Some(callee_range),
+            errors,
             errors,
             errors,
             None,

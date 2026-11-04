@@ -69,6 +69,71 @@ def foo(member: MyEnum) -> None:
 "#,
 );
 
+// Regression test for https://github.com/facebook/pyrefly/issues/4792.
+testcase!(
+    test_enum_self_value,
+    TestEnv::new().enable_no_any_return_implicit_error(),
+    r#"
+from enum import Enum
+from typing import Literal, assert_type
+
+class NoValue(Enum):
+    FIRST = "first"
+    SECOND = "second"
+
+    def command(self) -> str:
+        assert_type(self.value, Literal["first", "second"])
+        assert_type(self._value_, Literal["first", "second"])
+        return "--" + self.value
+
+class WithValue(Enum):
+    _value_: str
+    FIRST = "first"
+
+    def command(self) -> str:
+        assert_type(self.value, str)
+        assert_type(self._value_, str)
+        return "--" + self.value
+"#,
+);
+
+testcase!(
+    test_enum_self_value_overrides,
+    r#"
+from enum import Enum, IntEnum, StrEnum
+from typing import Literal, Self, assert_type
+
+class Number(IntEnum):
+    FIRST = 1
+
+    def get_value(self) -> int:
+        assert_type(self.value, Literal[1])
+        return self.value
+
+class Text(StrEnum):
+    FIRST = "first"
+
+    def get_value(self) -> str:
+        assert_type(self.value, Literal["first"])
+        return self.value
+
+class Custom(Enum):
+    FIRST = 1
+
+    @property
+    def value(self) -> str:
+        return str(self._value_)
+
+    def identity(self) -> Self:
+        return self
+
+    def check(self) -> None:
+        assert_type(self.value, str)
+        assert_type(self._value_, Literal[1])
+        assert_type(self.identity(), Self)
+"#,
+);
+
 testcase!(
     test_enum_string_getitem_with_future_annotations,
     r#"
@@ -148,6 +213,17 @@ assert_type(Color6.RED, Literal[Color6.RED])
 assert_type(Color7.RED, Literal[Color7.RED])
 assert_type(Color8.RED, Literal[Color8.RED])
 assert_type(Color9.RED, Literal[Color9.RED])
+"#,
+);
+
+testcase!(
+    test_enum_functional_walrus_arguments,
+    r#"
+from enum import Enum
+from typing import Literal, assert_type
+
+E = Enum("E", [(z := "X", 1)])  # E: Expected first item to be a string literal
+assert_type(z, Literal["X"])
 "#,
 );
 
@@ -373,7 +449,163 @@ def f(test: bool, e1: E1, e2: E2):
     x: Literal[E1.X, E1.Y] = e1
     y: Literal[E1.X, E1.Y, 1] = e1
     z: Literal[E2.X, E2.Y] = e2  # E: `E2` is not assignable to `Literal[E2.X, E2.Y]`
+    single: Literal[E2.X] = e2  # E: `E2` is not assignable to `Literal[E2.X]`
     "#,
+);
+
+testcase!(
+    test_enum_literal_union_member_compatibility,
+    r#"
+from enum import Enum
+from typing import Literal
+
+class Unset(Enum):
+    _UNSET = "UNSET"
+
+def takes_member(x: Literal["a", "b", Unset._UNSET] | None) -> None: ...
+def takes_class(x: Literal["a", "b"] | Unset | None) -> None: ...
+
+def f(x: Literal["a"] | Literal[Unset._UNSET] | None) -> None:
+    takes_member(x)
+    takes_class(x)
+"#,
+);
+
+testcase!(
+    test_single_member_flag_not_assignable_to_literal,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal
+
+class SingleFlag(Flag):
+    X = 1
+
+class SingleIntFlag(IntFlag):
+    X = 1
+
+def check(flag: SingleFlag, int_flag: SingleIntFlag) -> None:
+    x: Literal[SingleFlag.X] = flag  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X]`
+    y: Literal[SingleIntFlag.X] = int_flag  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X]`
+"#,
+);
+
+testcase!(
+    test_single_member_enum_literal_compatibility,
+    r#"
+from enum import Enum, IntEnum, StrEnum, nonmember
+from typing import Literal
+
+class Base(Enum):
+    pass
+
+class Single(Base):
+    X = 1
+    ALIAS = X
+    extra = nonmember(2)
+
+    def method(self) -> None: ...
+
+class SingleInt(IntEnum):
+    X = 1
+
+class SingleStr(StrEnum):
+    X = "x"
+
+class Other(Enum):
+    X = 1
+
+def check(single: Single, int_enum: SingleInt, str_enum: SingleStr, other: Other) -> None:
+    member: Literal[Single.X] = single
+    alias: Literal[Single.ALIAS] = single
+    int_member: Literal[SingleInt.X] = int_enum
+    str_member: Literal[SingleStr.X] = str_enum
+    wrong: Literal[Single.X] = other  # E: `Other` is not assignable to `Literal[Single.X]`
+"#,
+);
+
+testcase!(
+    test_indirect_single_member_flag_not_assignable_to_literal,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal
+
+class BaseFlag(Flag):
+    pass
+
+class BaseIntFlag(IntFlag):
+    pass
+
+class SingleFlag(BaseFlag):
+    X = 1
+
+class SingleIntFlag(BaseIntFlag):
+    X = 1
+
+def check(flag: SingleFlag, int_flag: SingleIntFlag) -> None:
+    x: Literal[SingleFlag.X] = flag  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X]`
+    y: Literal[SingleIntFlag.X] = int_flag  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X]`
+"#,
+);
+
+testcase!(
+    test_flag_literal_union_normalization,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal, assert_type
+
+class SingleFlag(Flag):
+    X = 1
+
+class SingleIntFlag(IntFlag):
+    X = 1
+
+class MultiFlag(Flag):
+    X = 1
+    Y = 2
+
+class MultiIntFlag(IntFlag):
+    X = 1
+    Y = 2
+
+def check(single: SingleFlag, single_int: SingleIntFlag, multi: MultiFlag, multi_int: MultiIntFlag, condition: bool) -> None:
+    optional: Literal[SingleFlag.X] | None = single  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X] | None`
+    optional_int: Literal[SingleIntFlag.X] | None = single_int  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X] | None`
+    complete: Literal[MultiFlag.X, MultiFlag.Y] = multi  # E: `MultiFlag` is not assignable to `Literal[MultiFlag.X, MultiFlag.Y]`
+    complete_int: Literal[MultiIntFlag.X, MultiIntFlag.Y] = multi_int  # E: `MultiIntFlag` is not assignable to `Literal[MultiIntFlag.X, MultiIntFlag.Y]`
+
+    assert_type(SingleFlag.X if condition else None, Literal[SingleFlag.X] | None)
+    assert_type(SingleIntFlag.X if condition else None, Literal[SingleIntFlag.X] | None)
+    assert_type(MultiFlag.X if condition else MultiFlag.Y, Literal[MultiFlag.X, MultiFlag.Y])
+    assert_type(MultiIntFlag.X if condition else MultiIntFlag.Y, Literal[MultiIntFlag.X, MultiIntFlag.Y])
+"#,
+);
+
+testcase!(
+    test_flag_literals_in_typed_dict_values,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal, TypedDict, assert_type
+
+class Bits(Flag):
+    A = 1
+    B = 2
+
+class IntBits(IntFlag):
+    A = 1
+    B = 2
+
+class Values(TypedDict, closed=True):
+    a: Literal[Bits.A]
+    b: Literal[Bits.B]
+
+class IntValues(TypedDict, closed=True):
+    a: Literal[IntBits.A]
+    b: Literal[IntBits.B]
+
+def check(values: Values, int_values: IntValues) -> None:
+    assert_type(next(iter(values.values())), Literal[Bits.A, Bits.B])
+    assert_type(next(iter(int_values.values())), Literal[IntBits.A, IntBits.B])
+"#,
 );
 
 testcase!(
@@ -1294,4 +1526,45 @@ class E(Enum):
 def f(e: E) -> Literal["X", "Y"]:
     return e.value
     "#,
+);
+
+testcase!(
+    test_enum_functional_walrus_keyword,
+    r#"
+from enum import Enum
+from typing import Literal, assert_type
+
+E = Enum("E", "A", qualname=(E := "m"))
+assert_type(E.A, Literal[E.A])
+"#,
+);
+
+testcase!(
+    test_enum_functional_walrus_positional_before_keyword,
+    r#"
+from enum import Enum
+from typing import Literal, assert_type
+
+E = Enum("E", [("A", (x := 1))], qualname=(x := "q"))
+assert_type(x, Literal["q"])
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/5279
+testcase!(
+    test_enum_member_keyword_value,
+    r#"
+from collections.abc import Callable
+from enum import Enum, member
+
+def decimal(value: int, /) -> str:
+    return str(value)
+
+class Format(Enum):
+    DECIMAL = member(value=decimal)
+
+    def render(self, value: int, /) -> str:
+        formatter: Callable[[int], str] = self.value
+        return formatter(value)
+"#,
 );

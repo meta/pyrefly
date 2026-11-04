@@ -8,7 +8,6 @@
 use std::iter::once;
 use std::sync::Arc;
 
-use dupe::Dupe;
 use pyrefly_build::handle::Handle;
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
@@ -34,9 +33,7 @@ use crate::binding::binding::Key;
 use crate::binding::binding::KeyClassField;
 use crate::binding::binding::UnpackedPosition;
 use crate::binding::bindings::Bindings;
-use crate::state::ide::import_regular_import_edit;
-use crate::state::ide::insert_import_edit;
-use crate::state::import_tracker::ImportTracker;
+use crate::state::annotation_renderer::AnnotationRenderer;
 use crate::state::lsp::AllOffPartial;
 use crate::state::lsp::AnnotationKind;
 use crate::state::lsp::DefinitionMetadata;
@@ -46,7 +43,6 @@ use crate::state::lsp::ReferenceOptions;
 use crate::state::state::CancellableTransaction;
 use crate::state::state::Transaction;
 use crate::types::callable::Param;
-use crate::types::stdlib::Stdlib;
 use crate::types::types::Type;
 
 pub struct InlayHintData {
@@ -60,120 +56,6 @@ pub struct InlayHintData {
 pub struct InlayHintEdits {
     pub annotation: String,
     pub imports: Vec<(TextSize, String)>,
-}
-
-struct DirectImport {
-    handle: Handle,
-    heads: Vec<String>,
-}
-
-struct TypeHintRenderer<'a, 'state> {
-    transaction: &'a Transaction<'state>,
-    handle: &'a Handle,
-    tracker: ImportTracker,
-    ast: Arc<ModModule>,
-    stdlib: &'a Stdlib,
-    import_format: ImportFormat,
-}
-
-impl TypeHintRenderer<'_, '_> {
-    fn render(&self, prefix: &str, ty: &Type) -> InlayHintEdits {
-        let parts = ty.get_annotation_parts(Some(self.stdlib));
-
-        let mut direct = Vec::<DirectImport>::new();
-        for (module, head) in self
-            .tracker
-            .direct_import_candidates(&parts, self.handle.module())
-        {
-            let Some(module_handle) = self
-                .transaction
-                .import_handle(self.handle, module, None)
-                .finding()
-            else {
-                continue;
-            };
-            let name = Name::new(&head);
-            if !self
-                .transaction
-                .get_exports(&module_handle)
-                .contains_key(&name)
-                || self
-                    .transaction
-                    .builtin_module_for_name(self.handle, &name)
-                    .is_some()
-            {
-                continue;
-            }
-            match direct
-                .iter_mut()
-                .find(|import| import.handle.module() == module)
-            {
-                Some(import) => import.heads.push(head),
-                None => direct.push(DirectImport {
-                    handle: module_handle,
-                    heads: vec![head],
-                }),
-            }
-        }
-        direct.sort_by(|left, right| {
-            left.handle
-                .module()
-                .as_str()
-                .cmp(right.handle.module().as_str())
-        });
-        for import in &mut direct {
-            import.heads.sort();
-        }
-
-        let direct_imports = direct
-            .iter()
-            .flat_map(|import| {
-                import
-                    .heads
-                    .iter()
-                    .map(|head| (import.handle.module(), head.as_str()))
-            })
-            .collect::<Vec<_>>();
-        let (text, missing) =
-            self.tracker
-                .resolve_annotation(&parts, self.handle.module(), &direct_imports);
-
-        let mut missing = missing.into_iter().collect::<Vec<_>>();
-        missing.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        let mut import_edit = None;
-        for module in missing {
-            if let Some(handle_to_import) = self
-                .transaction
-                .import_handle(self.handle, module, None)
-                .finding()
-            {
-                let (position, insert_text, _) =
-                    import_regular_import_edit(self.ast.as_ref(), handle_to_import, None);
-                let (_, combined) = import_edit.get_or_insert((position, String::new()));
-                combined.push_str(&insert_text);
-            }
-        }
-        for import in direct {
-            let edit = insert_import_edit(
-                self.ast.as_ref(),
-                self.transaction.config_finder(),
-                self.handle.dupe(),
-                import.handle,
-                &import.heads.join(", "),
-                self.import_format,
-            );
-            let (_, combined) = import_edit.get_or_insert((edit.range.start(), String::new()));
-            combined.push_str(&edit.insert_text);
-        }
-        let imports = match import_edit {
-            Some(import_edit) => vec![import_edit],
-            None => Vec::new(),
-        };
-        InlayHintEdits {
-            annotation: format!("{prefix}{text}"),
-            imports,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -280,27 +162,21 @@ impl<'a> Transaction<'a> {
         let answers = self.get_answers(handle)?;
         let bindings = answers.bindings();
         let stdlib = self.get_stdlib(handle);
-        let renderer = self.get_ast(handle).map(|ast| TypeHintRenderer {
-            transaction: self,
-            handle,
-            tracker: ImportTracker::from_ast(
-                ast.as_ref(),
-                handle.module(),
-                handle.path().is_init(),
-                *handle.sys_info(),
-            ),
-            ast,
-            stdlib: &stdlib,
-            import_format,
-        });
+        let renderer = self
+            .get_ast(handle)
+            .map(|ast| AnnotationRenderer::new(self, handle, ast, &stdlib, import_format));
         let make_type_hint =
             |prefix: &str, position: TextSize, ty: &Type, insertable: bool| -> InlayHintData {
                 let type_parts = ty.get_types_with_locations(Some(&stdlib));
                 let label_parts = once((prefix.to_owned(), None)).chain(type_parts).collect();
                 let edits = if insertable {
-                    renderer
-                        .as_ref()
-                        .map(|renderer| renderer.render(prefix, ty))
+                    renderer.as_ref().and_then(|renderer| {
+                        let rendered = renderer.render(ty)?;
+                        Some(InlayHintEdits {
+                            annotation: format!("{prefix}{}", rendered.text),
+                            imports: renderer.import_lines(&rendered).into_iter().collect(),
+                        })
+                    })
                 } else {
                     None
                 };
@@ -344,9 +220,12 @@ impl<'a> Transaction<'a> {
                 }
                 key @ Key::Definition(_)
                     if inlay_hint_config.variable_types
-                        && let Some(mut ty) = answers.get_type_at(idx) =>
+                        && let Some(ty) = answers.get_type_at(idx) =>
                 {
-                    let mut insertable = true;
+                    let declaration_type = answers.get_class_field_type_at_definition(idx);
+                    // A bare type annotation can discard an inherited field's ClassVar/Final qualifiers.
+                    let mut insertable = declaration_type.is_none();
+                    let mut ty = declaration_type.unwrap_or(ty);
                     if let Some(constructor) = self.new_type_constructor_signature(handle, &ty) {
                         ty = constructor;
                         insertable = false;
@@ -430,7 +309,7 @@ impl<'a> Transaction<'a> {
                         continue;
                     };
                     let mut ty = class_field.ty();
-                    let mut insertable = true;
+                    let mut insertable = !class_field.has_explicit_annotation();
                     if let Some(constructor) = self.new_type_constructor_signature(handle, &ty) {
                         ty = constructor;
                         insertable = false;
@@ -589,6 +468,7 @@ impl<'a> Transaction<'a> {
                                 && param_match.name.as_str() != "__self"
                                 && param_match.name.as_str() != "cls"
                                 && param_match.name.as_str() != "_cls"
+                                && !Self::inlay_hint_is_redundant(arg, &param_match)
                             {
                                 param_hints.push((
                                     arg.range().start(),
@@ -603,6 +483,15 @@ impl<'a> Transaction<'a> {
 
         param_hints.sort_by_key(|(pos, _)| *pos);
         param_hints
+    }
+
+    fn inlay_hint_is_redundant(arg: &Expr, param_match: &ParamNameMatch) -> bool {
+        let name = match (arg, param_match.is_vararg) {
+            (Expr::Name(name), false) => name,
+            (Expr::Starred(e), true) if let Expr::Name(name) = &*e.value => name,
+            _ => return false,
+        };
+        name.id == *param_match.name
     }
 
     pub(crate) fn param_name_for_positional_argument<'param>(

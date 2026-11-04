@@ -325,12 +325,31 @@ impl TArgs {
     /// This is mainly useful to take ancestors coming from the MRO (which are always in terms
     /// of the current class's type parameters) and re-express them in terms of the current
     /// class specialized with type arguments.
+    ///
+    /// Unions in the substituted arguments are simplified, so type arguments that differ only in
+    /// the order, nesting or duplication of union members compare equal.
     pub fn substitute_with(&self, substitution: &Substitution) -> Self {
+        if substitution.0.is_empty() {
+            return self.clone();
+        }
+        let heap = TypeHeap::new();
         let tys = self
             .0
             .1
             .iter()
-            .map(|ty| substitution.substitute_into(ty.clone()))
+            .map(|ty| {
+                let mut ty = substitution.substitute_into(ty.clone());
+                ty.transform_mut(&mut |x| {
+                    if let Type::Union(u) = x {
+                        let mut merged = unions(mem::take(&mut u.members), &heap);
+                        if let Type::Union(merged_u) = &mut merged {
+                            merged_u.display_name.0 = u.display_name.0.take();
+                        }
+                        *x = merged;
+                    }
+                });
+                ty
+            })
             .collect();
         Self::new(self.0.0.dupe(), tys)
     }
@@ -409,6 +428,10 @@ pub enum AnyStyle {
 }
 
 impl AnyStyle {
+    /// Downgrade an explicit `Any` to an implicit one, for a type that is derived from an `Any`
+    /// rather than being the user's `Any` itself, so that the derived type is not reported as a
+    /// use of an annotation the user wrote. An operation on an `Any` operand keeps the operand's
+    /// style instead of downgrading it: see `Type::merge_any_operands`.
     pub fn propagate(self) -> Type {
         match self {
             Self::Implicit | Self::Error => Type::Any(self),
@@ -416,6 +439,9 @@ impl AnyStyle {
         }
     }
 
+    /// Combine the styles of two `Any`s that flow into a single value. An error `Any` wins, so
+    /// that fallout from an earlier error is never blamed on the user's explicit `Any`, and an
+    /// implicit `Any` beats an explicit one for the same reason.
     pub fn merge(self, other: Self) -> Type {
         match (self, other) {
             (Self::Error, _) | (_, Self::Error) => Type::Any(Self::Error),
@@ -1378,6 +1404,34 @@ impl Type {
         matches!(self, Type::Any(_))
     }
 
+    /// Whether an implicit `Any` appears anywhere within this type, including the
+    /// type itself. Used to report a partially unknown type such as `list[Unknown]`.
+    pub fn contains_implicit_any(&self) -> bool {
+        fn walk(ty: &Type, found: &mut bool) {
+            if *found {
+                return;
+            }
+            if matches!(ty, Type::Any(AnyStyle::Implicit)) {
+                *found = true;
+                return;
+            }
+            // Unknown types in `__wrapped__` do not make the wrapper's signature unknown.
+            if ty
+                .toplevel_func_metadata()
+                .is_some_and(|metadata| metadata.flags.wrapped.is_some())
+            {
+                for (signature, _) in ty.toplevel_callable_signatures() {
+                    signature.visit(&mut |child| walk(child, found));
+                }
+            } else {
+                ty.recurse(&mut |child| walk(child, found));
+            }
+        }
+        let mut found = false;
+        walk(self, &mut found);
+        found
+    }
+
     pub fn is_object(&self) -> bool {
         matches!(self, Type::ClassType(cls) if cls.is_builtin("object"))
     }
@@ -1934,6 +1988,45 @@ impl Type {
         }
     }
 
+    /// Set a known wrapped target, widening unknown or repeated identities to `Any`.
+    /// Returns `false` when this type has no function metadata.
+    pub fn set_wrapped(&mut self, wrapped: Type) -> bool {
+        fn needs_widening(ty: &Type, kind: &FunctionKind) -> bool {
+            if let Type::Union(union) = ty {
+                return union.members.iter().any(|ty| needs_widening(ty, kind));
+            }
+            // Substitution can replace an opaque target with a whole wrapped function.
+            if matches!(
+                ty,
+                Type::Quantified(_) | Type::Var(_) | Type::ElementOfTypeVarTuple(_)
+            ) {
+                return true;
+            }
+            let Some(metadata) = ty.toplevel_func_metadata() else {
+                return false;
+            };
+            metadata.kind == *kind
+                || metadata
+                    .flags
+                    .wrapped
+                    .as_deref()
+                    .is_some_and(|ty| needs_widening(ty, kind))
+        }
+
+        let Some(metadata) = self.toplevel_func_metadata_mut() else {
+            return false;
+        };
+        // Repeated source identities can represent either a cycle on one object or
+        // arbitrarily many instances of the same wrapper created in a loop.
+        let wrapped = if needs_widening(&wrapped, &metadata.kind) {
+            Type::any_explicit()
+        } else {
+            wrapped
+        };
+        metadata.flags.wrapped = Some(Box::new(wrapped));
+        true
+    }
+
     pub fn has_toplevel_func_metadata(&self) -> bool {
         self.toplevel_func_metadata().is_some()
     }
@@ -1989,7 +2082,7 @@ impl Type {
 
     pub fn function_deprecation(&self) -> Option<&Deprecation> {
         self.toplevel_func_metadata()
-            .and_then(|meta| meta.flags.deprecation.as_ref())
+            .and_then(|meta| meta.flags.deprecation.as_deref())
     }
 
     pub fn has_final_decoration(&self) -> bool {
@@ -2141,6 +2234,18 @@ impl Type {
 
     pub fn any_error() -> Self {
         Type::Any(AnyStyle::Error)
+    }
+
+    /// The result of an operation on `lhs` and `rhs` when either operand is `Any`. Such an
+    /// operation can return anything, so the result is `Any`, keeping the operand's style. When
+    /// both operands are `Any` their styles are merged, so that an error or implicit `Any` is not
+    /// reported as a use of the explicit `Any` the user wrote.
+    pub fn merge_any_operands(lhs: &Type, rhs: &Type) -> Option<Type> {
+        match (lhs, rhs) {
+            (Type::Any(lstyle), Type::Any(rstyle)) => Some(lstyle.merge(*rstyle)),
+            (Type::Any(style), _) | (_, Type::Any(style)) => Some(Type::Any(*style)),
+            _ => None,
+        }
     }
 
     /// Canonicalize a dimension expression to a unique normal form.
@@ -2315,6 +2420,13 @@ impl Type {
                 }
                 answer
             }
+            Type::ClassType(cls) => {
+                // `Never` containers cannot hold any items; they are always empty; they are always falsy.
+                const CONTAINER_NAMES: &[&str] = &["set", "frozenset", "list", "dict"];
+                (CONTAINER_NAMES.iter().any(|n| cls.is_builtin(n))
+                    && cls.targs().as_slice().first().is_some_and(|t| t.is_never()))
+                .then_some(false)
+            }
             _ => None,
         }
     }
@@ -2337,31 +2449,122 @@ impl Type {
         self.toplevel_func_metadata().map(|meta| &meta.kind)
     }
 
+    /// Returns whether some type annotation expresses a type equivalent to this one. The
+    /// annotation may refer to newly defined classes, such as a callback protocol for a callable
+    /// type that the `Callable` special form cannot express.
+    pub fn is_spellable(&self) -> bool {
+        !self.any(|ty| match ty {
+            Type::Overloaded(_)
+            | Type::Intersect(_)
+            | Type::Module(_)
+            | Type::SpecialForm(_)
+            | Type::TypeAlias(_)
+            | Type::SuperInstance(_) => true,
+            Type::Literal(_)
+            | Type::LiteralString(_)
+            | Type::Callable(_)
+            | Type::TypeLevelDslCall(_)
+            | Type::Function(_)
+            | Type::BoundMethod(_)
+            | Type::Overload(_)
+            | Type::Union(_)
+            | Type::ClassDef(_)
+            | Type::ClassType(_)
+            | Type::TypedDict(_)
+            | Type::PartialTypedDict(_)
+            | Type::ShapedArray(_)
+            | Type::IntTuple(_)
+            | Type::NamedInts(_)
+            | Type::NNModule(_)
+            | Type::DataFrame(_)
+            | Type::Series(_)
+            | Type::Int(_)
+            | Type::Tuple(_)
+            | Type::Forall(_)
+            | Type::Var(_)
+            | Type::Quantified(_)
+            | Type::QuantifiedValue(_)
+            | Type::ElementOfTypeVarTuple(_)
+            | Type::TypeGuard(_)
+            | Type::TypeIs(_)
+            | Type::Annotated(_, _)
+            | Type::Unpack(_)
+            | Type::TypeVar(_)
+            | Type::ParamSpec(_)
+            | Type::TypeVarTuple(_)
+            | Type::Concatenate(_, _)
+            | Type::ParamSpecValue(_)
+            | Type::Args(_)
+            | Type::Kwargs(_)
+            | Type::ArgsValue(_)
+            | Type::KwargsValue(_)
+            | Type::Type(_)
+            | Type::TypeForm(_)
+            | Type::Ellipsis
+            | Type::Any(_)
+            | Type::Never(_)
+            | Type::UntypedAlias(_)
+            | Type::Sentinel(_)
+            | Type::SelfType(_)
+            | Type::KwCall(_)
+            | Type::Materialization
+            | Type::None => false,
+        })
+    }
+
     pub fn materialize(&self) -> Self {
         let mut ty = self.clone();
-        ty.transform_types_in_type_variable_positions(&mut |ty| {
-            if ty.is_any() {
-                *ty = Type::Materialization;
-            } else {
-                // Gradual shape dimensions are the shape analog of `Any`, but they
-                // are stored as `Int` rather than `Type`, so the traversal above
-                // never reaches them directly. Materialize them at each carrier so
-                // `is_equivalent` does not treat a gradual size as equivalent to a
-                // concrete one.
-                match ty {
-                    Type::Int(dim) => dim.materialize(),
-                    Type::IntTuple(tuple) => tuple.materialize(),
-                    Type::ShapedArray(shaped) => shaped.materialize_inline_shape(),
-                    _ => {}
+        ty.materialize_mut();
+        ty
+    }
+
+    /// Materializes `self` in place, children first.
+    fn materialize_mut(&mut self) {
+        if self.is_any() {
+            *self = Type::Materialization;
+            return;
+        }
+        if let Type::ClassType(cls) = self {
+            for (tparam, targ) in cls.targs_mut().iter_paired_mut() {
+                match tparam.restriction() {
+                    Restriction::Bound(bound) => {
+                        let original = targ.clone();
+                        targ.materialize_mut();
+                        // A well-formed type argument satisfies its parameter's bound, so only
+                        // subtypes of the (unmaterialized) bound are possible. The shapeless
+                        // `IntTuple` is the top of the shape domain, so intersecting with it is a
+                        // no-op.
+                        if *targ != original
+                            && !matches!(bound, Type::IntTuple(shape) if shape.is_shapeless())
+                        {
+                            *targ = Type::Intersect(Box::new((
+                                vec![targ.clone(), bound.clone()],
+                                targ.clone(),
+                            )));
+                        }
+                    }
+                    _ => targ.materialize_mut(),
                 }
             }
-            ty.transform_toplevel_callable_signatures(|callable: &mut Callable, _| {
-                if matches!(callable.params, Params::Ellipsis) {
-                    callable.params = Params::Materialization;
-                }
-            });
+        } else {
+            self.recurse_type_variable_positions_mut(&mut |ty| ty.materialize_mut());
+        }
+        // Gradual shape dimensions are the shape analog of `Any`, but they
+        // are stored as `Int` rather than `Type`, so the traversal above
+        // never reaches them directly. Materialize them at each carrier so
+        // `is_equivalent` does not treat a gradual size as equivalent to a
+        // concrete one.
+        match self {
+            Type::Int(dim) => dim.materialize(),
+            Type::IntTuple(tuple) => tuple.materialize(),
+            Type::ShapedArray(shaped) => shaped.materialize_inline_shape(),
+            _ => {}
+        }
+        self.transform_toplevel_callable_signatures(|callable: &mut Callable, _| {
+            if matches!(callable.params, Params::Ellipsis) {
+                callable.params = Params::Materialization;
+            }
         });
-        ty
     }
 
     /// Creates a union from the provided types without simplifying
@@ -2452,6 +2655,7 @@ mod tests {
     use crate::type_level_dsl::TypeLevelDslCall;
     use crate::type_var::PreInferenceVariance;
     use crate::type_var::Restriction;
+    use crate::types::AnyStyle;
     use crate::types::BoundMethod;
     use crate::types::BoundMethodType;
     use crate::types::Forall;
@@ -2679,5 +2883,18 @@ mod tests {
                 .truncate_class_nesting(3, 3, &Type::any_implicit()),
             wide_union,
         );
+    }
+
+    #[test]
+    fn test_any_style_ord_matches_merge() {
+        // `simplify::flatten_and_dedup` keeps the `max()` of a union's `Any` member styles and
+        // relies on that matching `AnyStyle::merge`. These agree only because the variants are
+        // declared weakest-first; this guards the coupling so reordering them fails here rather
+        // than silently changing which `Any` a union keeps.
+        for a in [AnyStyle::Explicit, AnyStyle::Implicit, AnyStyle::Error] {
+            for b in [AnyStyle::Explicit, AnyStyle::Implicit, AnyStyle::Error] {
+                assert_eq!(Type::Any(a.max(b)), a.merge(b));
+            }
+        }
     }
 }

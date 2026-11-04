@@ -28,6 +28,7 @@ use crate::callable::Callable;
 use crate::callable::Param;
 use crate::callable::ParamOverlay;
 use crate::callable::Params;
+use crate::callable::PrefixParam;
 use crate::callable::Required;
 use crate::class::Class;
 use crate::data_frame::SchemaCompleteness;
@@ -64,6 +65,7 @@ use crate::types::Forallable;
 use crate::types::NeverStyle;
 use crate::types::SuperObj;
 use crate::types::TArgs;
+use crate::types::TParams;
 use crate::types::Type;
 
 enum HoverParamRow {
@@ -170,7 +172,8 @@ pub struct TypeDisplayContext<'a> {
     render_self_type_as_self: bool,
     /// Render a `DataFrame` as its plain underlying class rather than the schema form.
     strip_library_schemas: bool,
-    render_unknown_as_any: bool,
+    /// Render types as source annotations: valid Python that references every name it uses.
+    render_source_annotation: bool,
     /// Optional stdlib reference for resolving builtin type locations
     stdlib: Option<&'a Stdlib>,
     /// Stack of identities of type variables currently bound by enclosing Foralls.
@@ -342,6 +345,7 @@ impl<'a> TypeDisplayContext<'a> {
     fn fmt_quantified(&self, quantified: &Quantified, output: &mut impl TypeOutput) -> fmt::Result {
         write!(output, "{}", quantified.name)?;
         if self.always_display_module_name
+            && !self.render_source_annotation
             && !self
                 .forall_tparam_uniques
                 .borrow()
@@ -892,6 +896,93 @@ impl<'a> TypeDisplayContext<'a> {
         }
     }
 
+    /// Writes a function type `t`, whose first signature is `callable`, as a source annotation.
+    /// Only a callback protocol or `Callable` can be written. Where `Callable` cannot express the
+    /// type (overloads, type parameters, or optional parameters), this writes a gradual form.
+    fn fmt_source_callable(
+        &self,
+        t: &Type,
+        callable: &Callable,
+        tparams: Option<&TParams>,
+        output: &mut impl TypeOutput,
+    ) -> fmt::Result {
+        if let Some(metadata) = t.toplevel_func_metadata()
+            && let FunctionKind::CallbackProtocol(cls) = &metadata.kind
+        {
+            output.write_qname(cls.qname())?;
+            return output.write_targs(cls.targs());
+        }
+        self.maybe_fmt_with_module("typing", "Callable", output)?;
+        if t.toplevel_callable_signatures().nth(1).is_some() {
+            output.write_str("[..., ")?;
+            self.maybe_fmt_with_module("typing", "Any", output)?;
+            return output.write_str("]");
+        }
+        let bound_signature = if matches!(t, Type::BoundMethod(_)) {
+            callable.strip_first_param()
+        } else {
+            None
+        };
+        let callable = bound_signature.as_ref().unwrap_or(callable);
+        let erased;
+        let callable = match tparams.filter(|tparams| !tparams.is_empty()) {
+            Some(tparams) => {
+                erased = callable.with_gradual_tparams(tparams.iter());
+                &erased
+            }
+            None => callable,
+        };
+        output.write_str("[")?;
+        // `Callable[[...], R]` and `Concatenate` make every parameter required and positional.
+        match &callable.params {
+            Params::List(params)
+                if params.items().iter().all(|param| {
+                    matches!(
+                        param,
+                        Param::PosOnly(_, _, Required::Required)
+                            | Param::Pos(_, _, Required::Required)
+                    )
+                }) =>
+            {
+                output.write_str("[")?;
+                self.fmt_type_sequence(
+                    params.items().iter().map(|p| p.as_type()),
+                    ", ",
+                    false,
+                    output,
+                )?;
+                output.write_str("]")?;
+            }
+            Params::ParamSpec(prefix, param_spec)
+                if !matches!(param_spec, Type::ParamSpecValue(_))
+                    && prefix.iter().all(|param| {
+                        matches!(
+                            param,
+                            PrefixParam::PosOnly(_, _, Required::Required)
+                                | PrefixParam::Pos(_, _, Required::Required)
+                        )
+                    }) =>
+            {
+                if prefix.is_empty() {
+                    self.fmt_helper_generic(param_spec, false, output)?;
+                } else {
+                    self.maybe_fmt_with_module("typing", "Concatenate", output)?;
+                    output.write_str("[")?;
+                    for param in prefix {
+                        self.fmt_helper_generic(param.ty(), false, output)?;
+                        output.write_str(", ")?;
+                    }
+                    self.fmt_helper_generic(param_spec, false, output)?;
+                    output.write_str("]")?;
+                }
+            }
+            _ => output.write_str("...")?,
+        }
+        output.write_str(", ")?;
+        self.fmt_helper_generic(&callable.ret, false, output)?;
+        output.write_str("]")
+    }
+
     /// Core formatting logic for types that works with any `TypeOutput` implementation.
     ///
     /// The method uses the `TypeOutput` trait abstraction to write output in various ways.
@@ -920,6 +1011,11 @@ impl<'a> TypeDisplayContext<'a> {
         is_toplevel: bool,
         output: &mut impl TypeOutput,
     ) -> fmt::Result {
+        if self.render_source_annotation
+            && let Some((callable, tparams)) = t.toplevel_callable_signatures().next()
+        {
+            return self.fmt_source_callable(t, callable, tparams.map(|t| t.as_ref()), output);
+        }
         match t {
             // Things that have QName's and need qualifying
             Type::ClassDef(cls) => {
@@ -1638,6 +1734,12 @@ impl<'a> TypeDisplayContext<'a> {
             Type::Quantified(var) => self.fmt_quantified(var, output),
             Type::QuantifiedValue(var) => write!(output, "{var}"),
             Type::ElementOfTypeVarTuple(var) => write!(output, "ElementOf[{var}]"),
+            Type::Args(q) if self.render_source_annotation => {
+                write!(output, "{}.args", q.name())
+            }
+            Type::Kwargs(q) if self.render_source_annotation => {
+                write!(output, "{}.kwargs", q.name())
+            }
             Type::Args(q) => {
                 output.write_str("Args[")?;
                 write!(output, "{q}")?;
@@ -1662,7 +1764,7 @@ impl<'a> TypeDisplayContext<'a> {
             Type::Ellipsis => output.write_str("..."),
             Type::Any(style) => match style {
                 AnyStyle::Explicit => self.maybe_fmt_with_module("typing", "Any", output),
-                AnyStyle::Implicit | AnyStyle::Error if self.render_unknown_as_any => {
+                AnyStyle::Implicit | AnyStyle::Error if self.render_source_annotation => {
                     self.maybe_fmt_with_module("typing", "Any", output)
                 }
                 AnyStyle::Implicit | AnyStyle::Error => output.write_str("Unknown"),
@@ -1856,7 +1958,7 @@ impl Type {
     /// Render an annotation while preserving semantic module references.
     pub fn get_annotation_parts(&self, stdlib: Option<&Stdlib>) -> Vec<AnnotationPart> {
         let mut ctx = annotation_context(self, stdlib);
-        ctx.render_unknown_as_any = true;
+        ctx.render_source_annotation = true;
         ctx.always_display_module_name_except_builtins();
         let mut output = AnnotationOutput::new(&ctx);
         ctx.fmt_helper_generic(self, false, &mut output).unwrap();
@@ -1955,6 +2057,7 @@ pub mod tests {
             mi,
             PrecomputedTParams::NotGeneric,
             false,
+            None,
         )
     }
 
@@ -3614,6 +3717,52 @@ def overloaded_func[T](
             assert_output_contains(&parts, expected);
         }
         assert!(parts.iter().any(|(_, loc)| loc.is_some()));
+    }
+
+    #[test]
+    fn source_annotation_renders_nested_callables() {
+        let inner = Type::Callable(Box::new(Callable::list(
+            ParamList::new(vec![Param::PosOnly(None, Type::None, Required::Required)]),
+            Type::any_implicit(),
+        )));
+        let ty = Type::Callable(Box::new(Callable::list(
+            ParamList::new(vec![Param::PosOnly(None, inner, Required::Required)]),
+            Type::None,
+        )));
+        assert_eq!(ty.to_string(), "((None) -> Unknown) -> None");
+        assert_eq!(
+            ty.get_annotation_parts(None),
+            vec![
+                AnnotationPart::Reference {
+                    module: ModuleName::from_str("typing"),
+                    name: "Callable".to_owned()
+                },
+                AnnotationPart::Text("[[".to_owned()),
+                AnnotationPart::Reference {
+                    module: ModuleName::from_str("typing"),
+                    name: "Callable".to_owned()
+                },
+                AnnotationPart::Text("[[None], ".to_owned()),
+                AnnotationPart::Reference {
+                    module: ModuleName::from_str("typing"),
+                    name: "Any".to_owned()
+                },
+                AnnotationPart::Text("]], None]".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn source_annotation_omits_bound_receiver() {
+        let annotation = fake_bound_method("method", "Class", "module")
+            .get_annotation_parts(None)
+            .into_iter()
+            .map(|part| match part {
+                AnnotationPart::Text(text) => text,
+                AnnotationPart::Reference { name, .. } => name,
+            })
+            .collect::<String>();
+        assert_eq!(annotation, "Callable[[Any, Any], None]");
     }
 
     #[test]

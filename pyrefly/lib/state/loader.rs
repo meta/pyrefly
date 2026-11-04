@@ -35,6 +35,8 @@ use crate::state::state::TransactionTimingCounters;
 
 #[derive(Debug, Clone, Dupe, PartialEq, Eq)]
 pub enum FindError {
+    /// This module resolved only through the fallback search path heuristic.
+    FallbackSearchPathRelativeImport(ModuleName),
     /// This module could not be found, and we should emit an error
     MissingImport(ModuleName, Arc<Vec1<String>>),
     /// This import could not be found, but the user configured it to be ignored
@@ -97,6 +99,16 @@ impl FindError {
 
     pub fn display(&self) -> (Option<Box<dyn Fn() -> ErrorContext + '_>>, Vec1<String>) {
         match self {
+            Self::FallbackSearchPathRelativeImport(module) => (
+                None,
+                vec1![
+                    format!(
+                        "Import `{module}` was resolved relative to the importing file because it was not found on the module search path"
+                    ),
+                    "Add the module to the search path/site package path, or use an explicit relative/fully qualified import"
+                        .to_owned(),
+                ],
+            ),
             Self::MissingImport(module, err) => {
                 let mut lines = (**err).clone();
                 // Compute suggestion lazily at display time, using global cache
@@ -131,6 +143,9 @@ impl FindError {
 
     pub fn kind(&self) -> Option<ErrorKind> {
         match self {
+            Self::FallbackSearchPathRelativeImport(..) => {
+                Some(ErrorKind::FallbackSearchPathRelativeImport)
+            }
             Self::MissingImport(..) => Some(ErrorKind::MissingImport),
             Self::MissingSource(..) => Some(ErrorKind::MissingSource),
             Self::MissingSourceForStubs(..) => Some(ErrorKind::MissingSourceForStubs),
@@ -481,12 +496,83 @@ impl LoaderFindCache {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::path::PathBuf;
 
+    use pyrefly_build::handle::Handle;
+    use pyrefly_build::source_db::LiveSourceDatabase;
+    use pyrefly_build::source_db::SourceDatabase;
     use pyrefly_build::source_db::map_db::MapDatabase;
     use pyrefly_util::test_path::TestPath;
 
     use super::*;
+    use crate::module::bundled::BundledStub;
+    use crate::module::typeshed::typeshed;
+
+    /// Resolves `module` to `path`, but only for imports from `owner`.
+    #[derive(Debug)]
+    struct OwnerOnlyDatabase {
+        owner: ModulePath,
+        module: ModuleName,
+        path: ModulePath,
+    }
+
+    impl SourceDatabase for OwnerOnlyDatabase {
+        fn lookup(
+            &self,
+            module: ModuleName,
+            origin: Option<&Path>,
+            _: Option<ModuleStyle>,
+        ) -> Option<ModulePath> {
+            (module == self.module && origin == Some(self.owner.as_path()))
+                .then(|| self.path.dupe())
+        }
+
+        fn handle_from_module_path(&self, _: &ModulePath) -> Option<Handle> {
+            None
+        }
+
+        fn as_live_source_database(&self) -> Option<&dyn LiveSourceDatabase> {
+            None
+        }
+    }
+
+    #[test]
+    fn test_bundled_result_lookup_order() {
+        let owner = ModulePath::memory(PathBuf::from("owner/main.py"));
+        let other = ModulePath::memory(PathBuf::from("other/main.py"));
+        let owned = ModulePath::memory(PathBuf::from("owner/typing_extensions.py"));
+        let module = ModuleName::typing_extensions();
+        let new_loader = || {
+            let mut config = ConfigFile::default();
+            config.python_environment.set_empty_to_default();
+            config.source_db = Some(ArcId::new(Box::new(OwnerOnlyDatabase {
+                owner: owner.dupe(),
+                module,
+                path: owned.dupe(),
+            })));
+            config.configure();
+            LoaderFindCache::new(ArcId::new(config))
+        };
+        let find = |loader: &LoaderFindCache, origin: &ModulePath| {
+            loader
+                .find_import(module, Some(origin), None)
+                .finding()
+                .unwrap()
+        };
+        let bundled = typeshed().unwrap().find(module).unwrap();
+
+        let owner_first = new_loader();
+        assert_eq!(find(&owner_first, &owner), owned);
+        assert_eq!(find(&owner_first, &other), bundled);
+        // The loader shares the bundled result that `other` found with every origin, so the
+        // owner's result depends on lookup order.
+        assert_eq!(find(&owner_first, &owner), bundled);
+
+        let other_first = new_loader();
+        assert_eq!(find(&other_first, &other), bundled);
+        assert_eq!(find(&other_first, &owner), bundled);
+    }
 
     #[test]
     fn test_tensor_shapes_missing_marker_uses_origin_independent_cache_entry() {

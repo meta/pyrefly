@@ -805,7 +805,7 @@ impl CalcStack {
             None
         } else {
             // The actual cycle is the set of nodes between the occurrence we just pushed
-            // and the most recent *previous* occurrence of this CaclId (i.e. the second-to-last)
+            // and the most recent *previous* occurrence of this CalcId (i.e. the second-to-last)
             let cycle_start = target_positions[target_positions.len() - 2];
             let cycle_entries: Vec<CalcId> =
                 stack[cycle_start + 1..].iter().rev().duped().collect();
@@ -1895,6 +1895,31 @@ impl Scc {
     }
 }
 
+struct LambdaBindingFrame {
+    parameters: SmallSet<(ModuleName, ModulePath, LambdaParamId)>,
+    answers: FxHashMap<(ModuleName, ModulePath, Idx<Key>), TypeInfo>,
+    generation: u64,
+}
+
+pub(crate) struct LambdaBindingContext<'a> {
+    state: &'a ThreadState,
+    depth: usize,
+}
+
+impl Drop for LambdaBindingContext<'_> {
+    fn drop(&mut self) {
+        let mut frames = self.state.lambda_binding_frames.borrow_mut();
+        debug_assert_eq!(
+            frames.len(),
+            self.depth,
+            "inference contexts drop in stack order"
+        );
+        frames
+            .pop()
+            .expect("an inference context must have an active lambda binding frame");
+    }
+}
+
 /// Represents thread-local state for the current `AnswersSolver` and any
 /// `AnswersSolver`s waiting for the results that we are currently computing.
 ///
@@ -1923,6 +1948,11 @@ pub struct ThreadState {
     /// The `ModulePath` is needed to distinguish the in-memory and on-disk
     /// versions of the same module, which can coexist in the IDE (issue #3789).
     lambda_param_types: RefCell<FxHashMap<(ModuleName, ModulePath, LambdaParamId), Type>>,
+    /// Each inference attempt owns its narrowed answers. Nested lambda attempts use separate
+    /// frames; changing an enclosing parameter invalidates its frame and all nested frames.
+    lambda_binding_frames: RefCell<Vec<LambdaBindingFrame>>,
+    /// Assigns fresh generations when a frame's contextual parameter state is invalidated.
+    lambda_context_generation: Cell<u64>,
     /// Active trace side-effect sink for the current calculation.
     /// Set before `K::solve`, taken after. `None` when tracing is disabled
     /// or between calculations. Saved sinks form a stack to handle recursive
@@ -1954,6 +1984,8 @@ impl ThreadState {
             recursion_limit_config,
             partial_answers: RefCell::new(FxHashMap::default()),
             lambda_param_types: RefCell::new(FxHashMap::default()),
+            lambda_binding_frames: RefCell::new(Vec::new()),
+            lambda_context_generation: Cell::new(0),
             trace_sink: RefCell::new(None),
             trace_sink_stack: RefCell::new(Vec::new()),
             overload_self_filter_stack: RefCell::new(FxHashSet::default()),
@@ -2072,6 +2104,7 @@ pub struct AnswersSolver<'ctx, 'answer, Ans: LookupAnswer> {
     current: &'answer Arc<Answers>,
     thread_state: &'answer ThreadState,
     answer_scope: &'answer AnswerScope,
+    comprehension_frame: Option<(usize, Option<CalcId>)>,
     // The base solver is only used to reset the error collector at binding
     // boundaries. Answers code should generally use the error collector passed
     // along the call stack instead.
@@ -2175,8 +2208,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             current,
             thread_state,
             answer_scope,
+            comprehension_frame: None,
             heap,
         }
+    }
+
+    /// Keep comprehension hints through nested overload dispatch within an intersection probe.
+    pub(crate) fn for_intersection_arguments(&self) -> AnswersSolver<'ctx, '_, Ans> {
+        let mut solver = self.for_answer_scope(self.answer_scope);
+        solver.comprehension_frame = Some((self.stack().len(), self.stack().peek()));
+        solver
+    }
+
+    pub(crate) fn preserves_contextual_comprehensions(&self) -> bool {
+        self.comprehension_frame
+            .as_ref()
+            .is_some_and(|(height, owner)| {
+                *height == self.stack().len() && *owner == self.stack().peek()
+            })
     }
 
     /// Reborrow this solver with SCC answer references owned by `answer_scope`.
@@ -2189,6 +2238,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             current: self.current,
             thread_state: self.thread_state,
             answer_scope,
+            comprehension_frame: self.comprehension_frame.clone(),
             base_errors: self.base_errors,
             exports: self.exports,
             uniques: self.uniques,
@@ -2241,11 +2291,113 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.answers.get_class_fields(cls)
     }
 
+    /// Start an independent lambda-hint or speculative-call inference attempt.
+    pub(crate) fn enter_lambda_binding_context(
+        &self,
+        parameters: impl IntoIterator<Item = LambdaParamId>,
+    ) -> LambdaBindingContext<'_> {
+        let generation = self.thread_state.lambda_context_generation.get() + 1;
+        self.thread_state.lambda_context_generation.set(generation);
+        self.thread_state
+            .lambda_binding_frames
+            .borrow_mut()
+            .push(LambdaBindingFrame {
+                parameters: parameters
+                    .into_iter()
+                    .map(|id| (self.module().name(), self.module().path().dupe(), id))
+                    .collect(),
+                answers: FxHashMap::default(),
+                generation,
+            });
+        LambdaBindingContext {
+            state: self.thread_state,
+            depth: self.thread_state.lambda_binding_frames.borrow().len(),
+        }
+    }
+
+    fn invalidate_lambda_binding_context(
+        &self,
+        parameter: Option<&(ModuleName, ModulePath, LambdaParamId)>,
+    ) {
+        let mut frames = self.thread_state.lambda_binding_frames.borrow_mut();
+        let start = match parameter {
+            Some(parameter) => frames
+                .iter()
+                .position(|frame| frame.parameters.contains(parameter)),
+            None => frames.len().checked_sub(1),
+        };
+        if let Some(start) = start {
+            let generation = self.thread_state.lambda_context_generation.get() + 1;
+            self.thread_state.lambda_context_generation.set(generation);
+            for frame in &mut frames[start..] {
+                frame.answers.clear();
+                frame.generation = generation;
+            }
+        }
+    }
+
     pub(crate) fn set_lambda_param_type(&self, id: LambdaParamId, ty: Type) {
+        let key = (self.module().name(), self.module().path().dupe(), id);
+        // Solver Vars can change without changing their syntax. Only closed, identical hints
+        // establish that an installation leaves its parameter's dependency state unchanged.
+        if ty.collect_all_vars().is_empty()
+            && self.thread_state.lambda_param_types.borrow().get(&key) == Some(&ty)
+        {
+            return;
+        }
         self.thread_state
             .lambda_param_types
             .borrow_mut()
-            .insert((self.module().name(), self.module().path().dupe(), id), ty);
+            .insert(key.clone(), ty);
+        self.invalidate_lambda_binding_context(Some(&key));
+    }
+
+    /// Reuse narrowed reads from this attempt or an enclosing one; store only in this attempt.
+    pub(crate) fn lambda_binding_answer(
+        &self,
+        idx: Idx<Key>,
+        binding: &Binding,
+    ) -> Option<TypeInfo> {
+        let parameter = self.bindings().lambda_parameter_origin(idx)?;
+        let parameter_key = (self.module().name(), self.module().path().dupe(), parameter);
+        let has_context = self
+            .thread_state
+            .lambda_binding_frames
+            .borrow()
+            .iter()
+            .any(|frame| frame.parameters.contains(&parameter_key));
+        if !has_context {
+            // An ad-hoc/whole-module read can force the owner before its final hints are known.
+            let _context = self.enter_lambda_binding_context([parameter]);
+            return self.lambda_binding_answer(idx, binding);
+        }
+        let key = (self.module().name(), self.module().path().dupe(), idx);
+        let generation = {
+            let frames = self.thread_state.lambda_binding_frames.borrow();
+            let frame = frames
+                .last()
+                .expect("a narrowed read has an inference frame");
+            // Enclosing answers predate this attempt. Invalidation clears their owning frame
+            // and all descendants; speculative answers are published only to the top frame.
+            if let Some(answer) = frames
+                .iter()
+                .rev()
+                .find_map(|frame| frame.answers.get(&key))
+            {
+                return Some(answer.clone());
+            }
+            frame.generation
+        };
+        let answer = self.binding_to_type_info(binding, self.base_errors());
+        let mut frames = self.thread_state.lambda_binding_frames.borrow_mut();
+        let frame = frames
+            .last_mut()
+            .expect("the inference frame remains active during a read");
+        // Owner-driven hint installation can invalidate this frame while computing the answer.
+        if frame.generation == generation {
+            frame.answers.insert(key, answer.clone());
+        }
+        Some(answer)
     }
 
     fn get_lambda_param_type(&self, id: LambdaParamId) -> Option<Type> {
@@ -2256,20 +2408,59 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .cloned()
     }
 
-    pub(crate) fn resolve_lambda_param_type(
-        &self,
-        id: LambdaParamId,
-        owner: Option<Idx<Key>>,
-    ) -> Type {
-        if let Some(owner_idx) = owner {
-            // Contextual lambda types are installed while their enclosing expression is
-            // solved, so resolving the parameter independently must force that owner.
-            let _ = self.get_idx(owner_idx);
+    /// Capture contextual lambda types owned by the current binding for a speculative call.
+    pub(crate) fn snapshot_lambda_param_types(&self) -> Vec<(LambdaParamId, Option<Type>)> {
+        let Some(CalcId(_, AnyIdx::Key(owner))) = self.stack().peek() else {
+            return Vec::new();
+        };
+        self.bindings()
+            .owned_lambda_params(owner)
+            .iter()
+            .map(|id| (*id, self.get_lambda_param_type(*id)))
+            .collect()
+    }
+
+    /// Restore contextual lambda types, including removing entries installed by a failed probe.
+    pub(crate) fn restore_lambda_param_types(&self, snapshot: &[(LambdaParamId, Option<Type>)]) {
+        self.invalidate_lambda_binding_context(None);
+        let mut types = self.thread_state.lambda_param_types.borrow_mut();
+        for (id, ty) in snapshot {
+            let key = (self.module().name(), self.module().path().dupe(), *id);
+            match ty {
+                Some(ty) => {
+                    types.insert(key, ty.clone());
+                }
+                None => {
+                    types.remove(&key);
+                }
+            }
         }
-        self.get_lambda_param_type(id).unwrap_or_else(|| {
-            // Some lambda parameters have no contextual type in the current solve.
-            self.heap.mk_any_implicit()
-        })
+    }
+
+    /// Publish the contextual types of the parameters of the lambdas that `owner` owns, as this
+    /// solve installed them while computing `owner`. Called before `owner`'s answer is recorded,
+    /// so a solve that finds the answer also finds these types.
+    pub(crate) fn publish_owned_lambda_param_types(&self, owner: Idx<Key>) {
+        for id in self.bindings().owned_lambda_params(owner) {
+            if let Some(ty) = self.get_lambda_param_type(*id) {
+                self.current()
+                    .publish_lambda_param_type(*id, self.solver().expand(ty));
+            }
+        }
+    }
+
+    pub(crate) fn resolve_lambda_param_type(&self, id: LambdaParamId, owner: Idx<Key>) -> Type {
+        // Contextual lambda types are installed while their enclosing expression is
+        // solved, so resolving the parameter independently must force that owner. If another
+        // solve computed the owner, this solve's thread-local state has no type for the
+        // parameter, so use the one that solve published.
+        let _ = self.get_idx(owner);
+        self.get_lambda_param_type(id)
+            .or_else(|| self.current().published_lambda_param_type(id))
+            .unwrap_or_else(|| {
+                // Some lambda parameters have no contextual type in the current solve.
+                self.heap.mk_any_implicit()
+            })
     }
 
     pub fn stack(&self) -> &CalcStack {
@@ -2325,6 +2516,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .partial_answers
             .borrow_mut()
             .remove(&(def_idx, height));
+    }
+
+    /// Unpinned answers participating in first-use inference on the current calculation frame.
+    pub(crate) fn active_first_use_types(&self) -> Vec<Type> {
+        let height = self.stack().len();
+        self.thread_state
+            .partial_answers
+            .borrow()
+            .iter()
+            .filter(|((_, depth), _)| *depth == height)
+            .map(|(_, answer)| answer.ty().clone())
+            .collect()
     }
 
     /// Check for a matching partial answer at the current CalcStack height.
@@ -2453,7 +2656,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // return the raw type without caching it in shared Answers and without
         // triggering cycle detection against the NameAssign's CalcStack frame.
         let binding = self.bindings().get(idx);
-        if let Some(answer) = K::check_shortcut(self, binding) {
+        if let Some(answer) = K::check_shortcut(self, idx, binding) {
             return (
                 self.answer_scope
                     .hold_temporary::<K>(AnswerBox::new(answer)),
@@ -2621,6 +2824,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Not an SCC member even after computation: publish directly to
             // the result slot. No recursive placeholder can exist because
             // placeholders are stored only in SCC-local SccNodeState::HasPlaceholder.
+            K::before_record(self, idx);
             let (answer, did_write) = match solve_result {
                 SolveResult::Answer(raw_answer) => {
                     self.sanitize_answer_vars::<K>(&raw_answer, range, &local_errors);
@@ -2632,7 +2836,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 SolveResult::Alias(target) => self.current().record_alias(idx, target),
             };
             if did_write {
-                self.base_errors.extend(local_errors);
+                self.base_errors
+                    .extend(self.retain_annotated_metadata_errors(range, local_errors));
                 // Publish trace side effects alongside errors.
                 if let Some(traces) = trace_side_effects {
                     self.current().merge_trace_side_effects(traces);
@@ -2846,10 +3051,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         // Store in IterationSccNodeState::Done. Do NOT publish to the result slot;
         // that happens only when the iteration driver commits final answers.
+        if !self.stack().is_cold_iteration() {
+            K::before_record(self, idx);
+        }
         let errors = if self.stack().is_cold_iteration() {
             None
         } else {
-            Some(Arc::new(local_errors))
+            Some(Arc::new(
+                self.retain_annotated_metadata_errors(range, local_errors),
+            ))
         };
         let answer_erased = self.stack().set_iteration_node_done(
             self.answer_scope,
@@ -3842,6 +4052,40 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.heap.mk_any_error()
     }
 
+    /// Reports a value whose type is an error `Any`, which comes from an error such as an
+    /// unresolved import or name. `subject` describes the value, e.g. "The type of `x`".
+    pub fn error_unknown_from_error(
+        &self,
+        errors: &ErrorCollector,
+        range: TextRange,
+        subject: impl Display,
+    ) {
+        errors
+            .error_builder(
+                range,
+                ErrorKind::UnknownFromError,
+                format!("{subject} is unknown because it comes from an error"),
+            )
+            .emit();
+    }
+
+    /// Reports a value whose type is an explicit `Any`. `subject` describes the value, e.g.
+    /// "The type of `x`".
+    pub fn error_explicit_any_use(
+        &self,
+        errors: &ErrorCollector,
+        range: TextRange,
+        subject: impl Display,
+    ) {
+        errors
+            .error_builder(
+                range,
+                ErrorKind::ExplicitAnyUse,
+                format!("{subject} is an explicit `Any`"),
+            )
+            .emit();
+    }
+
     /// Adds an error with the given context and returns Type::Any(Error)
     pub fn error_with_context(
         &self,
@@ -3856,6 +4100,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .with_context(context)
             .emit();
         self.heap.mk_any_error()
+    }
+
+    /// Bindings inside `Annotated` metadata are not type-checked, but names in them must still
+    /// resolve, so only name resolution errors are kept for them.
+    fn retain_annotated_metadata_errors(
+        &self,
+        range: TextRange,
+        errors: ErrorCollector,
+    ) -> ErrorCollector {
+        if !self.bindings().in_annotated_metadata(range) {
+            return errors;
+        }
+        let kept = self.error_collector();
+        kept.extend_filtered(errors, |err| {
+            matches!(
+                err.error_kind(),
+                ErrorKind::UnknownName | ErrorKind::UnboundName
+            )
+        });
+        kept
     }
 
     /// Create a new error collector. Useful when a caller wants to decide whether or not to report

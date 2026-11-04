@@ -24,6 +24,7 @@ use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
 use starlark_map::small_map::SmallMap;
 
 use crate::config::config::ConfigFile;
+use crate::config::error::ErrorDisplayConfig;
 use crate::config::finder::ConfigFinder;
 use crate::error::error::print_errors;
 use crate::state::errors::Errors;
@@ -32,6 +33,7 @@ use crate::state::require::Require;
 use crate::state::state::State;
 use crate::state::subscriber::TestSubscriber;
 use crate::test::util::init_test;
+use crate::test::util::report_unreachable_at_warn;
 
 #[derive(Default, Clone, Dupe, Debug)]
 struct IncrementalData(Arc<Mutex<SmallMap<ModuleName, Arc<String>>>>);
@@ -92,6 +94,12 @@ impl Incremental {
             );
         }
         config.source_db = Some(ArcId::new(Box::new(sourcedb)));
+        report_unreachable_at_warn(
+            config
+                .root
+                .errors
+                .get_or_insert_with(ErrorDisplayConfig::default),
+        );
         config.configure();
         let config = ArcId::new(config);
 
@@ -186,6 +194,42 @@ impl Incremental {
         let res = self.unchecked(want);
         res.check_recompute(recompute);
         res
+    }
+}
+
+#[test]
+fn test_functools_wrapping_mutation_invalidates_unwrap() {
+    let mut i = Incremental::new();
+    let module = |mutation: &str| {
+        format!(
+            r#"
+from functools import update_wrapper, wraps
+from inspect import unwrap
+
+def source() -> str:
+    return "source"
+
+@wraps(source)
+def wrapper() -> int:
+    return 1
+
+result = unwrap(wrapper)()
+
+def unrelated() -> bool:
+    return False
+
+{mutation}
+"#
+        )
+    };
+    for mutation in ["", "update_wrapper(unrelated, source)", ""] {
+        i.set("main", &module(mutation));
+        let expected = if mutation.is_empty() { "str" } else { "Any" };
+        i.set(
+            "foo",
+            &format!("from main import result\nfrom typing import Any, assert_type\nassert_type(result, {expected})\n"),
+        );
+        i.unchecked(&["main", "foo"]).check_errors();
     }
 }
 
@@ -2727,8 +2771,11 @@ fn test_class_deprecation_metadata_change_invalidates() {
 
     // foo.C is NOT deprecated initially
     i.set("foo", "class C:\n    x: int = 1");
-    // # E: comment is present for the second check when deprecation warning appears
-    i.set("main", "from foo import C # E:\nc = C()");
+    // The second check expects deprecation warnings at the import and constructor call.
+    i.set(
+        "main",
+        "from foo import C # E: `C` is deprecated\nc = C() # E: `foo.C` is deprecated",
+    );
     i.check_ignoring_expectations(&["foo", "main"], &["foo", "main"]);
 
     // Add @deprecated decorator to class - main should be recomputed
@@ -2737,6 +2784,85 @@ fn test_class_deprecation_metadata_change_invalidates() {
         "from warnings import deprecated\n@deprecated('use D instead')\nclass C:\n    x: int = 1",
     );
     i.check(&["foo", "main"], &["foo", "main"]);
+}
+
+/// A class reference depends on deprecation metadata even when no constructor is called.
+#[test]
+fn test_class_reference_deprecation_metadata_change_invalidates() {
+    let mut i = Incremental::new();
+
+    i.set("foo", "class C: pass");
+    i.set("main", "import foo\ncls = foo.C # E: use D instead");
+    i.check_ignoring_expectations(&["foo", "main"], &["foo", "main"]);
+
+    i.set(
+        "foo",
+        "from warnings import deprecated\n@deprecated('use D instead')\nclass C: pass",
+    );
+    i.check(&["foo", "main"], &["foo", "main"]);
+}
+
+/// Class aliases carry deprecation changes through their exported type.
+#[test]
+fn test_class_alias_deprecation_change_invalidates() {
+    let mut i = Incremental::new();
+    i.set("foo", "class C: pass\nAlias = C");
+    i.set("main", "import foo\ncls = foo.Alias # E: use D instead");
+    i.check_ignoring_expectations(&["foo", "main"], &["foo", "main"]);
+
+    i.set(
+        "foo",
+        "from warnings import deprecated\n@deprecated('use D instead')\nclass C: pass\nAlias = C # E: use D instead",
+    );
+    i.check(&["foo", "main"], &["foo", "main"]);
+
+    i.set(
+        "foo",
+        "from warnings import deprecated\n@deprecated('use E instead')\nclass C: pass\nAlias = C # E: use E instead",
+    );
+    let result = i.check_ignoring_expectations(&["foo", "main"], &["foo", "main"]);
+    let errors = result.errors.collect_display_errors();
+    assert_eq!(errors.len(), 2);
+    assert!(
+        errors
+            .iter()
+            .all(|error| error.msg().contains("use E instead"))
+    );
+
+    i.set("foo", "class C: pass\nAlias = C");
+    let result = i.check_ignoring_expectations(&["foo", "main"], &["foo", "main"]);
+    assert!(result.errors.collect_display_errors().is_empty());
+}
+
+/// Specialized class aliases carry deprecation changes through their exported type.
+#[test]
+fn test_specialized_class_alias_deprecation_change_invalidates() {
+    let mut i = Incremental::new();
+    i.set("foo", "class C[T]: pass\nAlias = C[int]");
+    i.set("main", "import foo\nfoo.Alias() # E: use D instead");
+    i.check_ignoring_expectations(&["foo", "main"], &["foo", "main"]);
+
+    i.set(
+        "foo",
+        "from warnings import deprecated\n@deprecated('use D instead')\nclass C[T]: pass\nAlias = C[int] # E: use D instead",
+    );
+    i.check(&["foo", "main"], &["foo", "main"]);
+
+    i.set("foo", "class C[T]: pass\nAlias = C[int]");
+    let result = i.check_ignoring_expectations(&["foo", "main"], &["foo", "main"]);
+    assert!(result.errors.collect_display_errors().is_empty());
+}
+
+/// Reading a class object does not depend on the types of its methods.
+#[test]
+fn test_class_reference_method_change_does_not_invalidate() {
+    let mut i = Incremental::new();
+    i.set("foo", "class C:\n    def method(self) -> int: return 1");
+    i.set("main", "import foo\ncls = foo.C");
+    i.check(&["foo", "main"], &["foo", "main"]);
+
+    i.set("foo", "class C:\n    def method(self) -> str: return 'new'");
+    i.check(&["foo", "main"], &["foo"]);
 }
 
 /// Test that when an export changes from direct definition to re-export, dependents are invalidated.
@@ -2958,4 +3084,96 @@ def first(shapes: IntTuple) -> IntTuple:
     let changed = i.unchecked(&["consumer", "helpers"]);
     changed.check_recompute(&["consumer", "helpers", "main"]);
     changed.check_errors();
+}
+
+/// Whether an imported `Final` settles a test depends on whether a module on the way to it defines
+/// or star-imports it under a test of the environment, which can change without changing its type.
+#[test]
+fn test_final_moved_under_environment_test_rechecks_importer() {
+    let mut i = Incremental::new();
+    let errors = |i: &mut Incremental| {
+        i.unchecked(&["main"])
+            .errors
+            .collect_display_errors()
+            .map(|error| error.msg().to_owned())
+    };
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("foo", "from bar import DEBUG as DEBUG");
+    i.set(
+        "main",
+        "from foo import DEBUG\nif DEBUG:\n    x = 1\nelse:\n    x = ''\nobserved: str = x",
+    );
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "bar",
+        "import sys\nfrom typing import Final\nif sys.platform != 'win32':\n    DEBUG: Final = False",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("foo", "from bar import *");
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "foo",
+        "import sys\nfrom bar import *\nif sys.platform == 'win32':\n    DEBUG = True",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+
+    i.set("foo", "from bar import *");
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "foo",
+        "import sys\nif sys.platform != 'win32':\n    from bar import *",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+}
+
+/// A star import in a suite this configuration rules out brings in whatever the other module
+/// defines, so defining the constant there must recheck the importer.
+#[test]
+fn test_constant_defined_behind_skipped_star_import_rechecks_importer() {
+    let mut i = Incremental::new();
+    let errors = |i: &mut Incremental| {
+        i.unchecked(&["main"])
+            .errors
+            .collect_display_errors()
+            .map(|error| error.msg().to_owned())
+    };
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("baz", "");
+    i.set(
+        "foo",
+        "import sys\nfrom bar import DEBUG as DEBUG\nif sys.platform == 'win32':\n    from baz import *",
+    );
+    i.set(
+        "main",
+        "from foo import DEBUG\nif DEBUG:\n    x = 1\nelse:\n    x = ''\nobserved: str = x",
+    );
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set("baz", "from typing import Final\nDEBUG: Final = True");
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
 }

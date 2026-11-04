@@ -46,6 +46,9 @@ def returns_expr(x: int) -> int:  # E: `@overload` bodies should not contain exe
 def returns_expr(x: str) -> str:
     ...
 
+def returns_expr(x: int | str) -> int | str:
+    return x
+
 @overload
 def raises_other(x: int) -> int:  # E: `@overload` bodies should not contain executable logic
     raise ValueError("bad")
@@ -53,6 +56,9 @@ def raises_other(x: int) -> int:  # E: `@overload` bodies should not contain exe
 @overload
 def raises_other(x: str) -> str:
     ...
+
+def raises_other(x: int | str) -> int | str:
+    return x
 
 @overload
 def has_assignment(x: int) -> int:  # E: `@overload` bodies should not contain executable logic
@@ -63,6 +69,9 @@ def has_assignment(x: int) -> int:  # E: `@overload` bodies should not contain e
 def has_assignment(x: str) -> str:
     ...
 
+def has_assignment(x: int | str) -> int | str:
+    return x
+
 @overload
 def has_multiple_stmts(x: int) -> int:  # E: `@overload` bodies should not contain executable logic
     print("side effect")
@@ -71,15 +80,6 @@ def has_multiple_stmts(x: int) -> int:  # E: `@overload` bodies should not conta
 @overload
 def has_multiple_stmts(x: str) -> str:
     ...
-
-def returns_expr(x: int | str) -> int | str:
-    return x
-
-def raises_other(x: int | str) -> int | str:
-    return x
-
-def has_assignment(x: int | str) -> int | str:
-    return x
 
 def has_multiple_stmts(x: int | str) -> int | str:
     return x
@@ -1037,6 +1037,115 @@ def f[T](x: T) -> T:
 );
 
 testcase!(
+    test_overloaded_async_iterator_impl,
+    r#"
+from collections.abc import AsyncIterator
+from typing import Literal, assert_type, overload
+
+class Patch:
+    pass
+
+class FullState(Patch):
+    pass
+
+@overload
+def astream(*, diff: Literal[True] = ...) -> AsyncIterator[Patch]: ...
+@overload
+def astream(*, diff: Literal[False]) -> AsyncIterator[FullState]: ...
+async def astream(*, diff: bool = True) -> AsyncIterator[Patch] | AsyncIterator[FullState]:
+    if diff:
+        yield Patch()
+    else:
+        yield FullState()
+
+assert_type(astream(), AsyncIterator[Patch])
+assert_type(astream(diff=True), AsyncIterator[Patch])
+assert_type(astream(diff=False), AsyncIterator[FullState])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_coroutine_factory,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, assert_type, overload
+
+async def stream[T](value: T) -> AsyncIterator[T]:
+    yield value
+
+async def make_stream[T](value: T) -> AsyncIterator[T]:
+    return stream(value)
+
+@overload
+async def factory(value: int) -> AsyncIterator[int]: ...
+@overload
+async def factory(value: str) -> AsyncIterator[str]: ...
+def factory(value: int | str) -> Any:
+    return make_stream(value)
+
+async def check() -> None:
+    result = assert_type(factory(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await factory("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_explicit_coroutine,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, assert_type, overload
+
+async def stream[T](value: T) -> AsyncIterator[T]:
+    yield value
+
+async def make_stream[T](value: T) -> AsyncIterator[T]:
+    return stream(value)
+
+@overload
+def factory(value: int) -> Coroutine[Any, Any, AsyncIterator[int]]: ...
+@overload
+def factory(value: str) -> Coroutine[Any, Any, AsyncIterator[str]]: ...
+def factory(value: int | str) -> Any:
+    return make_stream(value)
+
+async def check() -> None:
+    result = assert_type(factory(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await factory("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_inconsistent_impl,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, Protocol, assert_type, overload
+
+class StreamFactory(Protocol):
+    @overload
+    async def stream(self, value: int) -> AsyncIterator[int]: ...
+    @overload
+    async def stream(self, value: str) -> AsyncIterator[str]: ...
+
+@overload
+async def stream(value: int) -> AsyncIterator[int]: ...  # E: is not assignable to implementation return type
+@overload
+async def stream(value: str) -> AsyncIterator[str]: ...  # E: is not assignable to implementation return type
+async def stream(value: int | str) -> AsyncIterator[int | str]:
+    yield value
+
+async def check(factory: StreamFactory) -> None:
+    result = assert_type(stream(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await stream("value"), AsyncIterator[str])
+    result_from_protocol = assert_type(factory.stream(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result_from_protocol, AsyncIterator[int])
+    assert_type(await factory.stream("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
     test_param_consistency,
     r#"
 from typing import overload
@@ -1257,6 +1366,47 @@ def f(x: E) -> str:
 def g(x: E):
     assert_type(f(x), Literal['X', 'Y'])
     "#,
+);
+
+testcase!(
+    test_do_not_expand_flag_arguments,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal, assert_type, overload
+
+class BaseFlag(Flag):
+    pass
+
+class Bits(BaseFlag):
+    A = 1
+    B = 2
+
+class IntBits(IntFlag):
+    A = 1
+    B = 2
+
+@overload
+def choose(value: Literal[Bits.A]) -> Literal["A"]: ...
+@overload
+def choose(value: Literal[Bits.B]) -> Literal["B"]: ...
+def choose(value: Bits) -> str:
+    return value.name or ""
+
+@overload
+def choose_int(value: Literal[IntBits.A]) -> Literal["A"]: ...
+@overload
+def choose_int(value: Literal[IntBits.B]) -> Literal["B"]: ...
+def choose_int(value: IntBits) -> str:
+    return value.name or ""
+
+def check(value: Bits, int_value: IntBits) -> None:
+    choose(value)  # E: No matching overload found for function `choose`
+    choose_int(int_value)  # E: No matching overload found for function `choose_int`
+
+def check_members(value: Literal[Bits.A, Bits.B], int_value: Literal[IntBits.A, IntBits.B]) -> None:
+    assert_type(choose(value), Literal["A", "B"])
+    assert_type(choose_int(int_value), Literal["A", "B"])
+"#,
 );
 
 testcase!(
@@ -1653,6 +1803,27 @@ def f2(x: Any) -> int | str: ...
 def g(x: tuple[Any, ...]):
     assert_type(f1(x), int)
     assert_type(f2(x), Any)
+    "#,
+);
+
+testcase!(
+    test_materialization_respects_type_parameter_bound,
+    r#"
+from typing import Any, Generic, TypeVar, assert_type, overload
+
+T = TypeVar("T", bound=tuple[int, ...])
+
+class A(Generic[T]): ...
+
+@overload
+def f(x: A[T]) -> A[T]: ...
+@overload
+def f(x: object) -> None: ...
+def f(x: object) -> Any: ...
+
+def g(x1: A[Any], x2: A[tuple[Any, ...]]):
+    assert_type(f(x1), A[Any])
+    assert_type(f(x2), A[tuple[Any, ...]])
     "#,
 );
 
@@ -2576,4 +2747,477 @@ def f(any_frame: Frame[Any], owner: type[Frame[Any]]) -> None:
     assert_type(D().__get__(any_frame, owner), int)
     assert_type(any_frame.impl, int)
     "#,
+);
+
+testcase!(
+    test_overloaded_call_in_self_annotation,
+    r#"
+from typing import Callable, Protocol, assert_type, overload
+
+class CallP[T, R](Protocol):
+    def __call__(self, other: T, /) -> R: ...
+
+def apply[A, B](f: Callable[[A], B], y: A) -> B: ...
+
+class C[T]:
+    @overload
+    def __call__(self: C[int], other: int) -> C[int]: ...
+    @overload
+    def __call__(self: C[float], other: float) -> C[float]: ...
+    def __call__(self, other: object) -> object: ...
+    def radd[X, Y](self: CallP[X, Y], other: X) -> Y: ...
+
+def f(c: C[int]):
+    assert_type(apply(c.radd, 1), C[int])
+    "#,
+);
+
+// A captured branch that violates `B`'s bound fails the call. For `d: D[Any]`, the later overload
+// that only applies to `D[str]` must not be chosen in place of the first one.
+testcase!(
+    test_overloaded_argument_bound_violation,
+    r#"
+from typing import Any, Callable, Never, overload
+
+def add[A, B: int](f: Callable[[A], B], y: A) -> B: ...
+
+@overload
+def g(x: int) -> str: ...
+@overload
+def g(x: bytes) -> bytes: ...
+def g(x: object) -> object: ...
+
+class D[T]:
+    @overload
+    def m(self, other: int) -> str: ...
+    @overload
+    def m(self: D[str], other: float) -> Never: ...
+    def m(self, other: object) -> object: ...
+
+def f(d: D[Any]):
+    add(g, 1)  # E: `str` is not assignable to upper bound `int` of type variable `B`
+    add(d.m, 1)  # E: `str` is not assignable to upper bound `int` of type variable `B`
+    "#,
+);
+
+testcase!(
+    test_overloaded_protocol_method_against_unsolved_vars,
+    r#"
+from typing import assert_type, overload
+
+class RHS: ...
+
+class LHS:
+    @overload
+    def __divmod__(self, other: RHS) -> tuple[RHS, RHS]: ...
+    @overload
+    def __divmod__(self, other: object) -> tuple[LHS, LHS]: ...
+    def __divmod__(self, other: object) -> tuple[object, object]: ...
+
+def f(lhs: LHS, rhs: RHS):
+    assert_type(divmod(lhs, 1), tuple[LHS, LHS])
+    assert_type(divmod(lhs, rhs), tuple[RHS, RHS])
+    "#,
+);
+
+// `str.__iter__` is overloaded on `self: LiteralString`. The call's var appears only in the return
+// type of `Iterable.__iter__`, so the first matching overload applies rather than a union of all
+// matching overloads.
+testcase!(
+    test_overloaded_protocol_method_with_vars_only_in_return,
+    r#"
+from typing import Iterable, LiteralString, assert_type
+
+def first[T](x: Iterable[T]) -> T: ...
+
+def f(s: str, ls: LiteralString):
+    assert_type(first(s), str)
+    assert_type(first(ls), LiteralString)
+    "#,
+);
+
+// `D.__radd__` matches `int` with its first overload, so a later overload that only applies to
+// `D[str]` must not be chosen in its place when the first one violates `B`'s bound.
+testcase!(
+    test_overloaded_protocol_method_bound_violation,
+    r#"
+from typing import Any, Never, Protocol, overload
+
+class SupportsRAdd[T, R](Protocol):
+    def __radd__(self, other: T, /) -> R: ...
+
+def add[A, B: int](x: SupportsRAdd[A, B], y: A) -> B: ...
+
+class C:
+    @overload
+    def __radd__(self, other: int) -> str: ...
+    @overload
+    def __radd__(self, other: bytes) -> bytes: ...
+    def __radd__(self, other: object) -> object: ...
+
+class D[T]:
+    @overload
+    def __radd__(self, other: int) -> str: ...
+    @overload
+    def __radd__(self: D[str], other: float) -> Never: ...
+    def __radd__(self, other: object) -> object: ...
+
+def f(c: C, d: D[Any]):
+    add(c, 1)  # E: `str` is not assignable to upper bound `int` of type variable `B`
+    add(d, 1)  # E: `str` is not assignable to upper bound `int` of type variable `B`
+    "#,
+);
+
+// Binding `self` for `C.__radd__` solves the method's own type parameters on the spot, so the
+// choice of `_proto_radd` overload cannot be deferred to the enclosing call.
+testcase!(
+    test_overloaded_protocol_method_in_self_annotation,
+    r#"
+from typing import Protocol, assert_type, overload
+
+class SupportsRAdd[T, R](Protocol):
+    def __radd__(self, other: T, /) -> R: ...
+
+class ProtoRAdd[T, R](Protocol):
+    def _proto_radd(self, other: T, /) -> R: ...
+
+def radd[A, B](x: SupportsRAdd[A, B], y: A) -> B: ...
+
+class C[T]:
+    @overload
+    def _proto_radd(self: C[int], other: int) -> C[int]: ...
+    @overload
+    def _proto_radd(self: C[float], other: float) -> C[float]: ...
+    def _proto_radd(self, other: object) -> object: ...
+    def __radd__[X, Y](self: ProtoRAdd[X, Y], other: X) -> Y: ...
+
+def f(c: C[int]):
+    assert_type(radd(c, 1), C[int])
+    "#,
+);
+
+testcase!(
+    test_overloaded_protocol_method_against_constructor_hint,
+    r#"
+from typing import Protocol, assert_type, overload
+
+class SupportsDivMod[T, R](Protocol):
+    def __divmod__(self, other: T, /) -> R: ...
+
+def my_divmod[T, R](x: SupportsDivMod[T, R], y: T, /) -> R: ...
+
+class RHS: ...
+
+class LHS:
+    @overload
+    def __divmod__(self, other: RHS) -> tuple[RHS, RHS]: ...
+    @overload
+    def __divmod__(self, other: object) -> tuple[LHS, LHS]: ...
+    def __divmod__(self, other: object) -> tuple[object, object]: ...
+
+assert_type(my_divmod(LHS(), 1), tuple[LHS, LHS])
+assert_type(my_divmod(LHS(), RHS()), tuple[RHS, RHS])
+    "#,
+);
+
+// `R` appears only in the return type of `SupportsF.f`, but `Box` is invariant, so matching each
+// overload pins `R` from both sides. Once `y` solves `T`, the first matching overload applies.
+testcase!(
+    test_overloaded_protocol_method_with_invariant_return_var,
+    r#"
+from typing import Protocol, assert_type, overload
+
+class Box[T]:
+    x: T
+
+class SupportsF[T, R](Protocol):
+    def f(self, other: T, /) -> Box[R]: ...
+
+def call[T, R](x: SupportsF[T, R], y: T) -> R: ...
+
+def call_box[T, R](x: SupportsF[T, R], y: T) -> Box[R]: ...
+
+class A:
+    @overload
+    def f(self, other: int) -> Box[int]: ...
+    @overload
+    def f(self, other: float) -> Box[float]: ...
+    @overload
+    def f(self, other: complex) -> Box[complex]: ...
+    def f(self, other: complex) -> Box[int] | Box[float] | Box[complex]: ...
+
+def g(a: A, i: int, fl: float):
+    assert_type(call(a, i), int)
+    assert_type(call(a, fl), float)
+    assert_type(call_box(a, i), Box[int])
+    assert_type(call_box(a, fl), Box[float])
+    "#,
+);
+
+// When several overloads match and an argument type contains `Any`, choosing between them
+// materializes the arguments. A lambda argument must not be re-inferred without its parameter
+// type as a hint there, or its parameter is reported as unknown although the hint types it.
+testcase!(
+    test_overload_materialization_does_not_report_unhinted_lambda,
+    TestEnv::new()
+        .enable_implicit_any_lambda_error()
+        .enable_unknown_attribute_access_error(),
+    r#"
+from typing import Any, Callable, Generic, TypeVar, overload
+
+T = TypeVar("T")
+
+class Box(Generic[T]):
+    @overload
+    def then(self, f: Callable[[T], int]) -> int: ...
+    @overload
+    def then(self, f: Callable[[T], str]) -> str: ...
+    def then(self, f: Callable[[T], Any]) -> Any: ...
+
+def f(box: Box[Any]) -> None:
+    box.then(lambda r: r.name)
+    g = lambda r: r.name  # E: Type of lambda parameter `r` is unknown  # E: The type of attribute `name` is unknown
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/5396
+testcase!(
+    test_overload_lambda_parameter_after_boolop,
+    TestEnv::new().enable_unknown_attribute_access_error(),
+    r#"
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import assert_type
+
+@dataclass
+class D:
+    a: str | None
+    b: str
+
+def apply(f: Callable[[D], object]) -> None: ...
+
+def check(ds: list[D]) -> None:
+    sorted(ds, key=lambda d: (d.a or "", assert_type(d.b, str)))
+    ds.sort(key=lambda d: (d.a or "", assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (d.a, assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (assert_type(d.b, str), d.a or ""))
+    apply(lambda d: (d.a or "", assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (d.a and assert_type(d.a, str), assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (assert_type(d.a, str) if d.a else "", assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (d.a or "", d.a or "", assert_type(d.b, str)))
+    sorted(ds, key=lambda d: (
+        d.a or "",
+        sorted(ds, key=lambda inner: (
+            inner.a or "", assert_type(inner.b, str), assert_type(d.b, str),
+        )),
+    ))
+"#,
+);
+
+testcase!(
+    test_overload_lambda_narrowing_with_different_parameter_hints,
+    r#"
+from typing import Any, Callable, assert_type, overload
+
+@overload
+def choose(f: Callable[[int | None], int]) -> int: ...
+@overload
+def choose(f: Callable[[str | None], str]) -> str: ...
+def choose(f: Any) -> Any: ...
+
+assert_type(choose(lambda x: (x or "", x.upper() if x else "")[1]), str)
+assert_type(choose(lambda x: (x or 0, x + 1 if x else 0)[1]), int)
+"#,
+);
+
+// Sequential boolean expressions form a DAG of narrowed reads of the same parameter.
+testcase!(
+    test_overload_lambda_narrowing_chain,
+    r#"
+from typing import Callable, assert_type
+
+class D:
+    a: str | None
+    b: str
+
+def apply(f: Callable[[D], object]) -> None: ...
+
+def check(ds: list[D]) -> None:
+    apply(lambda d: (
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        d.a or "", d.a or "", d.a or "", d.a or "",
+        assert_type(d.b, str),
+    ))
+"#,
+);
+
+testcase!(
+    test_overload_lambda_nested_parameter_hints,
+    r#"
+from typing import Any, Callable, assert_type, overload
+
+@overload
+def choose(f: Callable[[int | None], int]) -> int: ...
+@overload
+def choose(f: Callable[[str | None], str]) -> str: ...
+def choose(f: Any) -> Any: ...
+
+def apply(f: Callable[[str | None], object]) -> None: ...
+
+assert_type(choose(lambda x: (
+    x or "",
+    apply(lambda y: (y or "", x or "", y.upper() if y else "")),
+    x.upper() if x else "",
+)[2]), str)
+assert_type(choose(lambda x: (
+    x or 0,
+    apply(lambda y: (y or "", x or 0, y.upper() if y else "")),
+    x + 1 if x else 0,
+)[2]), int)
+
+@overload
+def pair(f: Callable[[int | None, str | None], int]) -> int: ...
+@overload
+def pair(f: Callable[[str | None, int | None], str]) -> str: ...
+def pair(f: Any) -> Any: ...
+
+assert_type(pair(lambda x, y: (
+    x or "", y or 0, y + 1 if y else 0, x.upper() if x else "",
+)[3]), str)
+"#,
+);
+
+testcase!(
+    test_overload_lambda_replayed_predicate,
+    r#"
+from typing import Callable, assert_type
+
+def apply(f: Callable[[str | None], object]) -> None: ...
+
+apply(lambda x: (
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    x if x == (lambda y="": y)() else x,
+    assert_type(x, str | None),
+))
+"#,
+);
+
+testcase!(
+    test_overload_lambda_replayed_unsolved_default,
+    r#"
+from typing import Callable, assert_type
+
+def apply(f: Callable[[list[str] | None], object]) -> None: ...
+
+apply(lambda x: (
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    x if x == (lambda y=[]: y)() else x,
+    assert_type(x, list[str] | None),
+))
+"#,
+);
+
+testcase!(
+    test_overload_lambda_replayed_capture,
+    r#"
+from typing import Callable, assert_type
+
+def apply(f: Callable[[str | None], object]) -> None: ...
+
+apply(lambda x: (
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    x if x == (lambda: x)() else x,
+    assert_type(x, str | None),
+))
+"#,
+);
+
+testcase!(
+    test_overload_intervening_statement_before_implementation,
+    r#"
+from typing import overload
+
+@overload
+def fn(value: int) -> str: ...
+@overload
+def fn(value: str) -> int: ...
+
+def asdf(): ...
+
+def fn(value: str | int) -> int | str:  # E: @overload signatures must be immediately followed by another @overload or the implementation
+    return 0
+"#,
+);
+
+testcase!(
+    test_overload_intervening_statement_between_signatures,
+    r#"
+from typing import overload
+
+@overload
+def fn(value: int) -> str: ...
+
+x = 1
+
+@overload
+def fn(value: str) -> int: ...  # E: @overload signatures must be immediately followed by another @overload or the implementation
+
+def fn(value: str | int) -> int | str:
+    return 0
+"#,
+);
+
+testcase!(
+    test_overload_in_class_intervening_statement,
+    r#"
+from typing import overload
+
+class A:
+    @overload
+    def m(self, x: int) -> int: ...
+
+    field: int = 1
+
+    @overload
+    def m(self, x: str) -> str: ...  # E: @overload signatures must be immediately followed by another @overload or the implementation
+
+    def m(self, x: int | str) -> int | str:
+        return x
+"#,
 );

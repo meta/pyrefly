@@ -23,11 +23,178 @@ def int_min(a: Int, b: Int) -> Int:
     return dsl.Int.gradual()
 
 @type_shape_dsl_function
-def diag_extent(n: Int, k: int) -> Int:
-    # Non-literal Flag arguments become gradual before the DSL body is evaluated.
-    if k < 0:
-        return n - k
-    return n + k
+def diag_extent(n: Int, k: Int) -> Int:
+    return n + abs(k)
+
+@type_shape_dsl_function
+def repeat_shape(shape: IntTuple, repeats: Int, axis: int | None) -> IntTuple:
+    if dsl.is_concrete_int(repeats) and repeats < 0:
+        return dsl.Invalid("repeats may not contain negative values")
+    if axis is None:
+        return dsl.IntTuple((dsl.prod(shape) * repeats,))
+    if dsl.is_int_value(axis):
+        if len(shape) == 0:
+            if axis == 0 or axis == -1:
+                return dsl.IntTuple((repeats,))
+            return dsl.Invalid("axis is out of bounds")
+        rank = len(shape)
+        if axis < 0 - rank or axis >= rank:
+            return dsl.Invalid("axis is out of bounds")
+        if axis < 0:
+            normalized_axis = axis + rank
+        else:
+            normalized_axis = axis + 0
+        return dsl.IntTuple(
+            (
+                shape[index] * repeats if index == normalized_axis else shape[index]
+                for index in range(rank)
+            )
+        )
+    return dsl.Invalid("axis must be an integer or None")
+
+@type_shape_dsl_function
+def repeat_sequence_shape(
+    shape: IntTuple, repeats: IntTuple, axis: int | None
+) -> IntTuple:
+    if axis is None:
+        source = dsl.IntTuple((dsl.prod(shape),))
+        normalized_axis = 0
+    elif dsl.is_int_value(axis):
+        if len(shape) == 0:
+            if axis != 0 and axis != -1:
+                return dsl.Invalid("axis is out of bounds")
+            source = dsl.IntTuple((1,))
+        else:
+            source = shape
+        rank = len(source)
+        if axis < 0 - rank or axis >= rank:
+            return dsl.Invalid("axis is out of bounds")
+        if axis < 0:
+            normalized_axis = axis + rank
+        else:
+            normalized_axis = axis + 0
+    else:
+        return dsl.Invalid("axis must be an integer or None")
+    extent = source[normalized_axis]
+    if any(dsl.is_concrete_int(value) and value < 0 for value in repeats):
+        return dsl.Invalid("repeats may not contain negative values")
+    if len(repeats) == 1:
+        repeated = extent * repeats[0]
+    else:
+        if dsl.is_concrete_int(extent) and len(repeats) != extent:
+            return dsl.Invalid("repeats must match the selected axis")
+        repeated = dsl.sum(repeats)
+    return dsl.IntTuple(
+        (
+            repeated if index == normalized_axis else source[index]
+            for index in range(len(source))
+        )
+    )
+
+@type_shape_dsl_function
+def take_shape(shape: IntTuple, indices: IntTuple, axis: int | None) -> IntTuple:
+    if axis is None:
+        return indices
+    if dsl.is_int_value(axis):
+        rank = len(shape)
+        if axis < 0 - rank or axis >= rank:
+            return dsl.Invalid("axis out of bounds")
+        if axis < 0:
+            normalized_axis = axis + rank
+        else:
+            normalized_axis = axis + 0
+        return dsl.concat(
+            dsl.concat(shape[:normalized_axis], indices),
+            shape[normalized_axis + 1 :],
+        )
+    return dsl.Invalid("axis must be an integer or None")
+
+@type_shape_dsl_function
+def compress_shape(shape: IntTuple, axis: int | None) -> IntTuple:
+    indices = dsl.IntTuple((dsl.Int.gradual(),))
+    if axis is None:
+        return indices
+    if dsl.is_int_value(axis):
+        if len(shape) == 0 and (axis == 0 or axis == -1):
+            return indices
+    return take_shape(shape, indices, axis)
+
+@type_shape_dsl_function
+def diagonal_shape(
+    shape: IntTuple, axis1: int, axis2: int, keep_diagonal: bool, offset: int
+) -> IntTuple:
+    if len(shape) < 2:
+        return dsl.Invalid("diagonal requires at least two dimensions")
+    if (
+        axis1 < 0 - len(shape)
+        or axis1 >= len(shape)
+        or axis2 < 0 - len(shape)
+        or axis2 >= len(shape)
+    ):
+        return dsl.Invalid("diagonal axis out of bounds")
+    if axis1 < 0:
+        first = axis1 + len(shape)
+    else:
+        first = axis1 + 0
+    if axis2 < 0:
+        second = axis2 + len(shape)
+    else:
+        second = axis2 + 0
+    if first == second:
+        return dsl.Invalid("diagonal axes must be distinct")
+    outer = dsl.IntTuple(
+        (
+            shape[index]
+            for index in range(len(shape))
+            if index != first and index != second
+        )
+    )
+    if not keep_diagonal:
+        return outer
+
+    first_extent = shape[first]
+    second_extent = shape[second]
+    zero_tuple = dsl.IntTuple((0,))
+    zero = zero_tuple[0]
+    offset_tuple = dsl.IntTuple((offset + 0,))
+    offset_extent = offset_tuple[0]
+    if offset == 0:
+        if first_extent == second_extent:
+            return dsl.concat(outer, dsl.IntTuple((first_extent,)))
+        if dsl.is_concrete_int(first_extent) and dsl.is_concrete_int(second_extent):
+            if first_extent < second_extent:
+                return dsl.concat(outer, dsl.IntTuple((first_extent,)))
+            return dsl.concat(outer, dsl.IntTuple((second_extent,)))
+        return dsl.concat(outer, dsl.IntTuple((dsl.Int.gradual(),)))
+    if offset > 0:
+        limit = second_extent - offset_extent
+        if first_extent == limit:
+            return dsl.concat(outer, dsl.IntTuple((first_extent,)))
+        if dsl.is_concrete_int(first_extent) and dsl.is_concrete_int(limit):
+            if limit < zero:
+                return dsl.concat(outer, dsl.IntTuple((zero,)))
+            if first_extent < limit:
+                return dsl.concat(outer, dsl.IntTuple((first_extent,)))
+            return dsl.concat(outer, dsl.IntTuple((limit,)))
+        return dsl.concat(outer, dsl.IntTuple((dsl.Int.gradual(),)))
+    limit = first_extent + offset_extent
+    if limit == second_extent:
+        return dsl.concat(outer, dsl.IntTuple((second_extent,)))
+    if dsl.is_concrete_int(limit) and dsl.is_concrete_int(second_extent):
+        if limit < zero:
+            return dsl.concat(outer, dsl.IntTuple((zero,)))
+        if limit < second_extent:
+            return dsl.concat(outer, dsl.IntTuple((limit,)))
+        return dsl.concat(outer, dsl.IntTuple((second_extent,)))
+    return dsl.concat(outer, dsl.IntTuple((dsl.Int.gradual(),)))
+
+@type_shape_dsl_function
+def diag_matrix_shape(m: Int, n: Int, k: int) -> IntTuple:
+    shape = dsl.IntTuple((m, n))
+    axis1 = 0
+    axis2 = 1
+    keep_diagonal = True
+    return diagonal_shape(shape, axis1, axis2, keep_diagonal, k)
 
 @type_shape_dsl_function
 def matmul_shape(left: IntTuple, right: IntTuple) -> IntTuple:
@@ -42,6 +209,20 @@ def matmul_shape(left: IntTuple, right: IntTuple) -> IntTuple:
         return gufunc_broadcast(spec, operands)
     spec = "(m,n),(n,p)->(m,p)"
     return gufunc_broadcast(spec, operands)
+
+@type_shape_dsl_function
+def dot_shape(left: IntTuple, right: IntTuple) -> IntTuple:
+    if len(left) == 0:
+        return right
+    if len(right) == 0:
+        return left
+    if len(right) == 1:
+        if left[-1] != right[0]:
+            return dsl.Invalid("dot contraction dimensions must agree")
+        return left[:-1]
+    if left[-1] != right[-2]:
+        return dsl.Invalid("dot contraction dimensions must agree")
+    return dsl.concat(dsl.concat(left[:-1], right[:-2]), right[-1:])
 
 @type_shape_dsl_function
 def matvec_shape(left: IntTuple, right: IntTuple) -> IntTuple:
@@ -67,25 +248,7 @@ def reduce_shape(
     axis: int | tuple[int, ...] | None,
     keepdims: bool,
 ) -> IntTuple:
-    if axis is None:
-        axes = range(len(shape))
-    elif dsl.is_int_value(axis):
-        axes = (axis,)
-    else:
-        axes = axis
-    # The DSL does not support unary negation of a Flag integer.
-    if any(item < 0 - len(shape) or item >= len(shape) for item in axes):
-        return dsl.Invalid("axis out of bounds")
-    normalized = tuple(item + len(shape) if item < 0 else item for item in axes)
-    if any(normalized.count(item) > 1 for item in normalized):
-        return dsl.Invalid("duplicate axis")
-    if keepdims:
-        return dsl.IntTuple(
-            (1 if index in normalized else shape[index] for index in range(len(shape)))
-        )
-    return dsl.IntTuple(
-        (shape[index] for index in range(len(shape)) if index not in normalized)
-    )
+    return dsl.axis_reduce(shape, axis, keepdims, False, True, False)
 
 @type_shape_dsl_function
 def stack_shape(shapes: IntTuples, axis: int) -> IntTuple:

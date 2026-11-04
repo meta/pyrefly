@@ -135,6 +135,27 @@ def test_symbolic_parameter_and_buffer_shapes() -> None:
     assert_shape(module(torch.randn((16, 5))).shape, (16, 10))
 
 
+def test_module_parameter_iterators() -> None:
+    module = ModuleWithState()
+    parameters = list(module.parameters())
+    assert_type(parameters, list[nn.Parameter])
+    assert len(parameters) == 1
+    assert isinstance(parameters[0], nn.Parameter)
+    assert parameters[0] is module.weight
+    assert_shape(parameters[0].shape, (3, 3))
+
+    named_parameters = list(module.named_parameters())
+    assert_type(named_parameters, list[tuple[str, nn.Parameter]])
+    assert len(named_parameters) == 1
+    name, parameter = named_parameters[0]
+    assert_type(name, str)
+    assert_type(parameter, nn.Parameter)
+    assert name == "weight"
+    assert isinstance(parameter, nn.Parameter)
+    assert parameter is module.weight
+    assert_shape(parameter.shape, (3, 3))
+
+
 if TYPE_CHECKING:
 
     def check_parameter_with_runtime_extent(extent: int, bare: Tensor) -> None:

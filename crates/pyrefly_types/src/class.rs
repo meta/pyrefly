@@ -32,6 +32,8 @@ use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
 
 use crate::equality::TypeEq;
+use crate::equality::TypeEqCtx;
+use crate::function::Deprecation;
 use crate::types::Substitution;
 use crate::types::TArgs;
 use crate::types::TParams;
@@ -54,7 +56,12 @@ impl PartialEq for Class {
 }
 
 impl Eq for Class {}
-impl TypeEq for Class {}
+// Deprecation changes invalidate cached references without changing nominal class identity.
+impl TypeEq for Class {
+    fn type_eq(&self, other: &Self, _ctx: &mut TypeEqCtx) -> bool {
+        self == other && self.deprecation() == other.deprecation()
+    }
+}
 
 impl Ord for Class {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -103,6 +110,8 @@ pub struct ClassFieldProperties {
     // The field is defined in the class body (not in a method via self.x = ...)
     is_defined_in_class_body: bool,
     attrs_field_specifier: Option<AttrsFieldSpecifier>,
+    /// An explicit Django method-copy policy set in the class body.
+    django_queryset_only: Option<bool>,
     range: TextRange,
     // The range of the docstring following this field, if present
     docstring_range: Option<TextRange>,
@@ -127,6 +136,7 @@ impl ClassFieldProperties {
             is_initialized_on_class: has_default_value,
             is_defined_in_class_body,
             attrs_field_specifier,
+            django_queryset_only: None,
             range,
             docstring_range,
         }
@@ -136,6 +146,11 @@ impl ClassFieldProperties {
         self.is_initialized_on_class
     }
 
+    /// Attach the method-copy policy found during binding.
+    pub fn with_django_queryset_only(mut self, value: Option<bool>) -> Self {
+        self.django_queryset_only = value;
+        self
+    }
     pub fn is_defined_in_class_body(&self) -> bool {
         self.is_defined_in_class_body
     }
@@ -196,6 +211,11 @@ impl ClassFields {
 
     pub fn is_field_annotated(&self, name: &Name) -> bool {
         self.0.get(name).is_some_and(|prop| prop.is_annotated)
+    }
+
+    /// Return the explicit Django method-copy policy, if present.
+    pub fn django_queryset_only(&self, name: &Name) -> Option<bool> {
+        self.0.get(name).and_then(|prop| prop.django_queryset_only)
     }
 
     pub fn is_attrs_field_specifier(&self, name: &Name) -> bool {
@@ -279,6 +299,7 @@ struct ClassInner {
     def_index: ClassDefIndex,
     qname: QName,
     is_protocol: bool,
+    deprecation: Option<Deprecation>,
     precomputed_tparams: PrecomputedTParams,
 }
 
@@ -288,6 +309,7 @@ impl Debug for ClassInner {
             .field("index", &self.def_index)
             .field("qname", &self.qname)
             .field("is_protocol", &self.is_protocol)
+            .field("deprecation", &self.deprecation)
             .field("tparams", &self.precomputed_tparams)
             // We don't print `fields` because it's way too long.
             .finish_non_exhaustive()
@@ -353,11 +375,13 @@ impl Class {
         module: Module,
         precomputed_tparams: PrecomputedTParams,
         is_protocol: bool,
+        deprecation: Option<Deprecation>,
     ) -> Self {
         Self(Arc::new(ClassInner {
             def_index,
             qname: QName::new(name, parent, module),
             is_protocol,
+            deprecation,
             precomputed_tparams,
         }))
     }
@@ -380,6 +404,10 @@ impl Class {
 
     pub fn is_protocol(&self) -> bool {
         self.0.is_protocol
+    }
+
+    pub fn deprecation(&self) -> Option<&Deprecation> {
+        self.0.deprecation.as_ref()
     }
 
     pub fn precomputed_tparams(&self) -> &PrecomputedTParams {
@@ -435,7 +463,38 @@ impl Class {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[derive(Visit, VisitMut, TypeEq)]
-pub struct ClassType(Class, TArgs);
+pub struct ClassType(Class, TArgs, Option<Arc<DjangoClassMetadata>>);
+
+/// Construction-time Django specializations on nominal class instances.
+///
+/// The manager resolves generated members against its queryset. A specialized class uses
+/// its effective base for inherited members and nominal upcasts. Type traversal and substitution
+/// include this data, and instance binding preserves it when replacing `Self`. Explicit method
+/// return types stand alone: neither their model nor their row is rebound to the manager's model.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(TypeEq)]
+pub enum DjangoClassMetadata {
+    Manager { queryset: ClassType },
+    SpecializedBase { base: ClassType },
+}
+
+impl Visit<Type> for Arc<DjangoClassMetadata> {
+    fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
+        match self.as_ref() {
+            DjangoClassMetadata::Manager { queryset } => queryset.visit(f),
+            DjangoClassMetadata::SpecializedBase { base } => base.visit(f),
+        }
+    }
+}
+
+impl VisitMut<Type> for Arc<DjangoClassMetadata> {
+    fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
+        match Arc::make_mut(self) {
+            DjangoClassMetadata::Manager { queryset } => queryset.visit_mut(f),
+            DjangoClassMetadata::SpecializedBase { base } => base.visit_mut(f),
+        }
+    }
+}
 
 impl Display for ClassType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -447,7 +506,7 @@ impl ClassType {
     /// Create a class type.
     /// The `targs` must match the `tparams`, if this fails we will panic.
     pub fn new(class: Class, targs: TArgs) -> Self {
-        Self(class, targs)
+        Self(class, targs, None)
     }
 
     pub fn class_object(&self) -> &Class {
@@ -475,7 +534,23 @@ impl ClassType {
     /// This is used to propagate instantiation of base class type parameters when computing
     /// the MRO.
     pub fn substitute_with(&self, substitution: &Substitution) -> Self {
-        Self(self.0.dupe(), self.1.substitute_with(substitution))
+        let mut result = self.clone();
+        result.1 = self.1.substitute_with(substitution);
+        if let Some(metadata) = &mut result.2 {
+            metadata.recurse_mut(&mut |ty| substitution.substitute_into_mut(ty));
+        }
+        result
+    }
+
+    /// Attach a Django specialization to this nominal class instance.
+    pub fn with_django_metadata(mut self, metadata: DjangoClassMetadata) -> Self {
+        self.2 = Some(Arc::new(metadata));
+        self
+    }
+
+    /// Return the construction-time Django specialization, if present.
+    pub fn django_metadata(&self) -> Option<&DjangoClassMetadata> {
+        self.2.as_deref()
     }
 
     pub fn substitution(&self) -> Substitution<'_> {

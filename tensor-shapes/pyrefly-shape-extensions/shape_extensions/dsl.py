@@ -73,6 +73,19 @@ def concat(
     return _IntTupleSchema((*left, *right))
 
 
+def axis_reduce(
+    shape: _IntTupleSchema,
+    axis: int | tuple[int, ...] | None,
+    keepdims: bool,
+    empty_means_all: bool,
+    scalar_axis_ok: bool,
+    scalar_tuple_axis_ok: bool,
+    /,
+) -> _IntTupleSchema:
+    """Reduce axes, preserving dimensions outside a symbolic-rank middle."""
+    return _IntTupleSchema()
+
+
 def prod(xs: _IntTupleSchema, /) -> _IntSchema: ...
 
 

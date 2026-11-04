@@ -16,6 +16,9 @@ from math import e as e, nan as nan
 from types import EllipsisType
 from typing import Any, Callable, Literal, overload, Self, TYPE_CHECKING, Unpack
 
+# Torch does not require NumPy, so this import is intentionally not a package
+# dependency.
+import numpy as np
 from shape_extensions import (
     broadcast,
     Flag,
@@ -621,6 +624,7 @@ from torch._shapes import (
     repeat_shape,
     replace_axis_extent,
     reshape_shape,
+    reverse_shape,
     scatter_shape,
     select_shape,
     size_dim_shape,
@@ -642,7 +646,10 @@ from torch._shapes import (
 )
 from torch._tensor_str import set_printoptions as set_printoptions
 from torch.amp import autocast as autocast, GradScaler as GradScaler
-from torch.autograd import enable_grad as enable_grad
+from torch.autograd import (
+    enable_grad as enable_grad,
+    set_grad_enabled as set_grad_enabled,
+)
 from torch.func import vmap as vmap
 from torch.functional import (
     align_tensors as align_tensors,
@@ -665,6 +672,7 @@ from torch.random import (
     thread_safe_generator as thread_safe_generator,
 )
 from torch.storage import TypedStorage as TypedStorage, UntypedStorage as UntypedStorage
+from typing_extensions import TypeIs
 
 if TYPE_CHECKING:
     from shape_extensions import Int as _Int
@@ -682,18 +690,22 @@ type _BasicIndex = builtins.int | slice | list[builtins.int] | None | EllipsisTy
 type _TensorScalar = builtins.bool | builtins.int | builtins.float | builtins.complex
 type _LegacyTensorScalar = builtins.bool | builtins.int | builtins.float
 
-# Dtype constants
+# Dtype and memory-format constants
 qint8: Any
 quint8: Any
 float16: Any
+half: Any
 float32: Any
 float64: Any
 int8: Any
 int16: Any
 int32: Any
 int64: Any
+uint8: Any
 int: Any
 bool: Any
+channels_last: memory_format
+strided: layout
 ops: Any
 
 # ============================================================================
@@ -754,7 +766,8 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     device: Any  # Device where tensor is stored (cpu, cuda, etc.)
     dtype: Any  # Data type of tensor elements (float32, int64, etc.)
     ndim: builtins.int  # Number of dimensions
-    T: Self  # Transpose property (for 2D tensors). Use .t() method for shape inference.
+    @property
+    def T(self: Tensor[Shape]) -> Tensor[reverse_shape(Shape)]: ...
     real: Self  # Real part of complex tensor (shape-preserving)
     imag: Self  # Imaginary part of complex tensor (shape-preserving)
 
@@ -764,7 +777,12 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def __iter__(self) -> Iterator[Tensor]: ...
     def __array__(self, dtype: Any = None) -> Any: ...
     def zero_(self) -> Self: ...
-    def add_(self, other: Tensor | builtins.int | builtins.float) -> Self: ...
+    def add_(
+        self,
+        other: Tensor | builtins.int | builtins.float,
+        *,
+        alpha: builtins.int | builtins.float = 1,
+    ) -> Self: ...
     def pin_memory(self, device: Any = None) -> Self: ...
     def byte(self, memory_format: Any = None) -> Self: ...
     def reshape_as[OtherShape: _Shape](
@@ -815,7 +833,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
             | Tensor,
             ...,
         ],
-        value: Tensor | builtins.int | builtins.float,
+        value: Tensor | _Scalar,
     ) -> None:
         """Set values in tensor via indexing. Mutates tensor in-place."""
         ...
@@ -872,11 +890,11 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     ) -> Tensor[inplace_broadcast_shape(Shape, OtherShape)]: ...
 
     # Reverse operations for scalars
-    def __radd__(self, other: builtins.float | builtins.int) -> Self: ...
-    def __rsub__(self, other: builtins.float | builtins.int) -> Self: ...
-    def __rmul__(self, other: builtins.float | builtins.int) -> Self: ...
-    def __rtruediv__(self, other: builtins.float | builtins.int) -> Self: ...
-    def __rpow__(self, other: builtins.float | builtins.int) -> Self: ...
+    def __radd__(self, other: _Scalar) -> Self: ...
+    def __rsub__(self, other: _Scalar) -> Self: ...
+    def __rmul__(self, other: _Scalar) -> Self: ...
+    def __rtruediv__(self, other: _Scalar) -> Self: ...
+    def __rpow__(self, other: _Scalar) -> Self: ...
 
     # Power operations
     def __pow__[OtherShape: _Shape = []](
@@ -892,18 +910,12 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
 
     # ==== Comparison Operations ====
 
-    @overload
-    def __eq__[OtherShape: _Shape](
-        self, other: Tensor[OtherShape]
+    def __eq__[OtherShape: _Shape = []](
+        self, other: _TensorLike[OtherShape]
     ) -> Tensor[broadcast(Shape, OtherShape)]: ...  # type: ignore[override]
-    @overload
-    def __eq__(self, other: builtins.float | builtins.int) -> Self: ...  # type: ignore[override]
-    @overload
-    def __ne__[OtherShape: _Shape](
-        self, other: Tensor[OtherShape]
+    def __ne__[OtherShape: _Shape = []](
+        self, other: _TensorLike[OtherShape]
     ) -> Tensor[broadcast(Shape, OtherShape)]: ...  # type: ignore[override]
-    @overload
-    def __ne__(self, other: builtins.float | builtins.int) -> Self: ...  # type: ignore[override]
     # Ordering results are gradual because they are tensors elementwise, but
     # scalar tensors are also valid in truth-valued comparison protocols.
     def __lt__(self, other: Tensor | builtins.float | builtins.int) -> Any: ...
@@ -916,24 +928,15 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     # comparison operators do. Combining masks with `&` and `|` is the common
     # case, and those masks come from the comparisons above.
 
-    @overload
-    def __and__[OtherShape: _Shape](
-        self, other: Tensor[OtherShape]
+    def __and__[OtherShape: _Shape = []](
+        self, other: _IntegerTensorLike[OtherShape]
     ) -> Tensor[broadcast(Shape, OtherShape)]: ...
-    @overload
-    def __and__(self, other: bool | int) -> Self: ...
-    @overload
-    def __or__[OtherShape: _Shape](
-        self, other: Tensor[OtherShape]
+    def __or__[OtherShape: _Shape = []](
+        self, other: _IntegerTensorLike[OtherShape]
     ) -> Tensor[broadcast(Shape, OtherShape)]: ...
-    @overload
-    def __or__(self, other: bool | int) -> Self: ...
-    @overload
-    def __xor__[OtherShape: _Shape](
-        self, other: Tensor[OtherShape]
+    def __xor__[OtherShape: _Shape = []](
+        self, other: _IntegerTensorLike[OtherShape]
     ) -> Tensor[broadcast(Shape, OtherShape)]: ...
-    @overload
-    def __xor__(self, other: bool | int) -> Self: ...
     def __rand__(self, other: bool | int) -> Self: ...
     def __ror__(self, other: bool | int) -> Self: ...
     def __rxor__(self, other: bool | int) -> Self: ...
@@ -1187,9 +1190,20 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Create tensor from data with same dtype/device context."""
         ...
 
+    @overload
     def new_empty(
         self,
-        *size: builtins.int,
+        size: tuple[builtins.int, ...],
+        *,
+        dtype: Any = None,
+        device: Any = None,
+        requires_grad: builtins.bool = False,
+    ) -> Tensor: ...
+    @overload
+    def new_empty(
+        self,
+        size: builtins.int,
+        *sizes: builtins.int,
         dtype: Any = None,
         device: Any = None,
         requires_grad: builtins.bool = False,
@@ -1200,7 +1214,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def new_full(
         self,
         size: tuple[builtins.int, ...],
-        fill_value: builtins.float | builtins.int,
+        fill_value: _Scalar,
         dtype: Any = None,
         device: Any = None,
         requires_grad: builtins.bool = False,
@@ -1293,8 +1307,14 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Returns tensor as a nested Python list."""
         ...
 
-    def numpy(self: Tensor) -> Any:
-        """Returns tensor as a NumPy array."""
+    def numpy[Shape: IntTuple](self: Tensor[Shape]) -> np.ndarray[Shape]:
+        """Return a NumPy array with the same shape.
+
+        NumPy is an optional dependency of this stub package. Installing
+        `pyrefly-numpy-stubs` adds shape inference for values created through
+        NumPy APIs; otherwise only shape information already present in NumPy's
+        own annotations is preserved.
+        """
         ...
 
     # TODO: Restrict this to statically single-element tensors once the type
@@ -1675,22 +1695,26 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Compute distance to another tensor. Returns scalar tensor."""
         ...
 
-    def cumsum[Shape: IntTuple](self: Tensor[Shape], dim: int) -> Tensor[Shape]:
+    def cumsum[Shape: IntTuple](
+        self: Tensor[Shape], dim: builtins.int
+    ) -> Tensor[Shape]:
         """Cumulative sum along dimension. Shape-preserving operation."""
         ...
 
-    def cumprod[Shape: IntTuple](self: Tensor[Shape], dim: int) -> Tensor[Shape]:
+    def cumprod[Shape: IntTuple](
+        self: Tensor[Shape], dim: builtins.int
+    ) -> Tensor[Shape]:
         """Cumulative product along dimension. Shape-preserving operation."""
         ...
 
     def cummax[Shape: IntTuple](
-        self: Tensor[Shape], dim: int
+        self: Tensor[Shape], dim: builtins.int
     ) -> return_types.cummax[Shape]:
         """Cumulative maximum along dimension. Returns (values, indices). Shape-preserving operation."""
         ...
 
     def cummin[Shape: IntTuple](
-        self: Tensor[Shape], dim: int
+        self: Tensor[Shape], dim: builtins.int
     ) -> return_types.cummin[Shape]:
         """Cumulative minimum along dimension. Returns (values, indices). Shape-preserving operation."""
         ...
@@ -1707,17 +1731,17 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         self: Tensor[Shape],
         k: K,
         dim: Dim = -1,
-        largest: bool = True,
-        sorted: bool = True,
+        largest: builtins.bool = True,
+        sorted: builtins.bool = True,
     ) -> return_types.topk[topk_shape(Shape, Dim, K)]:
         """Top k elements. Returns (values, indices). Shape inference via meta-shape: torch.Tensor.topk"""
         ...
 
     def sort[Shape: IntTuple](
         self: Tensor[Shape],
-        dim: int = -1,
-        descending: bool = False,
-        stable: bool = False,
+        dim: builtins.int = -1,
+        descending: builtins.bool = False,
+        stable: builtins.bool = False,
     ) -> return_types.sort[Shape]:
         """Sort tensor. Returns (values, indices). Shape-preserving operation."""
         ...
@@ -1727,7 +1751,10 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         Dim: Flag[builtins.int],
         Keepdim: Flag[builtins.bool],
     ](
-        self: Tensor[Shape], k: int, dim: Dim = -1, keepdim: Keepdim = False
+        self: Tensor[Shape],
+        k: builtins.int,
+        dim: Dim = -1,
+        keepdim: Keepdim = False,
     ) -> return_types.kthvalue[reduce_shape(Shape, Dim, Keepdim)]:
         """Kth smallest value. Returns (values, indices). Shape inference via meta-shape: torch.Tensor.kthvalue"""
         ...
@@ -1745,11 +1772,11 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Create diagonal tensor. Shape inference via meta-shape: torch.Tensor.diag_embed"""
         ...
 
-    def tril(self, diagonal: int = 0) -> Self:
+    def tril(self, diagonal: builtins.int = 0) -> Self:
         """Lower triangular part. Shape inference via generic fixture signature."""
         ...
 
-    def triu(self, diagonal: int = 0) -> Self:
+    def triu(self, diagonal: builtins.int = 0) -> Self:
         """Upper triangular part. Shape inference via generic fixture signature."""
         ...
 
@@ -2039,6 +2066,14 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Element-wise hypotenuse. Shape inference via generic fixture signature."""
         ...
 
+    @overload
+    def lerp[OtherShape: _Shape, WeightShape: _Shape](
+        self, end: Tensor[OtherShape], weight: Tensor[WeightShape]
+    ) -> Tensor[broadcast(Shape, broadcast(OtherShape, WeightShape))]:
+        """Linear interpolation. Shape inference via generic fixture signature."""
+        ...
+
+    @overload
     def lerp[OtherShape: _Shape](
         self, end: Tensor[OtherShape], weight: builtins.float
     ) -> Tensor[broadcast(Shape, OtherShape)]:
@@ -2089,7 +2124,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Digamma function. Shape inference via generic fixture signature."""
         ...
 
-    def polygamma(self, n: int) -> Self:
+    def polygamma(self, n: builtins.int) -> Self:
         """Polygamma function. Shape inference via generic fixture signature."""
         ...
 
@@ -2191,32 +2226,32 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         ...
 
     def maximum[OtherShape: _Shape = []](
-        self, other: _TensorLike[OtherShape]
+        self, other: Tensor[OtherShape]
     ) -> Tensor[broadcast(Shape, OtherShape)]:
         """Element-wise maximum. Shape inference via generic fixture signature."""
         ...
 
     def minimum[OtherShape: _Shape = []](
-        self, other: _TensorLike[OtherShape]
+        self, other: Tensor[OtherShape]
     ) -> Tensor[broadcast(Shape, OtherShape)]:
         """Element-wise minimum. Shape inference via generic fixture signature."""
         ...
 
     def fmax[OtherShape: _Shape = []](
-        self, other: _TensorLike[OtherShape]
+        self, other: Tensor[OtherShape]
     ) -> Tensor[broadcast(Shape, OtherShape)]:
         """Element-wise maximum (NaN handling). Shape inference via generic fixture signature."""
         ...
 
     def fmin[OtherShape: _Shape = []](
-        self, other: _TensorLike[OtherShape]
+        self, other: Tensor[OtherShape]
     ) -> Tensor[broadcast(Shape, OtherShape)]:
         """Element-wise minimum (NaN handling). Shape inference via generic fixture signature."""
         ...
 
     # ==== Phase 4: Advanced Linear Algebra Methods ====
 
-    def cholesky(self, upper: bool = False) -> Self:
+    def cholesky(self, upper: builtins.bool = False) -> Self:
         """Cholesky decomposition. Shape inference via generic fixture signature."""
         ...
 
@@ -2244,7 +2279,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def slogdet[Shape: IntTuple](
         self: Tensor[Shape],
     ) -> return_types.slogdet[slogdet_shape(Shape)]: ...
-    def matrix_power(self, n: int) -> Self:
+    def matrix_power(self, n: builtins.int) -> Self:
         """Matrix power. Shape inference via generic fixture signature."""
         ...
 
@@ -2336,7 +2371,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         self,
         indices: tuple[Tensor, ...],
         values: Tensor,
-        accumulate: bool = False,
+        accumulate: builtins.bool = False,
     ) -> Self:
         """Put values at indices. Shape inference via generic fixture signature."""
         ...
@@ -2345,7 +2380,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         self,
         indices: tuple[Tensor, ...],
         values: Tensor,
-        accumulate: bool = False,
+        accumulate: builtins.bool = False,
     ) -> Self:
         """Put values at indices in-place. Shape inference via generic fixture signature."""
         ...
@@ -2379,7 +2414,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         self: Tensor[Shape],
         index: Tensor[IndexShape],
         source: Tensor[SourceShape],
-        accumulate: bool = False,
+        accumulate: builtins.bool = False,
     ) -> Tensor[put_shape(Shape, IndexShape, SourceShape)]:
         """Put values at indices. Shape inference via generic fixture signature."""
         ...
@@ -2388,7 +2423,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         self: Tensor[Shape],
         index: Tensor[IndexShape],
         source: Tensor[SourceShape],
-        accumulate: bool = False,
+        accumulate: builtins.bool = False,
     ) -> Tensor[put_shape(Shape, IndexShape, SourceShape)]:
         """Put values at indices in-place. Shape inference via generic fixture signature."""
         ...
@@ -2438,8 +2473,8 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
 
     def random_(
         self,
-        low: int = 0,
-        high: int | None = None,
+        low: builtins.int = 0,
+        high: builtins.int | None = None,
         *,
         generator: Generator | None = None,
     ) -> Self:
@@ -2468,6 +2503,8 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Return the number of elements."""
         ...
 
+FloatTensor = Tensor
+
 # ============================================================================
 # Module-level Functions
 # ============================================================================
@@ -2478,6 +2515,78 @@ def matmul[Left: IntTuple, Right: IntTuple](
     """Matrix multiplication function. Shape inference via meta-shape: torch.matmul"""
     ...
 
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    return_inverse: Literal[False] = False,
+    return_counts: Literal[False] = False,
+    dim: None = None,
+) -> Tensor[[Any]]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    return_inverse: Literal[False] = False,
+    return_counts: Literal[False] = False,
+    dim: builtins.int = 0,
+) -> Tensor: ...
+@overload
+def unique[Shape: IntTuple](
+    input: Tensor[Shape],
+    sorted: builtins.bool = True,
+    return_inverse: Literal[True] = True,
+    return_counts: Literal[False] = False,
+    dim: None = None,
+) -> tuple[Tensor[[Any]], Tensor[Shape]]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    return_inverse: Literal[True] = True,
+    return_counts: Literal[False] = False,
+    dim: builtins.int = 0,
+) -> tuple[Tensor, Tensor[[Any]]]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    return_inverse: Literal[False] = False,
+    return_counts: Literal[True] = True,
+    dim: None = None,
+) -> tuple[Tensor[[Any]], Tensor[[Any]]]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    return_inverse: Literal[False] = False,
+    return_counts: Literal[True] = True,
+    dim: builtins.int = 0,
+) -> tuple[Tensor, Tensor[[Any]]]: ...
+@overload
+def unique[Shape: IntTuple](
+    input: Tensor[Shape],
+    sorted: builtins.bool = True,
+    return_inverse: Literal[True] = True,
+    return_counts: Literal[True] = True,
+    dim: None = None,
+) -> tuple[Tensor[[Any]], Tensor[Shape], Tensor[[Any]]]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    return_inverse: Literal[True] = True,
+    return_counts: Literal[True] = True,
+    dim: builtins.int = 0,
+) -> tuple[Tensor, Tensor[[Any]], Tensor[[Any]]]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    return_inverse: builtins.bool = False,
+    return_counts: builtins.bool = False,
+    dim: builtins.int | None = None,
+) -> Tensor | tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor]: ...
 def cat[Shapes: IntTuples, Dim: Flag[builtins.int]](
     tensors: MapIntTuples[lambda S: Tensor[S], Shapes], dim: Dim = 0
 ) -> Tensor[cat_shape(Shapes, Dim)]:
@@ -2883,14 +2992,21 @@ def ones(
 ) -> Tensor: ...
 @overload
 def empty[Shape: IntTuple](
-    *size: *Shape, dtype: Any = None, device: Any = None
+    *size: *Shape,
+    dtype: Any = None,
+    device: Any = None,
+    requires_grad: builtins.bool = False,
 ) -> Tensor[Shape]:
     """Create uninitialized tensor. Shape is inferred from `size`."""
     ...
 
 @overload
 def empty[Shape: IntTuple](
-    size: Shape, dtype: Any = None, device: Any = None
+    size: Shape,
+    *,
+    dtype: Any = None,
+    device: Any = None,
+    requires_grad: builtins.bool = False,
 ) -> Tensor[Shape]:
     """Create uninitialized tensor. Shape is inferred from `size`."""
     ...
@@ -3601,6 +3717,14 @@ def atan[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]:
     """Element-wise arctangent. Shape inference via generic fixture signature."""
     ...
 
+@overload
+def lerp[Shape: IntTuple, OtherShape: IntTuple, WeightShape: IntTuple](
+    input: Tensor[Shape], end: Tensor[OtherShape], weight: Tensor[WeightShape]
+) -> Tensor[broadcast(Shape, broadcast(OtherShape, WeightShape))]:
+    """Linear interpolation. Shape inference via generic fixture signature."""
+    ...
+
+@overload
 def lerp[Shape: IntTuple, OtherShape: IntTuple](
     input: Tensor[Shape], end: Tensor[OtherShape], weight: builtins.float
 ) -> Tensor[broadcast(Shape, OtherShape)]:
@@ -3775,13 +3899,13 @@ def allclose(
     equal_nan: builtins.bool = False,
 ) -> builtins.bool: ...
 def maximum[Shape: IntTuple, OtherShape: IntTuple = []](
-    input: Tensor[Shape], other: _TensorLike[OtherShape]
+    input: Tensor[Shape], other: Tensor[OtherShape]
 ) -> Tensor[broadcast(Shape, OtherShape)]:
     """Element-wise maximum. Shape inference via generic fixture signature."""
     ...
 
 def minimum[Shape: IntTuple, OtherShape: IntTuple = []](
-    input: Tensor[Shape], other: _TensorLike[OtherShape]
+    input: Tensor[Shape], other: Tensor[OtherShape]
 ) -> Tensor[broadcast(Shape, OtherShape)]:
     """Element-wise minimum. Shape inference via generic fixture signature."""
     ...
@@ -3790,13 +3914,13 @@ def expm1[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]: ...
 def log10[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]: ...
 def sign[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]: ...
 def fmax[Shape: IntTuple, OtherShape: IntTuple = []](
-    input: Tensor[Shape], other: _TensorLike[OtherShape]
+    input: Tensor[Shape], other: Tensor[OtherShape]
 ) -> Tensor[broadcast(Shape, OtherShape)]:
     """Element-wise maximum (NaN handling). Shape inference via generic fixture signature."""
     ...
 
 def fmin[Shape: IntTuple, OtherShape: IntTuple = []](
-    input: Tensor[Shape], other: _TensorLike[OtherShape]
+    input: Tensor[Shape], other: Tensor[OtherShape]
 ) -> Tensor[broadcast(Shape, OtherShape)]:
     """Element-wise minimum (NaN handling). Shape inference via generic fixture signature."""
     ...
@@ -4107,7 +4231,7 @@ def poisson[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]:
     ...
 
 # Tensor property functions
-def is_tensor(obj: object, /) -> builtins.bool:
+def is_tensor(obj: object, /) -> TypeIs[Tensor]:
     """Return whether an object is a PyTorch tensor."""
     ...
 
@@ -4138,6 +4262,8 @@ class dtype:
     ...
 
 float: dtype = ...
+complex64: dtype = ...
+complex128: dtype = ...
 
 # ==============================================================================
 # Tensor Creation with dtype support
@@ -4181,10 +4307,27 @@ def as_tensor(
     """Create tensor from data, sharing memory with the input when possible."""
     ...
 
-def from_numpy(ndarray: Any) -> Tensor:
-    """Create a CPU tensor that shares memory with a numpy array."""
+def from_numpy[Shape: IntTuple](ndarray: np.ndarray[Shape]) -> Tensor[Shape]:
+    """Create a shape-preserving CPU tensor that shares memory with a NumPy array.
+
+    NumPy is an optional dependency of this stub package. Installing
+    `pyrefly-numpy-stubs` adds shape inference for values created through NumPy
+    APIs; otherwise only shape information already present in NumPy's own
+    annotations is preserved.
+    """
     ...
 
+@overload
+def randint[Shape: IntTuple](
+    high: int,
+    size: Shape,
+    *,
+    generator: Any = None,
+    dtype: Any = None,
+    device: Any = None,
+    requires_grad: bool = False,
+) -> Tensor[Shape]: ...
+@overload
 def randint[Shape: IntTuple](
     low: int,
     high: int,
@@ -4291,6 +4434,14 @@ def cross[B: IntTuple](
     ...
 
 # Context managers
+# Define the top-level API directly because older Torch versions lack torch.compiler.
+@overload
+def compile[F: Callable[..., Any]](model: F, **kwargs: Any) -> F: ...
+@overload
+def compile[**P, R](
+    model: None = None, **kwargs: Any
+) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+
 class no_grad:
     """Context manager and decorator that disables gradient tracking.
 
@@ -4345,6 +4496,10 @@ def meshgrid(
 # The functions below carry no shape information. They are declared because this
 # module shadows torch's own `__init__`, as described at the `torch._C` import
 # above, so omitting them removes them from `torch` for every dependent target.
+def set_default_dtype(d: dtype, /) -> None: ...
+def get_num_threads() -> builtins.int: ...
+def get_float32_matmul_precision() -> str: ...
+def are_deterministic_algorithms_enabled() -> builtins.bool: ...
 def manual_seed(seed: int) -> Generator:
     """Set the seed for generating random numbers on all devices."""
     ...

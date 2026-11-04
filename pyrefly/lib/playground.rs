@@ -14,12 +14,12 @@ use dupe::Dupe;
 use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::Contents;
+use lsp_types::DiagnosticTag;
 use lsp_types::SemanticTokens;
 use lsp_types::SemanticTokensLegend;
 use lsp_types::TextEdit;
 use pyrefly_build::handle::Handle;
 use pyrefly_build::source_db::map_db::MapDatabase;
-use pyrefly_python::ast::Ast;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::sys_info::SysInfo;
@@ -38,7 +38,7 @@ use starlark_map::small_map::SmallMap;
 
 use crate::config::config::ConfigFile;
 use crate::config::config::toml_error_span;
-use crate::config::error_kind::Severity;
+use crate::config::error_kind::ShownSeverity;
 use crate::config::finder::ConfigFinder;
 use crate::lsp::wasm::hover::get_hover;
 use crate::memory_project::memory_config;
@@ -152,6 +152,8 @@ pub struct Diagnostic {
     pub message_details: String,
     pub kind: String,
     pub severity: i32,
+    /// Monaco marker tags, which use the same numbers as LSP diagnostic tags.
+    pub tags: Vec<DiagnosticTag>,
     pub filename: String,
 }
 
@@ -275,6 +277,7 @@ impl Playground {
                         kind: "parse-error".to_owned(),
                         // MarkerSeverity.Error (8)
                         severity: 8,
+                        tags: Vec::new(),
                         filename: "pyrefly.toml".to_owned(),
                     });
                     if !force_update {
@@ -410,11 +413,14 @@ impl Playground {
             let collected = errors.collect_errors();
             let unused = errors.collect_unused_ignore_errors_for_display(&collected);
             let mut output_errors = collected.ordinary;
+            output_errors.extend(collected.hints);
             output_errors.extend(collected.directives);
             output_errors.extend(unused.ordinary);
-            let file_errors = output_errors.into_map(|e| {
+            output_errors.extend(unused.hints);
+            let file_errors = output_errors.into_iter().filter_map(|e| {
+                let severity = e.severity().shown()?;
                 let range = e.display_range();
-                Diagnostic {
+                Some(Diagnostic {
                     start_line: range.start.line_within_file().get() as i32,
                     start_col: range.start.column().get() as i32,
                     end_line: range.end.line_within_file().get() as i32,
@@ -423,128 +429,24 @@ impl Playground {
                     message_details: e.msg_details().unwrap_or("").to_owned(),
                     kind: e.error_kind().to_name().to_owned(),
                     // Severity values defined here: https://github.com/microsoft/vscode/blob/main/src/vs/editor/common/standalone/standaloneEnums.ts
-                    severity: match e.severity() {
-                        Severity::Error => 8,
-                        Severity::Warn => 4,
-                        Severity::Info => 2,
-                        Severity::Ignore => 1,
+                    severity: match severity {
+                        ShownSeverity::Error => 8,
+                        ShownSeverity::Warn => 4,
+                        ShownSeverity::Info => 2,
+                        // As in the LSP, a hint without its own editor look is shown like `info`.
+                        ShownSeverity::Hint if e.editor_tag().is_none() => 2,
+                        ShownSeverity::Hint => 1,
                     },
+                    tags: e.editor_tag().into_iter().collect(),
                     filename: filename.clone(),
-                }
+                })
             });
             all_diagnostics.extend(file_errors);
-
-            // Add unused diagnostics
-            Self::append_unused_import_diagnostics(
-                &transaction,
-                handle,
-                filename,
-                &mut all_diagnostics,
-            );
-            Self::append_unused_variable_diagnostics(
-                &transaction,
-                handle,
-                filename,
-                &mut all_diagnostics,
-            );
-            Self::append_unused_parameter_diagnostics(
-                &transaction,
-                handle,
-                filename,
-                &mut all_diagnostics,
-            );
         }
 
         // Include any diagnostics gathered while loading config
         all_diagnostics.extend(self.config_diagnostics.iter().cloned());
         all_diagnostics
-    }
-
-    fn append_unused_import_diagnostics(
-        transaction: &Transaction<'_>,
-        handle: &Handle,
-        filename: &str,
-        items: &mut Vec<Diagnostic>,
-    ) {
-        if let Some(answers) = transaction.get_answers(handle) {
-            let bindings = answers.bindings();
-            let module_info = bindings.module();
-            for unused in bindings.unused_imports() {
-                let range = module_info.display_range(unused.range);
-                items.push(Diagnostic {
-                    start_line: range.start.line_within_file().get() as i32,
-                    start_col: range.start.column().get() as i32,
-                    end_line: range.end.line_within_file().get() as i32,
-                    end_col: range.end.column().get() as i32,
-                    message_header: format!("Import `{}` may be unused", unused.name.as_str()),
-                    message_details: String::new(),
-                    kind: "unused-import".to_owned(),
-                    // MarkerSeverity.Hint (1)
-                    severity: 1,
-                    filename: filename.to_owned(),
-                });
-            }
-        }
-    }
-
-    fn append_unused_variable_diagnostics(
-        transaction: &Transaction<'_>,
-        handle: &Handle,
-        filename: &str,
-        items: &mut Vec<Diagnostic>,
-    ) {
-        if let Some(answers) = transaction.get_answers(handle) {
-            let bindings = answers.bindings();
-            let module_info = bindings.module();
-            for unused in bindings.unused_variables() {
-                if Ast::is_intentionally_unused(unused.name.as_str()) {
-                    continue;
-                }
-                let range = module_info.display_range(unused.range);
-                items.push(Diagnostic {
-                    start_line: range.start.line_within_file().get() as i32,
-                    start_col: range.start.column().get() as i32,
-                    end_line: range.end.line_within_file().get() as i32,
-                    end_col: range.end.column().get() as i32,
-                    message_header: format!("Variable `{}` is unused", unused.name.as_str()),
-                    message_details: String::new(),
-                    kind: "unused-variable".to_owned(),
-                    // MarkerSeverity.Hint (1)
-                    severity: 1,
-                    filename: filename.to_owned(),
-                });
-            }
-        }
-    }
-
-    fn append_unused_parameter_diagnostics(
-        transaction: &Transaction<'_>,
-        handle: &Handle,
-        filename: &str,
-        items: &mut Vec<Diagnostic>,
-    ) {
-        if let Some(answers) = transaction.get_answers(handle) {
-            let bindings = answers.bindings();
-            let module_info = bindings.module();
-            for unused in bindings.unused_parameters() {
-                if Ast::is_intentionally_unused(unused.name.as_str()) {
-                    continue;
-                }
-                let range = module_info.display_range(unused.range);
-                items.push(Diagnostic {
-                    start_line: range.start.line_within_file().get() as i32,
-                    start_col: range.start.column().get() as i32,
-                    end_line: range.end.line_within_file().get() as i32,
-                    end_col: range.end.column().get() as i32,
-                    message_header: format!("Parameter `{}` is unused", unused.name.as_str()),
-                    message_details: String::new(),
-                    kind: "unused-parameter".to_owned(),
-                    // MarkerSeverity.Hint (1)
-                    severity: 1,
-                    filename: filename.to_owned(),
-                });
-            }
-        }
     }
 
     fn to_text_size(&self, transaction: &Transaction, pos: Position) -> Option<TextSize> {
@@ -1045,6 +947,32 @@ mod tests {
     }
 
     #[test]
+    fn test_unsupported_python_version_is_config_error() {
+        // Editing `3.12` to `3.13` passes through `3.1`, which must not crash the sandbox.
+        let mut state = Playground::new(Some("3.12")).unwrap();
+        let mut files = SmallMap::new();
+        files.insert("main.py".to_owned(), "x: int = 1\n".to_owned());
+        files.insert(
+            "pyrefly.toml".to_owned(),
+            "python-version = \"3.1\"\n".to_owned(),
+        );
+
+        assert_eq!(state.update_sandbox_files(files.clone(), false), None);
+        assert!(state.update_sandbox_files(files, true).is_some());
+        let diagnostic = state
+            .get_errors()
+            .into_iter()
+            .find(|error| error.filename == "pyrefly.toml")
+            .expect("expected a pyrefly.toml parse diagnostic");
+        assert!(
+            diagnostic
+                .message_details
+                .contains("minimum supported version is 3.5.0")
+        );
+        assert!(Playground::new(Some("3.1")).is_err());
+    }
+
+    #[test]
     fn test_nested_folder_imports() {
         let mut state = Playground::new(None).unwrap();
         let mut files = SmallMap::new();
@@ -1176,5 +1104,49 @@ mod tests {
             "Parameter `age` is unused"
         );
         assert_eq!(unused_parameters[0].severity, 1); // MarkerSeverity.Hint
+    }
+
+    #[test]
+    fn test_unused_parameter_suppressed_by_ignore() {
+        let mut state = Playground::new(None).unwrap();
+        let mut files = SmallMap::new();
+        files.insert(
+            "main.py".to_owned(),
+            "def greet(name: str, age: int) -> str:  # pyrefly: ignore[unused-parameter]\n    return name"
+                .to_owned(),
+        );
+        state.update_sandbox_files(files, true);
+        state.set_active_file("main.py");
+
+        let kinds: Vec<_> = state.get_errors().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.is_empty(), "unexpected diagnostics: {kinds:?}");
+    }
+
+    // https://github.com/facebook/pyrefly/issues/5113
+    #[test]
+    fn test_kind_set_to_hint_in_config() {
+        let mut state = Playground::new(None).unwrap();
+        let mut files = SmallMap::new();
+        files.insert(
+            "main.py".to_owned(),
+            "import os\nx: int = \"wrong\"\n".to_owned(),
+        );
+        files.insert(
+            "pyrefly.toml".to_owned(),
+            "[errors]\nbad-assignment = \"hint\"\n".to_owned(),
+        );
+        state.update_sandbox_files(files, true);
+        state.set_active_file("main.py");
+
+        let errors = state.get_errors();
+        // The severity and the serialized tags are what Monaco receives.
+        let marker = |kind: &str| {
+            let e = errors.iter().find(|e| e.kind == kind).unwrap();
+            (e.severity, serde_json::to_string(&e.tags).unwrap())
+        };
+        // MarkerSeverity.Hint with MarkerTag.Unnecessary, drawn greyed out.
+        assert_eq!(marker("unused-import"), (1, "[1]".to_owned()));
+        // MarkerSeverity.Info, with no tag.
+        assert_eq!(marker("bad-assignment"), (2, "[]".to_owned()));
     }
 }

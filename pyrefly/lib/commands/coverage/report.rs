@@ -5,6 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::io;
+use std::io::Write;
+
 use clap::Parser;
 use pyrefly_config::args::EnvironmentArgs;
 use pyrefly_util::thread_pool::ThreadCount;
@@ -79,7 +82,13 @@ impl ReportArgs {
             summary: calculate_summary(&module_reports),
             module_reports,
         };
-        println!("{}", serde_json::to_string_pretty(&full_report)?);
+        let json = serde_json::to_string_pretty(&full_report)?;
+        if let Err(error) = writeln!(io::stdout().lock(), "{json}") {
+            // A pager can close the pipe before it reads the complete report.
+            if error.kind() != io::ErrorKind::BrokenPipe {
+                return Err(error.into());
+            }
+        }
 
         Ok(CommandExitStatus::Success)
     }
@@ -87,6 +96,8 @@ impl ReportArgs {
 
 #[cfg(test)]
 mod tests {
+    use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
+
     use super::*;
 
     #[test]
@@ -102,5 +113,13 @@ mod tests {
         assert_eq!(parts.len(), 2, "schema_version must be \"major.minor\"");
         assert!(parts[0].parse::<u32>().is_ok());
         assert!(parts[1].parse::<u32>().is_ok());
+    }
+
+    /// `--module` and `--public-only` cannot be combined.
+    #[test]
+    fn test_module_with_public_only_rejected() {
+        let args = ReportArgs::parse_from(["report", "--module", "m", "--public-only"]);
+        let err = args.run(None, TEST_THREAD_COUNT).unwrap_err();
+        assert!(err.to_string().contains("cannot be combined"), "{err}");
     }
 }

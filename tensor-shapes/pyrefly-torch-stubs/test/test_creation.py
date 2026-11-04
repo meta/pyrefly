@@ -24,6 +24,16 @@ def test_zeros() -> None:
         torch.zeros("invalid")  # E: No matching overload
 
 
+def test_empty_accepts_requires_grad() -> None:
+    sized = torch.empty((0, 2), requires_grad=False)
+    assert_shape(sized.shape, (0, 2))
+    assert not sized.requires_grad
+    separate = torch.empty(2, 3, dtype=torch.float32, device="cpu", requires_grad=True)
+    assert_shape(separate.shape, (2, 3))
+    assert separate.requires_grad
+    assert_shape(torch.empty((), requires_grad=True).shape, ())
+
+
 def test_tensor_data_constructors() -> None:
     assert_shape(torch.tensor(1).shape, ())
     assert_shape(torch.tensor([1, 2, 3]).shape, (3,))
@@ -49,6 +59,8 @@ def test_creation_signatures_reject_invalid_arguments() -> None:
     with assert_raises(TypeError):
         torch.rand((2, 2), torch.float32)  # E: Unpacked argument
     with assert_raises(TypeError):
+        torch.empty((2, 2), torch.float32)  # E: Unpacked argument
+    with assert_raises(TypeError):
         tensor.new_zeros()  # E: No matching overload found
     with assert_raises(TypeError):
         tensor.new_zeros((2, 3), 4)  # E: not assignable
@@ -69,6 +81,7 @@ def test_size_factories() -> None:
 def test_generator_and_tensor_factories() -> None:
     generator = torch.Generator()
     assert_shape(torch.rand((2, 3), generator=generator).shape, (2, 3))
+    assert_shape(torch.randint(10, (1,)).shape, (1,))
     assert_shape(torch.randint(0, 10, (3,), generator=generator).shape, (3,))
 
     tensor = torch.zeros((2, 3))
@@ -81,7 +94,7 @@ def test_generator_and_tensor_factories() -> None:
     )
     assert_shape(tensor.new_ones((4, 5)).shape, IntTuple, runtime=(4, 5))
     assert_shape(torch.as_tensor([1.0, 2.0]).shape, IntTuple, runtime=(2,))
-    assert_shape(torch.from_numpy(tensor.numpy()).shape, IntTuple, runtime=(2, 3))
+    assert_shape(torch.from_numpy(tensor.numpy()).shape, (2, 3))
 
     # `randperm` preserves rank, but its value-dependent extent is gradual.
     assert_shape(torch.randperm(5, generator=generator).shape, IntTuple, runtime=(5,))

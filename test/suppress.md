@@ -69,6 +69,23 @@ def f(x: str) -> None:
 [0]
 ```
 
+## `--suppress-errors` should not suppress a warning when `--min-severity` is not set
+
+```scrut
+$ mkdir $TMPDIR/suppress_default_warning && \
+> echo 'x: str = 0' > $TMPDIR/suppress_default_warning/main.py && \
+> : > $TMPDIR/suppress_default_warning/pyrefly.toml && \
+> $PYREFLY check $TMPDIR/suppress_default_warning/main.py \
+>     --config $TMPDIR/suppress_default_warning/pyrefly.toml \
+>     --warn=bad-assignment \
+>     --suppress-errors \
+>     --summary=none \
+>     >/dev/null 2>/dev/null && \
+> cat $TMPDIR/suppress_default_warning/main.py
+x: str = 0
+[0]
+```
+
 ## `--suppress-errors` should not suppress an unused `# type: ignore`
 
 ```scrut

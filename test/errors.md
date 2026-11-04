@@ -16,6 +16,17 @@ Invalid --search-path: `*/does_not_exist` does not exist (glob)
 [1]
 ```
 
+## We do not report errors from imported modules by default
+
+```scrut
+$ touch $TMPDIR/pyrefly.toml && \
+> echo "x: str = 12" > $TMPDIR/shown1.py && \
+> echo "import shown1; y: int = shown1.x" > $TMPDIR/shown2.py && \
+> $PYREFLY check --python-version 3.13.0 $TMPDIR/shown2.py --output-format=min-text --min-severity=warn
+ERROR */shown2.py:1:* (glob)
+[1]
+```
+
 ## We do report from nested with --check-all
 
 ```scrut
@@ -23,11 +34,22 @@ $ touch $TMPDIR/pyrefly.toml && \
 > echo "x: str = 12" > $TMPDIR/shown1.py && \
 > echo "import shown1; y: int = shown1.x" > $TMPDIR/shown2.py && \
 > $PYREFLY check --python-version 3.13.0 $TMPDIR/shown2.py --check-all --output-format=min-text --min-severity=warn
- WARN importlib/abc.pyi:147:9-41: `ResourceReader` is deprecated [deprecated]
+ WARN ast.pyi:1230:16-21: `slice` is deprecated [deprecated]
+ WARN ast.pyi:1234:13-18: `slice` is deprecated [deprecated]
+ WARN ast.pyi:2176:36-44: `ExtSlice` is deprecated [deprecated]
+ WARN ast.pyi:2177:33-38: `Index` is deprecated [deprecated]
+ WARN ast.pyi:2178:33-38: `Suite` is deprecated [deprecated]
+ WARN ast.pyi:2179:35-42: `AugLoad` is deprecated [deprecated]
+ WARN ast.pyi:2180:36-44: `AugStore` is deprecated [deprecated]
+ WARN ast.pyi:2181:33-38: `Param` is deprecated [deprecated]
+ WARN importlib/abc.pyi:96:50-64: `ResourceLoader` is deprecated [deprecated]
+ WARN importlib/abc.pyi:162:9-41: `ResourceReader` is deprecated [deprecated]
  WARN importlib/machinery.pyi:14:5-51: `WindowsRegistryFinder` is deprecated [deprecated]
  WARN importlib/resources/__init__.pyi:49:9-29: `contents` is deprecated [deprecated]
  WARN importlib/resources/__init__.pyi:79:41-73: `ResourceReader` is deprecated [deprecated]
  WARN importlib/resources/_common.pyi:8:41-55: `ResourceReader` is deprecated [deprecated]
+ WARN importlib/resources/_common.pyi:36:59-73: `importlib.resources.abc.ResourceReader` is deprecated [deprecated]
+ WARN importlib/resources/abc.pyi:58:32-46: `ResourceReader` is deprecated [deprecated]
 */shown*.py:1:* (glob)
 */shown*.py:1:* (glob)
 [1]
@@ -37,7 +59,6 @@ $ touch $TMPDIR/pyrefly.toml && \
 
 ```scrut {output_stream: stderr}
 $ $PYREFLY check --python-version 3.13.0 "$TMPDIR/*" --project-excludes="$TMPDIR/*"
- WARN Skipping include pattern `*` because it is matched by `project-excludes` or an ignore file. (glob)
 `project-excludes`: * (glob)
 No Python files matched pattern `*` (glob)
 [1]
@@ -168,6 +189,48 @@ $ touch $TMPDIR/pyrefly.toml && \
 [1]
 ```
 
+## A `hint` is not shown or counted by default
+
+```scrut {output_stream: stderr}
+$ mkdir -p $TMPDIR/hint && \
+> printf '[errors]\nbad-assignment = "hint"\n' > $TMPDIR/hint/pyrefly.toml && \
+> echo "x: str = 0" > $TMPDIR/hint/test.py && \
+> $PYREFLY check $TMPDIR/hint/test.py --output-format=min-text
+ INFO 0 errors
+```
+
+## `--min-severity hint` shows hints and causes nonzero exit
+
+```scrut
+$ mkdir -p $TMPDIR/hint && \
+> printf '[errors]\nbad-assignment = "hint"\n' > $TMPDIR/hint/pyrefly.toml && \
+> echo "x: str = 0" > $TMPDIR/hint/test.py && \
+> $PYREFLY check $TMPDIR/hint/test.py --min-severity=hint --output-format=min-text
+ HINT */hint/test.py:1:10-11: `Literal[0]` is not assignable to `str` [bad-assignment] (glob)
+[1]
+```
+
+## A suppressed `hint` is not counted in the summary
+
+```scrut {output_stream: stderr}
+$ mkdir -p $TMPDIR/hint && \
+> printf '[errors]\nbad-assignment = "hint"\n' > $TMPDIR/hint/pyrefly.toml && \
+> echo "x: str = 0  # pyrefly: ignore" > $TMPDIR/hint/test.py && \
+> $PYREFLY check $TMPDIR/hint/test.py --output-format=min-text
+ INFO 0 errors
+```
+
+## `unused-parameter` can be raised to `error`
+
+```scrut
+$ mkdir -p $TMPDIR/unused && \
+> printf '[errors]\nunused-parameter = "error"\n' > $TMPDIR/unused/pyrefly.toml && \
+> printf 'def f(x: int) -> int:\n    return 1\n' > $TMPDIR/unused/test.py && \
+> $PYREFLY check $TMPDIR/unused/test.py --output-format=min-text
+ERROR */unused/test.py:1:7-8: Parameter `x` is unused [unused-parameter] (glob)
+[1]
+```
+
 ## `--output-format junit-xml` emits well-formed XML
 
 ```scrut {output_stream: stdout}
@@ -187,8 +250,9 @@ $ touch $TMPDIR/pyrefly.toml && \
 
 ## `--output-format junit-xml` omits warnings unless `--min-severity=warn`
 
-Severity filtering happens before formatting, so by default a warning-level
-finding produces an empty suite:
+The suite lists only the diagnostics that make the exit code nonzero. By default
+a warning is printed but doesn't affect the exit code, so it produces an empty
+suite:
 
 ```scrut {output_stream: stdout}
 $ touch $TMPDIR/pyrefly.toml && \
@@ -217,6 +281,21 @@ $ touch $TMPDIR/pyrefly.toml && \
   </testsuite>
 </testsuites>
 [1]
+```
+
+## `--report-pysa` defaults `--min-severity` to `error`
+
+Pysa treats every type error as a failure, so its file leaves warnings out unless
+`--min-severity` says otherwise:
+
+```scrut
+$ mkdir -p $TMPDIR/pysa_warn && cd $TMPDIR/pysa_warn && touch pyrefly.toml && \
+> echo "x: str = 0" > warn.py && \
+> $PYREFLY check --warn=bad-assignment --report-pysa default --report-pysa-format json warn.py > /dev/null 2>&1; \
+> $PYREFLY check --warn=bad-assignment --min-severity=warn --report-pysa warn --report-pysa-format json warn.py > /dev/null 2>&1; \
+> $JQ -c '.errors | map(.kind)' default/errors.json warn/errors.json
+[]
+["bad-assignment"]
 ```
 
 ## `--output-format sarif` emits a complete SARIF report

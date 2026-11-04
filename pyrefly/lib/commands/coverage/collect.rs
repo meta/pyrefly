@@ -21,6 +21,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
+use pyrefly_types::annotation::Annotation;
 use pyrefly_types::class::Class;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::function::PropertyRole;
@@ -40,6 +41,7 @@ use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::Answers;
+use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::types::class_metadata::ClassMro;
 use crate::binding::binding::Binding;
 use crate::binding::binding::BindingAnnotation;
@@ -71,6 +73,7 @@ use crate::module::finder::find_import_with_mode;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::state::state::Transaction;
+use crate::state::state::TransactionHandle;
 
 /// All parameters with merge keys: positional-only → index, keyword-capable → name,
 /// variadic → singleton, implicit receiver → `None`.
@@ -238,15 +241,18 @@ fn classify_annotation(
     answers: &Answers,
     annotation_idx: Option<Idx<KeyAnnotation>>,
 ) -> SlotCounts {
+    let Some(idx) = annotation_idx else {
+        return SlotCounts::untyped();
+    };
     let bindings = answers.bindings();
-    let has_annotation = annotation_idx
-        .is_some_and(|idx| matches!(bindings.get(idx), BindingAnnotation::AnnotateExpr(..)));
-    let resolved_ty = annotation_idx.and_then(|idx| {
-        answers
-            .get_idx(idx)
-            .and_then(|awt| awt.annotation.ty.as_ref().map(is_type_known))
-    });
-    classify_annotation_rank(has_annotation, resolved_ty).into()
+    if let Some(resolved) = answers.get_idx(idx) {
+        return classify_resolved_annotation_rank(bindings, idx, &resolved.annotation).into();
+    }
+    classify_annotation_rank(
+        matches!(bindings.get(idx), BindingAnnotation::AnnotateExpr(..)),
+        None,
+    )
+    .into()
 }
 
 /// Returns true if the name is public: does not start with `_`, or is a dunder (`__x__`).
@@ -469,17 +475,29 @@ fn parse_variables(
 ) -> Vec<Variable> {
     let bindings = answers.bindings();
 
-    /// Only a call hides its type at the assignment site, unless it is a builtin constructor.
+    /// Only a call hides its type at the assignment site, unless the callee names the class it
+    /// yields: a builtin constructor like `list()`, or an explicitly specialized class like
+    /// `Spam[int]()`.
     fn untyped_if_call(answers: &Answers, idx: Idx<Key>, expr: &Expr) -> SlotCounts {
         let Expr::Call(call) = expr else {
             return SlotCounts::default();
         };
 
-        if let Expr::Name(n) = call.func.as_ref()
-            && IMPLICIT_BUILTIN_CONSTRUCTORS.contains(&n.id.as_str())
-            && answers
-                .get_idx(idx)
-                .is_some_and(|t| matches!(t.ty(), Type::ClassType(cls) if cls.is_builtin(&n.id)))
+        let callee_names = |cls: &ClassType| match call.func.as_ref() {
+            Expr::Name(n) => {
+                IMPLICIT_BUILTIN_CONSTRUCTORS.contains(&n.id.as_str()) && cls.is_builtin(&n.id)
+            }
+            Expr::Subscript(sub) => match sub.value.as_ref() {
+                Expr::Name(n) => *cls.name() == n.id,
+                Expr::Attribute(attr) => *cls.name() == attr.attr.id,
+                _ => false,
+            },
+            _ => false,
+        };
+
+        if answers
+            .get_idx(idx)
+            .is_some_and(|t| matches!(t.ty(), Type::ClassType(cls) if callee_names(cls)))
         {
             SlotCounts::default()
         } else {
@@ -487,23 +505,33 @@ fn parse_variables(
         }
     }
 
-    /// True if the binding resolves to an import in at least one flow branch.
-    fn involves_import(bindings: &Bindings, idx: Idx<Key>, seen: &mut SmallSet<Idx<Key>>) -> bool {
+    /// True if the binding resolves to an import, function, or class in at least one flow branch.
+    fn involves_import_or_def(
+        bindings: &Bindings,
+        idx: Idx<Key>,
+        seen: &mut SmallSet<Idx<Key>>,
+    ) -> bool {
         if !seen.insert(idx) {
             return false; // LoopPhi can be cyclic
         }
         match bindings.get(idx) {
-            Binding::Module(..) | Binding::Import(..) => true,
+            Binding::Module(..)
+            | Binding::Import(..)
+            | Binding::Function { .. }
+            | Binding::ClassDef(..) => true,
             Binding::Forward(i)
             | Binding::PromoteForward(i)
             | Binding::ForwardToFirstUse(i)
-            | Binding::Narrow(i, _, _) => involves_import(bindings, *i, seen),
+            | Binding::Narrow(i, _, _) => involves_import_or_def(bindings, *i, seen),
             Binding::Phi(_, branches) => branches
                 .iter()
-                .any(|b| involves_import(bindings, b.value_key, seen)),
+                .any(|b| involves_import_or_def(bindings, b.value_key, seen)),
             Binding::LoopPhi(phi) => {
-                involves_import(bindings, phi.0, seen)
-                    || phi.1.iter().any(|i| involves_import(bindings, *i, seen))
+                involves_import_or_def(bindings, phi.0, seen)
+                    || phi
+                        .1
+                        .iter()
+                        .any(|i| involves_import_or_def(bindings, *i, seen))
             }
             _ => false,
         }
@@ -511,6 +539,24 @@ fn parse_variables(
 
     let module_prefix = module_prefix(module);
     let deleted = bindings.module_deletes();
+
+    // Names that a Cython C global or C type declaration owns, even when later re-assigned.
+    let cython_declared: SmallSet<&Name> = bindings
+        .keys::<Key>()
+        .filter_map(|idx| match bindings.get(idx) {
+            Binding::NameAssign(na)
+                if !na.is_in_function_scope
+                    && na.class_key.is_none()
+                    && let Expr::Call(call) = na.expr.as_ref()
+                    && cython_attr(bindings, &call.func)
+                        .is_some_and(|f| CYTHON_DECLARATIONS.contains(&f)) =>
+            {
+                Some(&na.name)
+            }
+            _ => None,
+        })
+        .collect();
+
     // Collect names already reported as functions or classes so we can skip them.
     let reported_names: SmallSet<&str> = functions
         .iter()
@@ -521,11 +567,13 @@ fn parse_variables(
     let mut variables = Vec::new();
     for idx in bindings.keys::<KeyExport>() {
         let KeyExport(name) = bindings.idx_to_key(idx);
-        // Skip non-public module-level names (unless listed in `__all__`), excluded dunders, and `del`eted names.
+        // Skip non-public module-level names (unless listed in `__all__`), excluded dunders,
+        // `del`eted names, and Cython C declarations.
         let name_str = name.as_str();
         if (!is_public_name(name_str) && !dunder_all.contains(name))
             || EXCLUDED_MODULE_DUNDERS.contains(&name_str)
             || deleted.contains(name)
+            || cython_declared.contains(name)
         {
             continue;
         }
@@ -550,6 +598,8 @@ fn parse_variables(
                     classify_annotation(answers, Some(*annot_idx))
                 }
             }
+            // IMPLICIT: special type forms have 0 slots
+            BindingExport::SpecialForm(..) => SlotCounts::default(),
             BindingExport::Forward(idx) | BindingExport::PromoteForward(idx) => {
                 match bindings.get(*idx) {
                     // Skip injected implicit globals
@@ -560,9 +610,11 @@ fn parse_variables(
                     | Binding::TypeVarTuple(_)
                     | Binding::TypeAlias(_)
                     | Binding::TypeAliasRef(_) => SlotCounts::default(),
-                    // Functions and classes are handled by parse_functions/parse_classes;
-                    // skip them here even when excluded (e.g. @type_check_only).
-                    Binding::Function { .. } | Binding::ClassDef(..) => continue,
+                    // Functions and classes are handled by parse_functions/parse_classes; skip them
+                    // here even when excluded (e.g. @type_check_only) or reached through control
+                    // flow (e.g. a later `while True: ... break`). Skip optional imports
+                    // (`try: import x; except _: x = None`) like plain imports.
+                    _ if involves_import_or_def(bindings, *idx, &mut SmallSet::new()) => continue,
                     Binding::NameAssign(na) => untyped_if_call(answers, *idx, na.expr.as_ref()),
                     Binding::MultiTargetAssign(_, rhs_idx, _, _) => match bindings.get(*rhs_idx) {
                         Binding::Function { .. } | Binding::ClassDef(..) => continue,
@@ -573,12 +625,6 @@ fn parse_variables(
                             );
                         }
                     },
-                    // Skip optional imports (`try: import x; except _: x = None`) like plain imports.
-                    Binding::Phi(..) | Binding::LoopPhi(..)
-                        if involves_import(bindings, *idx, &mut SmallSet::new()) =>
-                    {
-                        continue;
-                    }
                     _ => SlotCounts::untyped(),
                 }
             }
@@ -602,6 +648,85 @@ fn class_mro<'a>(answers: &'a Answers, class: &Class) -> &'a ClassMro {
         .unwrap_or(&ClassMro::Cyclic)
 }
 
+/// Complete per-module snapshots of direct annotations for attributes that coverage can report.
+/// The solutions hook records each snapshot before eviction; it retains no solver data.
+#[derive(Default)]
+struct AnnotatedFields {
+    modules: Mutex<HashMap<Handle, HashMap<KeyClassField, SlotRank>>>,
+}
+
+impl AnnotatedFields {
+    fn record(&self, transaction: &Transaction, handle: &Handle) {
+        let answers = transaction
+            .get_answers(handle)
+            .expect("the solutions hook runs before answer eviction");
+        let bindings = answers.bindings();
+        let fields = bindings
+            .keys::<KeyClassField>()
+            .filter_map(|idx| {
+                let key = bindings.idx_to_key(idx);
+                if !is_public_name(key.1.as_str()) || is_implicit_dunder_attr(key.1.as_str()) {
+                    return None;
+                }
+                let annot = own_annotation_idx(bindings, idx)?;
+                let resolved = answers
+                    .get_idx(annot)
+                    .expect("checked modules solve every annotation key before Solutions");
+                let rank = classify_resolved_annotation_rank(bindings, annot, &resolved.annotation);
+                Some((key.clone(), rank))
+            })
+            .collect();
+        self.modules.lock().insert(handle.dupe(), fields);
+    }
+
+    /// Read a snapshot after its module's answers have been evicted. A missing field means the
+    /// module did not declare a reportable annotation, not that its snapshot is incomplete.
+    fn get(&self, handle: &Handle, key: &KeyClassField) -> Option<SlotCounts> {
+        self.modules
+            .lock()
+            .get(handle)
+            .expect("an evicted module's annotations were recorded by the solutions hook")
+            .get(key)
+            .copied()
+            .map(Into::into)
+    }
+}
+
+/// The annotation declared directly on `field`, not the effective inherited class field.
+fn own_annotation_idx(
+    bindings: &Bindings,
+    field: Idx<KeyClassField>,
+) -> Option<Idx<KeyAnnotation>> {
+    match &bindings.get(field).definition {
+        ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => Some(*annotation),
+        ClassFieldDefinition::DefinedInMethod { annotation, .. }
+        | ClassFieldDefinition::AssignedInBody { annotation, .. } => *annotation,
+        _ => None,
+    }
+}
+
+fn classify_resolved_annotation_rank(
+    bindings: &Bindings,
+    idx: Idx<KeyAnnotation>,
+    annotation: &Annotation,
+) -> SlotRank {
+    classify_annotation_rank(
+        matches!(bindings.get(idx), BindingAnnotation::AnnotateExpr(..)),
+        annotation.ty.as_ref().map(is_type_known),
+    )
+}
+
+/// Solves a direct annotation that may not have been demanded by the module's exports.
+fn own_annotation_slots(
+    solver: &AnswersSolver<TransactionHandle>,
+    field: Idx<KeyClassField>,
+) -> Option<SlotCounts> {
+    let bindings = solver.bindings();
+    let annot = own_annotation_idx(bindings, field)?;
+    let resolved = solver.get_idx(annot);
+    Some(classify_resolved_annotation_rank(bindings, annot, &resolved.annotation).into())
+}
+
 /// Slots for `field_name` from the nearest base class annotating it in `class_idx`'s MRO (gh-3997).
 ///
 /// Walks the MRO nearest-first and returns the first ancestor that *annotates* `field_name`, so the
@@ -612,6 +737,7 @@ fn inherited_annotation_slots(
     answers: &Answers,
     transaction: &Transaction,
     handle: &Handle,
+    annotated: &AnnotatedFields,
     class_idx: Idx<KeyClass>,
     field_name: &Name,
 ) -> Option<SlotCounts> {
@@ -626,19 +752,26 @@ fn inherited_annotation_slots(
                 cls.module_path().dupe(),
                 handle.sys_info().dupe(),
             );
-            let a = transaction.get_answers(&h)?;
-            let b = a.bindings();
-            let idx = b.key_to_idx_hashed_opt(Hashed::new(&KeyClassField(
-                cls.index(),
-                field_name.clone(),
-            )))?;
-            let annot = match &b.get(idx).definition {
-                ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => Some(*annotation),
-                ClassFieldDefinition::DefinedInMethod { annotation, .. }
-                | ClassFieldDefinition::AssignedInBody { annotation, .. } => *annotation,
-                _ => None,
-            }?;
-            Some(classify_annotation(&a, Some(annot)))
+            let key = KeyClassField(cls.index(), field_name.clone());
+            let Some(base_answers) = transaction.get_answers(&h) else {
+                // The solutions hook records annotations before answers are evicted.
+                return annotated.get(&h, &key);
+            };
+            let bindings = base_answers.bindings();
+            let idx = bindings.key_to_idx_hashed_opt(Hashed::new(&key))?;
+            let annot = own_annotation_idx(bindings, idx)?;
+            if let Some(resolved) = base_answers.get_idx(annot) {
+                return Some(
+                    classify_resolved_annotation_rank(bindings, annot, &resolved.annotation).into(),
+                );
+            }
+            // Imported-only modules can leave non-exported annotations unsolved. Re-resolve the
+            // declaration against the solver's own bindings rather than the probed answers.
+            let solved = transaction.ad_hoc_solve(&h, "coverage_inherited_annotation", |solver| {
+                let idx = solver.bindings().key_to_idx_hashed_opt(Hashed::new(&key))?;
+                own_annotation_slots(&solver, idx)
+            });
+            solved.unwrap_or_else(|| annotated.get(&h, &key))
         })
 }
 
@@ -659,10 +792,32 @@ fn parse_instance_attrs(
     answers: &Answers,
     transaction: &Transaction,
     handle: &Handle,
-    tco_classes: &SmallSet<Idx<KeyClass>>,
+    annotated: &AnnotatedFields,
+    hidden_classes: &SmallSet<Idx<KeyClass>>,
+    cython_classes: &SmallSet<Idx<KeyClass>>,
 ) -> Vec<Variable> {
     let bindings = answers.bindings();
     let mut attrs = Vec::new();
+
+    // The names declared in the class bodies of each Cython extension class and its ancestors:
+    // its C attributes, and `__dict__` if it has one.
+    let cython_body_fields: SmallMap<Idx<KeyClass>, SmallSet<Name>> = cython_classes
+        .iter()
+        .map(|&class_idx| {
+            let mut names = SmallSet::new();
+            if let Some(cls) = answers.get_idx(class_idx).and_then(|r| r.0.clone()) {
+                let ancestors = class_mro(answers, &cls).ancestors_no_object();
+                let mro =
+                    std::iter::once(&cls).chain(ancestors.iter().map(ClassType::class_object));
+                for c in mro {
+                    if let Some(fields) = transaction.get_class_fields(handle, c) {
+                        names.extend(fields.class_body_fields().cloned());
+                    }
+                }
+            }
+            (class_idx, names)
+        })
+        .collect();
 
     for field_idx in bindings.keys::<KeyClassField>() {
         let field = bindings.get(field_idx);
@@ -677,8 +832,8 @@ fn parse_instance_attrs(
             continue;
         }
 
-        // Skip attrs of @type_check_only classes.
-        if tco_classes.contains(&field.class_idx) {
+        // Skip attrs of hidden classes.
+        if hidden_classes.contains(&field.class_idx) {
             continue;
         }
 
@@ -690,6 +845,22 @@ fn parse_instance_attrs(
             || is_deleted_class(module, bindings, cls_binding)
         {
             continue;
+        }
+
+        // Cython extension class fields are C attributes that Python can't access, except for
+        // dynamic attributes: fields defined in a method of a class with a `__dict__`, that no
+        // class body in the MRO declares as a C attribute.
+        if let Some(body_fields) = cython_body_fields.get(&field.class_idx) {
+            let in_method = matches!(
+                field.definition,
+                ClassFieldDefinition::DefinedInMethod { .. }
+            );
+            let is_dynamic_attr = in_method
+                && body_fields.contains(&dunder::DICT)
+                && !body_fields.contains(&field.name);
+            if !is_dynamic_attr {
+                continue;
+            }
         }
 
         // Only count instance attrs from recognized methods (__init__, etc.)
@@ -707,6 +878,7 @@ fn parse_instance_attrs(
                         answers,
                         transaction,
                         handle,
+                        annotated,
                         field.class_idx,
                         &field.name,
                     )
@@ -730,6 +902,7 @@ fn parse_instance_attrs(
             ClassFieldDefinition::DeclaredByAnnotation {
                 annotation,
                 initialized_in_recognized_method,
+                ..
             } => {
                 if !initialized_in_recognized_method && !module.path().is_interface() {
                     continue;
@@ -757,7 +930,8 @@ fn parse_functions(
     answers: &Answers,
     exports: &SmallMap<Name, ExportLocation>,
     dunder_all: &SmallSet<Name>,
-    tco_classes: &SmallSet<Idx<KeyClass>>,
+    hidden_classes: &SmallSet<Idx<KeyClass>>,
+    cython_classes: &SmallSet<Idx<KeyClass>>,
 ) -> Vec<Function> {
     let bindings = answers.bindings();
     let mut functions = Vec::new();
@@ -779,8 +953,8 @@ fn parse_functions(
             if fun.parent.has_function_ancestor() {
                 continue;
             }
-            // Skip @type_check_only decorated functions.
-            if has_type_check_only_decorator(&fun.decorators, bindings) {
+            // Skip functions absent at runtime.
+            if has_hidden_decorator(&fun.decorators, bindings) {
                 continue;
             }
             // Skip @no_type_check decorated functions — their bodies are
@@ -788,10 +962,18 @@ fn parse_functions(
             if has_no_type_check_decorator(&fun.decorators, bindings) {
                 continue;
             }
-            // Skip methods of @type_check_only decorated classes.
-            if fun.class_key.is_some_and(|ck| tco_classes.contains(&ck)) {
+            // Skip methods of hidden classes.
+            if fun.class_key.is_some_and(|ck| hidden_classes.contains(&ck)) {
                 continue;
             }
+
+            let in_cython_class = fun.class_key.is_some_and(|ck| cython_classes.contains(&ck));
+            if in_cython_class && CYTHON_METHODS_C_SLOT.contains(&fun.def.name.as_str()) {
+                continue;
+            }
+            // Cython's `__cinit__` takes the constructor arguments of the `__new__` Python sees.
+            let is_cinit = in_cython_class && fun.def.name.as_str() == "__cinit__";
+
             // Skip overload implementation signatures — only @overload
             // decorated signatures are part of the public API.
             if let Some(pred) = pred_idx
@@ -826,7 +1008,12 @@ fn parse_functions(
                             continue;
                         }
                         let class_qname = class_fqn(module, &cls.parent, &cls.def.name);
-                        format!("{class_qname}.{}", fun.def.name)
+                        let method_name = if is_cinit {
+                            &dunder::NEW
+                        } else {
+                            &fun.def.name.id
+                        };
+                        format!("{class_qname}.{method_name}")
                     }
                     BindingClass::FunctionalClassDef(..) => {
                         continue;
@@ -865,6 +1052,7 @@ fn parse_functions(
             // Implicit dunder returns (e.g. __init__ → None) and property setter/deleter
             // returns are trivial, so they are excluded even when explicitly annotated.
             let skip_return = is_property_deleter
+                || is_cinit
                 || matches!(
                     property_role,
                     Some(PropertyRole::Setter | PropertyRole::SetterDecorator)
@@ -1080,9 +1268,94 @@ fn is_decorator_named(expr: &Expr, name: &str) -> bool {
     }
 }
 
-/// Check if any decorator in the list is `@type_check_only`.
-fn has_type_check_only_decorator(decorators: &[Idx<KeyDecorator>], bindings: &Bindings) -> bool {
+/// `cython.X(...)` calls that declare a C global or C type, which doesn't exist at runtime.
+const CYTHON_DECLARATIONS: &[&str] = &["declare", "typedef", "struct", "union", "fused_type"];
+
+/// `cython.X` decorators that make a definition absent at runtime: a C-only `cfunc`, or an
+/// `internal` class, which is left out of the module dict.
+const CYTHON_DECORATORS_HIDDEN: &[&str] = &["cfunc", "internal"];
+
+/// `cython.X` class decorators that make an extension type
+const CYTHON_DECORATORS_EXTENSION_TYPE: &[&str] = &["cclass", "total_ordering"];
+
+/// Extension type special methods that fill C slots without a typable Python counterpart. The
+/// buffer slots surface as `__buffer__`/`__release_buffer__` (Python 3.12+), but their signatures
+/// are trivial.
+const CYTHON_METHODS_C_SLOT: &[&str] = &[
+    "__dealloc__",
+    "__getbuffer__",
+    "__releasebuffer__",
+    "__richcmp__",
+];
+
+/// The `X` that `expr` refers to in Cython's pure Python mode `cython` module: `cython.X`, under
+/// any alias of the module, or a bare `X` from `from cython import X`. This follows the import
+/// bindings, so it works without Cython installed, and every control-flow path must agree.
+fn cython_attr<'a>(bindings: &'a Bindings, expr: &'a Expr) -> Option<&'a str> {
+    let (name, attr) = match expr {
+        Expr::Attribute(attr) => (attr.value.as_name_expr()?, Some(attr.attr.as_str())),
+        Expr::Name(name) => (name, None),
+        _ => return None,
+    };
+    let cython = ModuleName::from_str("cython");
+    let key = Key::BoundName(ShortIdentifier::expr_name(name));
+    let mut pending = vec![bindings.key_to_idx_hashed_opt(Hashed::new(&key))?];
+    let mut seen = SmallSet::new();
+    let mut resolved = None;
+    while let Some(idx) = pending.pop() {
+        if !seen.insert(idx) {
+            continue; // LoopPhi can be cyclic
+        }
+        let found = match (bindings.get(idx), attr) {
+            (
+                Binding::Forward(i)
+                | Binding::ForwardToFirstUse(i)
+                | Binding::PromoteForward(i)
+                | Binding::Narrow(i, _, _),
+                _,
+            ) => {
+                pending.push(*i);
+                continue;
+            }
+            (Binding::Phi(_, branches), _) => {
+                pending.extend(branches.iter().map(|b| b.value_key));
+                continue;
+            }
+            (Binding::LoopPhi(phi), _) => {
+                pending.push(phi.0);
+                pending.extend(phi.1.iter().copied());
+                continue;
+            }
+            // The path that the bound name refers to, e.g. `cython` for `import cython.parallel`.
+            (Binding::Module(module), Some(attr)) if *module.1 == [cython.first_component()] => {
+                attr
+            }
+            (Binding::Import(import), None) if import.module == cython => import.name.as_str(),
+            _ => return None,
+        };
+        if resolved.is_some_and(|r| r != found) {
+            return None;
+        }
+        resolved = Some(found);
+    }
+    resolved
+}
+
+/// Check if any decorator in the list is `@cython.<name>` for one of the given names.
+fn has_cython_decorator(
+    decorators: &[Idx<KeyDecorator>],
+    bindings: &Bindings,
+    names: &[&str],
+) -> bool {
+    decorators.iter().any(|&idx| {
+        cython_attr(bindings, &bindings.get(idx).expr).is_some_and(|attr| names.contains(&attr))
+    })
+}
+
+/// Check if any decorator in the list makes the definition absent at runtime.
+fn has_hidden_decorator(decorators: &[Idx<KeyDecorator>], bindings: &Bindings) -> bool {
     has_decorator_named(decorators, bindings, "type_check_only")
+        || has_cython_decorator(decorators, bindings, CYTHON_DECORATORS_HIDDEN)
 }
 
 /// Check if any decorator in the list is `@no_type_check`.
@@ -1119,17 +1392,18 @@ fn stub_merge_filter(
     })
 }
 
-/// Collect all class keys that have the `@type_check_only` decorator.
-fn collect_type_check_only_classes(bindings: &Bindings) -> SmallSet<Idx<KeyClass>> {
-    let mut tco_classes = SmallSet::new();
-    for idx in bindings.keys::<Key>() {
-        if let Binding::ClassDef(class_key, decorators) = bindings.get(idx)
-            && has_type_check_only_decorator(decorators, bindings)
-        {
-            tco_classes.insert(*class_key);
-        }
-    }
-    tco_classes
+/// Collect all class keys whose decorator list satisfies `predicate`.
+fn filter_decorated_classes(
+    bindings: &Bindings,
+    predicate: impl Fn(&[Idx<KeyDecorator>]) -> bool,
+) -> SmallSet<Idx<KeyClass>> {
+    bindings
+        .keys::<Key>()
+        .filter_map(|idx| match bindings.get(idx) {
+            Binding::ClassDef(class_key, decorators) if predicate(decorators) => Some(*class_key),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Determine whether a function name represents a method (contains '.', i.e. `Cls.method`).
@@ -1179,14 +1453,14 @@ pub fn calculate_summary(module_reports: &[ModuleReport]) -> ReportSummary {
 fn parse_classes(
     module: &Module,
     answers: &Answers,
-    tco_classes: &SmallSet<Idx<KeyClass>>,
+    hidden_classes: &SmallSet<Idx<KeyClass>>,
 ) -> Vec<ReportClass> {
     let bindings = answers.bindings();
     let mut classes = Vec::new();
 
     for class_idx in bindings.keys::<KeyClass>() {
-        // Skip @type_check_only classes.
-        if tco_classes.contains(&class_idx) {
+        // Skip hidden classes.
+        if hidden_classes.contains(&class_idx) {
             continue;
         }
         let cls_binding = match bindings.get(class_idx) {
@@ -1231,12 +1505,12 @@ fn collect_class_members(
     answers: &Answers,
     transaction: &Transaction,
     handle: &Handle,
-    tco_classes: &SmallSet<Idx<KeyClass>>,
+    hidden_classes: &SmallSet<Idx<KeyClass>>,
 ) -> SmallSet<String> {
     let bindings = answers.bindings();
     let mut members = SmallSet::new();
     for idx in bindings.keys::<KeyClass>() {
-        if tco_classes.contains(&idx) {
+        if hidden_classes.contains(&idx) {
             continue;
         }
         let BindingClass::ClassDef(binding) = bindings.get(idx) else {
@@ -1310,16 +1584,34 @@ struct ModuleSymbols {
 impl ModuleSymbols {
     /// Parse a solved module's symbols into plain data; `for_stub_merge` also captures
     /// `StubMergeData`.
-    fn collect(transaction: &Transaction, handle: &Handle, for_stub_merge: bool) -> Option<Self> {
+    fn collect(
+        transaction: &Transaction,
+        handle: &Handle,
+        for_stub_merge: bool,
+        annotated: &AnnotatedFields,
+    ) -> Option<Self> {
         let module = transaction.get_module_info(handle)?;
         let answers = transaction.get_answers(handle)?;
         let bindings = answers.bindings();
         let exports = transaction.get_exports(handle);
         let dunder_all = collect_dunder_all(transaction, handle).unwrap_or_default();
-        let tco_classes = collect_type_check_only_classes(bindings);
-        let mut functions = parse_functions(&module, &answers, &exports, &dunder_all, &tco_classes);
+
+        let hidden_classes =
+            filter_decorated_classes(bindings, |ds| has_hidden_decorator(ds, bindings));
+        let cython_classes = filter_decorated_classes(bindings, |ds| {
+            has_cython_decorator(ds, bindings, CYTHON_DECORATORS_EXTENSION_TYPE)
+        });
+
+        let mut functions = parse_functions(
+            &module,
+            &answers,
+            &exports,
+            &dunder_all,
+            &hidden_classes,
+            &cython_classes,
+        );
         merge_overloads(&mut functions);
-        let mut classes = parse_classes(&module, &answers, &tco_classes);
+        let mut classes = parse_classes(&module, &answers, &hidden_classes);
         let mut variables = parse_variables(
             &module,
             &answers,
@@ -1333,7 +1625,9 @@ impl ModuleSymbols {
             &answers,
             transaction,
             handle,
-            &tco_classes,
+            annotated,
+            &hidden_classes,
+            &cython_classes,
         ));
 
         // A private name hides its whole subtree, unless exported via `__all__` (issue #3578).
@@ -1360,7 +1654,7 @@ impl ModuleSymbols {
                 &answers,
                 transaction,
                 handle,
-                &tco_classes,
+                &hidden_classes,
             ),
             all_filter: stub_merge_filter(transaction, handle),
             reexports: collect_reexport_fqns(
@@ -1610,6 +1904,29 @@ fn collect_untyped_errors(
     }
 }
 
+/// Per-run collection state. The same hook records ancestor annotations and captures report
+/// targets before either module's answers can be evicted.
+#[derive(Default)]
+struct ModuleCollector {
+    to_collect: HashMap<Handle, bool>,
+    annotated: AnnotatedFields,
+    collected: Mutex<HashMap<Handle, ModuleSymbols>>,
+}
+
+impl ModuleCollector {
+    fn collect(&self, transaction: &Transaction, handle: &Handle) {
+        self.annotated.record(transaction, handle);
+        let Some(&for_stub_merge) = self.to_collect.get(handle) else {
+            return;
+        };
+        if let Some(symbols) =
+            ModuleSymbols::collect(transaction, handle, for_stub_merge, &self.annotated)
+        {
+            self.collected.lock().insert(handle.dupe(), symbols);
+        }
+    }
+}
+
 pub fn collect_module_reports(
     files_to_check: Box<dyn Includes>,
     config_finder: ConfigFinder,
@@ -1639,7 +1956,7 @@ pub fn collect_module_reports(
     };
 
     // Map each .pyi to its corresponding .py: first co-located,
-    // then by module-name lookup in site-package-path.
+    // then by module-name lookup in site-packages-path.
     let pyi_to_py: HashMap<PathBuf, Handle> = if prefer_stubs {
         let py_by_path: HashMap<PathBuf, &Handle> = handles
             .iter()
@@ -1656,7 +1973,7 @@ pub fn collect_module_reports(
                     .map(|&py_h| (h.path().as_path().to_path_buf(), py_h.clone()))
             })
             .collect();
-        // Fall back to site-package-path for stubs-only packages.
+        // Fall back to site-packages-path for stubs-only packages.
         for h in handles.iter().filter(|h| h.path().is_interface()) {
             let pyi_path = h.path().as_path().to_path_buf();
             if map.contains_key(&pyi_path) {
@@ -1713,7 +2030,10 @@ pub fn collect_module_reports(
         .chain(pyi_to_py.values().map(|h| (h.dupe(), false)))
         .collect();
     let run_set: Vec<Handle> = to_collect.keys().cloned().collect();
-    let collected: Mutex<HashMap<Handle, ModuleSymbols>> = Mutex::new(HashMap::new());
+    let collector = ModuleCollector {
+        to_collect,
+        ..Default::default()
+    };
 
     let mut forgetter = Forgetter::new(
         holder.as_ref().new_transaction(Require::Exports, None),
@@ -1723,12 +2043,7 @@ pub fn collect_module_reports(
     // Collect each module the moment it solves, before the run evicts its answers,
     // so peak memory holds only the solver's working set (gh-3989).
     transaction.set_solutions_hook(Some(Box::new(|handle, transaction| {
-        let Some(&for_stub_merge) = to_collect.get(handle) else {
-            return;
-        };
-        if let Some(symbols) = ModuleSymbols::collect(transaction, handle, for_stub_merge) {
-            collected.lock().insert(handle.dupe(), symbols);
-        }
+        collector.collect(transaction, handle);
     })));
     transaction.run(&run_set, Require::Errors, None);
     // Later lazy computation must not fire the hook.
@@ -1759,9 +2074,13 @@ pub fn collect_module_reports(
         if !extras.is_empty() {
             // `Everything` retains answers so the extras can be collected after the run
             transaction.run(&extras, Require::Everything, None);
-            collected.lock().extend(extras.iter().filter_map(|handle| {
-                ModuleSymbols::collect(transaction, handle, false).map(|s| (handle.dupe(), s))
-            }));
+            collector
+                .collected
+                .lock()
+                .extend(extras.iter().filter_map(|handle| {
+                    ModuleSymbols::collect(transaction, handle, false, &collector.annotated)
+                        .map(|s| (handle.dupe(), s))
+                }));
             targets.extend(extras);
         }
         fqns
@@ -1769,7 +2088,7 @@ pub fn collect_module_reports(
 
     let mut module_reports: Vec<ModuleReport> = Vec::new();
     let mut errors: Vec<Error> = Vec::new();
-    let mut collected = collected.lock();
+    let mut collected = collector.collected.lock();
     for handle in &targets {
         let Some(mut symbols) = collected.remove(handle) else {
             continue;
@@ -1840,6 +2159,7 @@ pub fn collect_module_reports(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::collections::HashSet;
     use std::path::PathBuf;
 
@@ -1847,6 +2167,8 @@ mod tests {
     use pyrefly_build::handle::Handle;
     use pyrefly_python::module_name::ModuleName;
     use pyrefly_python::module_path::ModulePath;
+    use pyrefly_python::sys_info::PythonPlatform;
+    use pyrefly_python::sys_info::PythonVersion;
     use pyrefly_python::sys_info::SysInfo;
     use pyrefly_util::globs::FilteredGlobs;
     use pyrefly_util::globs::Globs;
@@ -1859,12 +2181,17 @@ mod tests {
     use crate::state::require::Require;
     use crate::test::util::TestEnv;
 
+    /// The checked-in test-file directory from the COVERAGE_TEST_PATH env var.
+    fn test_files_dir() -> PathBuf {
+        let path =
+            std::env::var("COVERAGE_TEST_PATH").expect("COVERAGE_TEST_PATH env var must be set");
+        PathBuf::from(path)
+    }
+
     /// Load a checked-in test file from the COVERAGE_TEST_PATH directory.
     /// Normalizes `\r\n` to `\n` so snapshots pass on Windows.
     fn load_test_file(name: &str) -> String {
-        let path =
-            std::env::var("COVERAGE_TEST_PATH").expect("COVERAGE_TEST_PATH env var must be set");
-        std::fs::read_to_string(PathBuf::from(path).join(name))
+        std::fs::read_to_string(test_files_dir().join(name))
             .unwrap_or_else(|e| panic!("failed to read test file {name}: {e}"))
             .replace("\r\n", "\n")
     }
@@ -1892,6 +2219,16 @@ mod tests {
         );
     }
 
+    /// Collect a module's symbols from a state that keeps every module's answers, so no fields
+    /// need recording.
+    fn collect_symbols(
+        transaction: &Transaction,
+        handle: &Handle,
+        for_stub_merge: bool,
+    ) -> ModuleSymbols {
+        ModuleSymbols::collect(transaction, handle, for_stub_merge, &Default::default()).unwrap()
+    }
+
     /// Run the production parse pipeline on a checked-in test file, as module `test`.
     fn parse_test_module(file: &str, mut env: TestEnv) -> (ModuleSymbols, String) {
         let code = load_test_file(file);
@@ -1905,7 +2242,7 @@ mod tests {
             .with_default_require_level(Require::Everything)
             .to_state();
         let handle = handle_fn("test");
-        let symbols = ModuleSymbols::collect(&state.transaction(), &handle, false).unwrap();
+        let symbols = collect_symbols(&state.transaction(), &handle, false);
         (symbols, module_path)
     }
 
@@ -1953,7 +2290,7 @@ mod tests {
             .with_default_require_level(Require::Everything)
             .to_state();
         let pyi_handle = pyi_handle_fn("test");
-        let mut stub = ModuleSymbols::collect(&pyi_state.transaction(), &pyi_handle, true).unwrap();
+        let mut stub = collect_symbols(&pyi_state.transaction(), &pyi_handle, true);
 
         let (py, _) = parse_test_module(py_file, TestEnv::new());
         stub.merge_uncovered_py_symbols(py);
@@ -1993,9 +2330,18 @@ mod tests {
         compare_snapshot("optional_imports.expected.json", &report);
     }
 
-    // `involves_import` must not treat a `match` capture over an imported subject as import-involved:
-    // `PatternCapture` is a definition boundary, so the capture branch of the module-level `x` Phi is
-    // not followed through to `import json`, and `x` is reported as an untyped variable (not skipped).
+    /// Excluded functions and classes stay excluded when a later module-level
+    /// `while True: ... break` turns their bindings into forwards.
+    #[test]
+    fn test_report_excluded_def_before_loop() {
+        let report = build_module_report_for_test("excluded_def_before_loop.py");
+        compare_snapshot("excluded_def_before_loop.expected.json", &report);
+    }
+
+    // `involves_import_or_def` must not treat a `match` capture over an imported subject as
+    // import-involved: `PatternCapture` is a definition boundary, so the capture branch of the
+    // module-level `x` Phi is not followed through to `import json`, and `x` is reported as an
+    // untyped variable (not skipped).
     #[test]
     fn test_report_match_capture_import() {
         let report = build_module_report_for_test("match_capture_import.py");
@@ -2108,7 +2454,7 @@ mod tests {
         compare_snapshot("stub_class_attrs.expected.json", &report);
     }
 
-    /// Stubs-only packages: .py discovered via site-package-path, merged like co-located stubs.
+    /// Stubs-only packages: .py discovered via site-packages-path, merged like co-located stubs.
     #[test]
     fn test_report_external_stub_merge() {
         use pyrefly_config::config::ConfigFile;
@@ -2218,33 +2564,24 @@ mod tests {
 
     #[test]
     fn test_check_findings_match_report_symbols() {
-        for file in [
-            "any_annotations.py",
-            "any_detection.py",
-            "decorators.py",
-            "dunder_attrs.py",
-            "dunder_implicit.py",
-            "functions.py",
-            "incomplete_methods.py",
-            "inheritance.py",
-            "inherited_attrs.py",
-            "instance_attrs.py",
-            "method_aliases.py",
-            "optional_imports.py",
-            "overloads.py",
-            "overloads_partial.py",
-            "partial_any.py",
-            "property_basic.py",
-            "schema_classes_methods.py",
-            "stub_ignores_py_annotations.pyi",
-            "variables.py",
-        ] {
-            // `.pyi` entries are stub-merged with their `.py` source.
-            let (p, module_path) = if let Some(stem) = file.strip_suffix(".pyi") {
-                (
-                    merged_stub_symbols(file, &format!("{stem}.py")),
-                    "test.pyi".to_owned(),
-                )
+        // These need a site-package env; see their dedicated tests.
+        const SKIP: &[&str] = &["schema_classes_pydantic.py", "schema_classes_attrs.py"];
+
+        let files: BTreeSet<String> = std::fs::read_dir(test_files_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|f| (f.ends_with(".py") || f.ends_with(".pyi")) && !SKIP.contains(&f.as_str()))
+            .collect();
+        assert!(files.len() > 30, "corpus discovery looks broken: {files:?}");
+
+        for file in &files {
+            // `.pyi` entries with a `.py` twin are stub-merged, like the production pipeline.
+            let py_twin = file
+                .strip_suffix(".pyi")
+                .map(|stem| format!("{stem}.py"))
+                .filter(|py| files.contains(py));
+            let (p, module_path) = if let Some(py) = py_twin {
+                (merged_stub_symbols(file, &py), "test.pyi".to_owned())
             } else {
                 parse_test_module(file, TestEnv::new())
             };
@@ -2497,6 +2834,21 @@ mod tests {
         compare_snapshot("type_check_only.expected.json", &report);
     }
 
+    /// gh-5327: Cython pure-Python mode C-level declarations are excluded,
+    /// and an extension class's `__cinit__` is reported as `__new__`.
+    #[test]
+    fn test_report_cython_pure() {
+        let report = build_module_report_for_test("cython_pure.py");
+        compare_snapshot("cython_pure.expected.json", &report);
+    }
+
+    /// gh-5327: a stub `__init__` doesn't cover `__cinit__` (the runtime `__new__`).
+    #[test]
+    fn test_report_cython_stub() {
+        let report = build_stub_module_report("cython_stub.pyi", "cython_stub.py");
+        compare_snapshot("cython_stub.expected.json", &report);
+    }
+
     /// Class method aliases: __rand__ = __and__.
     /// Current: aliases are not reported (only the original method def).
     /// Typestats: method aliases are copied as Function symbols.
@@ -2646,7 +2998,7 @@ def g(x: int) -> int:
             .with_default_require_level(Require::Everything)
             .to_state();
         let handle = handle_fn("test");
-        let symbols = ModuleSymbols::collect(&state.transaction(), &handle, false).unwrap();
+        let symbols = collect_symbols(&state.transaction(), &handle, false);
 
         // Only g should be reported; f is excluded due to @no_type_check.
         assert_eq!(symbols.functions.len(), 1);
@@ -2766,7 +3118,7 @@ def g(x: int) -> int:
         assert_eq!(handle.module(), ModuleName::unknown());
 
         let transaction = state.transaction();
-        let symbols = ModuleSymbols::collect(&transaction, &handle, false).unwrap();
+        let symbols = collect_symbols(&transaction, &handle, false);
         // The bug lives in symbol construction: FQNs must be prefixed with the module name.
         assert_eq!(symbols.functions[0].name, "__unknown__.bar");
 
@@ -2802,7 +3154,7 @@ def g(x: int) -> int:
             .to_state();
         let handle = handle_fn("__unknown__");
         let transaction = state.transaction();
-        let symbols = ModuleSymbols::collect(&transaction, &handle, false).unwrap();
+        let symbols = collect_symbols(&transaction, &handle, false);
 
         let (public_fqns, _) = compute_public_fqns(std::slice::from_ref(&handle), &transaction);
         let mut errors = Vec::new();
@@ -3021,6 +3373,212 @@ def g(x: int) -> int:
         assert!(private.path.ends_with(FILES[1].0));
     }
 
+    /// A reassigned attr inherits its base annotation's type quality even when the base's module
+    /// was solved (and its answers evicted) before the subclass's module, on each platform.
+    #[test]
+    fn test_inherited_attr_from_evicted_module() {
+        let base = r#"
+import sys
+from typing import Any
+Value = Any if sys.platform == "win32" else int
+class Base:
+    x: Value
+"#;
+        let child = r#"
+from base import Base
+class Child(Base):
+    def __init__(self) -> None:
+        self.x = 1
+"#;
+        let mut env = TestEnv::new();
+        env.add("base", base);
+        env.add("child", child);
+        let (state, handle) = env.with_run_require(Require::Exports).to_state();
+        let on = |name: &str, platform: PythonPlatform| {
+            let sys_info = SysInfo::new(PythonVersion::default(), platform);
+            Handle::new(handle(name).module(), handle(name).path().dupe(), sys_info)
+        };
+        let platforms = [PythonPlatform::linux(), PythonPlatform::windows()];
+        let children = platforms.clone().map(|p| on("child", p));
+        let collector = ModuleCollector {
+            to_collect: children.iter().map(|h| (h.dupe(), false)).collect(),
+            ..Default::default()
+        };
+        let mut transaction = state.new_transaction(Require::Exports, None);
+        transaction.set_solutions_hook(Some(Box::new(|h, transaction| {
+            collector.collect(transaction, h);
+        })));
+        let bases = platforms.map(|p| on("base", p));
+        transaction.run(&bases, Require::Errors, None);
+        for base in &bases {
+            assert!(
+                transaction.get_answers(base).is_none(),
+                "base must be evicted"
+            );
+        }
+        transaction.run(&children, Require::Errors, None);
+
+        let collected = collector.collected.lock();
+        let slots = |child: &Handle| {
+            collected[child]
+                .variables
+                .iter()
+                .find(|v| v.name == "child.Child.x")
+                .unwrap()
+                .slots
+        };
+        assert_eq!(slots(&children[0]).n_typed, 1);
+        assert_eq!(slots(&children[1]).n_any, 1);
+    }
+
+    /// Callable fields keep their direct annotations, and a nearer `Any` declaration wins over
+    /// an inherited descriptor. Both live answers and pre-eviction snapshots must agree.
+    #[test]
+    fn test_inherited_direct_annotations_live_and_evicted() {
+        let base = r#"
+from typing import Callable, ClassVar
+class Descriptor:
+    def __get__(self, obj: object, owner: type | None = None) -> int: ...
+    def __set__(self, obj: object, value: object) -> None: ...
+class Base:
+    callback: ClassVar[Callable[[], int]] = lambda: 1
+    __add__: Callable[[object], int] = lambda other: 1
+    x: Descriptor = Descriptor()
+    typed: int
+"#;
+        let middle = r#"
+from typing import Any
+from base import Base
+class Middle(Base):
+    def __init__(self) -> None:
+        self.x: Any = 1
+        self.typed = 1
+"#;
+        let child = r#"
+from middle import Middle
+class Child(Middle):
+    def __new__(cls):
+        cls.callback = lambda: 2
+        cls.__add__ = lambda other: 2
+        return super().__new__(cls)
+    def __init__(self) -> None:
+        self.x = 2
+        self.typed = 2
+        self.unannotated = 2
+"#;
+        for thread_count in [ThreadCount::Inline, TEST_THREAD_COUNT] {
+            for retention in [Require::Exports, Require::Everything] {
+                let mut env = TestEnv::new().with_thread_count(thread_count);
+                env.add("base", base);
+                env.add("middle", middle);
+                env.add("child", child);
+                let (state, handle) = env.with_run_require(Require::Exports).to_state();
+                let child_handle = handle("child");
+                let collector = ModuleCollector {
+                    to_collect: HashMap::from([(child_handle.dupe(), false)]),
+                    ..Default::default()
+                };
+                let mut transaction = state.new_transaction(Require::Exports, None);
+                transaction.set_solutions_hook(Some(Box::new(|h, transaction| {
+                    collector.collect(transaction, h);
+                })));
+                let ancestors = [handle("base"), handle("middle")];
+                let require = retention.max(Require::Errors);
+                transaction.run(&ancestors, require, None);
+                for ancestor in &ancestors {
+                    assert_eq!(
+                        transaction.get_answers(ancestor).is_some(),
+                        retention.keep_answers(),
+                        "ancestor answer retention must match the path under test",
+                    );
+                }
+                transaction.run(&[child_handle.dupe()], require, None);
+
+                let collected = collector.collected.lock();
+                let symbols = collected
+                    .get(&child_handle)
+                    .expect("child symbols must be collected");
+                for (name, expected) in [
+                    ("callback", SlotCounts::typed()),
+                    ("__add__", SlotCounts::typed()),
+                    ("x", SlotCounts::any()),
+                    ("typed", SlotCounts::typed()),
+                    ("unannotated", SlotCounts::untyped()),
+                ] {
+                    let actual = symbols
+                        .variables
+                        .iter()
+                        .find(|v| v.name == format!("child.Child.{name}"))
+                        .unwrap_or_else(|| panic!("missing attribute {name}"))
+                        .slots;
+                    assert_eq!(
+                        actual, expected,
+                        "{name}, retention={retention:?}, threads={thread_count:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Inheritance coverage follows the nearest explicit attribute annotation, even across a
+    /// property override. The property's solved field does not demand `Base.x`'s annotation.
+    #[test]
+    fn test_inherited_attr_from_unsolved_annotation() {
+        let base = r#"
+from typing import Any
+class Base:
+    x: Any
+"#;
+        let middle = r#"
+from typing import Any
+from base import Base
+class Middle(Base):
+    @property
+    def x(self) -> Any: ...
+    @x.setter
+    def x(self, value: Any) -> None: ...
+"#;
+        let child = r#"
+from middle import Middle
+class Child(Middle):
+    def __init__(self) -> None:
+        self.x = 1
+"#;
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("pyrefly.toml"),
+            "search-path = ['.']\nskip-interpreter-query = true\n",
+        )
+        .unwrap();
+        for (name, source) in [
+            ("base.py", base),
+            ("middle.py", middle),
+            ("child.py", child),
+        ] {
+            std::fs::write(dir.path().join(name), source).unwrap();
+        }
+        let globs = FilteredGlobs::new(
+            Globs::new(vec![dir.path().join("child.py").display().to_string()]).unwrap(),
+            Globs::empty(),
+            None,
+            HiddenDirFilter::Disabled,
+        );
+        let (reports, _) = collect_module_reports(
+            Box::new(globs),
+            default_config_finder(None),
+            false,
+            None,
+            false,
+            None,
+            TEST_THREAD_COUNT,
+        )
+        .unwrap();
+
+        let symbols = &reports[0].symbol_reports;
+        let slots = |name: &str| symbols.iter().find(|s| s.name() == name).unwrap().slots();
+        assert_eq!(slots("child.Child.x").n_any, 1);
+    }
+
     /// Dataclass and NamedTuple fields are IMPLICIT; methods on those classes count normally.
     #[test]
     fn test_report_schema_classes_methods() {
@@ -3059,5 +3617,99 @@ def g(x: int) -> int:
         let env = TestEnv::new_with_site_package_paths(&[&path]);
         let report = build_module_report_for_test_with_env("schema_classes_attrs.py", env);
         compare_snapshot("schema_classes_attrs.expected.json", &report);
+    }
+
+    // --- prefer-stubs end-to-end tests ---
+
+    const STUB_TEST_CONFIG: &str = "search-path = ['.']\nskip-interpreter-query = true\n";
+    /// `g` exists only in the `.py`, untyped.
+    const STUB_TEST_PY: &str = "def f() -> int: ...\ndef g(x): ...\n";
+    const STUB_TEST_PYI: &str = "def f() -> int: ...\n";
+
+    /// Run `collect_module_reports` over `dir` with `prefer_stubs` enabled.
+    fn collect_reports_with_stubs(dir: &Path) -> (Vec<ModuleReport>, Vec<Error>) {
+        let globs = FilteredGlobs::new(
+            Globs::new(vec![dir.display().to_string()]).unwrap(),
+            Globs::empty(),
+            None,
+            HiddenDirFilter::Disabled,
+        );
+        collect_module_reports(
+            Box::new(globs),
+            default_config_finder(None),
+            true,
+            None,
+            false,
+            Some(false),
+            TEST_THREAD_COUNT,
+        )
+        .unwrap()
+    }
+
+    /// One stub report: `f` typed, `g` merged as untyped with its finding in the `.py`.
+    fn assert_stub_merged_report(reports: &[ModuleReport], errors: &[Error]) {
+        let [report] = reports else {
+            panic!("expected exactly one report, got {}", reports.len());
+        };
+        assert_eq!(report.name, "foo");
+        assert!(report.path.ends_with("foo.pyi"), "{}", report.path);
+
+        let slots = |name: &str| {
+            report
+                .symbol_reports
+                .iter()
+                .find(|s| s.name() == name)
+                .unwrap_or_else(|| panic!("no symbol named {name}"))
+                .slots()
+        };
+        assert_eq!((slots("foo.f").n_typable, slots("foo.f").n_typed), (1, 1));
+        assert_eq!((slots("foo.g").n_typable, slots("foo.g").n_untyped), (2, 2));
+
+        let [error] = errors else {
+            panic!("expected exactly one finding, got {}", errors.len());
+        };
+        assert!(
+            error.msg_header().contains("foo.g"),
+            "{}",
+            error.msg_header()
+        );
+        assert!(
+            error.path().to_string().ends_with("foo.py"),
+            "{}",
+            error.path()
+        );
+    }
+
+    /// A co-located `.pyi` shadows its `.py`; uncovered `.py` symbols merge into its report.
+    #[test]
+    fn test_prefer_stubs_end_to_end() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("pyrefly.toml"), STUB_TEST_CONFIG).unwrap();
+        std::fs::write(dir.path().join("foo.py"), STUB_TEST_PY).unwrap();
+        std::fs::write(dir.path().join("foo.pyi"), STUB_TEST_PYI).unwrap();
+
+        let (reports, errors) = collect_reports_with_stubs(dir.path());
+        assert_stub_merged_report(&reports, &errors);
+    }
+
+    /// A stubs-only project's `.py` is found via site-package-path and merged the same way.
+    #[test]
+    fn test_prefer_stubs_site_package_fallback() {
+        let site = TempDir::new().unwrap();
+        std::fs::write(site.path().join("foo.py"), STUB_TEST_PY).unwrap();
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("pyrefly.toml"),
+            format!(
+                "{STUB_TEST_CONFIG}site-package-path = ['{}']\n",
+                site.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("foo.pyi"), STUB_TEST_PYI).unwrap();
+
+        let (reports, errors) = collect_reports_with_stubs(dir.path());
+        assert_stub_merged_report(&reports, &errors);
     }
 }

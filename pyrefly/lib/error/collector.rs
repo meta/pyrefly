@@ -77,6 +77,37 @@ impl ModuleErrors {
         }
     }
 
+    /// For each error, whether it is an `unknown-from-error` error that a counted error within its
+    /// range explains. Such an error reports a value whose type comes from another error, and an
+    /// error within its range is the cause or a more precise report of the same unknown value. At an
+    /// equal range, only an error of another kind counts.
+    fn unknown_from_error_explained(&mut self, counts: impl Fn(ErrorKind) -> bool) -> Vec<bool> {
+        self.cleanup();
+        // `self.items` is sorted by range, so the candidates for each error start at the first item
+        // that does not start before it.
+        self.items
+            .iter()
+            .map(|x| {
+                if x.error_kind() != ErrorKind::UnknownFromError {
+                    return false;
+                }
+                let range = x.range();
+                let first = self
+                    .items
+                    .partition_point(|y| y.range().start() < range.start());
+                // `x` itself has an equal range and the same kind, so the last condition skips it.
+                self.items[first..]
+                    .iter()
+                    .take_while(|y| y.range().start() <= range.end())
+                    .any(|y| {
+                        counts(y.error_kind())
+                            && range.contains_range(y.range())
+                            && (y.range() != range || y.error_kind() != ErrorKind::UnknownFromError)
+                    })
+            })
+            .collect()
+    }
+
     fn is_empty(&self) -> bool {
         // No need to do cleanup if it's empty.
         self.items.is_empty()
@@ -113,6 +144,10 @@ pub struct CollectedErrors {
     /// suppression filters. These participate in baseline exclusion,
     /// suppression, and min-severity filtering.
     pub ordinary: Vec<Error>,
+    /// Diagnostics at `Severity::Hint` that passed suppression filters. Hints are
+    /// meant for the IDE, so only the surfaces that can show them (the language
+    /// server, the playground and `pyrefly check`) read them.
+    pub hints: Vec<Error>,
     /// Directive diagnostics (e.g. `reveal_type`) that are always displayed to
     /// the user. Directives are never subject to baseline exclusion,
     /// suppression, or min-severity filtering.
@@ -305,7 +340,19 @@ impl ErrorCollector {
     ) {
         let mut errors = self.errors.lock();
         if !(self.module_info.is_generated() && error_config.ignore_errors_in_generated_code) {
-            for err in errors.iter() {
+            // Only errors that are shown or suppressed explain an `unknown-from-error` error, so an
+            // error whose kind is disabled never hides one. A soft error never produces an error
+            // `Any`, so only hard errors and nested `unknown-from-error` errors count.
+            let shown = |kind| error_config.display_config.severity(kind) != Severity::Ignore;
+            let explained = shown(ErrorKind::UnknownFromError).then(|| {
+                errors.unknown_from_error_explained(|kind: ErrorKind| {
+                    shown(kind) && (!kind.is_soft() || kind == ErrorKind::UnknownFromError)
+                })
+            });
+            for (i, err) in errors.iter().enumerate() {
+                if explained.as_ref().is_some_and(|explained| explained[i]) {
+                    continue;
+                }
                 if err.error_kind().is_directive() {
                     // Directives bypass suppression, baseline, and
                     // min-severity, but still respect explicit severity
@@ -319,11 +366,11 @@ impl ErrorCollector {
                 } else {
                     let effect =
                         Self::suppression_effect(err, fstring_ranges, ignore_all, error_config);
+                    let mut severity = error_config.display_config.severity(err.error_kind());
                     if effect == SuppressionEffect::Suppress {
-                        result.suppressed.push(err.clone());
+                        result.suppressed.push(err.with_severity(severity));
                         continue;
                     }
-                    let mut severity = error_config.display_config.severity(err.error_kind());
                     if effect == SuppressionEffect::DowngradeToWarning {
                         severity = severity.min(Severity::Warn);
                     }
@@ -331,6 +378,7 @@ impl ErrorCollector {
                         Severity::Error => result.ordinary.push(err.with_severity(Severity::Error)),
                         Severity::Warn => result.ordinary.push(err.with_severity(Severity::Warn)),
                         Severity::Info => result.ordinary.push(err.with_severity(Severity::Info)),
+                        Severity::Hint => result.hints.push(err.with_severity(Severity::Hint)),
                         Severity::Ignore => result.disabled.push(err.clone()),
                     }
                 }
@@ -383,7 +431,10 @@ impl ErrorCollector {
             );
             match severity {
                 Severity::Ignore => result.disabled.push(err),
-                sev => result.ordinary.push(err.with_severity(sev)),
+                Severity::Hint => result.hints.push(err.with_severity(severity)),
+                Severity::Info | Severity::Warn | Severity::Error => {
+                    result.ordinary.push(err.with_severity(severity))
+                }
             }
         }
     }
@@ -654,6 +705,41 @@ mod tests {
             errors.collect(&config).ordinary.map(|x| x.msg()),
             vec!["a", "b", "d"]
         );
+    }
+
+    #[test]
+    fn test_error_collector_keeps_hints_apart() {
+        let mi = ModuleInfo::new(
+            ModuleName::from_name(&Name::new_static("main")),
+            ModulePath::filesystem(Path::new("main.py").to_owned()),
+            Arc::new("contents".to_owned()),
+        );
+        let errors = ErrorCollector::new(mi.dupe(), ErrorStyle::Delayed);
+        add(
+            &errors,
+            TextRange::new(TextSize::new(1), TextSize::new(3)),
+            ErrorKind::BadAssignment,
+            "a".to_owned(),
+        );
+        add(
+            &errors,
+            TextRange::new(TextSize::new(2), TextSize::new(3)),
+            ErrorKind::BadMatch,
+            "b".to_owned(),
+        );
+
+        let display_config =
+            ErrorDisplayConfig::new(HashMap::from([(ErrorKind::BadAssignment, Severity::Hint)]));
+        let config = ErrorConfig::new(
+            Cow::Owned(display_config),
+            false,
+            Tool::default_enabled(),
+            TypeIgnoreUnknownTagBehavior::NoEffect,
+        );
+
+        let collected = errors.collect(&config);
+        assert_eq!(collected.ordinary.map(|x| x.msg()), vec!["b"]);
+        assert_eq!(collected.hints.map(|x| x.msg()), vec!["a"]);
     }
 
     #[test]

@@ -296,7 +296,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         function_range: TextRange,
         errors: &ErrorCollector,
     ) -> Option<FunctionKind> {
-        let validated = match dsl.validate(|expr| self.resolve_type_shape_dsl_intrinsic(expr)) {
+        let validated = match dsl.validate(
+            |expr| self.resolve_type_shape_dsl_intrinsic(expr),
+            *self.bindings().sys_info(),
+        ) {
             Ok(validated) => Arc::new(validated),
             Err(error) => {
                 self.error(
@@ -363,6 +366,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                  helper_argument_domains: Option<&[Vec<TypeShapeDslInputDomain>]>| {
                     match definition.validate_with_resolved_domains(
                         |expr| self.resolve_type_shape_dsl_intrinsic(expr),
+                        *self.bindings().sys_info(),
                         &parameter_domains,
                         helper_argument_domains,
                     ) {
@@ -660,6 +664,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             == TypeShapeDslInputDomain::Value(TypeShapeDslDomain::IntTuples)
                     }))
                     .then_some("`@type_shape_dsl_function` gufunc operands must be annotated as `IntTuples`"),
+                    TypeShapeDslExpressionKind::AxisReduce {
+                        axis_parameters,
+                        parameter_origins,
+                        ..
+                    } => {
+                        let shape_valid = parameter_origins.as_ref().is_none_or(|origins| {
+                            origins.iter().all(|parameter| {
+                                parameter_domains[*parameter]
+                                    == TypeShapeDslInputDomain::Value(TypeShapeDslDomain::IntTuple)
+                            })
+                        });
+                        let axis_valid = axis_parameters.as_ref().is_none_or(|uses| {
+                            uses.iter().all(|use_| {
+                                matches!(parameter_domains[use_.parameter()],
+                                    TypeShapeDslInputDomain::Flag(domain)
+                                        if domain.is_subset_of(type_shape_dsl_narrowable_flag_domain()))
+                            })
+                        });
+                        (!shape_valid || !axis_valid).then_some("`dsl.axis_reduce` requires an `IntTuple` shape and a Flag[int | tuple[int, ...] | None] axis")
+                    }
                     TypeShapeDslExpressionKind::Rearrange {
                         parameter_origins,
                         ..
@@ -747,6 +771,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     | TypeShapeDslExpressionKind::FlagSequenceIndex
                     | TypeShapeDslExpressionKind::FlagIntArithmetic(_)
                     | TypeShapeDslExpressionKind::DimensionArithmetic(_)
+                    | TypeShapeDslExpressionKind::IntegerAbs(_)
                     | TypeShapeDslExpressionKind::DimensionTuple
                     | TypeShapeDslExpressionKind::Conditional
                     | TypeShapeDslExpressionKind::DimensionGenerator { .. }
@@ -979,6 +1004,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let FunctionKind::Def(id) = function_kind else {
             return None;
         };
+        if id.has_toplevel_qname("builtins", "abs") {
+            return Some(TypeShapeDslIntrinsic::Abs);
+        }
         if id.has_toplevel_qname("builtins", "any") {
             return Some(TypeShapeDslIntrinsic::Any);
         }
@@ -1014,6 +1042,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
         if id.has_toplevel_qname("shape_extensions.dsl", "reduce") {
             return Some(TypeShapeDslIntrinsic::Reduce);
+        }
+        if id.has_toplevel_qname("shape_extensions.dsl", "axis_reduce") {
+            return Some(TypeShapeDslIntrinsic::AxisReduce);
         }
         if id.has_toplevel_qname("shape_extensions.dsl", "repeat") {
             return Some(TypeShapeDslIntrinsic::Repeat);

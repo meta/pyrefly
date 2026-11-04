@@ -118,15 +118,129 @@ def test_ndarray_compress_and_repeat() -> None:
     array = np.arange(6).reshape((2, 3))
 
     assert_shape(array.compress([True, False, True]).shape, (int,), runtime=(2,))
+    assert_shape(array.compress([True, False], axis=0).shape, (int, 3), runtime=(1, 3))
+    assert_shape(array.compress([True, False], axis=-1).shape, (2, int), runtime=(2, 1))
+    assert_shape(array.compress([], axis=1).shape, (2, int), runtime=(2, 0))
+    assert_shape(np.array(7).compress([True], axis=0).shape, (int,), runtime=(1,))
+    assert_shape(np.array(7).compress([True], axis=-1).shape, (int,), runtime=(1,))
     assert_type(array.compress([True, False], axis=0).dtype, np.dtype[np.intp])
-    assert_shape(array.repeat(2).shape, (int,), runtime=(12,))
+    row_out = np.empty((1, 3), dtype=np.intp)
+    flat_out = np.empty((2,), dtype=np.intp)
+    assert_type(
+        array.compress([True, False], 0, row_out),
+        np.ndarray[[1, 3], np.dtype[np.intp]],
+    )
+    assert_type(
+        array.compress([True, False, True], out=flat_out),
+        np.ndarray[[2], np.dtype[np.intp]],
+    )
+
+    def dynamic_condition(condition: list[int]) -> None:
+        assert_shape(array.compress(condition, axis=1).shape, (2, int))
+        assert_shape(array.compress(condition).shape, (int,))
+
+    assert_shape(array.repeat(2).shape, (12,))
     assert_type(array.repeat(2, axis=1).dtype, np.dtype[np.intp])
     assert array.compress([True, False], axis=0).shape == (1, 3)
-    assert array.repeat(2, axis=1).shape == (2, 6)
+    assert_shape(array.repeat(2, axis=1).shape, (2, 6))
+    assert_shape(array.repeat(3, axis=-2).shape, (6, 3))
+    assert_shape(array.repeat([1, 2, 3], axis=1).shape, (2, 6))
+    assert_shape(array.repeat((1, 2, 3), axis=-1).shape, (2, 6))
+    assert_shape(array.repeat([2], axis=1).shape, (2, 6))
+    assert_shape(array.repeat([1, 2, 3, 4, 5, 6]).shape, (21,))
+    assert_shape(np.array(7).repeat(2, axis=0).shape, (2,))
+
+    def dynamic_counts(counts: list[int]) -> None:
+        assert_shape(array.repeat(counts, axis=1).shape, (2, int))
+        assert_shape(array.repeat(counts).shape, (int,))
+        assert_shape(array.repeat(np.array(counts), axis=1).shape, (2, int))
 
     if TYPE_CHECKING:
-        array.repeat("twice")  # E: Argument `Literal['twice']` is not assignable
+        array.repeat("twice")  # E: No matching overload
+        array.repeat(2, axis=2)  # E: axis is out of bounds
+        array.repeat(-1)  # E: repeats may not contain negative values
+        array.repeat([1, 2], axis=1)  # E: repeats must match the selected axis
+        array.repeat([1, -1, 1], axis=1)  # E: repeats may not contain negative values
         array.compress([1], axis="first")  # E: No matching overload
+        array.compress([1], axis=2)  # E: axis out of bounds
+
+
+def test_ndarray_choose_and_take() -> None:
+    indices = np.array([[0, 1], [1, 0]])
+    choices = (np.ones((2, 2)), np.zeros((2, 2)))
+    selected = indices.choose(choices)
+
+    assert_type(selected, np.ndarray[IntTuple])
+    assert selected.shape == (2, 2)
+    out = np.empty((2, 2))
+    assert_type(
+        indices.choose(choices, out=out), np.ndarray[[2, 2], np.dtype[np.float64]]
+    )
+    assert_shape(indices.take(np.array([[0, 1]])).shape, (1, 2))
+    assert_shape(indices.take([0, 1]).shape, (int,), runtime=(2,))
+    assert_type(indices.take(0), np.generic)
+    assert_type(
+        np.ones((2, 2), dtype=np.int32).take(0, axis=1).dtype, np.dtype[np.int32]
+    )
+    assert_shape(indices.take([0, 1], axis=0).shape, (int, 2), runtime=(2, 2))
+    assert_shape(indices.take(np.array([[0, 1]]), axis=-1).shape, (2, 1, 2))
+    assert_shape(indices.take(0, axis=1).shape, (2,))
+    assert_type(
+        indices.take([0, 1], axis=0, out=out), np.ndarray[[2, 2], np.dtype[np.float64]]
+    )
+
+    if TYPE_CHECKING:
+        indices.choose(choices, mode="invalid")  # E: No matching overload
+        indices.take([0], mode="invalid")  # E: No matching overload
+        indices.take([0], axis=2)  # E: axis out of bounds
+
+
+def test_ndarray_diagonal() -> None:
+    array = np.ones((2, 3, 4))
+
+    assert_shape(array.diagonal().shape, (4, 2))
+    assert_shape(array.diagonal(1, 1, 2).shape, (2, 3))
+    assert_shape(array.diagonal(-1, 0, -1).shape, (3, 1))
+    assert_shape(array.diagonal(3, 1, 2).shape, (2, 1))
+    assert_shape(array.diagonal(5, 1, 2).shape, (2, 0))
+    assert_shape(array.diagonal(1, 2, 1).shape, (2, 2))
+    assert_type(array.diagonal().dtype, np.dtype[np.float64])
+
+    if TYPE_CHECKING:
+        np.ones((3,)).diagonal()  # E: diagonal requires at least two dimensions
+        array.diagonal(axis1=0, axis2=0)  # E: diagonal axes must be distinct
+        array.diagonal(axis2=3)  # E: diagonal axis out of bounds
+
+
+def test_ndarray_trace() -> None:
+    array = np.ones((2, 3, 4))
+
+    assert_shape(array.trace().shape, (4,))
+    assert_shape(array.trace(axis1=1, axis2=-1).shape, (2,))
+    assert_type(np.ones((2, 3)).trace(), np.generic)
+    assert_type(array.trace(out=np.zeros((4,))), np.ndarray[[4], np.dtype[np.float64]])
+
+    if TYPE_CHECKING:
+        array.trace(axis1=0, axis2=0)  # E: diagonal axes must be distinct
+        np.ones((3,)).trace()  # E: diagonal requires at least two dimensions
+
+
+def test_ndarray_dot() -> None:
+    vector = np.ones((3,))
+    matrix = np.ones((2, 3))
+    right = np.ones((3, 4))
+
+    assert_type(vector.dot(vector), np.generic)
+    assert_shape(vector.dot(right).shape, (4,))
+    assert_shape(matrix.dot(vector).shape, (2,))
+    assert_shape(matrix.dot(right).shape, (2, 4))
+    assert_shape(np.ones((2, 5, 3)).dot(np.ones((6, 3, 4))).shape, (2, 5, 6, 4))
+    assert_shape(matrix.dot(2).shape, (2, 3))
+    assert_shape(vector.dot(np.ones(())).shape, (3,))
+
+    if TYPE_CHECKING:
+        matrix.dot(np.ones((2, 4)))  # E: dot contraction dimensions must agree
+        vector.dot(np.ones((2,)))  # E: dot contraction dimensions must agree
 
 
 def test_ndarray_matrix_transpose_and_swapaxes() -> None:
