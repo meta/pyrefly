@@ -171,7 +171,7 @@ pub struct TypeDisplayContext<'a> {
     always_display_expanded_unions: bool,
     render_self_type_as_self: bool,
     /// Render a type that has no annotation syntax as one that does: a schema form as its plain
-    /// class.
+    /// class, and an intersection as its fallback type.
     use_annotation_syntax: bool,
     /// Render types as source annotations: valid Python that references every name it uses.
     render_source_annotation: bool,
@@ -604,7 +604,9 @@ impl<'a> TypeDisplayContext<'a> {
     /// written with the `|` syntax.
     fn needs_parens_in_sequence(&self, t: &Type) -> bool {
         match t {
-            Type::Callable(_) | Type::Function(_) | Type::Intersect(_) => true,
+            Type::Callable(_) | Type::Function(_) => true,
+            Type::Intersect(x) if self.use_annotation_syntax => self.needs_parens_in_sequence(&x.1),
+            Type::Intersect(_) => true,
             // Overloads are already wrapped in `Overload[...]`, and query mode wraps bound methods in `BoundMethod[...]`.
             Type::BoundMethod(m) => {
                 !matches!(m.func, BoundMethodType::Overload(_))
@@ -1563,6 +1565,9 @@ impl<'a> TypeDisplayContext<'a> {
                     // No literals, just use the helper directly
                     self.fmt_type_sequence(union_members, " | ", true, output)
                 }
+            }
+            Type::Intersect(x) if self.use_annotation_syntax => {
+                self.fmt_helper_generic(&x.1, false, output)
             }
             Type::Intersect(x) => self.fmt_type_sequence(x.0.iter(), " & ", true, output),
             Type::Tuple(t) => {
@@ -3533,6 +3538,20 @@ def overloaded_func[T](
         ]);
         let ctx = TypeDisplayContext::new(&[&x]);
         assert_eq!(ctx.display(&x).to_string(), "(Any & LiteralString) | None");
+    }
+
+    #[test]
+    fn test_intersection_annotation_syntax() {
+        let x = Type::union(vec![
+            Type::Intersect(Box::new((
+                vec![Type::LiteralString(LitStyle::Implicit), Type::None],
+                Type::LiteralString(LitStyle::Implicit),
+            ))),
+            Type::None,
+        ]);
+        let mut ctx = TypeDisplayContext::new(&[&x]);
+        ctx.use_annotation_syntax();
+        assert_eq!(ctx.display(&x).to_string(), "LiteralString | None");
     }
 
     #[test]
