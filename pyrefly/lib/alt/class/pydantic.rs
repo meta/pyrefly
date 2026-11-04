@@ -1295,9 +1295,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 range,
                 ErrorKind::BadArgumentType,
                 format!(
-                    "Argument value `{}` is not valid for Pydantic `bool` field `{}`",
+                    "Argument value `{}` is not valid for Pydantic field `{}` with type `{}`",
                     self.for_display(value_ty.clone()),
-                    info.field_name
+                    info.field_name,
+                    self.for_display(field_ty.clone()),
                 ),
             );
         }

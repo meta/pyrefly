@@ -320,7 +320,7 @@ class Model(BaseModel):
     scalar: str | bool
     model: Something | OtherThing
 
-Model(scalar=5, model=Something())  # E: Argument value `Literal[5]` is not valid for Pydantic `bool` field `scalar`
+Model(scalar=5, model=Something())  # E: Argument value `Literal[5]` is not valid for Pydantic field `scalar` with type `bool | str`
 Model(scalar="value", model=5)  # E: Argument `Literal[5]` is not assignable to parameter `model`
 
 class BoolModel(BaseModel):
@@ -328,8 +328,8 @@ class BoolModel(BaseModel):
 
 BoolModel(value=0)
 BoolModel(value="yes")
-BoolModel(value=2)  # E: Argument value `Literal[2]` is not valid for Pydantic `bool` field `value`
-BoolModel(value="maybe")  # E: Argument value `Literal['maybe']` is not valid for Pydantic `bool` field `value`
+BoolModel(value=2)  # E: Argument value `Literal[2]` is not valid for Pydantic field `value` with type `bool`
+BoolModel(value="maybe")  # E: Argument value `Literal['maybe']` is not valid for Pydantic field `value` with type `bool`
 
 class IntOrBoolModel(BaseModel):
     value: int | bool
