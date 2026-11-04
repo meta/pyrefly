@@ -66,6 +66,32 @@ def f(value: int) -> None:
 );
 
 testcase!(
+    test_constructor_prepared_argument_unpacking,
+    r#"
+from typing import TypedDict, assert_type
+
+class Receiver[T]:
+    def __init__(self, value: T, other: object) -> None: ...
+
+class Arguments(TypedDict):
+    value: int
+    other: object
+
+def positional(value: int) -> tuple[int, object]:
+    return value, None
+
+def keywords(value: int) -> Arguments:
+    return {"value": value, "other": None}
+
+def f(value: int) -> None:
+    starred: Receiver[str] | Receiver[int] = Receiver(*positional(value))
+    unpacked: Receiver[str] | Receiver[int] = Receiver(**keywords(value))
+    assert_type(starred, Receiver[str] | Receiver[int])
+    assert_type(unpacked, Receiver[str] | Receiver[int])
+"#,
+);
+
+testcase!(
     test_deeply_nested_init_only_constructor_hints,
     r#"
 from typing import assert_type

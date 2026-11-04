@@ -669,6 +669,15 @@ fn constructor_dispatch(c: &mut Criterion) {
             0,
         );
     }
+    let calls = joined(256, "\n", |i| format!("box{i}: Box[int] = Box(make())"));
+    measure(
+        c,
+        "constructor_single_hint_factory_arguments_256",
+        format!(
+            "class Box[T]:\n    def __init__(self, value: T) -> None: ...\ndef make() -> int: ...\n{calls}"
+        ),
+        0,
+    );
 }
 
 fn pandas_method_dispatch(c: &mut Criterion) {
