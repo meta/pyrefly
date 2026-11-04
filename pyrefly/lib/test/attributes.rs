@@ -794,6 +794,84 @@ class Impl(P):
 );
 
 testcase!(
+    test_class_body_initialization_termination,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def coin() -> bool: ...
+def proceed() -> None: ...
+def risky() -> int: ...
+def mode() -> str: ...
+
+class Proceeds:
+    if coin():
+        value = 1  # E: Attribute `value` may be uninitialized
+    else:
+        proceed()
+
+class Raises:
+    if coin():
+        value = 1
+    else:
+        raise ValueError()
+
+class TryAssignsOnBothPaths:
+    try:
+        value = risky()
+    except ValueError:
+        value = 0
+
+class TryMissingInHandler:
+    try:
+        value = risky()  # E: Attribute `value` may be uninitialized
+    except ValueError:
+        pass
+
+class MatchWithoutWildcard:
+    match mode():
+        case "a":
+            value = 1  # E: Attribute `value` may be uninitialized
+        case "b":
+            value = 2
+
+class MatchWithWildcard:
+    match mode():
+        case "a":
+            value = 1
+        case _:
+            value = 2
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_any_base,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import Any
+from missing_module import Unknown  # E: Cannot find module `missing_module`
+
+def coin() -> bool: ...
+
+AnyBase: Any = object
+
+class FromUnresolved(Unknown):
+    if coin():
+        value = 1
+
+class FromAny(AnyBase):
+    if coin():
+        value = 1
+
+    def __init__(self) -> None:
+        if coin():
+            self.instance_value = 1
+
+class Known:
+    if coin():
+        value = 1  # E: Attribute `value` may be uninitialized
+"#,
+);
+
+testcase!(
     test_conditional_method_assignment_initialization,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"

@@ -3296,12 +3296,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 });
                 let inherited_or_dynamic = !initialized
                     && self.get_idx(*class).0.as_ref().is_some_and(|cls| {
+                        let metadata = self.get_metadata_for_class(cls);
+                        // An unknown base may define the attribute.
+                        metadata.has_base_any()
                         // Some classes initialize annotated fields themselves, and subclass
                         // bodies usually fill a metaclass's annotated attributes. A `ClassVar`
                         // declaration is not an instance attribute, and assigning it through
                         // `self` is reported separately.
-                        declared_annotation.is_some_and(|annot| {
-                            let metadata = self.get_metadata_for_class(cls);
+                        || declared_annotation.is_some_and(|annot| {
                             metadata.initializes_annotated_fields()
                                 || metadata.is_metaclass()
                                 || self
