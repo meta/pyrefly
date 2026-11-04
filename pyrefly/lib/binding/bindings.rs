@@ -267,6 +267,54 @@ impl InitializedInFlow {
     }
 }
 
+/// Initialization on every path through a control-flow merge.
+#[derive(Debug, Clone)]
+pub enum InitializationStatus {
+    Initialized,
+    Uninitialized,
+    /// The latest merges on the paths that miss the assignment, as for
+    /// `InitializedInFlow::DeferredCheck`. Initialized unless one of those paths continues.
+    Deferred(Vec<UnsetNodeId>),
+}
+
+impl InitializationStatus {
+    pub fn is_initialized(&self, some_path_continues: impl Fn(&[UnsetNodeId]) -> bool) -> bool {
+        match self {
+            Self::Initialized => true,
+            Self::Uninitialized => false,
+            Self::Deferred(nodes) => !some_path_continues(nodes),
+        }
+    }
+}
+
+impl From<InitializedInFlow> for InitializationStatus {
+    fn from(initialized: InitializedInFlow) -> Self {
+        match initialized {
+            InitializedInFlow::Yes => Self::Initialized,
+            InitializedInFlow::Conditionally | InitializedInFlow::No => Self::Uninitialized,
+            InitializedInFlow::DeferredCheck(nodes) => Self::Deferred(nodes),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum InitializedInClass {
+    Yes,
+    /// Any of these flows can establish initialization.
+    /// An empty list means no flow guarantees initialization.
+    IfAny(Vec<InitializationStatus>),
+}
+
+impl From<InitializationStatus> for InitializedInClass {
+    fn from(initialized: InitializationStatus) -> Self {
+        match initialized {
+            InitializationStatus::Initialized => Self::Yes,
+            InitializationStatus::Uninitialized => Self::IfAny(Vec::new()),
+            deferred @ InitializationStatus::Deferred(_) => Self::IfAny(vec![deferred]),
+        }
+    }
+}
+
 pub type BindingEntry<K> = (Index<K>, IndexMap<K, <K as Keyed>::Value>);
 
 table! {

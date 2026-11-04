@@ -75,6 +75,7 @@ use crate::binding::binding::KeyTParams;
 use crate::binding::binding::KeyVariance;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
+use crate::binding::bindings::InitializedInClass;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::django::collect_django_queryset_only;
 use crate::binding::expr::Usage;
@@ -472,7 +473,7 @@ impl<'a> BindingsBuilder<'a> {
             &NestingContext::class(ShortIdentifier::new(&x.name), parent.dupe()),
         );
         self.finish_classmethod_receivers();
-        let (field_definitions, nn_module_registrations, uninitialized_fields, redefinitions) =
+        let (field_definitions, nn_module_registrations, redefinitions) =
             self.scopes.finish_class_and_get_field_definitions();
         for (name, new, existing) in redefinitions {
             self.insert_binding(
@@ -497,7 +498,7 @@ impl<'a> BindingsBuilder<'a> {
         let django_field_info = self.extract_django_fields_from_class_body(&field_definitions);
         let mut fields = SmallMap::with_capacity(field_definitions.len());
         let mut django_relation_fields = Vec::new();
-        for (name, (definition, range)) in field_definitions.into_iter_hashed() {
+        for (name, (definition, range, initialized)) in field_definitions.into_iter_hashed() {
             if let ClassFieldDefinition::AssignedInBody { value, .. } = &definition
                 && let ExprOrBinding::Expr(e) = value.as_ref()
             {
@@ -523,7 +524,7 @@ impl<'a> BindingsBuilder<'a> {
 
             // Stub files declare attributes without runtime initialization.
             if !self.module_info.path().is_interface()
-                && let Some(unset_nodes) = uninitialized_fields.get(name.key())
+                && let InitializedInClass::IfAny(initializations) = initialized
             {
                 self.insert_binding(
                     KeyExpect::UninitializedAttributeCheck(range),
@@ -531,7 +532,7 @@ impl<'a> BindingsBuilder<'a> {
                         name: name.key().clone(),
                         range,
                         class: class_indices.class_idx,
-                        unset_nodes: unset_nodes.clone(),
+                        initializations,
                     },
                 );
             }

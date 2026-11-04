@@ -3287,11 +3287,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 name,
                 range,
                 class,
-                unset_nodes,
+                initializations,
             } => {
-                let initialized = unset_nodes
-                    .as_ref()
-                    .is_some_and(|nodes| !self.some_unset_path_continues(nodes));
+                let initialized = initializations.iter().any(|initialized| {
+                    initialized.is_initialized(|nodes| self.some_unset_path_continues(nodes))
+                });
                 let inherited = !initialized
                     && self.get_idx(*class).0.as_ref().is_some_and(|cls| {
                         self.get_mro_for_class(cls)

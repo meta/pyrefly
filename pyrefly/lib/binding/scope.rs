@@ -71,6 +71,8 @@ use crate::binding::binding::SuppressedException;
 use crate::binding::bindings::BindingTable;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
+use crate::binding::bindings::InitializationStatus;
+use crate::binding::bindings::InitializedInClass;
 use crate::binding::bindings::InitializedInFlow;
 use crate::binding::bindings::UnsetNodeId;
 use crate::binding::bindings::UnsetNodes;
@@ -3505,19 +3507,14 @@ impl Scopes {
     ///   coming from self-assignment in methods. If both occur, only the class body
     ///   definition is tracked.
     /// - Panics if the current scope is not a class body.
-    ///
-    /// The final map contains possibly uninitialized class-body fields. Its optional
-    /// `UnsetNode`s can prove that every path without an assignment terminates.
     pub fn finish_class_and_get_field_definitions(
         &mut self,
     ) -> (
-        SmallMap<Name, (ClassFieldDefinition, TextRange)>,
+        SmallMap<Name, (ClassFieldDefinition, TextRange, InitializedInClass)>,
         NNModuleRegistrations,
-        SmallMap<Name, Option<Vec<UnsetNodeId>>>,
         Vec<(Name, Idx<KeyAnnotation>, Idx<KeyAnnotation>)>,
     ) {
         let mut field_definitions = SmallMap::new();
-        let mut uninitialized_fields = SmallMap::new();
         let class_body = self.pop();
         let mut class_scope = {
             if let ScopeKind::Class(class_scope) = class_body.kind {
@@ -3627,17 +3624,22 @@ impl Scopes {
                             definition: value.idx,
                         },
                     };
-                    match &value.style {
-                        _ if static_info.function_def_only => {}
-                        FlowStyle::PossiblyUninitialized => {
-                            uninitialized_fields.insert_hashed(name.owned(), None);
-                        }
+                    let initialized = match &value.style {
+                        _ if static_info.function_def_only => InitializedInFlow::Yes,
+                        FlowStyle::PossiblyUninitialized => InitializedInFlow::Conditionally,
                         FlowStyle::MaybeInitialized(nodes) => {
-                            uninitialized_fields.insert_hashed(name.owned(), Some(nodes.clone()));
+                            InitializedInFlow::DeferredCheck(nodes.clone())
                         }
-                        _ => {}
-                    }
-                    field_definitions.insert_hashed(name.owned(), (definition, static_info.range));
+                        _ => InitializedInFlow::Yes,
+                    };
+                    field_definitions.insert_hashed(
+                        name.owned(),
+                        (
+                            definition,
+                            static_info.range,
+                            InitializationStatus::from(initialized).into(),
+                        ),
+                    );
                 }
             });
         // Merge assignments from different methods.
@@ -3654,6 +3656,7 @@ impl Scopes {
                         receiver_kind: existing_receiver,
                         has_instance_write: existing_instance_write,
                     },
+                    _,
                     _,
                 )) = field_definitions.get_mut(name.key())
                 {
@@ -3696,17 +3699,14 @@ impl Scopes {
                                 ),
                             },
                             range,
+                            // Method assignments are not checked for initialization.
+                            InitializedInClass::Yes,
                         ),
                     );
                 }
             },
         );
-        (
-            field_definitions,
-            nn_module_registrations,
-            uninitialized_fields,
-            redefinitions,
-        )
+        (field_definitions, nn_module_registrations, redefinitions)
     }
 
     /// Return a pair Some((method_name, class_key)) if we are currently in a method

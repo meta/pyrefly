@@ -77,6 +77,7 @@ use crate::binding::base_class::BaseClassGeneric;
 use crate::binding::bindings::BindingEntry;
 use crate::binding::bindings::BindingTable;
 use crate::binding::bindings::Bindings;
+use crate::binding::bindings::InitializationStatus;
 use crate::binding::bindings::UnsetNodeId;
 use crate::binding::classmethod::MethodReceiverKind;
 use crate::binding::django::DjangoFieldInfo;
@@ -1381,10 +1382,8 @@ pub enum BindingExpect {
         name: Name,
         range: TextRange,
         class: Idx<KeyClass>,
-        /// The latest merges on the paths on which the attribute is unset, as for
-        /// `UninitializedCheck`. `None` means some path has no termination key, so the attribute
-        /// may be uninitialized.
-        unset_nodes: Option<Vec<UnsetNodeId>>,
+        /// Any of these flows can establish initialization.
+        initializations: Vec<InitializationStatus>,
     },
     /// Check for forward reference string literal in union type.
     /// At runtime, `type.__or__` cannot handle string literals, so expressions
@@ -1561,7 +1560,7 @@ impl DisplayWith<Bindings> for BindingExpect {
                 name,
                 range,
                 class,
-                unset_nodes,
+                initializations,
             } => {
                 write!(
                     f,
@@ -1569,7 +1568,7 @@ impl DisplayWith<Bindings> for BindingExpect {
                     name,
                     ctx.module().display(range),
                     class,
-                    unset_nodes
+                    initializations
                 )
             }
             Self::ForwardRefUnion {
