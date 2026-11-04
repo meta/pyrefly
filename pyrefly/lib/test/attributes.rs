@@ -104,7 +104,6 @@ class Helper:
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_inherited,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -119,7 +118,7 @@ class Child(Base):
         if t is not None:
             self.timeout = t
             self.value = t
-            self.own = t
+            self.own = t  # E: Attribute `own` may be uninitialized
 
 class Grandchild(Child):
     def __init__(self, t: int | None = None) -> None:
@@ -134,7 +133,7 @@ class ClassBody(Base):
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
+    bug = "`Never` calls in methods do not end paths, and paths that end in an explicit return are not checked",
     test_attribute_initialization_trailing_noreturn,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -148,7 +147,7 @@ def proceed() -> None: ...
 class TrailingCall:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         stop()
 
 class TrailingRaise:
@@ -160,7 +159,7 @@ class TrailingRaise:
 class DeferredThenStop:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         else:
             proceed()
         stop()
@@ -168,7 +167,7 @@ class DeferredThenStop:
 class DeferredThenProceed:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         else:
             stop()
         proceed()
@@ -216,7 +215,7 @@ class NotCutOff:
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
+    bug = "Paths that end in an explicit return are not checked",
     test_attribute_initialization_while_true_return,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -243,14 +242,14 @@ class ReturnOrBreak:
     def __init__(self, flag: bool) -> None:
         while True:
             if flag:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
                 return
             break
 "#,
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
+    bug = "Assignments in nested functions initialize the enclosing method's attributes",
     test_attribute_initialization_nested_function,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -287,7 +286,7 @@ class NestedReturn:
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
+    bug = "`Never` calls in methods do not end paths, and deleting an attribute does not remove its initialization",
     test_attribute_initialization_control_flow,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -304,7 +303,7 @@ class TryExcept:
 class TryExceptMissing:
     def __init__(self, raw: str) -> None:
         try:
-            self.value = int(raw)
+            self.value = int(raw)  # E: Attribute `value` may be uninitialized
         except ValueError:
             pass
 
@@ -324,13 +323,13 @@ class WithConditional:
     def __init__(self, flag: bool) -> None:
         with nullcontext():
             if flag:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
 
 class Match:
     def __init__(self, kind: Literal["a", "b"]) -> None:
         match kind:
             case "a":
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
             case "b":
                 self.value = 2
 
@@ -338,7 +337,7 @@ class MatchMissing:
     def __init__(self, kind: str) -> None:
         match kind:
             case "a":
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
 
 class Deleted:
     def __init__(self) -> None:
@@ -360,7 +359,6 @@ class Reassigned:
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_class_conditions_and_hooks,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -390,7 +388,7 @@ class ConditionalPostInit:
     flag: bool
     def __post_init__(self) -> None:
         if self.flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
 
 class SubclassHook:
     def __init_subclass__(cls) -> None:
@@ -399,7 +397,7 @@ class SubclassHook:
 class ConditionalSubclassHook:
     def __init_subclass__(cls, flag: bool = False) -> None:
         if flag:
-            cls.value = 1
+            cls.value = 1  # E: Attribute `value` may be uninitialized
 
 class ClassLoop:
     for value in [1]:
@@ -471,7 +469,6 @@ C(True).missing  # E: Object of class `C` has no attribute `missing`
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_possibly_uninitialized_attribute_suppression,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -479,14 +476,13 @@ class C:
     def __init__(self, flag: bool) -> None:
         if flag:
             self.suppressed = 1  # pyrefly: ignore[possibly-uninitialized-attribute]
-            self.reported = 1  # pyrefly: ignore[missing-attribute]
+            self.reported = 1  # pyrefly: ignore[missing-attribute]  # E: Attribute `reported` may be uninitialized
 
 C(True).missing  # pyrefly: ignore[possibly-uninitialized-attribute]  # E: Object of class `C` has no attribute `missing`
 "#,
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_possibly_uninitialized_attribute_stub,
     TestEnv::one_with_path(
         "foo",
@@ -525,7 +521,7 @@ class Implementation:
 
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.instance_value = 1
+            self.instance_value = 1  # E: Attribute `instance_value` may be uninitialized
 "#,
 );
 
@@ -806,7 +802,7 @@ def f(a: A):
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
+    bug = "Only the first method that assigns an attribute is checked for initialization",
     test_conditional_attribute_initialized_in_helper,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -817,7 +813,7 @@ class DelegatingInit:
         if cfg is None:
             self._load_defaults()
         else:
-            self.cfg = cfg
+            self.cfg = cfg  # E: Attribute `cfg` may be uninitialized
 
     def _load_defaults(self) -> None:
         self.cfg = 0
@@ -829,12 +825,12 @@ class HelperFirst:
 
     def __init__(self, cfg: int | None = None) -> None:
         if cfg is not None:
-            self.cfg = cfg
+            self.cfg = cfg  # E: Attribute `cfg` may be uninitialized
 
 class ConditionalHelper:
     def __init__(self, cfg: int | None = None) -> None:
         if cfg is not None:
-            self.cfg = cfg
+            self.cfg = cfg  # E: Attribute `cfg` may be uninitialized
 
     def _load_defaults(self, enabled: bool) -> None:
         if enabled:
@@ -844,7 +840,7 @@ class ConditionalHelper:
 class IncompatibleHelper:
     def __init__(self, cfg: int | None = None) -> None:
         if cfg is not None:
-            self.cfg = cfg
+            self.cfg = cfg  # E: Attribute `cfg` may be uninitialized
 
     def _load_defaults(self) -> None:
         self.cfg = "bad"  # E: `Literal['bad']` is not assignable to attribute `cfg` with type `int`
@@ -869,7 +865,7 @@ def f(a: A):
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
+    bug = "`Never` calls in methods do not end paths, and only the first method that assigns an attribute is checked",
     test_attribute_initialization_deferred_methods,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -883,7 +879,7 @@ def proceed() -> None: ...
 class ConstructorTerminates:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         else:
             stop()
 
@@ -896,7 +892,7 @@ class ConstructorTerminates:
 class HelperTerminates:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         else:
             proceed()
 
@@ -909,7 +905,7 @@ class HelperTerminates:
 class NeitherTerminates:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         else:
             proceed()
 
@@ -922,7 +918,7 @@ class NeitherTerminates:
 class ConditionalHelper:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         else:
             stop()
 
@@ -933,7 +929,7 @@ class ConditionalHelper:
 class ConditionalConstructor:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
 
     def initialize(self, flag: bool) -> None:
         if flag:
@@ -944,7 +940,7 @@ class ConditionalConstructor:
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
+    bug = "`Never` calls in methods do not end paths, and loops that may run zero times are treated as running",
     test_attribute_initialization_loops,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -980,14 +976,14 @@ class ConditionalContinue:
         for value in [1]:
             if flag:
                 continue
-            self.value = value
+            self.value = value  # E: Attribute `value` may be uninitialized
 
 class ConditionalBreak:
     def __init__(self, flag: bool) -> None:
         while True:
             if flag:
                 break
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
             break
 
 class LoopElse:
@@ -1000,7 +996,7 @@ class LoopElse:
 class DeferredBeforeLoop:
     def __init__(self, flag: bool, values: list[int]) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         else:
             stop()
         for value in values:
@@ -1010,7 +1006,7 @@ class DeferredInLoop:
     def __init__(self, flag: bool) -> None:
         for value in [1]:
             if flag:
-                self.value = value
+                self.value = value  # E: Attribute `value` may be uninitialized
             else:
                 stop()
 
@@ -1021,7 +1017,7 @@ assert_type(LoopElse([]).value, int)
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
+    bug = "`Never` calls in methods do not end paths, and paths that end in an explicit return are not checked",
     test_attribute_initialization_deferred_return_paths,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -1036,7 +1032,7 @@ class AllPathsTerminate:
     def __init__(self, early: bool, flag: bool) -> None:
         if early:
             if flag:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
             else:
                 stop()
             return
@@ -1049,7 +1045,7 @@ class EarlyPathContinues:
     def __init__(self, early: bool, flag: bool) -> None:
         if early:
             if flag:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
             else:
                 proceed()
             return
@@ -1062,7 +1058,7 @@ class FinalPathContinues:
     def __init__(self, early: bool, flag: bool) -> None:
         if early:
             if flag:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
             else:
                 stop()
             return
@@ -5444,5 +5440,26 @@ class C:
         return super().__new__(cls)
 
 _ = C().x
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_unreachable_loop_exit,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+class LoopReturns:
+    def __init__(self) -> None:
+        for _ in [1]:
+            self.value = 1
+            return
+
+class LoopReturnsInBranch:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            for _ in [1]:
+                self.value = 1
+                return
+        else:
+            self.value = 2
 "#,
 );

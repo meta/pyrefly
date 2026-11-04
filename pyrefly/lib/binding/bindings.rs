@@ -306,7 +306,9 @@ impl InitializedInFlow {
 /// Initialization on every path through a control-flow merge.
 #[derive(Debug, Clone)]
 pub enum InitializationStatus {
+    /// Every path initializes the attribute.
     Initialized,
+    /// Some path completes without initializing the attribute.
     Uninitialized,
     /// The latest merges on the paths that miss the assignment, as for
     /// `InitializedInFlow::DeferredCheck`. Initialized unless one of those paths continues.
@@ -390,6 +392,7 @@ impl From<InitializedInFlow> for InitializationStatus {
 pub enum InitializedInClass {
     Yes,
     /// Any of these flows can establish initialization.
+    /// Class-body definitions are checked separately and never merge with methods.
     /// An empty list means no flow guarantees initialization.
     IfAny(Vec<InitializationStatus>),
 }

@@ -1377,7 +1377,7 @@ pub enum BindingExpect {
         /// reaches the use, the variable may be uninitialized.
         unset_nodes: Vec<UnsetNodeId>,
     },
-    /// Check whether a class-body attribute is initialized on every completing path.
+    /// Check whether an attribute is initialized on every completing path.
     UninitializedAttributeCheck {
         name: Name,
         range: TextRange,

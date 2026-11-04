@@ -2370,7 +2370,9 @@ impl Scopes {
                     .instance_attributes
                     .into_iter()
                     .map(|(name, attribute)| {
-                        let final_flow = (!scope.flow.has_terminated).then_some(&scope.flow);
+                        let final_flow = (!scope.flow.has_terminated
+                            && !scope.flow.is_definitely_unreachable)
+                            .then_some(&scope.flow);
                         let initialized = InitializationStatus::merge(
                             &mut self.unset_nodes,
                             final_flow.into_iter().map(|flow| {
@@ -3689,7 +3691,7 @@ impl Scopes {
                 method,
                 MethodAttribute {
                     attribute: InstanceAttribute(values, annotation, range, receiver_kind),
-                    ..
+                    initialized,
                 },
             )| {
                 if let Some((
@@ -3743,8 +3745,7 @@ impl Scopes {
                                 ),
                             },
                             range,
-                            // Method assignments are not checked for initialization yet.
-                            InitializedInClass::Yes,
+                            initialized.into(),
                         ),
                     );
                 }
@@ -4876,8 +4877,11 @@ impl<'a> BindingsBuilder<'a> {
 
         // Each reachable path must initialize an attribute.
         // If no loop path survives, retain the pre-loop state as the local flow does.
+        // A flow can be definitely unreachable without having terminated, such as after a loop
+        // that always runs and always exits through `return`.
         let attribute_flows = flows
             .iter()
+            .filter(|flow| !flow.is_definitely_unreachable)
             .chain((merge_style.is_loop() && flows.is_empty()).then_some(&base));
         let mut attribute_names = SmallSet::new();
         for flow in attribute_flows.clone() {

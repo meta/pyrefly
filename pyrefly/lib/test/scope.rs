@@ -1865,7 +1865,7 @@ def f():
 
 // https://github.com/facebook/pyrefly/issues/4318
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
+    bug = "`Never` calls in methods do not end paths; bare annotations, explicit returns, and `__getattr__` fallbacks are not handled",
     test_conditionally_defined_class_member,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -1898,7 +1898,7 @@ class Instance:
         else:
             self.complete = 2
         if coin():
-            self.partial = 1
+            self.partial = 1  # E: Attribute `partial` may be uninitialized
 
 class DynamicInstance:
     if coin():
@@ -1908,7 +1908,7 @@ class DynamicInstance:
 
     def __init__(self) -> None:
         if coin():
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
 
 class CompleteWithReturn:
     def __init__(self) -> None:
@@ -1930,7 +1930,7 @@ class BareAnnotation:
 class CompleteWithNever:
     def __init__(self) -> None:
         if coin():
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         else:
             stop()
 
