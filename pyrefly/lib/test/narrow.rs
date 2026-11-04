@@ -1552,6 +1552,94 @@ def f(x: Cat | Dog):
 );
 
 testcase!(
+    test_typeguard_keyword_argument,
+    r#"
+from typing import TypeGuard, TypeIs, assert_type, overload
+
+def is_str(x: str | None) -> TypeGuard[str]:
+    return x is not None
+
+def is_str_is(x: str | None) -> TypeIs[str]:
+    return x is not None
+
+def need_str(x: str) -> None: ...
+
+def kw_guard(x: str | None) -> None:
+    if is_str(x=x):
+        assert_type(x, str)
+    else:
+        assert_type(x, str | None)
+
+def kw_is(x: str | None) -> None:
+    if is_str_is(x=x):
+        need_str(x)
+    else:
+        assert_type(x, str | None)
+
+def kw_not(x: str | None) -> None:
+    if not is_str(x=x):
+        need_str(x)  # E: Argument `str | None` is not assignable to parameter `x` with type `str` in function `need_str`
+    else:
+        assert_type(x, str)
+
+# A keyword that binds a later parameter does not narrow that keyword's value.
+def guard2(y: object, x: str | None) -> TypeGuard[str]:
+    return x is not None
+
+def kw_second(y: object, x: str | None) -> None:
+    if guard2(y, x=x):
+        need_str(y)
+        need_str(x)  # E: Argument `str | None` is not assignable to parameter `x` with type `str` in function `need_str`
+
+# A keyword cannot bind a positional-only first parameter.
+def guard_po(x: str | None, /) -> TypeGuard[str]:
+    return x is not None
+
+def kw_po(x: str | None) -> None:
+    if guard_po(x=x):  # E: Unexpected keyword argument `x` for function `guard_po`
+        need_str(x)  # E: Argument `str | None` is not assignable to parameter `x` with type `str` in function `need_str`
+
+# Methods: the bound `self` is skipped when finding the first parameter.
+class Guards:
+    def is_str(self, x: str | None) -> TypeGuard[str]:
+        return x is not None
+
+def kw_method(g: Guards, x: str | None) -> None:
+    if g.is_str(x=x):
+        need_str(x)
+
+# Overloads: a keyword narrows if any signature binds it to the first parameter.
+@overload
+def oguard(x: int) -> TypeGuard[int]: ...
+@overload
+def oguard(x: str | None) -> TypeGuard[str]: ...
+def oguard(x: int | str | None) -> bool:
+    return x is not None
+
+def kw_overload(x: str | None) -> None:
+    if oguard(x=x):
+        need_str(x)
+
+# Attributes narrow like facets.
+class Box:
+    field: str | None
+
+def kw_facet(b: Box) -> None:
+    if is_str(x=b.field):
+        need_str(b.field)
+
+# Loops and asserts work like `if`.
+def kw_while(x: str | None) -> None:
+    while is_str(x=x):
+        need_str(x)
+
+def kw_assert(x: str | None) -> None:
+    assert is_str(x=x)
+    need_str(x)
+    "#,
+);
+
+testcase!(
     test_typeis,
     r#"
 from typing import TypeIs, assert_type
