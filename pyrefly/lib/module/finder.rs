@@ -602,11 +602,7 @@ fn find_directory_relative_fallback_import(
     let mut namespaces = vec![];
     find_module(
         module,
-        ancestors.get_ancestors(directory).iter().filter(|path| {
-            !config
-                .site_package_path()
-                .any(|site_package| path.starts_with(site_package))
-        }),
+        ancestors.get_ancestors(directory).iter(),
         options.module_options(style_filter, &mut namespaces),
     )
     .or_else(|| {
@@ -2974,12 +2970,10 @@ mod tests {
         // An editable install puts the project root on the site package path.
         let config = directory_relative_fallback_config(root, &[], &["."]);
 
-        // BUG: the fallback should find `tests/helper.py`, as it does when the project
-        // root is not a site package path.
-        assert!(matches!(
+        assert_eq!(
             find_import_from(&config, "helper", &root.join("tests/test_foo.py")),
-            FindingOrError::Error(FindError::MissingImport(..)),
-        ));
+            fallback_finding(root.join("tests/helper.py"), "helper"),
+        );
     }
 
     #[test]
