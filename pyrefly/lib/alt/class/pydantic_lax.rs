@@ -141,15 +141,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Check each union alternative with its lax conversion and refine bool's literal inputs.
     pub fn pydantic_lax_accepts_literal(&self, expected: &Type, literal: &Type) -> bool {
-        match expected {
-            Type::Union(union) => union
+        if let Type::Union(union) = expected {
+            return union
                 .members
                 .iter()
-                .any(|member| self.pydantic_lax_accepts_literal(member, literal)),
-            Type::ClassType(cls) if cls == self.stdlib.bool() => match literal {
-                Type::Literal(lit) => match &lit.value {
-                    Lit::Int(value) => matches!(value.as_i64(), Some(0 | 1)),
-                    Lit::Str(value) => matches!(
+                .any(|member| self.pydantic_lax_accepts_literal(member, literal));
+        }
+        if let Type::ClassType(cls) = expected
+            && cls == self.stdlib.bool()
+            && let Type::Literal(lit) = literal
+        {
+            match &lit.value {
+                Lit::Int(value) => return matches!(value.as_i64(), Some(0 | 1)),
+                Lit::Str(value) => {
+                    return matches!(
                         value.to_ascii_lowercase().as_str(),
                         "0" | "1"
                             | "f"
@@ -162,13 +167,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             | "true"
                             | "y"
                             | "yes"
-                    ),
-                    _ => self.is_subset_eq(literal, &self.expand_type_for_lax_mode(expected)),
-                },
-                _ => self.is_subset_eq(literal, &self.expand_type_for_lax_mode(expected)),
-            },
-            _ => self.is_subset_eq(literal, &self.expand_type_for_lax_mode(expected)),
+                    );
+                }
+                _ => {}
+            }
         }
+        self.is_subset_eq(literal, &self.expand_type_for_lax_mode(expected))
     }
 
     fn get_container_lax_conversion(
