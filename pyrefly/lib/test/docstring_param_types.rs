@@ -298,3 +298,22 @@ class C:
 C("a")
 "#,
 );
+
+testcase!(
+    test_sphinx_legacy_type_variable,
+    TestEnv::new().enable_infer_param_types_from_docstring(),
+    r#"
+from typing import TypeVar, assert_type
+
+T = TypeVar("T")
+
+def ident(x):
+    """
+    :param T x: the x
+    """
+    return x
+
+assert_type(ident(1), int)
+assert_type(ident("a"), str)
+"#,
+);

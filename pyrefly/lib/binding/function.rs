@@ -370,10 +370,14 @@ impl<'a> BindingsBuilder<'a> {
     ///
     /// A declared type is only a hint for the parameter, so a docstring type that cannot be
     /// understood is skipped instead of reported.
+    ///
+    /// Legacy type variables in a docstring type are collected like those in annotations, so
+    /// they become type parameters of the function.
     fn bind_docstring_param_types(
         &mut self,
         x: &StmtFunctionDef,
         class_docstring_range: Option<TextRange>,
+        legacy: &mut LegacyTParamCollector,
     ) {
         if !self.infer_param_types_from_docstring {
             return;
@@ -426,7 +430,7 @@ impl<'a> BindingsBuilder<'a> {
                 {
                     continue;
                 }
-                self.ensure_type(&mut expr, None);
+                self.ensure_type(&mut expr, Some(&mut *legacy));
                 bound_types.insert(start, expr.clone());
                 expr
             };
@@ -463,6 +467,7 @@ impl<'a> BindingsBuilder<'a> {
         x: &mut StmtFunctionDef,
         func_name: &Identifier,
         class_key: Option<Idx<KeyClass>>,
+        class_docstring_range: Option<TextRange>,
         usage: &mut Usage,
         parent: &NestingContext,
     ) -> (
@@ -488,6 +493,8 @@ impl<'a> BindingsBuilder<'a> {
         let return_ann_with_range = mem::take(&mut x.returns).map(|e| {
             self.to_return_annotation_with_range(*e, func_name, class_key, Some(&mut legacy))
         });
+
+        self.bind_docstring_param_types(x, class_docstring_range, &mut legacy);
 
         self.add_name_definitions(&legacy);
         let legacy_tparams = legacy.lookup_keys();
@@ -1034,10 +1041,15 @@ impl<'a> BindingsBuilder<'a> {
         let decorators = self.decorators(mem::take(&mut x.decorator_list), def_idx.usage());
 
         self.scopes.push(Scope::annotation(x.range, false));
-        let (return_ann_with_range, legacy_tparams) =
-            self.function_header(&mut x, &func_name, class_key, def_idx.usage(), parent);
+        let (return_ann_with_range, legacy_tparams) = self.function_header(
+            &mut x,
+            &func_name,
+            class_key,
+            class_docstring_range,
+            def_idx.usage(),
+            parent,
+        );
 
-        self.bind_docstring_param_types(&x, class_docstring_range);
         let docstring_range = Docstring::range_from_stmts(x.body.as_slice());
         let calls_super_method = SuperMethodCallFinder::find(&func_name.id, &x.body);
         let previous_tracking = mem::replace(&mut self.track_classmethod_uses, false);
