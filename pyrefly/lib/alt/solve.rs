@@ -4002,8 +4002,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // with a narrower variance. We only check invariant TypeVars here
         // because wrong variance on covariant/contravariant TypeVars is
         // already caught by InvalidVariance at the usage site.
-        // Constrained TypeVars are excluded because invariance is a sound default for a fixed
-        // set of constraints, and the narrower-variance suggestion is usually noise.
+        // Constraints often enumerate unrelated alternatives, making narrower-variance
+        // suggestions noisy. Explicit variance still matters for overlapping constraints
+        // and is validated above. This exemption intentionally differs from the
+        // constrained protocol case in protocols_variance.py.
         let metadata = self.get_metadata_for_class(class);
         if metadata.is_protocol()
             && tparams.as_vec().iter().any(|p| {
