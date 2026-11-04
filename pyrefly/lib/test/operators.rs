@@ -417,6 +417,40 @@ def f(x: int, y: str | Literal[False]):
 "#,
 );
 
+// `x and y` returns `x` only when `x` is falsy, so a truthy result is always `y`.
+testcase!(
+    bug = "The falsy part of `x and y` survives a truthy narrow of the result",
+    test_boolean_and_result_truthy_narrow,
+    r#"
+from typing import assert_type
+
+class Genre: ...
+
+class Author:
+    genre: Genre | None
+
+def assigned(author: Author | None) -> None:
+    genre = author and author.genre
+    if genre:
+        assert_type(genre, Author | Genre)
+
+def walrus(author: Author | None) -> None:
+    if genre := (author and author.genre):
+        assert_type(genre, Author | Genre)
+
+def container(d: dict[str, int] | None) -> None:
+    value = d and d["a"]
+    if value:
+        assert_type(value, dict[str, int] | int)
+
+# A subclass can define a falsy `__bool__`, so a falsy `Author` stays in the result.
+def not_none(author: Author | None) -> None:
+    genre = author and author.genre
+    if genre is not None:
+        assert_type(genre, Author | Genre)
+"#,
+);
+
 // Regression test: generic function calls in `and` expressions should not
 // have the narrowed type from earlier branches used as a hint for type variable
 // inference. The narrowing of `bool` to `Literal[False]` is for the result of
