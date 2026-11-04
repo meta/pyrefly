@@ -78,6 +78,7 @@ use crate::environment::environment::PythonEnvironment;
 use crate::environment::interpreters::Interpreters;
 use crate::error::ErrorConfig;
 use crate::error::ErrorDisplayConfig;
+use crate::error_kind::ErrorKind;
 use crate::error_kind::Severity;
 use crate::finder::ConfigError;
 use crate::migration::run::MigratedFromKind;
@@ -753,6 +754,12 @@ pub struct ConfigFile {
     /// Errors below this severity will not be shown. Defaults to "error".
     pub min_severity: Option<Severity>,
 
+    /// Only report errors of specified kinds, such as `["bad-assignment"]`.
+    /// This is equivalent to `--only` on the command line. If this is set in
+    /// both the CLI and the config value, the CLI value overrides the config value.
+    /// If left unset, it displays all kinds of errors.
+    pub only: Option<Vec<ErrorKind>>,
+
     /// Should we let Pyrefly try to index the project's files? Disabling this
     /// may speed up LSP operations on large projects.
     #[serde(default, skip_serializing_if = "crate::util::skip_default_false")]
@@ -823,6 +830,7 @@ impl Default for ConfigFile {
             baseline_format: BaselineFormat::default(),
             baseline_auto_update: false,
             min_severity: None,
+            only: None,
             output_format: None,
             skip_lsp_config_indexing: false,
             extra_file_extensions: Vec::new(),
@@ -2861,6 +2869,7 @@ mod tests {
                 baseline_format: BaselineFormat::Full,
                 baseline_auto_update: false,
                 min_severity: None,
+                only: None,
                 skip_lsp_config_indexing: false,
                 extra_file_extensions: Vec::new(),
                 synthesized_preset_reason: None,
@@ -3202,6 +3211,7 @@ mod tests {
             baseline_format: BaselineFormat::Full,
             baseline_auto_update: false,
             min_severity: None,
+            only: None,
             skip_lsp_config_indexing: false,
             extra_file_extensions: Vec::new(),
             synthesized_preset_reason: None,
@@ -3282,6 +3292,7 @@ mod tests {
             baseline_format: BaselineFormat::Full,
             baseline_auto_update: false,
             min_severity: None,
+            only: None,
             skip_lsp_config_indexing: false,
             extra_file_extensions: Vec::new(),
             synthesized_preset_reason: None,
@@ -3379,6 +3390,22 @@ mod tests {
                  "#;
         let err = ConfigFile::parse_config(config_str).unwrap_err();
         assert!(err.to_string().contains("missing field `matches`"));
+    }
+
+    #[test]
+    fn test_only_config_parsing() {
+        let config_str = r#"
+        only = ["bad-assignment", "bad-return"]
+        "#;
+
+        let config = ConfigFile::parse_config(config_str).unwrap();
+        assert_eq!(
+            config.only,
+            Some(vec![ErrorKind::BadAssignment, ErrorKind::BadReturn])
+        );
+
+        let defaults = ConfigFile::parse_config("").unwrap();
+        assert_eq!(defaults.only, None);
     }
 
     #[test]
