@@ -93,6 +93,10 @@ struct DocstringRenderState {
     output: Vec<String>,
     pending_literal_block: bool,
     pending_literal_block_indent: usize,
+    /// Language of the pending literal block. Empty when the block has no language.
+    pending_literal_block_language: String,
+    /// True from a code directive until its option lines (such as `:linenos:`) end.
+    in_directive_options: bool,
     code_block: Option<CodeBlockKind>,
     code_block_indent: usize,
     literal_block_marker_indent: usize,
@@ -106,6 +110,8 @@ impl DocstringRenderState {
             output: Vec::new(),
             pending_literal_block: false,
             pending_literal_block_indent: 0,
+            pending_literal_block_language: String::new(),
+            in_directive_options: false,
             code_block: None,
             code_block_indent: 0,
             literal_block_marker_indent: 0,
@@ -130,6 +136,21 @@ impl DocstringRenderState {
 
         if self.write_code_block_line(is_blank, is_doctest_prompt, raw_leading_spaces, &current) {
             return;
+        }
+
+        if let Some(language) = code_directive_language(base_line) {
+            self.pending_literal_block = true;
+            self.pending_literal_block_indent = raw_leading_spaces;
+            self.pending_literal_block_language = language.to_owned();
+            self.in_directive_options = true;
+            return;
+        }
+
+        if self.in_directive_options {
+            if trimmed_start.starts_with(':') {
+                return;
+            }
+            self.in_directive_options = false;
         }
 
         if self.maybe_start_code_block(
@@ -157,6 +178,7 @@ impl DocstringRenderState {
             *current = updated;
             self.pending_literal_block = true;
             self.pending_literal_block_indent = raw_leading_spaces;
+            self.pending_literal_block_language.clear();
             return true;
         }
         false
@@ -242,7 +264,8 @@ impl DocstringRenderState {
             self.code_block = Some(CodeBlockKind::Literal);
             self.code_block_indent = leading_spaces;
             self.literal_block_marker_indent = self.pending_literal_block_indent;
-            self.output.push("```".to_owned());
+            self.output
+                .push(format!("```{}", self.pending_literal_block_language));
             self.output
                 .push(strip_code_indent(current, self.code_block_indent));
             self.pending_literal_block = false;
@@ -331,6 +354,14 @@ fn code_fence_opening(line: &str) -> Option<usize> {
 fn is_closing_code_fence(line: &str, backticks: usize) -> bool {
     let line = line.trim();
     line.len() >= backticks && line.bytes().all(|b| b == b'`')
+}
+
+/// If this line is a reStructuredText code directive such as `.. code-block:: python`, return its
+/// language, which is empty when the directive names none.
+fn code_directive_language(line: &str) -> Option<&str> {
+    let (name, argument) = line.trim_start().strip_prefix(".. ")?.split_once("::")?;
+    matches!(name.trim(), "code-block" | "code" | "sourcecode")
+        .then(|| argument.split_whitespace().next().unwrap_or(""))
 }
 
 /// Strip a reStructuredText literal-block marker (`::`) and return the updated line.
@@ -976,6 +1007,67 @@ test = Test(
 )
 ```
 "#
+        );
+    }
+
+    #[test]
+    fn test_docstring_code_block_directive_uses_fence_with_language() {
+        let docstring = r#""""
+    For example:
+
+    .. code-block:: python
+
+        import os
+
+        monkeypatch.setattr(os, "getcwd", lambda: "/")
+
+    The code above replaces it.
+    """"#;
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            r#"
+For example:
+
+
+```python
+import os
+
+monkeypatch.setattr(os, "getcwd", lambda: "/")
+
+```
+The code above replaces it.
+"#
+        );
+    }
+
+    #[test]
+    fn test_docstring_code_directive_variants() {
+        for directive in [".. code::", ".. sourcecode::", ".. code-block::"] {
+            let docstring = format!("\"\"\"Example\n\n{directive}\n\n    x = 1\"\"\"");
+            assert_eq!(
+                Docstring::clean(&docstring).replace("  \n", "\n"),
+                "Example\n\n\n```\nx = 1\n```",
+                "{directive}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_docstring_code_directive_skips_option_lines() {
+        let docstring = "\"\"\"Example\n\n.. code-block:: python\n    :linenos:\n    :caption: demo\n\n    x = 1\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Example\n\n\n```python\nx = 1\n```"
+        );
+    }
+
+    #[test]
+    fn test_docstring_code_directive_after_literal_block() {
+        // A directive that ends a literal block still opens its own block.
+        let docstring = "\"\"\"A::\n\n    x = 1\n.. code-block:: python\n\n    y = 2\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "A:\n\n```\nx = 1\n```\n\n```python\ny = 2\n```"
         );
     }
 
