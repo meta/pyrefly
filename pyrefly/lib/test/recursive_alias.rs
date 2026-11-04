@@ -489,7 +489,6 @@ w: B = C()
 );
 
 testcase!(
-    bug = "Equivalent recursive aliases produce a spurious redefinition error",
     test_redefinition_equivalent_recursive_aliases,
     r#"
 type A = int | list[A]
@@ -498,12 +497,11 @@ class C:
     def __init__(self) -> None:
         self.x: A = 0
     def reset(self) -> None:
-        self.x: B = 0  # E: cannot be annotated
+        self.x: B = 0
     "#,
 );
 
 testcase!(
-    bug = "Equivalent imported recursive aliases produce a spurious redefinition error",
     test_redefinition_equivalent_imported_recursive_aliases,
     {
         let mut env = TestEnv::one("a", "type A = int | list[A]");
@@ -517,7 +515,7 @@ class C:
     def __init__(self) -> None:
         self.x: A = 0
     def reset(self) -> None:
-        self.x: B = 0  # E: cannot be annotated
+        self.x: B = 0
     "#,
 );
 
@@ -564,7 +562,6 @@ class C:
 );
 
 testcase!(
-    bug = "Redundant union members defeat recursive alias equivalence",
     test_redefinition_recursive_alias_semantic_union,
     r#"
 type A = int | list[A]
@@ -572,7 +569,7 @@ class C:
     def __init__(self) -> None:
         self.x: A = 0
     def reset(self) -> None:
-        self.x: A | bool = 0  # E: cannot be annotated
+        self.x: A | bool = 0
     "#,
 );
 

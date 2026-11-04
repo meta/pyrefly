@@ -3122,9 +3122,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             } => {
                 let ann_new = self.get_idx(*new);
                 let ann_existing = self.get_idx(*existing);
+                // Deferred alias references retain their defining identity. Compare annotations
+                // containing them with the solver's recursive equivalence check instead.
                 if let Some(t_new) = ann_new.ty(self.heap, self.stdlib)
                     && let Some(t_existing) = ann_existing.ty(self.heap, self.stdlib)
                     && t_new != t_existing
+                    && !((t_new.any(|ty| matches!(ty, Type::UntypedAlias(_)))
+                        || t_existing.any(|ty| matches!(ty, Type::UntypedAlias(_))))
+                        && self.is_equivalent(&t_new, &t_existing))
                 {
                     let t_new = self.for_display(t_new.clone());
                     let t_existing = self.for_display(t_existing.clone());
