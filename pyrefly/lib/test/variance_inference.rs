@@ -621,6 +621,64 @@ class Bar(Protocol[T]):
 );
 
 testcase!(
+    test_mixed_typevar_protocol_variance_mismatch,
+    r#"
+from typing import Protocol, TypeVar
+
+T = TypeVar("T", str, bytes)
+B = TypeVar("B", bound=float)
+U = TypeVar("U")
+
+# Eligible siblings force the diagnostic loop to run, but only those siblings warn.
+class Producer(Protocol[T, B]):  # E: Type variable `B` in class `Producer` is declared as invariant, but could be covariant based on its usage
+    def value(self) -> tuple[T, B]: ...
+
+class Consumer(Protocol[T, B]):  # E: Type variable `B` in class `Consumer` is declared as invariant, but could be contravariant based on its usage
+    def consume(self, x: T, y: B) -> None: ...
+
+class UnconstrainedProducer(Protocol[T, U]):  # E: Type variable `U` in class `UnconstrainedProducer` is declared as invariant, but could be covariant based on its usage
+    def value(self) -> tuple[T, U]: ...
+"#,
+);
+
+testcase!(
+    test_constrained_typevar_protocol_declared_variance,
+    r#"
+from typing import Protocol, TypeVar
+
+T = TypeVar("T", int, float)
+T_co = TypeVar("T_co", int, float, covariant=True)
+T_contra = TypeVar("T_contra", int, float, contravariant=True)
+
+class InvariantProducer(Protocol[T]):
+    def value(self) -> T: ...
+
+class Producer(Protocol[T_co]):
+    def value(self) -> T_co: ...
+
+class Consumer(Protocol[T_contra]):
+    def consume(self, x: T_contra) -> None: ...
+
+# Overlapping constraints make declared variance observable in subtyping.
+def check(
+    p_inv: InvariantProducer[int],
+    p_int: Producer[int],
+    p_float: Producer[float],
+    c_int: Consumer[int],
+    c_float: Consumer[float],
+) -> None:
+    invariant_bad: InvariantProducer[float] = p_inv  # E: `InvariantProducer[int]` is not assignable to `InvariantProducer[float]`
+    producer_ok: Producer[float] = p_int
+    producer_bad: Producer[int] = p_float  # E: `Producer[float]` is not assignable to `Producer[int]`
+    consumer_ok: Consumer[int] = c_float
+    consumer_bad: Consumer[float] = c_int  # E: `Consumer[int]` is not assignable to `Consumer[float]`
+
+class InvalidProducer(Protocol[T_contra]):
+    def value(self) -> T_contra: ...  # E: Type variable `T_contra` is contravariant but is used in covariant position
+"#,
+);
+
+testcase!(
     test_shallow_contravariant_in_return,
     r#"
 from typing import TypeVar, Generic
