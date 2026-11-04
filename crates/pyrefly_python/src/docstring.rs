@@ -137,7 +137,10 @@ impl DocstringRenderState {
         let mut current = base_line.to_owned();
 
         // Inside a fenced code block, a line ending in `::` is code, not a literal-block marker.
+        // A directive such as `.. toctree::` also ends in `::`, but it does not open a literal
+        // block.
         let saw_literal_marker = self.code_block != Some(CodeBlockKind::Fenced)
+            && split_directive(base_line).is_none()
             && self.apply_literal_block_marker(&mut current, raw_leading_spaces);
 
         // Dedent the body of an admonition, which ends at the first line that is not indented
@@ -390,12 +393,23 @@ fn is_closing_code_fence(line: &str, backticks: usize) -> bool {
     line.len() >= backticks && line.bytes().all(|b| b == b'`')
 }
 
-/// If this line is a reStructuredText code directive such as `.. code-block:: python`, return its
-/// language, which is empty when the directive names none.
-fn code_directive_language(line: &str) -> Option<&str> {
+/// Split a reStructuredText directive such as `.. note:: text` into its name and argument.
+fn split_directive(line: &str) -> Option<(&str, &str)> {
     let (name, argument) = line.trim_start().strip_prefix(".. ")?.split_once("::")?;
-    matches!(name.trim(), "code-block" | "code" | "sourcecode")
-        .then(|| argument.split_whitespace().next().unwrap_or(""))
+    (!name.is_empty() && !name.contains(char::is_whitespace)).then_some((name, argument.trim()))
+}
+
+/// If this line is a reStructuredText directive whose body is code, such as
+/// `.. code-block:: python`, return the language of the code. The language is empty when the
+/// directive names none. The body of `.. math::` is LaTeX.
+fn code_directive_language(line: &str) -> Option<&str> {
+    match split_directive(line)? {
+        ("code-block" | "code" | "sourcecode", argument) => {
+            Some(argument.split_whitespace().next().unwrap_or(""))
+        }
+        ("math", "") => Some("latex"),
+        _ => None,
+    }
 }
 
 /// The titles of reStructuredText admonitions, which take an optional text after the directive.
@@ -424,8 +438,7 @@ const VERSION_DIRECTIVES: [(&str, &str); 4] = [
 /// If this line is an admonition such as `.. note::`, `.. admonition:: Title` or
 /// `.. versionadded:: 1.2`, return the Markdown heading to show in its place.
 fn admonition_heading(line: &str) -> Option<String> {
-    let (name, argument) = line.trim_start().strip_prefix(".. ")?.split_once("::")?;
-    let (name, argument) = (name.trim(), argument.trim());
+    let (name, argument) = split_directive(line)?;
     // The generic admonition takes its title as the argument.
     if name == "admonition" && !argument.is_empty() {
         return Some(format!("**{argument}**"));
@@ -1218,6 +1231,33 @@ The code above replaces it.
         assert_eq!(
             Docstring::clean(docstring).replace("  \n", "\n"),
             "Summary.\n\n**Custom title**\n\nBody text.\n\nAfter."
+        );
+    }
+
+    #[test]
+    fn test_docstring_math_directive_is_latex() {
+        let docstring = "\"\"\"Summary.\n\n.. math::\n    :label: euler\n\n    e^{i\\pi} + 1 = 0\n\nAfter.\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Summary.\n\n\n```latex\ne^{i\\pi} + 1 = 0\n\n```\nAfter."
+        );
+    }
+
+    #[test]
+    fn test_docstring_unknown_directive_is_shown_as_written() {
+        // An unknown directive ends in `::` but opens no literal block, so its body stays text.
+        let docstring = "\"\"\"Summary.\n\n.. toctree::\n\n    intro\n    usage\n\nAfter.\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Summary.\n\n.. toctree::\n\n&nbsp;&nbsp;&nbsp;&nbsp;intro\n&nbsp;&nbsp;&nbsp;&nbsp;usage\n\nAfter."
+        );
+    }
+
+    #[test]
+    fn test_docstring_math_directive_with_inline_content_is_shown_as_written() {
+        assert_eq!(
+            Docstring::clean("\"\"\"Summary.\n\n.. math:: x = 1\"\"\"").replace("  \n", "\n"),
+            "Summary.\n\n.. math:: x = 1"
         );
     }
 
