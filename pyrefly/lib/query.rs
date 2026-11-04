@@ -768,7 +768,9 @@ impl<'a> CalleesWithLocation<'a> {
             Type::SelfType(c) => Self::class_info_for_qname(c.qname(), false),
             // TODO: wrap in 'type'
             Type::Type(t) => Self::class_info_from_bound_obj(t),
-            Type::ClassType(c) => Self::class_info_for_qname(c.qname(), false),
+            Type::ClassType(c) | Type::SpecializedClassDef(c) => {
+                Self::class_info_for_qname(c.qname(), false)
+            }
             Type::ClassDef(c) => Self::class_info_for_qname(c.qname(), false),
             Type::TypedDict(d) => match d {
                 TypedDict::TypedDict(inner) => Self::class_info_for_qname(inner.qname(), true),
@@ -925,7 +927,12 @@ impl<'a> CalleesWithLocation<'a> {
     }
     fn init_or_new_from_type(&self, ty: &Type, callee_range: TextRange) -> Vec<Callee> {
         match ty {
-            Type::SpecializedClass(c) => self.find_init_or_new(c.class_object()),
+            Type::SpecializedClassDef(_) => self.find_init_or_new(
+                self.transaction
+                    .get_stdlib(&self.handle)
+                    .generic_alias()
+                    .class_object(),
+            ),
             Type::SelfType(c) | Type::ClassType(c) => self.find_init_or_new(c.class_object()),
             Type::Quantified(q) => match &q.restriction {
                 Restriction::Bound(Type::ClassType(c)) => self.find_init_or_new(c.class_object()),
@@ -1030,7 +1037,7 @@ impl<'a> CalleesWithLocation<'a> {
             Type::Annotated(_, _) => vec![],
 
             Type::ClassDef(cls) => self.find_init_or_new(cls),
-            Type::SpecializedClass(cls) => self.find_init_or_new(cls.class_object()),
+            Type::SpecializedClassDef(cls) => self.find_init_or_new(cls.class_object()),
             Type::Forall(v) => match &v.body {
                 Forallable::Function(func) => {
                     vec![self.callee_from_function(func, call_target, call_arguments)]

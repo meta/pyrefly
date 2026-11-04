@@ -247,7 +247,7 @@ impl TypeConverter<'_> {
 
             // --- Class definitions (the class object itself, e.g. `type[int]`) ---
             PyreflyType::ClassDef(cls) => convert_class_def(cls),
-            PyreflyType::SpecializedClass(ct) => {
+            PyreflyType::SpecializedClassDef(ct) => {
                 self.convert_class_type(ct, TypeFlags::INSTANTIABLE)
             }
 

@@ -2741,7 +2741,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::ClassDef(cls) => acc.push(AttributeBase1::ClassObject(ClassBase::ClassDef(
                 self.as_class_type_unchecked(&cls),
             ))),
-            Type::SpecializedClass(class) => {
+            Type::SpecializedClassDef(class) => {
                 acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(class)));
             }
             Type::SelfType(class_type) => acc.push(AttributeBase1::SelfType(class_type)),
@@ -3032,8 +3032,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// `as_attribute_base1` helper for `Type::Type(ty)`.
     fn as_attribute_base1_of_type(&self, ty: Type, acc: &mut Vec<AttributeBase1>) {
         match ty {
-            Type::SpecializedClass(_) => acc.push(AttributeBase1::ClassObject(
-                ClassBase::ClassDef(self.stdlib.builtins_type().clone()),
+            Type::SpecializedClassDef(_) => acc.push(AttributeBase1::ClassObject(
+                ClassBase::ClassDef(self.stdlib.generic_alias().clone()),
             )),
             Type::SelfType(class_type) => {
                 acc.push(AttributeBase1::ClassObject(ClassBase::SelfType(class_type)))
@@ -3049,11 +3049,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::Literal(lit) => acc.push(AttributeBase1::ClassObject(ClassBase::ClassType(
                 lit.value.general_class_type(self.stdlib).clone(),
             ))),
-            Type::Tuple(tuple) => self.as_attribute_base1(
-                self.heap
-                    .mk_type_of(self.heap.mk_class_type(self.erase_tuple_type(tuple))),
-                acc,
-            ),
+            Type::Tuple(tuple) => acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(
+                self.erase_tuple_type(tuple),
+            ))),
             Type::ClassType(class) => {
                 acc.push(AttributeBase1::ClassObject(ClassBase::ClassType(class)))
             }
@@ -3382,7 +3380,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
 
         match ty {
-            Type::ClassDef(_) | Type::Type(_) => true,
+            Type::ClassDef(_) | Type::SpecializedClassDef(_) | Type::Type(_) => true,
             Type::TypeAlias(_)
             | Type::UntypedAlias(_)
             | Type::KwCall(_)

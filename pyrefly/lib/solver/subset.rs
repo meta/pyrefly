@@ -1956,10 +1956,10 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             (_, Type::ClassType(want)) if want.is(KnownClass::Object) => {
                 Ok(()) // everything is an instance of `object`
             }
-            (Type::SpecializedClass(got), want) => {
+            (Type::SpecializedClassDef(got), want) => {
                 self.is_subset_eq(&Type::type_of(Type::ClassType(got.clone())), want)
             }
-            (got, Type::SpecializedClass(want)) => {
+            (got, Type::SpecializedClassDef(want)) => {
                 self.is_subset_eq(got, &Type::type_of(Type::ClassType(want.clone())))
             }
             (got_ty, want_ty)

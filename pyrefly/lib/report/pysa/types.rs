@@ -298,7 +298,7 @@ fn get_classes_of_type(type_: &Type, context: &ModuleContext) -> ClassNamesFromT
         Type::ClassDef(class) => {
             ClassNamesFromType::from_class(class, context).prepend_modifier(TypeModifier::Type)
         }
-        Type::SpecializedClass(class_type) => {
+        Type::SpecializedClassDef(class_type) => {
             ClassNamesFromType::from_class(class_type.class_object(), context)
                 .prepend_modifier(TypeModifier::Type)
         }

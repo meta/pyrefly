@@ -123,7 +123,7 @@ pub enum ConstructorKind {
     // `MyClass`
     BareClassName,
     // `MyClass[int]`
-    SpecializedClass,
+    SpecializedClassName,
     // `type[MyClass]`
     TypeOfClass,
     // `type[Self]`
@@ -471,11 +471,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 _ => unreachable!(),
             },
-            Type::SpecializedClass(cls) => CallTargetLookup::Ok(Box::new(CallTarget::Class(
+            Type::SpecializedClassDef(cls) => CallTargetLookup::Ok(Box::new(CallTarget::Class(
                 cls,
-                ConstructorKind::SpecializedClass,
+                ConstructorKind::SpecializedClassName,
                 None,
             ))),
+            Type::Type(inner) if matches!(&*inner, Type::SpecializedClassDef(_)) => {
+                CallTargetLookup::Ok(Box::new(CallTarget::Class(
+                    self.stdlib.generic_alias().clone(),
+                    ConstructorKind::TypeOfClass,
+                    None,
+                )))
+            }
             Type::Type(f) if matches!(&*f, Type::ClassType(_)) => {
                 let Type::ClassType(cls) = *f else {
                     unreachable!("guarded by matches! above")
@@ -1995,7 +2002,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let metadata = self.get_metadata_for_class(cls.class_object());
                 let is_direct_class = matches!(
                     &constructor_kind,
-                    ConstructorKind::BareClassName | ConstructorKind::SpecializedClass
+                    ConstructorKind::BareClassName | ConstructorKind::SpecializedClassName
                 );
                 if metadata.is_protocol() && is_direct_class {
                     self.error_with_context(
@@ -2028,9 +2035,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             ),
                             context,
                         );
-                    } else if constructor_kind == ConstructorKind::BareClassName
-                        && metadata.is_explicitly_abstract()
-                    {
+                    } else if is_direct_class && metadata.is_explicitly_abstract() {
                         self.error_with_context(
                             call_errors,
                             arguments_range,

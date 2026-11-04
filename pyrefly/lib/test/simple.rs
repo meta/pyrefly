@@ -1337,6 +1337,26 @@ for a in A:  # E: Type `type[A]` is not iterable
 );
 
 testcase!(
+    test_specialized_class_def_union_display,
+    r#"
+from abc import ABC, abstractmethod
+from typing import reveal_type
+
+class C[T]: ...
+class D[T]: ...
+reveal_type([C[int], D[int]])  # E: revealed type: list[type[C[int]] | type[D[int]]]
+reveal_type([C, D])  # E: revealed type: list[type[C] | type[D]]
+
+class Shape[T](ABC):
+    @abstractmethod
+    def area(self) -> T: ...
+
+for constructor in [Shape[int], Shape[str]]:
+    constructor()  # E: Cannot instantiate `Shape`
+"#,
+);
+
+testcase!(
     test_getitem_cannot_iterate_generic_class,
     r#"
 class A[T]:

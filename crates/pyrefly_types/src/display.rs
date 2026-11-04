@@ -1032,7 +1032,7 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_qname(cls.qname())?;
                 output.write_str("]")
             }
-            Type::SpecializedClass(class_type) => {
+            Type::SpecializedClassDef(class_type) => {
                 output.write_str("type[")?;
                 output.write_qname(class_type.qname())?;
                 output.write_targs(class_type.targs())?;
