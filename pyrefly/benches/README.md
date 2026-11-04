@@ -135,6 +135,22 @@ lands at the fbsource repo root `target/criterion/`. It is throwaway — do not
 commit it, and do not add repo-root ignore entries (it is already gitignored
 appropriately).
 
+## Attribute initialization
+
+The `attribute_initialization` group in `micro` measures the cost of tracking
+instance attribute initialization. It varies the number of attributes and branch
+joins, loop joins, or early returns independently. Each iteration checks an
+in-memory module with the standard library already loaded. It does not require a
+PyTorch checkout.
+
+```bash
+cargo bench -p pyrefly --bench micro -- attribute_initialization --noplot
+```
+
+Use Criterion's `--save-baseline before` on the original version and
+`--baseline before` on the changed version to compare results. Synthetic
+results isolate this code path. They do not establish whole-project performance.
+
 ## TSP benchmark
 
 `benches/tsp/` -- buck `tsp_bench`, cargo bench `tsp`, Criterion id

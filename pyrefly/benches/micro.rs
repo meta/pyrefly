@@ -452,6 +452,69 @@ fn measure_module(
     c.bench_function(name, |b| b.iter(|| check_module(code.dupe(), module, path)));
 }
 
+#[derive(Clone, Copy)]
+enum AttributeInitializationShape {
+    Branches,
+    Loops,
+    Returns,
+}
+
+impl AttributeInitializationShape {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Branches => "branches",
+            Self::Loops => "loops",
+            Self::Returns => "returns",
+        }
+    }
+}
+
+/// Attribute initialization must track branches without constructing unused type joins.
+fn attribute_initialization(c: &mut Criterion) {
+    let mut group = c.benchmark_group("attribute_initialization");
+    for (attributes, joins) in [(16, 16), (64, 16), (16, 64), (64, 64)] {
+        for shape in [
+            AttributeInitializationShape::Branches,
+            AttributeInitializationShape::Loops,
+            AttributeInitializationShape::Returns,
+        ] {
+            let mut source = String::from(
+                "class C:\n    def __init__(self, flag: bool, values: list[int]) -> None:\n",
+            );
+            for i in 0..attributes {
+                let _ = writeln!(source, "        self.attribute_{i}: int = 0");
+            }
+            for i in 0..joins {
+                let attribute = i % attributes;
+                match shape {
+                    AttributeInitializationShape::Branches => {
+                        let _ = writeln!(
+                            source,
+                            "        if flag:\n            self.attribute_{attribute} = {i}\n        else:\n            self.attribute_{attribute} = -{i}"
+                        );
+                    }
+                    AttributeInitializationShape::Loops => {
+                        let _ = writeln!(
+                            source,
+                            "        for value in values:\n            self.attribute_{attribute} = value"
+                        );
+                    }
+                    AttributeInitializationShape::Returns => {
+                        let _ = writeln!(source, "        if flag:\n            return");
+                    }
+                }
+            }
+            let name = format!("{}_{attributes}_attributes_{joins}_joins", shape.name());
+            let code = Arc::new(FileContents::from_source(source));
+            assert_eq!(check_module(code.dupe(), "bench", BENCH_FILE), 0, "{name}");
+            group.bench_function(name, |b| {
+                b.iter(|| check_module(code.dupe(), "bench", BENCH_FILE))
+            });
+        }
+    }
+    group.finish();
+}
+
 /// Smoke benchmark validating the harness end-to-end.
 fn smoke(c: &mut Criterion) {
     measure(c, "smoke", "x: int = 1".to_owned(), 0);
@@ -957,6 +1020,7 @@ fn suggestion_nested(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    attribute_initialization,
     smoke,
     enum_members,
     enum_value_access,
