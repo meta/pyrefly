@@ -311,7 +311,6 @@ use crate::lsp::non_wasm::convert_module_package::convert_module_package_code_ac
 use crate::lsp::non_wasm::document_symbols::flatten_to_symbol_information;
 use crate::lsp::non_wasm::external_provider::ExternalProvider;
 use crate::lsp::non_wasm::external_provider::compute_qualified_name;
-use crate::lsp::non_wasm::lsp::apply_change_events;
 use crate::lsp::non_wasm::lsp::as_notification;
 use crate::lsp::non_wasm::lsp::as_request;
 use crate::lsp::non_wasm::lsp::as_request_response_pair;
@@ -357,6 +356,7 @@ use crate::lsp::non_wasm::workspace::Workspace;
 use crate::lsp::non_wasm::workspace::Workspaces;
 use crate::lsp::wasm::completion::CompletionOptions as CompletionRequestOptions;
 use crate::lsp::wasm::completion::supports_snippet_completions;
+use crate::lsp::wasm::document::apply_change_events;
 use crate::lsp::wasm::hover::HoverOptions;
 use crate::lsp::wasm::hover::HoverResult;
 use crate::lsp::wasm::hover::get_hover_with_verbosity;
