@@ -44,6 +44,7 @@ use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::attr::NoAccessReason;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
+use crate::alt::callable::CallValue;
 use crate::alt::callable::CallWithTypes;
 use crate::alt::callable::ConstructorArguments;
 use crate::alt::callable::ReturnTypeResolutionError;
@@ -1285,11 +1286,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self.get_dunder_new(cls, preserve_self).is_some()
                 && self.get_dunder_init(cls, false).is_some()
         };
-        let is_deeply_nested = |x: &TypeOrExpr| {
+        let is_deeply_nested = |x: &CallValue| {
             matches!(
-                x,
-                TypeOrExpr::Expr(e) | TypeOrExpr::Prepared(e, _)
-                    if nests_calls(e, FLATTEN_CALL_DEPTH)
+                x.as_type_or_expr(),
+                TypeOrExpr::Expr(e) if nests_calls(e, FLATTEN_CALL_DEPTH)
             )
         };
 
@@ -1684,8 +1684,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return result;
         };
 
-        let infer_type_or_expr = |toe: TypeOrExpr, errors: &ErrorCollector| -> Type {
-            let ty = toe.infer(self, errors);
+        let infer_call_value = |value: CallValue, errors: &ErrorCollector| -> Type {
+            let ty = value.infer(self, errors);
             // NNModule fields carry captured constructor args (e.g., padding=Literal[1]) that DSL
             // forward functions need as literals to compute output shapes.
             ty.with_literal_style(LitStyle::Explicit)
@@ -1698,11 +1698,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 k.arg
                     .is_some_and(|id| id.id.as_str() == param_name.as_str())
             }) {
-                fields.insert(param_name.clone(), infer_type_or_expr(kw.value, errors));
+                fields.insert(param_name.clone(), infer_call_value(kw.value, errors));
             } else if i < args.len() {
                 // Map positional arg by index to the capture param name.
                 if let CallArg::Arg(toe) = &args[i] {
-                    fields.insert(param_name.clone(), infer_type_or_expr(*toe, errors));
+                    fields.insert(param_name.clone(), infer_call_value(*toe, errors));
                 }
             }
             // If neither keyword nor positional, the param uses its default.
@@ -2382,12 +2382,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         );
         for arg in &args {
             let (CallArg::Arg(value) | CallArg::Star(value, _)) = arg;
-            if let TypeOrExpr::Type(ty, _) = value {
+            if let TypeOrExpr::Type(ty, _) = value.as_type_or_expr() {
                 roots.push(ty);
             }
         }
         for keyword in &keywords {
-            if let TypeOrExpr::Type(ty, _) = &keyword.value {
+            if let TypeOrExpr::Type(ty, _) = keyword.value.as_type_or_expr() {
                 roots.push(ty);
             }
         }

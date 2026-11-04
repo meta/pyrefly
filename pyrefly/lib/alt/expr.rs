@@ -146,8 +146,6 @@ pub enum TypeOrExpr<'a> {
     /// Bundles a `Type` with a `TextRange`, allowing us to give good errors.
     Type(&'a Type, TextRange),
     Expr(&'a Expr),
-    /// Retains contextual checking while sharing inference within one constructor call.
-    Prepared(&'a Expr, &'a ArgumentCache),
 }
 
 /// Inference under concrete hints, owned by one constructor argument.
@@ -233,7 +231,7 @@ impl Ranged for TypeOrExpr<'_> {
     fn range(&self) -> TextRange {
         match self {
             TypeOrExpr::Type(_, range) => *range,
-            TypeOrExpr::Expr(expr) | TypeOrExpr::Prepared(expr, _) => expr.range(),
+            TypeOrExpr::Expr(expr) => expr.range(),
         }
     }
 }
@@ -241,13 +239,6 @@ impl Ranged for TypeOrExpr<'_> {
 static ANONYMOUS_TYPED_DICT_MAX_ITEMS: usize = 20;
 
 impl<'a> TypeOrExpr<'a> {
-    pub(crate) fn argument_cache(self) -> Option<&'a ArgumentCache> {
-        match self {
-            Self::Prepared(_, cache) => Some(cache),
-            Self::Type(..) | Self::Expr(_) => None,
-        }
-    }
-
     pub fn infer<Ans: LookupAnswer>(
         self,
         solver: &AnswersSolver<Ans>,
@@ -256,26 +247,7 @@ impl<'a> TypeOrExpr<'a> {
         match self {
             TypeOrExpr::Type(ty, _) => ty.clone(),
             TypeOrExpr::Expr(x) => solver.expr_infer(x, errors),
-            TypeOrExpr::Prepared(x, cache) => solver
-                .expr_with_argument_cache(x, ExprOptions::infer(errors, None), Some(cache))
-                .into_ty(),
         }
-    }
-
-    pub fn transform<Ans: LookupAnswer>(
-        &self,
-        solver: &AnswersSolver<Ans>,
-        errors: &ErrorCollector,
-        owner: &'a Owner<Type>,
-        transformation: impl Fn(&Type) -> Type,
-    ) -> (Self, bool) {
-        let ty = self.infer(solver, errors);
-        let transformed = transformation(&ty);
-        let changed = ty != transformed;
-        (
-            TypeOrExpr::Type(owner.push(transformed), self.range()),
-            changed,
-        )
     }
 }
 

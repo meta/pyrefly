@@ -49,6 +49,7 @@ use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::callable::CallArg;
+use crate::alt::callable::CallValue;
 use crate::alt::expr::TypeOrExpr;
 use crate::solver::shape::has_int_tuple_bound;
 use crate::solver::shape::type_as_intvar_solution;
@@ -1661,7 +1662,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 match param {
                     Param::PosOnly(_, ty, required) => {
                         requiredness.push(required);
-                        fake_args.push(CallArg::Arg(TypeOrExpr::Type(ty, TextRange::default())));
+                        fake_args.push(CallArg::ty(ty, TextRange::default()));
                     }
                     // We already checked that all params are PosOnly.
                     _ => unreachable!(),
@@ -1676,7 +1677,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                         .iter()
                         .zip(requiredness.iter())
                         .map(|(arg, required)| match arg {
-                            CallArg::Arg(TypeOrExpr::Type(t, _)) => {
+                            CallArg::Arg(CallValue::Plain(TypeOrExpr::Type(t, _))) => {
                                 PrefixParam::new((**t).clone(), (**required).clone())
                             }
                             // We manually constructed the callargs above, so we know their exact shape.
