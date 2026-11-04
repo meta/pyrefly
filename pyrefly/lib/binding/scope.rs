@@ -4879,15 +4879,22 @@ impl<'a> BindingsBuilder<'a> {
         };
 
         // Each reachable path must initialize an attribute. A missing assignment can
-        // instead be justified by a Never-returning call on that path.
-        // If no loop path survives, retain the pre-loop state as the local flow does.
+        // instead be justified by a Never-returning call on that path. Ordinary loops
+        // include the pre-loop path because their bodies may execute zero times. A loop
+        // that definitely runs keeps the pre-loop state only if no loop path survives, as
+        // the local flow does.
+        let include_base = match merge_style {
+            MergeStyle::Loop => true,
+            MergeStyle::LoopDefinitelyRuns => flows.is_empty(),
+            MergeStyle::Exclusive | MergeStyle::Inclusive | MergeStyle::BoolOp => false,
+        };
         // A flow can be definitely unreachable without having terminated, such as after a loop
         // that always runs and always exits through `return`.
         let attribute_flows = flows
             .iter()
             .filter(|flow| !flow.is_definitely_unreachable)
             .map(|flow| (flow, flow.last_stmt_expr))
-            .chain((merge_style.is_loop() && flows.is_empty()).then_some((&base, None)));
+            .chain(include_base.then_some((&base, None)));
         let mut attribute_names = SmallSet::new();
         for (flow, _) in attribute_flows.clone() {
             for name in flow.instance_attribute_initialization.keys() {

@@ -940,7 +940,6 @@ class ConditionalConstructor:
 );
 
 testcase!(
-    bug = "Loops that may run zero times are treated as running",
     test_attribute_initialization_loops,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -958,7 +957,7 @@ class BeforeLoop:
 class PossiblyEmpty:
     def __init__(self, values: list[int]) -> None:
         for value in values:
-            self.value = value
+            self.value = value  # E: Attribute `value` may be uninitialized
 
 class NonEmpty:
     def __init__(self) -> None:
