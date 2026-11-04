@@ -935,42 +935,39 @@ impl<'a> BindingsBuilder<'a> {
             // match subject. This is required for cases like `match self.a`, where the
             // carried narrow is stored as a facet on `self` but the branch-local subject
             // is already the projected `self.a` expression.
-            let (case_subject_idx, prev_case_negations) = if let Some(narrowing_subject) =
-                match_subject.as_single()
+            // The negations passed to the reachability check are unprojected, to match the
+            // coordinates of `narrow_ops_for_case`.
+            let prev_narrow = if let Some(narrowing_subject) = match_subject.as_single()
                 && let Some((narrow_op, op_range)) =
                     negated_prev_ops.0.get(narrowing_subject.name())
                 && let Some(projected_narrow_op) = narrow_op.rebase_onto_subject(narrowing_subject)
             {
-                // Unprojected, to match the coordinates of `narrow_ops_for_case`.
-                let prev_case_negations = Some(Box::new((narrow_op.clone(), *op_range)));
-                let case_subject_idx = self.insert_binding(
-                    Key::PatternNarrow(case_range),
-                    Binding::Narrow(
-                        subject_idx,
-                        Box::new(projected_narrow_op),
-                        NarrowUseLocation::Start(*op_range),
-                    ),
-                );
-                (case_subject_idx, prev_case_negations)
-            } else if let Some((narrow_op, op_range)) = &negated_prev_subject {
-                let prev_case_negations = Some(Box::new((narrow_op.clone(), *op_range)));
-                let case_subject_idx = self.insert_binding(
-                    Key::PatternNarrow(case_range),
-                    Binding::Narrow(
-                        subject_idx,
-                        Box::new(narrow_op.clone()),
-                        NarrowUseLocation::Start(*op_range),
-                    ),
-                );
-                (case_subject_idx, prev_case_negations)
-            } else if match_subject.as_single().is_some() && !negated_prev_ops.0.is_empty() {
-                let case_subject_idx = self.insert_binding(
-                    Key::PatternNarrow(case_range),
-                    Binding::Expr(None, Box::new(*subject_expr.clone())),
-                );
-                (case_subject_idx, None)
+                Some((projected_narrow_op, (narrow_op.clone(), *op_range)))
             } else {
-                (subject_idx, None)
+                negated_prev_subject
+                    .as_ref()
+                    .map(|negations| (negations.0.clone(), negations.clone()))
+            };
+            let (case_subject_idx, prev_case_negations) = match prev_narrow {
+                Some((binding_op, negations)) => (
+                    self.insert_binding(
+                        Key::PatternNarrow(case_range),
+                        Binding::Narrow(
+                            subject_idx,
+                            Box::new(binding_op),
+                            NarrowUseLocation::Start(negations.1),
+                        ),
+                    ),
+                    Some(Box::new(negations)),
+                ),
+                None if match_subject.as_single().is_some() && !negated_prev_ops.0.is_empty() => (
+                    self.insert_binding(
+                        Key::PatternNarrow(case_range),
+                        Binding::Expr(None, Box::new(*subject_expr.clone())),
+                    ),
+                    None,
+                ),
+                None => (subject_idx, None),
             };
             let mut new_narrow_ops =
                 self.bind_pattern(match_subject.clone(), pattern, case_subject_idx);
