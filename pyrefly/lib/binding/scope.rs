@@ -656,6 +656,9 @@ pub struct Flow {
     info: SmallMap<Name, FlowInfo>,
     /// Pairs for which the current flow excludes both values being `None`.
     excluded_none_pairs: ExcludedNonePairs,
+    /// Attribute initialization has no type to merge and needs no Phi bindings.
+    /// An absent entry means the attribute is not initialized on this path.
+    instance_attribute_initialization: SmallMap<Name, InitializationStatus>,
     // Have we seen control flow terminate?
     //
     // We continue to analyze the rest of the code after a flow terminates, but
@@ -2367,11 +2370,18 @@ impl Scopes {
                     .instance_attributes
                     .into_iter()
                     .map(|(name, attribute)| {
+                        let final_flow = (!scope.flow.has_terminated).then_some(&scope.flow);
+                        let initialized = InitializationStatus::merge(
+                            &mut self.unset_nodes,
+                            final_flow.into_iter().map(|flow| {
+                                (flow.instance_attribute_initialization.get(&name), None)
+                            }),
+                        );
                         (
                             name,
                             MethodAttribute {
                                 attribute,
-                                initialized: InitializationStatus::Initialized,
+                                initialized,
                             },
                         )
                     })
@@ -2509,12 +2519,17 @@ impl Scopes {
         let Some((method_idx, _)) = self.find_receiver_method_index(&receiver_name.id) else {
             return false;
         };
-        let ScopeKind::Method(method_scope) = &mut self.scopes[method_idx].scope.kind else {
+        let scope = &mut self.scopes[method_idx].scope;
+        let ScopeKind::Method(method_scope) = &mut scope.kind else {
             unreachable!("`find_receiver_method_index` returns the index of a method scope");
         };
         if instance_only && method_scope.receiver_kind != MethodSelfKind::Instance {
             return false;
         }
+        scope
+            .flow
+            .instance_attribute_initialization
+            .insert(name.id.clone(), InitializationStatus::Initialized);
         if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
             // Accumulate subsequent assignments in the method.
             attr.0.push(value);
@@ -4859,6 +4874,28 @@ impl<'a> BindingsBuilder<'a> {
                 })
         };
 
+        // Each reachable path must initialize an attribute.
+        // If no loop path survives, retain the pre-loop state as the local flow does.
+        let attribute_flows = flows
+            .iter()
+            .chain((merge_style.is_loop() && flows.is_empty()).then_some(&base));
+        let mut attribute_names = SmallSet::new();
+        for flow in attribute_flows.clone() {
+            for name in flow.instance_attribute_initialization.keys() {
+                attribute_names.insert(name.clone());
+            }
+        }
+        let mut instance_attribute_initialization = SmallMap::with_capacity(attribute_names.len());
+        for name in attribute_names {
+            let initialized = InitializationStatus::merge(
+                &mut self.scopes.unset_nodes,
+                attribute_flows
+                    .clone()
+                    .map(|flow| (flow.instance_attribute_initialization.get(&name), None)),
+            );
+            instance_attribute_initialization.insert(name, initialized);
+        }
+
         // Collect all unique names from base + all flows. We need this before we construct merge items
         // so that we can accurately represent a flow in which some name doesn't appear.
         let mut all_names: SmallSet<Name> = SmallSet::new();
@@ -4915,6 +4952,7 @@ impl<'a> BindingsBuilder<'a> {
         let flow = Flow {
             info: merged_flow_infos,
             excluded_none_pairs,
+            instance_attribute_initialization,
             has_terminated,
             terminated_by_raise: has_terminated && any_terminated_by_raise,
             is_definitely_unreachable: all_are_unreachable,
