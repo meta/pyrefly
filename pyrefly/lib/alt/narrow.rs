@@ -2714,8 +2714,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
         let subject_info = self.with_type_for_exhaustiveness_check(self.get_idx(*subject_idx));
         let subject_ty = subject_info.ty().clone();
-        // #3338 is limited to `Any`. Keep the existing `object` behavior:
-        // structural patterns such as tuples can narrow `object` to `Never`
+        // Structural patterns such as tuples can narrow `object` to `Never`
         // spuriously.
         if subject_ty.is_object() {
             return;
