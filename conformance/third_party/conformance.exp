@@ -11028,17 +11028,6 @@
     {
       "code": -2,
       "column": 7,
-      "concise_description": "Type variable `T3` in class `Protocol2` is declared as invariant, but could be contravariant based on its usage",
-      "description": "Type variable `T3` in class `Protocol2` is declared as invariant, but could be contravariant based on its usage",
-      "line": 41,
-      "name": "variance-mismatch",
-      "severity": "warn",
-      "stop_column": 16,
-      "stop_line": 41
-    },
-    {
-      "code": -2,
-      "column": 7,
       "concise_description": "Type variable `T1` in class `Protocol4` is declared as invariant, but could be contravariant based on its usage",
       "description": "Type variable `T1` in class `Protocol4` is declared as invariant, but could be contravariant based on its usage",
       "line": 57,
