@@ -4244,6 +4244,43 @@ MyClass().method
 }
 
 #[test]
+fn hover_sphinx_roles_not_rewritten_in_code() {
+    let code = r#"
+def documented() -> None:
+    """Prose :func:`rewritten`, a literal ``:func:`kept` ``, and code.
+
+    .. code-block:: rst
+
+        See :func:`kept_in_directive`.
+
+    Example::
+
+        :func:`kept_in_literal_block`
+
+    Fenced:
+
+    ```
+    :func:`kept_in_fence`
+    ```
+    """
+
+documented
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+
+    assert!(report.contains("Prose `rewritten`"), "{report}");
+    for kept in [
+        "``:func:`kept` ``",
+        ":func:`kept_in_directive`",
+        ":func:`kept_in_literal_block`",
+        ":func:`kept_in_fence`",
+    ] {
+        assert!(report.contains(kept), "{kept} was rewritten:\n{report}");
+    }
+}
+
+#[test]
 fn hover_does_not_mix_unrelated_interface_constructor_docstring() {
     let mut test_env = TestEnv::new();
     test_env.add_with_path(

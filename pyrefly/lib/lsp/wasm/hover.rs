@@ -79,8 +79,11 @@ use crate::state::state::TransactionHandle;
 
 /// Matches Sphinx cross-references like `:meth:`target``, `:class:`MyClass``, or `:py:func:`f``.
 /// The first group is the role name without its optional domain, and the second is the body.
+/// The pattern also matches fenced code blocks and double-backtick literals, which set neither
+/// group, so that a role inside them is left as written.
 static SPHINX_REFERENCE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r":(?:[a-zA-Z0-9_-]+:)?([a-zA-Z0-9_-]+):`([^`]+)`").expect("invalid regex")
+    Regex::new(r"(?s)```.*?```|``.+?``|:(?:[a-zA-Z0-9_-]+:)?([a-zA-Z0-9_-]+):`([^`]+)`")
+        .expect("invalid regex")
 });
 
 /// Roles that point to a section or document rather than a Python object. They show their label
@@ -172,13 +175,16 @@ impl HoverValue {
     ) -> String {
         SPHINX_REFERENCE_PATTERN
             .replace_all(&text, |caps: &regex::Captures| {
-                let body = &caps[2];
+                let (Some(role), Some(body)) = (caps.get(1), caps.get(2)) else {
+                    return caps[0].to_owned();
+                };
+                let (role, body) = (role.as_str(), body.as_str());
                 let (title, target) = match body.strip_suffix('>').and_then(|b| b.rsplit_once(" <"))
                 {
                     Some((title, target)) => (Some(title.trim()), target),
                     None => (None, body),
                 };
-                if SPHINX_LINK_ROLES.contains(&&caps[1]) {
+                if SPHINX_LINK_ROLES.contains(&role) {
                     return title.unwrap_or(target).to_owned();
                 }
                 if let Some(target) = target.strip_prefix('!') {
