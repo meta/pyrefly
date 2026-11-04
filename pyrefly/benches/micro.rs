@@ -350,6 +350,23 @@ result: Base[object] = {expression}
     )
 }
 
+/// Each layer rejects the first hint and checks the same child under the second hint.
+fn nested_init_only_constructor_hints(depth: usize) -> String {
+    let mut expression = "Node(value)".to_owned();
+    for _ in 1..depth {
+        expression = format!("Node(value, {expression})");
+    }
+    format!(
+        r#"
+class Node[T]:
+    def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+
+def f(value: str) -> None:
+    root: Node[int] | Node[str] = {expression}
+"#
+    )
+}
+
 /// Models nested trees whose return annotation is a wide union.
 /// Each layer should be checked only once.
 fn nested_nongeneric_constructor_union_hint(depth: usize) -> String {
@@ -537,6 +554,14 @@ fn nested_generic_constructor(c: &mut Criterion) {
         nested_generic_constructor_soft_error(12),
         1,
     );
+    for depth in [8, 12] {
+        measure(
+            c,
+            &format!("nested_init_only_constructor_hints_{depth}"),
+            nested_init_only_constructor_hints(depth),
+            0,
+        );
+    }
 }
 
 fn nested_nongeneric_constructor(c: &mut Criterion) {
@@ -567,6 +592,20 @@ fn method_name_collision(c: &mut Criterion) {
 
 fn constructor_dispatch(c: &mut Criterion) {
     measure(c, "constructor_calls_256", constructor_calls(256), 0);
+    for (name, argument) in [
+        ("constructor_literal_arguments_256", "1"),
+        ("constructor_factory_arguments_256", "make()"),
+    ] {
+        let calls = joined(256, "\n", |_| format!("k = K({argument})"));
+        measure(
+            c,
+            name,
+            format!(
+                "class K:\n    def __init__(self, value: int) -> None: ...\ndef make() -> int: ...\n{calls}"
+            ),
+            0,
+        );
+    }
 }
 
 fn pandas_method_dispatch(c: &mut Criterion) {
