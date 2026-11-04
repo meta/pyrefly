@@ -162,16 +162,28 @@ are used.
                - Yes
                   Installed stubs are used.
                - No
-                  UntypedImport error.
+                  - Does the package ship a `py.typed` file?
+                     - Yes
+                        The installed package is used.
+                     - No
+                        UntypedImport error.
          - No
             MissingImport error.
    - No
       - Is the package installed?
          - Yes
-            Bundled stubs used.
+            - Does the package ship a `py.typed` file?
+               - Yes
+                  The installed package is used.
+               - No
+                  Bundled stubs used.
          - No
             MissingSourceForStubs error.
 ```
+
+A package that ships a `py.typed` file provides its own types, so following
+[PEP 561](https://peps.python.org/pep-0561/#type-checker-module-resolution-order),
+it takes priority over the bundled stubs, which may describe an older version of the package.
 
 ## Editable Installs
 

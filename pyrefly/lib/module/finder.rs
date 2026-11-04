@@ -83,6 +83,7 @@ fn find_result_module_path(result: FindResult) -> FindingOrError<ModulePath> {
 /// Returns `None` if we should continue to the normal result handling - this happens when:
 /// - No bundled stub was provided, OR
 /// - A `-stubs` package was found (higher priority), OR
+/// - The installed package ships `py.typed` (higher priority), OR
 /// - Using a real config file with no source package installed
 fn resolve_third_party_stub(
     module: ModuleName,
@@ -113,14 +114,17 @@ fn resolve_third_party_stub(
 
     // If we do have a bundled stub and we also do not find a
     // higher priority stub from the site packages, then we should use the
-    // bundled stub. However, if we also don't find the actual
-    // package (normal_result), we should attach a MissingSource error.
+    // bundled stub, unless the package ships its own types. However, if we also don't
+    // find the actual package (normal_result), we should attach a MissingSource error.
     if let Some(bundled) = bundled_stub
         && stub_result.is_none()
     {
         if let Some(normal_result) = normal_result {
-            // We have both typeshed third party stubs and the actual package.
-            if policy.replace_untyped && !package_has_py_typed(module, normal_result, dir_cache) {
+            // We have both typeshed third party stubs and the actual package. PEP 561
+            // orders a package that ships `py.typed` before typeshed's stubs.
+            if package_has_py_typed(module, normal_result, dir_cache) {
+                return None;
+            } else if policy.replace_untyped {
                 return Some(FindingOrError::Error(FindError::Ignored));
             } else {
                 return Some(bundled.clone());
@@ -3969,19 +3973,12 @@ mod tests {
                 FindImportOptions::new(&DirEntryCache::new()),
             );
 
-            // BUG: PEP 561 orders a package that ships `py.typed` before typeshed's
-            // stubs, so `site_packages/requests/__init__.py` should be found.
-            let FindingOrError::Finding(finding) = &result else {
-                panic!("Expected a finding, got: {result:?}");
-            };
-            assert!(
-                matches!(
-                    finding.finding.details(),
-                    ModulePathDetails::BundledTypeshedThirdParty(_)
-                ),
-                "got: {result:?}"
+            assert_eq!(
+                result,
+                FindingOrError::new_finding(ModulePath::filesystem(
+                    root.join("site_packages/requests/__init__.py")
+                ))
             );
-            assert_eq!(finding.error, None);
         }
     }
 
