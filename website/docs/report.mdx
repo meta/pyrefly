@@ -96,6 +96,12 @@ Findings go to stdout, the summary to stderr. With `--strict`, annotations that 
 count as untyped. `--output-format` controls the findings format.
 See `pyrefly coverage check --help` for all flags.
 
+### Pre-commit
+
+To check coverage on every commit with [prek](https://prek.j178.dev/) or
+[pre-commit](https://pre-commit.com/), use the `pyrefly-coverage-check` hook from
+[meta/pyrefly-pre-commit](https://github.com/meta/pyrefly-pre-commit#enforcing-type-coverage).
+
 ## Generating a JSON report
 
 ```sh
