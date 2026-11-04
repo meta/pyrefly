@@ -1104,10 +1104,16 @@ struct ScopeClass {
     attributes_set_on_new_instance: SmallSet<Name>,
     nn_module_registrations: NNModuleRegistrations,
     has_protocol_base: bool,
+    docstring_range: Option<TextRange>,
 }
 
 impl ScopeClass {
-    pub fn new(name: Identifier, indices: ClassIndices, has_protocol_base: bool) -> Self {
+    pub fn new(
+        name: Identifier,
+        indices: ClassIndices,
+        has_protocol_base: bool,
+        docstring_range: Option<TextRange>,
+    ) -> Self {
         Self {
             name,
             indices,
@@ -1117,6 +1123,7 @@ impl ScopeClass {
             attributes_set_on_new_instance: SmallSet::new(),
             nn_module_registrations: SmallMap::new(),
             has_protocol_base,
+            docstring_range,
         }
     }
 
@@ -1555,11 +1562,17 @@ impl Scope {
         indices: ClassIndices,
         name: Identifier,
         has_protocol_base: bool,
+        docstring_range: Option<TextRange>,
     ) -> Self {
         Self::new(
             range,
             FlowBarrier::AllowFlowChecked,
-            ScopeKind::Class(ScopeClass::new(name, indices, has_protocol_base)),
+            ScopeKind::Class(ScopeClass::new(
+                name,
+                indices,
+                has_protocol_base,
+                docstring_range,
+            )),
         )
     }
 
@@ -1609,6 +1622,13 @@ impl Scope {
     fn class_key(&self) -> Option<Idx<KeyClass>> {
         match &self.kind {
             ScopeKind::Class(class_scope) => Some(class_scope.indices.class_idx),
+            _ => None,
+        }
+    }
+
+    fn class_docstring_range(&self) -> Option<TextRange> {
+        match &self.kind {
+            ScopeKind::Class(class_scope) => class_scope.docstring_range,
             _ => None,
         }
     }
@@ -2017,6 +2037,11 @@ impl Scopes {
     /// Return enclosing classes from innermost to outermost.
     pub fn enclosing_class_keys(&self) -> Vec<Idx<KeyClass>> {
         self.iter_rev().filter_map(Scope::class_key).collect()
+    }
+
+    /// The range of the docstring of the class whose body we are directly in, if it has one.
+    pub fn current_class_docstring_range(&self) -> Option<TextRange> {
+        self.current().class_docstring_range()
     }
 
     /// Are we anywhere inside a class? If so, return the class object idx.

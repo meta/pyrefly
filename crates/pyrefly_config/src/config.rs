@@ -1311,6 +1311,14 @@ impl ConfigFile {
                  self.root.treat_all_caps_as_final.unwrap())
     }
 
+    pub fn infer_param_types_from_docstring(&self, path: &ModulePath) -> bool {
+        self.get_from_config_overrides(ConfigBase::get_infer_param_types_from_docstring, path)
+            .unwrap_or_else(||
+                 // we can use unwrap here, because the value in the root config must
+                 // be set in `ConfigFile::configure()`.
+                 self.root.infer_param_types_from_docstring.unwrap())
+    }
+
     pub fn enabled_ignores(&self, path: &ModulePath) -> Cow<'_, SmallSet<Tool>> {
         if let Some(ignores) = self.get_from_target_config(
             |config| ConfigBase::get_enabled_ignores(config).cloned(),
@@ -1802,6 +1810,7 @@ impl ConfigFile {
             apply_preset_default!(type_ignore_unknown_tag_behavior);
             apply_preset_default!(replace_untyped_imports_with_any);
             apply_preset_default!(treat_all_caps_as_final);
+            apply_preset_default!(infer_param_types_from_docstring);
         }
 
         if self.root.errors.is_none() {
@@ -1870,6 +1879,10 @@ impl ConfigFile {
 
         if self.root.treat_all_caps_as_final.is_none() {
             self.root.treat_all_caps_as_final = Some(false);
+        }
+
+        if self.root.infer_param_types_from_docstring.is_none() {
+            self.root.infer_param_types_from_docstring = Some(false);
         }
 
         if self.root.type_ignore_unknown_tag_behavior.is_none() {
@@ -2786,6 +2799,7 @@ mod tests {
                     spec_compliant_overloads: None,
                     legacy_overload_expansion: None,
                     treat_all_caps_as_final: None,
+                    infer_param_types_from_docstring: None,
                 },
                 source_db: Default::default(),
                 target_configs: Default::default(),
@@ -2817,6 +2831,7 @@ mod tests {
                         spec_compliant_overloads: None,
                         legacy_overload_expansion: None,
                         treat_all_caps_as_final: None,
+                        infer_param_types_from_docstring: None,
                     }
                 }],
                 coverage: CoverageConfig {
@@ -3511,6 +3526,7 @@ output-format = "omit-errors"
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
                 treat_all_caps_as_final: None,
+                infer_param_types_from_docstring: None,
             },
             sub_configs: vec![
                 SubConfig {
@@ -4014,6 +4030,20 @@ output-format = "omit-errors"
             errors.severity(ErrorKind::BadOverrideParamName),
             Severity::Ignore
         );
+    }
+
+    #[test]
+    fn test_infer_param_types_from_docstring() {
+        let path = ModulePath::filesystem(PathBuf::from("/project/foo.py"));
+
+        let mut config = ConfigFile::default();
+        config.configure();
+        assert!(!config.infer_param_types_from_docstring(&path));
+
+        let mut config =
+            ConfigFile::parse_config("infer-param-types-from-docstring = true").unwrap();
+        config.configure();
+        assert!(config.infer_param_types_from_docstring(&path));
     }
 
     #[test]
@@ -4891,6 +4921,7 @@ output-format = "omit-errors"
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
                 treat_all_caps_as_final: None,
+                infer_param_types_from_docstring: None,
             },
             sub_configs: vec![],
             ..Default::default()
@@ -4935,6 +4966,7 @@ output-format = "omit-errors"
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
                 treat_all_caps_as_final: None,
+                infer_param_types_from_docstring: None,
             },
             sub_configs: vec![],
             ..Default::default()
