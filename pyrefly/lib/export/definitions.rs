@@ -123,11 +123,13 @@ pub struct Definition {
     /// `MutableCapture` whose own scope defines a value (`global x; x = 1`) legally creates
     /// the outer-scope name, so it needs no pre-existing outer definition.
     pub has_value_definition: bool,
-    /// True while every definition site is a `def`. This is purely syntactic: a decorated `def`
-    /// (e.g. `@property`) counts, but a method-like assignment such as `f = staticmethod(g)` or
-    /// `f = lambda self: 1` does not. Telling such assignments apart from data attributes would
-    /// need type information, so the syntactic rule is much simpler and stays predictable.
-    pub function_def_only: bool,
+    /// True while every definition site is a `def` or `class` statement. This is purely
+    /// syntactic: a decorated `def` (e.g. `@property`) counts, but a method- or class-like
+    /// assignment such as `f = staticmethod(g)`, `f = lambda self: 1`, or
+    /// `Color = Enum("Color", "A B")` does not. Telling such assignments apart from data
+    /// attributes would need type information, so the syntactic rule is much simpler and stays
+    /// predictable.
+    pub definition_only: bool,
 }
 
 /// Does this definition style give the name a value in the current scope?
@@ -153,8 +155,10 @@ impl Definition {
 
     fn merge(&mut self, other: DefinitionStyle, range: TextRange, in_main_guard: bool) {
         self.main_guard_only &= in_main_guard;
-        self.function_def_only &=
-            matches!(other, DefinitionStyle::Unannotated(SymbolKind::Function));
+        self.definition_only &= matches!(
+            other,
+            DefinitionStyle::Unannotated(SymbolKind::Function | SymbolKind::Class)
+        );
         self.has_value_definition |= is_value_definition(&other);
         // To ensure binding code cannot produce invalid lookups, we ensure that
         // `self.style` and `self.range` always match.
@@ -427,7 +431,7 @@ impl Definitions {
                     last_range: TextRange::default(),
                     main_guard_only: false,
                     has_value_definition: false,
-                    function_def_only: false,
+                    definition_only: false,
                 },
             );
         }
@@ -525,7 +529,10 @@ impl DefinitionsBuilder {
             self.inner.environment_names.insert(x.clone());
         }
         let has_value_definition = is_value_definition(&style);
-        let function_def_only = matches!(style, DefinitionStyle::Unannotated(SymbolKind::Function));
+        let definition_only = matches!(
+            style,
+            DefinitionStyle::Unannotated(SymbolKind::Function | SymbolKind::Class)
+        );
         match self.inner.definitions.entry(x.clone()) {
             Entry::Occupied(mut e) => {
                 e.get_mut().merge(style, range, in_main_guard);
@@ -539,7 +546,7 @@ impl DefinitionsBuilder {
                     last_range: range,
                     main_guard_only: in_main_guard,
                     has_value_definition,
-                    function_def_only,
+                    definition_only,
                 });
             }
         }

@@ -254,9 +254,10 @@ struct StaticInfo {
     /// Both fit in padding `StaticInfo` already had, so they cost nothing.
     char_len: u32,
     char_mask: u32,
-    /// True while every definition site is a `def`. A conditionally defined method is not
-    /// reported as a possibly uninitialized class attribute.
-    function_def_only: bool,
+    /// True while every definition site is a `def` or `class` statement. A conditionally
+    /// defined method or nested class is not reported as a possibly uninitialized class
+    /// attribute.
+    definition_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -459,7 +460,7 @@ impl Static {
         range: TextRange,
         style: StaticStyle,
         last_range: TextRange,
-        function_def_only: bool,
+        definition_only: bool,
     ) {
         // Parse recovery produces empty names, such as a nameless type parameter. The
         // static scope never holds them, because `bind_name` never binds them.
@@ -475,7 +476,7 @@ impl Static {
                     last_range,
                     char_len,
                     char_mask,
-                    function_def_only,
+                    definition_only,
                 });
             }
             Entry::Occupied(mut e) => {
@@ -484,7 +485,7 @@ impl Static {
                 if last_range.start() > found.last_range.start() {
                     found.last_range = last_range;
                 }
-                found.function_def_only &= function_def_only;
+                found.definition_only &= definition_only;
                 if matches!(style, StaticStyle::PossibleLegacyTParam) {
                     // Static scopes are keyed by name, so `foo.T` and `foo.P` must share the
                     // `foo` entry. The caller links their bindings before each upsert, making
@@ -571,7 +572,7 @@ impl Static {
             // same name in this scope.
             let range = definition.range;
             let last_range = definition.last_range;
-            let function_def_only = definition.function_def_only;
+            let definition_only = definition.definition_only;
             let style = StaticStyle::of_definition(
                 name.as_ref(),
                 definition,
@@ -580,7 +581,7 @@ impl Static {
                 module_info.name(),
                 get_annotation_idx,
             );
-            self.upsert(name, range, style, last_range, function_def_only);
+            self.upsert(name, range, style, last_range, definition_only);
         }
         for (module, range, wildcard) in all_wildcards {
             // Builtins are a fallback, so they should never shadow an existing definition.
@@ -3748,7 +3749,7 @@ impl Scopes {
                         },
                     };
                     let initialized = match &value.style {
-                        _ if static_info.function_def_only => InitializedInFlow::Yes,
+                        _ if static_info.definition_only => InitializedInFlow::Yes,
                         FlowStyle::PossiblyUninitialized => InitializedInFlow::Conditionally,
                         FlowStyle::MaybeInitialized(nodes) => {
                             InitializedInFlow::DeferredCheck(nodes.clone())
@@ -4201,7 +4202,7 @@ impl Scopes {
                                 last_range: TextRange::default(),
                                 char_len,
                                 char_mask,
-                                function_def_only: false,
+                                definition_only: false,
                             }))
                         })
                     },

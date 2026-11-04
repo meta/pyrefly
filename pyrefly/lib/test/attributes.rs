@@ -615,6 +615,37 @@ async def use_async() -> None:
 );
 
 testcase!(
+    test_conditionally_defined_nested_classes,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from enum import Enum
+
+def enabled() -> bool: ...
+class Other: ...
+
+class ConditionalClass:
+    if enabled():
+        class Inner: ...
+
+class ConditionalFunctionalClass:
+    if enabled():
+        Color = Enum("Color", "A B")  # E: Attribute `Color` may be uninitialized
+
+class ReassignedClass:
+    if enabled():
+        class Inner: ...
+        Inner = Other  # E: Attribute `Inner` may be uninitialized
+
+class MixedDefinitions:
+    if enabled():
+        if enabled():
+            class Inner: ...
+        else:
+            Inner = Other  # E: Attribute `Inner` may be uninitialized
+"#,
+);
+
+testcase!(
     test_conditional_method_assignment_initialization,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"

@@ -1927,7 +1927,7 @@ Assignments inside nested functions do not initialize the enclosing method's att
 
 Pyrefly reports this error at the attribute definition, even if the attribute is never read.
 A later `hasattr` guard does not suppress this check.
-Conditional method definitions and stub (`.pyi`) files are excluded.
+Conditionally defined methods and nested classes, and stub (`.pyi`) files, are excluded.
 An annotation in a method without a value, such as `self.value: int`, declares the attribute without initializing it, so this check reports it.
 A class-body annotation without a value, such as `value: int`, is checked by [`uninitialized-instance-variable`](#uninitialized-instance-variable) instead.
 
