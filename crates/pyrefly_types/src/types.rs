@@ -2325,7 +2325,7 @@ impl Type {
     }
 
     /// Whether this type only records the truthiness of a boolean operand for narrowing. Such a
-    /// type is hidden from users and from `assert_type`.
+    /// type is ignored by `assert_type`.
     pub fn is_truthiness_marker(&self) -> bool {
         matches!(self, Type::Falsy | Type::Truthy)
     }

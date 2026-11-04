@@ -333,7 +333,7 @@ pub(super) fn type_to_indexed_shape(
             type_to_indexed_shape(context, &body_type, table)
         }
         Type::Union(union) => union_to_indexed_shape(context, union, table),
-        // Truthiness markers are hidden from users, so clients see the marked type itself.
+        // Truthiness markers are internal to narrowing, so query clients see the marked type itself.
         Type::Intersect(intersection) if intersection.0.iter().any(Type::is_truthiness_marker) => {
             type_to_indexed_shape(context, &ty.clone().without_truthiness_markers(), table)
         }

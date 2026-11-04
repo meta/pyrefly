@@ -445,7 +445,7 @@ def container(d: dict[str, int] | None) -> None:
 # A subclass can define a falsy `__bool__`, so a falsy `Author` stays in the result.
 def not_none(author: Author | None) -> None:
     genre = author and author.genre
-    reveal_type(genre)  # E: revealed type: Author | Genre | None
+    reveal_type(genre)  # E: revealed type: (Author & Falsy) | Genre | None
     if genre is not None:
         assert_type(genre, Author | Genre)
 "#,
@@ -460,7 +460,7 @@ from typing import reveal_type
 def f(flag: bool, value: object | None, other: bool) -> None:
     if flag or (value and other):
         pass
-    reveal_type(value and other)  # E: revealed type: bool | object | None
+    reveal_type(value and other)  # E: revealed type: bool | (object & Falsy) | None
 "#,
 );
 
@@ -468,7 +468,7 @@ def f(flag: bool, value: object | None, other: bool) -> None:
 testcase!(
     test_boolean_or_result_falsy_narrow,
     r#"
-from typing import assert_type
+from typing import assert_type, reveal_type
 
 class Config: ...
 
@@ -487,6 +487,9 @@ def container(items: list[int], default: Settings) -> None:
     value = items or default
     if not value:
         assert_type(value, Settings)
+
+def revealed(override: Config | None, default: Settings) -> None:
+    reveal_type(override or default)  # E: revealed type: (Config & Truthy) | Settings
 "#,
 );
 
