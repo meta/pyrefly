@@ -100,10 +100,12 @@ use crate::solver::solver::VarRecurser;
 use crate::solver::type_order::TypeOrder;
 use crate::types::class::Class;
 use crate::types::class::ClassFields;
+use crate::types::env::TypeEnv;
 use crate::types::equality::TypeEq;
 use crate::types::equality::TypeEqCtx;
 use crate::types::stdlib::Stdlib;
 use crate::types::type_info::TypeInfo;
+use crate::types::types::TParams;
 use crate::types::types::Type;
 use crate::types::types::Var;
 
@@ -2136,6 +2138,19 @@ pub struct AnswersSolver<'ctx, 'answer, Ans: LookupAnswer> {
     pub recurser: &'ctx VarRecurser,
     pub stdlib: &'ctx Stdlib,
     pub heap: &'ctx TypeHeap,
+}
+
+impl<Ans: LookupAnswer> TypeEnv for AnswersSolver<'_, '_, Ans> {
+    fn stdlib(&self) -> &Stdlib {
+        self.stdlib
+    }
+
+    /// May solve the class's `KeyTParams` on demand, so no variable lock may be held across
+    /// this call.
+    fn class_tparams<'a>(&'a self, cls: &'a Class) -> &'a TParams {
+        self.get_class_tparams(cls)
+            .map_or(TParams::empty_ref(), |tparams| &**tparams)
+    }
 }
 
 /// Proof that this SCC owns the pending result slot for this calculation.
