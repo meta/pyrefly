@@ -664,10 +664,12 @@ baseline-format = "minimal"
 
 ### `baseline-error-level`
 
-The severity assigned to diagnostics that match the baseline. The default value,
-`"ignore"`, suppresses them from CLI output. Set this to `"hint"`, `"info"`, `"warn"`,
-or `"error"` to report matched diagnostics at that severity. Reported matches follow
-the normal [`min-severity`](#min-severity) filtering and exit-status behaviour.
+The severity assigned to diagnostics that match the baseline. For `pyrefly check`,
+an unset value acts as `"ignore"` and suppresses them from CLI output. Set this to
+`"hint"`, `"info"`, `"warn"`, or `"error"` to report matched diagnostics at that
+severity. Reported matches follow the normal [`min-severity`](#min-severity)
+filtering and exit-status behaviour. The IDE uses the same value when it is set,
+and shows matched diagnostics as hints when it is unset.
 
 ```toml
 baseline = "baseline.json"
@@ -675,14 +677,17 @@ baseline-error-level = "warn"
 ```
 
 - Type: `"ignore"` | `"hint"` | `"info"` | `"warn"` | `"error"`
-- Default: `"ignore"`
+- Default: unset. `pyrefly check` treats that as `"ignore"`. The IDE shows hints.
 - Flag equivalent: `--baseline-error-level`
 - Notes:
     - `baseline-error-level` is a **project-level setting** and cannot be overridden
       in [`sub-config`](#sub-configs) sections.
-    - A CLI flag takes precedence over the configuration value.
-    - This setting affects `pyrefly check` output only. The IDE displays baselined
-      diagnostics as hints.
+    - A CLI flag takes precedence over the configuration value for `pyrefly check`.
+    - When the option is unset, the IDE shows matched diagnostics as hints. Hints
+      stay out of VS Code's Problems list.
+    - `"info"`, `"warn"`, and `"error"` use those severities in the IDE.
+      `"warn"` and `"error"` appear in the Problems list. `"ignore"` hides the
+      matched diagnostic in the IDE as well as in `pyrefly check`.
 
 ### `baseline-auto-update`
 

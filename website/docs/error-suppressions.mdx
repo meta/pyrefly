@@ -190,12 +190,16 @@ baseline-format = "minimal"
 Both settings are configuration-only so all users interpret and update the
 checked-in baseline consistently.
 
-Note that errors suppressed by the baseline file are still shown in the IDE.
+Errors that match the baseline are still shown in the IDE. Until
+`baseline-error-level` is set they appear as hints, which most editors leave out
+of the Problems list.
 
 `--baseline-error-level=<ignore|hint|info|warn|error>` and the project-level
-`baseline-error-level` setting control how matching errors are reported. The
-default is `ignore`, which omits them from CLI output; the other levels emit them
-at a reduced or unchanged severity:
+`baseline-error-level` setting control how matching errors are reported, in
+`pyrefly check` and in the IDE. For `pyrefly check`, an unset value acts as
+`ignore` and omits them from CLI output; the other levels emit them at that
+severity. The IDE keeps showing hints until the option is set, then uses the
+same level. `ignore` hides the matched diagnostic in the editor too:
 
 ```toml
 baseline = "baseline.json"
