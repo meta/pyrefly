@@ -973,6 +973,7 @@ django-model-modules = [
 List every module that directly contains model definitions with `ForeignKey`, `OneToOneField`, or
 `ManyToManyField` relationships. Pyrefly loads only the listed modules when it needs cross-module
 reverse relationships; it does not scan all project or currently loaded modules.
+Pyrefly reports a configuration warning if a listed module cannot be resolved.
 
 - Type: list of module names
 - Default: `[]`

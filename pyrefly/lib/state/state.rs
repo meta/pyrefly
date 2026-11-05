@@ -3387,9 +3387,20 @@ impl<'a> LookupExport for TransactionHandle<'a> {
 
 impl<'a> LookupAnswer for TransactionHandle<'a> {
     fn django_model_modules(&self) -> Vec<(ModuleName, ModulePath)> {
-        let modules = self.module_data.config.read().django_model_modules.clone();
-        modules
-            .into_iter()
+        let config = self.module_data.config.read().dupe();
+        if config.django_model_modules.is_empty() {
+            return Vec::new();
+        }
+        self.transaction
+            .get_cached_loader(&config)
+            .check_django_model_modules(
+                self.transaction.config_finder(),
+                self.module_data.handle.path(),
+            );
+        config
+            .django_model_modules
+            .iter()
+            .copied()
             .filter_map(|module| {
                 self.get_module(module, None, ModuleDep::Key(KeyDjangoRelations.to_anykey()))
                     .finding()
