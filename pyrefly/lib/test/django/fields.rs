@@ -10,7 +10,6 @@ use crate::test::django::util::django_env;
 use crate::testcase;
 
 django_testcase!(
-    bug = "Field unions lose their instance assignment and compatibility contracts",
     test_union_field_instance_contract,
     r#"
 from typing import Protocol, assert_type
@@ -29,17 +28,17 @@ class ActiveBase(models.Model):
     is_active: bool | models.BooleanField[bool, bool]
 
 class ActiveChild(ActiveBase):
-    is_active = models.BooleanField()  # E: inconsistent
+    is_active = models.BooleanField()
 
 def update(record: Record) -> None:
     assert_type(record.name, str)
-    record.name = "hello"  # E: not assignable to attribute `name`
+    record.name = "hello"
     record.name = object()  # E: not assignable to attribute `name`
     assert_type(record.different, str | int)
     record.different = "hello"  # E: not assignable to attribute `different`
     record.different = 1  # E: not assignable to attribute `different`
 
-value: HasName = Record()  # E: not assignable
+value: HasName = Record()
 "#,
 );
 

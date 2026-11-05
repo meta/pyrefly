@@ -382,6 +382,46 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         (specialized != *ty).then_some(specialized)
     }
 
+    /// Resolve constructed fields to their instance read and assignment contracts.
+    pub(crate) fn django_field_instance_types(&self, ty: &Type) -> Option<(Type, Type)> {
+        match ty {
+            Type::ClassType(cls) => match cls.django_metadata()? {
+                DjangoClassMetadata::Field {
+                    get_type, set_type, ..
+                } => Some((get_type.clone(), set_type.clone())),
+                _ => None,
+            },
+            Type::Union(union) => {
+                let (index, (get_type, set_type)) =
+                    union
+                        .members
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, member)| {
+                            self.django_field_instance_types(member)
+                                .map(|types| (index, types))
+                        })?;
+                let mut get_types = union.members[..index].to_vec();
+                let mut set_types = get_types.clone();
+                get_types.push(get_type);
+                set_types.push(set_type);
+                for member in &union.members[index + 1..] {
+                    let (get_type, set_type) = self
+                        .django_field_instance_types(member)
+                        .unwrap_or_else(|| (member.clone(), member.clone()));
+                    get_types.push(get_type);
+                    set_types.push(set_type);
+                }
+                // Reading may produce any branch, but a write must satisfy every branch.
+                Some((
+                    self.unions(get_types),
+                    self.intersect_guarantees(&set_types),
+                ))
+            }
+            _ => None,
+        }
+    }
+
     /// Return the read and assignment types of a Django field.
     pub fn get_django_field_types(
         &self,

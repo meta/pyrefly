@@ -3896,6 +3896,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 } else {
                     read_only_reason
                 };
+                if let Some((read_type, write_type)) = self.django_field_instance_types(&ty) {
+                    return match read_only_reason {
+                        Some(reason) => ClassAttribute::read_only(read_type, reason),
+                        None => ClassAttribute::ReadWrite {
+                            read_type,
+                            write_type: Some(write_type),
+                            is_method: IsMethod::No,
+                            is_instance_var: false,
+                        },
+                    };
+                }
                 match (descriptor_range, ty) {
                     (Some(range), Type::Union(union)) => {
                         let Some(base) = instance.to_descriptor_base() else {
