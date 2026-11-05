@@ -41,6 +41,10 @@ struct ModuleErrors {
 pub struct ModuleDiagnostics(Arc<[Error]>);
 
 impl ModuleDiagnostics {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &Error> {
         self.0.iter()
     }
@@ -381,12 +385,8 @@ impl ErrorCollector {
         effect
     }
 
-    /// Classify this collector's diagnostics together with finalized `snapshots` of
-    /// the same module, so that an error in one can explain an `unknown-from-error`
-    /// error in another.
     pub fn collect_into(
         &self,
-        snapshots: &[&ModuleDiagnostics],
         error_config: &ErrorConfig,
         fstring_ranges: &[(LineNumber, LineNumber)],
         ignore_all: &[Suppression],
@@ -394,74 +394,104 @@ impl ErrorCollector {
         result: &mut CollectedErrors,
     ) {
         let mut errors = self.errors.lock();
-        let mut all: Vec<&Error> = snapshots
+        let errors: Vec<&Error> = errors.iter().collect();
+        Self::collect_sorted(
+            &self.module_info,
+            &errors,
+            error_config,
+            fstring_ranges,
+            ignore_all,
+            misplaced,
+            result,
+        );
+    }
+
+    /// Classify the finalized `snapshots` of one module together, so that an error in
+    /// one can explain an `unknown-from-error` error in another.
+    pub(crate) fn collect_snapshots_into(
+        module_info: &ModuleInfo,
+        snapshots: &[&ModuleDiagnostics],
+        error_config: &ErrorConfig,
+        fstring_ranges: &[(LineNumber, LineNumber)],
+        ignore_all: &[Suppression],
+        misplaced: &[LineNumber],
+        result: &mut CollectedErrors,
+    ) {
+        let mut errors: Vec<&Error> = snapshots
             .iter()
             .flat_map(|snapshot| snapshot.iter())
-            .chain(errors.iter())
             .collect();
-        // Each source is sorted by range and the sort is stable, so diagnostics at an
-        // equal range keep the order of `snapshots`, followed by this collector.
-        all.sort_by_key(|error| (error.range().start(), error.range().end()));
-        self.collect_iter(&all, error_config, fstring_ranges, ignore_all, result);
-        if !(self.module_info.is_generated() && error_config.ignore_errors_in_generated_code) {
-            self.collect_misplaced_ignores(misplaced, error_config, result);
-        }
+        // Each snapshot is sorted by range and the sort is stable, so diagnostics at an
+        // equal range keep the order of `snapshots`.
+        errors.sort_by_key(|error| (error.range().start(), error.range().end()));
+        Self::collect_sorted(
+            module_info,
+            &errors,
+            error_config,
+            fstring_ranges,
+            ignore_all,
+            misplaced,
+            result,
+        );
     }
 
     /// Classify `errors`, which must be sorted by range.
-    fn collect_iter(
-        &self,
+    fn collect_sorted(
+        module_info: &ModuleInfo,
         errors: &[&Error],
         error_config: &ErrorConfig,
         fstring_ranges: &[(LineNumber, LineNumber)],
         ignore_all: &[Suppression],
+        misplaced: &[LineNumber],
         result: &mut CollectedErrors,
     ) {
-        if !(self.module_info.is_generated() && error_config.ignore_errors_in_generated_code) {
-            // Only errors that are shown or suppressed explain an `unknown-from-error` error, so an
-            // error whose kind is disabled never hides one. A soft error never produces an error
-            // `Any`, so only hard errors and nested `unknown-from-error` errors count.
-            let shown = |kind| error_config.display_config.severity(kind) != Severity::Ignore;
-            let explained = shown(ErrorKind::UnknownFromError).then(|| {
-                unknown_from_error_explained(errors, |kind: ErrorKind| {
-                    shown(kind) && (!kind.is_soft() || kind == ErrorKind::UnknownFromError)
-                })
-            });
-            for (i, err) in errors.iter().copied().enumerate() {
-                if explained.as_ref().is_some_and(|explained| explained[i]) {
+        if module_info.is_generated() && error_config.ignore_errors_in_generated_code {
+            return;
+        }
+        // Only errors that are shown or suppressed explain an `unknown-from-error` error, so an
+        // error whose kind is disabled never hides one. A soft error never produces an error
+        // `Any`, so only hard errors and nested `unknown-from-error` errors count.
+        let shown = |kind| error_config.display_config.severity(kind) != Severity::Ignore;
+        let explained = shown(ErrorKind::UnknownFromError).then(|| {
+            unknown_from_error_explained(errors, |kind: ErrorKind| {
+                shown(kind) && (!kind.is_soft() || kind == ErrorKind::UnknownFromError)
+            })
+        });
+        for (i, err) in errors.iter().copied().enumerate() {
+            if explained.as_ref().is_some_and(|explained| explained[i]) {
+                continue;
+            }
+            if err.error_kind().is_directive() {
+                // Directives bypass suppression, baseline, and
+                // min-severity, but still respect explicit severity
+                // overrides (e.g. --ignore reveal-type).
+                let severity = error_config.display_config.severity(err.error_kind());
+                if severity == Severity::Ignore {
+                    result.disabled.push(err.clone());
+                } else {
+                    result.directives.push(err.with_severity(severity));
+                }
+            } else {
+                let effect =
+                    Self::suppression_effect(err, fstring_ranges, ignore_all, error_config);
+                let mut severity = error_config.display_config.severity(err.error_kind());
+                if effect == SuppressionEffect::Suppress {
+                    result.suppressed.push(err.with_severity(severity));
                     continue;
                 }
-                if err.error_kind().is_directive() {
-                    // Directives bypass suppression, baseline, and
-                    // min-severity, but still respect explicit severity
-                    // overrides (e.g. --ignore reveal-type).
-                    let severity = error_config.display_config.severity(err.error_kind());
-                    if severity == Severity::Ignore {
-                        result.disabled.push(err.clone());
-                    } else {
-                        result.directives.push(err.with_severity(severity));
-                    }
-                } else {
-                    let effect =
-                        Self::suppression_effect(err, fstring_ranges, ignore_all, error_config);
-                    let mut severity = error_config.display_config.severity(err.error_kind());
-                    if effect == SuppressionEffect::Suppress {
-                        result.suppressed.push(err.with_severity(severity));
-                        continue;
-                    }
-                    if effect == SuppressionEffect::DowngradeToWarning {
-                        severity = severity.min(Severity::Warn);
-                    }
-                    match severity {
-                        Severity::Error => result.ordinary.push(err.with_severity(Severity::Error)),
-                        Severity::Warn => result.ordinary.push(err.with_severity(Severity::Warn)),
-                        Severity::Info => result.ordinary.push(err.with_severity(Severity::Info)),
-                        Severity::Hint => result.hints.push(err.with_severity(Severity::Hint)),
-                        Severity::Ignore => result.disabled.push(err.clone()),
-                    }
+                if effect == SuppressionEffect::DowngradeToWarning {
+                    severity = severity.min(Severity::Warn);
+                }
+                match severity {
+                    Severity::Error => result.ordinary.push(err.with_severity(Severity::Error)),
+                    Severity::Warn => result.ordinary.push(err.with_severity(Severity::Warn)),
+                    Severity::Info => result.ordinary.push(err.with_severity(Severity::Info)),
+                    Severity::Hint => result.hints.push(err.with_severity(Severity::Hint)),
+                    Severity::Ignore => result.disabled.push(err.clone()),
                 }
             }
         }
+        Self::collect_misplaced_ignores(module_info, misplaced, error_config, result);
     }
 
     /// Emit a diagnostic for each pyrefly `ignore-errors` directive found outside
@@ -475,7 +505,7 @@ impl ErrorCollector {
     /// of being routed through `is_error_suppressed` (the fix is to move or
     /// remove the directive, not to silence the warning about it).
     fn collect_misplaced_ignores(
-        &self,
+        module_info: &ModuleInfo,
         misplaced: &[LineNumber],
         error_config: &ErrorConfig,
         result: &mut CollectedErrors,
@@ -487,7 +517,7 @@ impl ErrorCollector {
             .display_config
             .severity(ErrorKind::MisplacedIgnore);
         for line in misplaced {
-            let buffer = self.module_info.lined_buffer();
+            let buffer = module_info.lined_buffer();
             let line_start = buffer.line_start(*line);
             // Point the diagnostic at the directive itself — from the `#` to the
             // end of the comment — rather than the leading whitespace at the line
@@ -500,7 +530,7 @@ impl ErrorCollector {
                 line_start + TextSize::new(content_len),
             );
             let err = Error::new(
-                self.module_info.dupe(),
+                module_info.dupe(),
                 range,
                 MISPLACED_IGNORE_MESSAGE.to_owned(),
                 Vec::new(),
@@ -518,7 +548,7 @@ impl ErrorCollector {
 
     pub fn collect(&self, error_config: &ErrorConfig) -> CollectedErrors {
         let mut result = CollectedErrors::default();
-        self.collect_into(&[], error_config, &[], &[], &[], &mut result);
+        self.collect_into(error_config, &[], &[], &[], &mut result);
         result
     }
 }
@@ -917,7 +947,6 @@ mod tests {
         );
         let mut result = CollectedErrors::default();
         errors.collect_into(
-            &[],
             &config1,
             &[],
             &[],

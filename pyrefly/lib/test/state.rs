@@ -39,6 +39,8 @@ use ruff_python_ast::name::Name;
 use starlark_map::small_set::SmallSet;
 use tempfile::TempDir;
 
+use crate::binding::binding::Binding;
+use crate::binding::binding::Key;
 use crate::commands::config_finder::default_config_finder;
 use crate::config::config::ConfigFile;
 use crate::config::config::ConfigSource;
@@ -226,6 +228,50 @@ else:
         .get_errors(&handles)
         .check_against_expectations()
         .unwrap();
+}
+
+#[test]
+fn test_ad_hoc_solve_does_not_persist_diagnostics() {
+    let mut env = TestEnv::new();
+    env.add("main", "from badmod import anchor\n");
+    env.add(
+        "badmod",
+        "anchor = 0\ndef f(x: int) -> int: return x\nf('bad')\n",
+    );
+    let sys_info = env.sys_info();
+    let handle = |name: &str| {
+        Handle::new(
+            ModuleName::from_str(name),
+            ModulePath::memory(PathBuf::from(format!("{name}.py"))),
+            sys_info.dupe(),
+        )
+    };
+    let (main, badmod) = (handle("main"), handle("badmod"));
+    let state = State::new(env.config_finder(), TEST_THREAD_COUNT);
+    let mut transaction = state.new_committable_transaction(Require::Exports, None);
+    transaction.as_mut().set_memory(env.get_memory());
+    transaction.as_mut().run(&[main], Require::Exports, None);
+    state.commit_transaction(transaction, None);
+
+    let transaction = state.transaction();
+    let answers = transaction
+        .get_answers(&badmod)
+        .expect("lazily reached module should retain answers");
+    let bindings = answers.bindings();
+    let call = bindings
+        .keys::<Key>()
+        .find(|idx| matches!(bindings.get(*idx), Binding::StmtExpr(..)))
+        .expect("bad module should bind the expression statement");
+    assert!(answers.get_idx(call).is_none());
+    assert_eq!(answers.errors().len(), 0);
+    for _ in 0..2 {
+        transaction
+            .ad_hoc_solve(&badmod, "test_ad_hoc_diagnostics", |solver| {
+                solver.get_idx(call);
+            })
+            .expect("module should support an ad hoc solve");
+        assert_eq!(answers.errors().len(), 0);
+    }
 }
 
 /// Regression for the TSP type converter's export-location resolution.

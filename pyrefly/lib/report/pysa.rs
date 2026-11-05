@@ -424,9 +424,9 @@ fn build_module_mapping(
     let mut project_modules = HashMap::new();
     for handle in handles {
         let module_id = module_ids.get_from_handle(handle);
-        let failed_to_load = transaction
-            .get_load(handle)
-            .is_some_and(|load| load.module_info.contents().is_empty() && !load.errors.is_empty());
+        let failed_to_load = transaction.get_load(handle).is_some_and(|load| {
+            load.module_info.contents().is_empty() && !load.load_errors.is_empty()
+        });
 
         // Path where we will store the information on the module.
         let info_filename = match handle.path().details() {

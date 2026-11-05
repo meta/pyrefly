@@ -110,6 +110,7 @@ use crate::config::environment::environment::PythonEnvironment;
 use crate::config::finder::ConfigError;
 use crate::config::finder::ConfigFinder;
 use crate::error::collector::ErrorCollector;
+use crate::error::style::ErrorStyle;
 use crate::export::exports::Export;
 use crate::export::exports::ExportLocation;
 use crate::export::exports::ExportOrigin;
@@ -1424,7 +1425,7 @@ impl<'a> Transaction<'a> {
                 guard.store_load(Some(Arc::new(Load::load_from_data(
                     module_data.handle.module(),
                     module_data.handle.path().dupe(),
-                    old_load.errors.style(),
+                    old_load.error_style,
                     file_contents,
                     self_error,
                 ))));
@@ -1439,7 +1440,7 @@ impl<'a> Transaction<'a> {
         {
             guard.store_load(Some(Arc::new(Load {
                 load_errors: old_load.load_errors.dupe(),
-                errors: ErrorCollector::new(old_load.module_info.dupe(), old_load.errors.style()),
+                error_style: old_load.error_style,
                 module_info: old_load.module_info.clone(),
             })));
             rebuild(false);
@@ -1491,10 +1492,7 @@ impl<'a> Transaction<'a> {
                 if let Some(old_load) = guard.get_load() {
                     guard.store_load(Some(Arc::new(Load {
                         load_errors: old_load.load_errors.dupe(),
-                        errors: ErrorCollector::new(
-                            old_load.module_info.dupe(),
-                            old_load.errors.style(),
-                        ),
+                        error_style: old_load.error_style,
                         module_info: old_load.module_info.clone(),
                     })));
                 }
@@ -2368,7 +2366,7 @@ impl<'a> Transaction<'a> {
         let lookup = self.lookup(module_data);
         let load = module_data.state.get_load()?;
         let answers = module_data.state.get_answers()?;
-        let errors = &load.errors;
+        let errors = ErrorCollector::new(load.module_info.dupe(), ErrorStyle::Delayed);
         let stdlib = self.get_stdlib(handle);
         let recurser = VarRecurser::new();
         let config = module_data.config.read();
@@ -2377,7 +2375,7 @@ impl<'a> Transaction<'a> {
         let solver = AnswersSolver::new(
             &lookup,
             &answers,
-            errors,
+            &errors,
             &lookup,
             &self.data.state.uniques,
             &recurser,

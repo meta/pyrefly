@@ -498,7 +498,7 @@ impl Step {
 
     #[inline(never)]
     fn step_ast<Lookup>(ctx: &Context<Lookup>, load: Arc<Load>) -> Arc<ParsedModule> {
-        let errors = ErrorCollector::new(load.module_info.dupe(), load.errors.style());
+        let errors = ErrorCollector::new(load.module_info.dupe(), load.error_style);
         let (module, tokens, ignore) = module_parse(
             load.module_info.contents(),
             ctx.sys_info.version(),
@@ -552,7 +552,7 @@ impl Step {
             &solver,
             ctx.lookup,
             *ctx.sys_info,
-            load.errors.style(),
+            load.error_style,
             enable_trace,
             ctx.check_unannotated_defs,
             ctx.require.keep_index(),
@@ -565,7 +565,7 @@ impl Step {
             solver,
             enable_index,
             enable_trace,
-            load.errors.style(),
+            load.error_style,
         ))
     }
 

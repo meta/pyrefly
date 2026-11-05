@@ -44,6 +44,7 @@ use crate::error::baseline::StaleRowScope;
 use crate::error::baseline::TrackedBaselineProcessor;
 use crate::error::baseline::normalize_baseline_path;
 use crate::error::collector::CollectedErrors;
+use crate::error::collector::ErrorCollector;
 use crate::error::collector::ModuleDiagnostics;
 use crate::error::error::BaselineStatus;
 use crate::error::error::Error;
@@ -381,7 +382,7 @@ impl Errors {
         let mut errors = CollectedErrors::default();
         for (load, parse_errors, binding_errors, solve_errors, module_ranges, config) in &self.loads
         {
-            if load.errors.style() == ErrorStyle::Never {
+            if load.error_style == ErrorStyle::Never {
                 continue;
             }
             let error_config = config.get_error_config(load.module_info.path());
@@ -398,7 +399,8 @@ impl Errors {
                 .chain(binding_errors)
                 .chain(solve_errors)
                 .collect();
-            load.errors.collect_into(
+            ErrorCollector::collect_snapshots_into(
+                &load.module_info,
                 &snapshots,
                 &error_config,
                 &ranges.multi_line,
@@ -454,7 +456,7 @@ impl Errors {
             let checked_paths: HashSet<_> = self
                 .loads
                 .iter()
-                .filter(|(load, _, _, _, _, _)| load.errors.style() != ErrorStyle::Never)
+                .filter(|(load, _, _, _, _, _)| load.error_style != ErrorStyle::Never)
                 .map(|(load, _, _, _, _, _)| {
                     normalize_baseline_path(load.module_info.path().as_path(), relative_to)
                 })
@@ -587,7 +589,7 @@ impl Errors {
         let fstring_ranges_by_module: SmallMap<&ModulePath, &[(LineNumber, LineNumber)]> = self
             .loads
             .iter()
-            .filter(|(load, _, _, _, _, _)| load.errors.style() != ErrorStyle::Never)
+            .filter(|(load, _, _, _, _, _)| load.error_style != ErrorStyle::Never)
             .map(|(load, _, _, _, module_ranges, _)| {
                 (
                     load.module_info.path(),
@@ -880,7 +882,7 @@ impl Errors {
     pub fn check_against_expectations(&self) -> anyhow::Result<()> {
         for (load, parse_errors, binding_errors, solve_errors, module_ranges, config) in &self.loads
         {
-            if load.errors.style() == ErrorStyle::Never {
+            if load.error_style == ErrorStyle::Never {
                 continue;
             }
             let error_config = config.get_error_config(load.module_info.path());
@@ -891,12 +893,15 @@ impl Errors {
             let parse_errors = parse_errors
                 .as_ref()
                 .expect("a module with module_ranges must have parse diagnostics");
+            // Collect in the order the phases run, so diagnostics at an equal range
+            // stay in phase order.
             let snapshots: Vec<&ModuleDiagnostics> = [&load.load_errors, parse_errors]
                 .into_iter()
                 .chain(binding_errors)
                 .chain(solve_errors)
                 .collect();
-            load.errors.collect_into(
+            ErrorCollector::collect_snapshots_into(
+                &load.module_info,
                 &snapshots,
                 &error_config,
                 &ranges.multi_line,

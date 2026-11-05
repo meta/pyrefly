@@ -81,11 +81,11 @@ impl LspFile {
     }
 }
 
-/// The result of loading a module, including its `Module` and `ErrorCollector`.
+/// The result of loading a module, including its module data and immutable load diagnostics.
 #[derive(Debug)]
 pub struct Load {
     pub load_errors: ModuleDiagnostics,
-    pub errors: ErrorCollector,
+    pub error_style: ErrorStyle,
     pub module_info: Module,
 }
 
@@ -187,10 +187,9 @@ impl Load {
                 .emit();
         }
         let load_errors = load_errors.finish();
-        let errors = ErrorCollector::new(module_info.dupe(), error_style);
         Self {
             load_errors,
-            errors,
+            error_style,
             module_info,
         }
     }
