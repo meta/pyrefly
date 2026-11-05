@@ -39,8 +39,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/2.0.0/clipboard.min.js"></script>
 <script src="/js/code-block-buttons.js"></script>
 <script src="/js/gtag-fragment-tracking.js"></script><link rel="stylesheet" href="/assets/css/styles.8e9df58b.css">
-<script src="/assets/js/runtime~main.a2097799.js" defer="defer"></script>
-<script src="/assets/js/main.0a7a0b55.js" defer="defer"></script>
+<script src="/assets/js/runtime~main.88a731c1.js" defer="defer"></script>
+<script src="/assets/js/main.806429bb.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
 <script>!function(){function t(t){document.documentElement.setAttribute("data-theme",t)}var e=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();t(null!==e?e:"dark")}(),function(){try{const n=new URLSearchParams(window.location.search).entries();for(var[t,e]of n)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script>
@@ -348,7 +348,9 @@ will be added as a fallback search path.</li>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="enable-fallback-search-path"><code>enable-fallback-search-path</code><a href="#enable-fallback-search-path" class="hash-link" aria-label="Direct link to enable-fallback-search-path" title="Direct link to enable-fallback-search-path">​</a></h3>
 <p>When enabled, Pyrefly resolves an otherwise-unresolved import by searching each
 directory from the importing file up to the directory that contains your
-config, using the first match it finds. This is a best-effort way to make
+config, using the first match it finds. Directories that belong to a regular
+package (that is, contain an <code>__init__.py</code> or <code>__init__.pyi</code>) are skipped, since
+they cannot be import roots without truncating the package&#x27;s module names. This is a best-effort way to make
 imports resolve when a module is importable relative to one of its parent
 directories but that directory isn&#x27;t listed in <a href="#search-path"><code>search-path</code></a>.</p>
 <ul>
@@ -358,6 +360,8 @@ directories but that directory isn&#x27;t listed in <a href="#search-path"><code
 <li>Equivalent configs: none</li>
 <li>Notes:<!-- -->
 <ul>
+<li>The fallback is only consulted after the search path, typeshed, and the site
+package path all fail to find the module, including as a namespace package.</li>
 <li>Has no effect when <a href="#disable-search-path-heuristics"><code>disable-search-path-heuristics</code></a>
 is <code>true</code> — that flag suppresses all fallback-path consumption.</li>
 <li>The search is bounded by the config root, so it cannot escape the project.</li>
@@ -702,8 +706,9 @@ nonzero exit code.</p>
 <p>The lowest threshold, <code>&quot;hint&quot;</code>, also shows hint-level diagnostics such as
 <a href="/en/docs/error-kinds/#unused-parameter"><code>unused-parameter</code></a>,
 <a href="/en/docs/error-kinds/#unused-variable"><code>unused-variable</code></a>,
-<a href="/en/docs/error-kinds/#unused-import"><code>unused-import</code></a>, and
-<a href="/en/docs/error-kinds/#unreachable"><code>unreachable</code></a>. These are hidden by default, and
+<a href="/en/docs/error-kinds/#unused-import"><code>unused-import</code></a>,
+<a href="/en/docs/error-kinds/#unreachable"><code>unreachable</code></a>, and
+<a href="/en/docs/error-kinds/#inactive-code"><code>inactive-code</code></a>. These are hidden by default, and
 showing them makes them count toward the exit code like any other displayed
 diagnostic.</p>
 <div class="language-toml codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-toml codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token comment" style="color:rgb(98, 114, 164)"># pyrefly.toml — show warnings and errors</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">min-severity</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token string" style="color:rgb(255, 121, 198)">&quot;warn&quot;</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
@@ -797,7 +802,7 @@ Any explicit settings you specify override the preset.</p>
 <li>Sets <a href="#check-unannotated-defs"><code>check-unannotated-defs</code></a> <code>= false</code>, <a href="#infer-return-types"><code>infer-return-types</code></a> <code>= &quot;never&quot;</code>, <a href="#infer-with-first-use"><code>infer-with-first-use</code></a> <code>= false</code>, <a href="#permissive-ignores"><code>permissive-ignores</code></a> <code>= true</code></li>
 <li>Enables (as errors): <a href="/en/docs/error-kinds/#bad-class-definition"><code>bad-class-definition</code></a>, <a href="/en/docs/error-kinds/#bad-instantiation"><code>bad-instantiation</code></a>, <a href="/en/docs/error-kinds/#bad-keyword-argument"><code>bad-keyword-argument</code></a>, <a href="/en/docs/error-kinds/#bad-raise"><code>bad-raise</code></a>, <a href="/en/docs/error-kinds/#bad-unpacking"><code>bad-unpacking</code></a>, <a href="/en/docs/error-kinds/#division-by-zero"><code>division-by-zero</code></a>, <a href="/en/docs/error-kinds/#invalid-annotation"><code>invalid-annotation</code></a>, <a href="/en/docs/error-kinds/#invalid-literal"><code>invalid-literal</code></a>, <a href="/en/docs/error-kinds/#invalid-super-call"><code>invalid-super-call</code></a>, <a href="/en/docs/error-kinds/#invalid-syntax"><code>invalid-syntax</code></a>, <a href="/en/docs/error-kinds/#missing-import"><code>missing-import</code></a>, <a href="/en/docs/error-kinds/#not-async"><code>not-async</code></a>, <a href="/en/docs/error-kinds/#parse-error"><code>parse-error</code></a>, <a href="/en/docs/error-kinds/#unexpected-keyword"><code>unexpected-keyword</code></a>, <a href="/en/docs/error-kinds/#unexpected-positional-argument"><code>unexpected-positional-argument</code></a>, <a href="/en/docs/error-kinds/#unknown-name"><code>unknown-name</code></a>, <a href="/en/docs/error-kinds/#unused-coroutine"><code>unused-coroutine</code></a></li>
 <li>Enables (as warnings): <a href="/en/docs/error-kinds/#fallback-search-path-relative-import"><code>fallback-search-path-relative-import</code></a></li>
-<li>Keeps as hints: <a href="/en/docs/error-kinds/#unused-import"><code>unused-import</code></a>, <a href="/en/docs/error-kinds/#unused-parameter"><code>unused-parameter</code></a>, <a href="/en/docs/error-kinds/#unused-variable"><code>unused-variable</code></a></li>
+<li>Keeps as hints: <a href="/en/docs/error-kinds/#inactive-code"><code>inactive-code</code></a>, <a href="/en/docs/error-kinds/#unused-import"><code>unused-import</code></a>, <a href="/en/docs/error-kinds/#unused-parameter"><code>unused-parameter</code></a>, <a href="/en/docs/error-kinds/#unused-variable"><code>unused-variable</code></a></li>
 <li>All other error kinds are silenced.</li>
 </ul>
 <h4 class="anchor anchorWithStickyNavbar_LWe7" id="preset-legacy">Preset: <code>legacy</code><a href="#preset-legacy" class="hash-link" aria-label="Direct link to preset-legacy" title="Direct link to preset-legacy">​</a></h4>
@@ -805,7 +810,7 @@ Any explicit settings you specify override the preset.</p>
 <ul>
 <li>Sets <a href="#check-unannotated-defs"><code>check-unannotated-defs</code></a> <code>= false</code>, <a href="#infer-return-types"><code>infer-return-types</code></a> <code>= &quot;never&quot;</code>, <a href="#legacy-overload-expansion"><code>legacy-overload-expansion</code></a> <code>= true</code>, <a href="#replace-untyped-imports-with-any"><code>replace-untyped-imports-with-any</code></a> <code>= [&quot;*&quot;]</code></li>
 <li>Sets <a href="#type-ignore-unknown-tag-behavior"><code>type-ignore-unknown-tag-behavior</code></a> <code>= &quot;suppress&quot;</code> so existing mypy-coded ignores retain their legacy blanket-suppression behavior.</li>
-<li>Disables: <a href="/en/docs/error-kinds/#bad-override-mutable-attribute"><code>bad-override-mutable-attribute</code></a>, <a href="/en/docs/error-kinds/#bad-override-param-name"><code>bad-override-param-name</code></a>, <a href="/en/docs/error-kinds/#unbound-name"><code>unbound-name</code></a></li>
+<li>Disables: <a href="/en/docs/error-kinds/#bad-override-mutable-attribute"><code>bad-override-mutable-attribute</code></a>, <a href="/en/docs/error-kinds/#bad-override-param-name"><code>bad-override-param-name</code></a>, <a href="/en/docs/error-kinds/#unbound-name"><code>unbound-name</code></a>. When both the parent and child members are plain read-write attributes, widening or incompatible types report plain <code>bad-override</code>, which this preset leaves enabled. Some overrides involving properties, including incompatible property getters, still report <code>bad-override-mutable-attribute</code> and are suppressed by this preset.</li>
 </ul>
 <h4 class="anchor anchorWithStickyNavbar_LWe7" id="preset-default">Preset: <code>default</code><a href="#preset-default" class="hash-link" aria-label="Direct link to preset-default" title="Direct link to preset-default">​</a></h4>
 <p>The default Pyrefly configuration. Equivalent to having no preset at all.</p>
@@ -821,7 +826,7 @@ Any explicit settings you specify override the preset.</p>
 <h4 class="anchor anchorWithStickyNavbar_LWe7" id="preset-all">Preset: <code>all</code><a href="#preset-all" class="hash-link" aria-label="Direct link to preset-all" title="Direct link to preset-all">​</a></h4>
 <div class="theme-admonition theme-admonition-info admonition_xJq3 alert alert--info"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 14 16"><path fill-rule="evenodd" d="M7 2.3c3.14 0 5.7 2.56 5.7 5.7s-2.56 5.7-5.7 5.7A5.71 5.71 0 0 1 1.3 8c0-3.14 2.56-5.7 5.7-5.7zM7 1C3.14 1 0 4.14 0 8s3.14 7 7 7 7-3.14 7-7-3.14-7-7-7zm1 3H6v5h2V4zm0 6H6v2h2v-2z"></path></svg></span>info</div><div class="admonitionContent_BuS1"><p>For most users, we recommend using the <code>strict</code> preset and enabling individual additional errors as desired,
 for more stability and an opt-in experience for new errors.</p></div></div>
-<p>Enables every error kind at <code>error</code> severity. Directives like <code>reveal-type</code> remain informational, and the unused-code kinds (<code>unused-parameter</code>, <code>unused-variable</code> and <code>unused-import</code>) remain hints.</p>
+<p>Enables every error kind at <code>error</code> severity. Directives like <code>reveal-type</code> remain informational, and hints about inactive and unused code remain hints.</p>
 <ul>
 <li>Sets <a href="#strict-callable-subtyping"><code>strict-callable-subtyping</code></a> <code>= true</code></li>
 <li>Enables every error kind at <code>error</code> severity</li>

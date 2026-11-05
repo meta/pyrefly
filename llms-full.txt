@@ -2423,7 +2423,9 @@ See more on [how Pyrefly does import resolution](import-resolution.mdx).
 
 When enabled, Pyrefly resolves an otherwise-unresolved import by searching each
 directory from the importing file up to the directory that contains your
-config, using the first match it finds. This is a best-effort way to make
+config, using the first match it finds. Directories that belong to a regular
+package (that is, contain an `__init__.py` or `__init__.pyi`) are skipped, since
+they cannot be import roots without truncating the package's module names. This is a best-effort way to make
 imports resolve when a module is importable relative to one of its parent
 directories but that directory isn't listed in [`search-path`](#search-path).
 
@@ -2432,6 +2434,8 @@ directories but that directory isn't listed in [`search-path`](#search-path).
 - Flag equivalent: `--enable-fallback-search-path`
 - Equivalent configs: none
 - Notes:
+    - The fallback is only consulted after the search path, typeshed, and the site
+      package path all fail to find the module, including as a namespace package.
     - Has no effect when [`disable-search-path-heuristics`](#disable-search-path-heuristics)
       is `true` — that flag suppresses all fallback-path consumption.
     - The search is bounded by the config root, so it cannot escape the project.
@@ -2798,8 +2802,9 @@ nonzero exit code.
 The lowest threshold, `"hint"`, also shows hint-level diagnostics such as
 [`unused-parameter`](../error-kinds#unused-parameter),
 [`unused-variable`](../error-kinds#unused-variable),
-[`unused-import`](../error-kinds#unused-import), and
-[`unreachable`](../error-kinds#unreachable). These are hidden by default, and
+[`unused-import`](../error-kinds#unused-import),
+[`unreachable`](../error-kinds#unreachable), and
+[`inactive-code`](../error-kinds#inactive-code). These are hidden by default, and
 showing them makes them count toward the exit code like any other displayed
 diagnostic.
 
@@ -2909,7 +2914,7 @@ A minimal-checking preset used when automatic configuration selection finds no m
 - Sets [`check-unannotated-defs`](#check-unannotated-defs) `= false`, [`infer-return-types`](#infer-return-types) `= "never"`, [`infer-with-first-use`](#infer-with-first-use) `= false`, [`permissive-ignores`](#permissive-ignores) `= true`
 - Enables (as errors): [`bad-class-definition`](./error-kinds.mdx#bad-class-definition), [`bad-instantiation`](./error-kinds.mdx#bad-instantiation), [`bad-keyword-argument`](./error-kinds.mdx#bad-keyword-argument), [`bad-raise`](./error-kinds.mdx#bad-raise), [`bad-unpacking`](./error-kinds.mdx#bad-unpacking), [`division-by-zero`](./error-kinds.mdx#division-by-zero), [`invalid-annotation`](./error-kinds.mdx#invalid-annotation), [`invalid-literal`](./error-kinds.mdx#invalid-literal), [`invalid-super-call`](./error-kinds.mdx#invalid-super-call), [`invalid-syntax`](./error-kinds.mdx#invalid-syntax), [`missing-import`](./error-kinds.mdx#missing-import), [`not-async`](./error-kinds.mdx#not-async), [`parse-error`](./error-kinds.mdx#parse-error), [`unexpected-keyword`](./error-kinds.mdx#unexpected-keyword), [`unexpected-positional-argument`](./error-kinds.mdx#unexpected-positional-argument), [`unknown-name`](./error-kinds.mdx#unknown-name), [`unused-coroutine`](./error-kinds.mdx#unused-coroutine)
 - Enables (as warnings): [`fallback-search-path-relative-import`](./error-kinds.mdx#fallback-search-path-relative-import)
-- Keeps as hints: [`unused-import`](./error-kinds.mdx#unused-import), [`unused-parameter`](./error-kinds.mdx#unused-parameter), [`unused-variable`](./error-kinds.mdx#unused-variable)
+- Keeps as hints: [`inactive-code`](./error-kinds.mdx#inactive-code), [`unused-import`](./error-kinds.mdx#unused-import), [`unused-parameter`](./error-kinds.mdx#unused-parameter), [`unused-variable`](./error-kinds.mdx#unused-variable)
 - All other error kinds are silenced.
 
 #### Preset: `legacy`
@@ -2918,7 +2923,7 @@ A looser, less-strict preset intended for codebases migrating from mypy. This is
 
 - Sets [`check-unannotated-defs`](#check-unannotated-defs) `= false`, [`infer-return-types`](#infer-return-types) `= "never"`, [`legacy-overload-expansion`](#legacy-overload-expansion) `= true`, [`replace-untyped-imports-with-any`](#replace-untyped-imports-with-any) `= ["*"]`
 - Sets [`type-ignore-unknown-tag-behavior`](#type-ignore-unknown-tag-behavior) `= "suppress"` so existing mypy-coded ignores retain their legacy blanket-suppression behavior.
-- Disables: [`bad-override-mutable-attribute`](./error-kinds.mdx#bad-override-mutable-attribute), [`bad-override-param-name`](./error-kinds.mdx#bad-override-param-name), [`unbound-name`](./error-kinds.mdx#unbound-name)
+- Disables: [`bad-override-mutable-attribute`](./error-kinds.mdx#bad-override-mutable-attribute), [`bad-override-param-name`](./error-kinds.mdx#bad-override-param-name), [`unbound-name`](./error-kinds.mdx#unbound-name). When both the parent and child members are plain read-write attributes, widening or incompatible types report plain `bad-override`, which this preset leaves enabled. Some overrides involving properties, including incompatible property getters, still report `bad-override-mutable-attribute` and are suppressed by this preset.
 
 #### Preset: `default`
 
@@ -2940,7 +2945,7 @@ For most users, we recommend using the `strict` preset and enabling individual a
 for more stability and an opt-in experience for new errors.
 :::
 
-Enables every error kind at `error` severity. Directives like `reveal-type` remain informational, and the unused-code kinds (`unused-parameter`, `unused-variable` and `unused-import`) remain hints.
+Enables every error kind at `error` severity. Directives like `reveal-type` remain informational, and hints about inactive and unused code remain hints.
 
 - Sets [`strict-callable-subtyping`](#strict-callable-subtyping) `= true`
 - Enables every error kind at `error` severity
@@ -5437,12 +5442,15 @@ That means everywhere that we call `Base.f` can safely call `Sub.f`.
 
 The opposite case, where `Base.f` takes `float` and `Sub.f` takes `int`, is an error because `Sub.f` cannot accept every `float` value.
 
-Note that bad overrides caused by inconsistent parameter names are separately reported as [bad-override-param-name](#bad-override-param-name), and bad overrides caused by mutable attribute type changes are separately reported as [bad-override-mutable-attribute](#bad-override-mutable-attribute).
+Note that bad overrides caused by inconsistent parameter names are separately reported as [bad-override-param-name](#bad-override-param-name), and some overrides involving mutable attributes are reported as [bad-override-mutable-attribute](#bad-override-mutable-attribute).
 
 ## bad-override-mutable-attribute
 
-Arises when a subclass overrides a mutable (read-write) attribute of a parent class with an incompatible type.
+Arises when a subclass narrows the type of a mutable (read-write) attribute inherited from a parent class.
 Mutable attributes require invariant types — the child's type must be exactly compatible with the parent's — because the attribute can be both read and written through a reference to the parent class.
+When both the parent and child members are plain read-write attributes, widening or incompatible types report [bad-override](#bad-override) instead.
+
+This kind also covers some overrides involving properties. For example, an incompatible property getter overriding a plain read-write attribute reports `bad-override-mutable-attribute`, so disabling this kind also suppresses that error.
 
 ```python
 class Base:
@@ -5970,6 +5978,22 @@ class C:
         self.x = 0  # no error, `__init__` always executes
     def f(self):
         self.y = 0  # error, `y` may be undefined if `f` does not execute
+```
+
+## inactive-code
+
+Default severity: `hint`
+
+A block of code that is inactive in the current type-checking configuration. Pyrefly does not check
+inactive code, and the IDE greys it out.
+
+```python
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+else:
+    Sequence = list  # inactive-code: This code is inactive for the current type-checking configuration
 ```
 
 ## incompatible-comparison
@@ -6957,22 +6981,84 @@ Default severity: `ignore`
 
 The `strict` preset enables this check as an error.
 
-Pyrefly checks whether each value assigned in a class body exists when that body
-completes. Every completing path must assign the attribute. A path that raises or
-ends in a `Never` or `NoReturn` call does not require an assignment.
+Pyrefly reports an attribute that the class body or an initialization method assigns on some paths but not others, so an instance may be created without it.
 
 ```python
 class C:
     if enabled():
-        value = 1  # possibly-uninitialized-attribute
+        flag = True  # possibly-uninitialized-attribute
+
+    def __init__(self, value: int | None) -> None:
+        if value is not None:
+            self.value = value  # possibly-uninitialized-attribute
 ```
 
-Pyrefly reports the error at the definition, even if the attribute is never read.
-A later `hasattr` guard does not suppress it. An assignment in `__init__` does not
-initialize a class attribute. Inherited attributes, conditional method definitions,
-and stub (`.pyi`) files are exempt.
+The check covers the class body and the methods that initialize an instance: `__init__`, `__new__`, `__post_init__`, `__init_subclass__`, and supported test setup methods.
+Every path that completes normally must assign the attribute, including one that ends in an early `return`.
+A path that raises, or ends in a call to a `Never` or `NoReturn` function, does not need to:
 
-To disable this check while retaining other strict checks, use:
+```python
+class Checked:
+    def __init__(self, value: int | None, early: bool) -> None:
+        if value is None:
+            raise ValueError()
+        self.value = value  # OK: the other path raises
+        if early:
+            return
+        self.ready = True  # possibly-uninitialized-attribute
+```
+
+Another method also counts if it assigns the attribute on every path, even when Pyrefly cannot tell whether the constructor calls it:
+
+```python
+class Delegating:
+    def __init__(self, cfg: int | None) -> None:
+        if cfg is None:
+            self._load_defaults()
+        else:
+            self.cfg = cfg  # OK: _load_defaults always assigns cfg
+
+    def _load_defaults(self) -> None:
+        self.cfg = 0
+```
+
+These do not initialize an attribute:
+
+```python
+class NotInitialized:
+    def __init__(self) -> None:
+        def later() -> None:
+            self.a = 1  # possibly-uninitialized-attribute: later may never run
+        self.b: int  # possibly-uninitialized-attribute: an annotation is not a value
+        self.c = 1  # possibly-uninitialized-attribute
+        del self.c
+```
+
+A bare class-body annotation is checked against the methods that assign it.
+If no initialization method assigns it, [`uninitialized-instance-variable`](#uninitialized-instance-variable) reports it instead.
+
+```python
+class Annotated:
+    x: int  # possibly-uninitialized-attribute
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.x = 1
+```
+
+Pyrefly does not report an attribute when:
+
+- a base class, including `object`, defines it, or a base class is unresolved or `Any`;
+- the class has an instance `__getattr__`;
+- it is an annotation in a class that initializes annotated fields itself: a dataclass (except a plain `@dataclass(init=False)`), an attrs class, a pydantic model, a named tuple, or a protocol;
+- it is a `ClassVar` annotation, or an annotation on a metaclass;
+- it is a bare annotation `x: int` that `__new__` assigns on the instance it creates, such as `obj = super().__new__(cls)` followed by `obj.x = ...`;
+- it is a method or nested class defined under a condition in the class body, unless the name is also bound another way (the attributes such a method assigns are still checked);
+- it is in a stub (`.pyi`) file.
+
+A conditional class-body assignment is reported even when a method also assigns the name.
+The error is reported at the attribute's definition, even if the attribute is never read, and a later `hasattr` check does not suppress it.
+
+To disable this check while keeping other strict checks, use:
 
 ```toml
 preset = "strict"
@@ -7877,7 +7963,9 @@ Default severity: `warn`
 
 Type information for some third-party libraries is shipped in a stubs package separate from the
 library's source code. This error is emitted when we detect that a library is being used without
-the recommended stubs package being installed.
+the recommended stubs package being installed. It only applies to libraries found on the site package
+path that do not ship a `py.typed` file; modules found on the search path, such as local stubs in a
+`typings/` directory or your own code, are never reported.
 
 ## untyped-namedtuple
 
@@ -8071,6 +8159,34 @@ def foo() -> int:
   return "this is a type error" # pyrefly: ignore[bad-return]
 ```
 
+To suppress the `unused-ignore` diagnostic for a suppression comment, include
+`unused-ignore` in that comment's error codes:
+
+```python
+x: int = 1  # pyrefly: ignore[bad-assignment, unused-ignore]
+```
+
+This also suppresses the diagnostic when `unused-ignore` is the only listed code.
+Other suppression comments still produce unused-ignore diagnostics.
+Explicit cleanup with `pyrefly suppress --remove-unused` still removes unused
+suppressions, including comments that contain `unused-ignore`.
+
+If a comment still suppresses an error, cleanup keeps its used codes and removes
+its unused codes. For example, cleanup rewrites:
+
+```python
+x: int = ""  # pyrefly: ignore[bad-assignment, unused-ignore]
+```
+
+to:
+
+```python
+x: int = ""  # pyrefly: ignore[bad-assignment]
+```
+
+The comment still suppresses `bad-assignment`, but cleanup removes its
+`unused-ignore` opt-out.
+
 We respect the specification and allow `type: ignore` to be used:
 
 ```python
@@ -8160,6 +8276,8 @@ baseline = "baseline.json"
 ```
 
 When the baseline is specified in the configuration file, you don't need to pass the `--baseline` flag on every invocation. The CLI flag takes precedence if both are specified.
+
+`pyrefly init` does this for a BasedPyright project that already has a baseline file. It asks whether to create `pyrefly_baseline.json` in the project root and fill it with the errors Pyrefly reports. The BasedPyright entries are not copied. Answering yes adds `baseline = "pyrefly_baseline.json"` and creates the file. Answering no, including `--non-interactive`, leaves that line out and continues with the normal check and error-suppression prompt.
 
 Note that `baseline` is a **project-level setting** and cannot be overridden in [`sub-config`](./configuration.mdx#sub-configs) sections. If you need different baseline files for different parts of your codebase, consider using separate Pyrefly configuration files.
 
@@ -8320,7 +8438,10 @@ more information on the contents of the search path.
 4. Try to import from the site package path. See the
 [site package path section](#site-packages-path) for more information on the contents
 of the site package path.
-5. Return an import error.
+5. If [`enable-fallback-search-path`](configuration.mdx#enable-fallback-search-path) is
+set, try to import relative to the directories containing the importing file, skipping
+directories that belong to a regular package. This is a last resort: it only applies when nothing above found a match, not even a namespace package.
+6. Return an import error.
 
 When searching for a match in one of the above groups, Pyrefly performs the following process
 over two passes, one looking for stub *packages*, and the other looking for source *packages*. See
@@ -8419,7 +8540,9 @@ and its stub package, [`pandas-stubs`](https://github.com/pandas-dev/pandas-stub
 
 When importing from a non-stubs package, Pyrefly loads typing information from
 imports by first searching for a relevant `-stubs` package, then by looking at
-the non-stubs package's `.pyi` files, then falls back to a `.py` file. See
+the non-stubs package's `.pyi` files, then falls back to a `.py` file. A `-stubs`
+directory only overrides modules it provides: a stub package without a top-level
+`__init__.pyi` does not hide the runtime package's `__init__.py`. See
 [Absolute Imports](#absolute-imports) for details on when non-stubs packages
 are allowed to be used for types, and how you can override that behavior.
 
@@ -8440,16 +8563,28 @@ are used.
                - Yes
                   Installed stubs are used.
                - No
-                  UntypedImport error.
+                  - Does the package ship a `py.typed` file?
+                     - Yes
+                        The installed package is used.
+                     - No
+                        UntypedImport error.
          - No
             MissingImport error.
    - No
       - Is the package installed?
          - Yes
-            Bundled stubs used.
+            - Does the package ship a `py.typed` file?
+               - Yes
+                  The installed package is used.
+               - No
+                  Bundled stubs used.
          - No
             MissingSourceForStubs error.
 ```
+
+A package that ships a `py.typed` file provides its own types, so following
+[PEP 561](https://peps.python.org/pep-0561/#type-checker-module-resolution-order),
+it takes priority over the bundled stubs, which may describe an older version of the package.
 
 ## Editable Installs
 
@@ -10617,6 +10752,13 @@ A baseline records the current errors in a file rather than in your source, and
 blocks only newly introduced errors while still showing the suppressed
 diagnostics in the IDE.
 
+If you are migrating from BasedPyright and a baseline file is already on disk,
+`pyrefly init` asks whether to create `pyrefly_baseline.json` in the project root.
+It does not copy the BasedPyright entries, because the error codes and columns
+differ. Answering yes adds `baseline = "pyrefly_baseline.json"` and fills the
+file with the errors Pyrefly sees now. Answering no leaves the config without
+that line and continues with the normal check and error-suppression prompt.
+
 Whichever you choose, Pyrefly respects `# type: ignore` by default. To also
 honor Pyright's ignores during the transition:
 
@@ -12307,6 +12449,12 @@ code is 0:
 Findings go to stdout, the summary to stderr. With `--strict`, annotations that resolve to `Any`
 count as untyped. `--output-format` controls the findings format.
 See `pyrefly coverage check --help` for all flags.
+
+### Pre-commit
+
+To check coverage on every commit with [prek](https://prek.j178.dev/) or
+[pre-commit](https://pre-commit.com/), use the `pyrefly-coverage-check` hook from
+[meta/pyrefly-pre-commit](https://github.com/meta/pyrefly-pre-commit#enforcing-type-coverage).
 
 ## Generating a JSON report
 

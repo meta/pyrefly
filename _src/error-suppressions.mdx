@@ -39,6 +39,34 @@ def foo() -> int:
   return "this is a type error" # pyrefly: ignore[bad-return]
 ```
 
+To suppress the `unused-ignore` diagnostic for a suppression comment, include
+`unused-ignore` in that comment's error codes:
+
+```python
+x: int = 1  # pyrefly: ignore[bad-assignment, unused-ignore]
+```
+
+This also suppresses the diagnostic when `unused-ignore` is the only listed code.
+Other suppression comments still produce unused-ignore diagnostics.
+Explicit cleanup with `pyrefly suppress --remove-unused` still removes unused
+suppressions, including comments that contain `unused-ignore`.
+
+If a comment still suppresses an error, cleanup keeps its used codes and removes
+its unused codes. For example, cleanup rewrites:
+
+```python
+x: int = ""  # pyrefly: ignore[bad-assignment, unused-ignore]
+```
+
+to:
+
+```python
+x: int = ""  # pyrefly: ignore[bad-assignment]
+```
+
+The comment still suppresses `bad-assignment`, but cleanup removes its
+`unused-ignore` opt-out.
+
 We respect the specification and allow `type: ignore` to be used:
 
 ```python
@@ -128,6 +156,8 @@ baseline = "baseline.json"
 ```
 
 When the baseline is specified in the configuration file, you don't need to pass the `--baseline` flag on every invocation. The CLI flag takes precedence if both are specified.
+
+`pyrefly init` does this for a BasedPyright project that already has a baseline file. It asks whether to create `pyrefly_baseline.json` in the project root and fill it with the errors Pyrefly reports. The BasedPyright entries are not copied. Answering yes adds `baseline = "pyrefly_baseline.json"` and creates the file. Answering no, including `--non-interactive`, leaves that line out and continues with the normal check and error-suppression prompt.
 
 Note that `baseline` is a **project-level setting** and cannot be overridden in [`sub-config`](./configuration.mdx#sub-configs) sections. If you need different baseline files for different parts of your codebase, consider using separate Pyrefly configuration files.
 

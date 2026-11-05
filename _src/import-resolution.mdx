@@ -39,7 +39,10 @@ more information on the contents of the search path.
 4. Try to import from the site package path. See the
 [site package path section](#site-packages-path) for more information on the contents
 of the site package path.
-5. Return an import error.
+5. If [`enable-fallback-search-path`](configuration.mdx#enable-fallback-search-path) is
+set, try to import relative to the directories containing the importing file, skipping
+directories that belong to a regular package. This is a last resort: it only applies when nothing above found a match, not even a namespace package.
+6. Return an import error.
 
 When searching for a match in one of the above groups, Pyrefly performs the following process
 over two passes, one looking for stub *packages*, and the other looking for source *packages*. See
@@ -138,7 +141,9 @@ and its stub package, [`pandas-stubs`](https://github.com/pandas-dev/pandas-stub
 
 When importing from a non-stubs package, Pyrefly loads typing information from
 imports by first searching for a relevant `-stubs` package, then by looking at
-the non-stubs package's `.pyi` files, then falls back to a `.py` file. See
+the non-stubs package's `.pyi` files, then falls back to a `.py` file. A `-stubs`
+directory only overrides modules it provides: a stub package without a top-level
+`__init__.pyi` does not hide the runtime package's `__init__.py`. See
 [Absolute Imports](#absolute-imports) for details on when non-stubs packages
 are allowed to be used for types, and how you can override that behavior.
 
@@ -159,16 +164,28 @@ are used.
                - Yes
                   Installed stubs are used.
                - No
-                  UntypedImport error.
+                  - Does the package ship a `py.typed` file?
+                     - Yes
+                        The installed package is used.
+                     - No
+                        UntypedImport error.
          - No
             MissingImport error.
    - No
       - Is the package installed?
          - Yes
-            Bundled stubs used.
+            - Does the package ship a `py.typed` file?
+               - Yes
+                  The installed package is used.
+               - No
+                  Bundled stubs used.
          - No
             MissingSourceForStubs error.
 ```
+
+A package that ships a `py.typed` file provides its own types, so following
+[PEP 561](https://peps.python.org/pep-0561/#type-checker-module-resolution-order),
+it takes priority over the bundled stubs, which may describe an older version of the package.
 
 ## Editable Installs
 

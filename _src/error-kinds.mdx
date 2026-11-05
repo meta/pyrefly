@@ -376,12 +376,15 @@ That means everywhere that we call `Base.f` can safely call `Sub.f`.
 
 The opposite case, where `Base.f` takes `float` and `Sub.f` takes `int`, is an error because `Sub.f` cannot accept every `float` value.
 
-Note that bad overrides caused by inconsistent parameter names are separately reported as [bad-override-param-name](#bad-override-param-name), and bad overrides caused by mutable attribute type changes are separately reported as [bad-override-mutable-attribute](#bad-override-mutable-attribute).
+Note that bad overrides caused by inconsistent parameter names are separately reported as [bad-override-param-name](#bad-override-param-name), and some overrides involving mutable attributes are reported as [bad-override-mutable-attribute](#bad-override-mutable-attribute).
 
 ## bad-override-mutable-attribute
 
-Arises when a subclass overrides a mutable (read-write) attribute of a parent class with an incompatible type.
+Arises when a subclass narrows the type of a mutable (read-write) attribute inherited from a parent class.
 Mutable attributes require invariant types — the child's type must be exactly compatible with the parent's — because the attribute can be both read and written through a reference to the parent class.
+When both the parent and child members are plain read-write attributes, widening or incompatible types report [bad-override](#bad-override) instead.
+
+This kind also covers some overrides involving properties. For example, an incompatible property getter overriding a plain read-write attribute reports `bad-override-mutable-attribute`, so disabling this kind also suppresses that error.
 
 ```python
 class Base:
@@ -909,6 +912,22 @@ class C:
         self.x = 0  # no error, `__init__` always executes
     def f(self):
         self.y = 0  # error, `y` may be undefined if `f` does not execute
+```
+
+## inactive-code
+
+Default severity: `hint`
+
+A block of code that is inactive in the current type-checking configuration. Pyrefly does not check
+inactive code, and the IDE greys it out.
+
+```python
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+else:
+    Sequence = list  # inactive-code: This code is inactive for the current type-checking configuration
 ```
 
 ## incompatible-comparison
@@ -1896,22 +1915,84 @@ Default severity: `ignore`
 
 The `strict` preset enables this check as an error.
 
-Pyrefly checks whether each value assigned in a class body exists when that body
-completes. Every completing path must assign the attribute. A path that raises or
-ends in a `Never` or `NoReturn` call does not require an assignment.
+Pyrefly reports an attribute that the class body or an initialization method assigns on some paths but not others, so an instance may be created without it.
 
 ```python
 class C:
     if enabled():
-        value = 1  # possibly-uninitialized-attribute
+        flag = True  # possibly-uninitialized-attribute
+
+    def __init__(self, value: int | None) -> None:
+        if value is not None:
+            self.value = value  # possibly-uninitialized-attribute
 ```
 
-Pyrefly reports the error at the definition, even if the attribute is never read.
-A later `hasattr` guard does not suppress it. An assignment in `__init__` does not
-initialize a class attribute. Inherited attributes, conditional method definitions,
-and stub (`.pyi`) files are exempt.
+The check covers the class body and the methods that initialize an instance: `__init__`, `__new__`, `__post_init__`, `__init_subclass__`, and supported test setup methods.
+Every path that completes normally must assign the attribute, including one that ends in an early `return`.
+A path that raises, or ends in a call to a `Never` or `NoReturn` function, does not need to:
 
-To disable this check while retaining other strict checks, use:
+```python
+class Checked:
+    def __init__(self, value: int | None, early: bool) -> None:
+        if value is None:
+            raise ValueError()
+        self.value = value  # OK: the other path raises
+        if early:
+            return
+        self.ready = True  # possibly-uninitialized-attribute
+```
+
+Another method also counts if it assigns the attribute on every path, even when Pyrefly cannot tell whether the constructor calls it:
+
+```python
+class Delegating:
+    def __init__(self, cfg: int | None) -> None:
+        if cfg is None:
+            self._load_defaults()
+        else:
+            self.cfg = cfg  # OK: _load_defaults always assigns cfg
+
+    def _load_defaults(self) -> None:
+        self.cfg = 0
+```
+
+These do not initialize an attribute:
+
+```python
+class NotInitialized:
+    def __init__(self) -> None:
+        def later() -> None:
+            self.a = 1  # possibly-uninitialized-attribute: later may never run
+        self.b: int  # possibly-uninitialized-attribute: an annotation is not a value
+        self.c = 1  # possibly-uninitialized-attribute
+        del self.c
+```
+
+A bare class-body annotation is checked against the methods that assign it.
+If no initialization method assigns it, [`uninitialized-instance-variable`](#uninitialized-instance-variable) reports it instead.
+
+```python
+class Annotated:
+    x: int  # possibly-uninitialized-attribute
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.x = 1
+```
+
+Pyrefly does not report an attribute when:
+
+- a base class, including `object`, defines it, or a base class is unresolved or `Any`;
+- the class has an instance `__getattr__`;
+- it is an annotation in a class that initializes annotated fields itself: a dataclass (except a plain `@dataclass(init=False)`), an attrs class, a pydantic model, a named tuple, or a protocol;
+- it is a `ClassVar` annotation, or an annotation on a metaclass;
+- it is a bare annotation `x: int` that `__new__` assigns on the instance it creates, such as `obj = super().__new__(cls)` followed by `obj.x = ...`;
+- it is a method or nested class defined under a condition in the class body, unless the name is also bound another way (the attributes such a method assigns are still checked);
+- it is in a stub (`.pyi`) file.
+
+A conditional class-body assignment is reported even when a method also assigns the name.
+The error is reported at the attribute's definition, even if the attribute is never read, and a later `hasattr` check does not suppress it.
+
+To disable this check while keeping other strict checks, use:
 
 ```toml
 preset = "strict"
@@ -2816,7 +2897,9 @@ Default severity: `warn`
 
 Type information for some third-party libraries is shipped in a stubs package separate from the
 library's source code. This error is emitted when we detect that a library is being used without
-the recommended stubs package being installed.
+the recommended stubs package being installed. It only applies to libraries found on the site package
+path that do not ship a `py.typed` file; modules found on the search path, such as local stubs in a
+`typings/` directory or your own code, are never reported.
 
 ## untyped-namedtuple
 
