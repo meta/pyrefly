@@ -272,6 +272,14 @@
           "type": "boolean",
           "default": false
         },
+        "only": {
+          "description": "An array of error kinds that restricts which diagnostics Pyrefly processes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
         "build-system": {
           "description": "Pyrefly supports integrating into build systems to discover targets to type check and their dependencies. Currently supports Buck2 and custom queries.",
           "type": "object",

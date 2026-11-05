@@ -760,6 +760,30 @@ min-severity = "warn"
     - Directives such as [`reveal_type`](../error-kinds#reveal-type) are always
       shown regardless of this threshold.
 
+### `only`
+
+An array of error kinds that restricts which diagnostics Pyrefly processes.
+With `only` set, `pyrefly check` processes only the listed kinds: it displays
+them in the output, allows them to affect the exit code, inserts ignore comments
+for them during suppression (`--suppress-errors`) and records them when
+updating baselines (`--update-baseline`).
+
+```toml
+# pyrefly.toml
+only = ["bad-assignment", "bad-return"]
+```
+
+- Type: Array of error kinds (see [error-kinds](../error-kinds))
+- Default: Not set (no filtering by error kind)
+- Flag equivalent: `--only`
+- Notes:
+    - `only` is a **project-level setting** and cannot be overridden
+      in [`sub-config`](#sub-configs) sections.
+    - The `--only` command-line flag completely overrides this
+      configuration value.
+    - `only = []` is rejected as a configuration error to prevent
+      accidentally hiding all diagnostics.
+
 ### `output-format`
 
 Default format for `pyrefly check` error output when `--output-format` is not
