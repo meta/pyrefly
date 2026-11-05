@@ -2146,12 +2146,12 @@ impl ConfigFile {
                 )));
             }
 
-            if let Some(only) = &config.only {
-                if only.is_empty() {
-                    errors.push(ConfigError::error(anyhow!(
-                        "a config with a value is required for `only`"
-                    )));
-                }
+            if let Some(only) = &config.only
+                && only.is_empty()
+            {
+                errors.push(ConfigError::error(anyhow!(
+                    "a config with a value is required for `only`"
+                )));
             }
 
             if !config.root.extras.0.is_empty() {
