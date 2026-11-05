@@ -668,7 +668,8 @@ pub struct ConfigFile {
     pub baseline: Option<PathBuf>,
 
     /// Severity assigned to errors that match the baseline.
-    /// Defaults to `ignore`.
+    /// `pyrefly check` treats an unset value as `ignore`. The IDE shows hints
+    /// until this is set, then uses the configured severity.
     pub baseline_error_level: Option<Severity>,
 
     /// Fields used to match diagnostics against baseline entries.

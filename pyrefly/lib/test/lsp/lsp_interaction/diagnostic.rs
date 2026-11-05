@@ -308,6 +308,95 @@ fn test_baseline_diagnostic_is_hint_push() {
     interaction.shutdown().unwrap();
 }
 
+/// `baseline-error-level = "warn"` raises the matched diagnostic above a hint
+/// so it is eligible for the Problems list. The unmatched error stays an error.
+#[test]
+fn test_baseline_diagnostic_respects_configured_level() {
+    let test_files_root = get_test_files_root();
+    let root_path = test_files_root.path().join("baseline_warn");
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root_path);
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .expect("Failed to initialize");
+
+    interaction.client.did_open("bad.py");
+
+    interaction
+        .client
+        .diagnostic("bad.py")
+        .expect_response_with(|response| {
+            let report = response;
+            let lsp_types::DocumentDiagnosticReport::RelatedFullDocumentDiagnosticReport(full) =
+                report
+            else {
+                return false;
+            };
+            let items = &full.full_document_diagnostic_report.items;
+            items.len() == 2
+                && items.iter().all(|item| {
+                    item.code == Some(lsp_types::Code::String("bad-assignment".to_owned()))
+                })
+                && severity_count(items, lsp_types::DiagnosticSeverity::Warning) == 1
+                && severity_count(items, lsp_types::DiagnosticSeverity::Error) == 1
+        })
+        .expect("Failed to receive warning diagnostic for a baselined error");
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_baseline_diagnostic_respects_configured_level_push() {
+    let test_files_root = get_test_files_root();
+    let root_path = test_files_root.path().join("baseline_warn");
+    let bad_py = root_path.join("bad.py");
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root_path);
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .expect("Failed to initialize");
+
+    interaction.client.did_open("bad.py");
+
+    interaction
+        .client
+        .expect_message("publishDiagnostics with baseline WARNING", |msg| {
+            let Message::Notification(notification) = msg else {
+                return None;
+            };
+            if notification.method != PublishDiagnosticsNotification::METHOD.as_str() {
+                return None;
+            }
+            let params: PublishDiagnosticsParams =
+                serde_json::from_value(notification.params).unwrap();
+            if params.uri.to_file_path().unwrap() != bad_py {
+                return None;
+            }
+            let warnings =
+                severity_count(&params.diagnostics, lsp_types::DiagnosticSeverity::Warning);
+            let errors = severity_count(&params.diagnostics, lsp_types::DiagnosticSeverity::Error);
+            if params.diagnostics.len() == 2 && warnings == 1 && errors == 1 {
+                Some(Ok(()))
+            } else {
+                Some(Err(LspMessageError::Custom {
+                    description: format!(
+                        "Expected 1 WARNING and 1 ERROR, got {warnings} WARNING and {errors} ERROR ({} total)",
+                        params.diagnostics.len()
+                    ),
+                }))
+            }
+        })
+        .expect("Failed to receive push diagnostics with baseline WARNING");
+
+    interaction.shutdown().unwrap();
+}
+
 /// Poll the baseline file until it holds `expected` entries. The prune runs on the
 /// recheck that follows the save, so there is no client message to synchronize on.
 /// A read that lands mid-rewrite sees the previous file, since the rewrite renames a
