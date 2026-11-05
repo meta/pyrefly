@@ -688,10 +688,40 @@ def unary(x: int): ...
 def variadic(*args: int): ...
 
 def test(xs: list[int]):
-    f(*xs)  # E:
+    f(*xs)
     unary(*xs)
     f(*())
     variadic(*xs)
+"#,
+);
+
+testcase!(
+    test_splat_unknown_length_zero_positional_params_5542,
+    r#"
+def no_args() -> int:
+    return 0
+
+def unary(x: int) -> None: ...
+
+def forward(xs: list[int], rest: tuple[int, ...]) -> None:
+    no_args(*xs)
+    unary(1, *xs)
+    unary(1, *rest)
+
+def test_nonempty(
+    xs: tuple[int, *tuple[int, ...]],
+    ys: tuple[*tuple[int, ...], int],
+    zs: tuple[int, *tuple[int, ...], int],
+) -> None:
+    no_args(*xs)  # E: Expected 0 positional arguments
+    no_args(*ys)  # E: Expected 0 positional arguments
+    unary(1, *xs)  # E: Expected 1 positional argument
+    unary(1, *ys)  # E: Expected 1 positional argument
+    unary(*xs)
+    unary(*ys)
+    unary(*zs)  # E: Expected 1 positional argument
+
+forward([], ())
 "#,
 );
 

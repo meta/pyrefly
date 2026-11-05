@@ -590,7 +590,7 @@ impl<'a> CallArg<'a> {
                         middle,
                         suffix,
                         consumed: 0,
-                        matched: false,
+                        matched_count: 0,
                         done: false,
                     }
                 }
@@ -610,7 +610,7 @@ enum CallArgPreEval<'a> {
         middle: Type,
         suffix: Vec<Type>,
         consumed: usize,
-        matched: bool,
+        matched_count: usize,
         done: bool,
     },
     Fixed(Vec<Type>, usize),
@@ -676,17 +676,17 @@ impl CallArgPreEval<'_> {
             Self::Star {
                 prefix,
                 consumed,
-                matched,
+                matched_count,
                 done,
                 ..
             } => {
-                if !vararg && *consumed < prefix.len() {
-                    // A prefix element is consumed once matched; the variadic tail remains on
-                    // offer to every later parameter.
-                    *consumed += 1;
-                }
                 if !vararg {
-                    *matched = true;
+                    if *consumed < prefix.len() {
+                        // A prefix element is consumed once matched; the variadic tail remains on
+                        // offer to every later parameter.
+                        *consumed += 1;
+                    }
+                    *matched_count += 1;
                 }
                 *done = vararg;
             }
@@ -1401,14 +1401,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                     None => {
                         arg_pre.post_infer(self, arg_errors);
-                        // A gradual splat can match any arity. For a non-gradual splat, only
-                        // reject it here if it has not already matched a positional parameter:
-                        // that prevents zero-arity overloads from swallowing it without adding
-                        // a spurious extra argument after a finite parameter list.
+                        // An unknown-length splat only guarantees an extra positional argument if
+                        // it still has more fixed elements (prefix + suffix) than the number
+                        // of non-variadic positional parameters it has already matched (fixes #5542).
                         let extra_arg = match &arg_pre {
                             CallArgPreEval::Star {
-                                middle, matched, ..
-                            } => !middle.is_any() && !matched,
+                                prefix,
+                                suffix,
+                                matched_count,
+                                ..
+                            } => prefix.len() + suffix.len() > *matched_count,
                             _ => true,
                         };
                         if extra_arg {
