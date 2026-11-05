@@ -376,13 +376,15 @@ That means everywhere that we call `Base.f` can safely call `Sub.f`.
 
 The opposite case, where `Base.f` takes `float` and `Sub.f` takes `int`, is an error because `Sub.f` cannot accept every `float` value.
 
-Note that bad overrides caused by inconsistent parameter names are separately reported as [bad-override-param-name](#bad-override-param-name), and bad overrides caused by mutable attribute type changes are separately reported as [bad-override-mutable-attribute](#bad-override-mutable-attribute). The mutable-attribute kind is reserved for overrides that fail only because of mutability (narrowing); an attribute override that widens the parent's type, or whose type is incompatible with the parent's in both directions, is reported as plain `bad-override`.
+Note that bad overrides caused by inconsistent parameter names are separately reported as [bad-override-param-name](#bad-override-param-name), and some overrides involving mutable attributes are reported as [bad-override-mutable-attribute](#bad-override-mutable-attribute).
 
 ## bad-override-mutable-attribute
 
-Arises when a subclass overrides a mutable (read-write) attribute of a parent class with a type that differs only in a way mutability forbids (narrowing).
+Arises when a subclass narrows the type of a mutable (read-write) attribute inherited from a parent class.
 Mutable attributes require invariant types — the child's type must be exactly compatible with the parent's — because the attribute can be both read and written through a reference to the parent class.
-If the child's type widens the parent's, or is incompatible with it in both directions, the override is reported as [bad-override](#bad-override) instead, so that disabling this error kind cannot mask the worse incompatibility.
+When both the parent and child members are plain read-write attributes, widening or incompatible types report [bad-override](#bad-override) instead.
+
+This kind also covers some overrides involving properties. For example, an incompatible property getter overriding a plain read-write attribute reports `bad-override-mutable-attribute`, so disabling this kind also suppresses that error.
 
 ```python
 class Base:
