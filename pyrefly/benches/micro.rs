@@ -350,8 +350,8 @@ result: Base[object] = {expression}
     )
 }
 
-/// Each layer rejects the first hint and checks the same child under the second hint.
-fn nested_init_only_constructor_hints(depth: usize) -> String {
+/// Repeated contextual attempts check each child against the same union hint.
+fn nested_init_only_constructor_hints(depth: usize, value_type: &str) -> String {
     let mut expression = "Node(value)".to_owned();
     for _ in 1..depth {
         expression = format!("Node(value, {expression})");
@@ -361,7 +361,7 @@ fn nested_init_only_constructor_hints(depth: usize) -> String {
 class Node[T]:
     def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
 
-def f(value: str) -> None:
+def f(value: {value_type}) -> None:
     root: Node[int] | Node[str] = {expression}
 "#
     )
@@ -621,7 +621,15 @@ fn nested_generic_constructor(c: &mut Criterion) {
         measure(
             c,
             &format!("nested_init_only_constructor_hints_{depth}"),
-            nested_init_only_constructor_hints(depth),
+            nested_init_only_constructor_hints(depth, "str"),
+            0,
+        );
+    }
+    for depth in [8, 12] {
+        measure(
+            c,
+            &format!("nested_init_only_constructor_union_distribution_{depth}"),
+            nested_init_only_constructor_hints(depth, "int | str"),
             0,
         );
     }
