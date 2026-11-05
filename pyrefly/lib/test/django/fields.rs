@@ -9,6 +9,54 @@ use crate::django_testcase;
 use crate::test::django::util::django_env;
 use crate::testcase;
 
+django_testcase!(
+    bug = "Field unions lose their instance assignment and compatibility contracts",
+    test_union_field_instance_contract,
+    r#"
+from typing import Protocol, assert_type
+from django.db import models
+
+def flag() -> bool: ...
+
+class HasName(Protocol):
+    name: str
+
+class Record(models.Model):
+    name = models.CharField[str, str](max_length=20) if flag() else models.TextField[str, str]()
+    different = models.CharField[str, str](max_length=20) if flag() else models.IntegerField[int, int]()
+
+class ActiveBase(models.Model):
+    is_active: bool | models.BooleanField[bool, bool]
+
+class ActiveChild(ActiveBase):
+    is_active = models.BooleanField()  # E: inconsistent
+
+def update(record: Record) -> None:
+    assert_type(record.name, str)
+    record.name = "hello"  # E: not assignable to attribute `name`
+    record.name = object()  # E: not assignable to attribute `name`
+    assert_type(record.different, str | int)
+    record.different = "hello"  # E: not assignable to attribute `different`
+    record.different = 1  # E: not assignable to attribute `different`
+
+value: HasName = Record()  # E: not assignable
+"#,
+);
+
+django_testcase!(
+    bug = "Override checks use the getter instead of the inferred setter",
+    test_field_inferred_setter_override_contract,
+    r#"
+from django.db import models
+
+class WideSetter(models.Model):
+    name: models.CharField[str | int, str] = models.CharField(max_length=200)
+
+class Child(WideSetter):
+    name = models.CharField(max_length=100)  # E: inconsistent
+"#,
+);
+
 testcase!(
     test_field_instance_contract_compatibility,
     django_env().enable_missing_override_decorator_error(),
