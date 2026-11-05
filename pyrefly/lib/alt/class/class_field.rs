@@ -351,7 +351,11 @@ pub enum ClassFieldInitialization {
     /// installed on the class), but matches what other type checkers do and is required for
     /// compatibility with the many library stubs and metaclass-powered patterns (e.g.
     /// `__attributes__`-driven frameworks) that rely on this behavior.
-    Uninitialized,
+    Uninitialized {
+        /// Whether the class may initialize the field outside the class body, such as in a
+        /// method.
+        initialized_in_method: bool,
+    },
     /// The field is not initialized in the class body or any method in the class,
     /// but we treat it as if it was initialized.
     /// For example, any field defined in a stub file.
@@ -364,7 +368,7 @@ impl Display for ClassFieldInitialization {
             Self::ClassBody(_) => write!(f, "initialized on class body"),
             Self::Method => write!(f, "initialized in method"),
             Self::ClassMethod => write!(f, "initialized in class method"),
-            Self::Uninitialized => write!(f, "initialized on instances"),
+            Self::Uninitialized { .. } => write!(f, "initialized on instances"),
             Self::Magic => {
                 write!(f, "not initialized on class body/method")
             }
@@ -494,7 +498,9 @@ impl ClassField {
     ) -> Self {
         let is_instance_var = annotation.is_some() && !Self::is_class_metadata_attribute(name);
         let initialization = if annotation.is_some() {
-            ClassFieldInitialization::Uninitialized
+            ClassFieldInitialization::Uninitialized {
+                initialized_in_method: false,
+            }
         } else {
             ClassFieldInitialization::Magic
         };
@@ -840,7 +846,7 @@ impl ClassField {
                 ClassFieldInitialization::ClassBody(_) => Some(ty),
                 ClassFieldInitialization::Method
                 | ClassFieldInitialization::ClassMethod
-                | ClassFieldInitialization::Uninitialized
+                | ClassFieldInitialization::Uninitialized { .. }
                 | ClassFieldInitialization::Magic => None,
             },
             ClassFieldInner::InstanceAttribute { .. } => None, // Instance attrs not in class body
@@ -945,7 +951,7 @@ impl ClassField {
                 initialization:
                     ClassFieldInitialization::Method
                     | ClassFieldInitialization::ClassMethod
-                    | ClassFieldInitialization::Uninitialized
+                    | ClassFieldInitialization::Uninitialized { .. }
                     | ClassFieldInitialization::Magic,
                 ..
             } => Required::Required,
@@ -1063,7 +1069,8 @@ impl ClassField {
                 *is_classvar
                     && matches!(
                         initialization,
-                        ClassFieldInitialization::Uninitialized | ClassFieldInitialization::Magic
+                        ClassFieldInitialization::Uninitialized { .. }
+                            | ClassFieldInitialization::Magic
                     )
             }
             ClassFieldInner::InstanceAttribute { .. } => false,
@@ -1173,7 +1180,7 @@ impl ClassField {
                         ClassFieldInitialization::ClassBody(Some(field_flags)) => field_flags.init,
                         ClassFieldInitialization::Method
                         | ClassFieldInitialization::ClassMethod
-                        | ClassFieldInitialization::Uninitialized
+                        | ClassFieldInitialization::Uninitialized { .. }
                         | ClassFieldInitialization::Magic => false,
                     } =>
             {
@@ -1264,7 +1271,7 @@ impl ClassField {
                 }
                 ClassFieldInitialization::Method
                 | ClassFieldInitialization::ClassMethod
-                | ClassFieldInitialization::Uninitialized
+                | ClassFieldInitialization::Uninitialized { .. }
                 | ClassFieldInitialization::Magic => DataclassFieldKeywords::new(),
             },
             ClassFieldInner::Method { .. } => DataclassFieldKeywords::new(),
@@ -1279,11 +1286,24 @@ impl ClassField {
                 }
                 ClassFieldInitialization::Method
                 | ClassFieldInitialization::ClassMethod
-                | ClassFieldInitialization::Uninitialized
+                | ClassFieldInitialization::Uninitialized { .. }
                 | ClassFieldInitialization::Magic => DataclassFieldKeywords::new(),
             },
             ClassFieldInner::InstanceAttribute { .. } => DataclassFieldKeywords::new(),
         }
+    }
+
+    /// Whether the class declares this field without initializing it.
+    pub fn is_declared_only(&self) -> bool {
+        matches!(
+            &self.0,
+            ClassFieldInner::ClassAttribute {
+                initialization: ClassFieldInitialization::Uninitialized {
+                    initialized_in_method: false,
+                },
+                ..
+            }
+        )
     }
 
     fn is_initialized_in_method(&self) -> bool {
@@ -1745,7 +1765,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     ClassFieldInitialization::ClassBody(Some(Box::new(flags)))
                 } else {
-                    ClassFieldInitialization::Uninitialized
+                    ClassFieldInitialization::Uninitialized {
+                        initialized_in_method: *initialized_in_recognized_method
+                            || *initialized_on_new_instance,
+                    }
                 };
                 // A Final field declared in the class body must be initialized either there
                 // or in a recognized attribute-defining method like `__init__`.
@@ -1754,7 +1777,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // protocol members are abstract declarations that don't need initialization.
                 let is_uninit_final = !initialized_in_recognized_method
                     && direct_annotation.as_ref().is_some_and(|a| a.is_final())
-                    && matches!(initialization, ClassFieldInitialization::Uninitialized);
+                    && matches!(
+                        initialization,
+                        ClassFieldInitialization::Uninitialized { .. }
+                    );
                 let is_special_class = metadata.dataclass_metadata().is_some()
                     || metadata.named_tuple_metadata().is_some()
                     || metadata.is_protocol();
@@ -1773,7 +1799,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let is_uninit_instance_var = !initialized_in_recognized_method
                     && !initialized_on_new_instance
                     && !direct_annotation.as_ref().is_some_and(|a| a.is_final())
-                    && matches!(initialization, ClassFieldInitialization::Uninitialized);
+                    && matches!(
+                        initialization,
+                        ClassFieldInitialization::Uninitialized { .. }
+                    );
                 // Metaclass attributes are typically filled by subclass class bodies via
                 // `type.__new__`, so annotation-only declarations on a metaclass are not
                 // uninitialized instance vars in the ordinary sense (see #5278).
@@ -2228,7 +2257,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let initialization = if class.module_path().is_interface() {
                     ClassFieldInitialization::Magic
                 } else {
-                    ClassFieldInitialization::Uninitialized
+                    // A synthesized class may initialize the field in ways we do not see.
+                    ClassFieldInitialization::Uninitialized {
+                        initialized_in_method: true,
+                    }
                 };
                 let value =
                     value_storage.push(ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit)));
@@ -2330,7 +2362,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             initialization,
             ClassFieldInitialization::ClassBody(_)
                 | ClassFieldInitialization::Magic
-                | ClassFieldInitialization::Uninitialized
+                | ClassFieldInitialization::Uninitialized { .. }
         ) {
             match &ty {
                 Type::ClassType(cls) => {

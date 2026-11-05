@@ -761,11 +761,11 @@ class Meta(type):
 );
 
 testcase!(
-    bug = "A base class or Protocol that only declares an attribute exempts subclasses",
     test_attribute_initialization_declared_only_in_base,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Protocol, Self
 
 def enabled() -> bool: ...
 
@@ -775,10 +775,10 @@ class Base:
 class Derived(Base):
     def __init__(self) -> None:
         if enabled():
-            self.x = 1  # Should report `x`
+            self.x = 1  # E: Attribute `x` may be uninitialized
 
 class DerivedRedeclare(Base):
-    x: int  # Should report `x`
+    x: int  # E: Attribute `x` may be uninitialized
     def __init__(self) -> None:
         if enabled():
             self.x = 1
@@ -789,7 +789,47 @@ class P(Protocol):
 class Impl(P):
     def __init__(self) -> None:
         if enabled():
-            self.x = 1  # Should report `x`
+            self.x = 1  # E: Attribute `x` may be uninitialized
+
+class InitializingBase:
+    x: int
+    def __init__(self) -> None:
+        self.x = 0
+
+class DerivedFromInitializing(InitializingBase):
+    def __init__(self) -> None:
+        super().__init__()
+        if enabled():
+            self.x = 1
+
+@dataclass
+class DataBase:
+    x: int
+
+class DerivedFromDataclass(DataBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class MetaBase(type):
+    key: str
+
+class MetaDerived(MetaBase):
+    def __init__(cls, name: str, bases: tuple[type, ...], ns: dict[str, object]) -> None:
+        if "key" not in ns:
+            cls.key = name
+
+class NewBase:
+    x: int
+    def __new__(cls) -> Self:
+        instance = super().__new__(cls)
+        instance.x = 0
+        return instance
+
+class DerivedFromNew(NewBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
 "#,
 );
 

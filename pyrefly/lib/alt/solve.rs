@@ -3347,16 +3347,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         }) || (*is_instance
                             && self.get_class_member(cls, &dunder::GETATTR).is_some())
                             // Check each ancestor's own fields, including `object`, so the
-                            // result does not depend on whether the class has other bases.
+                            // result does not depend on whether the class has other bases. An
+                            // ancestor that only declares the attribute does not initialize it.
                             || self
                                 .get_mro_for_class(cls)
                                 .ancestors(self.stdlib)
                                 .any(|base| {
-                                    self.get_field_from_current_class_only(
-                                        base.class_object(),
-                                        name,
-                                    )
-                                    .is_some()
+                                    let base = base.class_object();
+                                    let Some(field) =
+                                        self.get_field_from_current_class_only(base, name)
+                                    else {
+                                        return false;
+                                    };
+                                    if !field.is_declared_only() {
+                                        return true;
+                                    }
+                                    // A declaration still counts in an ancestor that initializes
+                                    // annotated fields itself, other than a protocol, or in a
+                                    // metaclass, whose subclass bodies usually fill it.
+                                    let base_metadata = self.get_metadata_for_class(base);
+                                    (base_metadata.initializes_annotated_fields()
+                                        && !base_metadata.is_protocol())
+                                        || base_metadata.is_metaclass()
                                 })
                     });
                 if !initialized && !inherited_or_dynamic {

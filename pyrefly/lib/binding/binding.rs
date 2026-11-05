@@ -3594,7 +3594,7 @@ pub enum ClassFieldDefinition {
     /// instance attribute-defining method (e.g., `__init__`), meaning a Final field
     /// declared here is legally initialized even without a class-body value.
     /// `initialized_on_new_instance` is true if `__new__` assigns the field on the instance
-    /// it creates. Only the `uninitialized-instance-variable` check reads it.
+    /// it creates.
     DeclaredByAnnotation {
         annotation: Idx<KeyAnnotation>,
         initialized_in_recognized_method: bool,
