@@ -1244,6 +1244,30 @@ pub struct MethodAttribute {
     pub initialized: InitializationStatus,
 }
 
+/// Attribute initialization combined over the reachable `return`s of a method.
+#[derive(Clone, Debug)]
+struct ReturnAttributeInitialization {
+    attributes: SmallMap<Name, InitializationStatus>,
+    /// The status of every attribute absent from `attributes`.
+    unlisted: InitializationStatus,
+}
+
+impl ReturnAttributeInitialization {
+    fn get(&self, name: &Name) -> &InitializationStatus {
+        self.attributes.get(name).unwrap_or(&self.unlisted)
+    }
+}
+
+impl Default for ReturnAttributeInitialization {
+    /// With no `return` yet, no `return` misses an attribute.
+    fn default() -> Self {
+        Self {
+            attributes: SmallMap::new(),
+            unlisted: InitializationStatus::Initialized,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ScopeMethod {
     name: Identifier,
@@ -1253,9 +1277,8 @@ struct ScopeMethod {
     new_instance_names: SmallSet<Name>,
     instance_attributes: SmallMap<Name, InstanceAttribute>,
     nn_module_registrations: NNModuleRegistrations,
-    /// Attribute initialization combined over the reachable `return`s so far, or `None` before
-    /// the first one. An absent name is uninitialized at some `return`.
-    return_attribute_initialization: Option<SmallMap<Name, InitializationStatus>>,
+    /// Attribute initialization combined over the reachable `return`s so far.
+    return_attribute_initialization: ReturnAttributeInitialization,
     parameters: SmallMap<Name, ParameterUsage>,
     yields_and_returns: YieldsAndReturns,
     is_async: bool,
@@ -1329,7 +1352,7 @@ impl ScopeMethod {
             new_instance_names: SmallSet::new(),
             instance_attributes: SmallMap::new(),
             nn_module_registrations: SmallMap::new(),
-            return_attribute_initialization: None,
+            return_attribute_initialization: Default::default(),
             parameters: SmallMap::new(),
             yields_and_returns: Default::default(),
             is_async,
@@ -2388,12 +2411,10 @@ impl Scopes {
                                         flow.last_stmt_expr,
                                     )
                                 })
-                                .chain(
-                                    method_scope
-                                        .return_attribute_initialization
-                                        .iter()
-                                        .map(|flow| (flow.get(&name), None)),
-                                ),
+                                .chain([(
+                                    Some(method_scope.return_attribute_initialization.get(&name)),
+                                    None,
+                                )]),
                         );
                         (
                             name,
@@ -3518,7 +3539,8 @@ impl Scopes {
         None
     }
 
-    /// Record a return in the enclosing function body there is one.
+    /// Record a return in the enclosing function body there is one. `previous_stmt_expr` is the
+    /// termination key of the statement before the `return`.
     ///
     /// Return `None` if this succeeded and Some(rejected_return) if we are at the top-level
     pub fn record_or_reject_return(
@@ -3526,6 +3548,7 @@ impl Scopes {
         ret: CurrentIdx,
         x: StmtReturn,
         is_unreachable: bool,
+        previous_stmt_expr: Option<Idx<Key>>,
     ) -> Result<(), (CurrentIdx, StmtReturn)> {
         let unset_nodes = &mut self.unset_nodes;
         for scope in self.scopes.iter_mut().map(|node| &mut node.scope).rev() {
@@ -3540,28 +3563,39 @@ impl Scopes {
                 ScopeKind::Method(method) => {
                     if !is_unreachable {
                         let current = &scope.flow.instance_attribute_initialization;
-                        // A name that is uninitialized at a `return` stays uninitialized, so
-                        // it is dropped instead of being merged again at later ones.
-                        match &mut method.return_attribute_initialization {
-                            None => {
-                                method.return_attribute_initialization = Some(
-                                    current
-                                        .iter()
-                                        .filter(|(_, status)| {
-                                            !matches!(status, InitializationStatus::Uninitialized)
-                                        })
-                                        .map(|(name, status)| (name.clone(), status.clone()))
-                                        .collect(),
-                                );
+                        let returns = &mut method.return_attribute_initialization;
+                        // The status at this `return` of an attribute the flow has not assigned.
+                        let missing =
+                            InitializationStatus::merge(unset_nodes, [(None, previous_stmt_expr)]);
+                        let unlisted = InitializationStatus::merge(
+                            unset_nodes,
+                            [(Some(&returns.unlisted), None), (Some(&missing), None)],
+                        );
+                        // List the attributes this flow assigns, unless being unlisted already
+                        // makes them uninitialized.
+                        if returns.unlisted != InitializationStatus::Uninitialized {
+                            for name in current.keys() {
+                                if !returns.attributes.contains_key(name) {
+                                    returns
+                                        .attributes
+                                        .insert(name.clone(), returns.unlisted.clone());
+                                }
                             }
-                            Some(previous) => previous.retain(|name, status| {
-                                *status = InitializationStatus::merge(
-                                    unset_nodes,
-                                    [(Some(&*status), None), (current.get(name), None)],
-                                );
-                                !matches!(status, InitializationStatus::Uninitialized)
-                            }),
                         }
+                        returns.attributes.retain(|name, status| {
+                            let here = match current.get(name) {
+                                None | Some(InitializationStatus::Uninitialized) => {
+                                    (Some(&missing), None)
+                                }
+                                here => (here, previous_stmt_expr),
+                            };
+                            *status = InitializationStatus::merge(
+                                unset_nodes,
+                                [(Some(&*status), None), here],
+                            );
+                            *status != unlisted
+                        });
+                        returns.unlisted = unlisted;
                     }
                     method
                         .yields_and_returns

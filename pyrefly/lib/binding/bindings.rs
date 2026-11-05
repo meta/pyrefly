@@ -306,7 +306,7 @@ impl InitializedInFlow {
 }
 
 /// Initialization on every path through a control-flow merge.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitializationStatus {
     /// Every path initializes the attribute.
     Initialized,

@@ -837,7 +837,7 @@ impl<'a> BindingsBuilder<'a> {
     ///
     /// If this is the top level, report a type error about the invalid return
     /// and also create a binding to ensure we type check the expression.
-    fn record_return(&mut self, mut x: StmtReturn) {
+    fn record_return(&mut self, mut x: StmtReturn, previous_stmt_expr: Option<Idx<Key>>) {
         // PEP 765: Disallow return in finally block (Python 3.14+)
         if self.sys_info.version().at_least(3, 14) && self.scopes.in_finally() {
             self.error(
@@ -848,10 +848,12 @@ impl<'a> BindingsBuilder<'a> {
         }
         let mut ret = self.declare_current_idx(Key::ReturnExplicit(x.range()));
         self.ensure_expr_opt(x.value.as_deref_mut(), ret.usage());
-        if let Err((ret, oops_top_level)) =
-            self.scopes
-                .record_or_reject_return(ret, x, self.scopes.is_definitely_unreachable())
-        {
+        if let Err((ret, oops_top_level)) = self.scopes.record_or_reject_return(
+            ret,
+            x,
+            self.scopes.is_definitely_unreachable(),
+            previous_stmt_expr,
+        ) {
             match oops_top_level.value {
                 Some(v) => self.insert_binding_current(ret, Binding::Expr(None, v)),
                 None => self.insert_binding_current(ret, Binding::None),
@@ -931,6 +933,7 @@ impl<'a> BindingsBuilder<'a> {
     fn stmt_impl(&mut self, x: Stmt, parent: &NestingContext) {
         self.with_semantic_checker(|semantic, context| semantic.visit_stmt(&x, context));
 
+        let previous_stmt_expr = self.scopes.last_stmt_expr();
         // Clear last_stmt_expr at the start - will be set again if this is a StmtExpr
         self.scopes.set_last_stmt_expr(None);
 
@@ -953,7 +956,7 @@ impl<'a> BindingsBuilder<'a> {
             }
             Stmt::ClassDef(x) => self.class_def(x, parent),
             Stmt::Return(x) => {
-                self.record_return(x);
+                self.record_return(x, previous_stmt_expr);
             }
             Stmt::Delete(x) => {
                 let mut targets = x.targets;
@@ -2115,6 +2118,11 @@ impl<'a> BindingsBuilder<'a> {
                 } else {
                     None
                 };
+                // The `finally` body also runs when the last statement before it raises, so a
+                // leading `return` must not take that statement's termination key.
+                if !x.finalbody.is_empty() {
+                    self.scopes.set_last_stmt_expr(None);
+                }
                 self.stmts(x.finalbody, parent);
                 if let Some(termination) = termination {
                     self.scopes.restore_termination(termination);

@@ -5953,6 +5953,81 @@ class EveryReturnCutOff:
 );
 
 testcase!(
+    test_attribute_initialization_never_call_before_return,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+def proceed() -> None: ...
+
+class StopsBeforeReturn:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            stop()
+            return  # E: This code is unreachable
+        if b:
+            self.value = 1
+            return
+        self.value = 2
+
+class StopsInEveryBranchBeforeReturn:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            if b:
+                stop()
+            else:
+                stop()
+            return  # E: This code is unreachable
+        self.value = 1
+
+class ProceedsBeforeReturn:
+    def __init__(self, a: bool) -> None:
+        if a:
+            proceed()
+            return
+        self.value = 1  # E: Attribute `value` may be uninitialized
+
+class DeletedBeforeStop:
+    def __init__(self, a: bool) -> None:
+        self.value = 1
+        if a:
+            del self.value
+            stop()
+            return  # E: This code is unreachable
+
+class DeferredBeforeStop:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            if b:
+                proceed()
+            else:
+                self.value = 1
+            stop()
+            return  # E: This code is unreachable
+        self.value = 2
+
+class ReturnInFinallyAfterStop:
+    def __init__(self, a: bool) -> None:
+        if a:
+            try:
+                stop()
+            finally:
+                return
+        self.value = 1  # E: Attribute `value` may be uninitialized
+
+class LaterReturnMisses:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            stop()
+            return  # E: This code is unreachable
+        if b:
+            return
+        self.value = 1  # E: Attribute `value` may be uninitialized
+"#,
+);
+
+testcase!(
     test_attribute_initialization_inherited_getattr_fallback,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
