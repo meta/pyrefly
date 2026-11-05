@@ -286,7 +286,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Look up the `_value_` attribute for an enum type (not a specific member).
     /// Whether `_value_` should be read-write is unspecified, but we need to allow assigning
     /// it in `__init__` so we make it read-write.
-    fn enum_value_lookup_on_class(&self, class: &ClassType, enum_metadata: &EnumMetadata) -> Type {
+    pub(crate) fn enum_value_lookup_on_class(
+        &self,
+        class: &ClassType,
+        enum_metadata: &EnumMetadata,
+    ) -> Type {
         let mixed_in = self.mixed_in_enum_data_type(class.class_object());
         let has_new = self
             .get_class_fields(class.class_object())
@@ -337,9 +341,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// If this enum mixes in a data type by inheriting from it, return the mixed-in type.
     /// Searches all bases, not just the first, to handle cases like
     /// `IntegerChoices(Choices, IntEnum)` where the data type comes from `IntEnum`.
-    /// A non-enum base is only treated as a data type if it has `__new__`
+    /// A non-enum base is treated as a data type if it is a dataclass or has `__new__`
     /// inherited from a class other than `object`, which is how Python
-    /// distinguishes data type mixins (`int`, `str`, `float`, and their
+    /// distinguishes data type mixins (`int`, `str`, `float`, dataclasses, and their
     /// subclasses like `MyStr(str)`) from regular method mixins.
     fn mixed_in_enum_data_type(&self, class: &Class) -> Option<Type> {
         let bases = self.get_base_types_for_class(class);
@@ -352,13 +356,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     return Some(ty);
                 }
             } else {
-                let is_data_type = self
-                    .get_class_member_with_defining_class(base.class_object(), &dunder::NEW)
-                    .is_some_and(|field| {
-                        !field
-                            .defining_class
-                            .has_toplevel_qname("builtins", "object")
-                    });
+                let is_dataclass = self
+                    .get_metadata_for_class(base.class_object())
+                    .dataclass_metadata()
+                    .is_some();
+                let is_data_type = is_dataclass
+                    || self
+                        .get_class_member_with_defining_class(base.class_object(), &dunder::NEW)
+                        .is_some_and(|field| {
+                            !field
+                                .defining_class
+                                .has_toplevel_qname("builtins", "object")
+                        });
                 if is_data_type {
                     return Some(self.heap.mk_class_type(base.clone()));
                 }

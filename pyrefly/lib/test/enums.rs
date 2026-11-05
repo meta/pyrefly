@@ -1550,6 +1550,255 @@ assert_type(x, Literal["q"])
 "#,
 );
 
+testcase!(
+    test_enum_call_rejects_none_for_int_members,
+    r#"
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+
+Color(1)
+Color(value=2)
+Color(Color.RED)
+Color(None)  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+Color(value=None)  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+    "#,
+);
+
+testcase!(
+    test_enum_call_cross_numeric_equality,
+    r#"
+from decimal import Decimal
+from enum import Enum
+from fractions import Fraction
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+
+# Numeric values and equality domains succeed at runtime.
+Color(1.0)
+Color(True)
+Color(Decimal(1))
+Color(Fraction(1))
+
+class B(Enum):
+    YES = True
+
+B(1)
+B(1.0)
+B(1 + 0j)
+B(None)  # E: Argument `None` is not assignable to parameter `value` with type `B | bool | complex | float | int`
+
+class TupleEnum(Enum):
+    PAIR = (1, 2)
+
+TupleEnum((1.0, 2.0))
+
+class ListEnum(Enum):
+    ITEMS = [1, 2]
+
+ListEnum([1.0, 2.0])
+    "#,
+);
+
+testcase!(
+    test_enum_call_ignores_multi_param_init,
+    r#"
+from enum import Enum
+
+class Planet(Enum):
+    MERCURY = (3.303e+23, 2.4397e6)
+    EARTH = (5.976e+24, 6.37814e6)
+
+    def __init__(self, mass: float, radius: float) -> None:
+        self.mass = mass
+        self.radius = radius
+
+# `__init__` runs at class definition, not at lookup.
+Planet((5.976e+24, 6.37814e6))
+Planet(Planet.EARTH)
+Planet(value=(3.303e+23, 2.4397e6))
+    "#,
+);
+
+testcase!(
+    test_enum_call_init_param_names_irrelevant,
+    r#"
+from enum import Enum
+
+class Category(Enum):
+    GAMES = "GAMES", "0_0"
+    MUSIC = "MUSIC", "1_1"
+
+    def __init__(self, label: str, id: str) -> None:
+        self._value_ = label
+        self.id = id
+
+Category(Category.GAMES)
+Category(value=("GAMES", "0_0"))
+    "#,
+);
+
+testcase!(
+    test_enum_call_new_changes_value_type,
+    r#"
+from enum import Enum
+
+class Coordinate(Enum):
+    def __new__(cls, value: int, label: str):
+        obj = object.__new__(cls)
+        obj._value_ = label
+        return obj
+
+    PX = (0, "P.X")
+    PY = (1, "P.Y")
+
+# `_value_` is the label string, not the `(int, str)` creation arguments.
+Coordinate("P.X")
+Coordinate(Coordinate.PX)
+
+class IntCoordinate(int, Enum):
+    def __new__(cls, value: int, label: str):
+        obj = int.__new__(cls, value)
+        obj._value_ = value
+        return obj
+
+    PX = (0, "P.X")
+
+IntCoordinate(0)
+
+class Untyped(Enum):
+    def __new__(cls, raw: str):
+        obj = object.__new__(cls)
+        obj._value_ = len(raw)
+        return obj
+
+    A = "a"
+    BB = "bb"
+
+Untyped(1)
+Untyped("anything")
+    "#,
+);
+
+testcase!(
+    test_enum_call_custom_metaclass_and_missing,
+    r#"
+from enum import Enum, EnumMeta
+from typing import Any, Self
+
+class LenientMeta(EnumMeta):
+    def __call__(cls, value: Any, *args: Any, **kwargs: Any) -> Any:
+        return super().__call__(value, *args, **kwargs)
+
+class WithMeta(Enum, metaclass=LenientMeta):
+    A = 1
+
+WithMeta(None)
+WithMeta("a")
+
+class WithMissing(Enum):
+    A = 1
+
+    @classmethod
+    def _missing_(cls, value: object) -> Self:
+        return cls.A
+
+WithMissing(None)
+WithMissing("a")
+    "#,
+);
+
+testcase!(
+    test_enum_call_deeply_nested,
+    r#"
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+
+Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(1)))))))))))))))))))))
+    "#,
+);
+
+testcase!(
+    test_enum_call_deeply_nested_error_linear_time,
+    r#"
+from enum import Enum
+
+class E(Enum):
+    A = 1
+
+def identity[T](x: T) -> T:
+    return x
+
+identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(1 + "x"))))))))))))))))))))))))))))))))))))))))  # E: `+` is not supported between `Literal[1]` and `Literal['x']`
+    "#,
+);
+
+testcase!(
+    test_enum_call_extensible_base_self_type,
+    r#"
+from enum import Enum
+from typing import Self
+
+class Base(str, Enum):
+    @classmethod
+    def parse(cls, raw: object) -> Self:
+        return cls(raw)
+
+class Color(Base):
+    RED = "red"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "Color":
+        return cls.RED
+
+assert Color.parse(None) is Color.RED
+    "#,
+);
+
+testcase!(
+    test_enum_call_dataclass_mixin,
+    r#"
+from dataclasses import dataclass
+from enum import Enum
+
+@dataclass
+class Data:
+    n: int
+
+class E(Data, Enum):
+    A = (1,)
+
+assert E(Data(1)) is E.A
+    "#,
+);
+
+testcase!(
+    test_enum_call_pre_inferred_arguments,
+    r#"
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+
+    def __init__(self, value: int) -> None:
+        self._value_ = value
+
+def identity[T](x: T) -> T:
+    return x
+
+Color(None)  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+Color(identity(None))  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+Color(identity(identity(identity(identity(None)))))  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+Color(value=identity(identity(identity(identity(None)))))  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+    "#,
+);
+
 // https://github.com/facebook/pyrefly/issues/5279
 testcase!(
     test_enum_member_keyword_value,
@@ -1566,5 +1815,73 @@ class Format(Enum):
     def render(self, value: int, /) -> str:
         formatter: Callable[[int], str] = self.value
         return formatter(value)
+"#,
+);
+
+fn env_enum_stub_ellipsis() -> TestEnv {
+    let mut env = TestEnv::new();
+    env.add_with_path(
+        "res",
+        "res.pyi",
+        r#"
+from enum import Enum
+
+class Resolution(Enum):
+    RESO_NS = ...
+    RESO_US = ...
+"#,
+    );
+    env
+}
+
+testcase!(
+    test_enum_lookup_stub_ellipsis_values_unchecked,
+    env_enum_stub_ellipsis(),
+    r#"
+import res
+res.Resolution(7)
+"#,
+);
+
+testcase!(
+    test_enum_call_object_and_union_arguments,
+    r#"
+from enum import Enum
+from typing import Any
+
+class IntColor(Enum):
+    RED = 1
+    GREEN = 2
+
+class StrColor(Enum):
+    HOSTED = "hosted"
+    LOCAL = "local"
+
+def test_object_and_any(
+    obj: object,
+    any_val: Any,
+    opt_obj: object | None,
+    opt_str: str | None,
+    zulip_union: bool | int | str,
+    meson_union: bool | int | list[str] | str,
+) -> None:
+    # `object` and `Any` are accepted for both numeric and string enums because
+    # lookup uses equality at runtime.
+    IntColor(obj)
+    IntColor(any_val)
+    StrColor(obj)
+    StrColor(any_val)
+
+    # Nullable types must be rejected unless the enum accepts None or defines _missing_.
+    IntColor(opt_obj)  # E: Argument `object | None` is not assignable to parameter `value` with type `IntColor | complex | float | int`
+    StrColor(opt_obj)  # E: Argument `object | None` is not assignable to parameter `value` with type `StrColor | str`
+    StrColor(opt_str)  # E: Argument `str | None` is not assignable to parameter `value` with type `StrColor | str`
+
+    # Incompatible unions where some branches do not match the target must be rejected.
+    IntColor(zulip_union)  # E: Argument `bool | int | str` is not assignable to parameter `value` with type `IntColor | complex | float | int`
+    StrColor(meson_union)  # E: Argument `bool | int | list[str] | str` is not assignable to parameter `value` with type `StrColor | str`
+
+    # Disjoint type (str passed to int enum) must be rejected.
+    IntColor("1")  # E: Argument `Literal['1']` is not assignable to parameter `value` with type `IntColor | complex | float | int`
 "#,
 );
