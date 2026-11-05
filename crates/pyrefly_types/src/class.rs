@@ -446,16 +446,6 @@ impl Class {
         self.0.qname.module()
     }
 
-    pub fn has_toplevel_qname(&self, module: &str, name: &str) -> bool {
-        self.0.qname.module_name().as_str() == module
-            && self.0.qname.parent().is_toplevel()
-            && self.0.qname.id() == name
-    }
-
-    pub fn is_builtin(&self, name: &str) -> bool {
-        self.has_toplevel_qname("builtins", name)
-    }
-
     /// The known class this is, if it is one. Only top-level classes can be known classes.
     pub fn known(&self) -> Option<KnownClass> {
         self.0.known
@@ -662,14 +652,6 @@ impl ClassType {
 
     pub fn to_type(self) -> Type {
         Type::ClassType(self)
-    }
-
-    pub fn has_qname(&self, module: &str, name: &str) -> bool {
-        self.0.has_toplevel_qname(module, name)
-    }
-
-    pub fn is_builtin(&self, name: &str) -> bool {
-        self.0.is_builtin(name)
     }
 
     pub fn known(&self) -> Option<KnownClass> {
