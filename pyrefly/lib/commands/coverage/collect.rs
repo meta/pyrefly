@@ -648,9 +648,49 @@ fn class_mro<'a>(answers: &'a Answers, class: &Class) -> &'a ClassMro {
         .unwrap_or(&ClassMro::Cyclic)
 }
 
-/// Slots of each class field annotated in its own class, keyed by the class's module. Recorded for
-/// each module before its answers are evicted, so subclasses solved later can still inherit it.
-type AnnotatedFields = Mutex<HashMap<(Handle, KeyClassField), SlotCounts>>;
+/// Complete per-module snapshots of direct annotations for attributes that coverage can report.
+/// The solutions hook records each snapshot before eviction; it retains no solver data.
+#[derive(Default)]
+struct AnnotatedFields {
+    modules: Mutex<HashMap<Handle, HashMap<KeyClassField, SlotRank>>>,
+}
+
+impl AnnotatedFields {
+    fn record(&self, transaction: &Transaction, handle: &Handle) {
+        let answers = transaction
+            .get_answers(handle)
+            .expect("the solutions hook runs before answer eviction");
+        let bindings = answers.bindings();
+        let fields = bindings
+            .keys::<KeyClassField>()
+            .filter_map(|idx| {
+                let key = bindings.idx_to_key(idx);
+                if !is_public_name(key.1.as_str()) || is_implicit_dunder_attr(key.1.as_str()) {
+                    return None;
+                }
+                let annot = own_annotation_idx(bindings, idx)?;
+                let resolved = answers
+                    .get_idx(annot)
+                    .expect("checked modules solve every annotation key before Solutions");
+                let rank = classify_resolved_annotation_rank(bindings, annot, &resolved.annotation);
+                Some((key.clone(), rank))
+            })
+            .collect();
+        self.modules.lock().insert(handle.dupe(), fields);
+    }
+
+    /// Read a snapshot after its module's answers have been evicted. A missing field means the
+    /// module did not declare a reportable annotation, not that its snapshot is incomplete.
+    fn get(&self, handle: &Handle, key: &KeyClassField) -> Option<SlotCounts> {
+        self.modules
+            .lock()
+            .get(handle)
+            .expect("an evicted module's annotations were recorded by the solutions hook")
+            .get(key)
+            .copied()
+            .map(Into::into)
+    }
+}
 
 /// The annotation declared directly on `field`, not the effective inherited class field.
 fn own_annotation_idx(
@@ -687,25 +727,6 @@ fn own_annotation_slots(
     Some(classify_resolved_annotation_rank(bindings, annot, &resolved.annotation).into())
 }
 
-/// Record the slots of each class field annotated in its own class in `handle`'s module.
-fn record_annotated_fields(
-    transaction: &Transaction,
-    handle: &Handle,
-    annotated: &AnnotatedFields,
-) {
-    let fields = transaction.ad_hoc_solve(handle, "coverage_annotated_fields", |solver| {
-        let bindings = solver.bindings();
-        bindings
-            .keys::<KeyClassField>()
-            .filter_map(|idx| {
-                let slots = own_annotation_slots(&solver, idx)?;
-                Some(((handle.dupe(), bindings.idx_to_key(idx).clone()), slots))
-            })
-            .collect::<Vec<_>>()
-    });
-    annotated.lock().extend(fields.into_iter().flatten());
-}
-
 /// Slots for `field_name` from the nearest base class annotating it in `class_idx`'s MRO (gh-3997).
 ///
 /// Walks the MRO nearest-first and returns the first ancestor that *annotates* `field_name`, so the
@@ -734,7 +755,7 @@ fn inherited_annotation_slots(
             let key = KeyClassField(cls.index(), field_name.clone());
             let Some(base_answers) = transaction.get_answers(&h) else {
                 // The solutions hook records annotations before answers are evicted.
-                return annotated.lock().get(&(h, key)).copied();
+                return annotated.get(&h, &key);
             };
             let bindings = base_answers.bindings();
             let idx = bindings.key_to_idx_hashed_opt(Hashed::new(&key))?;
@@ -750,7 +771,7 @@ fn inherited_annotation_slots(
                 let idx = solver.bindings().key_to_idx_hashed_opt(Hashed::new(&key))?;
                 own_annotation_slots(&solver, idx)
             });
-            solved.unwrap_or_else(|| annotated.lock().get(&(h, key)).copied())
+            solved.unwrap_or_else(|| annotated.get(&h, &key))
         })
 }
 
@@ -1893,7 +1914,7 @@ struct ModuleCollector {
 
 impl ModuleCollector {
     fn collect(&self, transaction: &Transaction, handle: &Handle) {
-        record_annotated_fields(transaction, handle, &self.annotated);
+        self.annotated.record(transaction, handle);
         let Some(&for_stub_merge) = self.to_collect.get(handle) else {
             return;
         };
