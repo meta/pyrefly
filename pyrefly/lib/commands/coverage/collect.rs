@@ -3335,6 +3335,12 @@ class Child(Base):
         })));
         let bases = platforms.clone().map(|p| on("base", p));
         transaction.run(&bases, Require::Errors, None);
+        for base in &bases {
+            assert!(
+                transaction.get_answers(base).is_none(),
+                "base must be evicted"
+            );
+        }
         let children = platforms.map(|p| on("child", p));
         transaction.run(&children, Require::Errors, None);
 
@@ -3351,8 +3357,108 @@ class Child(Base):
         assert_eq!(slots(&children[1]).n_any, 1);
     }
 
-    /// A reassigned attr inherits its base annotation's type quality even when nothing else has
-    /// demanded that annotation yet: `Child.x` resolves to `Middle`'s property, never `Base.x`.
+    /// Callable fields keep their direct annotations, and a nearer `Any` declaration wins over
+    /// an inherited descriptor. Both live answers and pre-eviction snapshots must agree.
+    #[test]
+    fn test_inherited_direct_annotations_live_and_evicted() {
+        let base = r#"
+from typing import Callable, ClassVar
+class Descriptor:
+    def __get__(self, obj: object, owner: type | None = None) -> int: ...
+    def __set__(self, obj: object, value: object) -> None: ...
+class Base:
+    callback: ClassVar[Callable[[], int]] = lambda: 1
+    __add__: Callable[[object], int] = lambda other: 1
+    x: Descriptor = Descriptor()
+    typed: int
+"#;
+        let middle = r#"
+from typing import Any
+from base import Base
+class Middle(Base):
+    def __init__(self) -> None:
+        self.x: Any = 1
+        self.typed = 1
+"#;
+        let child = r#"
+from middle import Middle
+class Child(Middle):
+    def __new__(cls):
+        cls.callback = lambda: 2
+        cls.__add__ = lambda other: 2
+        return super().__new__(cls)
+    def __init__(self) -> None:
+        self.x = 2
+        self.typed = 2
+        self.unannotated = 2
+"#;
+        for thread_count in [ThreadCount::Inline, TEST_THREAD_COUNT] {
+            for retention in [Require::Exports, Require::Everything] {
+                let mut env = TestEnv::new().with_thread_count(thread_count);
+                env.add("base", base);
+                env.add("middle", middle);
+                env.add("child", child);
+                let (state, handle) = env.with_run_require(Require::Exports).to_state();
+                let annotated = AnnotatedFields::default();
+                let collected = Mutex::new(None);
+                let child_handle = handle("child");
+                let mut transaction = state.new_transaction(Require::Exports, None);
+                transaction.set_solutions_hook(Some(Box::new(|h, transaction| {
+                    record_annotated_fields(transaction, h, &annotated);
+                    if h == &child_handle {
+                        *collected.lock() =
+                            ModuleSymbols::collect(transaction, h, false, &annotated);
+                    }
+                })));
+                let ancestors = [handle("base"), handle("middle")];
+                let require = retention.max(Require::Errors);
+                transaction.run(&ancestors, require, None);
+                for ancestor in &ancestors {
+                    assert_eq!(
+                        transaction.get_answers(ancestor).is_some(),
+                        retention.keep_answers(),
+                        "ancestor answer retention must match the path under test",
+                    );
+                }
+                transaction.run(&[child_handle.dupe()], require, None);
+
+                let collected = collected.lock();
+                let symbols = collected.as_ref().expect("child symbols must be collected");
+                for (name, expected) in [
+                    ("callback", SlotCounts::typed()),
+                    ("__add__", SlotCounts::typed()),
+                    ("x", SlotCounts::any()),
+                    ("typed", SlotCounts::typed()),
+                    ("unannotated", SlotCounts::untyped()),
+                ] {
+                    let actual = symbols
+                        .variables
+                        .iter()
+                        .find(|v| v.name == format!("child.Child.{name}"))
+                        .unwrap_or_else(|| panic!("missing attribute {name}"))
+                        .slots;
+                    assert_eq!(
+                        (
+                            actual.n_typable,
+                            actual.n_typed,
+                            actual.n_any,
+                            actual.n_untyped
+                        ),
+                        (
+                            expected.n_typable,
+                            expected.n_typed,
+                            expected.n_any,
+                            expected.n_untyped
+                        ),
+                        "{name}, retention={retention:?}, threads={thread_count:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Inheritance coverage follows the nearest explicit attribute annotation, even across a
+    /// property override. The property's solved field does not demand `Base.x`'s annotation.
     #[test]
     fn test_inherited_attr_from_unsolved_annotation() {
         let base = r#"
@@ -3376,7 +3482,11 @@ class Child(Middle):
         self.x = 1
 "#;
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("pyrefly.toml"), "search-path = ['.']").unwrap();
+        std::fs::write(
+            dir.path().join("pyrefly.toml"),
+            "search-path = ['.']\nskip-interpreter-query = true\n",
+        )
+        .unwrap();
         for (name, source) in [
             ("base.py", base),
             ("middle.py", middle),
