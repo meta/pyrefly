@@ -2146,6 +2146,14 @@ impl ConfigFile {
                 )));
             }
 
+            if let Some(only) = &config.only {
+                if only.is_empty() {
+                    errors.push(ConfigError::error(anyhow!(
+                        "a config with a value is required for `only`"
+                    )));
+                }
+            }
+
             if !config.root.extras.0.is_empty() {
                 let extra_keys = config.root.extras.0.keys().join(", ");
                 errors.push(ConfigError::warn(anyhow!(
@@ -3406,6 +3414,24 @@ mod tests {
 
         let defaults = ConfigFile::parse_config("").unwrap();
         assert_eq!(defaults.only, None);
+    }
+
+    #[test]
+    fn test_only_empty_list_is_rejected() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join(ConfigFile::PYREFLY_FILE_NAME);
+        for (content, expect_error) in
+            [("only = []", true), (r#"only = ["bad-assignment"]"#, false)]
+        {
+            fs::write(&path, content).unwrap();
+            let (_, errors) = ConfigFile::from_file(&path);
+            if expect_error {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].severity(), Severity::Error);
+            } else {
+                assert!(errors.is_empty());
+            }
+        }
     }
 
     #[test]
