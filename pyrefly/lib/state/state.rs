@@ -107,7 +107,6 @@ use crate::binding::scope::builtin_module_for_name;
 use crate::binding::table::TableKeyed;
 use crate::config::config::ConfigFile;
 use crate::config::environment::environment::PythonEnvironment;
-use crate::config::error_kind::ErrorKind;
 use crate::config::finder::ConfigError;
 use crate::config::finder::ConfigFinder;
 use crate::error::collector::ErrorCollector;
@@ -1886,17 +1885,6 @@ impl<'a> Transaction<'a> {
         (res, created)
     }
 
-    fn add_error(
-        &self,
-        module_data: &ArcId<ModuleDataMut>,
-        range: TextRange,
-        msg: String,
-        kind: ErrorKind,
-    ) {
-        let load = module_data.state.get_load().unwrap();
-        load.errors.error_builder(range, kind, msg).emit();
-    }
-
     fn lookup<'b>(&'b self, module_data: &'b ArcId<ModuleDataMut>) -> TransactionHandle<'b> {
         TransactionHandle {
             transaction: self,
@@ -1919,15 +1907,6 @@ impl<'a> Transaction<'a> {
             .exports(&self.lookup(module_data))
             .contains_key(name)
         {
-            self.add_error(
-                module_data,
-                TextRange::default(),
-                format!(
-                    "Stdlib import failure, was expecting `{}` to contain `{name}`",
-                    module_data.handle.module()
-                ),
-                ErrorKind::MissingModuleAttribute,
-            );
             return None;
         }
 
@@ -1937,37 +1916,23 @@ impl<'a> Transaction<'a> {
             thread_state,
             &answer_scope,
         );
-        let class = match t {
-            Some(Type::ClassDef(cls)) => Some(cls.dupe()),
-            ty => {
-                self.add_error(
-                    module_data,
-                    TextRange::default(),
-                    format!(
-                        "Did not expect non-class type `{}` for stdlib import `{}.{name}`",
-                        ty.map_or_else(|| "<KeyError>".to_owned(), |t| t.to_string()),
-                        module_data.handle.module()
-                    ),
-                    ErrorKind::MissingModuleAttribute,
-                );
-                None
-            }
+        let Some(Type::ClassDef(class)) = t else {
+            return None;
         };
-        class.map(|class| {
-            let tparams = match class.precomputed_tparams() {
-                PrecomputedTParams::NotGeneric => None,
-                PrecomputedTParams::FromBinding => self
-                    .lookup_answer(
-                        module_data,
-                        &KeyTParams(class.index()),
-                        thread_state,
-                        &answer_scope,
-                    )
-                    .map(Dupe::dupe),
-                PrecomputedTParams::Precomputed(tparams) => Some(tparams.dupe()),
-            };
-            (class, tparams)
-        })
+        let class = class.dupe();
+        let tparams = match class.precomputed_tparams() {
+            PrecomputedTParams::NotGeneric => None,
+            PrecomputedTParams::FromBinding => self
+                .lookup_answer(
+                    module_data,
+                    &KeyTParams(class.index()),
+                    thread_state,
+                    &answer_scope,
+                )
+                .map(Dupe::dupe),
+            PrecomputedTParams::Precomputed(tparams) => Some(tparams.dupe()),
+        };
+        Some((class, tparams))
     }
 
     fn lookup_export(&self, module_data: &ArcId<ModuleDataMut>) -> Arc<Exports> {

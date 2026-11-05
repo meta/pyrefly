@@ -41,7 +41,6 @@ const SPECIAL_FORM_NAMES: &[&str] = &[
 
 #[derive(Debug, Clone)]
 struct StdlibError {
-    bootstrapping: bool,
     name: &'static str,
 }
 
@@ -166,17 +165,15 @@ impl Stdlib {
         let collections_abc = ModuleName::collections_abc();
         let string_templatelib = ModuleName::string_templatelib();
 
-        let lookup_generic =
-            |module: ModuleName, name: &'static str, args: usize| match lookup_class(
-                module,
-                &Name::new_static(name),
-            ) {
+        let lookup_generic = |module: ModuleName, name: &'static str, args: usize| {
+            match lookup_class(module, &Name::new_static(name)) {
                 Some((cls, Some(tparams))) if tparams.len() == args => Ok((cls, tparams)),
-                _ => Err(StdlibError {
-                    bootstrapping,
-                    name,
-                }),
-            };
+                _ if bootstrapping => Err(StdlibError { name }),
+                _ => panic!(
+                    "Stdlib class `{module}.{name}` is missing or does not have {args} type parameters"
+                ),
+            }
+        };
         let lookup_concrete = |module: ModuleName, name: &'static str| match lookup_class(
             module,
             &Name::new_static(name),
@@ -196,10 +193,8 @@ impl Stdlib {
                 });
                 Ok(ClassType::new(cls, targs))
             }
-            _ => Err(StdlibError {
-                bootstrapping,
-                name,
-            }),
+            _ if bootstrapping => Err(StdlibError { name }),
+            _ => panic!("Stdlib class `{module}.{name}` is missing or generic"),
         };
 
         let none_location = if version.at_least(3, 10) {
@@ -327,15 +322,7 @@ impl Stdlib {
         match x {
             Ok(x) => x,
             Err(err) => {
-                unreachable!(
-                    "Stdlib missing class `{}`{}",
-                    err.name,
-                    if err.bootstrapping {
-                        " (while bootstrapping)"
-                    } else {
-                        ""
-                    },
-                )
+                unreachable!("Stdlib missing class `{}` while bootstrapping", err.name)
             }
         }
     }
@@ -696,7 +683,8 @@ mod tests {
 
     #[test]
     fn none_tparams_are_empty_for_stdlib_lookup() {
-        let stdlib = Stdlib::new(
+        let stdlib = Stdlib::new_with_bootstrapping(
+            true,
             PythonVersion::default(),
             &|module, name| Some((fake_class(module, name), None)),
             &|_, _| None,
@@ -709,6 +697,24 @@ mod tests {
         assert!(
             stdlib.list.is_err(),
             "A generic class should require its expected tparams"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Stdlib class `builtins.str` is missing or generic")]
+    fn normal_stdlib_fails_eagerly_when_a_class_is_missing() {
+        Stdlib::new(PythonVersion::default(), &|_, _| None, &|_, _| None);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "Stdlib class `builtins.slice` is missing or does not have 3 type parameters"
+    )]
+    fn normal_stdlib_fails_eagerly_when_a_generic_is_invalid() {
+        Stdlib::new(
+            PythonVersion::default(),
+            &|module, name| Some((fake_class(module, name), None)),
+            &|_, _| None,
         );
     }
 }
