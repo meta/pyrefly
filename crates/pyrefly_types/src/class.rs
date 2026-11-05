@@ -430,14 +430,10 @@ impl Class {
         self.0.qname.module()
     }
 
-    pub fn has_qname(&self, module: &str, parent: &NestingContext, name: &str) -> bool {
-        self.0.qname.module_name().as_str() == module
-            && self.0.qname.parent() == parent
-            && self.0.qname.id() == name
-    }
-
     pub fn has_toplevel_qname(&self, module: &str, name: &str) -> bool {
-        self.has_qname(module, &NestingContext::toplevel(), name)
+        self.0.qname.module_name().as_str() == module
+            && self.0.qname.parent().is_toplevel()
+            && self.0.qname.id() == name
     }
 
     pub fn is_builtin(&self, name: &str) -> bool {
