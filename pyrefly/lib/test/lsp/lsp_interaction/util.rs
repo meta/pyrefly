@@ -7,11 +7,16 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
+use crossbeam_channel::Receiver;
 use lsp_types::Definition;
 use lsp_types::DefinitionResponse;
 use lsp_types::Location;
 use lsp_types::TypeDefinitionResponse;
+use pyrefly_lsp_test::object_model::RecordedTelemetryEvent;
+use pyrefly_util::telemetry::TelemetryEventKind;
 
 use crate::module::bundled::BundledStub;
 use crate::module::typeshed::typeshed;
@@ -134,5 +139,22 @@ pub fn check_inlay_hint_label_values(
             true
         }
         _ => false,
+    }
+}
+
+/// Waits until a background disk invalidation, such as the one queued by `didSave`, has committed.
+pub fn wait_for_disk_invalidation(telemetry_events: &Receiver<Arc<RecordedTelemetryEvent>>) {
+    loop {
+        let event = telemetry_events
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+        if matches!(event.event.kind, TelemetryEventKind::InvalidateDisk) {
+            assert!(
+                event.error.is_none(),
+                "Disk refresh failed: {:?}",
+                event.error
+            );
+            return;
+        }
     }
 }
