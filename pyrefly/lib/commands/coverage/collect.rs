@@ -40,6 +40,7 @@ use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::Answers;
+use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::types::class_metadata::ClassMro;
 use crate::binding::binding::Binding;
 use crate::binding::binding::BindingAnnotation;
@@ -71,6 +72,7 @@ use crate::module::finder::find_import_with_mode;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::state::state::Transaction;
+use crate::state::state::TransactionHandle;
 
 /// All parameters with merge keys: positional-only → index, keyword-capable → name,
 /// variadic → singleton, implicit receiver → `None`.
@@ -642,6 +644,46 @@ fn class_mro<'a>(answers: &'a Answers, class: &Class) -> &'a ClassMro {
         .unwrap_or(&ClassMro::Cyclic)
 }
 
+/// Slots of each class field annotated in its own class, keyed by the class's module. Recorded for
+/// each module before its answers are evicted, so subclasses solved later can still inherit it.
+type AnnotatedFields = Mutex<HashMap<(Handle, KeyClassField), SlotCounts>>;
+
+/// Slots of the annotation that `field`'s own class gives it, if any. Solves the annotation first,
+/// because a module only solves its non-exported keys on demand unless it computes errors.
+fn own_annotation_slots(
+    solver: &AnswersSolver<TransactionHandle>,
+    field: Idx<KeyClassField>,
+) -> Option<SlotCounts> {
+    let answers = solver.current();
+    let annot = match &answers.bindings().get(field).definition {
+        ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => Some(*annotation),
+        ClassFieldDefinition::DefinedInMethod { annotation, .. }
+        | ClassFieldDefinition::AssignedInBody { annotation, .. } => *annotation,
+        _ => None,
+    }?;
+    solver.get_idx(annot);
+    Some(classify_annotation(answers, Some(annot)))
+}
+
+/// Record the slots of each class field annotated in its own class in `handle`'s module.
+fn record_annotated_fields(
+    transaction: &Transaction,
+    handle: &Handle,
+    annotated: &AnnotatedFields,
+) {
+    let fields = transaction.ad_hoc_solve(handle, "coverage_annotated_fields", |solver| {
+        let bindings = solver.bindings();
+        bindings
+            .keys::<KeyClassField>()
+            .filter_map(|idx| {
+                let slots = own_annotation_slots(&solver, idx)?;
+                Some(((handle.dupe(), bindings.idx_to_key(idx).clone()), slots))
+            })
+            .collect::<Vec<_>>()
+    });
+    annotated.lock().extend(fields.into_iter().flatten());
+}
+
 /// Slots for `field_name` from the nearest base class annotating it in `class_idx`'s MRO (gh-3997).
 ///
 /// Walks the MRO nearest-first and returns the first ancestor that *annotates* `field_name`, so the
@@ -652,6 +694,7 @@ fn inherited_annotation_slots(
     answers: &Answers,
     transaction: &Transaction,
     handle: &Handle,
+    annotated: &AnnotatedFields,
     class_idx: Idx<KeyClass>,
     field_name: &Name,
 ) -> Option<SlotCounts> {
@@ -666,19 +709,14 @@ fn inherited_annotation_slots(
                 cls.module_path().dupe(),
                 handle.sys_info().dupe(),
             );
-            let a = transaction.get_answers(&h)?;
-            let b = a.bindings();
-            let idx = b.key_to_idx_hashed_opt(Hashed::new(&KeyClassField(
-                cls.index(),
-                field_name.clone(),
-            )))?;
-            let annot = match &b.get(idx).definition {
-                ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => Some(*annotation),
-                ClassFieldDefinition::DefinedInMethod { annotation, .. }
-                | ClassFieldDefinition::AssignedInBody { annotation, .. } => *annotation,
-                _ => None,
-            }?;
-            Some(classify_annotation(&a, Some(annot)))
+            let key = KeyClassField(cls.index(), field_name.clone());
+            let solved = transaction.ad_hoc_solve(&h, "coverage_inherited_annotation", |solver| {
+                let idx = solver.bindings().key_to_idx_hashed_opt(Hashed::new(&key))?;
+                own_annotation_slots(&solver, idx)
+            });
+            // `ad_hoc_solve` fails only once the base's answers are evicted, after the solutions
+            // hook recorded its fields.
+            solved.unwrap_or_else(|| annotated.lock().get(&(h, key)).copied())
         })
 }
 
@@ -699,6 +737,7 @@ fn parse_instance_attrs(
     answers: &Answers,
     transaction: &Transaction,
     handle: &Handle,
+    annotated: &AnnotatedFields,
     hidden_classes: &SmallSet<Idx<KeyClass>>,
     cython_classes: &SmallSet<Idx<KeyClass>>,
 ) -> Vec<Variable> {
@@ -784,6 +823,7 @@ fn parse_instance_attrs(
                         answers,
                         transaction,
                         handle,
+                        annotated,
                         field.class_idx,
                         &field.name,
                     )
@@ -1488,7 +1528,12 @@ struct ModuleSymbols {
 impl ModuleSymbols {
     /// Parse a solved module's symbols into plain data; `for_stub_merge` also captures
     /// `StubMergeData`.
-    fn collect(transaction: &Transaction, handle: &Handle, for_stub_merge: bool) -> Option<Self> {
+    fn collect(
+        transaction: &Transaction,
+        handle: &Handle,
+        for_stub_merge: bool,
+        annotated: &AnnotatedFields,
+    ) -> Option<Self> {
         let module = transaction.get_module_info(handle)?;
         let answers = transaction.get_answers(handle)?;
         let bindings = answers.bindings();
@@ -1524,6 +1569,7 @@ impl ModuleSymbols {
             &answers,
             transaction,
             handle,
+            annotated,
             &hidden_classes,
             &cython_classes,
         ));
@@ -1906,6 +1952,7 @@ pub fn collect_module_reports(
         .collect();
     let run_set: Vec<Handle> = to_collect.keys().cloned().collect();
     let collected: Mutex<HashMap<Handle, ModuleSymbols>> = Mutex::new(HashMap::new());
+    let annotated = AnnotatedFields::default();
 
     let mut forgetter = Forgetter::new(
         holder.as_ref().new_transaction(Require::Exports, None),
@@ -1915,10 +1962,13 @@ pub fn collect_module_reports(
     // Collect each module the moment it solves, before the run evicts its answers,
     // so peak memory holds only the solver's working set (gh-3989).
     transaction.set_solutions_hook(Some(Box::new(|handle, transaction| {
+        record_annotated_fields(transaction, handle, &annotated);
         let Some(&for_stub_merge) = to_collect.get(handle) else {
             return;
         };
-        if let Some(symbols) = ModuleSymbols::collect(transaction, handle, for_stub_merge) {
+        if let Some(symbols) =
+            ModuleSymbols::collect(transaction, handle, for_stub_merge, &annotated)
+        {
             collected.lock().insert(handle.dupe(), symbols);
         }
     })));
@@ -1952,7 +2002,8 @@ pub fn collect_module_reports(
             // `Everything` retains answers so the extras can be collected after the run
             transaction.run(&extras, Require::Everything, None);
             collected.lock().extend(extras.iter().filter_map(|handle| {
-                ModuleSymbols::collect(transaction, handle, false).map(|s| (handle.dupe(), s))
+                ModuleSymbols::collect(transaction, handle, false, &annotated)
+                    .map(|s| (handle.dupe(), s))
             }));
             targets.extend(extras);
         }
@@ -2040,6 +2091,8 @@ mod tests {
     use pyrefly_build::handle::Handle;
     use pyrefly_python::module_name::ModuleName;
     use pyrefly_python::module_path::ModulePath;
+    use pyrefly_python::sys_info::PythonPlatform;
+    use pyrefly_python::sys_info::PythonVersion;
     use pyrefly_python::sys_info::SysInfo;
     use pyrefly_util::globs::FilteredGlobs;
     use pyrefly_util::globs::Globs;
@@ -2090,6 +2143,16 @@ mod tests {
         );
     }
 
+    /// Collect a module's symbols from a state that keeps every module's answers, so no fields
+    /// need recording.
+    fn collect_symbols(
+        transaction: &Transaction,
+        handle: &Handle,
+        for_stub_merge: bool,
+    ) -> ModuleSymbols {
+        ModuleSymbols::collect(transaction, handle, for_stub_merge, &Default::default()).unwrap()
+    }
+
     /// Run the production parse pipeline on a checked-in test file, as module `test`.
     fn parse_test_module(file: &str, mut env: TestEnv) -> (ModuleSymbols, String) {
         let code = load_test_file(file);
@@ -2103,7 +2166,7 @@ mod tests {
             .with_default_require_level(Require::Everything)
             .to_state();
         let handle = handle_fn("test");
-        let symbols = ModuleSymbols::collect(&state.transaction(), &handle, false).unwrap();
+        let symbols = collect_symbols(&state.transaction(), &handle, false);
         (symbols, module_path)
     }
 
@@ -2151,7 +2214,7 @@ mod tests {
             .with_default_require_level(Require::Everything)
             .to_state();
         let pyi_handle = pyi_handle_fn("test");
-        let mut stub = ModuleSymbols::collect(&pyi_state.transaction(), &pyi_handle, true).unwrap();
+        let mut stub = collect_symbols(&pyi_state.transaction(), &pyi_handle, true);
 
         let (py, _) = parse_test_module(py_file, TestEnv::new());
         stub.merge_uncovered_py_symbols(py);
@@ -2859,7 +2922,7 @@ def g(x: int) -> int:
             .with_default_require_level(Require::Everything)
             .to_state();
         let handle = handle_fn("test");
-        let symbols = ModuleSymbols::collect(&state.transaction(), &handle, false).unwrap();
+        let symbols = collect_symbols(&state.transaction(), &handle, false);
 
         // Only g should be reported; f is excluded due to @no_type_check.
         assert_eq!(symbols.functions.len(), 1);
@@ -2979,7 +3042,7 @@ def g(x: int) -> int:
         assert_eq!(handle.module(), ModuleName::unknown());
 
         let transaction = state.transaction();
-        let symbols = ModuleSymbols::collect(&transaction, &handle, false).unwrap();
+        let symbols = collect_symbols(&transaction, &handle, false);
         // The bug lives in symbol construction: FQNs must be prefixed with the module name.
         assert_eq!(symbols.functions[0].name, "__unknown__.bar");
 
@@ -3015,7 +3078,7 @@ def g(x: int) -> int:
             .to_state();
         let handle = handle_fn("__unknown__");
         let transaction = state.transaction();
-        let symbols = ModuleSymbols::collect(&transaction, &handle, false).unwrap();
+        let symbols = collect_symbols(&transaction, &handle, false);
 
         let (public_fqns, _) = compute_public_fqns(std::slice::from_ref(&handle), &transaction);
         let mut errors = Vec::new();
@@ -3232,6 +3295,115 @@ def g(x: int) -> int:
         let twins = [FILES[0], FILES[1], ("_private.pyi", FILES[1].1)];
         let private = collect_private(&twins, twins[2].0, true).unwrap();
         assert!(private.path.ends_with(FILES[1].0));
+    }
+
+    /// A reassigned attr inherits its base annotation's type quality even when the base's module
+    /// was solved (and its answers evicted) before the subclass's module, on each platform.
+    #[test]
+    fn test_inherited_attr_from_evicted_module() {
+        let base = r#"
+import sys
+from typing import Any
+Value = Any if sys.platform == "win32" else int
+class Base:
+    x: Value
+"#;
+        let child = r#"
+from base import Base
+class Child(Base):
+    def __init__(self) -> None:
+        self.x = 1
+"#;
+        let mut env = TestEnv::new();
+        env.add("base", base);
+        env.add("child", child);
+        let (state, handle) = env.with_run_require(Require::Exports).to_state();
+        let on = |name: &str, platform: PythonPlatform| {
+            let sys_info = SysInfo::new(PythonVersion::default(), platform);
+            Handle::new(handle(name).module(), handle(name).path().dupe(), sys_info)
+        };
+        let platforms = [PythonPlatform::linux(), PythonPlatform::windows()];
+        let annotated = AnnotatedFields::default();
+        let collected = Mutex::new(HashMap::new());
+        let mut transaction = state.new_transaction(Require::Exports, None);
+        transaction.set_solutions_hook(Some(Box::new(|h, transaction| {
+            record_annotated_fields(transaction, h, &annotated);
+            if h.module() == ModuleName::from_str("child") {
+                let symbols = ModuleSymbols::collect(transaction, h, false, &annotated);
+                collected.lock().insert(h.dupe(), symbols.unwrap());
+            }
+        })));
+        let bases = platforms.clone().map(|p| on("base", p));
+        transaction.run(&bases, Require::Errors, None);
+        let children = platforms.map(|p| on("child", p));
+        transaction.run(&children, Require::Errors, None);
+
+        let collected = collected.lock();
+        let slots = |child: &Handle| {
+            collected[child]
+                .variables
+                .iter()
+                .find(|v| v.name == "child.Child.x")
+                .unwrap()
+                .slots
+        };
+        assert_eq!(slots(&children[0]).n_typed, 1);
+        assert_eq!(slots(&children[1]).n_any, 1);
+    }
+
+    /// A reassigned attr inherits its base annotation's type quality even when nothing else has
+    /// demanded that annotation yet: `Child.x` resolves to `Middle`'s property, never `Base.x`.
+    #[test]
+    fn test_inherited_attr_from_unsolved_annotation() {
+        let base = r#"
+from typing import Any
+class Base:
+    x: Any
+"#;
+        let middle = r#"
+from typing import Any
+from base import Base
+class Middle(Base):
+    @property
+    def x(self) -> Any: ...
+    @x.setter
+    def x(self, value: Any) -> None: ...
+"#;
+        let child = r#"
+from middle import Middle
+class Child(Middle):
+    def __init__(self) -> None:
+        self.x = 1
+"#;
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("pyrefly.toml"), "search-path = ['.']").unwrap();
+        for (name, source) in [
+            ("base.py", base),
+            ("middle.py", middle),
+            ("child.py", child),
+        ] {
+            std::fs::write(dir.path().join(name), source).unwrap();
+        }
+        let globs = FilteredGlobs::new(
+            Globs::new(vec![dir.path().join("child.py").display().to_string()]).unwrap(),
+            Globs::empty(),
+            None,
+            HiddenDirFilter::Disabled,
+        );
+        let (reports, _) = collect_module_reports(
+            Box::new(globs),
+            default_config_finder(None),
+            false,
+            None,
+            false,
+            None,
+            TEST_THREAD_COUNT,
+        )
+        .unwrap();
+
+        let symbols = &reports[0].symbol_reports;
+        let slots = |name: &str| symbols.iter().find(|s| s.name() == name).unwrap().slots();
+        assert_eq!(slots("child.Child.x").n_any, 1);
     }
 
     /// Dataclass and NamedTuple fields are IMPLICIT; methods on those classes count normally.
