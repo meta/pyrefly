@@ -3402,8 +3402,6 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
                 let (errors, traces) = reserved.take_side_effects();
                 let did_write = if let Some(target_load) = load {
                     if let Some(errors) = errors {
-                        let errors = Arc::try_unwrap(errors)
-                            .expect("cross-module SCC errors Arc has unexpected extra references");
                         target_load
                             .errors
                             .extend_if(errors, || {

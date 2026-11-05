@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::btree_map::Entry as BTreeEntry;
 use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -891,7 +892,7 @@ impl CalcStack {
         answer_scope: &'answer AnswerScope,
         current: &CalcId,
         answer: AnyAnswer,
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
     ) -> &'answer AnyAnswer {
         let canonical = {
@@ -1221,7 +1222,7 @@ impl CalcStack {
         answer_scope: &'answer AnswerScope,
         target: &CalcId,
         answer: AnyAnswer,
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
     ) -> &'answer AnyAnswer {
         let (needs_completion_check, answer) = {
@@ -1385,7 +1386,7 @@ impl CalcStack {
 ///
 /// The variants are ordered by "advancement" (Fresh < InProgress < HasPlaceholder < Done).
 /// The `advancement_rank()` method encodes this ordering for use during SCC merge.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum SccNodeState {
     /// Node is queued for the iterative driver and has no live calculation.
     Fresh,
@@ -1402,7 +1403,7 @@ pub enum SccNodeState {
     /// completes, at which point answers are published to their result slots.
     Done {
         /// Errors collected during solving. None during Phase 0 (cold start).
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         /// Trace side effects collected during solving. None during Phase 0.
         traces: Option<TraceSideEffects>,
     },
@@ -1646,7 +1647,7 @@ impl Scc {
         &'a mut self,
         current: &CalcId,
         answer: AnyAnswer,
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
     ) -> GenerationAnswer<'a> {
         let state = self
@@ -1708,14 +1709,17 @@ impl Scc {
     fn merge(mut self, other: Scc) -> Self {
         // Union node_state maps (keep the more advanced state)
         for (k, v) in other.node_state {
-            self.node_state
-                .entry(k)
-                .and_modify(|existing| {
+            match self.node_state.entry(k) {
+                BTreeEntry::Occupied(mut entry) => {
+                    let existing = entry.get_mut();
                     if v.advancement_rank() > existing.advancement_rank() {
-                        *existing = v.clone();
+                        *existing = v;
                     }
-                })
-                .or_insert(v);
+                }
+                BTreeEntry::Vacant(entry) => {
+                    entry.insert(v);
+                }
+            }
         }
         // Keep the smallest detected_at for consistency/determinism
         self.detected_at = self.detected_at.min(other.detected_at);
@@ -1789,7 +1793,7 @@ impl Scc {
         Item = (
             CalcId,
             AnyAnswer,
-            Option<Arc<ErrorCollector>>,
+            Option<ErrorCollector>,
             Option<TraceSideEffects>,
         ),
     > {
@@ -2151,7 +2155,7 @@ pub struct ReservedSlot<'a, 'ctx, 'answer, Ans: LookupAnswer> {
     /// evicts them. Drop must still reach the pending slot to roll it back;
     /// otherwise another thread waiting for publication could deadlock.
     cross_module_answers: Option<Arc<Answers>>,
-    errors: Option<Arc<ErrorCollector>>,
+    errors: Option<ErrorCollector>,
     traces: Option<TraceSideEffects>,
 }
 
@@ -2162,7 +2166,7 @@ impl<Ans: LookupAnswer> ReservedSlot<'_, '_, '_, Ans> {
 
     pub(crate) fn take_side_effects(
         &mut self,
-    ) -> (Option<Arc<ErrorCollector>>, Option<TraceSideEffects>) {
+    ) -> (Option<ErrorCollector>, Option<TraceSideEffects>) {
         (self.errors.take(), self.traces.take())
     }
 
@@ -3088,9 +3092,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let errors = if self.stack().is_cold_iteration() {
             None
         } else {
-            Some(Arc::new(
-                self.retain_annotated_metadata_errors(range, local_errors),
-            ))
+            Some(self.retain_annotated_metadata_errors(range, local_errors))
         };
         let answer_erased = self.stack().set_iteration_node_done(
             self.answer_scope,
@@ -3116,7 +3118,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         calc_id: CalcId,
         answer: AnyAnswer,
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
     ) -> Option<ReservedSlot<'_, 'ctx, 'answer, Ans>> {
         let CalcId(_, ref any_idx) = calc_id;
@@ -3169,7 +3171,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     unsafe fn publish_reserved_same_module<K: Solve<Ans>>(
         &self,
         idx: Idx<K>,
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
     ) -> bool
     where
@@ -3178,8 +3180,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
         let did_write = if let Some(errors) = errors {
-            let errors = Arc::try_unwrap(errors)
-                .expect("SCC errors Arc has unexpected extra references; errors would be lost");
             self.base_errors
                 .extend_if(errors, || {
                     // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
