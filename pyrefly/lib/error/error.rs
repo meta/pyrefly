@@ -597,6 +597,11 @@ impl Error {
         res
     }
 
+    pub(crate) fn into_with_severity(mut self, severity: Severity) -> Self {
+        self.severity = severity;
+        self
+    }
+
     pub fn severity(&self) -> Severity {
         self.severity
     }
@@ -631,7 +636,12 @@ impl Error {
 
     /// Create a diagnostic suitable for use in LSP, or `None` for an ignored error.
     pub fn to_diagnostic(&self) -> Option<Diagnostic> {
-        let severity = self.severity().shown()?;
+        self.to_diagnostic_with_severity(self.severity)
+    }
+
+    /// Like `to_diagnostic`, but with `severity` in place of this error's own severity.
+    pub(crate) fn to_diagnostic_with_severity(&self, severity: Severity) -> Option<Diagnostic> {
+        let severity = severity.shown()?;
         let code = self.error_kind().to_name().to_owned();
         let code_description = Uri::parse(&self.error_kind().docs_url())
             .ok()

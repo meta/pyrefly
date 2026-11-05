@@ -43,6 +43,8 @@ use crate::error::baseline::BaselineProcessor;
 use crate::error::baseline::StaleRowScope;
 use crate::error::baseline::TrackedBaselineProcessor;
 use crate::error::baseline::normalize_baseline_path;
+use crate::error::collector::BorrowedCollectedErrors;
+use crate::error::collector::CollectedDiagnostic;
 use crate::error::collector::CollectedErrors;
 use crate::error::collector::ErrorCollector;
 use crate::error::collector::ModuleDiagnostics;
@@ -279,7 +281,7 @@ impl ModuleRanges {
 /// The errors from a collection of modules.
 #[derive(Debug)]
 pub struct Errors {
-    // Sorted by module name and path (so deterministic display order)
+    // Sorted by module path so concatenating per-module diagnostics is deterministic.
     loads: Vec<(
         Arc<Load>,
         Option<ModuleDiagnostics>,
@@ -358,7 +360,7 @@ impl Errors {
             ArcId<ConfigFile>,
         )>,
     ) -> Self {
-        loads.sort_by_key(|x| (x.0.module_info.name(), x.0.module_info.path().dupe()));
+        loads.sort_by_key(|x| x.0.module_info.path().dupe());
         Self { loads }
     }
 
@@ -379,7 +381,22 @@ impl Errors {
     }
 
     pub fn collect_errors(&self) -> CollectedErrors {
+        let borrowed = self.collect_error_refs();
         let mut errors = CollectedErrors::default();
+        borrowed.into_owned(&mut errors);
+        errors
+    }
+
+    fn collect_error_refs(&self) -> BorrowedCollectedErrors<'_> {
+        let mut errors = BorrowedCollectedErrors::default();
+        self.for_each_module_errors(|module_errors| errors.append(module_errors));
+        errors
+    }
+
+    pub(crate) fn for_each_module_errors<'a>(
+        &'a self,
+        mut visit: impl FnMut(BorrowedCollectedErrors<'a>),
+    ) {
         for (load, parse_errors, binding_errors, solve_errors, module_ranges, config) in &self.loads
         {
             if load.error_style == ErrorStyle::Never {
@@ -399,6 +416,7 @@ impl Errors {
                 .chain(binding_errors)
                 .chain(solve_errors)
                 .collect();
+            let mut errors = BorrowedCollectedErrors::default();
             ErrorCollector::collect_snapshots_into(
                 &load.module_info,
                 &snapshots,
@@ -407,8 +425,8 @@ impl Errors {
                 &ranges.ignore_all,
                 &mut errors,
             );
+            visit(errors);
         }
-        errors
     }
 
     /// Apply baseline filtering to already-collected errors in place.
@@ -493,31 +511,75 @@ impl Errors {
     /// Paths recorded in a baseline resolve relative to its config's source root, falling
     /// back to the baseline file's own directory.
     pub fn collect_lsp_errors_with_baselines(&self) -> (Vec<Error>, Vec<Error>) {
-        let mut collected = self.collect_errors();
-        let unused = self.collect_unused_ignore_errors_for_display(&collected);
-        collected.ordinary.extend(unused.ordinary);
-        collected.ordinary.extend(unused.hints);
-        collected.ordinary.append(&mut collected.hints);
+        let (borrowed, mut ordinary, baseline) = self.collect_lsp_error_refs_with_baselines();
+        ordinary.extend(borrowed.into_iter().map(CollectedDiagnostic::into_error));
+        (
+            Self::merge_display_errors(ordinary, Vec::new()),
+            Self::merge_display_errors(baseline, Vec::new()),
+        )
+    }
+
+    /// Like `collect_lsp_errors_with_baselines`, but borrowing the diagnostics that no
+    /// baseline governs. Returns `(normal, normal, baselined)`: the borrowed normal
+    /// diagnostics are sorted by path and range, while the owned ones (unused
+    /// suppressions and diagnostics that a baseline governs but does not match) are
+    /// not sorted.
+    pub(crate) fn collect_lsp_error_refs_with_baselines(
+        &self,
+    ) -> (Vec<CollectedDiagnostic<'_>>, Vec<Error>, Vec<Error>) {
+        let collected = self.collect_error_refs();
+        let unused = self.collect_unused_ignore_errors_from(
+            collected
+                .suppressed
+                .iter()
+                .chain(&collected.ordinary)
+                .chain(&collected.hints)
+                .map(CollectedDiagnostic::error),
+        );
         let config_by_path: SmallMap<&ModulePath, &ArcId<ConfigFile>> = self
             .loads
             .iter()
             .map(|(load, _, _, _, _, config)| (load.module_info.path(), config))
             .collect();
-        let mut errors = collected;
-        let mut ordinary = Vec::new();
+        let mut borrowed = collected.directives;
+        let mut owned = Vec::new();
+        let mut owned_baseline = Vec::new();
 
         // Group by config before matching, so that each baseline is parsed once and sees
-        // every diagnostic it governs in a single call.
+        // every diagnostic it governs in a single call. `process_errors` takes owned
+        // errors, so only diagnostics governed by a baseline are copied.
         let mut by_config: SmallMap<ArcId<ConfigFile>, (&Path, Vec<Error>)> = SmallMap::new();
-        for error in errors.ordinary.drain(..) {
+        for error in collected.ordinary.into_iter().chain(collected.hints) {
             match config_by_path.get(&error.path()) {
                 Some(config) if let Some(baseline) = &config.baseline => by_config
                     .entry((*config).dupe())
                     .or_insert_with(|| (baseline, Vec::new()))
                     .1
-                    .push(error),
+                    .push(error.into_error()),
                 // The module has no config, or its config has no baseline.
-                _ => ordinary.push(error),
+                _ => borrowed.push(error),
+            }
+        }
+        for error in unused {
+            let path = error.path().dupe();
+            let Some(config) = config_by_path.get(&path) else {
+                continue;
+            };
+            let severity = config
+                .get_error_config(error.path())
+                .display_config
+                .severity(error.error_kind());
+            if severity == Severity::Ignore {
+                continue;
+            }
+            let error = error.into_with_severity(severity);
+            match &config.baseline {
+                Some(baseline) => by_config
+                    .entry((*config).dupe())
+                    .or_insert_with(|| (baseline, Vec::new()))
+                    .1
+                    .push(error),
+                None => owned.push(error),
             }
         }
 
@@ -534,15 +596,19 @@ impl Errors {
             // An unreadable or invalid baseline suppresses nothing; the language server
             // surfaces every diagnostic rather than failing the request.
             if let Some(processor) = processor {
-                processor.process_errors(&mut group, &mut errors.baseline);
+                processor.process_errors(&mut group, &mut owned_baseline);
             }
-            ordinary.extend(group);
+            owned.extend(group);
         }
 
-        (
-            Self::merge_display_errors(ordinary, errors.directives),
-            Self::merge_display_errors(errors.baseline, Vec::new()),
-        )
+        borrowed.sort_by_cached_key(|error| {
+            (
+                error.path().dupe(),
+                error.range().start(),
+                error.range().end(),
+            )
+        });
+        (borrowed, owned, owned_baseline)
     }
 
     pub fn collect_display_errors(&self) -> Vec<Error> {
@@ -573,14 +639,22 @@ impl Errors {
     /// suppression comment that doesn't suppress any actual error.
     /// Accepts pre-collected errors to avoid redundant error collection.
     pub fn collect_unused_ignore_errors(&self, collected: &CollectedErrors) -> Vec<Error> {
+        self.collect_unused_ignore_errors_from(
+            collected
+                .suppressed
+                .iter()
+                .chain(&collected.ordinary)
+                .chain(&collected.hints),
+        )
+    }
+
+    fn collect_unused_ignore_errors_from<'a>(
+        &self,
+        affected: impl Iterator<Item = &'a Error>,
+    ) -> Vec<Error> {
         let mut affected_by_suppression_by_module: SmallMap<&ModulePath, Vec<&Error>> =
             SmallMap::new();
-        for error in collected
-            .suppressed
-            .iter()
-            .chain(&collected.ordinary)
-            .chain(&collected.hints)
-        {
+        for error in affected {
             affected_by_suppression_by_module
                 .entry(error.path())
                 .or_default()
@@ -856,7 +930,6 @@ impl Errors {
             let ranges = module_ranges
                 .as_ref()
                 .expect("module_ranges must be present when error style is not Never");
-            let mut result = CollectedErrors::default();
             let parse_errors = parse_errors
                 .as_ref()
                 .expect("a module with module_ranges must have parse diagnostics");
@@ -867,14 +940,17 @@ impl Errors {
                 .chain(binding_errors)
                 .chain(solve_errors)
                 .collect();
+            let mut borrowed = BorrowedCollectedErrors::default();
             ErrorCollector::collect_snapshots_into(
                 &load.module_info,
                 &snapshots,
                 &error_config,
                 &ranges.multi_line,
                 &ranges.ignore_all,
-                &mut result,
+                &mut borrowed,
             );
+            let mut result = CollectedErrors::default();
+            borrowed.into_owned(&mut result);
             let output_errors = Self::merge_display_errors(result.ordinary, result.directives);
             Expectation::parse(load.module_info.dupe(), load.module_info.contents())
                 .check(&output_errors)?;

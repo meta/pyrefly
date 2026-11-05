@@ -3311,6 +3311,7 @@ impl Server {
     fn get_diag_if_shown(
         &self,
         e: &Error,
+        severity: Severity,
         open_files: &HashMap<PathBuf, Arc<LspFile>>,
         cell_uri: Option<&Uri>, // If the file is a notebook, only show diagnostics for the matching cell
     ) -> Option<(PathBuf, Diagnostic)> {
@@ -3365,11 +3366,13 @@ impl Server {
                         } else {
                             Some((
                                 PathBuf::from(error_cell_uri.to_string()),
-                                e.to_diagnostic()?,
+                                e.to_diagnostic_with_severity(severity)?,
                             ))
                         }
                     }
-                    LspFile::Source { .. } => Some((path.to_path_buf(), e.to_diagnostic()?)),
+                    LspFile::Source { .. } => {
+                        Some((path.to_path_buf(), e.to_diagnostic_with_severity(severity)?))
+                    }
                 };
             }
 
@@ -3378,13 +3381,13 @@ impl Server {
             // Only show error-severity diagnostics for non-open files; lower-severity
             // diagnostics (warnings, info) are restricted to open files.
             if open_files.get(&path).is_none()
-                && e.severity() >= Severity::Error
+                && severity >= Severity::Error
                 && self.workspaces.diagnostic_mode(&path) == DiagnosticMode::Workspace
                 && config.project_includes.covers(&path)
                 && !config.project_excludes.covers(&path)
                 && type_error_status.is_enabled()
             {
-                return Some((path.to_path_buf(), e.to_diagnostic()?));
+                return Some((path.to_path_buf(), e.to_diagnostic_with_severity(severity)?));
             }
         }
         None
@@ -3537,17 +3540,27 @@ impl Server {
                 diags.insert(handle_path_buf, Vec::new());
             }
         }
-        let (normal_errors, baseline_errors) = transaction
-            .get_errors(handles)
-            .collect_lsp_errors_with_baselines();
+        let errors = transaction.get_errors(handles);
+        let (normal_errors, owned_normal_errors, baseline_errors) =
+            errors.collect_lsp_error_refs_with_baselines();
         for e in normal_errors {
-            if let Some((path, diag)) = self.get_diag_if_shown(&e, &open_files, None) {
+            if let Some((path, diag)) =
+                self.get_diag_if_shown(e.error(), e.severity(), &open_files, None)
+            {
+                diags.entry(path.to_owned()).or_default().push(diag);
+            }
+        }
+        for e in owned_normal_errors {
+            if let Some((path, diag)) = self.get_diag_if_shown(&e, e.severity(), &open_files, None)
+            {
                 diags.entry(path.to_owned()).or_default().push(diag);
             }
         }
         for e in baseline_errors {
             // Errors in open files that match a baseline file are downgraded to HINT.
-            if let Some((path, mut diag)) = self.get_diag_if_shown(&e, &open_files, None) {
+            if let Some((path, mut diag)) =
+                self.get_diag_if_shown(&e, e.severity(), &open_files, None)
+            {
                 if to_real_path(e.path()).is_some_and(|p| open_files.contains_key(&p)) {
                     diag.severity = Some(DiagnosticSeverity::Hint);
                 }
@@ -6622,17 +6635,27 @@ impl Server {
         let handle = make_open_handle(&self.state, &path);
         let mut items = Vec::new();
         let open_files = &self.open_files.read();
-        let (normal_errors, baseline_errors) = transaction
-            .get_errors(once(&handle))
-            .collect_lsp_errors_with_baselines();
+        let errors = transaction.get_errors(once(&handle));
+        let (normal_errors, owned_normal_errors, baseline_errors) =
+            errors.collect_lsp_error_refs_with_baselines();
         for e in normal_errors {
-            if let Some((_, diag)) = self.get_diag_if_shown(&e, open_files, cell_uri) {
+            if let Some((_, diag)) =
+                self.get_diag_if_shown(e.error(), e.severity(), open_files, cell_uri)
+            {
+                items.push(diag);
+            }
+        }
+        for e in owned_normal_errors {
+            if let Some((_, diag)) = self.get_diag_if_shown(&e, e.severity(), open_files, cell_uri)
+            {
                 items.push(diag);
             }
         }
         for e in baseline_errors {
             // Errors in open files that match a baseline file are downgraded to HINT.
-            if let Some((_, mut diag)) = self.get_diag_if_shown(&e, open_files, cell_uri) {
+            if let Some((_, mut diag)) =
+                self.get_diag_if_shown(&e, e.severity(), open_files, cell_uri)
+            {
                 if to_real_path(e.path()).is_some_and(|p| open_files.contains_key(&p)) {
                     diag.severity = Some(DiagnosticSeverity::Hint);
                 }

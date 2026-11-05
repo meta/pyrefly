@@ -7,6 +7,7 @@
 
 use std::fmt::Debug;
 use std::mem;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use dupe::Dupe;
@@ -169,6 +170,69 @@ pub struct CollectedErrors {
     pub disabled: Vec<Error>,
     /// Errors that are suppressed by baseline file.
     pub baseline: Vec<Error>,
+}
+
+/// A classified diagnostic that borrows its payload from a module's diagnostics.
+#[derive(Debug)]
+pub(crate) struct CollectedDiagnostic<'a> {
+    error: &'a Error,
+    severity: Severity,
+}
+
+impl<'a> CollectedDiagnostic<'a> {
+    pub(crate) fn error(&self) -> &'a Error {
+        self.error
+    }
+
+    pub(crate) fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    pub(crate) fn into_error(self) -> Error {
+        self.error.with_severity(self.severity)
+    }
+}
+
+impl Deref for CollectedDiagnostic<'_> {
+    type Target = Error;
+
+    fn deref(&self) -> &Self::Target {
+        self.error
+    }
+}
+
+/// Like `CollectedErrors`, but borrowing each diagnostic from its module.
+#[derive(Debug, Default)]
+pub(crate) struct BorrowedCollectedErrors<'a> {
+    pub(crate) ordinary: Vec<CollectedDiagnostic<'a>>,
+    pub(crate) hints: Vec<CollectedDiagnostic<'a>>,
+    pub(crate) directives: Vec<CollectedDiagnostic<'a>>,
+    pub(crate) suppressed: Vec<CollectedDiagnostic<'a>>,
+    pub(crate) disabled: Vec<CollectedDiagnostic<'a>>,
+}
+
+impl BorrowedCollectedErrors<'_> {
+    pub(crate) fn append(&mut self, other: Self) {
+        self.ordinary.extend(other.ordinary);
+        self.hints.extend(other.hints);
+        self.directives.extend(other.directives);
+        self.suppressed.extend(other.suppressed);
+        self.disabled.extend(other.disabled);
+    }
+
+    pub(crate) fn into_owned(self, result: &mut CollectedErrors) {
+        fn owned<'a>(
+            errors: Vec<CollectedDiagnostic<'a>>,
+        ) -> impl Iterator<Item = Error> + use<'a> {
+            errors.into_iter().map(CollectedDiagnostic::into_error)
+        }
+
+        result.ordinary.extend(owned(self.ordinary));
+        result.hints.extend(owned(self.hints));
+        result.directives.extend(owned(self.directives));
+        result.suppressed.extend(owned(self.suppressed));
+        result.disabled.extend(owned(self.disabled));
+    }
 }
 
 /// Collects the user errors (e.g. type errors) associated with a module.
@@ -418,27 +482,30 @@ impl ErrorCollector {
     ) {
         let mut errors = self.errors.lock();
         let errors: Vec<&Error> = errors.iter().collect();
+        let mut borrowed = BorrowedCollectedErrors::default();
         Self::collect_sorted(
             &self.module_info,
             &errors,
             error_config,
             fstring_ranges,
             ignore_all,
-            result,
+            &mut borrowed,
         );
+        borrowed.into_owned(result);
     }
 
     /// Classify the finalized `snapshots` of one module together, so that an error in
-    /// one can explain an `unknown-from-error` error in another.
-    pub(crate) fn collect_snapshots_into(
+    /// one can explain an `unknown-from-error` error in another. Each category of
+    /// `result` receives the module's diagnostics sorted by range.
+    pub(crate) fn collect_snapshots_into<'a>(
         module_info: &ModuleInfo,
-        snapshots: &[&ModuleDiagnostics],
+        snapshots: &[&'a ModuleDiagnostics],
         error_config: &ErrorConfig,
         fstring_ranges: &[(LineNumber, LineNumber)],
         ignore_all: &[Suppression],
-        result: &mut CollectedErrors,
+        result: &mut BorrowedCollectedErrors<'a>,
     ) {
-        let mut errors: Vec<&Error> = snapshots
+        let mut errors: Vec<&'a Error> = snapshots
             .iter()
             .flat_map(|snapshot| snapshot.iter())
             .collect();
@@ -456,13 +523,13 @@ impl ErrorCollector {
     }
 
     /// Classify `errors`, which must be sorted by range.
-    fn collect_sorted(
+    fn collect_sorted<'a>(
         module_info: &ModuleInfo,
-        errors: &[&Error],
+        errors: &[&'a Error],
         error_config: &ErrorConfig,
         fstring_ranges: &[(LineNumber, LineNumber)],
         ignore_all: &[Suppression],
-        result: &mut CollectedErrors,
+        result: &mut BorrowedCollectedErrors<'a>,
     ) {
         if module_info.is_generated() && error_config.ignore_errors_in_generated_code {
             return;
@@ -476,43 +543,45 @@ impl ErrorCollector {
                 shown(kind) && (!kind.is_soft() || kind == ErrorKind::UnknownFromError)
             })
         });
-        for (i, err) in errors.iter().copied().enumerate() {
+        for (i, &error) in errors.iter().enumerate() {
             if explained.as_ref().is_some_and(|explained| explained[i]) {
                 continue;
             }
-            if err.error_kind().is_directive() {
+            let severity = error_config.display_config.severity(error.error_kind());
+            let collected = |severity| CollectedDiagnostic { error, severity };
+            if error.error_kind().is_directive() {
                 // Directives bypass suppression, baseline, and
                 // min-severity, but still respect explicit severity
                 // overrides (e.g. --ignore reveal-type).
-                let severity = error_config.display_config.severity(err.error_kind());
                 if severity == Severity::Ignore {
-                    result.disabled.push(err.clone());
+                    result.disabled.push(collected(error.severity()));
                 } else {
-                    result.directives.push(err.with_severity(severity));
+                    result.directives.push(collected(severity));
                 }
+                continue;
+            }
+            // A `misplaced-ignore` error is about a suppression comment, so the fix is to
+            // move or remove the comment rather than to suppress the error.
+            let effect = if error.error_kind() == ErrorKind::MisplacedIgnore {
+                SuppressionEffect::None
             } else {
-                // A `misplaced-ignore` error is about a suppression comment, so the fix is to
-                // move or remove the comment rather than to suppress the error.
-                let effect = if err.error_kind() == ErrorKind::MisplacedIgnore {
-                    SuppressionEffect::None
-                } else {
-                    Self::suppression_effect(err, fstring_ranges, ignore_all, error_config)
-                };
-                let mut severity = error_config.display_config.severity(err.error_kind());
-                if effect == SuppressionEffect::Suppress {
-                    result.suppressed.push(err.with_severity(severity));
-                    continue;
+                Self::suppression_effect(error, fstring_ranges, ignore_all, error_config)
+            };
+            if effect == SuppressionEffect::Suppress {
+                result.suppressed.push(collected(severity));
+                continue;
+            }
+            let severity = if effect == SuppressionEffect::DowngradeToWarning {
+                severity.min(Severity::Warn)
+            } else {
+                severity
+            };
+            match severity {
+                Severity::Error | Severity::Warn | Severity::Info => {
+                    result.ordinary.push(collected(severity))
                 }
-                if effect == SuppressionEffect::DowngradeToWarning {
-                    severity = severity.min(Severity::Warn);
-                }
-                match severity {
-                    Severity::Error => result.ordinary.push(err.with_severity(Severity::Error)),
-                    Severity::Warn => result.ordinary.push(err.with_severity(Severity::Warn)),
-                    Severity::Info => result.ordinary.push(err.with_severity(Severity::Info)),
-                    Severity::Hint => result.hints.push(err.with_severity(Severity::Hint)),
-                    Severity::Ignore => result.disabled.push(err.clone()),
-                }
+                Severity::Hint => result.hints.push(collected(severity)),
+                Severity::Ignore => result.disabled.push(collected(error.severity())),
             }
         }
     }
