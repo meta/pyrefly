@@ -504,8 +504,8 @@ def f(name: str | None) -> None:
 "#,
 );
 
-// A marked operand still accepts every value of its type when it is the inferred type of an
-// attribute or a container element.
+// The inferred type of an attribute or a container element does not keep a truthiness marker, so
+// it accepts every value of the operand's type.
 testcase!(
     test_boolean_or_inferred_attribute_type,
     r#"

@@ -2222,6 +2222,9 @@ impl Type {
                 *ty = lit.value.general_class_type(stdlib).clone().to_type()
             }
             Type::LiteralString(LitStyle::Implicit) => *ty = stdlib.str().clone().to_type(),
+            Type::Intersect(x) if x.0.iter().any(Type::is_truthiness_marker) => {
+                *ty = ty.clone().without_truthiness_markers()
+            }
             _ => {}
         }
     }
@@ -2239,6 +2242,9 @@ impl Type {
         self
     }
 
+    /// Widen an inferred type for a slot that later assignments can write, such as an attribute,
+    /// a container element or a solved type variable: implicit literals become their class, and
+    /// truthiness markers are removed, because they describe only the value of one expression.
     pub fn promote_implicit_literals(mut self, stdlib: &Stdlib) -> Type {
         fn g(ty: &mut Type, f: &mut dyn FnMut(&mut Type)) {
             ty.recurse_mut(&mut |ty| g(ty, f));
@@ -2350,8 +2356,7 @@ impl Type {
         self
     }
 
-    /// Whether this type only records the truthiness of a boolean operand for narrowing. Such a
-    /// type is ignored by `assert_type`.
+    /// Whether this type only records the truthiness of a boolean operand for narrowing.
     pub fn is_truthiness_marker(&self) -> bool {
         matches!(self, Type::Falsy | Type::Truthy)
     }
