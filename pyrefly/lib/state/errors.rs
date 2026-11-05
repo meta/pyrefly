@@ -29,6 +29,7 @@ use pyrefly_python::module_path::ModulePath;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::lined_buffer::LineNumber;
 use pyrefly_util::visit::Visit;
+use rayon::prelude::*;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::visitor::Visitor;
@@ -278,18 +279,25 @@ impl ModuleRanges {
     }
 }
 
+/// A module's load, its parse, binding and solve diagnostics, its ranges, and its config.
+type LoadErrors = (
+    Arc<Load>,
+    Option<ModuleDiagnostics>,
+    Option<ModuleDiagnostics>,
+    Option<ModuleDiagnostics>,
+    Option<Arc<ModuleRanges>>,
+    ArcId<ConfigFile>,
+);
+
+/// Below this many modules, `Errors` collates on the calling thread, where the work is
+/// too small to pay for moving it to a thread pool.
+const PARALLEL_COLLATION_MIN_MODULES: usize = 64;
+
 /// The errors from a collection of modules.
 #[derive(Debug)]
 pub struct Errors {
     // Sorted by module path so concatenating per-module diagnostics is deterministic.
-    loads: Vec<(
-        Arc<Load>,
-        Option<ModuleDiagnostics>,
-        Option<ModuleDiagnostics>,
-        Option<ModuleDiagnostics>,
-        Option<Arc<ModuleRanges>>,
-        ArcId<ConfigFile>,
-    )>,
+    loads: Vec<LoadErrors>,
 }
 
 /// Outcome of applying a baseline file.
@@ -350,16 +358,7 @@ impl BaselineApplyResult {
 }
 
 impl Errors {
-    pub fn new(
-        mut loads: Vec<(
-            Arc<Load>,
-            Option<ModuleDiagnostics>,
-            Option<ModuleDiagnostics>,
-            Option<ModuleDiagnostics>,
-            Option<Arc<ModuleRanges>>,
-            ArcId<ConfigFile>,
-        )>,
-    ) -> Self {
+    pub fn new(mut loads: Vec<LoadErrors>) -> Self {
         loads.sort_by_key(|x| x.0.module_info.path().dupe());
         Self { loads }
     }
@@ -380,53 +379,77 @@ impl Errors {
         ordinary
     }
 
+    /// Apply `f` to each module, in `loads` order. Every diagnostic is stored on the
+    /// module that contains its primary location, so each module's diagnostics are
+    /// collated on their own, and the results never need deduplicating across modules.
+    /// That lets large collections run in parallel, on the ambient rayon thread pool
+    /// rather than on the state's pool, which a concurrent recheck may be occupying.
+    fn map_modules<'a, R: Send>(&'a self, f: impl Fn(&'a LoadErrors) -> R + Sync + Send) -> Vec<R> {
+        if self.loads.len() < PARALLEL_COLLATION_MIN_MODULES {
+            self.loads.iter().map(f).collect()
+        } else {
+            self.loads.par_iter().map(f).collect()
+        }
+    }
+
     pub fn collect_errors(&self) -> CollectedErrors {
-        let borrowed = self.collect_error_refs();
         let mut errors = CollectedErrors::default();
-        borrowed.into_owned(&mut errors);
+        // Copy each module's diagnostics on the thread that collated them.
+        let modules = self.map_modules(|module| {
+            let mut owned = CollectedErrors::default();
+            Self::collect_module_error_refs(module)?.into_owned(&mut owned);
+            Some(owned)
+        });
+        for module in modules.into_iter().flatten() {
+            errors.append(module);
+        }
         errors
     }
 
     fn collect_error_refs(&self) -> BorrowedCollectedErrors<'_> {
         let mut errors = BorrowedCollectedErrors::default();
-        self.for_each_module_errors(|module_errors| errors.append(module_errors));
+        for module in self
+            .map_modules(Self::collect_module_error_refs)
+            .into_iter()
+            .flatten()
+        {
+            errors.append(module);
+        }
         errors
     }
 
-    pub(crate) fn for_each_module_errors<'a>(
-        &'a self,
-        mut visit: impl FnMut(BorrowedCollectedErrors<'a>),
-    ) {
-        for (load, parse_errors, binding_errors, solve_errors, module_ranges, config) in &self.loads
-        {
-            if load.error_style == ErrorStyle::Never {
-                continue;
-            }
-            let error_config = config.get_error_config(load.module_info.path());
-            let ranges = module_ranges
-                .as_ref()
-                .expect("module_ranges must be present when error style is not Never");
-            let parse_errors = parse_errors
-                .as_ref()
-                .expect("a module with module_ranges must have parse diagnostics");
-            // Collect in the order the phases run, so diagnostics at an equal range
-            // stay in phase order.
-            let snapshots: Vec<&ModuleDiagnostics> = [&load.load_errors, parse_errors]
-                .into_iter()
-                .chain(binding_errors)
-                .chain(solve_errors)
-                .collect();
-            let mut errors = BorrowedCollectedErrors::default();
-            ErrorCollector::collect_snapshots_into(
-                &load.module_info,
-                &snapshots,
-                &error_config,
-                &ranges.multi_line,
-                &ranges.ignore_all,
-                &mut errors,
-            );
-            visit(errors);
+    /// Collate one module's diagnostics, or `None` if the module does not report any.
+    /// Each category of the result is sorted by range.
+    fn collect_module_error_refs(
+        (load, parse_errors, binding_errors, solve_errors, module_ranges, config): &LoadErrors,
+    ) -> Option<BorrowedCollectedErrors<'_>> {
+        if load.error_style == ErrorStyle::Never {
+            return None;
         }
+        let error_config = config.get_error_config(load.module_info.path());
+        let ranges = module_ranges
+            .as_ref()
+            .expect("module_ranges must be present when error style is not Never");
+        let parse_errors = parse_errors
+            .as_ref()
+            .expect("a module with module_ranges must have parse diagnostics");
+        // Collect in the order the phases run, so diagnostics at an equal range
+        // stay in phase order.
+        let snapshots: Vec<&ModuleDiagnostics> = [&load.load_errors, parse_errors]
+            .into_iter()
+            .chain(binding_errors)
+            .chain(solve_errors)
+            .collect();
+        let mut errors = BorrowedCollectedErrors::default();
+        ErrorCollector::collect_snapshots_into(
+            &load.module_info,
+            &snapshots,
+            &error_config,
+            &ranges.multi_line,
+            &ranges.ignore_all,
+            &mut errors,
+        );
+        Some(errors)
     }
 
     /// Apply baseline filtering to already-collected errors in place.
@@ -660,23 +683,23 @@ impl Errors {
                 .or_default()
                 .push(error);
         }
-        self.loads
-            .iter()
-            .flat_map(|(load, _, _, _, module_ranges, config)| {
-                let path = load.module_info.path();
-                let affected = affected_by_suppression_by_module
-                    .get(path)
-                    .into_iter()
-                    .flat_map(|errors| errors.iter().copied());
-                Self::collect_unused_ignore_errors_for_module(
-                    &load.module_info,
-                    module_ranges.as_deref(),
-                    config.enabled_ignores(path).as_ref(),
-                    config.type_ignore_unknown_tag_behavior(path),
-                    affected,
-                )
-            })
-            .collect()
+        self.map_modules(|(load, _, _, _, module_ranges, config)| {
+            let path = load.module_info.path();
+            let affected = affected_by_suppression_by_module
+                .get(path)
+                .into_iter()
+                .flat_map(|errors| errors.iter().copied());
+            Self::collect_unused_ignore_errors_for_module(
+                &load.module_info,
+                module_ranges.as_deref(),
+                config.enabled_ignores(path).as_ref(),
+                config.type_ignore_unknown_tag_behavior(path),
+                affected,
+            )
+        })
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// Collects errors for the unused ignore comments of one module, given the module's
@@ -921,39 +944,15 @@ impl Errors {
     }
 
     pub fn check_against_expectations(&self) -> anyhow::Result<()> {
-        for (load, parse_errors, binding_errors, solve_errors, module_ranges, config) in &self.loads
-        {
-            if load.error_style == ErrorStyle::Never {
+        for module in &self.loads {
+            let Some(errors) = Self::collect_module_error_refs(module) else {
                 continue;
-            }
-            let error_config = config.get_error_config(load.module_info.path());
-            let ranges = module_ranges
-                .as_ref()
-                .expect("module_ranges must be present when error style is not Never");
-            let parse_errors = parse_errors
-                .as_ref()
-                .expect("a module with module_ranges must have parse diagnostics");
-            // Collect in the order the phases run, so diagnostics at an equal range
-            // stay in phase order.
-            let snapshots: Vec<&ModuleDiagnostics> = [&load.load_errors, parse_errors]
-                .into_iter()
-                .chain(binding_errors)
-                .chain(solve_errors)
-                .collect();
-            let mut borrowed = BorrowedCollectedErrors::default();
-            ErrorCollector::collect_snapshots_into(
-                &load.module_info,
-                &snapshots,
-                &error_config,
-                &ranges.multi_line,
-                &ranges.ignore_all,
-                &mut borrowed,
-            );
+            };
             let mut result = CollectedErrors::default();
-            borrowed.into_owned(&mut result);
+            errors.into_owned(&mut result);
+            let module_info = &module.0.module_info;
             let output_errors = Self::merge_display_errors(result.ordinary, result.directives);
-            Expectation::parse(load.module_info.dupe(), load.module_info.contents())
-                .check(&output_errors)?;
+            Expectation::parse(module_info.dupe(), module_info.contents()).check(&output_errors)?;
         }
         Ok(())
     }
@@ -987,6 +986,7 @@ mod tests {
     use crate::config::finder::ConfigFinder;
     use crate::error::error::ErrorRenderer;
     use crate::state::errors::Errors;
+    use crate::state::errors::PARALLEL_COLLATION_MIN_MODULES;
     use crate::state::load::FileContents;
     use crate::state::require::Require;
     use crate::state::state::State;
@@ -1099,6 +1099,39 @@ def f() -> int:
         assert!(unused.ordinary.is_empty());
         assert_eq!(unused.disabled.len(), 1);
         assert_eq!(unused.disabled[0].severity(), Severity::Ignore);
+    }
+
+    #[test]
+    fn test_collect_errors_from_many_modules_in_path_order() {
+        let count = PARALLEL_COLLATION_MIN_MODULES + 6;
+        let names = (0..count).map(|i| format!("m{i:03}")).collect::<Vec<_>>();
+        let mut env = TestEnv::new();
+        for name in &names {
+            env.add(name, "x: int = ''\ny: int = 1  # pyrefly: ignore\n");
+        }
+        let (state, handle) = env.to_state();
+        let handles = names.iter().map(|name| handle(name)).collect::<Vec<_>>();
+        let transaction = state.transaction();
+        let errors = transaction.get_errors(&handles);
+        let collected = errors.collect_errors();
+        let modules = collected
+            .ordinary
+            .iter()
+            .map(|error| error.module().name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(modules, names, "each module's error, in path order");
+        assert!(
+            collected
+                .ordinary
+                .iter()
+                .all(|error| error.error_kind() == ErrorKind::BadAssignment)
+        );
+        let unused = errors.collect_unused_ignore_errors(&collected);
+        let modules = unused
+            .iter()
+            .map(|error| error.module().name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(modules, names, "each module's unused ignore, in path order");
     }
 
     #[test]

@@ -172,6 +172,17 @@ pub struct CollectedErrors {
     pub baseline: Vec<Error>,
 }
 
+impl CollectedErrors {
+    pub(crate) fn append(&mut self, other: Self) {
+        self.ordinary.extend(other.ordinary);
+        self.hints.extend(other.hints);
+        self.directives.extend(other.directives);
+        self.suppressed.extend(other.suppressed);
+        self.disabled.extend(other.disabled);
+        self.baseline.extend(other.baseline);
+    }
+}
+
 /// A classified diagnostic that borrows its payload from a module's diagnostics.
 #[derive(Debug)]
 pub(crate) struct CollectedDiagnostic<'a> {
