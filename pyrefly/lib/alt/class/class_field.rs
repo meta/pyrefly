@@ -4695,8 +4695,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 attr
             };
-            let Some(want_attribute) = self.filter_overloads_for_override(want_attribute, cls)
-            else {
+            let Some(want_attribute) = self.filter_overloads_for_override(want_attribute) else {
                 // All parent overloads have a `self` type incompatible with the child class;
                 // skip the override check.
                 continue;
@@ -5345,6 +5344,33 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         name: &Name,
     ) -> Option<(ParamList, FuncFlags)> {
         self.inherited_member_where(cls, name, Self::callable_params_and_flags)
+    }
+
+    /// Resolve the first defined inherited callable with normal receiver binding
+    /// and overload applicability. A non-callable member still shadows later bases.
+    pub(crate) fn inherited_callable_for_override(
+        &self,
+        cls: &Class,
+        name: &Name,
+        accessor: Option<PropertyRole>,
+    ) -> Option<Type> {
+        let member = self.get_super_class_member(cls, None, name)?;
+        let class_type = self.as_class_type_unchecked(cls);
+        let instance = Instance::of_protocol(&class_type, self.instantiate(cls));
+        let attribute = match self.as_instance_attribute(name, member.value.as_ref(), &instance) {
+            ClassAttribute::Property(getter, setter, _) => {
+                // A writable property stores both signatures; only the matching
+                // accessor can dictate an override annotation.
+                ClassAttribute::read_write(match accessor {
+                    Some(PropertyRole::Getter) => getter,
+                    Some(PropertyRole::Setter) => setter?,
+                    _ => return None,
+                })
+            }
+            attribute => attribute,
+        };
+        self.filter_overloads_for_override(attribute)?
+            .as_instance_method()
     }
 
     /// Test raw metaclass fields without binding methods or applying descriptors.
@@ -6055,16 +6081,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// Filter out overloads from a parent's attribute whose `self` parameter type is
-    /// incompatible with the child class. This prevents false positive `bad-override` errors.
-    fn filter_overloads_for_override(
-        &self,
-        attr: ClassAttribute,
-        child_cls: &Class,
-    ) -> Option<ClassAttribute> {
-        let child_type = self
-            .heap
-            .mk_class_type(self.as_class_type_unchecked(child_cls));
+    /// Filter out overloads incompatible with their bound receiver. Instance
+    /// methods bind an instance; classmethods bind its class object.
+    fn filter_overloads_for_override(&self, attr: ClassAttribute) -> Option<ClassAttribute> {
         let filter_type = |ty: Type| -> Option<Type> {
             match ty {
                 Type::BoundMethod(bm) if matches!(bm.func, BoundMethodType::Overload(_)) => {
@@ -6086,7 +6105,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                     forall.body.signature.get_first_param()
                                 }
                             };
-                            self_param.is_none_or(|param| self.is_subset_eq(&child_type, param))
+                            self_param.is_none_or(|param| self.is_subset_eq(&obj, param))
                         })
                         .collect();
                     let signatures = vec1::Vec1::try_from_vec(applicable).ok()?;

@@ -602,7 +602,6 @@ class Child(Base):
 );
 
 testcase!(
-    bug = "A shadowed ancestor grants explicit-any exemptions",
     test_explicit_any_override_stops_at_shadowing_member,
     TestEnv::new().enable_explicit_any_error(),
     r#"
@@ -616,13 +615,12 @@ class B(A):
 
 class C(B):
     @override
-    def f(self, value: Any) -> Any:
+    def f(self, value: Any) -> Any:  # E: Explicit `Any` is not allowed # E: Explicit `Any` is not allowed
         return value
 "#,
 );
 
 testcase!(
-    bug = "Static override correspondence includes the base receiver",
     test_explicit_any_override_instance_to_static_receiver,
     TestEnv::new().enable_explicit_any_error(),
     r#"
@@ -634,7 +632,7 @@ class Base:
 class Child(Base):
     @staticmethod
     @override
-    def f(renamed: Any, /) -> None: ...  # E: Explicit `Any` is not allowed
+    def f(renamed: Any, /) -> None: ...
 
 class Base2:
     def f(self, value: int, unrelated: Any, /) -> None: ...  # E: Explicit `Any` is not allowed
@@ -642,7 +640,7 @@ class Base2:
 class Child2(Base2):
     @staticmethod
     @override
-    def f(value: object, unrelated: object, extra: Any = None, /) -> None: ...
+    def f(value: object, unrelated: object, extra: Any = None, /) -> None: ...  # E: Explicit `Any` is not allowed
 
 Child().f(1)
 Child2().f(1, "")
@@ -650,7 +648,6 @@ Child2().f(1, "")
 );
 
 testcase!(
-    bug = "Inapplicable receiver overloads grant explicit-any exemptions",
     test_explicit_any_override_filters_receiver_overloads,
     TestEnv::new().enable_explicit_any_error(),
     r#"
@@ -666,7 +663,7 @@ class Base[T]:
 
 class Child(Base[int]):
     @override
-    def f(self, value: Any) -> Any:
+    def f(self, value: Any) -> Any:  # E: Explicit `Any` is not allowed # E: Explicit `Any` is not allowed
         return value
 
 class ApplicableChild(Base[str]):
@@ -753,7 +750,6 @@ class Child(Base):
 );
 
 testcase!(
-    bug = "A writable property's getter uses the setter return for Any exemptions",
     test_explicit_any_override_writable_property_accessors,
     TestEnv::new().enable_explicit_any_error(),
     r#"
@@ -768,7 +764,7 @@ class Base:
 class Child(Base):
     @property
     @override
-    def value(self) -> Any: ...  # E: Explicit `Any` is not allowed
+    def value(self) -> Any: ...
     @value.setter
     @override
     def value(self, value: Any) -> None: ...  # E: Explicit `Any` is not allowed

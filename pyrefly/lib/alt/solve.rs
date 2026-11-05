@@ -111,7 +111,6 @@ use crate::binding::binding::EmptyAnswer;
 use crate::binding::binding::ExceptClauseCatches;
 use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::FirstUse;
-use crate::binding::binding::FunctionDefData;
 use crate::binding::binding::FunctionParameter;
 use crate::binding::binding::GateCondition;
 use crate::binding::binding::ImportBinding;
@@ -167,7 +166,6 @@ use crate::types::annotation::Qualifier;
 use crate::types::callable::Callable;
 use crate::types::callable::Param;
 use crate::types::callable::ParamList;
-use crate::types::callable::Params;
 use crate::types::callable::Required;
 use crate::types::class::AttrsFieldSpecifierKind;
 use crate::types::class::Class;
@@ -446,60 +444,6 @@ enum DivergenceQuestion {
     /// overrides with one that returns. Only divergence we can attribute to the call itself
     /// is worth telling a user about.
     DeadCode,
-}
-
-/// How an annotated `@override` parameter receives its value, from the
-/// override's own definition. Used to match the corresponding base-signature
-/// position by index and kind rather than by spelling alone, so a renamed
-/// positional-only parameter still matches its slot while a same-spelled
-/// keyword-only parameter does not match an unrelated positional slot.
-enum OverrideCorrespondence {
-    /// Positional-only parameter at this positional index (`self` included,
-    /// matching unbound base-signature indexing).
-    PositionalOnly(usize),
-    /// Positional-or-keyword parameter: matches by index or by name.
-    PositionalOrKeyword { index: usize, name: Name },
-    /// Keyword-only parameter: matches a keyword-capable base parameter by name.
-    KeywordOnly(Name),
-    /// Return, `*args` or `**kwargs` annotation: matched by kind, no parameter lookup.
-    Other,
-}
-
-impl OverrideCorrespondence {
-    fn for_target(def: &FunctionDefData, target: &AnnotationTarget) -> Option<Self> {
-        match target {
-            AnnotationTarget::Return(_)
-            | AnnotationTarget::ArgsParam(_)
-            | AnnotationTarget::KwargsParam(_) => Some(Self::Other),
-            AnnotationTarget::Param(name) => {
-                let params = &def.parameters;
-                if let Some((index, _)) = params
-                    .posonlyargs
-                    .iter()
-                    .enumerate()
-                    .find(|(_, p)| &p.name().id == name)
-                {
-                    return Some(Self::PositionalOnly(index));
-                }
-                if let Some((index, _)) = params
-                    .args
-                    .iter()
-                    .enumerate()
-                    .find(|(_, p)| &p.name().id == name)
-                {
-                    return Some(Self::PositionalOrKeyword {
-                        index: params.posonlyargs.len() + index,
-                        name: name.clone(),
-                    });
-                }
-                if params.kwonlyargs.iter().any(|p| &p.name().id == name) {
-                    return Some(Self::KeywordOnly(name.clone()));
-                }
-                None
-            }
-            _ => None,
-        }
-    }
 }
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
@@ -799,9 +743,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // present in the local collector.
                     let dictated = matches!(&ann.ty, Some(Type::Any(AnyStyle::Explicit)))
                         && ann_errors.has_error_kind(ErrorKind::ExplicitAny)
-                        && override_func.as_ref().is_some_and(|func| {
-                            self.override_base_dictates_any(*class_key, *func, target)
-                        });
+                        && override_func
+                            .as_ref()
+                            .is_some_and(|func| self.override_base_dictates_any(*func, target));
                     errors.extend_filtered(ann_errors, |error| {
                         !(dictated && error.error_kind() == ErrorKind::ExplicitAny)
                     });
@@ -8430,95 +8374,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             );
         }
         ty
-    }
-
-    /// For a parameter or return annotation of an `@override` method: does the
-    /// base-class signature dictate `Any` at this position? As a policy choice
-    /// we do not blame the override for repeating such an `Any`, so it is
-    /// exempt from `explicit-any`. Only an explicitly-`Any`-annotated base
-    /// position exempts — an unannotated one does not.
-    fn override_base_dictates_any(
-        &self,
-        class_key: Option<Idx<KeyClass>>,
-        override_func: Idx<KeyUndecoratedFunction>,
-        target: &AnnotationTarget,
-    ) -> bool {
-        let Some(class_key) = class_key else {
-            return false;
-        };
-        let class = self.get_idx(class_key);
-        let Some(cls) = &class.0 else {
-            return false;
-        };
-        let func = self.bindings().get(override_func);
-        let Some(correspondence) = OverrideCorrespondence::for_target(&func.def, target) else {
-            return false;
-        };
-        let Some(base) = self.inherited_member_where(cls, &func.def.name.id, |ty| {
-            ty.is_toplevel_callable().then_some(ty)
-        }) else {
-            return false;
-        };
-        // An async function stores its declared return as `Coroutine[Any, Any, T]`;
-        // unwrap only when both sides are async, so an explicitly annotated
-        // coroutine return on a sync base is not mistaken for a dictated `Any`.
-        let base_is_async = base
-            .toplevel_func_metadata()
-            .is_some_and(|meta| meta.flags.is_async);
-        let unwrap_base_coroutine = func.def.is_async && base_is_async;
-        let is_explicit_any = |ty: &Type| matches!(ty, Type::Any(AnyStyle::Explicit));
-        let return_dictates = |ret: &Type| {
-            is_explicit_any(ret)
-                || (unwrap_base_coroutine
-                    && self
-                        .unwrap_coroutine(ret)
-                        .is_some_and(|(_, _, ret)| is_explicit_any(&ret)))
-        };
-        base.toplevel_callable_signatures().any(|(sig, _)| {
-            let items: &[Param] = match &sig.params {
-                Params::List(params) | Params::Partial(params) => params.items(),
-                _ => &[],
-            };
-            // Positional slots in order, `self` included: inherited member
-            // types are unbound, matching override-side indexing.
-            let positional: Vec<&Type> = items
-                .iter()
-                .filter_map(|p| match p {
-                    Param::Pos(_, ty, _) | Param::PosOnly(_, ty, _) => Some(ty),
-                    _ => None,
-                })
-                .collect();
-            let keyword_dictates = |name: &Name| {
-                items.iter().any(|p| match p {
-                    // Positional-only base parameters are not keyword-capable.
-                    Param::Pos(param_name, ty, _) | Param::KwOnly(param_name, ty, _) => {
-                        param_name.as_str() == name.as_str() && is_explicit_any(ty)
-                    }
-                    _ => false,
-                })
-            };
-            match target {
-                AnnotationTarget::Return(_) => return_dictates(&sig.ret),
-                AnnotationTarget::Param(_) => match &correspondence {
-                    OverrideCorrespondence::PositionalOnly(index) => positional
-                        .get(*index)
-                        .is_some_and(|ty| is_explicit_any(ty)),
-                    OverrideCorrespondence::PositionalOrKeyword { index, name } => {
-                        positional.get(*index).is_some_and(|ty| is_explicit_any(ty))
-                            || keyword_dictates(name)
-                    }
-                    OverrideCorrespondence::KeywordOnly(name) => keyword_dictates(name),
-                    _ => false,
-                },
-                AnnotationTarget::ArgsParam(_) => items.iter().any(|p| {
-                    matches!(p, Param::Varargs(_, ty) if matches!(ty, Type::Any(AnyStyle::Explicit)))
-                }),
-                AnnotationTarget::KwargsParam(_) => items.iter().any(|p| {
-                    matches!(p, Param::Kwargs(_, ty) if matches!(ty, Type::Any(AnyStyle::Explicit)))
-                }),
-                _ => false,
-            }
-        })
     }
 
     /// Type check a delete expression, including ensuring that the target of the

@@ -1511,7 +1511,6 @@ class B(A):
 );
 
 testcase!(
-    bug = "Overloaded classmethod override checks discard the class receiver",
     test_override_classmethod_overload_narrow_signature,
     r#"
 from typing import overload
@@ -1529,7 +1528,7 @@ class Base:
 
 class Child(Base):
     @classmethod
-    def make(cls, x: int) -> int:
+    def make(cls, x: int) -> int:  # E: Class member `Child.make` overrides parent class `Base` in an inconsistent manner
         return x
 "#,
 );
