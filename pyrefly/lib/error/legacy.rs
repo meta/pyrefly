@@ -9,13 +9,14 @@ use std::path::Path;
 
 use pyrefly_config::error_kind::Severity;
 use pyrefly_util::absolutize::Absolutize;
-use pyrefly_util::prelude::SliceExt;
+use rayon::prelude::*;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::config::config::BaselineFormat;
 use crate::config::config::BaselineMatchingMode;
 use crate::error::error::Error;
+use crate::error::error::ReportedError;
 
 pub(crate) fn severity_to_str(severity: Severity) -> String {
     match severity {
@@ -25,6 +26,17 @@ pub(crate) fn severity_to_str(severity: Severity) -> String {
         Severity::Warn => "warn".to_owned(),
         Severity::Error => "error".to_owned(),
     }
+}
+
+/// The path of `error` relative to `relative_to`, with `/` separators so that files written
+/// from it are the same on every platform.
+fn relative_path(relative_to: &Path, error: &Error) -> String {
+    error
+        .path()
+        .as_path()
+        .relativize_from(relative_to)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn default_legacy_severity() -> Severity {
@@ -64,26 +76,28 @@ pub struct LegacyError {
 }
 
 impl LegacyError {
-    pub fn from_error(relative_to: &Path, error: &Error) -> Self {
+    pub fn from_error(relative_to: &Path, reported: &impl ReportedError) -> Self {
+        Self::with_path(relative_path(relative_to, reported.error()), reported)
+    }
+
+    /// `path` is the error's path as `relative_path` renders it.
+    fn with_path(path: String, reported: &impl ReportedError) -> Self {
+        let error = reported.error();
         let error_range = error.display_range();
-        let error_path = error.path().as_path();
         Self {
             line: error_range.start.line_within_cell().get() as usize,
             column: error_range.start.column().get() as usize,
             stop_line: error_range.end.line_within_cell().get() as usize,
             stop_column: error_range.end.column().get() as usize,
             cell: error_range.start.cell().map(|cell| cell.get() as usize),
-            path: error_path
-                .relativize_from(relative_to)
-                .to_string_lossy()
-                .replace('\\', "/"), // Normalize Windows backslashes so baseline files are consistent across platforms
+            path,
             // -2 is chosen because it's an unused error code in Pyre1
             code: -2, // TODO: replace this dummy value
             name: error.error_kind().to_name().to_owned(),
             description: error.msg(),
             concise_description: error.msg_header().to_owned(),
-            severity: error.severity(),
-            baselined: error.baseline_status().legacy_baselined_flag(),
+            severity: reported.severity(),
+            baselined: reported.baseline_status().legacy_baselined_flag(),
             suppressed: false,
         }
     }
@@ -129,11 +143,36 @@ pub struct LegacyErrors {
     pub errors: Vec<LegacyError>,
 }
 
+/// Below this many errors, `LegacyErrors::from_errors` converts on the calling thread, where
+/// the work is too small to pay for moving it to a thread pool.
+const PARALLEL_CONVERSION_MIN_ERRORS: usize = 4096;
+
 impl LegacyErrors {
-    pub fn from_errors(relative_to: &Path, errors: &[Error]) -> Self {
-        Self {
-            errors: errors.map(|e| LegacyError::from_error(relative_to, e)),
+    /// Convert `errors`, in parallel when there are many. Errors from one module are usually
+    /// adjacent, so each run of errors with the same path relativizes that path once.
+    pub fn from_errors<E: ReportedError>(relative_to: &Path, errors: &[E]) -> Self {
+        fn convert<'a, E: ReportedError>(
+            relative_to: &Path,
+            run: &'a [E],
+        ) -> impl Iterator<Item = LegacyError> + 'a {
+            let path = relative_path(relative_to, run[0].error());
+            run.iter()
+                .map(move |reported| LegacyError::with_path(path.clone(), reported))
         }
+
+        let same_path = |a: &E, b: &E| a.error().path() == b.error().path();
+        let errors = if errors.len() < PARALLEL_CONVERSION_MIN_ERRORS {
+            errors
+                .chunk_by(same_path)
+                .flat_map(|run| convert(relative_to, run))
+                .collect()
+        } else {
+            errors
+                .par_chunk_by(same_path)
+                .flat_map_iter(|run| convert(relative_to, run))
+                .collect()
+        };
+        Self { errors }
     }
 }
 
@@ -154,19 +193,16 @@ pub struct BaselineError {
 }
 
 impl BaselineError {
-    fn from_error(relative_to: &Path, error: &Error) -> Self {
+    fn from_error(relative_to: &Path, reported: &impl ReportedError) -> Self {
+        let error = reported.error();
         let error_range = error.display_range();
-        let error_path = error.path().as_path();
         Self {
             column: Some(error_range.start.column().get() as usize),
             cell: error_range.start.cell().map(|cell| cell.get() as usize),
-            path: error_path
-                .relativize_from(relative_to)
-                .to_string_lossy()
-                .replace('\\', "/"), // Normalize Windows backslashes so baseline files are consistent across platforms
+            path: relative_path(relative_to, error),
             name: error.error_kind().to_name().to_owned(),
             concise_description: Some(error.msg_header().to_owned()),
-            severity: Some(error.severity()),
+            severity: Some(reported.severity()),
         }
     }
 }
@@ -184,10 +220,17 @@ pub struct BaselineErrors {
 }
 
 impl BaselineErrors {
-    pub fn from_errors(relative_to: &Path, min_severity: Severity, errors: &[Error]) -> Self {
+    pub fn from_errors(
+        relative_to: &Path,
+        min_severity: Severity,
+        errors: &[impl ReportedError],
+    ) -> Self {
         Self {
             min_severity: Some(min_severity),
-            errors: errors.map(|e| BaselineError::from_error(relative_to, e)),
+            errors: errors
+                .iter()
+                .map(|e| BaselineError::from_error(relative_to, e))
+                .collect(),
         }
     }
 

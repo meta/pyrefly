@@ -99,6 +99,29 @@ pub enum BaselineStatus {
     Matched,
 }
 
+/// A diagnostic as it is reported: an error, with the severity and baseline status it is
+/// reported with. These can differ from the error's own, so reporting can borrow an error
+/// rather than copy it to change them. Reports are built in parallel, hence `Sync`.
+pub trait ReportedError: Sync {
+    fn error(&self) -> &Error;
+    fn severity(&self) -> Severity;
+    fn baseline_status(&self) -> BaselineStatus;
+}
+
+impl ReportedError for Error {
+    fn error(&self) -> &Error {
+        self
+    }
+
+    fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    fn baseline_status(&self) -> BaselineStatus {
+        self.baseline_status
+    }
+}
+
 impl BaselineStatus {
     /// Value for the legacy JSON `baselined` field.
     /// `None` omits the field (no baseline configured), `Some(true/false)` emits it.
@@ -240,16 +263,23 @@ impl<W: Write> ErrorRenderer<W> {
         }
     }
 
-    pub fn write(&mut self, error: &Error, project_root: &Path, verbose: bool) -> io::Result<()> {
-        if !error.severity.is_enabled() {
+    pub fn write(
+        &mut self,
+        reported: &impl ReportedError,
+        project_root: &Path,
+        verbose: bool,
+    ) -> io::Result<()> {
+        let severity = reported.severity();
+        if !severity.is_enabled() {
             return Ok(());
         }
+        let error = reported.error();
         let origin = error.path_string_with_fragment(project_root);
         let metadata = RenderMetadata {
-            severity: error.severity,
+            severity,
             header: &error.msg_header,
             name: error.error_kind.to_name(),
-            baselined: error.baseline_status == BaselineStatus::Matched,
+            baselined: reported.baseline_status() == BaselineStatus::Matched,
         };
         if verbose {
             self.write_header(&metadata)?;
@@ -597,11 +627,6 @@ impl Error {
         res
     }
 
-    pub(crate) fn into_with_severity(mut self, severity: Severity) -> Self {
-        self.severity = severity;
-        self
-    }
-
     pub fn severity(&self) -> Severity {
         self.severity
     }
@@ -695,10 +720,10 @@ pub fn print_errors(project_root: &Path, errors: &[Error]) {
     }
 }
 
-fn count_error_kinds(errors: &[Error]) -> Vec<(ErrorKind, usize)> {
+fn count_error_kinds(errors: &[impl ReportedError]) -> Vec<(ErrorKind, usize)> {
     let mut map = SmallMap::new();
     for err in errors {
-        let kind = err.error_kind();
+        let kind = err.error().error_kind();
         *map.entry(kind).or_default() += 1;
     }
     let mut res = map.into_iter().collect::<Vec<_>>();
@@ -706,7 +731,7 @@ fn count_error_kinds(errors: &[Error]) -> Vec<(ErrorKind, usize)> {
     res
 }
 
-pub fn print_error_counts(errors: &[Error], limit: usize) {
+pub fn print_error_counts(errors: &[impl ReportedError], limit: usize) {
     let items = count_error_kinds(errors);
     let limit = if limit > 0 { limit } else { items.len() };
     for (error, count) in items.iter().rev().take(limit) {

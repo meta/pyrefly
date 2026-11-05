@@ -48,7 +48,7 @@ use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use serde::Serialize;
 
-use crate::error::error::Error as TypeError;
+use crate::error::error::ReportedError;
 use crate::module::bundled::BundledStub;
 use crate::module::third_party::get_bundled_third_party;
 use crate::module::typeshed::typeshed;
@@ -561,7 +561,7 @@ pub struct PysaTypeErrorsFile {
 
 fn write_errors_file(
     results_directory: &Path,
-    errors: &[TypeError],
+    errors: &[impl ReportedError],
     format: PysaFormat,
 ) -> anyhow::Result<()> {
     let step = StepLogger::start("Exporting type errors", "Exported type errors");
@@ -570,6 +570,7 @@ fn write_errors_file(
         format_version: 1,
         errors: errors
             .iter()
+            .map(|error| error.error())
             .map(|error| PysaTypeError {
                 module_name: error.module().name(),
                 module_path: error.module().path().details().clone(),
@@ -605,7 +606,7 @@ pub fn write_project_file(
     pysa_reporter: &PysaReporter,
     transaction: &Transaction,
     project_handles: &[Handle],
-    errors: &[TypeError],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let results_directory = &pysa_reporter.pysa_directory;
 

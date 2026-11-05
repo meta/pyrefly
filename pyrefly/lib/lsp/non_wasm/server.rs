@@ -3541,8 +3541,9 @@ impl Server {
             }
         }
         let errors = transaction.get_errors(handles);
-        let (normal_errors, owned_normal_errors, baseline_errors) =
-            errors.collect_lsp_error_refs_with_baselines();
+        let mut unused = Vec::new();
+        let (normal_errors, baseline_errors) =
+            errors.collect_lsp_error_refs_with_baselines(&mut unused);
         for e in normal_errors {
             if let Some((path, diag)) =
                 self.get_diag_if_shown(e.error(), e.severity(), &open_files, None)
@@ -3550,18 +3551,12 @@ impl Server {
                 diags.entry(path.to_owned()).or_default().push(diag);
             }
         }
-        for e in owned_normal_errors {
-            if let Some((path, diag)) = self.get_diag_if_shown(&e, e.severity(), &open_files, None)
-            {
-                diags.entry(path.to_owned()).or_default().push(diag);
-            }
-        }
         for e in baseline_errors {
             // Errors in open files that match a baseline file are downgraded to HINT.
             if let Some((path, mut diag)) =
-                self.get_diag_if_shown(&e, e.severity(), &open_files, None)
+                self.get_diag_if_shown(e.error(), e.severity(), &open_files, None)
             {
-                if to_real_path(e.path()).is_some_and(|p| open_files.contains_key(&p)) {
+                if to_real_path(e.error().path()).is_some_and(|p| open_files.contains_key(&p)) {
                     diag.severity = Some(DiagnosticSeverity::Hint);
                 }
                 diags.entry(path.to_owned()).or_default().push(diag);
@@ -4120,7 +4115,8 @@ impl Server {
                 collected.ordinary.extend(unused_ignores.hints);
                 collected.ordinary.append(&mut collected.hints);
                 let applied = errors.apply_baseline(
-                    &mut collected,
+                    &mut collected.ordinary,
+                    &mut collected.baseline,
                     Some(&baseline_path),
                     relative_to,
                     config.baseline_matching_mode,
@@ -6636,8 +6632,9 @@ impl Server {
         let mut items = Vec::new();
         let open_files = &self.open_files.read();
         let errors = transaction.get_errors(once(&handle));
-        let (normal_errors, owned_normal_errors, baseline_errors) =
-            errors.collect_lsp_error_refs_with_baselines();
+        let mut unused = Vec::new();
+        let (normal_errors, baseline_errors) =
+            errors.collect_lsp_error_refs_with_baselines(&mut unused);
         for e in normal_errors {
             if let Some((_, diag)) =
                 self.get_diag_if_shown(e.error(), e.severity(), open_files, cell_uri)
@@ -6645,18 +6642,12 @@ impl Server {
                 items.push(diag);
             }
         }
-        for e in owned_normal_errors {
-            if let Some((_, diag)) = self.get_diag_if_shown(&e, e.severity(), open_files, cell_uri)
-            {
-                items.push(diag);
-            }
-        }
         for e in baseline_errors {
             // Errors in open files that match a baseline file are downgraded to HINT.
             if let Some((_, mut diag)) =
-                self.get_diag_if_shown(&e, e.severity(), open_files, cell_uri)
+                self.get_diag_if_shown(e.error(), e.severity(), open_files, cell_uri)
             {
-                if to_real_path(e.path()).is_some_and(|p| open_files.contains_key(&p)) {
+                if to_real_path(e.error().path()).is_some_and(|p| open_files.contains_key(&p)) {
                     diag.severity = Some(DiagnosticSeverity::Hint);
                 }
                 items.push(diag);

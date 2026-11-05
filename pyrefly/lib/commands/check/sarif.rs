@@ -31,6 +31,7 @@ use serde::Serialize;
 
 use crate::error::error::BaselineStatus;
 use crate::error::error::Error;
+use crate::error::error::ReportedError;
 
 const SCHEMA_URL: &str = "https://json.schemastore.org/sarif-2.1.0.json";
 const SARIF_VERSION: &str = "2.1.0";
@@ -234,7 +235,11 @@ fn artifact_uri(path: &Path, relative_to: Option<&Path>) -> anyhow::Result<Strin
     })
 }
 
-fn errors_to_sarif(version: &str, relative_to: &Path, errors: &[Error]) -> anyhow::Result<Report> {
+fn errors_to_sarif(
+    version: &str,
+    relative_to: &Path,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<Report> {
     // `--relative-to ""` asks for absolute paths. Absolutizing an empty path would
     // resolve it to the current directory and silently make paths relative to that.
     let relative_to: Option<PathBuf> = if relative_to.as_os_str().is_empty() {
@@ -252,7 +257,7 @@ fn errors_to_sarif(version: &str, relative_to: &Path, errors: &[Error]) -> anyho
 
     let rule_kinds = errors
         .iter()
-        .map(|error| error.error_kind())
+        .map(|error| error.error().error_kind())
         .sorted_unstable_by_key(|kind| kind.to_name())
         .dedup()
         .collect::<Vec<_>>();
@@ -264,7 +269,7 @@ fn errors_to_sarif(version: &str, relative_to: &Path, errors: &[Error]) -> anyho
 
     let mut artifact_uris = HashMap::new();
     for error in &errors {
-        let path = error.path().as_path();
+        let path = error.error().path().as_path();
         if let Entry::Vacant(entry) = artifact_uris.entry(path.to_path_buf()) {
             entry.insert(artifact_uri(path, relative_to)?);
         }
@@ -284,7 +289,8 @@ fn errors_to_sarif(version: &str, relative_to: &Path, errors: &[Error]) -> anyho
 
     let results = errors
         .iter()
-        .map(|error| {
+        .map(|reported| {
+            let error = reported.error();
             let kind = error.error_kind();
             let base_uri = artifact_uris
                 .get(error.path().as_path())
@@ -308,7 +314,7 @@ fn errors_to_sarif(version: &str, relative_to: &Path, errors: &[Error]) -> anyho
                 rule_index: *rule_indices
                     .get(&kind)
                     .expect("error kind was collected into the SARIF rule table"),
-                level: severity_to_level(error.severity()),
+                level: severity_to_level(reported.severity()),
                 message: Message {
                     text: message_text(error),
                 },
@@ -325,7 +331,7 @@ fn errors_to_sarif(version: &str, relative_to: &Path, errors: &[Error]) -> anyho
                         )
                     })
                     .collect(),
-                baseline_state: match error.baseline_status() {
+                baseline_state: match reported.baseline_status() {
                     BaselineStatus::Unmatched => Some(SarifBaselineState::New),
                     BaselineStatus::Matched => Some(SarifBaselineState::Unchanged),
                     BaselineStatus::NotConfigured | BaselineStatus::NotCompared => None,
@@ -356,7 +362,7 @@ fn buffered_write_error_sarif(
     writer: impl Write,
     version: &str,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     serde_json::to_writer_pretty(&mut writer, &errors_to_sarif(version, relative_to, errors)?)?;
@@ -369,7 +375,7 @@ pub(crate) fn write_error_sarif_to_file(
     path: &Path,
     version: &str,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     buffered_write_error_sarif(File::create(path)?, version, relative_to, errors)
         .with_context(|| format!("while writing SARIF errors to `{}`", path.display()))
@@ -378,7 +384,7 @@ pub(crate) fn write_error_sarif_to_file(
 pub(crate) fn write_error_sarif_to_console(
     version: &str,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     buffered_write_error_sarif(stdout(), version, relative_to, errors)
 }
@@ -501,7 +507,7 @@ mod tests {
             vec![Level::Warning, Level::Error, Level::Note]
         );
 
-        let empty = errors_to_sarif(VERSION, Path::new("/repo"), &[]).unwrap();
+        let empty = errors_to_sarif(VERSION, Path::new("/repo"), &[] as &[Error]).unwrap();
         assert!(empty.runs[0].tool.driver.rules.is_empty());
         assert!(empty.runs[0].results.is_empty());
     }

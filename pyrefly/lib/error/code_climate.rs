@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use xxhash_rust::xxh64::Xxh64;
 
-use crate::error::error::Error;
+use crate::error::error::ReportedError;
 
 pub(crate) fn severity_to_code_climate_str(severity: Severity) -> Option<&'static str> {
     match severity {
@@ -69,8 +69,9 @@ struct CodeClimateIssuePosition {
 }
 
 impl CodeClimateIssue {
-    pub fn from_error(relative_to: &Path, error: &Error) -> Option<Self> {
-        let severity = severity_to_code_climate_str(error.severity())?.to_owned();
+    pub fn from_error(relative_to: &Path, reported: &impl ReportedError) -> Option<Self> {
+        let severity = severity_to_code_climate_str(reported.severity())?.to_owned();
+        let error = reported.error();
 
         let error_range = error.display_range();
         let error_path = str_path_to_unix_string(error.path_string_with_fragment(relative_to));
@@ -119,7 +120,7 @@ impl CodeClimateIssue {
 pub struct CodeClimateIssues(Vec<CodeClimateIssue>);
 
 impl CodeClimateIssues {
-    pub fn from_errors(relative_to: &Path, errors: &[Error]) -> Self {
+    pub fn from_errors(relative_to: &Path, errors: &[impl ReportedError]) -> Self {
         Self(
             errors
                 .iter()
@@ -144,6 +145,7 @@ mod tests {
     use vec1::vec1;
 
     use super::*;
+    use crate::error::error::Error;
 
     fn sample_error(msg: Vec1<String>) -> Error {
         let module = Module::new(

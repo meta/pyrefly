@@ -88,9 +88,11 @@ use crate::error::baseline::StaleRowScope;
 use crate::error::baseline::prepare_baseline_rows;
 use crate::error::baseline::write_baseline_file;
 use crate::error::code_climate::CodeClimateIssues;
+use crate::error::collector::CollectedDiagnostic;
 use crate::error::error::BaselineStatus;
 use crate::error::error::Error;
 use crate::error::error::ErrorRenderer;
+use crate::error::error::ReportedError;
 use crate::error::error::SerializableError;
 use crate::error::error::print_error_counts;
 use crate::error::legacy::BaselineErrors;
@@ -119,19 +121,6 @@ pub struct CheckResult {
     pub legacy_errors: Vec<LegacyError>,
     /// Number of files (modules) that were checked.
     pub checked_file_count: usize,
-}
-
-impl CheckResult {
-    /// Build a `CheckResult` from the raw error list.
-    fn from_errors(errors: &[Error], relative_to: &Path, checked_file_count: usize) -> Self {
-        Self {
-            legacy_errors: errors
-                .iter()
-                .map(|e| LegacyError::from_error(relative_to, e))
-                .collect(),
-            checked_file_count,
-        }
-    }
 }
 
 /// Check the given files.
@@ -215,7 +204,7 @@ async fn run_check(
         .await?;
         Ok((CommandExitStatus::Success, None))
     } else {
-        let (status, _, check_result) =
+        let (status, check_result) =
             args.run_once(version, files_to_check, config_finder, upsell, thread_count)?;
         Ok((status, Some(check_result)))
     }
@@ -713,7 +702,7 @@ fn write_errors_to_file(
     path: &Path,
     version: &str,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     match format {
         OutputFormat::MinText => write_error_text_to_file(path, relative_to, errors, false),
@@ -734,7 +723,7 @@ pub(crate) fn write_errors_to_console(
     format: OutputFormat,
     version: &str,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     match format {
         OutputFormat::MinText => write_error_text_to_console(relative_to, errors, false),
@@ -801,7 +790,7 @@ fn write_serializable_error_json_to_console(errors: &[SerializableError]) -> any
 fn write_error_text_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
     verbose: bool,
 ) -> anyhow::Result<()> {
     let mut renderer = ErrorRenderer::plain(BufWriter::new(File::create(path)?));
@@ -814,7 +803,7 @@ fn write_error_text_to_file(
 
 fn write_error_text_to_console(
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
     verbose: bool,
 ) -> anyhow::Result<()> {
     let stdout = stdout();
@@ -830,7 +819,7 @@ fn write_error_text_to_console(
 
 pub(crate) fn write_errors_to_stderr(
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
     verbose: bool,
 ) -> anyhow::Result<()> {
     let stderr = stderr();
@@ -847,7 +836,7 @@ pub(crate) fn write_errors_to_stderr(
 fn write_error_json(
     writer: &mut impl Write,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let legacy_errors = LegacyErrors::from_errors(relative_to, errors);
     serde_json::to_writer_pretty(writer, &legacy_errors)?;
@@ -857,7 +846,7 @@ fn write_error_json(
 fn buffered_write_error_json(
     writer: impl Write,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     write_error_json(&mut writer, relative_to, errors)?;
@@ -868,9 +857,9 @@ fn buffered_write_error_json(
 fn write_error_json_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    fn f(path: &Path, relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
+    fn f(path: &Path, relative_to: &Path, errors: &[impl ReportedError]) -> anyhow::Result<()> {
         let file = File::create(path)?;
         buffered_write_error_json(file, relative_to, errors)
     }
@@ -881,7 +870,7 @@ fn write_error_json_to_file(
 fn write_baseline_errors_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
     matching_mode: BaselineMatchingMode,
     format: BaselineFormat,
     min_severity: Severity,
@@ -897,11 +886,17 @@ fn write_baseline_errors_to_file(
     .map(|_| ())
 }
 
-fn write_error_json_to_console(relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
+fn write_error_json_to_console(
+    relative_to: &Path,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<()> {
     buffered_write_error_json(stdout(), relative_to, errors)
 }
 
-fn write_error_github(writer: &mut impl Write, errors: &[Error]) -> anyhow::Result<()> {
+fn write_error_github(
+    writer: &mut impl Write,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<()> {
     for error in errors {
         if let Some(command) = github_actions_command(error) {
             writeln!(writer, "{command}")?;
@@ -910,19 +905,22 @@ fn write_error_github(writer: &mut impl Write, errors: &[Error]) -> anyhow::Resu
     Ok(())
 }
 
-fn buffered_write_error_github(writer: impl Write, errors: &[Error]) -> anyhow::Result<()> {
+fn buffered_write_error_github(
+    writer: impl Write,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     write_error_github(&mut writer, errors)?;
     writer.flush()?;
     Ok(())
 }
 
-fn write_error_github_to_file(path: &Path, errors: &[Error]) -> anyhow::Result<()> {
+fn write_error_github_to_file(path: &Path, errors: &[impl ReportedError]) -> anyhow::Result<()> {
     let file = File::create(path)?;
     buffered_write_error_github(file, errors)
 }
 
-fn write_error_github_to_console(errors: &[Error]) -> anyhow::Result<()> {
+fn write_error_github_to_console(errors: &[impl ReportedError]) -> anyhow::Result<()> {
     buffered_write_error_github(stdout(), errors)
 }
 
@@ -930,7 +928,7 @@ fn write_error_full_text_with_github(
     writer: impl Write,
     color_choice: ColorChoice,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     {
@@ -948,14 +946,14 @@ fn write_error_full_text_with_github(
 fn write_error_full_text_with_github_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     write_error_full_text_with_github(File::create(path)?, ColorChoice::Never, relative_to, errors)
 }
 
 fn write_error_full_text_with_github_to_console(
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let stdout = stdout();
     let color_choice = stdout.current_choice();
@@ -1013,7 +1011,7 @@ fn xml_escape_cdata(s: &str) -> String {
 fn write_error_junit_xml<W: Write>(
     mut writer: W,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let n = errors.len();
 
@@ -1025,6 +1023,7 @@ fn write_error_junit_xml<W: Write>(
     )?;
 
     for err in errors {
+        let err = err.error();
         let error_path = err.path().as_path();
         let path = error_path
             .strip_prefix(relative_to)
@@ -1061,7 +1060,7 @@ fn write_error_junit_xml<W: Write>(
 fn buffered_write_error_junit_xml(
     writer: impl Write,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     write_error_junit_xml(&mut writer, relative_to, errors)?;
@@ -1072,13 +1071,16 @@ fn buffered_write_error_junit_xml(
 fn write_error_junit_xml_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let file = File::create(path)?;
     buffered_write_error_junit_xml(file, relative_to, errors)
 }
 
-fn write_error_junit_xml_to_console(relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
+fn write_error_junit_xml_to_console(
+    relative_to: &Path,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<()> {
     buffered_write_error_junit_xml(stdout(), relative_to, errors)
 }
 
@@ -1093,11 +1095,12 @@ fn severity_to_github_command(severity: Severity) -> Option<&'static str> {
     }
 }
 
-fn github_actions_command(error: &Error) -> Option<String> {
-    let command = severity_to_github_command(error.severity())?;
+fn github_actions_command(reported: &impl ReportedError) -> Option<String> {
+    let command = severity_to_github_command(reported.severity())?;
+    let baseline_marker = reported.baseline_status().display_suffix();
+    let error = reported.error();
     let range = error.display_range();
     let file = path_to_unix_string(error.path().as_path());
-    let baseline_marker = error.baseline_status().display_suffix();
     let params = format!(
         "file={},line={},col={},endLine={},endColumn={},title={}",
         escape_workflow_property(&file),
@@ -1128,7 +1131,7 @@ fn escape_workflow_property(value: &str) -> String {
 fn write_error_codeclimate(
     writer: &mut impl Write,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let issues = CodeClimateIssues::from_errors(relative_to, errors);
     serde_json::to_writer_pretty(writer, &issues)?;
@@ -1138,7 +1141,7 @@ fn write_error_codeclimate(
 fn buffered_write_error_codeclimate(
     writer: impl Write,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     write_error_codeclimate(&mut writer, relative_to, errors)?;
@@ -1149,9 +1152,9 @@ fn buffered_write_error_codeclimate(
 fn write_error_codeclimate_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    fn f(path: &Path, relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
+    fn f(path: &Path, relative_to: &Path, errors: &[impl ReportedError]) -> anyhow::Result<()> {
         let file = File::create(path)?;
         buffered_write_error_codeclimate(file, relative_to, errors)
     }
@@ -1159,7 +1162,10 @@ fn write_error_codeclimate_to_file(
         .with_context(|| format!("while writing CodeClimate issues to `{}`", path.display()))
 }
 
-fn write_error_codeclimate_to_console(relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
+fn write_error_codeclimate_to_console(
+    relative_to: &Path,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<()> {
     buffered_write_error_codeclimate(stdout(), relative_to, errors)
 }
 
@@ -1588,7 +1594,7 @@ impl IncrementalCheckCommand {
         version: &str,
         events: &CategorizedEvents,
         upsell: UpsellDecision,
-    ) -> anyhow::Result<(CommandExitStatus, Vec<Error>)> {
+    ) -> anyhow::Result<CommandExitStatus> {
         let timings = Timings::new();
         let args = &self.args;
         let mut check = self.checker.prepare_check(events, &[]);
@@ -1611,9 +1617,10 @@ impl IncrementalCheckCommand {
                 &defaults,
                 sourcedb_errors,
                 upsell,
+                |_, _| (),
             );
             transaction.discard_queued_steps();
-            result
+            result.map(|(status, ())| status)
         })
     }
 }
@@ -1666,8 +1673,8 @@ impl CheckArgs {
         self.output.resolve(config).min_severity
     }
 
-    /// Run a one-shot type check. Returns the exit status, the CLI-visible errors,
-    /// and a `CheckResult` suitable for telemetry logging.
+    /// Run a one-shot type check. Returns the exit status and a `CheckResult` suitable for
+    /// telemetry logging.
     pub fn run_once(
         self,
         version: &str,
@@ -1675,7 +1682,36 @@ impl CheckArgs {
         config_finder: ConfigFinder,
         upsell: UpsellDecision,
         thread_count: ThreadCount,
-    ) -> anyhow::Result<(CommandExitStatus, Vec<Error>, CheckResult)> {
+    ) -> anyhow::Result<(CommandExitStatus, CheckResult)> {
+        let (status, checked_file_count, legacy_errors) = self.run_once_with(
+            version,
+            files_to_check,
+            config_finder,
+            upsell,
+            thread_count,
+            |errors, relative_to| LegacyErrors::from_errors(relative_to, errors).errors,
+        )?;
+        Ok((
+            status,
+            CheckResult {
+                legacy_errors,
+                checked_file_count,
+            },
+        ))
+    }
+
+    /// Run a one-shot type check. Returns the exit status, the number of files checked,
+    /// and what `inspect` makes of the displayed diagnostics, given the path they are
+    /// displayed relative to.
+    pub(crate) fn run_once_with<R>(
+        self,
+        version: &str,
+        files_to_check: Box<dyn Includes>,
+        config_finder: ConfigFinder,
+        upsell: UpsellDecision,
+        thread_count: ThreadCount,
+        inspect: impl FnOnce(&[CollectedDiagnostic<'_>], &Path) -> R,
+    ) -> anyhow::Result<(CommandExitStatus, usize, R)> {
         self.output.validate_outputs()?;
         let mut timings = Timings::new();
         let list_files_start = Instant::now();
@@ -1688,14 +1724,8 @@ impl CheckArgs {
             Timings::show(timings.list_files),
         );
         if handles.is_empty() {
-            return Ok((
-                CommandExitStatus::Success,
-                Vec::new(),
-                CheckResult {
-                    legacy_errors: Vec::new(),
-                    checked_file_count: 0,
-                },
-            ));
+            let relative_to = resolve_relative_to(self.output.relative_to.as_ref());
+            return Ok((CommandExitStatus::Success, 0, inspect(&[], &relative_to)));
         }
 
         let state = Forgetter::new(State::new(config_finder, thread_count), true);
@@ -1727,8 +1757,7 @@ impl CheckArgs {
         let defaults = self.output.resolve(config.as_deref());
 
         let checked_file_count = loaded_handles.len();
-        let relative_to = resolve_relative_to(self.output.relative_to.as_ref());
-        let (status, errors) = self.run_inner(
+        let (status, inspected) = self.run_inner(
             timings,
             transaction.as_mut(),
             version,
@@ -1737,9 +1766,9 @@ impl CheckArgs {
             sourcedb_errors,
             require_levels.specified,
             upsell,
+            inspect,
         )?;
-        let check_result = CheckResult::from_errors(&errors, &relative_to, checked_file_count);
-        Ok((status, errors, check_result))
+        Ok((status, checked_file_count, inspected))
     }
 
     pub fn run_once_with_snippet(
@@ -1781,8 +1810,7 @@ impl CheckArgs {
             Some(Arc::new(FileContents::from_source(code))),
         )]);
 
-        let relative_to = resolve_relative_to(self.output.relative_to.as_ref());
-        let (status, errors) = self.run_inner(
+        let (status, legacy_errors) = self.run_inner(
             Timings::new(),
             transaction.as_mut(),
             version,
@@ -1792,8 +1820,15 @@ impl CheckArgs {
             require_levels.specified,
             // Snippet checks are interactive ad-hoc inputs — never upsell.
             UpsellDecision::Skip,
+            |errors, relative_to| LegacyErrors::from_errors(relative_to, errors).errors,
         )?;
-        Ok((status, CheckResult::from_errors(&errors, &relative_to, 1)))
+        Ok((
+            status,
+            CheckResult {
+                legacy_errors,
+                checked_file_count: 1,
+            },
+        ))
     }
 
     fn get_required_levels(&self) -> RequireLevels {
@@ -1820,7 +1855,7 @@ impl CheckArgs {
         }
     }
 
-    fn run_inner(
+    fn run_inner<R>(
         &self,
         timings: Timings,
         transaction: &mut Transaction,
@@ -1830,7 +1865,8 @@ impl CheckArgs {
         sourcedb_errors: Vec<ConfigError>,
         require: Require,
         upsell: UpsellDecision,
-    ) -> anyhow::Result<(CommandExitStatus, Vec<Error>)> {
+        inspect: impl FnOnce(&[CollectedDiagnostic<'_>], &Path) -> R,
+    ) -> anyhow::Result<(CommandExitStatus, R)> {
         let run = self.prepare_cli_run(timings, transaction, handles, defaults)?;
         transaction.run(handles, require, None);
         self.finish_cli_run(
@@ -1841,6 +1877,7 @@ impl CheckArgs {
             defaults,
             sourcedb_errors,
             upsell,
+            inspect,
         )
     }
 
@@ -1927,7 +1964,9 @@ impl CheckArgs {
         })
     }
 
-    fn finish_cli_run(
+    /// Report the diagnostics of a run, and return what `inspect` makes of the diagnostics
+    /// it displays, given the path they are displayed relative to.
+    fn finish_cli_run<R>(
         &self,
         run: PreparedCliRun,
         transaction: &mut Transaction,
@@ -1936,7 +1975,8 @@ impl CheckArgs {
         defaults: &OutputDefaults,
         mut sourcedb_errors: Vec<ConfigError>,
         upsell: UpsellDecision,
-    ) -> anyhow::Result<(CommandExitStatus, Vec<Error>)> {
+        inspect: impl FnOnce(&[CollectedDiagnostic<'_>], &Path) -> R,
+    ) -> anyhow::Result<(CommandExitStatus, R)> {
         let PreparedCliRun {
             mut timings,
             mut memory_trace,
@@ -1963,22 +2003,21 @@ impl CheckArgs {
             }
         }
 
-        let relative_to = self.output.relative_to.as_ref().map_or_else(
-            || std::env::current_dir().ok().unwrap_or_default(),
-            |x| PathBuf::from_str(x.as_str()).unwrap(),
-        );
+        let relative_to = resolve_relative_to(self.output.relative_to.as_ref());
         let output_format = defaults.output_format;
 
-        let mut collected = loads.collect_errors();
-        // Pass pre-collected errors to avoid redundant error collection.
-        let unused_ignore_errors = loads.collect_unused_ignore_errors_for_display(&collected);
-        collected.ordinary.extend(unused_ignore_errors.ordinary);
-        collected.ordinary.extend(unused_ignore_errors.hints);
+        // Every diagnostic below borrows its error, from `loads` or from `unused_ignores`.
+        let collected = loads.collect_error_refs();
+        let unused_ignores = loads.collect_unused_ignore_errors_for_refs(&collected);
+        let mut ordinary = collected.ordinary;
+        ordinary.extend(loads.shown_unused_ignore_errors(&unused_ignores));
         // Hints go through baselines and `--min-severity` like other diagnostics.
-        collected.ordinary.append(&mut collected.hints);
+        ordinary.extend(collected.hints);
+        let mut baseline = Vec::new();
 
         let baseline_apply_result = loads.apply_baseline(
-            &mut collected,
+            &mut ordinary,
+            &mut baseline,
             defaults.baseline.as_deref(),
             relative_to.as_path(),
             defaults.baseline_matching_mode,
@@ -1990,47 +2029,37 @@ impl CheckArgs {
 
         let (baseline_status, unused_baseline_entries, retained_baseline_entries) =
             baseline_apply_result.resolve(self.output.update_baseline)?;
-        let errors = collected;
         let only_filter = self
             .output
             .only
             .as_ref()
             .map(|only| only.iter().collect::<SmallSet<&ErrorKind>>());
 
-        let with_status = |errors: Vec<Error>, status: BaselineStatus| -> Vec<Error> {
-            if let Some(only) = &only_filter {
-                errors
-                    .into_iter()
-                    .filter(|e| only.contains(&e.error_kind()))
-                    .map(|e| e.with_baseline_status(status))
-                    .collect()
-            } else {
-                errors
-                    .into_iter()
-                    .map(|e| e.with_baseline_status(status))
-                    .collect()
-            }
+        let shown_kind = |e: &CollectedDiagnostic| {
+            only_filter
+                .as_ref()
+                .is_none_or(|only| only.contains(&e.error().error_kind()))
+        };
+        let with_status = |errors: Vec<_>, status: BaselineStatus| {
+            errors
+                .into_iter()
+                .filter(shown_kind)
+                .map(|e| e.with_baseline_status(status))
+                .collect::<Vec<_>>()
         };
 
-        let directives = with_status(errors.directives, baseline_status);
-        let ordinary_errors = with_status(errors.ordinary, baseline_status);
+        let directives = with_status(collected.directives, baseline_status);
+        let ordinary_errors = with_status(ordinary, baseline_status);
 
-        // Baseline matches are cloned for display. Baseline maintenance uses the
-        // original severity and baseline representation.
+        // Baseline matches are displayed at a capped severity. Baseline maintenance uses
+        // the original severity and baseline representation.
         let baseline_error_level = defaults.baseline_error_level;
         let displayed_baseline_errors = if baseline_error_level == Severity::Ignore {
             Vec::new()
         } else {
-            errors
-                .baseline
+            baseline
                 .iter()
-                .filter(|e| {
-                    if let Some(only) = &only_filter {
-                        only.contains(&e.error_kind())
-                    } else {
-                        true
-                    }
-                })
+                .filter(|e| shown_kind(e))
                 .map(|e| {
                     e.with_severity(e.severity().min(baseline_error_level))
                         .with_baseline_status(BaselineStatus::Matched)
@@ -2052,7 +2081,7 @@ impl CheckArgs {
             .into_iter()
             .partition(|e| e.severity() >= show_severity);
         hidden_errors.extend(hidden_baseline_errors);
-        let fails = |e: &&Error| e.severity() >= min_severity;
+        let fails = |e: &&CollectedDiagnostic| e.severity() >= min_severity;
 
         // Suppress operates on ordinary diagnostics only — directives are
         // structurally excluded since they live in `directives`, not `ordinary_errors`.
@@ -2061,16 +2090,14 @@ impl CheckArgs {
             let serialized_errors: Vec<SerializedError> = ordinary_errors
                 .iter()
                 .filter(fails)
-                .filter(|e| e.error_kind().is_suppressable())
-                .filter_map(SerializedError::from_error)
+                .filter(|e| e.error().error_kind().is_suppressable())
+                .filter_map(|e| SerializedError::from_error(e.error()))
                 .collect();
             suppress::suppress_errors(serialized_errors, CommentLocation::LineBefore);
         }
         if let Some(kind) = self.behavior.remove_unused_ignores {
             // TODO: Deprecate this in favor of `pyrefly suppress`
-            let collected = loads.collect_errors();
-            let unused_errors = loads.collect_unused_ignore_errors(&collected);
-            suppress::remove_unused_ignores(unused_errors, kind)?;
+            suppress::remove_unused_ignores(&unused_ignores, kind)?;
         }
 
         // We update the baseline file if requested, after reporting any new
@@ -2084,9 +2111,9 @@ impl CheckArgs {
                 .as_ref()
                 .expect("a baseline action requires a baseline path");
             // The baseline only tracks errors that meet the min-severity threshold.
-            let mut new_baseline = errors.baseline;
+            let mut new_baseline = baseline;
             new_baseline.retain(|e| e.severity() >= min_severity);
-            new_baseline.extend(ordinary_errors.iter().filter(fails).cloned());
+            new_baseline.extend(ordinary_errors.iter().filter(fails).copied());
             prepare_baseline_rows(&mut new_baseline, defaults.baseline_matching_mode);
             write_baseline_errors_to_file(
                 baseline_path,
@@ -2141,6 +2168,7 @@ impl CheckArgs {
         output_errors.extend(baseline_errors);
         output_errors.extend(directives);
         output_errors.sort_by_cached_key(|e| {
+            let e = e.error();
             (
                 e.module().name(),
                 e.path().dupe(),
@@ -2151,10 +2179,10 @@ impl CheckArgs {
 
         // A JUnit failure means a nonzero exit code, so the report lists only the diagnostics
         // that make the exit code nonzero; a shown warning that doesn't is left out.
-        let failing_errors: Vec<Error> = output_errors
+        let failing_errors: Vec<CollectedDiagnostic> = output_errors
             .iter()
             .filter(|e| e.severity() >= min_severity)
-            .cloned()
+            .copied()
             .collect();
         let errors_for = |format: OutputFormat| match format {
             OutputFormat::JunitXml => failing_errors.as_slice(),
@@ -2198,7 +2226,7 @@ impl CheckArgs {
 
         if self.output.summary != Summary::None {
             // A suppressed hint was never going to be shown, so it isn't counted either.
-            let suppress_count = errors
+            let suppress_count = collected
                 .suppressed
                 .iter()
                 .filter(|e| e.severity() != Severity::Hint)
@@ -2211,7 +2239,7 @@ impl CheckArgs {
             let mut parts = vec![count(diagnostics_count, label)];
             let (mut shown_warnings, mut shown_info) = (0, 0);
             for e in &output_errors {
-                if e.error_kind().is_directive() || e.severity() >= min_severity {
+                if e.error().error_kind().is_directive() || e.severity() >= min_severity {
                     continue;
                 }
                 match e.severity() {
@@ -2383,14 +2411,15 @@ impl CheckArgs {
             let output = report_json(&roots, &module_steps);
             fs_anyhow::write(path, output)?;
         }
-        if self.behavior.expectations {
+        let status = if self.behavior.expectations {
             loads.check_against_expectations()?;
-            Ok((CommandExitStatus::Success, output_errors))
+            CommandExitStatus::Success
         } else if diagnostics_count > 0 || stale_baseline {
-            Ok((CommandExitStatus::UserError, output_errors))
+            CommandExitStatus::UserError
         } else {
-            Ok((CommandExitStatus::Success, output_errors))
-        }
+            CommandExitStatus::Success
+        };
+        Ok((status, inspect(&output_errors, &relative_to)))
     }
 }
 
@@ -2552,25 +2581,31 @@ mod tests {
         let files = config.get_filtered_globs(None, ConfigScope::Default);
         let config_finder = ConfigFinder::new_constant(ArcId::new(config));
 
-        let (_, errors, check_result) = CheckArgs::parse_from(["check", "--summary=none"])
-            .run_once(
-                "test",
-                Box::new(files),
-                config_finder,
-                UpsellDecision::Skip,
-                ThreadCount::Inline,
-            )
-            .unwrap();
+        let (_, check_result) = CheckArgs::parse_from([
+            "check",
+            "--summary=none",
+            "--relative-to",
+            root.to_str().unwrap(),
+        ])
+        .run_once(
+            "test",
+            Box::new(files),
+            config_finder,
+            UpsellDecision::Skip,
+            ThreadCount::Inline,
+        )
+        .unwrap();
+        let errors = &check_result.legacy_errors;
         let bad_assignments = errors
             .iter()
-            .filter(|error| error.error_kind() == ErrorKind::BadAssignment)
-            .map(|error| error.path().as_path().to_path_buf())
+            .filter(|error| error.name == ErrorKind::BadAssignment.to_name())
+            .map(|error| error.path.as_str())
             .collect::<Vec<_>>();
 
         assert_eq!(check_result.checked_file_count, 2);
         assert_eq!(
             bad_assignments,
-            vec![source],
+            vec!["packages/my-lib/src/my_lib/main.py"],
             "the editable workspace source is now checked: {errors:#?}",
         );
     }
@@ -2625,7 +2660,7 @@ def go(w: Widget) -> int:
             "--glean-module-names",
             names_path.to_str().unwrap(),
         ]);
-        let (status, errors, _) = args
+        let (status, check_result) = args
             .run_once(
                 "test",
                 Box::new(TestIncludes {
@@ -2637,6 +2672,7 @@ def go(w: Widget) -> int:
                 ThreadCount::Inline,
             )
             .unwrap();
+        let errors = &check_result.legacy_errors;
         assert!(errors.is_empty(), "unexpected type errors: {errors:#?}");
         assert!(matches!(status, CommandExitStatus::Success));
 

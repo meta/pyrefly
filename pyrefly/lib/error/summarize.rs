@@ -14,7 +14,7 @@ use pyrefly_util::display;
 use starlark_map::small_map::SmallMap;
 
 use crate::config::error_kind::ErrorKind;
-use crate::error::error::Error;
+use crate::error::error::ReportedError;
 
 type ErrorCounts = SmallMap<ErrorKind, usize>;
 
@@ -46,9 +46,12 @@ where
     errors
 }
 
-fn get_errors_per_file(errors: &[Error]) -> SmallMap<ModulePath, SmallMap<ErrorKind, usize>> {
+fn get_errors_per_file(
+    errors: &[impl ReportedError],
+) -> SmallMap<ModulePath, SmallMap<ErrorKind, usize>> {
     let mut map: SmallMap<ModulePath, SmallMap<ErrorKind, usize>> = SmallMap::new();
     for err in errors {
+        let err = err.error();
         *map.entry(err.path().dupe())
             .or_default()
             .entry(err.error_kind())
@@ -64,7 +67,7 @@ fn get_errors_per_file(errors: &[Error]) -> SmallMap<ModulePath, SmallMap<ErrorK
 /// path_index = 0 groups by /alpha, path_index = 1 groups by /alpha/beta,
 /// and path_index = 2 groups by alpha/beta/gamma.
 /// If the path_index is larger than the number of components in the path, then the entire path is used.
-pub fn print_error_summary(errors: &[Error]) {
+pub fn print_error_summary(errors: &[impl ReportedError]) {
     // TODO: Consider output formatting.
     let path_errors = get_errors_per_file(errors);
     eprintln!("=== Error Summary ===");

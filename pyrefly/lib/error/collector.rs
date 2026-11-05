@@ -7,7 +7,6 @@
 
 use std::fmt::Debug;
 use std::mem;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use dupe::Dupe;
@@ -24,8 +23,10 @@ use ruff_text_size::TextSize;
 use crate::config::error::ErrorConfig;
 use crate::config::error_kind::Severity;
 use crate::error::context::ErrorContext;
+use crate::error::error::BaselineStatus;
 use crate::error::error::Error;
 use crate::error::error::ErrorQuickFix;
+use crate::error::error::ReportedError;
 use crate::error::style::ErrorStyle;
 use crate::module::module_info::ModuleInfo;
 use crate::state::errors::find_containing_range;
@@ -183,14 +184,24 @@ impl CollectedErrors {
     }
 }
 
-/// A classified diagnostic that borrows its payload from a module's diagnostics.
-#[derive(Debug)]
+/// A reported diagnostic that borrows its error, so that reporting can change the severity
+/// and baseline status it is reported with without copying the error.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct CollectedDiagnostic<'a> {
     error: &'a Error,
     severity: Severity,
+    baseline_status: BaselineStatus,
 }
 
 impl<'a> CollectedDiagnostic<'a> {
+    pub(crate) fn new(error: &'a Error, severity: Severity) -> Self {
+        Self {
+            error,
+            severity,
+            baseline_status: error.baseline_status(),
+        }
+    }
+
     pub(crate) fn error(&self) -> &'a Error {
         self.error
     }
@@ -199,16 +210,35 @@ impl<'a> CollectedDiagnostic<'a> {
         self.severity
     }
 
+    pub(crate) fn with_severity(self, severity: Severity) -> Self {
+        Self { severity, ..self }
+    }
+
+    pub(crate) fn with_baseline_status(self, baseline_status: BaselineStatus) -> Self {
+        Self {
+            baseline_status,
+            ..self
+        }
+    }
+
     pub(crate) fn into_error(self) -> Error {
-        self.error.with_severity(self.severity)
+        self.error
+            .with_severity(self.severity)
+            .with_baseline_status(self.baseline_status)
     }
 }
 
-impl Deref for CollectedDiagnostic<'_> {
-    type Target = Error;
-
-    fn deref(&self) -> &Self::Target {
+impl ReportedError for CollectedDiagnostic<'_> {
+    fn error(&self) -> &Error {
         self.error
+    }
+
+    fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    fn baseline_status(&self) -> BaselineStatus {
+        self.baseline_status
     }
 }
 
@@ -559,7 +589,7 @@ impl ErrorCollector {
                 continue;
             }
             let severity = error_config.display_config.severity(error.error_kind());
-            let collected = |severity| CollectedDiagnostic { error, severity };
+            let collected = |severity| CollectedDiagnostic::new(error, severity);
             if error.error_kind().is_directive() {
                 // Directives bypass suppression, baseline, and
                 // min-severity, but still respect explicit severity
