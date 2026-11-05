@@ -1713,6 +1713,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ClassFieldDefinition::DeclaredByAnnotation {
                 annotation: annot,
                 initialized_in_recognized_method,
+                initialized_in_method,
                 initialized_on_new_instance,
             } => {
                 let direct_annotation = Some(self.get_idx(*annot).annotation.clone());
@@ -1766,7 +1767,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ClassFieldInitialization::ClassBody(Some(Box::new(flags)))
                 } else {
                     ClassFieldInitialization::Uninitialized {
-                        initialized_in_method: *initialized_in_recognized_method
+                        initialized_in_method: *initialized_in_method
                             || *initialized_on_new_instance,
                     }
                 };

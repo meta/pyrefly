@@ -230,17 +230,20 @@ fn is_annotated<T>(returns: &Option<T>, params: &Parameters) -> bool {
 /// without fully analyzing the function body.
 struct SelfAttrNames<'a> {
     self_name: &'a Name,
-    names: SmallMap<Name, TextRange>,
+    /// The range of the first write to each attribute, and whether some write assigns a value.
+    names: SmallMap<Name, (TextRange, bool)>,
 }
 
 impl<'a> SelfAttrNames<'a> {
-    fn expr_lvalue(&mut self, x: &Expr) {
+    fn expr_lvalue(&mut self, x: &Expr, has_value: bool) {
         Ast::expr_assignment_targets(x, &mut |target| {
             if let AssignmentTargetKind::Attribute(x) = target.kind
                 && let Some(attr) = Ast::expr_receiver_attr(x, self.self_name)
-                && !self.names.contains_key(&attr.id)
             {
-                self.names.insert(attr.id.clone(), attr.range());
+                self.names
+                    .entry(attr.id.clone())
+                    .or_insert((attr.range(), false))
+                    .1 |= has_value;
             }
         });
     }
@@ -249,22 +252,23 @@ impl<'a> SelfAttrNames<'a> {
         match x {
             Stmt::Assign(x) => {
                 for e in x.targets.iter() {
-                    self.expr_lvalue(e);
+                    self.expr_lvalue(e, true);
                 }
             }
             Stmt::AnnAssign(x) => {
-                self.expr_lvalue(x.target.as_ref());
+                self.expr_lvalue(x.target.as_ref(), x.value.is_some());
             }
+            // An augmented assignment reads the attribute before writing it.
             Stmt::AugAssign(x) => {
-                self.expr_lvalue(x.target.as_ref());
+                self.expr_lvalue(x.target.as_ref(), false);
             }
             Stmt::For(x) => {
-                self.expr_lvalue(x.target.as_ref());
+                self.expr_lvalue(x.target.as_ref(), true);
             }
             Stmt::With(x) => {
                 for item in &x.items {
                     if let Some(optional_vars) = &item.optional_vars {
-                        self.expr_lvalue(optional_vars);
+                        self.expr_lvalue(optional_vars, true);
                     }
                 }
             }
@@ -297,7 +301,7 @@ impl<'a> SelfAttrNames<'a> {
         let instance_attributes = finder
             .names
             .into_iter()
-            .map(|(n, r)| {
+            .map(|(n, (r, has_value))| {
                 (
                     n,
                     MethodAttribute {
@@ -306,6 +310,7 @@ impl<'a> SelfAttrNames<'a> {
                             None,
                             r,
                             MethodSelfKind::Instance,
+                            has_value,
                         ),
                         initialized: InitializationStatus::Initialized,
                     },
@@ -1466,7 +1471,7 @@ mod tests {
             self_name: &self_name,
             names: Default::default(),
         };
-        finder.expr_lvalue(&expr);
+        finder.expr_lvalue(&expr, true);
 
         assert_eq!(
             finder
@@ -1482,9 +1487,12 @@ mod tests {
             + "self.".len();
         assert_eq!(
             finder.names.get(&Name::new_static("repeated")),
-            Some(&TextRange::at(
-                TextSize::new(repeated_start as u32),
-                TextSize::new("repeated".len() as u32),
+            Some(&(
+                TextRange::at(
+                    TextSize::new(repeated_start as u32),
+                    TextSize::new("repeated".len() as u32),
+                ),
+                true,
             ))
         );
     }

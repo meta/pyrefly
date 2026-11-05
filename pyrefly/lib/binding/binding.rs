@@ -3593,11 +3593,13 @@ pub enum ClassFieldDefinition {
     /// `initialized_in_recognized_method` is true if the field is assigned in a recognized
     /// instance attribute-defining method (e.g., `__init__`), meaning a Final field
     /// declared here is legally initialized even without a class-body value.
+    /// `initialized_in_method` is true if any method of the class assigns the field.
     /// `initialized_on_new_instance` is true if `__new__` assigns the field on the instance
     /// it creates.
     DeclaredByAnnotation {
         annotation: Idx<KeyAnnotation>,
         initialized_in_recognized_method: bool,
+        initialized_in_method: bool,
         initialized_on_new_instance: bool,
     },
     /// Declared with no annotation or assignment (this is impossible
@@ -3650,13 +3652,15 @@ impl DisplayWith<Bindings> for ClassFieldDefinition {
             Self::DeclaredByAnnotation {
                 annotation,
                 initialized_in_recognized_method,
+                initialized_in_method,
                 initialized_on_new_instance,
             } => {
                 write!(
                     f,
-                    "ClassFieldDefinition::DeclaredByAnnotation({}, initialized_in_recognized_method={}, initialized_on_new_instance={})",
+                    "ClassFieldDefinition::DeclaredByAnnotation({}, initialized_in_recognized_method={}, initialized_in_method={}, initialized_on_new_instance={})",
                     ctx.display(*annotation),
                     initialized_in_recognized_method,
+                    initialized_in_method,
                     initialized_on_new_instance,
                 )
             }

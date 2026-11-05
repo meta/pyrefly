@@ -1235,6 +1235,8 @@ pub struct InstanceAttribute(
     pub Option<Idx<KeyAnnotation>>,
     pub TextRange,
     pub MethodSelfKind,
+    /// Whether some write assigns a value, rather than only annotating the attribute.
+    pub bool,
 );
 
 /// An attribute assigned in a method, with its initialization at the end of the method.
@@ -2583,6 +2585,7 @@ impl Scopes {
         if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
             // Accumulate subsequent assignments in the method.
             attr.0.push(value);
+            attr.4 |= has_value;
             // Keep the first type annotation encountered in the method.
             if attr.1.is_none() {
                 attr.1 = annotation;
@@ -2596,6 +2599,7 @@ impl Scopes {
                     annotation,
                     name.range,
                     method_scope.receiver_kind,
+                    has_value,
                 ),
             );
         }
@@ -3769,6 +3773,8 @@ impl Scopes {
                                 annotation,
                                 initialized_in_recognized_method: recognized_instance_attrs
                                     .contains(name.key().as_str()),
+                                // Set below for each method that assigns the field.
+                                initialized_in_method: false,
                                 initialized_on_new_instance: attributes_set_on_new_instance
                                     .contains(name.key().as_str()),
                             },
@@ -3825,7 +3831,8 @@ impl Scopes {
                 name,
                 method,
                 MethodAttribute {
-                    attribute: InstanceAttribute(values, annotation, range, receiver_kind),
+                    attribute:
+                        InstanceAttribute(values, annotation, range, receiver_kind, has_value),
                     initialized,
                 },
             )| {
@@ -3869,12 +3876,16 @@ impl Scopes {
                     // Any method can establish initialization, so combine their requirements with OR.
                     existing_initialized.or(initialized);
                 } else if let Some((
-                    ClassFieldDefinition::DeclaredByAnnotation { .. },
+                    ClassFieldDefinition::DeclaredByAnnotation {
+                        initialized_in_method,
+                        ..
+                    },
                     _,
                     existing_initialized,
                 )) = field_definitions.get_mut(name.key())
                 {
                     // Methods initialize a bare class-body annotation without changing its definition.
+                    *initialized_in_method |= has_value;
                     existing_initialized.or(initialized);
                 } else if !field_definitions.contains_key_hashed(name.as_ref()) {
                     field_definitions.insert_hashed(

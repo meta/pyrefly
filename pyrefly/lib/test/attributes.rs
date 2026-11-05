@@ -802,6 +802,29 @@ class DerivedFromInitializing(InitializingBase):
         if enabled():
             self.x = 1
 
+class HelperBase:
+    x: int
+    def __init__(self) -> None:
+        self.reset()
+    def reset(self) -> None:
+        self.x = 0
+
+class DerivedFromHelper(HelperBase):
+    def __init__(self) -> None:
+        super().__init__()
+        if enabled():
+            self.x = 1
+
+class AnnotatingBase:
+    x: int  # E: Attribute `x` may be uninitialized
+    def __init__(self) -> None:
+        self.x: int
+
+class DerivedFromAnnotating(AnnotatingBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # E: Attribute `x` may be uninitialized
+
 @dataclass
 class DataBase:
     x: int
@@ -827,6 +850,47 @@ class NewBase:
         return instance
 
 class DerivedFromNew(NewBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+"#,
+);
+
+// A method whose body is skipped is scanned only for the attributes it writes.
+testcase!(
+    test_attribute_initialization_declared_only_in_base_skipped_body,
+    TestEnv::new_skip_check_no_infer()
+        .with_run_require(Require::Errors)
+        .enable_possibly_uninitialized_attribute_error(),
+    r#"
+def enabled() -> bool: ...
+
+class AnnotatingBase:
+    x: int
+    def setup(self):
+        self.x: int
+
+class DerivedFromAnnotating(AnnotatingBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # E: Attribute `x` may be uninitialized
+
+class AugmentingBase:
+    x: int
+    def setup(self):
+        self.x += 1
+
+class DerivedFromAugmenting(AugmentingBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # E: Attribute `x` may be uninitialized
+
+class AssigningBase:
+    x: int
+    def setup(self):
+        self.x = 0
+
+class DerivedFromAssigning(AssigningBase):
     def __init__(self) -> None:
         if enabled():
             self.x = 1
