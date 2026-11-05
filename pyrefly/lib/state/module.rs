@@ -473,6 +473,10 @@ pub trait ModuleStateReader {
                     .map(|solutions| solutions.binding_errors().dupe())
             })
     }
+    fn solve_errors(&self) -> Option<ModuleDiagnostics> {
+        self.get_solutions()
+            .map(|solutions| solutions.solve_errors().dupe())
+    }
     fn module_ranges(&self) -> Option<Arc<ModuleRanges>>;
 }
 

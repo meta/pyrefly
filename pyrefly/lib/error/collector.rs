@@ -195,6 +195,13 @@ impl ErrorCollector {
         ModuleDiagnostics(errors.items.into())
     }
 
+    /// Remove and finalize the collector's accumulated diagnostics.
+    pub(crate) fn take(&self) -> ModuleDiagnostics {
+        let mut errors = mem::take(&mut *self.errors.lock());
+        errors.cleanup();
+        ModuleDiagnostics(errors.items.into())
+    }
+
     pub fn extend(&self, other: ErrorCollector) {
         if self.is_active() {
             self.errors.lock().extend(other.errors.into_inner());
@@ -209,7 +216,7 @@ impl ErrorCollector {
         }
     }
 
-    /// Run `commit` while collection is blocked, and append `other` only if it
+    /// Run `commit` while draining is blocked, and append `other` only if it
     /// succeeds. If it fails, return `other` so the caller can retry. `commit`
     /// must not block, because other threads take this lock to publish.
     pub(crate) fn extend_if<T, E>(
@@ -751,6 +758,36 @@ mod tests {
         );
         assert!(errors.extend_if(accepted, || Ok::<_, ()>(())).is_ok());
         assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn test_error_collector_take() {
+        let mi = ModuleInfo::new(
+            ModuleName::from_name(&Name::new_static("main")),
+            ModulePath::filesystem(Path::new("main.py").to_owned()),
+            Arc::new("contents".to_owned()),
+        );
+        let errors = ErrorCollector::new(mi, ErrorStyle::Delayed);
+        add(
+            &errors,
+            TextRange::new(TextSize::new(1), TextSize::new(2)),
+            ErrorKind::InternalError,
+            "before".to_owned(),
+        );
+
+        let taken = errors.take();
+        assert_eq!(taken.iter().map(Error::msg).collect::<Vec<_>>(), ["before"]);
+
+        add(
+            &errors,
+            TextRange::new(TextSize::new(2), TextSize::new(3)),
+            ErrorKind::InternalError,
+            "after".to_owned(),
+        );
+        assert_eq!(
+            errors.take().iter().map(Error::msg).collect::<Vec<_>>(),
+            ["after"]
+        );
     }
 
     #[test]

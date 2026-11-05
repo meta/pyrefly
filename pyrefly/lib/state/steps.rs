@@ -560,7 +560,13 @@ impl Step {
             ctx.treat_all_caps_as_final,
             ctx.infer_param_types_from_docstring,
         );
-        Arc::new(Answers::new(bindings, solver, enable_index, enable_trace))
+        Arc::new(Answers::new(
+            bindings,
+            solver,
+            enable_index,
+            enable_trace,
+            load.errors.style(),
+        ))
     }
 
     #[inline(never)]
@@ -586,7 +592,7 @@ impl Step {
         let solutions = answers.solve(
             ctx.lookup,
             ctx.lookup,
-            &load.errors,
+            answers.errors(),
             ctx.stdlib,
             ctx.uniques,
             ctx.require.compute_errors()

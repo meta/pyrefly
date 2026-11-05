@@ -247,6 +247,7 @@ pub struct Answers {
     solver: Solver,
     table: AnswerTable,
     solutions: Arc<SolutionsData>,
+    errors: ErrorCollector,
     index: Option<Arc<Mutex<Index>>>,
     trace: Option<Mutex<Traces>>,
     /// The contextual types of lambda parameters, published by the solve that computed each
@@ -824,6 +825,7 @@ pub struct Solutions {
     module_info: ModuleInfo,
     parse_errors: ModuleDiagnostics,
     binding_errors: ModuleDiagnostics,
+    solve_errors: ModuleDiagnostics,
     data: Arc<SolutionsData>,
     metadata: Arc<BindingsMetadata>,
     /// Multi-line ranges and ignore-all directives.
@@ -929,6 +931,10 @@ impl Solutions {
 
     pub fn binding_errors(&self) -> &ModuleDiagnostics {
         &self.binding_errors
+    }
+
+    pub(crate) fn solve_errors(&self) -> &ModuleDiagnostics {
+        &self.solve_errors
     }
 
     pub fn module_ranges(&self) -> &Arc<ModuleRanges> {
@@ -1255,7 +1261,13 @@ pub trait LookupAnswer: Sized {
 }
 
 impl Answers {
-    pub fn new(bindings: Bindings, solver: Solver, enable_index: bool, enable_trace: bool) -> Self {
+    pub fn new(
+        bindings: Bindings,
+        solver: Solver,
+        enable_index: bool,
+        enable_trace: bool,
+        error_style: ErrorStyle,
+    ) -> Self {
         fn presize<K: Keyed>(items: &mut AnswerEntry<K>, bindings: &Bindings)
         where
             BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
@@ -1268,6 +1280,7 @@ impl Answers {
         let mut table = AnswerTable::default();
         table_mut_for_each!(&mut table, |items| presize(items, &bindings));
         let solutions = Arc::new(SolutionsData::new(&bindings));
+        let errors = ErrorCollector::new(bindings.module().dupe(), error_style);
         let index = if enable_index {
             Some(Arc::new(Mutex::new(Index::default())))
         } else {
@@ -1284,6 +1297,7 @@ impl Answers {
             solver,
             table,
             solutions,
+            errors,
             index,
             trace,
             lambda_param_types: Mutex::new(SmallMap::new()),
@@ -1318,14 +1332,13 @@ impl Answers {
         }
     }
 
-    /// Publish `answer` for `idx`, appending `errors` to `destination` if and
-    /// only if this write wins.
+    /// Publish `answer` for `idx`, appending `errors` to this table's
+    /// collector if and only if this write wins.
     pub(crate) fn record<K: Keyed>(
         &self,
         idx: Idx<K>,
         answer: AnswerBox<K::Answer>,
         errors: ErrorCollector,
-        destination: &ErrorCollector,
     ) -> (&K::Answer, bool)
     where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
@@ -1334,19 +1347,18 @@ impl Answers {
         self.answer_slot(idx).record_with_errors(
             answer,
             errors,
-            destination,
+            &self.errors,
             AnswerSlot::try_record,
         )
     }
 
-    /// Publish `target`'s answer for `idx`, appending `errors` to `destination`
-    /// if and only if this write wins.
+    /// Publish `target`'s answer for `idx`, appending `errors` to this table's
+    /// collector if and only if this write wins.
     pub(crate) fn record_alias<K: Keyed>(
         &self,
         idx: Idx<K>,
         target: Idx<K>,
         errors: ErrorCollector,
-        destination: &ErrorCollector,
     ) -> (&K::Answer, bool)
     where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
@@ -1354,7 +1366,7 @@ impl Answers {
     {
         let target = self.answer_slot(target);
         self.answer_slot(idx)
-            .record_with_errors((), errors, destination, |slot, ()| {
+            .record_with_errors((), errors, &self.errors, |slot, ()| {
                 // SAFETY: Both slots belong to this Answers table and are dropped together.
                 unsafe { slot.try_record_alias(target) }
             })
@@ -1371,13 +1383,31 @@ impl Answers {
     /// # Safety
     ///
     /// The caller must own the reservation for `idx`'s slot.
-    pub(crate) unsafe fn publish_reserved<K: Keyed>(&self, idx: Idx<K>) -> bool
+    pub(crate) unsafe fn publish_reserved<K: Keyed>(
+        &self,
+        idx: Idx<K>,
+        errors: Option<ErrorCollector>,
+    ) -> bool
     where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
-        // SAFETY: Forwarded from the caller.
-        unsafe { self.answer_slot(idx).publish_reserved() }
+        let slot = self.answer_slot(idx);
+        if let Some(errors) = errors {
+            self.errors
+                .extend_if(errors, || {
+                    // SAFETY: Forwarded from the caller.
+                    unsafe { slot.publish_reserved() }.then_some(()).ok_or(())
+                })
+                .is_ok()
+        } else {
+            // SAFETY: Forwarded from the caller.
+            unsafe { slot.publish_reserved() }
+        }
+    }
+
+    pub(crate) fn errors(&self) -> &ErrorCollector {
+        &self.errors
     }
 
     /// # Safety
@@ -1516,6 +1546,7 @@ impl Answers {
             module_info: bindings.module().dupe(),
             parse_errors: bindings.parse_errors().dupe(),
             binding_errors: bindings.binding_errors().dupe(),
+            solve_errors: self.errors.take(),
             data: self.solutions.dupe(),
             metadata: bindings.metadata().dupe(),
             module_ranges: bindings.module_ranges().dupe(),
@@ -1618,10 +1649,11 @@ impl Answers {
     pub fn publish_reserved_preliminary<Ans: LookupAnswer>(
         &self,
         reserved: &mut ReservedSlot<'_, '_, '_, Ans>,
+        errors: Option<ErrorCollector>,
     ) -> bool {
         let CalcId(_, any_idx) = reserved.calc_id().dupe();
         // SAFETY: `reserved` proves that this SCC owns the pending slot.
-        unsafe { dispatch_anyidx!(&any_idx, self, publish_reserved_typed) }
+        unsafe { dispatch_anyidx!(&any_idx, self, publish_reserved_typed, errors) }
     }
 
     /// Roll back a slot reserved by an SCC batch if it is still pending.
@@ -1649,14 +1681,18 @@ impl Answers {
     ///
     /// The caller must own the reservation for `idx`'s slot, which a
     /// `&mut ReservedSlot` proves.
-    unsafe fn publish_reserved_typed<K: Keyed>(&self, idx: Idx<K>) -> bool
+    unsafe fn publish_reserved_typed<K: Keyed>(
+        &self,
+        idx: Idx<K>,
+        errors: Option<ErrorCollector>,
+    ) -> bool
     where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
         // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
         // which proves ownership of the reservation.
-        unsafe { self.publish_reserved(idx) }
+        unsafe { self.publish_reserved(idx, errors) }
     }
 
     /// # Safety

@@ -233,6 +233,7 @@ impl CalcId {
             Solver::new(Default::default()),
             false,
             false,
+            ErrorStyle::Never,
         ));
         // Create a fake Key index - the actual key doesn't matter for test purposes,
         // only that different idx values produce different CalcIds
@@ -2854,7 +2855,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         idx,
                         AnswerBox::new(raw_answer),
                         self.retain_annotated_metadata_errors(range, local_errors),
-                        self.base_errors,
                     )
                 }
                 // The target was sanitized and forced when it was recorded, so
@@ -2863,7 +2863,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     idx,
                     target,
                     self.retain_annotated_metadata_errors(range, local_errors),
-                    self.base_errors,
                 ),
             };
             if did_write && let Some(traces) = trace_side_effects {
@@ -3170,21 +3169,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
-        let did_write = if let Some(errors) = errors {
-            self.base_errors
-                .extend_if(errors, || {
-                    // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
-                    // which proves ownership of the reservation.
-                    unsafe { self.current().publish_reserved(idx) }
-                        .then_some(())
-                        .ok_or(())
-                })
-                .is_ok()
-        } else {
-            // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
-            // which proves ownership of the reservation.
-            unsafe { self.current().publish_reserved(idx) }
-        };
+        // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
+        // which proves ownership of the reservation.
+        let did_write = unsafe { self.current().publish_reserved(idx, errors) };
         if did_write && let Some(traces) = traces {
             self.current().merge_trace_side_effects(traces);
         }

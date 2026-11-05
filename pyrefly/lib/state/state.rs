@@ -989,11 +989,13 @@ impl<'a> Transaction<'a> {
                         let load = x.get_load()?;
                         let parse_errors = x.parse_errors();
                         let binding_errors = x.binding_errors();
+                        let solve_diagnostics = x.solve_errors();
                         let module_ranges = x.module_ranges();
                         Some((
                             load,
                             parse_errors,
                             binding_errors,
+                            solve_diagnostics,
                             module_ranges,
                             config.dupe(),
                         ))
@@ -1014,11 +1016,13 @@ impl<'a> Transaction<'a> {
                         let load = x.state.get_load()?;
                         let parse_errors = x.state.parse_errors();
                         let binding_errors = x.state.binding_errors();
+                        let solve_diagnostics = x.state.solve_errors();
                         let module_ranges = x.state.module_ranges();
                         Some((
                             load,
                             parse_errors,
                             binding_errors,
+                            solve_diagnostics,
                             module_ranges,
                             x.config.dupe(),
                         ))
@@ -1034,11 +1038,13 @@ impl<'a> Transaction<'a> {
                 let load = x.1.state.get_load()?;
                 let parse_errors = x.1.state.parse_errors();
                 let binding_errors = x.1.state.binding_errors();
+                let solve_diagnostics = x.1.state.solve_errors();
                 let module_ranges = x.1.state.module_ranges();
                 Some((
                     load,
                     parse_errors,
                     binding_errors,
+                    solve_diagnostics,
                     module_ranges,
                     x.1.config.read().dupe(),
                 ))
@@ -1050,11 +1056,13 @@ impl<'a> Transaction<'a> {
             {
                 let parse_errors = v.state.parse_errors();
                 let binding_errors = v.state.binding_errors();
+                let solve_diagnostics = v.state.solve_errors();
                 let module_ranges = v.state.module_ranges();
                 res.push((
                     load,
                     parse_errors,
                     binding_errors,
+                    solve_diagnostics,
                     module_ranges,
                     v.config.dupe(),
                 ));
@@ -2038,13 +2046,12 @@ impl<'a> Transaction<'a> {
         }
 
         // Slow path: need full solve_exported_key for computation.
-        let load = module_data.state.get_load().unwrap();
         let stdlib = self.get_stdlib(&module_data.handle);
         let lookup = self.lookup(module_data);
         answers.solve_exported_key(
             &lookup,
             &lookup,
-            &load.errors,
+            answers.errors(),
             &stdlib,
             &self.data.state.uniques,
             key,
@@ -2885,7 +2892,6 @@ enum TargetAnswers<'a> {
     /// its operation (commit or solve) using the contained data.
     Available {
         answers: Arc<Answers>,
-        load: Option<Arc<Load>>,
         module_data: &'a ArcId<ModuleDataMut>,
     },
     /// The target module's `Answers` have been evicted but `Solutions` exist.
@@ -3015,10 +3021,8 @@ impl<'a> TransactionHandle<'a> {
         };
 
         if let Some(answers) = module_data.state.get_answers() {
-            let load = module_data.state.get_load();
             TargetAnswers::Available {
                 answers,
-                load,
                 module_data,
             }
         } else if module_data.state.get_solutions().is_some()
@@ -3382,20 +3386,16 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
             TargetAnswers::Evicted => true,
             TargetAnswers::Available {
                 answers: target_answers,
-                load,
                 module_data,
+                ..
             } => {
-                let target_load = load.expect(
-                    "target module has Answers but no Load; this should be unreachable \
-                     because Load is computed before Answers",
-                );
                 let stdlib = self.transaction.get_stdlib(&module_data.handle);
                 let lookup = self.transaction.lookup(module_data);
                 target_answers.solve_idx_erased(
                     any_idx,
                     &lookup,
                     &lookup,
-                    &target_load.errors,
+                    target_answers.errors(),
                     &stdlib,
                     &self.transaction.data.state.uniques,
                     thread_state,
@@ -3432,25 +3432,9 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
                 drop(reserved.take_side_effects());
                 false
             }
-            TargetAnswers::Available { answers, load, .. } => {
+            TargetAnswers::Available { answers, .. } => {
                 let (errors, traces) = reserved.take_side_effects();
-                let did_write = if let Some(target_load) = load {
-                    if let Some(errors) = errors {
-                        target_load
-                            .errors
-                            .extend_if(errors, || {
-                                answers
-                                    .publish_reserved_preliminary(reserved)
-                                    .then_some(())
-                                    .ok_or(())
-                            })
-                            .is_ok()
-                    } else {
-                        answers.publish_reserved_preliminary(reserved)
-                    }
-                } else {
-                    answers.publish_reserved_preliminary(reserved)
-                };
+                let did_write = answers.publish_reserved_preliminary(reserved, errors);
                 if did_write && let Some(traces) = traces {
                     answers.merge_trace_side_effects(traces);
                 }
