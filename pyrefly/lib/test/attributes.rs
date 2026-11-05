@@ -420,16 +420,113 @@ class C:
 );
 
 testcase!(
-    bug = "Return snapshots do not include assignments from finally",
     test_attribute_initialization_finally_after_return,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
-class C:
+def enabled() -> bool: ...
+
+class AssignedInFinally:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            self.value = 1
+
+class UnpackedInFinally:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            self.first, [self.second, *self.rest] = 1, [2, 3]
+
+class ReturnBeforeTry:
+    def __init__(self) -> None:
+        if enabled():
+            return
+        try:
+            pass
+        finally:
+            self.value = 1  # E: Attribute `value` may be uninitialized
+
+class ReturnInFinally:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            if enabled():
+                return
+            self.value = 1  # E: Attribute `value` may be uninitialized
+
+class NestedInTry:
+    def __init__(self) -> None:
+        try:
+            try:
+                return
+            finally:
+                self.inner = 1
+        finally:
+            self.outer = 1
+
+class DeletedLaterInFinally:
     def __init__(self) -> None:
         try:
             return
         finally:
             self.value = 1  # E: Attribute `value` may be uninitialized
+            if enabled():
+                del self.value
+"#,
+);
+
+// The outer `finally` may delete the attribute after the inner one assigns it.
+testcase!(
+    bug = "A `del` in an outer `finally` does not cancel an inner `finally` assignment",
+    test_attribute_initialization_finally_deleted_by_outer_finally,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def enabled() -> bool: ...
+
+class C:
+    def __init__(self) -> None:
+        try:
+            try:
+                return
+            finally:
+                self.value = 1  # Should report `value`
+        finally:
+            if enabled():
+                del self.value
+"#,
+);
+
+// The `finally` body only counts for `return` paths when it assigns the attribute directly.
+testcase!(
+    bug = "An assignment in a block inside `finally` does not count for `return` paths",
+    test_attribute_initialization_finally_nested_assignment,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def enabled() -> bool: ...
+
+class C:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            if enabled():
+                self.value = 1  # E: Attribute `value` may be uninitialized
+            else:
+                self.value = 2
+
+class NestedTryInFinally:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            try:
+                pass
+            finally:
+                self.inner = 1  # E: Attribute `inner` may be uninitialized
+            self.outer = 1
 "#,
 );
 

@@ -1983,6 +1983,9 @@ impl<'a> BindingsBuilder<'a> {
             Stmt::Try(x) => {
                 // Handlers can observe writes made before an exception, not just entry values.
                 self.scopes.clear_excluded_none_pairs();
+                // A `finally` body that assigns attributes directly initializes them on the paths
+                // of the `return`s inside the statement too.
+                let before_try = self.scopes.finally_return_statuses(&x.finalbody);
                 self.start_fork_and_branch(x.range);
 
                 // We branch before the body, conservatively assuming that any statement can fail
@@ -2123,7 +2126,12 @@ impl<'a> BindingsBuilder<'a> {
                 if !x.finalbody.is_empty() {
                     self.scopes.set_last_stmt_expr(None);
                 }
+                let returns =
+                    before_try.map(|before_try| (before_try, self.scopes.take_method_returns()));
                 self.stmts(x.finalbody, parent);
+                if let Some((before_try, returns)) = returns {
+                    self.scopes.finish_try_returns(before_try, returns);
+                }
                 if let Some(termination) = termination {
                     self.scopes.restore_termination(termination);
                 }

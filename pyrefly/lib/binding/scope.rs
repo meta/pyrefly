@@ -8,6 +8,7 @@
 use std::cmp::max;
 use std::fmt::Debug;
 use std::mem;
+use std::slice;
 
 use itertools::Either;
 use itertools::Itertools;
@@ -1248,7 +1249,7 @@ pub struct MethodAttribute {
 
 /// Attribute initialization combined over the reachable `return`s of a method.
 #[derive(Clone, Debug)]
-struct ReturnAttributeInitialization {
+pub struct ReturnAttributeInitialization {
     attributes: SmallMap<Name, InitializationStatus>,
     /// The status of every attribute absent from `attributes`.
     unlisted: InitializationStatus,
@@ -1257,6 +1258,43 @@ struct ReturnAttributeInitialization {
 impl ReturnAttributeInitialization {
     fn get(&self, name: &Name) -> &InitializationStatus {
         self.attributes.get(name).unwrap_or(&self.unlisted)
+    }
+
+    /// Whether every attribute is initialized at every `return` so far, as when there is none.
+    fn initializes_everything(&self) -> bool {
+        self.attributes.is_empty() && self.unlisted == InitializationStatus::Initialized
+    }
+
+    /// Combine the `return`s of another part of the method into these.
+    fn combine(&mut self, other: Self, unset_nodes: &mut UnsetNodes) {
+        if other.initializes_everything() {
+            return;
+        }
+        if self.initializes_everything() {
+            *self = other;
+            return;
+        }
+        let unlisted = InitializationStatus::merge(
+            unset_nodes,
+            [(Some(&self.unlisted), None), (Some(&other.unlisted), None)],
+        );
+        // List the attributes that only `other` lists, unless being unlisted here already makes
+        // them uninitialized.
+        if self.unlisted != InitializationStatus::Uninitialized {
+            for name in other.attributes.keys() {
+                if !self.attributes.contains_key(name) {
+                    self.attributes.insert(name.clone(), self.unlisted.clone());
+                }
+            }
+        }
+        self.attributes.retain(|name, status| {
+            *status = InitializationStatus::merge(
+                unset_nodes,
+                [(Some(&*status), None), (Some(other.get(name)), None)],
+            );
+            *status != unlisted
+        });
+        self.unlisted = unlisted;
     }
 }
 
@@ -3541,6 +3579,87 @@ impl Scopes {
             }
         }
         None
+    }
+
+    /// The attributes of the current method's receiver that a `finally` body assigns directly,
+    /// outside any nested block, with their status over the method's `return`s so far. `None` if
+    /// it assigns none.
+    pub fn finally_return_statuses(
+        &self,
+        finally: &[Stmt],
+    ) -> Option<SmallMap<Name, InitializationStatus>> {
+        let ScopeKind::Method(ScopeMethod {
+            self_name: Some(self_name),
+            return_attribute_initialization: returns,
+            ..
+        }) = &self.current().kind
+        else {
+            return None;
+        };
+        let mut targets: Vec<&Expr> = finally
+            .iter()
+            .flat_map(|stmt| match stmt {
+                Stmt::Assign(x) => x.targets.as_slice(),
+                Stmt::AnnAssign(x) if x.value.is_some() => slice::from_ref(&*x.target),
+                _ => &[],
+            })
+            .collect();
+        let mut statuses = SmallMap::new();
+        while let Some(target) = targets.pop() {
+            match target {
+                Expr::Tuple(x) => targets.extend(&x.elts),
+                Expr::List(x) => targets.extend(&x.elts),
+                Expr::Starred(x) => targets.push(&x.value),
+                Expr::Attribute(x) => {
+                    if matches!(&*x.value, Expr::Name(name) if name.id == self_name.id) {
+                        statuses.insert(x.attr.id.clone(), returns.get(&x.attr.id).clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        (!statuses.is_empty()).then_some(statuses)
+    }
+
+    /// Take the combined `return` state of the current method, so that the `return`s of a
+    /// `finally` body that assigns attributes directly can be collected separately.
+    pub fn take_method_returns(&mut self) -> ReturnAttributeInitialization {
+        let ScopeKind::Method(method) = &mut self.current_mut().kind else {
+            unreachable!("only a method's `finally` body assigns attributes directly");
+        };
+        mem::take(&mut method.return_attribute_initialization)
+    }
+
+    /// Finish a `try` statement whose `finally` body assigns attributes directly.
+    /// `before_try` holds their status over the `return`s before the statement, and `returns`
+    /// combines those with the `return`s before the `finally` body, which runs after them. An
+    /// attribute that is still initialized after the `finally` body is initialized on the
+    /// `return` paths inside the statement, so its status is the one from before the statement.
+    pub fn finish_try_returns(
+        &mut self,
+        before_try: SmallMap<Name, InitializationStatus>,
+        mut returns: ReturnAttributeInitialization,
+    ) {
+        let unset_nodes = &mut self.unset_nodes;
+        let scope = &mut self.scopes.last_mut().scope;
+        let ScopeKind::Method(method) = &mut scope.kind else {
+            unreachable!("only a method's `finally` body assigns attributes directly");
+        };
+        for (name, status) in before_try {
+            if scope.flow.instance_attribute_initialization.get(&name)
+                != Some(&InitializationStatus::Initialized)
+            {
+                continue;
+            }
+            if status == returns.unlisted {
+                returns.attributes.shift_remove(&name);
+            } else {
+                returns.attributes.insert(name, status);
+            }
+        }
+        let finally_returns = mem::take(&mut method.return_attribute_initialization);
+        returns.combine(finally_returns, unset_nodes);
+        method.return_attribute_initialization = returns;
     }
 
     /// Record a return in the enclosing function body there is one. `previous_stmt_expr` is the
