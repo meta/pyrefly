@@ -2855,19 +2855,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 SolveResult::Answer(raw_answer) => {
                     self.sanitize_answer_vars::<K>(&raw_answer, range, &local_errors);
                     let raw_answer = self.force_exported_answer::<K>(raw_answer);
-                    self.current().record(idx, AnswerBox::new(raw_answer))
+                    self.current().record(
+                        idx,
+                        AnswerBox::new(raw_answer),
+                        self.retain_annotated_metadata_errors(range, local_errors),
+                        self.base_errors,
+                    )
                 }
                 // The target was sanitized and forced when it was recorded, so
                 // sharing its answer needs neither step repeated.
-                SolveResult::Alias(target) => self.current().record_alias(idx, target),
+                SolveResult::Alias(target) => self.current().record_alias(
+                    idx,
+                    target,
+                    self.retain_annotated_metadata_errors(range, local_errors),
+                    self.base_errors,
+                ),
             };
-            if did_write {
-                self.base_errors
-                    .extend(self.retain_annotated_metadata_errors(range, local_errors));
-                // Publish trace side effects alongside errors.
-                if let Some(traces) = trace_side_effects {
-                    self.current().merge_trace_side_effects(traces);
-                }
+            if did_write && let Some(traces) = trace_side_effects {
+                self.current().merge_trace_side_effects(traces);
             }
             answer
         }
@@ -3151,10 +3156,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if self.is_same_module(&calc_id) {
             let (errors, traces) = reserved.take_side_effects();
             // SAFETY: `reserved` proves that this SCC owns the pending slot.
-            unsafe {
-                dispatch_anyidx!(any_idx, self, publish_reserved_same_module, errors, traces)
-            };
-            true
+            unsafe { dispatch_anyidx!(any_idx, self, publish_reserved_same_module, errors, traces) }
         } else {
             self.answers.publish_reserved_in_module(reserved)
         }
@@ -3169,22 +3171,33 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         idx: Idx<K>,
         errors: Option<Arc<ErrorCollector>>,
         traces: Option<TraceSideEffects>,
-    ) where
+    ) -> bool
+    where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
-        if let Some(errors) = errors {
+        let did_write = if let Some(errors) = errors {
             let errors = Arc::try_unwrap(errors)
                 .expect("SCC errors Arc has unexpected extra references; errors would be lost");
-            self.base_errors.extend(errors);
-        }
-        if let Some(traces) = traces {
+            self.base_errors
+                .extend_if(errors, || {
+                    // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
+                    // which proves ownership of the reservation.
+                    unsafe { self.current().publish_reserved(idx) }
+                        .then_some(())
+                        .ok_or(())
+                })
+                .is_ok()
+        } else {
+            // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
+            // which proves ownership of the reservation.
+            unsafe { self.current().publish_reserved(idx) }
+        };
+        if did_write && let Some(traces) = traces {
             self.current().merge_trace_side_effects(traces);
         }
-        // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
-        // which proves ownership of the reservation.
-        unsafe { self.current().publish_reserved(idx) }
+        did_write
     }
 
     /// Roll back a reservation if it is still pending.

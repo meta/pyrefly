@@ -196,6 +196,29 @@ impl ErrorCollector {
         }
     }
 
+    /// Run `commit` while collection is blocked, and append `other` only if it
+    /// succeeds. If it fails, return `other` so the caller can retry. `commit`
+    /// must not block, because other threads take this lock to publish.
+    pub(crate) fn extend_if<T, E>(
+        &self,
+        mut other: ErrorCollector,
+        commit: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, (E, ErrorCollector)> {
+        // With nothing to append, `commit` has no diagnostics to make visible
+        // with it, so it does not need to block collection.
+        if !self.is_active() || other.errors.get_mut().is_empty() {
+            return commit().map_err(|failure| (failure, other));
+        }
+        let mut errors = self.errors.lock();
+        match commit() {
+            Ok(result) => {
+                errors.extend(other.errors.into_inner());
+                Ok(result)
+            }
+            Err(failure) => Err((failure, other)),
+        }
+    }
+
     /// Add the errors from another collector that satisfy `keep`.
     pub(crate) fn extend_filtered(
         &self,
@@ -656,6 +679,39 @@ mod tests {
                 .map(|x| x.msg()),
             vec!["b", "a", "a"]
         );
+    }
+
+    #[test]
+    fn test_error_collector_extend_if() {
+        let mi = ModuleInfo::new(
+            ModuleName::from_name(&Name::new_static("main")),
+            ModulePath::filesystem(Path::new("main.py").to_owned()),
+            Arc::new("contents".to_owned()),
+        );
+        let errors = ErrorCollector::new(mi.dupe(), ErrorStyle::Delayed);
+
+        let rejected = ErrorCollector::new(mi.dupe(), ErrorStyle::Delayed);
+        add(
+            &rejected,
+            TextRange::new(TextSize::new(1), TextSize::new(2)),
+            ErrorKind::InternalError,
+            "rejected".to_owned(),
+        );
+        let Err(((), rejected)) = errors.extend_if(rejected, || Err::<(), _>(())) else {
+            panic!("a failed commit should return its errors");
+        };
+        assert_eq!(errors.len(), 0);
+        assert_eq!(rejected.len(), 1, "the returned errors should be intact");
+
+        let accepted = ErrorCollector::new(mi, ErrorStyle::Delayed);
+        add(
+            &accepted,
+            TextRange::new(TextSize::new(2), TextSize::new(3)),
+            ErrorKind::InternalError,
+            "accepted".to_owned(),
+        );
+        assert!(errors.extend_if(accepted, || Ok::<_, ()>(())).is_ok());
+        assert_eq!(errors.len(), 1);
     }
 
     #[test]

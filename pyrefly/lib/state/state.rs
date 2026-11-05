@@ -3400,16 +3400,29 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
             }
             TargetAnswers::Available { answers, load, .. } => {
                 let (errors, traces) = reserved.take_side_effects();
-                if let (Some(errors), Some(target_load)) = (errors, load) {
-                    let errors = Arc::try_unwrap(errors)
-                        .expect("cross-module SCC errors Arc has unexpected extra references");
-                    target_load.errors.extend(errors);
-                }
-                if let Some(traces) = traces {
+                let did_write = if let Some(target_load) = load {
+                    if let Some(errors) = errors {
+                        let errors = Arc::try_unwrap(errors)
+                            .expect("cross-module SCC errors Arc has unexpected extra references");
+                        target_load
+                            .errors
+                            .extend_if(errors, || {
+                                answers
+                                    .publish_reserved_preliminary(reserved)
+                                    .then_some(())
+                                    .ok_or(())
+                            })
+                            .is_ok()
+                    } else {
+                        answers.publish_reserved_preliminary(reserved)
+                    }
+                } else {
+                    answers.publish_reserved_preliminary(reserved)
+                };
+                if did_write && let Some(traces) = traces {
                     answers.merge_trace_side_effects(traces);
                 }
-                answers.publish_reserved_preliminary(reserved);
-                true
+                did_write
             }
         }
     }
