@@ -48,6 +48,42 @@ def g(p: P, c1: C1, c2: C2, c3: C3, c4: C4, c5: C5) -> None:
 );
 
 testcase!(
+    test_protocol_typevar_bound_classmethod_preserves_specialized_targs,
+    r#"
+from typing import Any, Callable, Protocol, Sequence, TypeVar
+
+class NativeExpr: ...
+
+NativeExprT = TypeVar("NativeExprT", bound=NativeExpr)
+NativeExprT_co = TypeVar("NativeExprT_co", bound=NativeExpr, covariant=True)
+
+class CompliantExpr(Protocol[NativeExprT_co]): ...
+
+CompliantExprT = TypeVar("CompliantExprT", bound=CompliantExpr[Any], covariant=True)
+
+class SQLExpr(CompliantExpr[NativeExprT], Protocol[NativeExprT]):
+    @classmethod
+    def from_elementwise(
+        cls, func: Callable[[Sequence[NativeExprT]], NativeExprT]
+    ) -> None:
+        return None
+
+SQLExprT = TypeVar("SQLExprT", bound=SQLExpr[Any], covariant=True)
+
+class CompliantNamespace(Protocol[CompliantExprT]):
+    @property
+    def _expr(self) -> type[CompliantExprT]: ...
+
+class SQLNamespace(CompliantNamespace[SQLExprT], Protocol[SQLExprT, NativeExprT_co]):
+    def foo(self) -> None:
+        def _func(a: Sequence[NativeExprT_co]) -> NativeExprT_co:
+            return a[0]
+
+        self._expr.from_elementwise(_func)
+"#,
+);
+
+testcase!(
     test_protocol_metaclass_assignability,
     r#"
 from abc import ABCMeta
