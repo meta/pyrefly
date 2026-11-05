@@ -602,6 +602,227 @@ class Child(Base):
 );
 
 testcase!(
+    bug = "A shadowed ancestor grants explicit-any exemptions",
+    test_explicit_any_override_stops_at_shadowing_member,
+    TestEnv::new().enable_explicit_any_error(),
+    r#"
+from typing import Any, override
+
+class A:
+    def f(self, value: Any) -> Any: ...  # E: Explicit `Any` is not allowed # E: Explicit `Any` is not allowed
+
+class B(A):
+    f: Any = None  # E: Explicit `Any` is not allowed
+
+class C(B):
+    @override
+    def f(self, value: Any) -> Any:
+        return value
+"#,
+);
+
+testcase!(
+    bug = "Static override correspondence includes the base receiver",
+    test_explicit_any_override_instance_to_static_receiver,
+    TestEnv::new().enable_explicit_any_error(),
+    r#"
+from typing import Any, override
+
+class Base:
+    def f(self, original: Any, /) -> None: ...  # E: Explicit `Any` is not allowed
+
+class Child(Base):
+    @staticmethod
+    @override
+    def f(renamed: Any, /) -> None: ...  # E: Explicit `Any` is not allowed
+
+class Base2:
+    def f(self, value: int, unrelated: Any, /) -> None: ...  # E: Explicit `Any` is not allowed
+
+class Child2(Base2):
+    @staticmethod
+    @override
+    def f(value: object, unrelated: object, extra: Any = None, /) -> None: ...
+
+Child().f(1)
+Child2().f(1, "")
+"#,
+);
+
+testcase!(
+    bug = "Inapplicable receiver overloads grant explicit-any exemptions",
+    test_explicit_any_override_filters_receiver_overloads,
+    TestEnv::new().enable_explicit_any_error(),
+    r#"
+from typing import Any, overload, override
+
+class Base[T]:
+    @overload
+    def f(self: "Base[str]", value: Any) -> Any: ...  # E: Explicit `Any` is not allowed # E: Explicit `Any` is not allowed
+    @overload
+    def f(self: "Base[int]", value: int) -> int: ...
+    def f(self, value):
+        return value
+
+class Child(Base[int]):
+    @override
+    def f(self, value: Any) -> Any:
+        return value
+
+class ApplicableChild(Base[str]):
+    @override
+    def f(self, value: Any) -> Any:
+        return value
+"#,
+);
+
+// Exemptions follow the effective inherited type, including inference and substitution.
+testcase!(
+    test_explicit_any_override_effective_inherited_type,
+    TestEnv::new().enable_explicit_any_error(),
+    r#"
+from typing import Any, override
+
+class Base:
+    def f(self, value: Any):  # E: Explicit `Any` is not allowed
+        return value
+
+class Child(Base):
+    @override
+    def f(self, value: Any) -> Any:
+        return value
+
+class AsyncBase:
+    async def f(self, value: Any):  # E: Explicit `Any` is not allowed
+        return value
+
+class AsyncChild(AsyncBase):
+    @override
+    async def f(self, value: Any) -> Any:
+        return value
+
+class Hinted(Base):
+    @override
+    def f(self, value) -> None: ...
+
+class HintedChild(Hinted):
+    @override
+    def f(self, value: Any) -> None: ...
+
+class GenericBase[T]:
+    def f(self, value: T) -> T:
+        return value
+
+class GenericChild(GenericBase[Any]):  # E: Explicit `Any` is not allowed
+    @override
+    def f(self, value: Any) -> Any:
+        return value
+
+class ConcreteChild(GenericBase[int]):
+    @override
+    def f(self, value: Any) -> Any: ...  # E: Explicit `Any` is not allowed # E: Explicit `Any` is not allowed
+"#,
+);
+
+// Method kinds and property accessors retain their own implicit receiver slots.
+testcase!(
+    test_explicit_any_override_static_class_and_property,
+    TestEnv::new().enable_explicit_any_error(),
+    r#"
+from typing import Any, override
+
+class Base:
+    @staticmethod
+    def static(value: Any, /) -> Any: ...  # E: Explicit `Any` is not allowed # E: Explicit `Any` is not allowed
+    @classmethod
+    def make(cls, value: Any, /) -> Any: ...  # E: Explicit `Any` is not allowed # E: Explicit `Any` is not allowed
+    @property
+    def value(self) -> Any: ...  # E: Explicit `Any` is not allowed
+
+class Child(Base):
+    @staticmethod
+    @override
+    def static(renamed: Any, /) -> Any: ...
+    @classmethod
+    @override
+    def make(cls, renamed: Any, /) -> Any: ...
+    @property
+    @override
+    def value(self) -> Any: ...
+"#,
+);
+
+testcase!(
+    bug = "A writable property's getter uses the setter return for Any exemptions",
+    test_explicit_any_override_writable_property_accessors,
+    TestEnv::new().enable_explicit_any_error(),
+    r#"
+from typing import Any, override
+
+class Base:
+    @property
+    def value(self) -> Any: ...  # E: Explicit `Any` is not allowed
+    @value.setter
+    def value(self, value: object) -> None: ...
+
+class Child(Base):
+    @property
+    @override
+    def value(self) -> Any: ...  # E: Explicit `Any` is not allowed
+    @value.setter
+    @override
+    def value(self, value: Any) -> None: ...  # E: Explicit `Any` is not allowed
+"#,
+);
+
+testcase!(
+    test_explicit_any_override_new_receiver,
+    TestEnv::new().enable_explicit_any_error(),
+    r#"
+from typing import Any, Self, override
+
+class Base:
+    def __new__(cls, original: Any, /) -> Self:  # E: Explicit `Any` is not allowed
+        return super().__new__(cls)
+
+class Repeated(Base):
+    @override
+    def __new__(cls, renamed: Any, /) -> Self:
+        return super().__new__(cls, renamed)
+
+class Extra(Base):
+    @override
+    def __new__(cls, renamed: object, extra: Any = None, /) -> Self:  # E: Explicit `Any` is not allowed
+        return super().__new__(cls, renamed)
+"#,
+);
+
+testcase!(
+    test_explicit_any_override_classmethod_overloads,
+    TestEnv::new().enable_explicit_any_error(),
+    r#"
+from typing import Any, overload, override
+
+class Base:
+    @classmethod
+    @overload
+    def make(cls, value: int) -> int: ...
+    @classmethod
+    @overload
+    def make(cls, value: Any) -> Any: ...  # E: Explicit `Any` is not allowed # E: Explicit `Any` is not allowed
+    @classmethod
+    def make(cls, value):
+        return value
+
+class Child(Base):
+    @classmethod
+    @override
+    def make(cls, value: Any) -> Any:
+        return value
+"#,
+);
+
+testcase!(
     test_warn_on_implicit_any_in_attribute,
     TestEnv::new().enable_implicit_any_attribute_error(),
     r#"

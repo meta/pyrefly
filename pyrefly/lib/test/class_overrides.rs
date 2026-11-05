@@ -1511,6 +1511,30 @@ class B(A):
 );
 
 testcase!(
+    bug = "Overloaded classmethod override checks discard the class receiver",
+    test_override_classmethod_overload_narrow_signature,
+    r#"
+from typing import overload
+
+class Base:
+    @classmethod
+    @overload
+    def make(cls, x: int) -> int: ...
+    @classmethod
+    @overload
+    def make(cls, x: str) -> str: ...
+    @classmethod
+    def make(cls, x):
+        return x
+
+class Child(Base):
+    @classmethod
+    def make(cls, x: int) -> int:
+        return x
+"#,
+);
+
+testcase!(
     test_override_staticmethod,
     r#"
 class A:
