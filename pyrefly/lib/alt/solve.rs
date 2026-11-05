@@ -681,14 +681,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         match binding {
             BindingAnnotation::AnnotateExpr(target, x, class_key, override_func) => {
                 let type_form_context = target.type_form_context();
-                // An `@override` method repeating the base signature's `Any` is exempt
-                // from `explicit-any`; solve into a local collector only then, so the
-                // dictated error can be filtered out. The local collector is active
-                // even when the incoming one is not, so require an active incoming
-                // collector first: dependency modules use `Never` when errors are
-                // not requested.
+                // Filter repeated inherited `Any` only when both this operation and
+                // its module collect diagnostics. Binding solves use active local
+                // collectors even for silent dependencies, whose module collector
+                // is `Never`. Configured severity does not control collection.
                 let may_exempt = override_func.is_some()
                     && errors.is_active()
+                    && self.base_errors().is_active()
                     && matches!(
                         type_form_context,
                         TypeFormContext::ParameterAnnotation

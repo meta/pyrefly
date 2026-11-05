@@ -68,6 +68,4 @@ a -> c::KeyClassSynthesizedFields(ClassDefIndex(0))
 a -> b::KeyClassMro(ClassDefIndex(0))
 a -> b::KeyClassField(ClassDefIndex(0), Name("f"))
   b -> c::KeyClassField(ClassDefIndex(0), Name("f"))
-  b -> c::KeyClassField(ClassDefIndex(0), Name("f"))
-  b -> c::KeyClassField(ClassDefIndex(0), Name("f"))
 ```
