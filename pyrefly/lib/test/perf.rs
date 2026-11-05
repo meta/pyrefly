@@ -15,6 +15,7 @@ fn test_builtin_getattr_nested_arguments() -> anyhow::Result<()> {
     let mut code = String::from(
         "from typing import Any, assert_type\nclass C:\n    child: C\ndef test(c: C) -> None:\n",
     );
+    let mut contextual = String::new();
     for (name, expected) in [("child", "C"), ("missing", "Any")] {
         let mut receiver = String::from("c");
         let mut default = String::from("None");
@@ -24,7 +25,11 @@ fn test_builtin_getattr_nested_arguments() -> anyhow::Result<()> {
         }
         code.push_str(&format!("    assert_type({receiver}, {expected})\n"));
         code.push_str(&format!("    assert_type({default}, {expected} | None)\n"));
+        contextual.push_str(&format!(
+            "def contextual_{name}(c: C) -> {expected} | None:\n    return {default}\n",
+        ));
     }
+    code.push_str(&contextual);
     testcase_for_macro(TestEnv::new(), &code, file!(), line!())
 }
 
