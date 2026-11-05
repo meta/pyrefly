@@ -1111,6 +1111,7 @@ impl Bindings {
         x: ModModule,
         module_info: ModuleInfo,
         parse_errors: ModuleDiagnostics,
+        module_ranges: Arc<ModuleRanges>,
         exports: &Exports,
         solver: &Solver,
         lookup: &dyn LookupExport,
@@ -1125,10 +1126,6 @@ impl Bindings {
     ) -> Self {
         let module_range = x.range;
         let pytest_info = PytestBindingInfo::from_module(&x);
-        // Compute module ranges from the AST before consuming it. These are
-        // needed later for error collection, which runs after the AST may
-        // have been evicted.
-        let module_ranges = Arc::new(ModuleRanges::compute(&x, &module_info));
         let errors = ErrorCollector::new(module_info.dupe(), error_style);
         let shape_comments = ShapeComments::new(&x, &module_info, &errors);
         let mut builder = BindingsBuilder {

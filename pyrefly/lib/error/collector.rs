@@ -303,6 +303,30 @@ impl ErrorCollector {
         self.style
     }
 
+    /// Report each pyrefly `ignore-errors` directive found outside the preamble, where
+    /// it is inert.
+    pub(crate) fn add_misplaced_ignores(&self, misplaced: &[LineNumber]) {
+        for line in misplaced {
+            let buffer = self.module_info.lined_buffer();
+            let line_start = buffer.line_start(*line);
+            // Point the diagnostic at the directive itself, from the `#` to the end of the
+            // comment, rather than at the leading whitespace, so editor underlines land on it.
+            let line_text = buffer.content_in_line_range(*line, *line);
+            let leading_ws = (line_text.len() - line_text.trim_start().len()) as u32;
+            let content_len = line_text.trim_end().len() as u32;
+            let range = TextRange::new(
+                line_start + TextSize::new(leading_ws),
+                line_start + TextSize::new(content_len),
+            );
+            self.error_builder(
+                range,
+                ErrorKind::MisplacedIgnore,
+                MISPLACED_IGNORE_MESSAGE.to_owned(),
+            )
+            .emit();
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.errors.lock().is_empty()
     }
@@ -390,7 +414,6 @@ impl ErrorCollector {
         error_config: &ErrorConfig,
         fstring_ranges: &[(LineNumber, LineNumber)],
         ignore_all: &[Suppression],
-        misplaced: &[LineNumber],
         result: &mut CollectedErrors,
     ) {
         let mut errors = self.errors.lock();
@@ -401,7 +424,6 @@ impl ErrorCollector {
             error_config,
             fstring_ranges,
             ignore_all,
-            misplaced,
             result,
         );
     }
@@ -414,7 +436,6 @@ impl ErrorCollector {
         error_config: &ErrorConfig,
         fstring_ranges: &[(LineNumber, LineNumber)],
         ignore_all: &[Suppression],
-        misplaced: &[LineNumber],
         result: &mut CollectedErrors,
     ) {
         let mut errors: Vec<&Error> = snapshots
@@ -430,7 +451,6 @@ impl ErrorCollector {
             error_config,
             fstring_ranges,
             ignore_all,
-            misplaced,
             result,
         );
     }
@@ -442,7 +462,6 @@ impl ErrorCollector {
         error_config: &ErrorConfig,
         fstring_ranges: &[(LineNumber, LineNumber)],
         ignore_all: &[Suppression],
-        misplaced: &[LineNumber],
         result: &mut CollectedErrors,
     ) {
         if module_info.is_generated() && error_config.ignore_errors_in_generated_code {
@@ -472,8 +491,13 @@ impl ErrorCollector {
                     result.directives.push(err.with_severity(severity));
                 }
             } else {
-                let effect =
-                    Self::suppression_effect(err, fstring_ranges, ignore_all, error_config);
+                // A `misplaced-ignore` error is about a suppression comment, so the fix is to
+                // move or remove the comment rather than to suppress the error.
+                let effect = if err.error_kind() == ErrorKind::MisplacedIgnore {
+                    SuppressionEffect::None
+                } else {
+                    Self::suppression_effect(err, fstring_ranges, ignore_all, error_config)
+                };
                 let mut severity = error_config.display_config.severity(err.error_kind());
                 if effect == SuppressionEffect::Suppress {
                     result.suppressed.push(err.with_severity(severity));
@@ -491,64 +515,11 @@ impl ErrorCollector {
                 }
             }
         }
-        Self::collect_misplaced_ignores(module_info, misplaced, error_config, result);
-    }
-
-    /// Emit a diagnostic for each pyrefly `ignore-errors` directive found outside
-    /// the preamble, where it is inert. These are synthesized here rather than
-    /// during type checking so that every display surface and the `testcase!`
-    /// path (both of which funnel through `collect_into`) report them uniformly.
-    ///
-    /// Like `unused-ignore`, this is a suppression-hygiene diagnostic: it is
-    /// controlled via config severity rather than a per-line
-    /// `# pyrefly: ignore[misplaced-ignore]`, so it is emitted directly instead
-    /// of being routed through `is_error_suppressed` (the fix is to move or
-    /// remove the directive, not to silence the warning about it).
-    fn collect_misplaced_ignores(
-        module_info: &ModuleInfo,
-        misplaced: &[LineNumber],
-        error_config: &ErrorConfig,
-        result: &mut CollectedErrors,
-    ) {
-        if misplaced.is_empty() {
-            return;
-        }
-        let severity = error_config
-            .display_config
-            .severity(ErrorKind::MisplacedIgnore);
-        for line in misplaced {
-            let buffer = module_info.lined_buffer();
-            let line_start = buffer.line_start(*line);
-            // Point the diagnostic at the directive itself — from the `#` to the
-            // end of the comment — rather than the leading whitespace at the line
-            // start, so editor underlines land on the offending directive.
-            let line_text = buffer.content_in_line_range(*line, *line);
-            let leading_ws = (line_text.len() - line_text.trim_start().len()) as u32;
-            let content_len = line_text.trim_end().len() as u32;
-            let range = TextRange::new(
-                line_start + TextSize::new(leading_ws),
-                line_start + TextSize::new(content_len),
-            );
-            let err = Error::new(
-                module_info.dupe(),
-                range,
-                MISPLACED_IGNORE_MESSAGE.to_owned(),
-                Vec::new(),
-                ErrorKind::MisplacedIgnore,
-            );
-            match severity {
-                Severity::Ignore => result.disabled.push(err),
-                Severity::Hint => result.hints.push(err.with_severity(severity)),
-                Severity::Info | Severity::Warn | Severity::Error => {
-                    result.ordinary.push(err.with_severity(severity))
-                }
-            }
-        }
     }
 
     pub fn collect(&self, error_config: &ErrorConfig) -> CollectedErrors {
         let mut result = CollectedErrors::default();
-        self.collect_into(error_config, &[], &[], &[], &mut result);
+        self.collect_into(error_config, &[], &[], &mut result);
         result
     }
 }
@@ -939,21 +910,19 @@ mod tests {
             vec!["a"]
         );
 
+        add(
+            &errors,
+            TextRange::new(TextSize::new(1), TextSize::new(3)),
+            ErrorKind::MisplacedIgnore,
+            "misplaced".to_owned(),
+        );
         let config1 = ErrorConfig::new(
             Cow::Owned(display_config),
             true,
             Tool::default_enabled(),
             TypeIgnoreUnknownTagBehavior::NoEffect,
         );
-        let mut result = CollectedErrors::default();
-        errors.collect_into(
-            &config1,
-            &[],
-            &[],
-            &[LineNumber::new(2).expect("line number should be valid")],
-            &mut result,
-        );
-        assert!(result.ordinary.is_empty());
+        assert!(errors.collect(&config1).ordinary.is_empty());
     }
 
     #[test]

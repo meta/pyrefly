@@ -405,7 +405,6 @@ impl Errors {
                 &error_config,
                 &ranges.multi_line,
                 &ranges.ignore_all,
-                &ranges.misplaced_ignore_all,
                 &mut errors,
             );
         }
@@ -906,7 +905,6 @@ impl Errors {
                 &error_config,
                 &ranges.multi_line,
                 &ranges.ignore_all,
-                &ranges.misplaced_ignore_all,
                 &mut result,
             );
             let output_errors = Self::merge_display_errors(result.ordinary, result.directives);

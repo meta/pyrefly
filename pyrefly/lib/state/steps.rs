@@ -36,6 +36,7 @@ use crate::export::exports::LookupExport;
 use crate::module::parse::module_parse;
 use crate::solver::solver::Solver;
 use crate::solver::solver::SolverConfig;
+use crate::state::errors::ModuleRanges;
 use crate::state::load::Load;
 use crate::state::memory::MemoryFilesLookup;
 use crate::state::require::Require;
@@ -87,14 +88,21 @@ pub struct ParsedModule {
     module: Arc<ModModule>,
     tokens: Option<Arc<Tokens>>,
     errors: ModuleDiagnostics,
+    module_ranges: Arc<ModuleRanges>,
 }
 
 impl ParsedModule {
-    pub fn new(module: ModModule, tokens: Option<Tokens>, errors: ModuleDiagnostics) -> Self {
+    pub fn new(
+        module: ModModule,
+        tokens: Option<Tokens>,
+        errors: ModuleDiagnostics,
+        module_ranges: Arc<ModuleRanges>,
+    ) -> Self {
         Self {
             module: Arc::new(module),
             tokens: tokens.map(Arc::new),
             errors,
+            module_ranges,
         }
     }
 
@@ -108,6 +116,10 @@ impl ParsedModule {
 
     pub fn errors(&self) -> &ModuleDiagnostics {
         &self.errors
+    }
+
+    pub fn module_ranges(&self) -> &Arc<ModuleRanges> {
+        &self.module_ranges
     }
 }
 
@@ -507,7 +519,14 @@ impl Step {
             ctx.require.keep_ast(),
         );
         load.module_info.initialize_ignore(ignore);
-        Arc::new(ParsedModule::new(module, tokens, errors.finish()))
+        let module_ranges = Arc::new(ModuleRanges::compute(&module, &load.module_info));
+        errors.add_misplaced_ignores(&module_ranges.misplaced_ignore_all);
+        Arc::new(ParsedModule::new(
+            module,
+            tokens,
+            errors.finish(),
+            module_ranges,
+        ))
     }
 
     #[inline(never)]
@@ -548,6 +567,7 @@ impl Step {
             Arc::unwrap_or_clone(parsed_ast.module()),
             load.module_info.dupe(),
             parsed_ast.errors().dupe(),
+            parsed_ast.module_ranges().dupe(),
             &exports,
             &solver,
             ctx.lookup,
