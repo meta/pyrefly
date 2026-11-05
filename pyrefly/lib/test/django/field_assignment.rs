@@ -10,7 +10,6 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 django_testcase!(
-    bug = "Constructor inference replaces the field assignment contract",
     test_field_db_default_assignment_contract,
     r#"
 from typing import assert_type
@@ -25,9 +24,9 @@ assert_type(Record().optional_count, int | None)
 
 def update(record: Record) -> None:
     record.count = 1
-    record.count = F("count") + 1  # E: is not assignable to attribute `count`
-    record.optional_count = None  # E: is not assignable to attribute `optional_count`
-    record.count = "bad"  # E: is not assignable to attribute `count`
+    record.count = F("count") + 1
+    record.optional_count = None
+    record.count = object()  # E: is not assignable to attribute `count`
 "#,
 );
 

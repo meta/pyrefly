@@ -259,22 +259,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         )
     }
 
-    /// Infer missing descriptor arguments without replacing explicit arguments.
+    /// Fill inferred descriptor arguments while retaining declared arguments.
     fn specialize_django_field_descriptor(
         &self,
         field: &ClassType,
         get_type: Type,
         set_type: Type,
+        infer_arguments: bool,
     ) -> ClassType {
         let mut field = field.clone();
         for (param, arg) in field.targs_mut().iter_paired_mut() {
             match param.name().as_str() {
-                "_ST" => {
-                    if matches!(arg, Type::Any(AnyStyle::Implicit)) {
-                        *arg = set_type.clone();
-                    }
+                "_ST" if infer_arguments || matches!(arg, Type::Any(AnyStyle::Implicit)) => {
+                    *arg = set_type.clone();
                 }
-                "_GT" if matches!(arg, Type::Any(AnyStyle::Implicit)) => {
+                "_GT" if infer_arguments || matches!(arg, Type::Any(AnyStyle::Implicit)) => {
                     *arg = get_type.clone();
                 }
                 "_To" | "_Through" if matches!(arg, Type::Any(AnyStyle::Implicit)) => {
@@ -309,10 +308,44 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             },
             _ => None,
         };
+        if !self.get_metadata_for_class(class).is_django_model() {
+            return self
+                .get_django_field_types(ty, class, Some(name), initial_value)
+                .map(|(get_type, _)| get_type);
+        }
+        let has_annotation_type = match definition {
+            ClassFieldDefinition::AssignedInBody {
+                annotation: Some(annotation),
+                ..
+            }
+            | ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => {
+                self.get_idx(*annotation).annotation.ty.is_some()
+            }
+            _ => false,
+        };
+        // Constructor type parameters describe inference holes before arguments such as
+        // `db_default` solve them. A specialized constructor has no such parameters.
+        let infer_arguments = !has_annotation_type
+            && initial_value
+                .and_then(|expr| expr.as_call_expr())
+                .and_then(|call| {
+                    self.unwrap_class_object_silently(
+                        &self.expr_infer(&call.func, &self.error_swallower()),
+                    )
+                })
+                .is_some_and(|(parameters, _)| !parameters.is_empty());
         let specialized = self.distribute_over_union(ty, |member| {
-            let Some((get_type, set_type)) =
+            let types = if infer_arguments && let Type::ClassType(field) = member {
+                self.get_django_field_types_from_class(
+                    field.class_object(),
+                    class,
+                    Some(name),
+                    initial_value,
+                )
+            } else {
                 self.get_django_field_types(member, class, Some(name), initial_value)
-            else {
+            };
+            let Some((get_type, set_type)) = types else {
                 return member.clone();
             };
             if let Type::ClassType(field) = member
@@ -321,9 +354,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let Type::ClassType(field) = self.solver().force(member.clone()) else {
                     unreachable!("forcing a field instance preserves its class type")
                 };
-                let override_type = if field.targs().iter_paired().any(|(param, arg)| {
-                    param.name().as_str() == "_ST" && !matches!(arg, Type::Any(AnyStyle::Implicit))
-                }) {
+                let override_type = if !infer_arguments
+                    && field.targs().iter_paired().any(|(param, arg)| {
+                        param.name().as_str() == "_ST"
+                            && !matches!(arg, Type::Any(AnyStyle::Implicit))
+                    }) {
                     set_type.clone()
                 } else {
                     get_type.clone()
@@ -332,6 +367,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     &field,
                     get_type.clone(),
                     set_type.clone(),
+                    infer_arguments,
                 );
                 self.heap
                     .mk_class_type(field.with_django_metadata(DjangoClassMetadata::Field {
