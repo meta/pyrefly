@@ -2007,8 +2007,7 @@ impl CheckArgs {
         let output_format = defaults.output_format;
 
         // Every diagnostic below borrows its error, from `loads` or from `unused_ignores`.
-        let collected = loads.collect_error_refs();
-        let unused_ignores = loads.collect_unused_ignore_errors_for_refs(&collected);
+        let (collected, unused_ignores) = loads.collect_error_refs_with_unused_ignores();
         let mut ordinary = collected.ordinary;
         ordinary.extend(loads.shown_unused_ignore_errors(&unused_ignores));
         // Hints go through baselines and `--min-severity` like other diagnostics.

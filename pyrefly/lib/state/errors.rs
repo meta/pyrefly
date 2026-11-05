@@ -408,16 +408,35 @@ impl Errors {
         errors
     }
 
-    pub(crate) fn collect_error_refs(&self) -> BorrowedCollectedErrors<'_> {
+    /// Collate every module's diagnostics, borrowing them, along with the unused-suppression
+    /// diagnostics, which each module works out from its own diagnostics as it collates them.
+    pub(crate) fn collect_error_refs_with_unused_ignores(
+        &self,
+    ) -> (BorrowedCollectedErrors<'_>, Vec<Error>) {
         let mut errors = BorrowedCollectedErrors::default();
-        for module in self
-            .map_modules(Self::collect_module_error_refs)
-            .into_iter()
-            .flatten()
-        {
-            errors.append(module);
+        let mut unused = Vec::new();
+        for (module_errors, module_unused) in self.map_modules(|module| {
+            let (load, _, _, _, module_ranges, config) = module;
+            let module_errors = Self::collect_module_error_refs(module).unwrap_or_default();
+            let path = load.module_info.path();
+            let module_unused = Self::collect_unused_ignore_errors_for_module(
+                &load.module_info,
+                module_ranges.as_deref(),
+                config.enabled_ignores(path).as_ref(),
+                config.type_ignore_unknown_tag_behavior(path),
+                module_errors
+                    .suppressed
+                    .iter()
+                    .chain(&module_errors.ordinary)
+                    .chain(&module_errors.hints)
+                    .map(CollectedDiagnostic::error),
+            );
+            (module_errors, module_unused)
+        }) {
+            errors.append(module_errors);
+            unused.extend(module_unused);
         }
-        errors
+        (errors, unused)
     }
 
     /// Collate one module's diagnostics, or `None` if the module does not report any.
@@ -550,8 +569,8 @@ impl Errors {
         &'a self,
         unused: &'a mut Vec<Error>,
     ) -> (Vec<CollectedDiagnostic<'a>>, Vec<CollectedDiagnostic<'a>>) {
-        let collected = self.collect_error_refs();
-        *unused = self.collect_unused_ignore_errors_for_refs(&collected);
+        let (collected, unused_ignores) = self.collect_error_refs_with_unused_ignores();
+        *unused = unused_ignores;
         let unused: &'a [Error] = unused;
         let config_by_path = self.config_by_path();
         let mut normal = collected.directives;
@@ -607,21 +626,6 @@ impl Errors {
             .iter()
             .map(|(load, _, _, _, _, config)| (load.module_info.path(), config))
             .collect()
-    }
-
-    /// The unused-suppression diagnostics for `collected`.
-    pub(crate) fn collect_unused_ignore_errors_for_refs(
-        &self,
-        collected: &BorrowedCollectedErrors<'_>,
-    ) -> Vec<Error> {
-        self.collect_unused_ignore_errors_from(
-            collected
-                .suppressed
-                .iter()
-                .chain(&collected.ordinary)
-                .chain(&collected.hints)
-                .map(CollectedDiagnostic::error),
-        )
     }
 
     /// The diagnostics in `unused` that their module's config shows, at the severity it
