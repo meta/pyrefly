@@ -17,10 +17,10 @@ use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
+use std::io::stdout;
 use std::path::Path;
 use std::path::PathBuf;
 
-use anstream::stdout;
 use anyhow::Context as _;
 use itertools::Itertools as _;
 use lsp_types::Uri;
@@ -386,7 +386,7 @@ pub(crate) fn write_error_sarif_to_console(
     relative_to: &Path,
     errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    buffered_write_error_sarif(stdout(), version, relative_to, errors)
+    buffered_write_error_sarif(stdout().lock(), version, relative_to, errors)
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::fmt::Display;
 use std::fs::File;
+use std::io;
 use std::io::BufWriter;
 use std::io::Read;
 use std::io::Write;
@@ -785,15 +786,32 @@ fn write_serializable_error_text_to_console(
     errors: &[SerializableError],
     verbose: bool,
 ) -> anyhow::Result<()> {
-    let stdout = stdout();
-    let color_choice = stdout.current_choice();
-    let mut renderer = ErrorRenderer::new(BufWriter::new(stdout.lock()), color_choice);
-    // Serialized diagnostics arrive as a complete batch, so there is no partial result to flush.
-    for error in errors {
-        renderer.write_serializable(error, verbose)?;
+    fn write(
+        mut renderer: ErrorRenderer<impl Write>,
+        errors: &[SerializableError],
+        verbose: bool,
+    ) -> anyhow::Result<()> {
+        // Serialized diagnostics arrive as a complete batch, so there is no partial result to flush.
+        for error in errors {
+            renderer.write_serializable(error, verbose)?;
+        }
+        renderer.flush()?;
+        Ok(())
     }
-    renderer.flush()?;
-    Ok(())
+
+    // See `write_error_text_to_console` for why uncolored text bypasses `anstream`.
+    match stdout().current_choice() {
+        ColorChoice::Never => write(
+            ErrorRenderer::plain(BufWriter::new(io::stdout().lock())),
+            errors,
+            verbose,
+        ),
+        color_choice => write(
+            ErrorRenderer::new(BufWriter::new(stdout().lock()), color_choice),
+            errors,
+            verbose,
+        ),
+    }
 }
 
 #[derive(Serialize)]
@@ -803,9 +821,20 @@ struct LegacyErrorReferences<'a> {
 
 fn write_serializable_error_json_to_console(errors: &[SerializableError]) -> anyhow::Result<()> {
     let errors = errors.iter().map(SerializableError::legacy_error).collect();
-    let mut writer = BufWriter::new(stdout());
+    let mut writer = BufWriter::new(io::stdout().lock());
     serde_json::to_writer_pretty(&mut writer, &LegacyErrorReferences { errors })?;
     writer.flush()?;
+    Ok(())
+}
+
+fn write_error_text(
+    mut renderer: ErrorRenderer<impl Write>,
+    relative_to: &Path,
+    errors: &[impl ReportedError],
+    verbose: bool,
+) -> anyhow::Result<()> {
+    renderer.write_all(errors, relative_to, verbose)?;
+    renderer.flush()?;
     Ok(())
 }
 
@@ -815,12 +844,12 @@ fn write_error_text_to_file(
     errors: &[impl ReportedError],
     verbose: bool,
 ) -> anyhow::Result<()> {
-    let mut renderer = ErrorRenderer::plain(BufWriter::new(File::create(path)?));
-    for e in errors {
-        renderer.write(e, relative_to, verbose)?;
-    }
-    renderer.flush()?;
-    Ok(())
+    write_error_text(
+        ErrorRenderer::plain(BufWriter::new(File::create(path)?)),
+        relative_to,
+        errors,
+        verbose,
+    )
 }
 
 fn write_error_text_to_console(
@@ -828,15 +857,23 @@ fn write_error_text_to_console(
     errors: &[impl ReportedError],
     verbose: bool,
 ) -> anyhow::Result<()> {
-    let stdout = stdout();
-    let color_choice = stdout.current_choice();
-    let mut renderer = ErrorRenderer::new(BufWriter::new(stdout.lock()), color_choice);
-    for error in errors {
-        renderer.write(error, relative_to, verbose)?;
-        renderer.flush()?;
+    // `anstream` strips escape codes from text written to a stream that does not take
+    // colors, which means scanning every byte. Uncolored text has no escape codes, so it is
+    // written to the stream directly.
+    match stdout().current_choice() {
+        ColorChoice::Never => write_error_text(
+            ErrorRenderer::plain(BufWriter::new(io::stdout().lock())),
+            relative_to,
+            errors,
+            verbose,
+        ),
+        color_choice => write_error_text(
+            ErrorRenderer::new(BufWriter::new(stdout().lock()), color_choice),
+            relative_to,
+            errors,
+            verbose,
+        ),
     }
-    renderer.flush()?;
-    Ok(())
 }
 
 pub(crate) fn write_errors_to_stderr(
@@ -844,15 +881,21 @@ pub(crate) fn write_errors_to_stderr(
     errors: &[impl ReportedError],
     verbose: bool,
 ) -> anyhow::Result<()> {
-    let stderr = stderr();
-    let color_choice = stderr.current_choice();
-    let mut renderer = ErrorRenderer::new(BufWriter::new(stderr.lock()), color_choice);
-    for error in errors {
-        renderer.write(error, relative_to, verbose)?;
-        renderer.flush()?;
+    // See `write_error_text_to_console` for why uncolored text bypasses `anstream`.
+    match stderr().current_choice() {
+        ColorChoice::Never => write_error_text(
+            ErrorRenderer::plain(BufWriter::new(io::stderr().lock())),
+            relative_to,
+            errors,
+            verbose,
+        ),
+        color_choice => write_error_text(
+            ErrorRenderer::new(BufWriter::new(stderr().lock()), color_choice),
+            relative_to,
+            errors,
+            verbose,
+        ),
     }
-    renderer.flush()?;
-    Ok(())
 }
 
 fn write_error_json(
@@ -860,8 +903,7 @@ fn write_error_json(
     relative_to: &Path,
     errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    let legacy_errors = LegacyErrors::from_errors(relative_to, errors);
-    serde_json::to_writer_pretty(writer, &legacy_errors)?;
+    LegacyErrors::write_json(writer, relative_to, errors)?;
     Ok(())
 }
 
@@ -912,7 +954,7 @@ fn write_error_json_to_console(
     relative_to: &Path,
     errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    buffered_write_error_json(stdout(), relative_to, errors)
+    buffered_write_error_json(io::stdout().lock(), relative_to, errors)
 }
 
 fn write_error_github(
@@ -943,7 +985,7 @@ fn write_error_github_to_file(path: &Path, errors: &[impl ReportedError]) -> any
 }
 
 fn write_error_github_to_console(errors: &[impl ReportedError]) -> anyhow::Result<()> {
-    buffered_write_error_github(stdout(), errors)
+    buffered_write_error_github(io::stdout().lock(), errors)
 }
 
 fn write_error_full_text_with_github(
@@ -955,9 +997,7 @@ fn write_error_full_text_with_github(
     let mut writer = BufWriter::new(writer);
     {
         let mut renderer = ErrorRenderer::new(&mut writer, color_choice);
-        for error in errors {
-            renderer.write(error, relative_to, true)?;
-        }
+        renderer.write_all(errors, relative_to, true)?;
         renderer.flush()?;
     }
     write_error_github(&mut writer, errors)?;
@@ -977,9 +1017,18 @@ fn write_error_full_text_with_github_to_console(
     relative_to: &Path,
     errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    let stdout = stdout();
-    let color_choice = stdout.current_choice();
-    write_error_full_text_with_github(stdout.lock(), color_choice, relative_to, errors)
+    // See `write_error_text_to_console` for why uncolored text bypasses `anstream`.
+    match stdout().current_choice() {
+        ColorChoice::Never => write_error_full_text_with_github(
+            io::stdout().lock(),
+            ColorChoice::Never,
+            relative_to,
+            errors,
+        ),
+        color_choice => {
+            write_error_full_text_with_github(stdout().lock(), color_choice, relative_to, errors)
+        }
+    }
 }
 
 /// True for characters allowed by the XML 1.0 `Char` production. Everything else
@@ -1103,7 +1152,7 @@ fn write_error_junit_xml_to_console(
     relative_to: &Path,
     errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    buffered_write_error_junit_xml(stdout(), relative_to, errors)
+    buffered_write_error_junit_xml(io::stdout().lock(), relative_to, errors)
 }
 
 fn severity_to_github_command(severity: Severity) -> Option<&'static str> {
@@ -1188,7 +1237,7 @@ fn write_error_codeclimate_to_console(
     relative_to: &Path,
     errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    buffered_write_error_codeclimate(stdout(), relative_to, errors)
+    buffered_write_error_codeclimate(io::stdout().lock(), relative_to, errors)
 }
 
 /// A data structure to facilitate the creation of handles for all the files we want to check.
@@ -2024,8 +2073,10 @@ impl CheckArgs {
 
         // Every diagnostic below borrows its error, from `loads` or from `unused_ignores`.
         let (collected, unused_ignores) = loads.collect_error_refs_with_unused_ignores();
+        let shown_unused_ignores = loads.shown_unused_ignore_errors(&unused_ignores);
         let mut ordinary = collected.ordinary;
-        ordinary.extend(loads.shown_unused_ignore_errors(&unused_ignores));
+        ordinary.reserve_exact(shown_unused_ignores.len() + collected.hints.len());
+        ordinary.extend(shown_unused_ignores);
         // Hints go through baselines and `--min-severity` like other diagnostics.
         ordinary.extend(collected.hints);
         let mut baseline = Vec::new();
@@ -2064,12 +2115,12 @@ impl CheckArgs {
         };
 
         let directives = with_status(collected.directives, baseline_status);
-        let ordinary_errors = with_status(ordinary, baseline_status);
+        let mut ordinary_errors = with_status(ordinary, baseline_status);
 
         // Baseline matches are displayed at a capped severity. Baseline maintenance uses
         // the original severity and baseline representation.
         let baseline_error_level = defaults.baseline_error_level;
-        let displayed_baseline_errors = if baseline_error_level == Severity::Ignore {
+        let mut baseline_errors = if baseline_error_level == Severity::Ignore {
             Vec::new()
         } else {
             baseline
@@ -2089,13 +2140,9 @@ impl CheckArgs {
         // should not get a suppression comment written into source.
         let min_severity = defaults.min_severity;
         let show_severity = defaults.show_severity;
-        let (ordinary_errors, mut hidden_errors): (Vec<_>, Vec<_>) = ordinary_errors
-            .into_iter()
-            .partition(|e| e.severity() >= show_severity);
-        let (baseline_errors, hidden_baseline_errors): (Vec<_>, Vec<_>) = displayed_baseline_errors
-            .into_iter()
-            .partition(|e| e.severity() >= show_severity);
-        hidden_errors.extend(hidden_baseline_errors);
+        let hidden = |e: &mut CollectedDiagnostic| e.severity() < show_severity;
+        let mut hidden_errors: Vec<_> = ordinary_errors.extract_if(.., hidden).collect();
+        hidden_errors.extend(baseline_errors.extract_if(.., hidden));
         let fails = |e: &&CollectedDiagnostic| e.severity() >= min_severity;
 
         // Suppress operates on ordinary diagnostics only — directives are

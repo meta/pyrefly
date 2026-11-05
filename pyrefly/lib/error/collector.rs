@@ -173,14 +173,26 @@ pub struct CollectedErrors {
     pub baseline: Vec<Error>,
 }
 
+/// Concatenate the vectors that `field` picks out of `parts`, allocating the result once.
+fn concat<P, T>(parts: &mut [P], field: impl Fn(&mut P) -> &mut Vec<T>) -> Vec<T> {
+    let mut result = Vec::with_capacity(parts.iter_mut().map(|part| field(part).len()).sum());
+    for part in parts {
+        result.append(field(part));
+    }
+    result
+}
+
 impl CollectedErrors {
-    pub(crate) fn append(&mut self, other: Self) {
-        self.ordinary.extend(other.ordinary);
-        self.hints.extend(other.hints);
-        self.directives.extend(other.directives);
-        self.suppressed.extend(other.suppressed);
-        self.disabled.extend(other.disabled);
-        self.baseline.extend(other.baseline);
+    /// Concatenate each category of `parts`.
+    pub(crate) fn concat(mut parts: Vec<Self>) -> Self {
+        Self {
+            ordinary: concat(&mut parts, |part| &mut part.ordinary),
+            hints: concat(&mut parts, |part| &mut part.hints),
+            directives: concat(&mut parts, |part| &mut part.directives),
+            suppressed: concat(&mut parts, |part| &mut part.suppressed),
+            disabled: concat(&mut parts, |part| &mut part.disabled),
+            baseline: concat(&mut parts, |part| &mut part.baseline),
+        }
     }
 }
 
@@ -253,12 +265,15 @@ pub(crate) struct BorrowedCollectedErrors<'a> {
 }
 
 impl BorrowedCollectedErrors<'_> {
-    pub(crate) fn append(&mut self, other: Self) {
-        self.ordinary.extend(other.ordinary);
-        self.hints.extend(other.hints);
-        self.directives.extend(other.directives);
-        self.suppressed.extend(other.suppressed);
-        self.disabled.extend(other.disabled);
+    /// Concatenate each category of `parts`.
+    pub(crate) fn concat(mut parts: Vec<Self>) -> Self {
+        Self {
+            ordinary: concat(&mut parts, |part| &mut part.ordinary),
+            hints: concat(&mut parts, |part| &mut part.hints),
+            directives: concat(&mut parts, |part| &mut part.directives),
+            suppressed: concat(&mut parts, |part| &mut part.suppressed),
+            disabled: concat(&mut parts, |part| &mut part.disabled),
+        }
     }
 
     pub(crate) fn into_owned(self, result: &mut CollectedErrors) {

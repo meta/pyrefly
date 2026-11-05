@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::io;
+use std::io::Write;
 use std::path::Path;
 
 use pyrefly_config::error_kind::Severity;
@@ -174,6 +176,81 @@ impl LegacyErrors {
         };
         Self { errors }
     }
+
+    /// Write the JSON that `serde_json::to_writer_pretty` writes for the `LegacyErrors` built
+    /// from `errors`, without building it. Many errors are converted and serialized in
+    /// parallel, each chunk into its own buffer, and the buffers are written in order. The
+    /// work is done in waves, so only a wave's buffers are held at once.
+    pub fn write_json<E: ReportedError>(
+        writer: &mut impl Write,
+        relative_to: &Path,
+        errors: &[E],
+    ) -> io::Result<()> {
+        const CHUNK: usize = 1024;
+        if errors.is_empty() {
+            return writer.write_all(b"{\n  \"errors\": []\n}");
+        }
+        let serialize = |chunk: &[E]| {
+            let mut buffer = Vec::new();
+            for run in chunk.chunk_by(|a, b| a.error().path() == b.error().path()) {
+                let path = relative_path(relative_to, run[0].error());
+                for reported in run {
+                    if !buffer.is_empty() {
+                        buffer.extend_from_slice(b",\n");
+                    }
+                    // Each error is an element of the array that is the value of `errors`,
+                    // two levels into the document, so every line is indented four spaces.
+                    buffer.extend_from_slice(b"    ");
+                    serde_json::to_writer_pretty(
+                        Indented(&mut buffer),
+                        &LegacyError::with_path(path.clone(), reported),
+                    )
+                    .expect("serializing to a `Vec` cannot fail");
+                }
+            }
+            buffer
+        };
+        writer.write_all(b"{\n  \"errors\": [\n")?;
+        let mut first = true;
+        for wave in errors.chunks(CHUNK * rayon::current_num_threads() * 4) {
+            let buffers: Vec<Vec<u8>> = if wave.len() <= CHUNK {
+                vec![serialize(wave)]
+            } else {
+                wave.par_chunks(CHUNK).map(serialize).collect()
+            };
+            for buffer in buffers {
+                if !first {
+                    writer.write_all(b",\n")?;
+                }
+                first = false;
+                writer.write_all(&buffer)?;
+            }
+        }
+        writer.write_all(b"\n  ]\n}")
+    }
+}
+
+/// Writes to the inner writer, indenting each line after the first by four spaces. JSON
+/// escapes newlines inside strings, so every newline in pretty-printed JSON is between
+/// tokens, and this nests the JSON two levels deeper.
+struct Indented<W>(W);
+
+impl<W: Write> Write for Indented<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut lines = buf.split(|byte| *byte == b'\n');
+        if let Some(first) = lines.next() {
+            self.0.write_all(first)?;
+        }
+        for line in lines {
+            self.0.write_all(b"\n    ")?;
+            self.0.write_all(line)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -269,6 +346,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use dupe::Dupe;
     use pyrefly_python::module::Module;
     use pyrefly_python::module_name::ModuleName;
     use pyrefly_python::module_path::ModulePath;
@@ -278,6 +356,47 @@ mod tests {
     use super::*;
     use crate::config::error_kind::ErrorKind;
     use crate::error::error::BaselineStatus;
+
+    #[test]
+    fn test_write_json_matches_serializing_legacy_errors() {
+        let contents = Arc::new("x = 1\n".repeat(2000));
+        let errors: Vec<Error> = ["foo", "bar"]
+            .into_iter()
+            .flat_map(|name| {
+                let module = Module::new(
+                    ModuleName::from_str(name),
+                    ModulePath::filesystem(PathBuf::from(format!("/repo/{name}.py"))),
+                    contents.dupe(),
+                );
+                (0..1500u32).map(move |i| {
+                    let start = TextSize::new(i * 6);
+                    Error::new(
+                        module.dupe(),
+                        TextRange::new(start, start + TextSize::new(1)),
+                        format!("error {i} with \"quotes\""),
+                        vec!["detail\n  over two lines".to_owned()],
+                        ErrorKind::BadAssignment,
+                    )
+                    .with_baseline_status(BaselineStatus::Unmatched)
+                })
+            })
+            .collect();
+        // Enough errors to be written in parallel, a few, and none.
+        for errors in [&errors[..], &errors[..3], &[]] {
+            let mut expected = Vec::new();
+            serde_json::to_writer_pretty(
+                &mut expected,
+                &LegacyErrors::from_errors(Path::new("/repo"), errors),
+            )
+            .unwrap();
+            let mut written = Vec::new();
+            LegacyErrors::write_json(&mut written, Path::new("/repo"), errors).unwrap();
+            assert_eq!(
+                String::from_utf8(written).unwrap(),
+                String::from_utf8(expected).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn test_relativize_when_error_is_not_under_relative_to() {

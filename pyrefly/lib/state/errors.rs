@@ -395,17 +395,13 @@ impl Errors {
     }
 
     pub fn collect_errors(&self) -> CollectedErrors {
-        let mut errors = CollectedErrors::default();
         // Copy each module's diagnostics on the thread that collated them.
         let modules = self.map_modules(|module| {
             let mut owned = CollectedErrors::default();
             Self::collect_module_error_refs(module)?.into_owned(&mut owned);
             Some(owned)
         });
-        for module in modules.into_iter().flatten() {
-            errors.append(module);
-        }
-        errors
+        CollectedErrors::concat(modules.into_iter().flatten().collect())
     }
 
     /// Collate every module's diagnostics, borrowing them, along with the unused-suppression
@@ -413,30 +409,31 @@ impl Errors {
     pub(crate) fn collect_error_refs_with_unused_ignores(
         &self,
     ) -> (BorrowedCollectedErrors<'_>, Vec<Error>) {
-        let mut errors = BorrowedCollectedErrors::default();
-        let mut unused = Vec::new();
-        for (module_errors, module_unused) in self.map_modules(|module| {
-            let (load, _, _, _, module_ranges, config) = module;
-            let module_errors = Self::collect_module_error_refs(module).unwrap_or_default();
-            let path = load.module_info.path();
-            let module_unused = Self::collect_unused_ignore_errors_for_module(
-                &load.module_info,
-                module_ranges.as_deref(),
-                config.enabled_ignores(path).as_ref(),
-                config.type_ignore_unknown_tag_behavior(path),
-                module_errors
-                    .suppressed
-                    .iter()
-                    .chain(&module_errors.ordinary)
-                    .chain(&module_errors.hints)
-                    .map(CollectedDiagnostic::error),
-            );
-            (module_errors, module_unused)
-        }) {
-            errors.append(module_errors);
-            unused.extend(module_unused);
-        }
-        (errors, unused)
+        let (errors, unused): (Vec<_>, Vec<_>) = self
+            .map_modules(|module| {
+                let (load, _, _, _, module_ranges, config) = module;
+                let module_errors = Self::collect_module_error_refs(module).unwrap_or_default();
+                let path = load.module_info.path();
+                let module_unused = Self::collect_unused_ignore_errors_for_module(
+                    &load.module_info,
+                    module_ranges.as_deref(),
+                    config.enabled_ignores(path).as_ref(),
+                    config.type_ignore_unknown_tag_behavior(path),
+                    module_errors
+                        .suppressed
+                        .iter()
+                        .chain(&module_errors.ordinary)
+                        .chain(&module_errors.hints)
+                        .map(CollectedDiagnostic::error),
+                );
+                (module_errors, module_unused)
+            })
+            .into_iter()
+            .unzip();
+        (
+            BorrowedCollectedErrors::concat(errors),
+            unused.into_iter().flatten().collect(),
+        )
     }
 
     /// Collate one module's diagnostics, or `None` if the module does not report any.
