@@ -471,11 +471,21 @@ pub struct ClassType(Class, TArgs, Option<Arc<DjangoClassMetadata>>);
 /// its effective base for inherited members and nominal upcasts. Type traversal and substitution
 /// include this data, and instance binding preserves it when replacing `Self`. Explicit method
 /// return types stand alone: neither their model nor their row is rebound to the manager's model.
+/// Fields retain construction-specific accessor and override contracts.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[derive(TypeEq)]
 pub enum DjangoClassMetadata {
-    Manager { queryset: ClassType },
-    SpecializedBase { base: ClassType },
+    Manager {
+        queryset: ClassType,
+    },
+    SpecializedBase {
+        base: ClassType,
+    },
+    Field {
+        get_type: Type,
+        set_type: Type,
+        override_type: Type,
+    },
 }
 
 impl Visit<Type> for Arc<DjangoClassMetadata> {
@@ -483,6 +493,15 @@ impl Visit<Type> for Arc<DjangoClassMetadata> {
         match self.as_ref() {
             DjangoClassMetadata::Manager { queryset } => queryset.visit(f),
             DjangoClassMetadata::SpecializedBase { base } => base.visit(f),
+            DjangoClassMetadata::Field {
+                get_type,
+                set_type,
+                override_type,
+            } => {
+                f(get_type);
+                f(set_type);
+                f(override_type);
+            }
         }
     }
 }
@@ -492,6 +511,15 @@ impl VisitMut<Type> for Arc<DjangoClassMetadata> {
         match Arc::make_mut(self) {
             DjangoClassMetadata::Manager { queryset } => queryset.visit_mut(f),
             DjangoClassMetadata::SpecializedBase { base } => base.visit_mut(f),
+            DjangoClassMetadata::Field {
+                get_type,
+                set_type,
+                override_type,
+            } => {
+                f(get_type);
+                f(set_type);
+                f(override_type);
+            }
         }
     }
 }

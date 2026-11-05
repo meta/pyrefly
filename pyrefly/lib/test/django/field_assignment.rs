@@ -118,6 +118,8 @@ class Record(models.Model):
     count = models.IntegerField()
     optional_count = models.IntegerField(null=True)
 
+assert_type(Record.count, models.IntegerField)
+
 def update(record: Record) -> None:
     assert_type(record.count, int)
     assert_type(record.optional_count, int | None)

@@ -187,9 +187,21 @@ impl PropertyMetadata {
     }
 }
 
+/// A generated descriptor setter that stores values compatible with its read type.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Visit, VisitMut, TypeEq
+)]
+pub struct DescriptorSetterMetadata {
+    pub read_type: Type,
+    /// The assignment contract required of replacements, excluding inferred coercions.
+    pub override_type: Type,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[derive(Visit, VisitMut, TypeEq)]
 pub struct FuncFlags {
+    /// The storage contract of a generated `__set__` method.
+    pub descriptor_setter: Option<Box<DescriptorSetterMetadata>>,
     pub is_overload: bool,
     pub is_staticmethod: bool,
     pub is_classmethod: bool,

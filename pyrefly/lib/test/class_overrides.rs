@@ -754,7 +754,7 @@ class D:
 class A:
     d = D()
 class B(A):
-    d = 42  # E: `B.d` and `A.d` must both be descriptors
+    d = 42  # E: not assignable from `str`
     "#,
 );
 
@@ -767,7 +767,7 @@ class D:
 class A:
     d: D = D()
 class B(A):
-    d: int = 42  # E: `B.d` and `A.d` must both be descriptors
+    d: int = 42  # E: not assignable from `str`
     "#,
 );
 
