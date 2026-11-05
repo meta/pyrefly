@@ -474,6 +474,98 @@ A().
 }
 
 #[test]
+fn dot_complete_from_getattr_literal_parameter_union_receivers() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    def __getattr__(self, name: Literal["a", "shared"]) -> int: ...
+
+class B:
+    def __getattr__(self, name: Literal["b", "shared"]) -> str: ...
+
+class C: pass
+
+class Static:
+    @staticmethod
+    def __getattr__(name: Literal["static"]) -> bool: ...
+
+def f(both: A | B, missing: A | C, mixed_binding: A | Static):
+    both.
+#        ^
+    missing.
+#           ^
+    mixed_binding.
+#                 ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let txn = state.transaction();
+    let fields: Vec<Vec<String>> = extract_cursors_for_test(code)
+        .into_iter()
+        .map(|position| {
+            txn.completion(
+                &handles["main"],
+                position,
+                ImportFormat::Absolute,
+                true,
+                None,
+            )
+            .into_iter()
+            .filter(|item| {
+                item.kind == Some(CompletionItemKind::Field)
+                    && !is_object_attribute(item)
+                    && item.label != "__getattr__"
+            })
+            .map(|item| format!("{}: {}", item.label, item.detail.unwrap()))
+            .collect()
+        })
+        .collect();
+    // TODO: Literal-derived fields are missing on union receivers.
+    assert_eq!(fields, [Vec::<String>::new(), Vec::new(), Vec::new()]);
+}
+
+#[test]
+fn dot_complete_from_getattr_literal_parameter_preserves_defined_fields() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    real: str = ""
+    def __getattr__(self, name: Literal["real", "virtual"]) -> int: ...
+
+class B(A): pass
+
+B().
+#   ^
+B.
+# ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let txn = state.transaction();
+    let positions = extract_cursors_for_test(code);
+    assert_eq!(
+        dict_field_labels(&txn, &handles["main"], positions[0]),
+        ["real", "virtual"],
+    );
+    assert_eq!(
+        dict_field_labels(&txn, &handles["main"], positions[1]),
+        ["real"],
+    );
+    let real = txn
+        .completion(
+            &handles["main"],
+            positions[0],
+            ImportFormat::Absolute,
+            true,
+            None,
+        )
+        .into_iter()
+        .find(|item| item.label == "real")
+        .unwrap();
+    assert_eq!(real.detail.as_deref(), Some("str"));
+}
+
+#[test]
 fn dict_key_completion_from_literal() {
     let code = r#"
 def use_dict():
