@@ -512,6 +512,7 @@ def f(both: A | B, missing: A | C, mixed_binding: A | Static):
             )
             .into_iter()
             .filter(|item| {
+                // The method itself is a union and is classified as a field.
                 item.kind == Some(CompletionItemKind::Field)
                     && !is_object_attribute(item)
                     && item.label != "__getattr__"
@@ -520,8 +521,14 @@ def f(both: A | B, missing: A | C, mixed_binding: A | Static):
             .collect()
         })
         .collect();
-    // TODO: Literal-derived fields are missing on union receivers.
-    assert_eq!(fields, [Vec::<String>::new(), Vec::new(), Vec::new()]);
+    assert_eq!(
+        fields,
+        [
+            vec!["a: int", "b: str", "shared: int | str"],
+            vec!["a: int", "shared: int"],
+            vec!["a: int", "shared: int", "static: bool"],
+        ],
+    );
 }
 
 #[test]

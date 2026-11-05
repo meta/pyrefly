@@ -28,6 +28,7 @@ use pyrefly_util::suggest::best_suggestion;
 use ruff_python_ast::helpers::is_dunder;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
+use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 use vec1::Vec1;
 
@@ -3819,49 +3820,64 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 &mut res,
             );
         }
-        if expected_attribute_name.is_none()
-            && let Some(getattr) = self.type_of_magic_dunder_attr(
-                &base,
-                &dunder::GETATTR,
-                TextRange::default(),
-                &self.error_swallower(),
-                None,
-                "completion_getattr",
-                false,
-            )
-        {
-            let param_index = usize::from(matches!(&getattr, Type::BoundMethod(_)));
-            for (callable, _) in getattr.toplevel_callable_signatures() {
-                let Some(param) = callable.get_positional_param(param_index) else {
-                    continue;
-                };
-                let members = match param {
-                    Type::Union(union) => union.members.as_slice(),
-                    _ => std::slice::from_ref(param),
-                };
-                for member in members {
-                    let Type::Literal(lit) = member else {
+        if expected_attribute_name.is_none() {
+            // Look up receivers separately so one missing __getattr__ does not discard the others.
+            let getattrs = base
+                .into_unions()
+                .into_iter()
+                .filter_map(|base| {
+                    self.type_of_magic_dunder_attr(
+                        &base,
+                        &dunder::GETATTR,
+                        TextRange::default(),
+                        &self.error_swallower(),
+                        None,
+                        "completion_getattr",
+                        false,
+                    )
+                })
+                .flat_map(Type::into_unions);
+            let mut literal_attrs: SmallMap<Name, Vec<Type>> = SmallMap::new();
+            for getattr in getattrs {
+                // Bound signatures retain self/cls as their first positional parameter.
+                let param_index = usize::from(matches!(&getattr, Type::BoundMethod(_)));
+                for (callable, _) in getattr.toplevel_callable_signatures() {
+                    let Some(param) = callable.get_positional_param(param_index) else {
                         continue;
                     };
-                    let Lit::Str(value) = &lit.value else {
-                        continue;
+                    let members = match param {
+                        Type::Union(union) => union.members.as_slice(),
+                        _ => std::slice::from_ref(param),
                     };
-                    if !is_valid_identifier(value.as_str()) {
-                        continue;
-                    }
-                    let name = Name::new(value);
-                    if !res.iter().any(|info| info.name == name) {
-                        res.push(AttrInfo {
-                            name,
-                            ty: include_types.then(|| callable.ret.clone()),
-                            is_deprecated: false,
-                            definition: AttrDefinition::Synthetic,
-                            is_reexport: false,
-                            is_from_object: false,
-                        });
+                    for member in members {
+                        let Type::Literal(lit) = member else {
+                            continue;
+                        };
+                        let Lit::Str(value) = &lit.value else {
+                            continue;
+                        };
+                        if !is_valid_identifier(value.as_str()) {
+                            continue;
+                        }
+                        let name = Name::new(value);
+                        if res.iter().any(|info| info.name == name) {
+                            continue;
+                        }
+                        let types = literal_attrs.entry(name).or_default();
+                        if include_types {
+                            types.push(callable.ret.clone());
+                        }
                     }
                 }
             }
+            res.extend(literal_attrs.into_iter().map(|(name, types)| AttrInfo {
+                name,
+                ty: include_types.then(|| self.unions(types)),
+                is_deprecated: false,
+                definition: AttrDefinition::Synthetic,
+                is_reexport: false,
+                is_from_object: false,
+            }));
         }
         for (name, ty) in annotated_fields {
             if expected_attribute_name.is_none_or(|expected| expected == &name)
