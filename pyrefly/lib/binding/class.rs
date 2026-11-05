@@ -49,7 +49,6 @@ use crate::binding::binding::BindingClassDisjointBase;
 use crate::binding::binding::BindingClassField;
 use crate::binding::binding::BindingClassMetadata;
 use crate::binding::binding::BindingClassMro;
-use crate::binding::binding::BindingClassSubscriptSymmetry;
 use crate::binding::binding::BindingClassSynthesizedFields;
 use crate::binding::binding::BindingExpect;
 use crate::binding::binding::BindingTParams;
@@ -68,7 +67,6 @@ use crate::binding::binding::KeyClassDisjointBase;
 use crate::binding::binding::KeyClassField;
 use crate::binding::binding::KeyClassMetadata;
 use crate::binding::binding::KeyClassMro;
-use crate::binding::binding::KeyClassSubscriptSymmetry;
 use crate::binding::binding::KeyClassSynthesizedFields;
 use crate::binding::binding::KeyExpect;
 use crate::binding::binding::KeyTParams;
@@ -144,7 +142,6 @@ impl<'a> BindingsBuilder<'a> {
             variance_idx: self.idx_for_promise(KeyVariance(def_index)),
             class_checks_idx: self.idx_for_promise(KeyClassChecks(def_index)),
             abstract_class_check_idx: self.idx_for_promise(KeyAbstractClassCheck(def_index)),
-            subscript_symmetry_idx: self.idx_for_promise(KeyClassSubscriptSymmetry(def_index)),
         };
         (class_object, class_indices)
     }
@@ -671,12 +668,6 @@ impl<'a> BindingsBuilder<'a> {
         self.insert_binding_idx(
             class_indices.abstract_class_check_idx,
             BindingAbstractClassCheck {
-                class_idx: class_indices.class_idx,
-            },
-        );
-        self.insert_binding_idx(
-            class_indices.subscript_symmetry_idx,
-            BindingClassSubscriptSymmetry {
                 class_idx: class_indices.class_idx,
             },
         );
@@ -1243,12 +1234,6 @@ impl<'a> BindingsBuilder<'a> {
         self.insert_binding_idx(
             class_indices.abstract_class_check_idx,
             BindingAbstractClassCheck {
-                class_idx: class_indices.class_idx,
-            },
-        );
-        self.insert_binding_idx(
-            class_indices.subscript_symmetry_idx,
-            BindingClassSubscriptSymmetry {
                 class_idx: class_indices.class_idx,
             },
         );
