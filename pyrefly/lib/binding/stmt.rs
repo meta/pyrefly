@@ -1633,7 +1633,8 @@ impl<'a> BindingsBuilder<'a> {
                     // A suite is only dead everywhere if its test never consults the runtime
                     // environment. A `sys.version_info`, `sys.platform`, `os.name`, or
                     // `TYPE_CHECKING` guard is dead under this configuration alone, and the
-                    // suite is live under another, so reporting it would be a false positive.
+                    // suite is live under another, so reporting it as unreachable would be a
+                    // false positive.
                     // An `else` has no test of its own and inherits the ones above it.
                     let test_is_environment_independent = test
                         .as_ref()
@@ -1648,6 +1649,7 @@ impl<'a> BindingsBuilder<'a> {
                         if test_is_environment_independent {
                             self.report_unreachable_body(&body);
                         } else {
+                            self.report_inactive_body(&body);
                             self.record_environment_names(&body);
                         }
                         // Skip the body in this case - it typically means a check (e.g. a sys version,
@@ -1747,6 +1749,7 @@ impl<'a> BindingsBuilder<'a> {
                             if report_all_remaining || unconditional == Some(false) {
                                 self.report_unreachable_body(&body);
                             } else {
+                                self.report_inactive_body(&body);
                                 self.record_environment_names(&body);
                             }
                             report_all_remaining |= unconditional == Some(true);

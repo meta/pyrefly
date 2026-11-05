@@ -257,6 +257,7 @@ pub struct TestEnv {
     recursion_depth_limit: Option<u32>,
     site_package_path: Vec<PathBuf>,
     implicitly_defined_attribute_error: bool,
+    inactive_code_error: bool,
     uninitialized_instance_variable_error: bool,
     possibly_uninitialized_attribute_error: bool,
     explicit_any_error: bool,
@@ -335,6 +336,7 @@ impl TestEnv {
             recursion_depth_limit: None,
             site_package_path: Vec::new(),
             implicitly_defined_attribute_error: false,
+            inactive_code_error: false,
             uninitialized_instance_variable_error: false,
             possibly_uninitialized_attribute_error: false,
             explicit_any_error: false,
@@ -489,6 +491,11 @@ impl TestEnv {
 
     pub fn enable_implicitly_defined_attribute_error(mut self) -> Self {
         self.implicitly_defined_attribute_error = true;
+        self
+    }
+
+    pub fn enable_inactive_code_error(mut self) -> Self {
+        self.inactive_code_error = true;
         self
     }
 
@@ -902,6 +909,9 @@ impl TestEnv {
         report_unreachable_at_warn(errors);
         if self.implicitly_defined_attribute_error {
             errors.set_error_severity(ErrorKind::ImplicitlyDefinedAttribute, Severity::Error);
+        }
+        if self.inactive_code_error {
+            errors.set_error_severity(ErrorKind::InactiveCode, Severity::Error);
         }
         if self.uninitialized_instance_variable_error {
             errors.set_error_severity(ErrorKind::UninitializedInstanceVariable, Severity::Error);

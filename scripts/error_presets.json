@@ -55,6 +55,7 @@
     "implicit-import": ["legacy", "default", "strict", "all"],
     "implicit-reexport": ["all"],
     "implicitly-defined-attribute": ["all"],
+    "inactive-code": ["basic", "legacy", "default", "strict", "all"],
     "incompatible-comparison": ["all"],
     "incompatible-overload-argument": ["legacy", "default", "strict", "all"],
     "incompatible-overload-residual": ["legacy", "default", "strict", "all"],

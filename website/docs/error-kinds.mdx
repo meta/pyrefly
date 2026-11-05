@@ -911,6 +911,22 @@ class C:
         self.y = 0  # error, `y` may be undefined if `f` does not execute
 ```
 
+## inactive-code
+
+Default severity: `hint`
+
+A block of code that is inactive in the current type-checking configuration. Pyrefly does not check
+inactive code, and the IDE greys it out.
+
+```python
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+else:
+    Sequence = list  # inactive-code: This code is inactive for the current type-checking configuration
+```
+
 ## incompatible-comparison
 
 Default severity: `ignore`

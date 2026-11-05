@@ -43,7 +43,6 @@ use lsp_types::CallHierarchyPrepareRequest;
 use lsp_types::CallHierarchyProvider;
 use lsp_types::CancelNotification;
 use lsp_types::ChangeNotifications;
-use lsp_types::Code;
 use lsp_types::CodeAction;
 use lsp_types::CodeActionKind;
 use lsp_types::CodeActionOptions;
@@ -74,7 +73,6 @@ use lsp_types::DefinitionRequest;
 use lsp_types::DefinitionResponse;
 use lsp_types::Diagnostic;
 use lsp_types::DiagnosticSeverity;
-use lsp_types::DiagnosticTag;
 use lsp_types::DidChangeConfigurationClientCapabilities;
 use lsp_types::DidChangeConfigurationNotification;
 use lsp_types::DidChangeConfigurationParams;
@@ -289,7 +287,6 @@ use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::lsp::IndexingMode;
 use crate::config::config::ConfigFile;
 use crate::config::config::ConfigScope;
-use crate::config::error_kind::ErrorKind;
 use crate::error::baseline::BaselineWrite;
 use crate::error::baseline::StaleRowScope;
 use crate::error::baseline::write_baseline_file;
@@ -381,7 +378,6 @@ use crate::state::lsp::ReferenceOptions;
 use crate::state::notebook::LspNotebook;
 use crate::state::require::Require;
 use crate::state::semantic_tokens::SemanticTokensLegends;
-use crate::state::semantic_tokens::disabled_ranges_for_module;
 use crate::state::state::CancellableTransaction;
 use crate::state::state::CommittingTransaction;
 use crate::state::state::State;
@@ -3519,7 +3515,6 @@ impl Server {
         for x in open_notebook_cells.keys() {
             notebook_cell_urls.insert(PathBuf::from(x.to_string()), x.clone());
         }
-        let mut open_diag_paths: HashSet<PathBuf> = HashSet::new();
         for handle in handles {
             let handle_path_buf = handle.path().as_path().to_path_buf();
             if let Some(lsp_file) = open_files.get(&handle_path_buf) {
@@ -3530,7 +3525,6 @@ impl Server {
                         }
                     }
                     LspFile::Source { .. } => {
-                        open_diag_paths.insert(handle_path_buf.clone());
                         diags.insert(handle_path_buf, Vec::new());
                     }
                 }
@@ -3561,19 +3555,10 @@ impl Server {
             }
         }
         drop(open_files);
-        for (path, diagnostics) in diags.iter_mut() {
+        for diagnostics in diags.values_mut() {
             for diagnostic in diagnostics.iter_mut() {
                 diagnostic.data = serde_json::to_value(source).ok()
             }
-            if notebook_cell_urls.contains_key(path) {
-                continue;
-            }
-            // Skip inactive-code hints for non-open workspace files to reduce noise.
-            if !open_diag_paths.contains(path) {
-                continue;
-            }
-            let handle = make_open_handle(&self.state, path);
-            Self::append_unreachable_hints(transaction, &handle, diagnostics);
         }
         self.publish_diagnostics(
             diags,
@@ -6469,58 +6454,6 @@ impl Server {
         Ok(merged)
     }
 
-    /// Grey out code that is disabled by the current configuration but carries no
-    /// `unreachable` diagnostic of its own.
-    ///
-    /// Editors dim a region when a diagnostic covering it is tagged `UNNECESSARY`, so a
-    /// suite we deliberately do not report — one guarded by `sys.version_info`,
-    /// `sys.platform`, `os.name`, or `TYPE_CHECKING` — would otherwise lose its dimming.
-    /// Suites the real diagnostic does cover are skipped, since it carries the tag itself.
-    fn append_unreachable_hints(
-        transaction: &Transaction<'_>,
-        handle: &Handle,
-        items: &mut Vec<Diagnostic>,
-    ) {
-        let (Some(ast), Some(module_info)) = (
-            transaction.get_ast(handle),
-            transaction.get_module_info(handle),
-        ) else {
-            return;
-        };
-        let unreachable_code = Code::String(ErrorKind::Unreachable.to_name().to_owned());
-        let already_reported = items
-            .iter()
-            .filter(|d| d.code.as_ref() == Some(&unreachable_code))
-            .map(|d| d.range)
-            .collect::<Vec<_>>();
-        let mut seen = HashSet::new();
-        for range in disabled_ranges_for_module(ast.as_ref(), *handle.sys_info()) {
-            if range.is_empty() || !seen.insert(range) {
-                continue;
-            }
-            let lsp_range = module_info.to_lsp_range(range);
-            if already_reported
-                .iter()
-                .any(|r| r.start <= lsp_range.start && lsp_range.end <= r.end)
-            {
-                continue;
-            }
-            items.push(Diagnostic {
-                range: lsp_range,
-                severity: Some(DiagnosticSeverity::Hint),
-                source: Some("Pyrefly".to_owned()),
-                message: "This code is inactive for the current type-checking configuration"
-                    .to_owned()
-                    .into(),
-                code: Some(Code::String("inactive-code".to_owned())),
-                code_description: None,
-                related_information: None,
-                tags: Some(vec![DiagnosticTag::Unnecessary]),
-                data: None,
-            });
-        }
-    }
-
     fn docstring_ranges(
         &self,
         transaction: &Transaction<'_>,
@@ -6706,7 +6639,6 @@ impl Server {
                 items.push(diag);
             }
         }
-        Self::append_unreachable_hints(transaction, &handle, &mut items);
         DocumentDiagnosticReport::RelatedFullDocumentDiagnosticReport(
             RelatedFullDocumentDiagnosticReport {
                 full_document_diagnostic_report: FullDocumentDiagnosticReport {

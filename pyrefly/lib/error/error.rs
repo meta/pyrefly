@@ -611,13 +611,14 @@ impl Error {
     }
 
     /// The tag editors use to draw this diagnostic in their own way: struck
-    /// through for a deprecated name, greyed out for unreachable or unused code.
+    /// through for a deprecated name, greyed out for inactive, unreachable, or unused code.
     pub fn editor_tag(&self) -> Option<DiagnosticTag> {
         if self.deprecated_tag {
             Some(DiagnosticTag::Deprecated)
         } else if matches!(
             self.error_kind(),
-            ErrorKind::Unreachable
+            ErrorKind::InactiveCode
+                | ErrorKind::Unreachable
                 | ErrorKind::UnusedImport
                 | ErrorKind::UnusedParameter
                 | ErrorKind::UnusedVariable

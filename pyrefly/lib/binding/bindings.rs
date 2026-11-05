@@ -1893,6 +1893,18 @@ impl<'a> BindingsBuilder<'a> {
         }
     }
 
+    /// Report a body that the configuration rules out by a test of the environment. The body is
+    /// not bound, so nothing in it is checked.
+    pub fn report_inactive_body(&self, body: &[Stmt]) {
+        if let Some(range) = self.unreachable_body_range(body) {
+            self.error(
+                range,
+                ErrorKind::InactiveCode,
+                "This code is inactive for the current type-checking configuration".to_owned(),
+            );
+        }
+    }
+
     pub fn stmts(&mut self, xs: ThinVec<Stmt>, parent: &NestingContext) {
         let suite_end = xs.last().map(|x| x.range().end());
         // A suite has at most two dead regions, and the certain one is always last: nothing after

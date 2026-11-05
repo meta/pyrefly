@@ -254,6 +254,9 @@ pub enum ErrorKind {
     /// do not recognize as always executing (we recognize constructors and some test setup
     /// methods).
     ImplicitlyDefinedAttribute,
+    /// A block of code that is unreachable in the current type-checking configuration - for
+    /// example, the `else` block following an `if TYPE_CHECKING: ...` block.
+    InactiveCode,
     /// Equality or inequality comparison between incompatible types.
     IncompatibleComparison,
     /// Pruning an overloaded argument's branches left none that accept what the call solved one
@@ -659,6 +662,7 @@ impl ErrorKind {
             ErrorKind::ImplicitImport => Severity::Warn,
             ErrorKind::ImplicitReexport => Severity::Ignore,
             ErrorKind::ImplicitlyDefinedAttribute => Severity::Ignore,
+            ErrorKind::InactiveCode => Severity::Hint,
             ErrorKind::IncompatibleComparison => Severity::Ignore,
             ErrorKind::InstanceVarAssign => Severity::Ignore,
             ErrorKind::InvalidAbstractMethod => Severity::Ignore,
