@@ -4781,9 +4781,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 Err(error) => {
                     let mut diff_lines = Vec::new();
-                    // Invariant = ReadWrite vs ReadWrite type mismatch.
-                    // Covariant or contravariant failures between a ReadWrite attribute and a
-                    // Property are mutable attribute override violations.
+                    // An Invariant failure is only about mutability when the override
+                    // narrows: the read direction holds and only the write direction
+                    // fails. Widening and mutually incompatible pairs fail the read
+                    // direction too (as recorded by the engine, using the same
+                    // any-branch overload semantics as the original check), so
+                    // report those as plain `bad-override` with a covariant message.
+                    let error = match *error {
+                        AttrSubsetError::Invariant {
+                            got,
+                            want,
+                            subset_error,
+                            read_failed: true,
+                        } => Box::new(AttrSubsetError::Covariant {
+                            got,
+                            want,
+                            got_is_property: false,
+                            want_is_property: false,
+                            subset_error,
+                        }),
+                        error => Box::new(error),
+                    };
+                    // A surviving Invariant is a narrowing ReadWrite vs ReadWrite
+                    // mismatch. Covariant or contravariant failures between a ReadWrite
+                    // attribute and a Property are mutable attribute override violations.
                     let is_mutable_attribute = matches!(
                         &*error,
                         AttrSubsetError::Invariant { .. }
@@ -6290,6 +6311,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .expect("`Overloaded` has at least one branch"),
                     _ => is_subset(got, want),
                 };
+                let read_failed = assignable.is_err();
                 let subset_error = assignable
                     .map_or_else(Some, |_| is_subset(want, got).map_or_else(Some, |_| None));
                 if let Some(subset_error) = subset_error {
@@ -6297,6 +6319,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         got: got.clone(),
                         want: want.clone(),
                         subset_error,
+                        read_failed,
                     }))
                 } else {
                     Ok(())
