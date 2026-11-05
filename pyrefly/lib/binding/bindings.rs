@@ -1521,6 +1521,22 @@ fn is_empty_generator_yield(x: &Stmt) -> bool {
     matches!(x, Stmt::Expr(x) if matches!(&*x.value, Expr::Yield(_) | Expr::YieldFrom(_)))
 }
 
+/// A statement that diverges by its own syntax: a `raise`, or an `assert` whose test is
+/// statically false.
+///
+/// The typing spec's `assert_never` idiom puts a diverging statement after one the author believes
+/// control never passes, so that the checker proves the belief and the runtime enforces it. These
+/// are the same idiom in its plain form, and a gated region never begins with one. An expression
+/// of type `Never` is the third form, which only the solver can recognize; see
+/// `SuiteGate::expr_at_start`.
+fn is_divergence_marker(x: &Stmt, sys_info: SysInfo) -> bool {
+    match x {
+        Stmt::Raise(_) => true,
+        Stmt::Assert(x) => sys_info.evaluate_bool(&x.test) == Some(false),
+        _ => false,
+    }
+}
+
 impl<'a> BindingsBuilder<'a> {
     /// Whether to infer empty container types and unsolved type variables based on first use.
     pub fn infer_with_first_use(&self) -> bool {
@@ -1943,14 +1959,29 @@ impl<'a> BindingsBuilder<'a> {
             // Set while binding an earlier statement that control passes only conditionally.
             // This statement begins that gate's region; a leading `yield` leaves the value
             // pending so the region starts past it too.
+            //
+            // A statement that itself diverges, a `raise` or a failing `assert`, is a divergence
+            // marker: the defensive form of `assert_never`, placed after a statement the author
+            // believes nothing passes. Reporting it would condemn the idiom, so the gate holds
+            // until the first statement that is not one; a `raise` leaves nothing for it to
+            // describe, since the certain region takes over right after.
+            let is_marker = is_divergence_marker(&x, self.sys_info);
             if !is_yield
+                && !is_marker
                 && let Some(condition) = self.pending_gate.take()
                 && can_open_region
                 && !starts_certain_region
             {
+                // An expression of type `Never` is the other divergence marker, and whether it
+                // is one needs its solved type, so the solver gets the key to ask.
+                let expr_at_start = match &x {
+                    Stmt::Expr(e) => Some(self.idx_for_promise(Key::StmtExpr(e.value.range()))),
+                    _ => None,
+                };
                 gates.push(SuiteGate {
                     condition,
                     start: x.range().start(),
+                    expr_at_start,
                 });
             }
             if starts_certain_region {
@@ -1994,20 +2025,15 @@ impl<'a> BindingsBuilder<'a> {
                 .then(|| function_last_expressions(slice::from_ref(&x), self.sys_info))
                 .flatten()
                 // An answer the environment decided holds for this configuration only, and a
-                // suite dead under one configuration is live under another. An exhaustive `match`
-                // path is refused for a different reason: its deadness comes from narrowing, which
-                // `assert_never` deliberately relies on, so reporting it condemns the idiom. An
-                // `if` chain's fall-through is kept, because its `BranchEnd` counts as dead code
-                // only when its test settles it.
+                // suite dead under one configuration is live under another. An exhaustive
+                // `match` path is kept: its deadness comes from narrowing, which `assert_never`
+                // relies on, but that statement is a divergence marker, and the gate skips those
+                // rather than refusing the proof. An `if` chain's fall-through counts as dead
+                // code only when its test settles it.
                 .filter(|paths| {
                     !paths.decided_by_environment
                         && !paths.clauses.is_empty()
                         && paths.clauses.iter().any(|c| !c.is_empty())
-                        && !paths.clauses.iter().any(|clause| {
-                            clause
-                                .iter()
-                                .any(|path| matches!(path.last, LastStmt::Exhaustive(..)))
-                        })
                 })
                 .map(|paths| {
                     paths
@@ -2022,8 +2048,9 @@ impl<'a> BindingsBuilder<'a> {
                         .collect::<Box<[_]>>()
                 });
             self.stmt(x, parent);
-            // A gate still pending was skipped by the `yield` carve-out above and must survive to
-            // the statement that carve-out is holding it for. A `yield` cannot diverge anyway.
+            // A gate still pending was skipped by the `yield` or marker carve-out above and must
+            // survive to the statement that carve-out is holding it for. Neither a `yield` nor a
+            // marker opens a gate of its own anyway.
             if self.pending_gate.is_none() {
                 if is_expr_stmt && let Some(result) = self.scopes.last_stmt_expr() {
                     self.pending_gate = Some(GateCondition::ExpressionReturns { result });

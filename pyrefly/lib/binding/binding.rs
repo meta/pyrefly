@@ -2509,8 +2509,14 @@ pub struct ExhaustiveBinding {
 #[derive(Clone, Debug)]
 pub struct SuiteGate {
     pub condition: GateCondition,
-    /// Where this gate's dead region would begin, i.e. the statement following it.
+    /// Where this gate's dead region would begin: the first statement following it that is not a
+    /// `raise` or a failing `assert`.
     pub start: TextSize,
+    /// The expression statement at `start`, if that is what the region begins with. One of type
+    /// `Never` is a divergence marker like a `raise`, the shape `assert_never` takes, and is not
+    /// reported even when the gate is closed. The gate that statement opens covers whatever
+    /// follows it.
+    pub expr_at_start: Option<Idx<Key>>,
 }
 
 /// What must hold for control to pass a [`SuiteGate`].
