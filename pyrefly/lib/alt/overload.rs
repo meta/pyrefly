@@ -151,6 +151,7 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
             }
         };
         // These expressions need parameter context and cannot produce an expandable type.
+        let inference_errors = self.solver.error_collector();
         let expanded_types = match value.as_type_or_expr() {
             TypeOrExpr::Expr(
                 Expr::Lambda(_)
@@ -162,12 +163,15 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
                 | Expr::SetComp(_)
                 | Expr::Generator(_),
             ) => Vec::new(),
-            _ => self.expand_type(value.infer(self.solver, errors)),
+            _ => self.expand_type(value.infer(self.solver, &inference_errors)),
         };
         if expanded_types.is_empty() {
-            // Nothing to expand here, try the next argument.
+            // Unchanged expressions are checked with each candidate's context. Their probe
+            // diagnostics are not authoritative, particularly for nested lambdas.
             self.expand(errors, owner)
         } else {
+            // Expanded expressions become types and will not be checked again.
+            errors.extend(inference_errors);
             let expanded_types = expanded_types.into_map(|t| owner.push(t));
             let mut new_arg_lists = Vec::new();
             for (posargs, keywords) in self.arg_lists.iter() {

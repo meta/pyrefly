@@ -300,6 +300,7 @@ pub struct TestEnv {
     no_any_return_explicit_error: bool,
     no_any_return_implicit_error: bool,
     implicit_any_lambda_error: bool,
+    deprecated_error: bool,
     invalid_abstract_method_error: bool,
     empty_body_error: bool,
     instance_var_assign_error: bool,
@@ -379,6 +380,7 @@ impl TestEnv {
             no_any_return_explicit_error: false,
             no_any_return_implicit_error: false,
             implicit_any_lambda_error: false,
+            deprecated_error: false,
             invalid_abstract_method_error: false,
             empty_body_error: false,
             instance_var_assign_error: false,
@@ -717,6 +719,11 @@ impl TestEnv {
         self
     }
 
+    pub fn enable_deprecated_error(mut self) -> Self {
+        self.deprecated_error = true;
+        self
+    }
+
     pub fn enable_invalid_abstract_method_error(mut self) -> Self {
         self.invalid_abstract_method_error = true;
         self
@@ -1027,6 +1034,9 @@ impl TestEnv {
         }
         if self.implicit_any_lambda_error {
             errors.set_error_severity(ErrorKind::ImplicitAnyLambda, Severity::Error);
+        }
+        if self.deprecated_error {
+            errors.set_error_severity(ErrorKind::Deprecated, Severity::Error);
         }
         if self.invalid_abstract_method_error {
             errors.set_error_severity(ErrorKind::InvalidAbstractMethod, Severity::Error);
