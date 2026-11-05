@@ -434,6 +434,44 @@ Completion Results:
 }
 
 #[test]
+fn dot_complete_from_getattr_literal_parameter() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    def __getattr__(self, item: Literal["A", "B"]) -> object: ...
+
+A().
+#   ^
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    assert!(report.contains("- (Field) A"), "{report}");
+    assert!(report.contains("- (Field) B"), "{report}");
+}
+
+#[test]
+fn dot_complete_from_getattr_literal_parameter_filters_invalid_identifiers() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    def __getattr__(
+        self, item: Literal["good", "bad-name", "class", ""]
+    ) -> object: ...
+
+A().
+#   ^
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    assert!(report.contains("- (Field) good"), "{report}");
+    assert!(!report.contains("- (Field) bad-name"), "{report}");
+    assert!(!report.contains("- (Field) class"), "{report}");
+    assert!(!report.contains("- (Field) \n"), "{report}");
+}
+
+#[test]
 fn dict_key_completion_from_literal() {
     let code = r#"
 def use_dict():
