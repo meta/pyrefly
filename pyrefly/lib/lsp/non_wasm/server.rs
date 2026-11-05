@@ -3568,7 +3568,7 @@ impl Server {
             if notebook_cell_urls.contains_key(path) {
                 continue;
             }
-            // Skip unreachable-code hints for non-open workspace files to reduce noise.
+            // Skip inactive-code hints for non-open workspace files to reduce noise.
             if !open_diag_paths.contains(path) {
                 continue;
             }
@@ -6509,10 +6509,10 @@ impl Server {
                 range: lsp_range,
                 severity: Some(DiagnosticSeverity::Hint),
                 source: Some("Pyrefly".to_owned()),
-                message: "This code is unreachable for the current configuration"
+                message: "This code is inactive for the current type-checking configuration"
                     .to_owned()
                     .into(),
-                code: Some(Code::String("unreachable-code".to_owned())),
+                code: Some(Code::String("inactive-code".to_owned())),
                 code_description: None,
                 related_information: None,
                 tags: Some(vec![DiagnosticTag::Unnecessary]),

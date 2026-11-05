@@ -1031,8 +1031,8 @@ fn test_unreachable_env_gated_hint_diagnostic() {
         .expect_response(json!({
             "items": [
                 {
-                    "code": "unreachable-code",
-                    "message": "This code is unreachable for the current configuration",
+                    "code": "inactive-code",
+                    "message": "This code is inactive for the current type-checking configuration",
                     "range": {
                         "end": {"character": 12, "line": 8},
                         "start": {"character": 4, "line": 8}
