@@ -2873,15 +2873,25 @@ impl<'a> TransactionHandle<'a> {
         path: Option<&ModulePath>,
         dep: ModuleDep,
     ) -> FindingOrError<&'a ArcId<ModuleDataMut>> {
-        let handle = match path {
-            Some(path) => {
-                // Explicit path — already resolved. Bypass imports entirely.
-                FindingOrError::new_finding(Handle::new(
-                    module,
-                    path.dupe(),
-                    self.module_data.handle.sys_info().dupe(),
-                ))
-            }
+        let resolve = move |path: &ModulePath| {
+            let handle = Handle::new(
+                module,
+                path.dupe(),
+                self.module_data.handle.sys_info().dupe(),
+            );
+            let res = self.transaction.get_imported_module(&handle);
+            self.deferred_deps
+                .borrow_mut()
+                .entry(handle.path().dupe())
+                .or_insert_with(|| (handle, ModuleDeps::default()))
+                .1
+                .add_dep(dep);
+            res
+        };
+        match path {
+            // Explicit path — already resolved. Bypass imports entirely. Most lookups take this
+            // path, so it resolves directly rather than through a `FindingOrError`.
+            Some(path) => FindingOrError::new_finding(resolve(path)),
             None => {
                 // No path — needs find_import. Check imports cache first.
                 let imports_read = self.module_data.imports.read();
@@ -2912,26 +2922,9 @@ impl<'a> TransactionHandle<'a> {
                         finding
                     }
                 };
-                path.map(|path| {
-                    Handle::new(
-                        module,
-                        path.dupe(),
-                        self.module_data.handle.sys_info().dupe(),
-                    )
-                })
+                path.map(|path| resolve(&path))
             }
-        };
-
-        handle.map(|handle| {
-            let res = self.transaction.get_imported_module(&handle);
-            self.deferred_deps
-                .borrow_mut()
-                .entry(handle.path().dupe())
-                .or_insert_with(|| (handle, ModuleDeps::default()))
-                .1
-                .add_dep(dep);
-            res
-        })
+        }
     }
 
     /// Helper to get exports for a module with the correct lookup context.
