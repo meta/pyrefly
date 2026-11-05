@@ -71,6 +71,7 @@ pub struct Context<'a, Lookup> {
     pub legacy_overload_expansion: bool,
     pub treat_all_caps_as_final: bool,
     pub infer_param_types_from_docstring: bool,
+    pub reveal_type_qualified_names: bool,
     pub recursion_limit_config: Option<RecursionLimitConfig>,
     /// Pysa context for building PysaSolutions during the Solutions step.
     pub pysa_context: Option<PysaContext<'a>>,
@@ -559,6 +560,7 @@ impl Step {
             strict_partial_subtyping: ctx.strict_partial_subtyping,
             spec_compliant_overloads: ctx.spec_compliant_overloads,
             legacy_overload_expansion: ctx.legacy_overload_expansion,
+            reveal_type_qualified_names: ctx.reveal_type_qualified_names,
         });
         let enable_index = ctx.require.keep_index();
         let enable_trace =
