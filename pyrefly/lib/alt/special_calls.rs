@@ -12,6 +12,7 @@
  */
 
 use pyrefly_python::dunder;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
 use pyrefly_types::shaped_array::is_tuple_carrier_shape_middle;
@@ -616,7 +617,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Decompose class_info, which could be a union or tuple
         for class_info_ty in self.as_class_info(class_info) {
             if let Type::ClassDef(class_info_cls) = &class_info_ty {
-                if class_info_cls.has_toplevel_qname("typing", "Any") {
+                if class_info_cls.is(KnownClass::TypingAny) {
                     self.error(
                         errors,
                         range,

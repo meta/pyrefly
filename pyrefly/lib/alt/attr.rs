@@ -1402,7 +1402,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ];
         !relevant_dunders.iter().any(|dunder: &&Name| {
             let field = self.get_class_member_with_defining_class(cls, dunder);
-            field.is_some_and(|field| !field.defining_class.is_builtin("object"))
+            field.is_some_and(|field| !field.defining_class.is(KnownClass::Object))
         })
     }
 
@@ -2084,7 +2084,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         match metaclass_attr {
                             Some(meta_attr)
                                 if self.class_attribute_is_data_descriptor(&meta_attr)
-                                    || metaclass.class_object().is_builtin("type") =>
+                                    || metaclass.class_object().is(KnownClass::Type) =>
                             {
                                 acc.found_class_attribute(meta_attr, base)
                             }
@@ -2101,7 +2101,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         {
                             let metadata = self.get_metadata_for_class(class.class_object());
                             let metaclass = metadata.metaclass(self.stdlib);
-                            if !metaclass.class_object().is_builtin("type") {
+                            if !metaclass.class_object().is(KnownClass::Type) {
                                 let metaclass_attr =
                                     self.get_metaclass_attribute(class, metaclass, attr_name);
                                 match metaclass_attr {

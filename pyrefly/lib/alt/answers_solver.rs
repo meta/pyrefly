@@ -36,6 +36,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::type_alias::TypeAlias;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_util::arc_id::ArcId;
@@ -3849,7 +3850,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if got.is_error() || got.is_any() || want.is_any() {
             return;
         }
-        let is_str = matches!(got, Type::ClassType(cls) if cls.is_builtin("str"));
+        let is_str = matches!(got, Type::ClassType(cls) if cls.is(KnownClass::Str));
         if !is_str && !got.is_literal_string() {
             return;
         }
@@ -3865,7 +3866,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 matches!(
                     cls.targs().as_slice(),
-                    [elem] if matches!(elem, Type::ClassType(elem_cls) if elem_cls.is_builtin("str"))
+                    [elem] if matches!(elem, Type::ClassType(elem_cls) if elem_cls.is(KnownClass::Str))
                 )
             }
             _ => false,

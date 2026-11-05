@@ -25,6 +25,7 @@ use pyrefly_types::dimension::Int;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::function::FuncDefId;
 use pyrefly_types::identity::IdentityIgnored;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
 use pyrefly_types::meta_shape_dsl::ShapeTransform;
@@ -2114,9 +2115,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             Type::ClassType(cls)
-                if cls.has_qname("functools", "_Wrapped")
+                if cls.is(KnownClass::FunctoolsWrapped)
                     || (original_decoratee.property_metadata().is_some()
-                        && cls.has_qname("functools", "_lru_cache_wrapper")) =>
+                        && cls.is(KnownClass::FunctoolsLruCacheWrapper)) =>
             {
                 original_decoratee.clone()
             }
@@ -2133,7 +2134,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if u.members.iter().any(|m| match m {
                     Type::Function(f) => f.signature.is_args_kwargs_wrapper(),
                     Type::Callable(c) => c.is_args_kwargs_wrapper(),
-                    Type::ClassType(cls) => cls.has_qname("functools", "_Wrapped"),
+                    Type::ClassType(cls) => cls.is(KnownClass::FunctoolsWrapped),
                     _ => false,
                 }) =>
             {

@@ -20,6 +20,7 @@ use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::facet::FacetKind;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::identity::IdentityIgnored;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::type_alias::TypeAliasData;
@@ -787,7 +788,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn is_proxy_method_type_in_annotation(ty: &Type) -> bool {
         if let Type::ClassType(cls) = ty {
             cls.class_object()
-                .has_toplevel_qname("shape_extensions", "ProxyMethod")
+                .is(KnownClass::ShapeExtensionsProxyMethod)
         } else {
             false
         }
@@ -927,7 +928,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         } else if let Some(ty) = ty
             && let Type::ClassDef(cls) = &ty
-            && cls.has_toplevel_qname("dataclasses", "InitVar")
+            && cls.is(KnownClass::DataclassesInitVar)
         {
             Some(Qualifier::InitVar)
         } else {
@@ -961,14 +962,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let swallower = self.error_swallower();
         let is_type = matches!(
             self.expr_infer(&call.func, &swallower),
-            Type::ClassDef(cls) if cls.is_builtin("type")
+            Type::ClassDef(cls) if cls.is(KnownClass::Type)
         );
         let suggestion =
             if is_type && call.arguments.args.len() == 1 && call.arguments.keywords.is_empty() {
                 match self.expr_infer(&call.arguments.args[0], &swallower) {
                     Type::ClassType(cls)
-                        if cls.is_builtin("_NotImplementedType")
-                            || cls.has_qname("types", "NotImplementedType") =>
+                        if cls.is(KnownClass::NotImplementedType)
+                            || cls.is(KnownClass::TypesNotImplementedType) =>
                     {
                         Some("`types.NotImplementedType`".to_owned())
                     }
@@ -1197,12 +1198,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         else {
             return false;
         };
-        !iter_method
-            .defining_class
-            .has_toplevel_qname("builtins", "tuple")
-            && !iter_method
-                .defining_class
-                .has_toplevel_qname("type_checker_internals", "NamedTupleFallback")
+        let defining_class = &iter_method.defining_class;
+        // The `NamedTupleFallback` comparison never matches, because that class is defined in
+        // `_typeshed._type_checker_internals`. D129806257 switches it to `KnownClass`.
+        !defining_class.is(KnownClass::Tuple)
+            && !(defining_class.module_name().as_str() == "type_checker_internals"
+                && defining_class.name() == "NamedTupleFallback")
     }
 
     /// Given an `iterable` type, determine the iteration type; this is the type
@@ -2286,7 +2287,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if let Some(default_expr) = &tp.default {
             let is_size_bound = |ty: &Type| {
                 matches!(ty, Type::Int(_))
-                    || matches!(ty, Type::ClassType(cls) if cls.has_qname("shape_extensions", "Int"))
+                    || matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsInt))
             };
             let default = if matches!(
                 &restriction,
@@ -7888,11 +7889,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub(crate) fn is_int_tuple_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "IntTuple")
+        cls.is(KnownClass::ShapeExtensionsIntTuple)
     }
 
     pub(crate) fn is_int_tuples_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "IntTuples")
+        cls.is(KnownClass::ShapeExtensionsIntTuples)
     }
 
     pub(crate) fn bare_int_tuple_carrier(&self) -> Type {
@@ -8002,14 +8003,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             Some(self.heap.mk_int_tuple(IntTuple::shapeless()))
                         } else if self.is_int_tuples_class(cls.class_object()) {
                             Some(self.bare_int_tuples())
-                        } else if cls.has_qname("shape_extensions", "Int") {
+                        } else if cls.is(KnownClass::ShapeExtensionsInt) {
                             Some(gradual_size())
                         } else if self.shaped_array_shape_for_class_type(cls).is_some() {
                             // Canonicalize bare shaped-array types to Type::ShapedArray(shapeless)
                             // for consistency. Subscripted arrays are already converted to
                             // Type::ShapedArray during annotation parsing, so only the bare case reaches here.
                             Some(ShapedArrayType::shapeless(cls.clone()).to_type())
-                        } else if cls.has_qname("types", "NoneType") {
+                        } else if cls.is(KnownClass::TypesNoneType) {
                             // Normalize type[NoneType] as None
                             Some(self.heap.mk_none())
                         } else {

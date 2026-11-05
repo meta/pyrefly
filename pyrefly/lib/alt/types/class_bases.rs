@@ -16,6 +16,7 @@ use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::equality::TypeEq;
 use pyrefly_types::equality::TypeEqCtx;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::type_info::TypeInfo;
 use pyrefly_types::typed_dict::TypedDict;
@@ -557,7 +558,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // has no consistent MRO. An `Any` base is not in this list, so it never triggers the error.
         if let Some(position) = base_class_types_with_ranges
             .iter()
-            .position(|(ty, _)| ty.is_builtin("object"))
+            .position(|(ty, _)| ty.is(KnownClass::Object))
             && position + 1 < base_class_types_with_ranges.len()
         {
             self.error(
@@ -574,7 +575,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // An explicit `object` base is dropped, so `class C(object)` has the same bases as
         // `class C`. The MRO leaves `object` out of every class's ancestors and puts it last, so a
         // stored `object` would be linearized ahead of the bases that follow it.
-        base_class_types_with_ranges.retain(|(ty, _)| !ty.is_builtin("object"));
+        base_class_types_with_ranges.retain(|(ty, _)| !ty.is(KnownClass::Object));
 
         let metadata = self.get_metadata_for_class(cls);
         if metadata.is_typed_dict() && base_class_types_with_ranges.is_empty() {

@@ -25,6 +25,7 @@ use pyrefly_types::dimension::canonicalize;
 use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::dimension::int_type_is_provably_negative;
 use pyrefly_types::function::FunctionKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::literal::Literal;
 use pyrefly_types::series::SeriesSchema;
@@ -456,7 +457,7 @@ pub(crate) const MAX_TUPLE_LENGTH: usize = 256;
 fn is_integer_index_scalar_type(ty: &Type) -> bool {
     match ty {
         Type::Literal(lit) => matches!(lit.value, Lit::Int(_)),
-        Type::ClassType(cls) => cls.is_builtin("int"),
+        Type::ClassType(cls) => cls.is(KnownClass::Int),
         Type::Int(_) => true,
         Type::Union(union) => {
             !union.members.is_empty() && union.members.iter().all(is_integer_index_scalar_type)
@@ -495,7 +496,7 @@ fn classify_shaped_array_index_type(ty: &Type) -> Option<IndexOp> {
         Type::Tuple(Tuple::Unbounded(element)) if is_integer_index_scalar_type(element) => {
             Some(IndexOp::Fancy(Int::Int))
         }
-        Type::ClassType(cls) if cls.has_qname("builtins", "list") => match cls.targs().as_slice() {
+        Type::ClassType(cls) if cls.is(KnownClass::List) => match cls.targs().as_slice() {
             [element] if is_integer_index_scalar_type(element) => Some(IndexOp::Fancy(Int::Int)),
             _ => None,
         },
@@ -2464,7 +2465,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// If this is a `dict` call that can be converted to an equivalent dict literal (e.g., `dict(x=1)` => `{'x': 1}`),
     /// return the items in the converted dict.
     fn call_to_dict(&self, callee_ty: &Type, args: &Arguments) -> Option<Vec<DictItem>> {
-        if !matches!(callee_ty, Type::ClassDef(class) if class.is_builtin("dict")) {
+        if !matches!(callee_ty, Type::ClassDef(class) if class.is(KnownClass::Dict)) {
             return None;
         }
         if !args.args.is_empty() {
@@ -2568,7 +2569,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Type::Literal(literal) => match literal.value {
                     Lit::Int(value) => value.as_i64().map(|value| value & 64 != 0),
                     Lit::Bool(_) => Some(false),
-                    Lit::Enum(value) if value.class.has_qname("re", "RegexFlag") => {
+                    Lit::Enum(value) if value.class.is(KnownClass::ReRegexFlag) => {
                         Some(matches!(value.member.as_str(), "X" | "VERBOSE"))
                     }
                     _ => None,
@@ -2765,9 +2766,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let marker = if truthy { Type::Truthy } else { Type::Falsy };
         self.distribute_over_union(ty, |t| match t {
             Type::ClassType(cls)
-                if ["int", "str", "bytes"]
-                    .iter()
-                    .any(|name| cls.is_builtin(name)) =>
+                if matches!(
+                    cls.known(),
+                    Some(KnownClass::Int | KnownClass::Str | KnownClass::Bytes)
+                ) =>
             {
                 t.clone()
             }
@@ -3086,18 +3088,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 *ty = self.heap.mk_type_of(self.heap.mk_any_implicit())
             }
             Type::ClassDef(cls) => {
-                if cls.is_builtin("tuple") {
+                if cls.is(KnownClass::Tuple) {
                     Self::add_implicit_any_error(errors, range, "class `tuple`".to_owned(), None);
                     *ty = self
                         .heap
                         .mk_type_of(self.heap.mk_unbounded_tuple(self.heap.mk_any_implicit()));
-                } else if cls.is_builtin("type") {
+                } else if cls.is(KnownClass::Type) {
                     // `type`` is equivalent to `type[Any]`. As a result, the class def itself
                     // has type `type[type[Any]]`.
                     *ty = self
                         .heap
                         .mk_type_of(self.heap.mk_type_of(self.heap.mk_any_implicit()));
-                } else if cls.has_toplevel_qname("typing", "Any") {
+                } else if cls.is(KnownClass::TypingAny) {
                     // This is the one place a written `Any` becomes `AnyStyle::Explicit`, so it
                     // is where the diagnostic belongs: `range` is the expression that spells
                     // `Any`, and an `Any` reaching some other position by flowing out of a
@@ -3110,7 +3112,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         )
                         .emit();
                     *ty = self.heap.mk_type_of(self.heap.mk_any_explicit())
-                } else if cls.has_toplevel_qname("typing", "NamedTuple") {
+                } else if cls.is(KnownClass::TypingNamedTuple) {
                     // When `NamedTuple` is used as a type annotation (e.g. TypeVar bound),
                     // resolve to `NamedTupleFallback` — the class that actually appears in
                     // the MRO of user-defined NamedTuple subclasses.
@@ -3123,7 +3125,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     *ty = self.heap.mk_type_of(self.promote(cls, range, errors));
                 }
             }
-            Type::ClassType(cls) if cls.is_builtin("type") => {
+            Type::ClassType(cls) if cls.is(KnownClass::Type) => {
                 *ty = self.heap.mk_type_of(self.heap.mk_any_implicit());
             }
             _ => {}
@@ -3836,9 +3838,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// must be parsed by that path rather than specialized as generics. `IntTuple` is handled
     /// directly by the base-class parser; shaped arrays specialize correctly as generics.
     pub(crate) fn has_special_class_subscript(&self, cls: &Class) -> bool {
-        cls.is_builtin("type")
-            || cls.has_toplevel_qname("pyre_extensions", "PyreReadOnly")
-            || cls.has_toplevel_qname("pyre_extensions", "ReadOnly")
+        cls.is(KnownClass::Type)
+            || cls.is(KnownClass::PyreExtensionsPyreReadOnly)
+            || cls.is(KnownClass::PyreExtensionsReadOnly)
             || self.is_int_class(cls)
             || self.is_map_int_tuples_class(cls)
     }
@@ -3857,7 +3859,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let is_builtin_sequence = |base: &Type| match base {
             Type::Tuple(_) => true,
             Type::ClassType(cls) | Type::SelfType(cls) => {
-                cls.is_builtin("list")
+                cls.is(KnownClass::List)
                     || (self.as_tuple(cls).is_some() && !self.class_overrides_tuple_getitem(cls))
             }
             _ => false,
@@ -4059,7 +4061,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 // Note that we have to check for `builtins.type` by name here because this code runs
                 // when we're bootstrapping the stdlib and don't have access to class objects yet.
-                Type::ClassDef(cls) if cls.is_builtin("type") => {
+                Type::ClassDef(cls) if cls.is(KnownClass::Type) => {
                     let (arguments, _) = match slice {
                             Expr::Tuple(x) => (x.elts.as_slice(), x.parenthesized),
                             _ => (slice::from_ref(slice), false),
@@ -4069,8 +4071,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // TODO: pyre_extensions.PyreReadOnly is a non-standard type system extension that marks read-only
                 // objects. We don't support it yet.
                 Type::ClassDef(cls)
-                    if cls.has_toplevel_qname("pyre_extensions", "PyreReadOnly")
-                        || cls.has_toplevel_qname("pyre_extensions", "ReadOnly") =>
+                    if cls.is(KnownClass::PyreExtensionsPyreReadOnly)
+                        || cls.is(KnownClass::PyreExtensionsReadOnly) =>
                 {
                     match xs.len() {
                         1 => self.expr_infer(&xs[0], errors),
@@ -4102,7 +4104,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.parse_int_type(xs, range, type_form_context, errors)
                 }
                 Type::ClassDef(ref cls)
-                    if cls.has_toplevel_qname("shape_extensions", "ProxyMethod") =>
+                    if cls.is(KnownClass::ShapeExtensionsProxyMethod) =>
                 {
                     self.proxy_method_subscript_infer(cls, xs, range, errors)
                 }
@@ -4344,7 +4346,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         errors,
                     )
                 }
-                Type::ClassType(ref cls) | Type::SelfType(ref cls) if cls.is_builtin("list") => {
+                Type::ClassType(ref cls) | Type::SelfType(ref cls) if cls.is(KnownClass::List) => {
                     let index_arg = match builtin_sequence_slice_ty {
                         Some(ty) => CallArg::ty(ty, slice.range()),
                         None => CallArg::expr(slice),
@@ -4801,9 +4803,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     fn is_pytorch_tensor_type(ty: &Type) -> bool {
         fn is_torch_tensor_class(cls: &ClassType) -> bool {
-            let module = cls.class_object().module_name();
-            let module = module.as_str();
-            cls.name().as_str() == "Tensor" && matches!(module, "torch" | "torch._tensor")
+            matches!(
+                cls.known(),
+                Some(KnownClass::TorchTensor | KnownClass::TorchTensorTensor)
+            )
         }
 
         match ty {
@@ -4955,12 +4958,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Check if a class is a Int class (shape_extensions.Int)
     fn is_int_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "Int")
+        cls.is(KnownClass::ShapeExtensionsInt)
     }
 
     /// Check if a class is the IntVar class (shape_extensions.IntVar)
     fn is_int_var_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "IntVar")
+        cls.is(KnownClass::ShapeExtensionsIntVar)
     }
 
     fn is_builtin_abs_call(&self, call: &ExprCall) -> bool {
@@ -4994,7 +4997,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             if comment.mode == ShapeCommentMode::Append
                 && !matches!(self.expr_infer(expr, &self.error_swallower()),
-                    Type::ClassDef(cls) if cls.is_builtin("int"))
+                    Type::ClassDef(cls) if cls.is(KnownClass::Int))
             {
                 self.error(errors, comment.range, ErrorKind::InvalidAnnotation,
                     "A concise shape comment on a scalar type argument requires `int`; use `type =` to replace another dimension".to_owned());
@@ -5093,12 +5096,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let expr_type = self.expr_infer(expr, errors);
 
                 match &expr_type {
-                    Type::ClassDef(cls) if cls.has_toplevel_qname("typing", "Any") => {
+                    Type::ClassDef(cls) if cls.is(KnownClass::TypingAny) => {
                         // typing.Any in a type annotation position (e.g., Tensor[16, Any])
                         // Use Explicit since the user wrote Any explicitly
                         Ok(Type::Any(AnyStyle::Explicit))
                     }
-                    Type::ClassDef(cls) if cls.is_builtin("int") => Ok(gradual_size()),
+                    Type::ClassDef(cls) if cls.is(KnownClass::Int) => Ok(gradual_size()),
                     _ if context.allows_explicit_int_wrapper()
                         && let Some(dimension) = type_to_dim(&expr_type) =>
                     {
@@ -5628,7 +5631,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     fn is_shape_elements_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "Elements")
+        cls.is(KnownClass::ShapeExtensionsElements)
     }
 
     /// Parse `Elements[S]` in `*Elements[S]`, returning the bare `S` argument.
@@ -6128,7 +6131,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // instance that defines `__bool__` or `__len__` at runtime.
                 let metadata = self.get_metadata_for_class(cls);
                 let is_abstract =
-                    cls.is_builtin("object") || metadata.is_protocol() || metadata.extends_abc();
+                    cls.is(KnownClass::Object) || metadata.is_protocol() || metadata.extends_abc();
                 // Skip warning for classes coming from stubs. Stub-only classes often have
                 // dynamic runtime behavior (e.g. `datetime`, `asyncio.Future`, `Lock`,
                 // sqlalchemy `Session`) that the stubs don't model, and the idiomatic
