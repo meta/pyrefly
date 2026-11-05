@@ -27,8 +27,8 @@ use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
+use crate::alt::callable::CallValue;
 use crate::alt::expr::ExprOptions;
-use crate::alt::expr::TypeOrExpr;
 use crate::alt::shape_extension::is_int_tuple_bound;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::types::decorated_function::Decorator;
@@ -199,10 +199,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Refine a literal-name `getattr` call when attribute lookup succeeds without errors.
     pub fn call_getattr(
         &self,
-        obj_arg: TypeOrExpr,
+        obj_arg: CallValue,
         attr_name: &Name,
         attr_range: TextRange,
-        default_arg: Option<TypeOrExpr>,
+        default_arg: Option<CallValue>,
         callee_ty: Type,
         func_range: TextRange,
         arguments_range: TextRange,
