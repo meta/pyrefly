@@ -1452,14 +1452,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                     None => {
                         arg_pre.post_infer(self, arg_errors);
-                        // A gradual splat can match any arity. For a non-gradual splat, only
-                        // reject it here if it has not already matched a positional parameter:
-                        // that prevents zero-arity overloads from swallowing it without adding
-                        // a spurious extra argument after a finite parameter list.
+                        // A gradual splat can match any arity. An unknown-length splat without
+                        // unconsumed fixed elements has a minimum length of 0, so it does not
+                        // represent an extra argument if the parameter list is empty or already
+                        // satisfied (fixes #5542). If it has already matched a parameter, it can
+                        // stop matching without error.
                         let extra_arg = match &arg_pre {
                             CallArgPreEval::Star {
-                                middle, matched, ..
-                            } => !middle.is_any() && !matched,
+                                prefix,
+                                suffix,
+                                consumed,
+                                middle,
+                                matched,
+                                ..
+                            } => {
+                                let has_unconsumed_fixed =
+                                    *consumed < prefix.len() || !suffix.is_empty();
+                                if *matched || !has_unconsumed_fixed {
+                                    false
+                                } else {
+                                    !middle.is_any()
+                                }
+                            }
                             _ => true,
                         };
                         if extra_arg {
