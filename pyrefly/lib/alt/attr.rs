@@ -13,6 +13,7 @@ use pyrefly_python::keywords::is_valid_identifier;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitEnum;
 use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::shaped_array::shape_to_tuple_carrier;
@@ -2247,7 +2248,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let inherited_from_object = self.field_is_inherited_from(
                     self.stdlib.generic_alias().class_object(),
                     attr_name,
-                    ("builtins", "object"),
+                    KnownClass::Object,
                 );
                 for (b, exclude) in [(&generic_alias, inherited_from_object), (&origin, false)] {
                     if exclude {
@@ -2344,7 +2345,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         metaclass.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     )
                 {
                     acc.not_found(NotFoundOn::ClassInstance(
@@ -2369,7 +2370,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let inherited_from_object = self.field_is_inherited_from(
                     self.stdlib.generic_alias().class_object(),
                     dunder_name,
-                    ("builtins", "object"),
+                    KnownClass::Object,
                 );
                 for (b, exclude) in [(&generic_alias, inherited_from_object), (&origin, false)] {
                     if exclude {
@@ -2400,7 +2401,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         cls.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(cls.class_object().clone(), base))
@@ -2415,7 +2416,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         self.stdlib.method_type().class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(
@@ -2430,7 +2431,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         tensor.base_class.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(

@@ -6,6 +6,7 @@
  */
 
 use pyrefly_python::dunder;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::typed_dict::AnonymousTypedDictInner;
 use pyrefly_types::typed_dict::TypedDict;
 use pyrefly_types::typed_dict::TypedDictField;
@@ -1162,7 +1163,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub fn compute_kw_only_fields_by_class(&self, cls: &Class) -> SmallMap<Class, SmallSet<Name>> {
-        let is_kw_only_marker = |ty: &Type| matches!(ty, Type::ClassType(cls) if cls.has_qname("dataclasses", "KW_ONLY"));
+        let is_kw_only_marker =
+            |ty: &Type| matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::DataclassesKwOnly));
 
         let compute_for_class = |target_cls: &Class| -> SmallSet<Name> {
             let mut kw_only_fields = SmallSet::new();

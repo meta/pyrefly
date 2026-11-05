@@ -28,6 +28,7 @@ use pyrefly_types::function::BodyKind;
 use pyrefly_types::function::FuncFlags;
 use pyrefly_types::function::FunctionKind;
 use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::read_only::IsFinalVariableInitialized;
 use pyrefly_types::shaped_array::ShapedArrayType;
@@ -1011,7 +1012,7 @@ impl ClassField {
             ClassFieldInner::ProxyMethod { .. } => false,
             ClassFieldInner::NestedClass { .. } => false,
             ClassFieldInner::ClassAttribute { ty, .. } => {
-                matches!(ty, Type::ClassType(cls) if cls.has_qname("dataclasses", "KW_ONLY"))
+                matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::DataclassesKwOnly))
             }
             ClassFieldInner::InstanceAttribute { .. } => false,
         }
@@ -1420,8 +1421,8 @@ pub struct WithDefiningClass<T> {
 }
 
 impl<T> WithDefiningClass<T> {
-    fn is_defined_on(&self, module: &str, cls: &str) -> bool {
-        self.defining_class.has_toplevel_qname(module, cls)
+    fn is_defined_on(&self, cls: KnownClass) -> bool {
+        self.defining_class.is(cls)
     }
 }
 
@@ -2594,7 +2595,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // Everything else is a class attribute
                 _ => {
                     let is_staticmethod =
-                        matches!(&ty, Type::ClassType(cls) if cls.is_builtin("staticmethod"));
+                        matches!(&ty, Type::ClassType(cls) if cls.is(KnownClass::StaticMethod));
                     // Classmethod-created fields are exempt unless they inherit an instance declaration.
                     let is_instance_var = annotation.is_some()
                         && !is_class_var
@@ -2863,7 +2864,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return false;
         };
         cls.class_object()
-            .has_toplevel_qname("shape_extensions", "ProxyMethod")
+            .is(KnownClass::ShapeExtensionsProxyMethod)
     }
 
     fn contains_proxy_method_type(ty: &Type) -> bool {
@@ -2922,7 +2923,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let errors = self.error_swallower();
                 if matches!(
                     self.expr_infer(expr, &errors),
-                    Type::ClassDef(cls) if cls.has_toplevel_qname("shape_extensions", "ProxyMethod")
+                    Type::ClassDef(cls) if cls.is(KnownClass::ShapeExtensionsProxyMethod)
                 ) {
                     ProxyMethodAnnotationForm::Direct
                 } else {
@@ -3284,12 +3285,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         self.get_mro_for_class(field.class_object())
                             .ancestors_no_object(),
                     )
-                    .any(|field| {
-                        field.class_object().has_toplevel_qname(
-                            ModuleName::rest_framework_fields().as_str(),
-                            "Field",
-                        )
-                    }),
+                    .any(|field| field.class_object().is(KnownClass::RestFrameworkField)),
                 _ => false,
             };
             if is_declared_field {
@@ -3313,8 +3309,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .and_then(|ann| ann.ty.as_ref())
                 .is_none_or(|ty| {
                     matches!(ty, Type::ClassType(cls) if
-                        cls.has_qname("django.db.models.manager", "Manager")
-                        || cls.has_qname("django.db.models.manager", "BaseManager"))
+                        cls.is(KnownClass::DjangoManager)
+                        || cls.is(KnownClass::DjangoBaseManager))
                 })
             && let ExprOrBinding::Expr(e) = value
             && let Some(mut manager) = self.get_django_manager_assignment_type(class, e, errors)
@@ -4369,7 +4365,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             else {
                 continue;
             };
-            if want_field.defining_class.is_builtin("object") {
+            if want_field.defining_class.is(KnownClass::Object) {
                 continue;
             }
             if self.super_method_needs_impl_reason(&want_field).is_some() {
@@ -4496,7 +4492,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 continue;
             }
             parent_attr_found = true;
-            if want_field.defining_class.is_builtin("object") {
+            if want_field.defining_class.is(KnownClass::Object) {
                 parent_attr_is_from_object = true;
             }
             let want_class_field = want_field.value;
@@ -4559,8 +4555,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         if annotation.as_ref().is_none_or(|ann| ann.ty.is_none())
                 );
                 let parent_is_standard = matches!(want_class_field.ty(), Type::ClassType(cls) if
-                    cls.has_qname("django.db.models.manager", "Manager")
-                    || cls.has_qname("django.db.models.manager", "BaseManager"));
+                    cls.is(KnownClass::DjangoManager)
+                    || cls.is(KnownClass::DjangoBaseManager));
                 // Inferred interfaces allow replacements; declared standard interfaces only
                 // permit implicit rebinding. Other declared interfaces keep ordinary checks.
                 if parent_is_inferred
@@ -5099,7 +5095,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         get_field: &impl Fn(&Class, &Name) -> Option<&'s ClassField>,
     ) -> Option<WithDefiningClass<Cow<'s, ClassField>>> {
         ancestors.find_map(|ancestor| {
-            let field = if ancestor.is_builtin("object")
+            let field = if ancestor.is(KnownClass::Object)
                 && [dunder::NEW, dunder::INIT].contains(name)
                 && self.extends_any(cls)
             {
@@ -5419,11 +5415,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             attr.as_ref(),
             &Instance::of_metaclass(cls.clone(), metaclass),
         );
-        if name == &dunder::CALL
-            && metaclass
-                .class_object()
-                .has_toplevel_qname(ModuleName::builtins().as_str(), "type")
-        {
+        if name == &dunder::CALL && metaclass.class_object().is(KnownClass::Type) {
             return Some(ClassAttribute::read_write(
                 self.constructor_to_callable(cls.class_type()),
             ));
@@ -5647,15 +5639,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             })
     }
 
-    pub fn field_is_inherited_from(
-        &self,
-        cls: &Class,
-        field: &Name,
-        ancestor: (&str, &str),
-    ) -> bool {
-        self.field_defining_class_matches(cls, field, |c| {
-            c.has_toplevel_qname(ancestor.0, ancestor.1)
-        })
+    pub fn field_is_inherited_from(&self, cls: &Class, field: &Name, ancestor: KnownClass) -> bool {
+        self.field_defining_class_matches(cls, field, |c| c.is(ancestor))
     }
 
     /// Check whether the defining class of `field` on `cls` satisfies `predicate`.
@@ -5684,7 +5669,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub fn get_dunder_new(&self, cls: &ClassType, preserve_self: bool) -> Option<Type> {
         let new_member =
             self.get_class_member_with_defining_class(cls.class_object(), &dunder::NEW)?;
-        if new_member.is_defined_on("builtins", "object") {
+        if new_member.is_defined_on(KnownClass::Object) {
             // The default behavior of `object.__new__` is already baked into our implementation of
             // class construction; we only care about `__new__` if it is overridden.
             None
@@ -5721,7 +5706,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn get_dunder_init_helper(&self, instance: &Instance, get_object_init: bool) -> Option<Type> {
         let init_method =
             self.get_class_member_with_defining_class(instance.class, &dunder::INIT)?;
-        if get_object_init || !init_method.is_defined_on("builtins", "object") {
+        if get_object_init || !init_method.is_defined_on(KnownClass::Object) {
             init_method
                 .value
                 .as_special_method_type(self.heap, instance)
@@ -5741,7 +5726,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// metadata is still being computed; callers that need an inherited
     /// definition must walk the bases themselves.
     pub(crate) fn get_dunder_init_subclass(&self, cls: &ClassType) -> Option<Type> {
-        if cls.class_object().is_builtin("object") {
+        if cls.class_object().is(KnownClass::Object) {
             return None;
         }
         let field = self.get_non_synthesized_field_from_current_class_only(
@@ -5786,7 +5771,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let metaclass = metadata.custom_metaclass()?;
         let attr =
             self.get_class_member_with_defining_class(metaclass.class_object(), &dunder::CALL)?;
-        if attr.is_defined_on("builtins", "type") {
+        if attr.is_defined_on(KnownClass::Type) {
             // The behavior of `type.__call__` is already baked into our implementation of constructors,
             // so we can skip analyzing it at the type level.
             None

@@ -16,6 +16,7 @@
 use dupe::Dupe;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::short_identifier::ShortIdentifier;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::typed_dict::AnonymousTypedDictInner;
 use pyrefly_types::typed_dict::TypedDict;
 use pyrefly_types::typed_dict::TypedDictField;
@@ -60,7 +61,7 @@ pub(crate) fn is_attrs_nothing(ty: &Type) -> bool {
         Type::ClassType(c) => c,
         _ => return false,
     };
-    class.has_qname("attr", "_Nothing") || class.has_qname("attrs", "_Nothing")
+    class.is(KnownClass::AttrNothing) || class.is(KnownClass::AttrsNothing)
 }
 
 /// Recognizes `attr.setters.frozen` / `attrs.setters.frozen` (an `on_setattr` hook that makes an
@@ -111,7 +112,7 @@ fn attrs_type_is_frozen_setter(ty: &Type) -> bool {
                 || attrs_type_is_frozen_setter(middle)
                 || suffix.iter().any(attrs_type_is_frozen_setter)
         }
-        Type::ClassType(ct) if ct.is_builtin("list") => ct
+        Type::ClassType(ct) if ct.is(KnownClass::List) => ct
             .targs()
             .as_slice()
             .first()

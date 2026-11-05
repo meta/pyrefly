@@ -12,6 +12,7 @@ use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_types::callable::Callable;
 use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::class::PrecomputedTParams;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::special_form::SpecialForm;
 use ruff_python_ast::Identifier;
@@ -178,7 +179,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub fn unwrap_class_object_silently(&self, ty: &Type) -> Option<(TParams, Type)> {
         match ty {
-            Type::ClassDef(c) if c.is_builtin("tuple") => Some(self.instantiate_unbounded_tuple()),
+            Type::ClassDef(c) if c.is(KnownClass::Tuple) => {
+                Some(self.instantiate_unbounded_tuple())
+            }
             Type::ClassDef(c) => Some((
                 self.get_class_tparams(c)
                     .map_or_else(TParams::default, |tparams| (**tparams).clone()),
@@ -263,7 +266,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             && self.has_superclass(base.class_object(), want)
         {
             self.as_superclass(base, want)
-        } else if !class.class_object().is_builtin("tuple")
+        } else if !class.class_object().is(KnownClass::Tuple)
             && let Some(tuple) = self.as_tuple(class)
             && self.has_superclass(self.stdlib.tuple_object(), want)
         {

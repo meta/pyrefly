@@ -6,6 +6,7 @@
  */
 
 use pyrefly_python::dunder;
+use pyrefly_types::known_class::KnownClass;
 use ruff_python_ast::name::Name;
 use starlark_map::small_map::SmallMap;
 
@@ -41,7 +42,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         for other_cmp in conversion_order {
             if let Some(other_cmp_field) = self
                 .get_class_member_ignoring_own_synthesized(cls, other_cmp)
-                .filter(|field| !field.defining_class.is_builtin("object"))
+                .filter(|field| !field.defining_class.is(KnownClass::Object))
             {
                 let ty = other_cmp_field.value.as_named_tuple_type();
                 return ClassSynthesizedField::new(ty);
@@ -62,7 +63,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // The class must have one of the rich comparison dunder methods defined
         if !dunder::RICH_CMPS_TOTAL_ORDERING.iter().any(|cmp| {
             self.get_class_member_ignoring_own_synthesized(cls, cmp)
-                .is_some_and(|field| !field.defining_class.is_builtin("object"))
+                .is_some_and(|field| !field.defining_class.is(KnownClass::Object))
         }) {
             let total_ordering_metadata = metadata.total_ordering_metadata().unwrap();
             self.error(
@@ -80,7 +81,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .iter()
             .filter(|cmp| {
                 self.get_class_member_ignoring_own_synthesized(cls, cmp)
-                    .is_none_or(|field| field.defining_class.is_builtin("object"))
+                    .is_none_or(|field| field.defining_class.is(KnownClass::Object))
             })
             .collect();
         let mut fields = SmallMap::with_capacity(rich_cmps_to_synthesize.len());

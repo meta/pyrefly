@@ -25,6 +25,7 @@ use pyrefly_types::function::PropertyRole;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::keywords::KwCall;
 use pyrefly_types::keywords::TypeMap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::types::AnyStyle;
@@ -62,7 +63,7 @@ const COMBINABLE: Name = Name::new_static("Combinable");
 
 pub fn is_django_choices_subclass(bases_with_metadata: &[(Class, &ClassMetadata)]) -> bool {
     bases_with_metadata.iter().any(|(base, base_meta)| {
-        base.has_toplevel_qname(ModuleName::django_models_enums().as_str(), "Choices")
+        base.is(KnownClass::DjangoChoices)
             || base_meta
                 .enum_metadata()
                 .as_ref()
@@ -89,12 +90,8 @@ const VALUES: Name = Name::new_static("values");
 const ID: Name = Name::new_static("id");
 const PK: Name = Name::new_static("pk");
 const AUTO_FIELD: Name = Name::new_static("AutoField");
-const FOREIGN_KEY: Name = Name::new_static("ForeignKey");
-const ONE_TO_ONE_FIELD: Name = Name::new_static("OneToOneField");
 const NULL: Name = Name::new_static("null");
 const BLANK: Name = Name::new_static("blank");
-const CHAR_FIELD: Name = Name::new_static("CharField");
-const MANY_TO_MANY_FIELD: Name = Name::new_static("ManyToManyField");
 const MODEL: Name = Name::new_static("Model");
 const ANNOTATE: Name = Name::new_static("annotate");
 const MANYRELATEDMANAGER: Name = Name::new_static("ManyRelatedManager");
@@ -142,8 +139,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return false;
         };
         symbol.name == ANNOTATE
-            && (cls.has_toplevel_qname("django.db.models.query", "QuerySet")
-                || cls.has_toplevel_qname("django.db.models.manager", "Manager"))
+            && (cls.is(KnownClass::DjangoQuerySet) || cls.is(KnownClass::DjangoManager))
     }
 
     pub(crate) fn infer_django_annotate_call(
@@ -208,7 +204,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // The intersection preserves call-site metadata while generic QuerySet operations use the
         // original row as their fallback type.
         base.targs_mut().as_mut()[1] = self.heap.mk_intersect(vec![annotation], row);
-        if queryset.has_qname("django.db.models.query", "QuerySet") {
+        if queryset.is(KnownClass::DjangoQuerySet) {
             queryset = base;
         } else {
             queryset = queryset.with_django_metadata(DjangoClassMetadata::SpecializedBase { base });
@@ -253,10 +249,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     fn is_one_to_one_field(&self, field: &Class) -> bool {
-        field.has_toplevel_qname(
-            ModuleName::django_models_fields_related().as_str(),
-            ONE_TO_ONE_FIELD.as_str(),
-        )
+        field.is(KnownClass::DjangoOneToOneField)
     }
 
     /// Fill inferred descriptor arguments while retaining declared arguments.
@@ -431,14 +424,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         initial_value_expr: Option<&Expr>,
     ) -> Option<(Type, Type)> {
         match ty {
-            Type::ClassType(cls)
-                if cls.has_qname(ModuleName::django_utils_functional().as_str(), "_Getter") =>
-            {
-                cls.targs()
-                    .as_slice()
-                    .first()
-                    .map(|ty| (ty.clone(), ty.clone()))
-            }
+            Type::ClassType(cls) if cls.is(KnownClass::DjangoGetter) => cls
+                .targs()
+                .as_slice()
+                .first()
+                .map(|ty| (ty.clone(), ty.clone())),
             Type::ClassType(cls) => {
                 let (mut get_type, mut set_type) = self.get_django_field_types_from_class(
                     cls.class_object(),
@@ -582,9 +572,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn inherits_from_django_field(&self, cls: &Class) -> bool {
         self.get_mro_for_class(cls)
             .ancestors(self.stdlib)
-            .any(|ancestor| {
-                ancestor.has_qname(ModuleName::django_models_fields().as_str(), "Field")
-            })
+            .any(|ancestor| ancestor.is(KnownClass::DjangoField))
     }
 
     /// Bind a generated manager and its initial queryset for a class-body assignment.
@@ -646,7 +634,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             base.targs_mut().as_mut()[1] = model.clone();
         }
-        let queryset = if queryset.has_qname("django.db.models.query", "QuerySet") {
+        let queryset = if queryset.is(KnownClass::DjangoQuerySet) {
             base
         } else {
             queryset.with_django_metadata(DjangoClassMetadata::SpecializedBase { base })
@@ -695,8 +683,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .ancestors(self.stdlib),
             )
             .find(|base| {
-                base.has_qname("django.db.models.manager", "Manager")
-                    || base.has_qname("django.db.models.manager", "BaseManager")
+                base.is(KnownClass::DjangoManager) || base.is(KnownClass::DjangoBaseManager)
             })?
             .clone();
         let [original_model] = base.targs().as_slice() else {
@@ -737,12 +724,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn django_queryset_base(&self, cls: &ClassType) -> Option<ClassType> {
         if let Some(DjangoClassMetadata::SpecializedBase { base }) = cls.django_metadata() {
             Some(base.clone())
-        } else if cls.has_qname("django.db.models.query", "QuerySet") {
+        } else if cls.is(KnownClass::DjangoQuerySet) {
             Some(cls.clone())
         } else {
             self.get_mro_for_class(cls.class_object())
                 .ancestors(self.stdlib)
-                .find(|base| base.has_qname("django.db.models.query", "QuerySet"))
+                .find(|base| base.is(KnownClass::DjangoQuerySet))
                 .map(|base| base.substitute_with(&cls.substitution()))
         }
     }
@@ -754,16 +741,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 && symbol
                     .cls
                     .as_ref()
-                    .is_some_and(|cls| cls.has_toplevel_qname("django.db.models.query", "QuerySet"))
+                    .is_some_and(|cls| cls.is(KnownClass::DjangoQuerySet))
         })
     }
 
     /// Check manager replacements by nominal type, independently of their attribute names.
     pub(crate) fn is_django_manager_type(&self, ty: &Type) -> bool {
         matches!(ty, Type::ClassType(cls) if
-            cls.has_qname("django.db.models.manager", "BaseManager")
+            cls.is(KnownClass::DjangoBaseManager)
             || self.get_mro_for_class(cls.class_object()).ancestors(self.stdlib)
-                .any(|base| base.has_qname("django.db.models.manager", "BaseManager")))
+                .any(|base| base.is(KnownClass::DjangoBaseManager)))
     }
 
     /// Resolve generated members through the same path as ordinary instance members.
@@ -785,7 +772,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         if let ClassAttribute::ReadWrite { read_type, .. } = &mut attr {
                             read_type.transform_toplevel_callable_signatures(|signature, _| {
                             if matches!(signature.get_positional_param(1), Some(Type::ClassType(instance))
-                                if instance.has_qname("django.db.models.base", "Model")) {
+                                if instance.is(KnownClass::DjangoModel)) {
                                 signature.ret = get_type.clone();
                             }
                         });
@@ -855,9 +842,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let manager_member =
                     self.get_class_member_with_defining_class(cls.class_object(), name);
                 if let Some(member) = &manager_member
-                    && member
-                        .defining_class
-                        .has_toplevel_qname("django.db.models.manager", "BaseManager")
+                    && member.defining_class.is(KnownClass::DjangoBaseManager)
                 {
                     if !matches!(name.as_str(), "all" | "get_queryset") {
                         return None;
@@ -887,9 +872,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     let policy = self
                         .get_class_fields(&member.defining_class)
                         .and_then(|fields| fields.django_queryset_only(name));
-                    let queryset_only = member
-                        .defining_class
-                        .has_toplevel_qname("django.db.models.query", "QuerySet")
+                    let queryset_only = member.defining_class.is(KnownClass::DjangoQuerySet)
                         && matches!(name.as_str(), "delete" | "adelete" | "as_manager");
                     if policy == Some(true)
                         || (policy.is_none() && (name.as_str().starts_with('_') || queryset_only))
@@ -981,16 +964,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub fn is_foreign_key_like_field(&self, field: &Class) -> bool {
-        let module = ModuleName::django_models_fields_related();
-        field.has_toplevel_qname(module.as_str(), FOREIGN_KEY.as_str())
-            || field.has_toplevel_qname(module.as_str(), ONE_TO_ONE_FIELD.as_str())
+        field.is(KnownClass::DjangoForeignKey) || field.is(KnownClass::DjangoOneToOneField)
     }
 
     pub fn is_many_to_many_field(&self, field: &Class) -> bool {
-        field.has_toplevel_qname(
-            ModuleName::django_models_fields_related().as_str(),
-            MANY_TO_MANY_FIELD.as_str(),
-        )
+        field.is(KnownClass::DjangoManyToManyField)
     }
 
     pub fn get_django_enum_synthesized_fields(
@@ -1166,10 +1144,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Check if a Django field is a CharField.
     fn is_char_field(&self, field: &Class) -> bool {
-        field.has_toplevel_qname(
-            ModuleName::django_models_fields().as_str(),
-            CHAR_FIELD.as_str(),
-        )
+        field.is(KnownClass::DjangoCharField)
     }
 
     /// Extract a Literal type from CharField choices.
