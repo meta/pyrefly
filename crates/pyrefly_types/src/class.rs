@@ -336,24 +336,28 @@ pub enum ClassKind {
 }
 
 impl ClassKind {
-    fn from_qname(qname: &QName) -> Self {
-        let name = qname.id();
-        match (qname.module_name().as_str(), name.as_str()) {
-            ("builtins", "staticmethod") => Self::StaticMethod(name.clone()),
-            ("abc", "abstractstaticmethod") => Self::StaticMethod(name.clone()),
-            ("builtins", "classmethod") => Self::ClassMethod(name.clone()),
-            ("abc", "abstractclassmethod") => Self::ClassMethod(name.clone()),
-            ("builtins", "property") => Self::Property(name.clone()),
-            ("abc", "abstractproperty") => Self::Property(name.clone()),
-            ("functools", "cached_property") => Self::CachedProperty(name.clone()),
-            ("cached_property", "threaded_cached_property") => Self::CachedProperty(name.clone()),
-            ("cached_property", "cached_property") => Self::CachedProperty(name.clone()),
-            ("cinder", "cached_property") => Self::CachedProperty(name.clone()),
-            ("cinder", "async_cached_property") => Self::CachedProperty(name.clone()),
-            ("enum", "property") => Self::Property(name.clone()),
-            ("enum", "member") => Self::EnumMember,
-            ("enum", "nonmember") => Self::EnumNonmember,
-            ("dataclasses", "Field") => Self::DataclassField,
+    /// `name` is the class's own name, which the descriptor kinds carry.
+    fn new(known: Option<KnownClass>, name: &Name) -> Self {
+        match known {
+            Some(KnownClass::StaticMethod | KnownClass::AbcAbstractStaticMethod) => {
+                Self::StaticMethod(name.clone())
+            }
+            Some(KnownClass::ClassMethod | KnownClass::AbcAbstractClassMethod) => {
+                Self::ClassMethod(name.clone())
+            }
+            Some(
+                KnownClass::Property | KnownClass::AbcAbstractProperty | KnownClass::EnumProperty,
+            ) => Self::Property(name.clone()),
+            Some(
+                KnownClass::FunctoolsCachedProperty
+                | KnownClass::CachedPropertyThreadedCachedProperty
+                | KnownClass::CachedProperty
+                | KnownClass::CinderCachedProperty
+                | KnownClass::CinderAsyncCachedProperty,
+            ) => Self::CachedProperty(name.clone()),
+            Some(KnownClass::EnumMember) => Self::EnumMember,
+            Some(KnownClass::EnumNonmember) => Self::EnumNonmember,
+            Some(KnownClass::DataclassesField) => Self::DataclassField,
             _ => Self::Class,
         }
     }
@@ -411,7 +415,7 @@ impl Class {
     }
 
     pub fn kind(&self) -> ClassKind {
-        ClassKind::from_qname(self.qname())
+        ClassKind::new(self.known(), self.name())
     }
 
     pub fn is_protocol(&self) -> bool {
@@ -499,7 +503,7 @@ impl Class {
     }
 
     pub fn kind_in<E: TypeEnv + ?Sized>(&self, env: &E) -> ClassKind {
-        ClassKind::from_qname(self.qname_in(env))
+        ClassKind::new(self.known(), self.name_in(env))
     }
 
     /// The type parameters of this class, which are empty if it is not generic.

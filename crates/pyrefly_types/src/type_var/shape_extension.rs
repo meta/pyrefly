@@ -213,6 +213,7 @@ mod tests {
     use crate::class::Class;
     use crate::class::ClassDefIndex;
     use crate::class::PrecomputedTParams;
+    use crate::known_class::KnownClass;
     use crate::type_var::FlagMember;
 
     fn fake_class(module_name: ModuleName, name: &Name) -> Class {
@@ -254,7 +255,7 @@ mod tests {
         );
         let members = extension.upper_bound_members(&stdlib);
         assert_eq!(members.len(), 1);
-        assert!(matches!(&members[0], Type::ClassType(cls) if cls.is_builtin("int")));
+        assert!(matches!(&members[0], Type::ClassType(cls) if cls.is(KnownClass::Int)));
     }
 
     #[test]
@@ -278,6 +279,6 @@ mod tests {
         );
         let members = extension.upper_bound_members(&stdlib);
         assert_eq!(members.len(), 1);
-        assert!(matches!(&members[0], Type::ClassType(cls) if cls.is_builtin("object")));
+        assert!(matches!(&members[0], Type::ClassType(cls) if cls.is(KnownClass::Object)));
     }
 }

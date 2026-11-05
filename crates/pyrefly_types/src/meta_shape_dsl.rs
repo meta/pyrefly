@@ -174,6 +174,7 @@ impl Val {
 /// to runtime values. Each returns `None` if the type doesn't match.
 mod extract {
     use crate::dimension::Int;
+    use crate::known_class::KnownClass;
     use crate::literal::Lit;
     use crate::shaped_array::IntTuple;
     use crate::tuple::Tuple;
@@ -296,7 +297,7 @@ mod extract {
 
         match ty {
             // list[Array[...]] - can't determine element count, return None
-            Type::ClassType(class_type) if class_type.has_qname("builtins", "list") => {
+            Type::ClassType(class_type) if class_type.is(KnownClass::List) => {
                 // Lists don't preserve element count in the type system
                 // Fall back to fixture for now
                 None

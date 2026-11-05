@@ -29,6 +29,7 @@ use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
 
 use crate::heap::TypeHeap;
+use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::simplify::unions;
 use crate::stdlib::Stdlib;
@@ -59,7 +60,7 @@ fn int_tuple_length(tuple: &Tuple) -> Option<IntTupleLength> {
     fn is_int(ty: &Type) -> bool {
         match ty {
             Type::Any(_) | Type::Int(_) => true,
-            Type::ClassType(cls) => cls.is_builtin("int"),
+            Type::ClassType(cls) => cls.is(KnownClass::Int),
             Type::Literal(lit) => matches!(lit.value, Lit::Int(_)),
             Type::Union(union) => union.members.iter().all(is_int),
             Type::Quantified(q) => q
@@ -145,9 +146,9 @@ impl FlagMember {
     /// parsed separately because they can carry a fixed arity.
     fn from_type(ty: &Type) -> Option<Self> {
         match ty {
-            Type::ClassType(cls) if cls.is_builtin("int") => Some(Self::Int),
-            Type::ClassType(cls) if cls.is_builtin("bool") => Some(Self::Bool),
-            Type::ClassType(cls) if cls.is_builtin("str") => Some(Self::Str),
+            Type::ClassType(cls) if cls.is(KnownClass::Int) => Some(Self::Int),
+            Type::ClassType(cls) if cls.is(KnownClass::Bool) => Some(Self::Bool),
+            Type::ClassType(cls) if cls.is(KnownClass::Str) => Some(Self::Str),
             Type::None => Some(Self::NoneType),
             _ => None,
         }
@@ -156,9 +157,9 @@ impl FlagMember {
     /// Accepts this scalar member exactly rather than applying Python subtyping.
     fn accepts(self, ty: &Type) -> bool {
         match (self, ty) {
-            (Self::Int, Type::ClassType(cls)) => cls.is_builtin("int"),
-            (Self::Bool, Type::ClassType(cls)) => cls.is_builtin("bool"),
-            (Self::Str, Type::ClassType(cls)) => cls.is_builtin("str"),
+            (Self::Int, Type::ClassType(cls)) => cls.is(KnownClass::Int),
+            (Self::Bool, Type::ClassType(cls)) => cls.is(KnownClass::Bool),
+            (Self::Str, Type::ClassType(cls)) => cls.is(KnownClass::Str),
             (Self::NoneType, Type::None) => true,
             (Self::Int, Type::Int(_)) => true,
             (Self::Int, Type::Literal(lit)) => matches!(lit.value, Lit::Int(_)),
@@ -191,12 +192,12 @@ enum FlagTuple {
 impl FlagTuple {
     fn from_type(ty: &Type) -> Option<Self> {
         match ty {
-            Type::Tuple(Tuple::Unbounded(element)) if matches!(element.as_ref(), Type::ClassType(cls) if cls.is_builtin("int")) => {
+            Type::Tuple(Tuple::Unbounded(element)) if matches!(element.as_ref(), Type::ClassType(cls) if cls.is(KnownClass::Int)) => {
                 Some(Self::Unbounded)
             }
             Type::Tuple(Tuple::Concrete(elements))
                 if elements.iter().all(
-                    |element| matches!(element, Type::ClassType(cls) if cls.is_builtin("int")),
+                    |element| matches!(element, Type::ClassType(cls) if cls.is(KnownClass::Int)),
                 ) =>
             {
                 Some(Self::Fixed(elements.len()))
@@ -245,7 +246,7 @@ impl FlagTuple {
 
     fn accepts(self, ty: &Type) -> bool {
         let length = match ty {
-            Type::ClassType(cls) if cls.is_builtin("tuple") => IntTupleLength {
+            Type::ClassType(cls) if cls.is(KnownClass::Tuple) => IntTupleLength {
                 minimum: 0,
                 exact: false,
             },
