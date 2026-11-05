@@ -22,6 +22,7 @@ use pyrefly_build::source_db::LiveSourceDatabase;
 use pyrefly_build::source_db::ModuleEnumerator;
 use pyrefly_build::source_db::SourceDatabase;
 use pyrefly_build::source_db::map_db::MapDatabase;
+use pyrefly_python::module::TextRangeWithModule;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModuleStyle;
@@ -36,6 +37,7 @@ use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
 use pyrefly_util::thread_pool::ThreadCount;
 use pyrefly_util::thread_pool::ThreadPool;
 use ruff_python_ast::name::Name;
+use ruff_text_size::TextSize;
 use starlark_map::small_set::SmallSet;
 use tempfile::TempDir;
 
@@ -46,6 +48,7 @@ use crate::config::error_kind::ErrorKind;
 use crate::config::error_kind::Severity;
 use crate::config::finder::ConfigFinder;
 use crate::error::error::print_errors;
+use crate::lsp::non_wasm::module_helpers::handle_from_module_path;
 use crate::lsp::non_wasm::server::resolve_export_location;
 use crate::module::bundled::BundledStub;
 use crate::module::bundled::set_readonly;
@@ -54,9 +57,12 @@ use crate::module::finder::FindImportOptions;
 use crate::module::finder::find_import;
 use crate::module::typeshed::typeshed;
 use crate::state::load::FileContents;
+use crate::state::lsp::FindPreference;
+use crate::state::lsp::ReferenceOptions;
 use crate::state::require::Require;
 use crate::state::require::RequireLevels;
 use crate::state::state::State;
+use crate::state::state::Transaction;
 use crate::test::util::TestEnv;
 
 #[test]
@@ -1599,4 +1605,195 @@ fn test_stdlib_cached_on_recheck() {
         "Cached stdlib should skip pre-warming entirely"
     );
     state.commit_transaction(t2, None);
+}
+
+/// Writes apps `app` and `app2` and a library `lib`, each with its own config and Python
+/// environment, and each environment with a module `dep`. The apps find the library through their
+/// site-package paths, and the library's config uses `lib_site_package_path`.
+fn write_apps_and_library(root: &Path, lib_site_package_path: &[&str]) {
+    let site_package_path = |dirs: &[&str]| {
+        dirs.iter()
+            .map(|dir| format!("'{}'", root.join(dir).display()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for (app, env) in [("app", "app_env"), ("app2", "app2_env")] {
+        fs::create_dir_all(root.join(app)).unwrap();
+        fs::create_dir_all(root.join(env)).unwrap();
+        fs::write(
+            root.join(app).join(ConfigFile::PYREFLY_FILE_NAME),
+            format!(
+                "site-package-path = [{}]\nskip-interpreter-query = true\n",
+                site_package_path(&[env, "lib"])
+            ),
+        )
+        .unwrap();
+        fs::write(root.join(env).join("dep.py"), "class C: ...\n").unwrap();
+        fs::write(
+            root.join(app).join("main.py"),
+            "import dep\nimport mylib\nmylib.f(x=dep.C())\n",
+        )
+        .unwrap();
+    }
+    fs::create_dir_all(root.join("lib")).unwrap();
+    fs::create_dir_all(root.join("lib_env")).unwrap();
+    fs::write(
+        root.join("lib").join(ConfigFile::PYREFLY_FILE_NAME),
+        format!(
+            "site-package-path = [{}]\nskip-interpreter-query = true\n",
+            site_package_path(lib_site_package_path)
+        ),
+    )
+    .unwrap();
+    fs::write(root.join("lib_env/dep.py"), "class C: ...\n").unwrap();
+    fs::write(
+        root.join("lib/mylib.py"),
+        "import dep\ndef f(x: dep.C) -> None: ...\n",
+    )
+    .unwrap();
+}
+
+/// A library with its own config and environment, found through an app's site-package path, is
+/// checked in the app's environment: the app's copy of the library resolves `dep` to the same
+/// handle as the app does, so passing the app's `dep.C` to it is not an error. Two apps get one
+/// copy each, and IDE features that look up the library from an app use the app's copy. Checked on
+/// its own, the library resolves `dep` through its own site-package path. Find references reports
+/// each file once. See https://github.com/facebook/pyrefly/issues/3556.
+#[test]
+fn test_library_imported_from_another_environment() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    write_apps_and_library(root, &["lib_env"]);
+    let state = State::new(default_config_finder(None), TEST_THREAD_COUNT);
+    let handle =
+        |path: &str| handle_from_module_path(&state, ModulePath::filesystem(root.join(path)));
+    let (main, main2, mylib) = (
+        handle("app/main.py"),
+        handle("app2/main.py"),
+        handle("lib/mylib.py"),
+    );
+    let mut transaction = state.new_transaction(Require::Exports, None);
+    transaction.run(&[main.dupe(), main2.dupe()], Require::Everything, None);
+    let errors = transaction
+        .get_errors([&main, &main2])
+        .collect_display_errors();
+    assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+
+    let import = |transaction: &Transaction, handle: &Handle, module: &str| {
+        transaction
+            .import_handle(handle, ModuleName::from_str(module), None)
+            .finding()
+            .unwrap()
+    };
+    for main in [&main, &main2] {
+        assert_eq!(
+            import(&transaction, &import(&transaction, main, "mylib"), "dep"),
+            import(&transaction, main, "dep")
+        );
+    }
+    assert_eq!(
+        import(&transaction, &import(&transaction, &main2, "mylib"), "dep")
+            .path()
+            .as_path(),
+        root.join("app2_env/dep.py")
+    );
+
+    let code = fs::read_to_string(root.join("app/main.py")).unwrap();
+    let position = |text: &str| TextSize::try_from(code.find(text).unwrap()).unwrap();
+    let type_definition = transaction
+        .goto_type_definition(&main, position("f("))
+        .unwrap();
+    assert_eq!(
+        type_definition
+            .iter()
+            .map(|definition| definition.module.path().as_path())
+            .collect::<Vec<_>>(),
+        vec![root.join("lib/mylib.py")]
+    );
+    let mut rdeps = transaction
+        .get_rdeps(&mylib)
+        .into_iter()
+        .map(|handle| handle.path().as_path().to_owned())
+        .collect::<Vec<_>>();
+    rdeps.sort();
+    assert_eq!(
+        rdeps,
+        vec![root.join("app/main.py"), root.join("app2/main.py")]
+    );
+
+    transaction.run(&[mylib.dupe()], Require::Everything, None);
+    let errors = transaction.get_errors([&mylib]).collect_display_errors();
+    assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+    assert_eq!(
+        import(&transaction, &mylib, "dep").path().as_path(),
+        root.join("lib_env/dep.py")
+    );
+
+    let definitions = transaction
+        .find_definition(&main, position("f("), FindPreference::default())
+        .unwrap();
+    let definition = definitions.first();
+    let mut references = transaction
+        .find_global_references_from_definition(
+            *main.sys_info(),
+            definition.metadata.clone(),
+            TextRangeWithModule::new(definition.module.clone(), definition.definition_range),
+            ReferenceOptions::textual_only(true),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|(module, ranges)| (module.path().as_path().to_owned(), ranges.len()))
+        .collect::<Vec<_>>();
+    references.sort();
+    assert_eq!(
+        references,
+        vec![
+            (root.join("app/main.py"), 1),
+            (root.join("app2/main.py"), 1),
+            (root.join("lib/mylib.py"), 1)
+        ]
+    );
+}
+
+/// When the library's config changes from the app's environment to its own, the app's import of
+/// the library switches to the library's copy in the app's environment.
+#[test]
+fn test_library_environment_change_rechecks_importer() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    write_apps_and_library(root, &["app_env", "lib"]);
+    let state = State::new(default_config_finder(None), TEST_THREAD_COUNT);
+    let main = handle_from_module_path(&state, ModulePath::filesystem(root.join("app/main.py")));
+    let error_count_after = |events: CategorizedEvents| {
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction.as_mut().invalidate_events(&events);
+        transaction
+            .as_mut()
+            .run(&[main.dupe()], Require::Everything, None);
+        let count = transaction
+            .as_mut()
+            .get_errors([&main])
+            .collect_display_errors()
+            .len();
+        state.commit_transaction(transaction, None);
+        count
+    };
+
+    assert_eq!(error_count_after(CategorizedEvents::default()), 0);
+    let lib_config = root.join("lib").join(ConfigFile::PYREFLY_FILE_NAME);
+    fs::write(
+        &lib_config,
+        format!(
+            "site-package-path = ['{}']\nskip-interpreter-query = true\n",
+            root.join("lib_env").display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        error_count_after(CategorizedEvents {
+            modified: vec![lib_config],
+            ..Default::default()
+        }),
+        0
+    );
 }
