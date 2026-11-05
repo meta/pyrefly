@@ -1198,12 +1198,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         else {
             return false;
         };
-        let defining_class = &iter_method.defining_class;
-        // The `NamedTupleFallback` comparison never matches, because that class is defined in
-        // `_typeshed._type_checker_internals`. D129806257 switches it to `KnownClass`.
-        !defining_class.is(KnownClass::Tuple)
-            && !(defining_class.module_name().as_str() == "type_checker_internals"
-                && defining_class.name() == "NamedTupleFallback")
+        !matches!(
+            iter_method.defining_class.known(),
+            Some(KnownClass::Tuple | KnownClass::TypeshedNamedTupleFallback)
+        )
     }
 
     /// Given an `iterable` type, determine the iteration type; this is the type

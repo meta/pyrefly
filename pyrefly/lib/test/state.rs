@@ -1523,6 +1523,69 @@ def use_default(method: MethodType) -> None:
     assert!(errors.ordinary.is_empty(), "{errors:?}");
 }
 
+#[test]
+fn test_custom_typeshed_named_tuple_fallback_iter_is_not_an_override() {
+    let temp_dir = TempDir::new().unwrap();
+    let stdlib_path = temp_dir.path().join("stdlib");
+    typeshed().unwrap().write(&stdlib_path).unwrap();
+    fs::write(
+        stdlib_path.join("VERSIONS"),
+        pyrefly_bundled::bundled_typeshed_versions(),
+    )
+    .unwrap();
+
+    // Model a typeshed whose `NamedTupleFallback` declares `__iter__`. Every named tuple
+    // inherits it, so it is not a user override and must not hide the field types.
+    let internals_path = stdlib_path.join("_typeshed/_type_checker_internals.pyi");
+    // Bundled stubs can use CRLF line endings on Windows.
+    let internals = fs::read_to_string(&internals_path)
+        .unwrap()
+        .replace("\r\n", "\n");
+    let header = "class NamedTupleFallback(tuple[Any, ...]):\n";
+    assert_eq!(internals.matches(header).count(), 1);
+    let internals = internals.replace(
+        header,
+        &format!("{header}    def __iter__(self) -> Generator[Any, None, None]: ...\n"),
+    );
+    set_readonly(&internals_path, false).unwrap();
+    fs::write(&internals_path, internals).unwrap();
+
+    let mut config = ConfigFile::default();
+    config.python_environment.set_empty_to_default();
+    config.typeshed_path = Some(temp_dir.path().to_owned());
+    config.configure();
+    let handle = Handle::new(
+        ModuleName::from_str("main"),
+        ModulePath::memory(PathBuf::from("main.py")),
+        config.get_sys_info(),
+    );
+    let state = State::new(
+        ConfigFinder::new_constant(ArcId::new(config)),
+        TEST_THREAD_COUNT,
+    );
+    let mut transaction = state.new_transaction(Require::Everything, None);
+    transaction.set_memory(vec![(
+        PathBuf::from("main.py"),
+        Some(Arc::new(FileContents::from_source(
+            r#"
+from typing import NamedTuple, assert_type
+
+class Pair(NamedTuple):
+    x: int
+    y: str
+
+x, y = Pair(1, "")
+assert_type(x, int)
+assert_type(y, str)
+"#
+            .to_owned(),
+        ))),
+    )]);
+    transaction.run(&[handle.dupe()], Require::Everything, None);
+    let errors = transaction.get_errors([&handle]).collect_errors();
+    assert!(errors.ordinary.is_empty(), "{errors:?}");
+}
+
 const SEQUENTIAL_COMMITTABLE_TRANSACTIONS_SLEEP_TIME_MS: u64 = 100;
 
 #[test]
