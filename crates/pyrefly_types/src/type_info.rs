@@ -369,30 +369,28 @@ impl TypeInfo {
 
     /// `ctx` must have been created from every type in this `TypeInfo`.
     pub fn display_with<'a>(&'a self, ctx: &'a TypeDisplayContext<'a>) -> impl Display + 'a {
-        Fmt(move |f| self.fmt_with(&|ty, f| write!(f, "{}", ctx.display(ty)), f))
-    }
-
-    fn fmt_with(&self, fmt_ty: &FmtType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_ty(self.ty(), f)?;
-        if let Some(facets) = &self.facets
-            && facets.has_displayable_content()
-        {
-            write!(f, " (")?;
-            facets.fmt_with_prefix(&mut Vec::new(), fmt_ty, f)?;
-            write!(f, ")")?;
-        }
-        Ok(())
+        Fmt(move |f| {
+            write!(f, "{}", ctx.display(self.ty()))?;
+            if let Some(facets) = &self.facets
+                && facets.has_displayable_content()
+            {
+                write!(f, " (")?;
+                facets.fmt_with_prefix(&mut Vec::new(), ctx, f)?;
+                write!(f, ")")?;
+            }
+            Ok(())
+        })
     }
 }
 
 impl Display for TypeInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_with(&|ty, f| ty.fmt(f), f)
+        let mut types = Vec::new();
+        self.visit(&mut |ty| types.push(ty));
+        let ctx = TypeDisplayContext::new(&types);
+        self.display_with(&ctx).fmt(f)
     }
 }
-
-/// Writes a single type.
-type FmtType<'a> = dyn Fn(&Type, &mut fmt::Formatter<'_>) -> fmt::Result + 'a;
 
 /// Limit on the size of [NarrowedFacets].
 ///
@@ -592,7 +590,7 @@ impl NarrowedFacets {
     fn fmt_with_prefix(
         &self,
         prefix: &mut Vec<FacetKind>,
-        fmt_ty: &FmtType,
+        ctx: &TypeDisplayContext,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         let mut first = true;
@@ -608,17 +606,17 @@ impl NarrowedFacets {
                 write!(f, ", ")?;
             }
             match value {
-                NarrowedFacet::Leaf(ty) => Self::fmt_type_with_label(prefix, facet, ty, fmt_ty, f),
+                NarrowedFacet::Leaf(ty) => Self::fmt_type_with_label(prefix, facet, ty, ctx, f),
                 NarrowedFacet::WithRoot(ty, facets) => {
-                    Self::fmt_type_with_label(prefix, facet, ty, fmt_ty, f)?;
+                    Self::fmt_type_with_label(prefix, facet, ty, ctx, f)?;
                     if facets.has_displayable_content() {
                         write!(f, ", ")?;
-                        facets.fmt_with_prefix_and_facet(prefix, facet, fmt_ty, f)?;
+                        facets.fmt_with_prefix_and_facet(prefix, facet, ctx, f)?;
                     }
                     Ok(())
                 }
                 NarrowedFacet::WithoutRoot { facets, .. } => {
-                    facets.fmt_with_prefix_and_facet(prefix, facet, fmt_ty, f)
+                    facets.fmt_with_prefix_and_facet(prefix, facet, ctx, f)
                 }
             }?;
         }
@@ -629,11 +627,11 @@ impl NarrowedFacets {
         &self,
         prefix: &mut Vec<FacetKind>,
         facet: &'a FacetKind,
-        fmt_ty: &FmtType,
+        ctx: &TypeDisplayContext,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         prefix.push(facet.clone());
-        self.fmt_with_prefix(prefix, fmt_ty, f)?;
+        self.fmt_with_prefix(prefix, ctx, f)?;
         prefix.pop();
         Ok(())
     }
@@ -642,11 +640,16 @@ impl NarrowedFacets {
         prefix: &[FacetKind],
         facet: &FacetKind,
         ty: &Type,
-        fmt_ty: &FmtType,
+        ctx: &TypeDisplayContext,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
-        write!(f, "_{}{}: ", prefix.iter().join(""), facet)?;
-        fmt_ty(ty, f)
+        write!(
+            f,
+            "_{}{}: {}",
+            prefix.iter().join(""),
+            facet,
+            ctx.display(ty)
+        )
     }
 }
 
@@ -665,12 +668,6 @@ impl VisitMut<Type> for NarrowedFacets {
         facets.values_mut().for_each(|value| {
             value.visit_mut(f);
         })
-    }
-}
-
-impl Display for NarrowedFacets {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_with_prefix(&mut Vec::new(), &|ty, f| ty.fmt(f), f)
     }
 }
 

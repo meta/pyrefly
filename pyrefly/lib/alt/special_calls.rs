@@ -266,16 +266,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             type_info.visit_mut(&mut |ty| {
                 *ty = self.for_display(ty.clone());
             });
-            let message = if self.solver().config.reveal_type_qualified_names {
-                let mut types = Vec::new();
-                type_info.visit(&mut |ty| types.push(ty));
-                let mut ctx = TypeDisplayContext::new(&types);
+            let mut types = Vec::new();
+            type_info.visit(&mut |ty| types.push(ty));
+            let mut ctx = TypeDisplayContext::new(&types);
+            if self.solver().config.reveal_type_qualified_names {
                 ctx.always_display_module_name_except_builtins();
-                format!("revealed type: {}", type_info.display_with(&ctx))
-            } else {
-                format!("revealed type: {type_info}")
-            };
-            self.error(errors, range, ErrorKind::RevealType, message);
+            }
+            self.error(
+                errors,
+                range,
+                ErrorKind::RevealType,
+                format!("revealed type: {}", type_info.display_with(&ctx)),
+            );
             ret
         } else {
             self.error(
