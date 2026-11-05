@@ -15,6 +15,7 @@ use pyrefly_python::ast::Ast;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::data_frame::DataFrameKind;
 use pyrefly_types::facet::FacetKind;
+use pyrefly_types::known_class::KnownClass;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
@@ -371,7 +372,7 @@ impl<'a> Transaction<'a> {
                 if unpacked.arguments.args.is_empty()
                     && matches!(
                         self.get_type_trace(handle, unpacked.func.range()),
-                        Some(Type::ClassDef(class)) if class.is_builtin("dict")
+                        Some(Type::ClassDef(class)) if class.is(KnownClass::Dict)
                     ) =>
             {
                 for keyword in &unpacked.arguments.keywords {
@@ -1122,7 +1123,7 @@ impl<'a> Transaction<'a> {
             || in_keyword_value
             || !matches!(
                 self.get_type_trace(handle, call.func.range()),
-                Some(Type::ClassDef(class)) if class.is_builtin("dict")
+                Some(Type::ClassDef(class)) if class.is(KnownClass::Dict)
             )
         {
             return None;

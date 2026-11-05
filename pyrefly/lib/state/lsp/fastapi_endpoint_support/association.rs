@@ -15,6 +15,7 @@ use pyrefly_python::module::Module;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_python::short_identifier::ShortIdentifier;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::types::Type;
 use ruff_python_ast::Expr;
 use ruff_text_size::Ranged;
@@ -153,8 +154,7 @@ fn direct_constructor(transaction: &Transaction<'_>, handle: &Handle, callee: &E
     let Some(Type::ClassDef(class)) = transaction.get_type_trace(handle, callee.range()) else {
         return false;
     };
-    class.has_toplevel_qname("starlette.testclient", "TestClient")
-        || class.has_toplevel_qname("fastapi.testclient", "TestClient")
+    class.is(KnownClass::StarletteTestClient) || class.is(KnownClass::FastApiTestClient)
 }
 
 /// Only a direct constructor exposes the meaning of its `app` argument; factories and

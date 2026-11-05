@@ -17,6 +17,7 @@ use pyrefly_types::facet::FacetChain;
 use pyrefly_types::facet::FacetKind;
 use pyrefly_types::facet::UnresolvedFacetChain;
 use pyrefly_types::facet::UnresolvedFacetKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::simplify::intersect;
 use pyrefly_types::simplify::simplify_tuples;
@@ -374,7 +375,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let is_concrete = obj == self.stdlib.list_object()
             || obj == self.stdlib.set_object()
             || obj == self.stdlib.frozenset_object()
-            || cls.has_qname("collections", "deque");
+            || cls.is(KnownClass::CollectionsDeque);
         if !is_concrete {
             return None;
         }
@@ -652,7 +653,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             (Type::Sentinel(s1), Type::Sentinel(s2)) if s1 == s2 => self.heap.mk_never(),
             (Type::ClassType(cls), Type::Literal(lit))
-                if cls.is_builtin("bool")
+                if cls.is(KnownClass::Bool)
                     && let Lit::Bool(b) = &lit.value =>
             {
                 Lit::Bool(!b).to_implicit_type()
@@ -724,7 +725,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // Confirm via type inference that it's actually the builtin, to guard
                 // against shadowing or unrelated attributes with the same name.
                 let is_builtin_container = match self.expr_infer(&call.func, errors) {
-                    Type::ClassDef(cls) => CONTAINER_NAMES.iter().any(|n| cls.is_builtin(n)),
+                    Type::ClassDef(cls) => matches!(
+                        cls.known(),
+                        Some(
+                            KnownClass::List
+                                | KnownClass::Tuple
+                                | KnownClass::Set
+                                | KnownClass::FrozenSet
+                        )
+                    ),
                     _ => false,
                 };
                 if !is_builtin_container {
@@ -783,7 +792,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn unwrap_class_info_target(&self, left: &Type, right: &Type) -> Option<(TParams, Type)> {
         let right_is_tuple = match right {
             Type::Type(f) if matches!(&**f, Type::Tuple(_)) => true,
-            Type::ClassDef(cls) => cls.is_builtin("tuple"),
+            Type::ClassDef(cls) => cls.is(KnownClass::Tuple),
             _ => false,
         };
         let narrow_heterogeneous_tuple = right_is_tuple
@@ -1825,7 +1834,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 // satisfies type[int] but is not identity-equal
                                 // to `int` at runtime.
                                 (Type::ClassType(cls), Type::Literal(lit))
-                                    if cls.is_builtin("bool")
+                                    if cls.is(KnownClass::Bool)
                                         && let Lit::Bool(b) = &lit.value =>
                                 {
                                     result = Lit::Bool(!b).to_implicit_type();
@@ -2016,17 +2025,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     if self.as_bool(t, range, &silent) == Some(!boolval) {
                         return self.heap.mk_never();
                     } else if let Type::ClassType(cls) = t {
-                        if cls.is_builtin("bool") {
+                        if cls.is(KnownClass::Bool) {
                             return Lit::Bool(boolval).to_implicit_type();
                         }
                         if !boolval {
                             // Primitive truthiness assumes builtin behavior; overrides in
                             // subclasses are outside this narrowing model.
-                            if cls.is_builtin("int") {
+                            if cls.is(KnownClass::Int) {
                                 return LitInt::new(0).to_implicit_type();
-                            } else if cls.is_builtin("str") {
+                            } else if cls.is(KnownClass::Str) {
                                 return Lit::Str("".into()).to_implicit_type();
-                            } else if cls.is_builtin("bytes") {
+                            } else if cls.is(KnownClass::Bytes) {
                                 let empty = Vec::new();
                                 return Lit::Bytes(empty.into_boxed_slice()).to_implicit_type();
                             }
@@ -2079,7 +2088,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.distribute_over_union(ty, |t| match (t, &right) {
                         (_, _) if Self::literal_equal(t, &right) => self.heap.mk_never(),
                         (Type::ClassType(cls), Type::Literal(lit))
-                            if cls.is_builtin("bool")
+                            if cls.is(KnownClass::Bool)
                                 && let Lit::Bool(b) = &lit.value =>
                         {
                             Lit::Bool(!b).to_implicit_type()
@@ -2593,7 +2602,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // whose members can be combined into new members via bitwise ops
                 !self.is_flag_enum(cls) && !self.is_subclassable(cls.class_object())
                     // bool is effectively Literal[True] | Literal[False]
-                    || cls.is_builtin("bool")
+                    || cls.is(KnownClass::Bool)
             }
 
             // Literal types have explicit values

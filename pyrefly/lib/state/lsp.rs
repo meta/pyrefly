@@ -36,6 +36,7 @@ use pyrefly_python::sys_info::SysInfo;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::function::FuncMetadata;
 use pyrefly_types::function::FunctionKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_types::typed_dict::TypedDict;
 use pyrefly_types::typed_dict::TypedDictInner;
@@ -2281,8 +2282,7 @@ impl<'a> Transaction<'a> {
                             .map(|base| base.class_object()),
                     )
                     .any(|base| {
-                        base.has_toplevel_qname("torch.nn", "Module")
-                            || base.has_toplevel_qname("torch.nn.modules.module", "Module")
+                        base.is(KnownClass::TorchModule) || base.is(KnownClass::TorchModulesModule)
                     })
             })
             .unwrap_or(false);

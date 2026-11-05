@@ -35,6 +35,7 @@ use crate::data_frame::SchemaCompleteness;
 use crate::function::Function;
 use crate::function::FunctionKind;
 use crate::heap::TypeHeap;
+use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::quantified::Quantified;
 use crate::quantified::QuantifiedIdentity;
@@ -218,10 +219,12 @@ impl<'a> TypeDisplayContext<'a> {
             if let Type::Function(func) = t
                 && let FunctionKind::CallbackProtocol(cls) = &func.metadata.kind
                 && matches!(
-                    cls.qname().module_name().as_str(),
-                    "functools" | "singledispatch"
+                    cls.known(),
+                    Some(
+                        KnownClass::FunctoolsSingleDispatchCallable
+                            | KnownClass::SingleDispatchCallable
+                    )
                 )
-                && cls.name().as_str() == "_SingleDispatchCallable"
             {
                 self.add_qname(cls.qname());
             }
@@ -1030,9 +1033,7 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_str("]")
             }
             Type::ClassType(class_type)
-                if class_type.qname().module_name().as_str() == "builtins"
-                    && class_type.qname().id().as_str() == "tuple"
-                    && class_type.targs().as_slice().len() == 1 =>
+                if class_type.is(KnownClass::Tuple) && class_type.targs().as_slice().len() == 1 =>
             {
                 output.write_qname(class_type.qname())?;
                 output.write_str("[")?;
@@ -1231,10 +1232,12 @@ impl<'a> TypeDisplayContext<'a> {
                 // signature, but should still reveal as `_SingleDispatchCallable[T]`.
                 if let FunctionKind::CallbackProtocol(cls) = &metadata.kind
                     && matches!(
-                        cls.qname().module_name().as_str(),
-                        "functools" | "singledispatch"
+                        cls.known(),
+                        Some(
+                            KnownClass::FunctoolsSingleDispatchCallable
+                                | KnownClass::SingleDispatchCallable
+                        )
                     )
-                    && cls.name().as_str() == "_SingleDispatchCallable"
                 {
                     return self.fmt_helper_generic(
                         &Type::ClassType((**cls).clone()),

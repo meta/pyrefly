@@ -54,6 +54,7 @@ use crate::function::PropertyRole;
 use crate::heap::TypeHeap;
 use crate::identity::IdentityIgnored;
 use crate::keywords::KwCall;
+use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::literal::LitStyle;
 use crate::literal::Literal;
@@ -1466,7 +1467,7 @@ impl Type {
     }
 
     pub fn is_object(&self) -> bool {
-        matches!(self, Type::ClassType(cls) if cls.is_builtin("object"))
+        matches!(self, Type::ClassType(cls) if cls.is(KnownClass::Object))
     }
 
     pub fn is_typed_dict(&self) -> bool {
@@ -2497,9 +2498,15 @@ impl Type {
             Type::Intersect(x) => x.0.iter().find_map(Type::as_bool),
             Type::ClassType(cls) => {
                 // `Never` containers cannot hold any items; they are always empty; they are always falsy.
-                const CONTAINER_NAMES: &[&str] = &["set", "frozenset", "list", "dict"];
-                (CONTAINER_NAMES.iter().any(|n| cls.is_builtin(n))
-                    && cls.targs().as_slice().first().is_some_and(|t| t.is_never()))
+                (matches!(
+                    cls.known(),
+                    Some(
+                        KnownClass::Set
+                            | KnownClass::FrozenSet
+                            | KnownClass::List
+                            | KnownClass::Dict
+                    )
+                ) && cls.targs().as_slice().first().is_some_and(|t| t.is_never()))
                 .then_some(false)
             }
             _ => None,
@@ -2666,7 +2673,7 @@ impl Type {
     /// Note the difference with `Type::Ellipsis`, which represents `...` in a type annotation,
     /// e.g., `x: Callable[Concatenate[int, ...], int]`.
     pub fn is_ellipsis_value(&self) -> bool {
-        matches!(self, Type::ClassType(cls) if cls.has_qname("types", "EllipsisType"))
+        matches!(self, Type::ClassType(cls) if cls.is(KnownClass::TypesEllipsisType))
     }
 }
 

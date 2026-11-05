@@ -985,9 +985,10 @@ class Box[N: IntVar](Generic[N]): ...
     };
     assert_eq!(param.name().as_str(), "N");
     assert_eq!(param.kind(), QuantifiedKind::TypeVar);
+    let other_int_var = get_class("IntVar", &handle("other"), &reader);
     assert!(matches!(
         param.restriction(),
-        Restriction::Bound(Type::ClassType(cls)) if cls.has_qname("other", "IntVar")
+        Restriction::Bound(Type::ClassType(cls)) if *cls.class_object() == other_int_var
     ));
 }
 
@@ -1047,11 +1048,12 @@ class Box[Shape: IntTuple](Generic[Shape]): ...
     };
     assert_eq!(ordinary_param.name().as_str(), "Shape");
     assert_eq!(ordinary_param.kind(), QuantifiedKind::TypeVar);
+    let lookalike_int_tuple = get_class("IntTuple", &handle("lookalike"), &reader);
     assert!(
         matches!(
             ordinary_param.restriction(),
             Restriction::Bound(Type::ClassType(bound_cls))
-                if bound_cls.has_qname("lookalike", "IntTuple")
+                if *bound_cls.class_object() == lookalike_int_tuple
         ),
         "an unrelated IntTuple class should remain an ordinary class bound"
     );

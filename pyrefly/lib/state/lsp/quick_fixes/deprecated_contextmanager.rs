@@ -12,6 +12,7 @@ use pyrefly_build::handle::Handle;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::module::Module;
 use pyrefly_python::sys_info::PythonVersion;
+use pyrefly_types::known_class::KnownClass;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprContext;
 use ruff_python_ast::Identifier;
@@ -80,8 +81,19 @@ pub(crate) fn replace_return_code_action(
     let Type::ClassDef(class) = transaction.get_type_at(handle, position)? else {
         return None;
     };
-    if !class.has_toplevel_qname("typing", from)
-        && !class.has_toplevel_qname("collections.abc", from)
+    let iterators = match kind {
+        ContextManagerKind::Sync => [
+            KnownClass::TypingIterator,
+            KnownClass::CollectionsAbcIterator,
+        ],
+        ContextManagerKind::Async => [
+            KnownClass::TypingAsyncIterator,
+            KnownClass::CollectionsAbcAsyncIterator,
+        ],
+    };
+    if !class
+        .known()
+        .is_some_and(|known| iterators.contains(&known))
     {
         return None;
     }

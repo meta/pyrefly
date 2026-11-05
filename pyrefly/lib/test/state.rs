@@ -41,6 +41,8 @@ use tempfile::TempDir;
 
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
+use crate::binding::binding::KeyExport;
+use crate::binding::binding::KeyTParams;
 use crate::commands::config_finder::default_config_finder;
 use crate::config::config::ConfigFile;
 use crate::config::config::ConfigSource;
@@ -61,6 +63,8 @@ use crate::state::require::Require;
 use crate::state::require::RequireLevels;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
+use crate::types::class::Class;
+use crate::types::types::Type;
 
 mod module_path_overlay_tests {
     use super::*;
@@ -688,6 +692,95 @@ fn test_cross_module_literal_promotion() {
         .get_errors(&handles)
         .check_against_expectations()
         .unwrap();
+}
+
+/// Check `main`, and also `foo` if `check_foo`, then read the type parameters of classes that
+/// `foo` defines through the `TypeEnv` of `main`.
+fn assert_type_env_reads_tparams_from_other_module(check_foo: bool) {
+    let mut test_env = TestEnv::new();
+    test_env.add(
+        "foo",
+        r#"
+from typing import Generic, TypeVar
+T = TypeVar("T")
+class LegacyBox(Generic[T]): ...
+class Box[S]: ...
+class Plain: ...
+"#,
+    );
+    test_env.add("main", "from foo import LegacyBox, Box, Plain");
+    let config_file = test_env.config();
+    let sys_info = test_env.sys_info();
+    let handle = |name: &str| {
+        let name = ModuleName::from_str(name);
+        let path = find_import(
+            &config_file,
+            name,
+            FindImportOptions::new(&DirEntryCache::new()),
+        )
+        .finding()
+        .unwrap();
+        Handle::new(name, path, sys_info.dupe())
+    };
+    let main = handle("main");
+    let foo = handle("foo");
+    let state = State::new(test_env.config_finder(), TEST_THREAD_COUNT);
+    let mut transaction = state.new_transaction(Require::Exports, None);
+    transaction.set_memory(test_env.get_memory());
+    let checked = if check_foo {
+        vec![main.dupe(), foo.dupe()]
+    } else {
+        vec![main.dupe()]
+    };
+    transaction.run(&checked, Require::Everything, None);
+    assert_eq!(
+        transaction.get_solutions(&foo).is_some(),
+        check_foo,
+        "`foo` is fully solved exactly when it is checked"
+    );
+
+    let solutions = transaction.get_solutions(&main).unwrap();
+    let class = |name: &str| match solutions.get(&KeyExport(Name::new(name))) {
+        Type::ClassDef(cls) => cls.dupe(),
+        ty => panic!("`{name}` should be a class, got `{ty}`"),
+    };
+    let type_env = transaction.type_env(&main);
+    let tparam_names = |cls: &Class| {
+        cls.tparams_in(&type_env)
+            .iter()
+            .map(|q| q.name().to_string())
+            .collect::<Vec<_>>()
+    };
+    let legacy_box = class("LegacyBox");
+    assert_eq!(legacy_box.module_name(), ModuleName::from_str("foo"));
+    if !check_foo {
+        let answers = transaction.get_answers(&foo).unwrap();
+        let idx = answers
+            .bindings()
+            .key_to_idx(&KeyTParams(legacy_box.index()));
+        assert!(
+            answers.get_idx(idx).is_none(),
+            "checking `main` does not need the type parameters of `LegacyBox`"
+        );
+        assert_eq!(tparam_names(&legacy_box), ["T"]);
+        assert!(
+            answers.get_idx(idx).is_some(),
+            "the env solves them on demand"
+        );
+    }
+    assert_eq!(tparam_names(&legacy_box), ["T"]);
+    assert_eq!(tparam_names(&class("Box")), ["S"]);
+    assert!(class("Plain").tparams_in(&type_env).is_empty());
+}
+
+#[test]
+fn test_type_env_class_tparams_from_solved_module() {
+    assert_type_env_reads_tparams_from_other_module(true);
+}
+
+#[test]
+fn test_type_env_class_tparams_solved_on_demand() {
+    assert_type_env_reads_tparams_from_other_module(false);
 }
 
 #[test]
@@ -1684,6 +1777,69 @@ assert_type(bound(42), str)
 
 def use_default(method: MethodType) -> None:
     method(1, extra="value")
+"#
+            .to_owned(),
+        ))),
+    )]);
+    transaction.run(&[handle.dupe()], Require::Everything, None);
+    let errors = transaction.get_errors([&handle]).collect_errors();
+    assert!(errors.ordinary.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn test_custom_typeshed_named_tuple_fallback_iter_is_not_an_override() {
+    let temp_dir = TempDir::new().unwrap();
+    let stdlib_path = temp_dir.path().join("stdlib");
+    typeshed().unwrap().write(&stdlib_path).unwrap();
+    fs::write(
+        stdlib_path.join("VERSIONS"),
+        pyrefly_bundled::bundled_typeshed_versions(),
+    )
+    .unwrap();
+
+    // Model a typeshed whose `NamedTupleFallback` declares `__iter__`. Every named tuple
+    // inherits it, so it is not a user override and must not hide the field types.
+    let internals_path = stdlib_path.join("_typeshed/_type_checker_internals.pyi");
+    // Bundled stubs can use CRLF line endings on Windows.
+    let internals = fs::read_to_string(&internals_path)
+        .unwrap()
+        .replace("\r\n", "\n");
+    let header = "class NamedTupleFallback(tuple[Any, ...]):\n";
+    assert_eq!(internals.matches(header).count(), 1);
+    let internals = internals.replace(
+        header,
+        &format!("{header}    def __iter__(self) -> Generator[Any, None, None]: ...\n"),
+    );
+    set_readonly(&internals_path, false).unwrap();
+    fs::write(&internals_path, internals).unwrap();
+
+    let mut config = ConfigFile::default();
+    config.python_environment.set_empty_to_default();
+    config.typeshed_path = Some(temp_dir.path().to_owned());
+    config.configure();
+    let handle = Handle::new(
+        ModuleName::from_str("main"),
+        ModulePath::memory(PathBuf::from("main.py")),
+        config.get_sys_info(),
+    );
+    let state = State::new(
+        ConfigFinder::new_constant(ArcId::new(config)),
+        TEST_THREAD_COUNT,
+    );
+    let mut transaction = state.new_transaction(Require::Everything, None);
+    transaction.set_memory(vec![(
+        ModulePath::memory(PathBuf::from("main.py")),
+        Some(Arc::new(FileContents::from_source(
+            r#"
+from typing import NamedTuple, assert_type
+
+class Pair(NamedTuple):
+    x: int
+    y: str
+
+x, y = Pair(1, "")
+assert_type(x, int)
+assert_type(y, str)
 "#
             .to_owned(),
         ))),

@@ -15,6 +15,7 @@ use pyrefly_types::callable::Param;
 use pyrefly_types::callable::ParamOverlay;
 use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::display::TypeDisplayContext;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::meta_shape_dsl::ShapeTransform;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::type_output::DisplayOutput;
@@ -211,7 +212,7 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
     fn expand_type(&self, ty: Type) -> Vec<Type> {
         match ty {
             Type::Union(f) => f.members,
-            Type::ClassType(cls) if cls.is_builtin("bool") => {
+            Type::ClassType(cls) if cls.is(KnownClass::Bool) => {
                 vec![
                     Lit::Bool(true).to_implicit_type(),
                     Lit::Bool(false).to_implicit_type(),

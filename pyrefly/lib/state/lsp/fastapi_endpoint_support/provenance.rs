@@ -9,6 +9,7 @@
 
 use pyrefly_build::handle::Handle;
 use pyrefly_types::class::Class;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::types::Type;
 use ruff_text_size::TextRange;
 
@@ -26,8 +27,8 @@ pub(super) fn is_test_client(
         handle,
         receiver,
         &[
-            ("starlette.testclient", "TestClient"),
-            ("fastapi.testclient", "TestClient"),
+            KnownClass::StarletteTestClient,
+            KnownClass::FastApiTestClient,
         ],
     )
 }
@@ -44,9 +45,9 @@ pub(super) fn is_application(
         handle,
         receiver,
         &[
-            ("fastapi", "FastAPI"),
-            ("fastapi.applications", "FastAPI"),
-            ("starlette.applications", "Starlette"),
+            KnownClass::FastApi,
+            KnownClass::FastApiApplications,
+            KnownClass::Starlette,
         ],
     )
 }
@@ -55,18 +56,14 @@ fn is_instance_of(
     transaction: &Transaction<'_>,
     handle: &Handle,
     receiver: TextRange,
-    qualified_names: &[(&str, &str)],
+    classes: &[KnownClass],
 ) -> bool {
     let Some(Type::ClassType(instance) | Type::SelfType(instance)) =
         transaction.get_type_trace(handle, receiver)
     else {
         return false;
     };
-    let matches = |class: &Class| {
-        qualified_names
-            .iter()
-            .any(|(module, name)| class.has_toplevel_qname(module, name))
-    };
+    let matches = |class: &Class| class.known().is_some_and(|known| classes.contains(&known));
     let class = instance.class_object();
     if matches(class) {
         return true;

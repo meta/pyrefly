@@ -11,6 +11,7 @@ use pyrefly_types::data_frame::DataFrameKind;
 use pyrefly_types::data_frame::DataFrameSchema;
 use pyrefly_types::data_frame::SchemaCompleteness;
 use pyrefly_types::data_frame::SchemaRole;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::polars_dtype::PolarsArrayShape;
 use pyrefly_types::polars_dtype::PolarsDType;
 use pyrefly_types::series::SeriesSchema;
@@ -82,47 +83,46 @@ enum RuntimeClass {
 }
 
 impl RuntimeClass {
-    fn qnames(self) -> &'static [(&'static str, &'static str)] {
+    fn known_classes(self) -> &'static [KnownClass] {
         match self {
-            Self::PolarsDataFrame => &[("polars.dataframe.frame", "DataFrame")],
-            Self::PolarsSeries => &[("polars.series.series", "Series")],
-            Self::PolarsDataFrameSeries => &[("polars.dataframe.frame", "Series")],
-            Self::PolarsExpr => &[("polars.expr.expr", "Expr")],
-            Self::PolarsLazyFrame => &[("polars.lazyframe.frame", "LazyFrame")],
-            Self::PolarsCol => &[("polars.functions.col", "Col")],
-            Self::PolarsSchema => &[("polars.schema", "Schema")],
+            Self::PolarsDataFrame => &[KnownClass::PolarsDataFrame],
+            Self::PolarsSeries => &[KnownClass::PolarsSeries],
+            Self::PolarsDataFrameSeries => &[KnownClass::PolarsDataFrameSeries],
+            Self::PolarsExpr => &[KnownClass::PolarsExpr],
+            Self::PolarsLazyFrame => &[KnownClass::PolarsLazyFrame],
+            Self::PolarsCol => &[KnownClass::PolarsCol],
+            Self::PolarsSchema => &[KnownClass::PolarsSchema],
             Self::NarwhalsDataFrame => &[
-                ("narwhals.dataframe", "DataFrame"),
-                ("narwhals.stable.v1", "DataFrame"),
-                ("narwhals.stable.v2", "DataFrame"),
+                KnownClass::NarwhalsDataFrame,
+                KnownClass::NarwhalsStableV1DataFrame,
+                KnownClass::NarwhalsStableV2DataFrame,
             ],
             Self::NarwhalsLazyFrame => &[
-                ("narwhals.dataframe", "LazyFrame"),
-                ("narwhals.stable.v1", "LazyFrame"),
-                ("narwhals.stable.v2", "LazyFrame"),
+                KnownClass::NarwhalsLazyFrame,
+                KnownClass::NarwhalsStableV1LazyFrame,
+                KnownClass::NarwhalsStableV2LazyFrame,
             ],
             Self::NarwhalsSeries => &[
-                ("narwhals.series", "Series"),
-                ("narwhals.stable.v1", "Series"),
-                ("narwhals.stable.v2", "Series"),
+                KnownClass::NarwhalsSeries,
+                KnownClass::NarwhalsStableV1Series,
+                KnownClass::NarwhalsStableV2Series,
             ],
             Self::NarwhalsExpr => &[
-                ("narwhals.expr", "Expr"),
-                ("narwhals.stable.v1", "Expr"),
-                ("narwhals.stable.v2", "Expr"),
+                KnownClass::NarwhalsExpr,
+                KnownClass::NarwhalsStableV1Expr,
+                KnownClass::NarwhalsStableV2Expr,
             ],
-            Self::PandasDataFrame => &[("pandas.core.frame", "DataFrame")],
-            Self::Date => &[("datetime", "date")],
-            Self::Datetime => &[("datetime", "datetime")],
-            Self::Time => &[("datetime", "time")],
-            Self::Timedelta => &[("datetime", "timedelta")],
+            Self::PandasDataFrame => &[KnownClass::PandasDataFrame],
+            Self::Date => &[KnownClass::DatetimeDate],
+            Self::Datetime => &[KnownClass::Datetime],
+            Self::Time => &[KnownClass::DatetimeTime],
+            Self::Timedelta => &[KnownClass::DatetimeTimedelta],
         }
     }
 
     fn matches(self, cls: &Class) -> bool {
-        self.qnames()
-            .iter()
-            .any(|(module, name)| cls.has_toplevel_qname(module, name))
+        cls.known()
+            .is_some_and(|known| self.known_classes().contains(&known))
     }
 }
 
@@ -259,15 +259,15 @@ fn polars_dtype_from_scalar_type(ty: &Type) -> Option<PolarsDType> {
     let Type::ClassType(cls) = ty else {
         return None;
     };
-    Some(if cls.is_builtin("bool") {
+    Some(if cls.is(KnownClass::Bool) {
         PolarsDType::Boolean
-    } else if cls.is_builtin("int") {
+    } else if cls.is(KnownClass::Int) {
         PolarsDType::Int64
-    } else if cls.is_builtin("float") {
+    } else if cls.is(KnownClass::Float) {
         PolarsDType::Float64
-    } else if cls.is_builtin("str") {
+    } else if cls.is(KnownClass::Str) {
         PolarsDType::String
-    } else if cls.is_builtin("bytes") {
+    } else if cls.is(KnownClass::Bytes) {
         PolarsDType::Binary
     } else {
         return None;

@@ -36,6 +36,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::type_alias::TypeAlias;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_util::arc_id::ArcId;
@@ -100,10 +101,12 @@ use crate::solver::solver::VarRecurser;
 use crate::solver::type_order::TypeOrder;
 use crate::types::class::Class;
 use crate::types::class::ClassFields;
+use crate::types::env::TypeEnv;
 use crate::types::equality::TypeEq;
 use crate::types::equality::TypeEqCtx;
 use crate::types::stdlib::Stdlib;
 use crate::types::type_info::TypeInfo;
+use crate::types::types::TParams;
 use crate::types::types::Type;
 use crate::types::types::Var;
 
@@ -2138,6 +2141,19 @@ pub struct AnswersSolver<'ctx, 'answer, Ans: LookupAnswer> {
     pub heap: &'ctx TypeHeap,
 }
 
+impl<Ans: LookupAnswer> TypeEnv for AnswersSolver<'_, '_, Ans> {
+    fn stdlib(&self) -> &Stdlib {
+        self.stdlib
+    }
+
+    /// May solve the class's `KeyTParams` on demand, so no variable lock may be held across
+    /// this call.
+    fn class_tparams<'a>(&'a self, cls: &'a Class) -> &'a TParams {
+        self.get_class_tparams(cls)
+            .map_or(TParams::empty_ref(), |tparams| &**tparams)
+    }
+}
+
 /// Proof that this SCC owns the pending result slot for this calculation.
 /// Dropping the proof rolls back the reservation if it is still pending.
 pub struct ReservedSlot<'a, 'ctx, 'answer, Ans: LookupAnswer> {
@@ -3834,7 +3850,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if got.is_error() || got.is_any() || want.is_any() {
             return;
         }
-        let is_str = matches!(got, Type::ClassType(cls) if cls.is_builtin("str"));
+        let is_str = matches!(got, Type::ClassType(cls) if cls.is(KnownClass::Str));
         if !is_str && !got.is_literal_string() {
             return;
         }
@@ -3850,7 +3866,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 matches!(
                     cls.targs().as_slice(),
-                    [elem] if matches!(elem, Type::ClassType(elem_cls) if elem_cls.is_builtin("str"))
+                    [elem] if matches!(elem, Type::ClassType(elem_cls) if elem_cls.is(KnownClass::Str))
                 )
             }
             _ => false,

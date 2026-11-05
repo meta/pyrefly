@@ -25,6 +25,7 @@ use pyrefly_types::annotation::Annotation;
 use pyrefly_types::class::Class;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::function::PropertyRole;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::types::Type;
 use pyrefly_util::forgetter::Forgetter;
 use pyrefly_util::includes::Includes;
@@ -444,25 +445,25 @@ fn is_schema_class(answers: &Answers, cls_binding: &ClassBinding) -> bool {
 }
 
 /// Builtin classes whose constructor names the type it yields. Iterator adapters are left out.
-const IMPLICIT_BUILTIN_CONSTRUCTORS: &[&str] = &[
-    "bool",
-    "bytearray",
-    "bytes",
-    "complex",
-    "dict",
-    "float",
-    "frozendict",
-    "frozenset",
-    "int",
-    "list",
-    "memoryview",
-    "object",
-    "range",
-    "sentinel",
-    "set",
-    "slice",
-    "str",
-    "tuple",
+const IMPLICIT_BUILTIN_CONSTRUCTORS: &[KnownClass] = &[
+    KnownClass::Bool,
+    KnownClass::ByteArray,
+    KnownClass::Bytes,
+    KnownClass::Complex,
+    KnownClass::Dict,
+    KnownClass::Float,
+    KnownClass::FrozenDict,
+    KnownClass::FrozenSet,
+    KnownClass::Int,
+    KnownClass::List,
+    KnownClass::MemoryView,
+    KnownClass::Object,
+    KnownClass::Range,
+    KnownClass::Sentinel,
+    KnownClass::Set,
+    KnownClass::Slice,
+    KnownClass::Str,
+    KnownClass::Tuple,
 ];
 
 fn parse_variables(
@@ -485,7 +486,9 @@ fn parse_variables(
 
         let callee_names = |cls: &ClassType| match call.func.as_ref() {
             Expr::Name(n) => {
-                IMPLICIT_BUILTIN_CONSTRUCTORS.contains(&n.id.as_str()) && cls.is_builtin(&n.id)
+                cls.known()
+                    .is_some_and(|known| IMPLICIT_BUILTIN_CONSTRUCTORS.contains(&known))
+                    && *cls.name() == n.id
             }
             Expr::Subscript(sub) => match sub.value.as_ref() {
                 Expr::Name(n) => *cls.name() == n.id,
