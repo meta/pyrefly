@@ -573,79 +573,61 @@ impl Errors {
     /// suppression comment that doesn't suppress any actual error.
     /// Accepts pre-collected errors to avoid redundant error collection.
     pub fn collect_unused_ignore_errors(&self, collected: &CollectedErrors) -> Vec<Error> {
-        let mut unused_errors = Vec::new();
-
-        // Build a map of which error codes were suppressed on each line, keyed by module path.
-        // Key: module_path, Value: map from line number to set of suppressed error codes
-        let mut suppressed_codes_by_module: SmallMap<
-            &ModulePath,
-            SmallMap<LineNumber, SmallSet<String>>,
-        > = SmallMap::new();
-
-        // Build per-module lookup maps for f-string ranges and enabled ignores.
-        // Skip modules that never computed errors — they have no suppressed
-        // errors and no module_ranges.
-        let fstring_ranges_by_module: SmallMap<&ModulePath, &[(LineNumber, LineNumber)]> = self
-            .loads
-            .iter()
-            .filter(|(load, _, _, _, _, _)| load.error_style != ErrorStyle::Never)
-            .map(|(load, _, _, _, module_ranges, _)| {
-                (
-                    load.module_info.path(),
-                    module_ranges
-                        .as_ref()
-                        .expect("module_ranges must be present when error style is not Never")
-                        .multi_line
-                        .as_slice(),
-                )
-            })
-            .collect();
-
-        let enabled_ignores_by_module: SmallMap<&ModulePath, SmallSet<Tool>> = self
-            .loads
-            .iter()
-            .map(|(load, _, _, _, _, config)| {
-                let path = load.module_info.path();
-                (path, config.enabled_ignores(path).into_owned())
-            })
-            .collect();
-
-        let type_ignore_unknown_tag_behavior_by_module: SmallMap<
-            &ModulePath,
-            TypeIgnoreUnknownTagBehavior,
-        > = self
-            .loads
-            .iter()
-            .map(|(load, _, _, _, _, config)| {
-                let path = load.module_info.path();
-                (path, config.type_ignore_unknown_tag_behavior(path))
-            })
-            .collect();
-
+        let mut affected_by_suppression_by_module: SmallMap<&ModulePath, Vec<&Error>> =
+            SmallMap::new();
         for error in collected
             .suppressed
             .iter()
             .chain(&collected.ordinary)
             .chain(&collected.hints)
         {
-            let module_path = error.path();
-            let enabled_ignores = enabled_ignores_by_module
-                .get(&module_path)
-                .cloned()
-                .unwrap_or_else(Tool::default_enabled);
-            let type_ignore_unknown_tag_behavior = type_ignore_unknown_tag_behavior_by_module
-                .get(&module_path)
-                .copied()
-                .unwrap_or_default();
+            affected_by_suppression_by_module
+                .entry(error.path())
+                .or_default()
+                .push(error);
+        }
+        self.loads
+            .iter()
+            .flat_map(|(load, _, _, _, module_ranges, config)| {
+                let path = load.module_info.path();
+                let affected = affected_by_suppression_by_module
+                    .get(path)
+                    .into_iter()
+                    .flat_map(|errors| errors.iter().copied());
+                Self::collect_unused_ignore_errors_for_module(
+                    &load.module_info,
+                    module_ranges.as_deref(),
+                    config.enabled_ignores(path).as_ref(),
+                    config.type_ignore_unknown_tag_behavior(path),
+                    affected,
+                )
+            })
+            .collect()
+    }
+
+    /// Collects errors for the unused ignore comments of one module, given the module's
+    /// diagnostics that a suppression affects.
+    pub(crate) fn collect_unused_ignore_errors_for_module<'a>(
+        module: &Module,
+        ranges: Option<&ModuleRanges>,
+        enabled_ignores: &SmallSet<Tool>,
+        type_ignore_unknown_tag_behavior: TypeIgnoreUnknownTagBehavior,
+        affected: impl Iterator<Item = &'a Error>,
+    ) -> Vec<Error> {
+        let multi_line = ranges.map_or(&[][..], |ranges| ranges.multi_line.as_slice());
+        // Map from line number to the set of error codes suppressed on it.
+        let mut suppressed_codes: SmallMap<LineNumber, SmallSet<String>> = SmallMap::new();
+        for error in affected {
+            assert_eq!(
+                error.path(),
+                module.path(),
+                "a module can only classify its own suppressed diagnostics"
+            );
             let start_line = error.display_range().start.line_within_file();
             let end_line = error.display_range().end.line_within_file();
-
-            let containing_range = fstring_ranges_by_module
-                .get(&module_path)
-                .and_then(|ranges| find_containing_range(ranges, start_line));
-
+            let containing_range = find_containing_range(multi_line, start_line);
             let is_affected = error
-                .suppression_effect(&enabled_ignores, type_ignore_unknown_tag_behavior)
+                .suppression_effect(enabled_ignores, type_ignore_unknown_tag_behavior)
                 != SuppressionEffect::None
                 || containing_range.is_some_and(|(fs_start, fs_end)| {
                     let ignore = error.module().ignore();
@@ -654,22 +636,19 @@ impl Errors {
                             && ignore.suppression_effect(
                                 fs_start,
                                 kind,
-                                &enabled_ignores,
+                                enabled_ignores,
                                 type_ignore_unknown_tag_behavior,
                             ) != SuppressionEffect::None)
                             || (fs_end != start_line
                                 && ignore.suppression_effect(
                                     fs_end,
                                     kind,
-                                    &enabled_ignores,
+                                    enabled_ignores,
                                     type_ignore_unknown_tag_behavior,
                                 ) != SuppressionEffect::None)
                     })
                 });
-
             if is_affected {
-                let module_codes = suppressed_codes_by_module.entry(module_path).or_default();
-
                 // Track both this kind's name and any parent kind's name, so that
                 // e.g. `# pyrefly: ignore[bad-override]` is not reported as unused
                 // when it suppresses a `bad-override-mutable-attribute` error.
@@ -681,7 +660,7 @@ impl Errors {
 
                 // Track the error codes for all lines the error spans.
                 for line_idx in start_line.to_zero_indexed()..=end_line.to_zero_indexed() {
-                    let line_codes = module_codes
+                    let line_codes = suppressed_codes
                         .entry(LineNumber::from_zero_indexed(line_idx))
                         .or_default();
                     for code in &error_codes {
@@ -694,148 +673,137 @@ impl Errors {
                 // suppression comment placed there is recognized as "used".
                 if let Some((fs_start, fs_end)) = containing_range {
                     for code in &error_codes {
-                        module_codes
+                        suppressed_codes
                             .entry(fs_start)
                             .or_default()
                             .insert(code.clone());
-                        module_codes.entry(fs_end).or_default().insert(code.clone());
+                        suppressed_codes
+                            .entry(fs_end)
+                            .or_default()
+                            .insert(code.clone());
                     }
                 }
             }
         }
 
-        // Iterate over each module and check for unused ignores
-        for (load, _, _, _, ranges, config) in &self.loads {
-            let module = &load.module_info;
-            let module_path = module.path();
-            let ignore = module.ignore();
-            let enabled_ignores = config.enabled_ignores(module_path);
+        let mut unused_errors = Vec::new();
+        for (applies_to_line, suppressions) in module.ignore().iter() {
+            for supp in suppressions {
+                if ranges.is_some_and(|ranges| ranges.ignore_all.contains(supp)) {
+                    continue;
+                }
+                let tool = supp.tool();
+                // Only check tools that are enabled and that we support
+                // reporting unused ignores for (Pyrefly and Pyre).
+                if !enabled_ignores.contains(&tool) {
+                    continue;
+                }
+                match tool {
+                    Tool::Pyrefly | Tool::Pyre | Tool::Type => {}
+                    _ => continue,
+                }
 
-            // Get the suppressed codes for this module (if any)
-            let module_suppressed_codes = suppressed_codes_by_module.get(&module_path);
-
-            for (applies_to_line, suppressions) in ignore.iter() {
-                for supp in suppressions {
-                    if ranges
-                        .as_ref()
-                        .is_some_and(|ranges| ranges.ignore_all.contains(supp))
-                    {
-                        continue;
+                // Get the error codes actually suppressed on this line
+                let used_codes: SmallSet<String> = suppressed_codes
+                    .get(applies_to_line)
+                    .cloned()
+                    .unwrap_or_default();
+                // For Tool::Pyre, error code filtering is not enforced
+                // (any Pyre suppression suppresses all errors on the line),
+                // so we only report it as unused when no errors at all were
+                // suppressed on its line.
+                if tool == Tool::Pyre {
+                    if !used_codes.is_empty() {
+                        continue; // Pyre suppression is used
                     }
-                    let tool = supp.tool();
-                    // Only check tools that are enabled and that we support
-                    // reporting unused ignores for (Pyrefly and Pyre).
-                    if !enabled_ignores.contains(&tool) {
-                        continue;
-                    }
-                    match tool {
-                        Tool::Pyrefly | Tool::Pyre | Tool::Type => {}
-                        _ => continue,
-                    }
-
-                    // Get the error codes actually suppressed on this line
-                    let used_codes: SmallSet<String> = module_suppressed_codes
-                        .and_then(|m| m.get(applies_to_line))
-                        .cloned()
-                        .unwrap_or_default();
-                    // For Tool::Pyre, error code filtering is not enforced
-                    // (any Pyre suppression suppresses all errors on the line),
-                    // so we only report it as unused when no errors at all were
-                    // suppressed on its line.
-                    if tool == Tool::Pyre {
-                        if !used_codes.is_empty() {
-                            continue; // Pyre suppression is used
-                        }
-                        let edit = supp.removal_edit(module.lined_buffer(), None);
-                        unused_errors.push(
-                            Error::new(
-                                module.dupe(),
-                                edit.range,
-                                "Unused pyre-fixme comment".to_owned(),
-                                Vec::new(),
-                                ErrorKind::UnusedIgnore,
-                            )
-                            .with_quick_fix(edit.into()),
-                        );
-                        continue;
-                    }
-
-                    // For `# type: ignore`, line-wide bookkeeping considers it unused
-                    // only if no suppression effect applies to any diagnostic on this line.
-                    if tool == Tool::Type {
-                        if !used_codes.is_empty() {
-                            continue; // type: ignore is used
-                        }
-                        let edit = supp.removal_edit(module.lined_buffer(), None);
-                        unused_errors.push(
-                            Error::new(
-                                module.dupe(),
-                                edit.range,
-                                "Unused `# type: ignore` comment".to_owned(),
-                                Vec::new(),
-                                ErrorKind::UnusedTypeIgnore,
-                            )
-                            .with_quick_fix(edit.into()),
-                        );
-                        continue;
-                    }
-
-                    // Tool::Pyrefly: check individual error codes
-                    let declared_codes: SmallSet<String> =
-                        supp.error_codes().iter().cloned().collect();
-
-                    // Determine if the suppression is unused
-                    let unused_codes: SmallSet<String> = if declared_codes.is_empty() {
-                        // Blanket ignore - unused if no errors were suppressed
-                        if used_codes.is_empty() {
-                            SmallSet::new() // Mark as unused (empty set signals blanket unused)
-                        } else {
-                            continue; // Used, skip
-                        }
-                    } else {
-                        // Specific codes - find which are unused
-                        let unused: SmallSet<String> = declared_codes
-                            .iter()
-                            .filter(|code| !used_codes.contains(*code))
-                            .cloned()
-                            .collect();
-                        if unused.is_empty() {
-                            continue; // All codes used, skip
-                        }
-                        unused
-                    };
-
-                    let msg = if declared_codes.is_empty() {
-                        "Unused `# pyrefly: ignore` comment".to_owned()
-                    } else if unused_codes.len() == declared_codes.len() {
-                        format!(
-                            "Unused `# pyrefly: ignore` comment for code(s): {}",
-                            unused_codes.iter().cloned().collect::<Vec<_>>().join(", ")
-                        )
-                    } else {
-                        format!(
-                            "Unused error code(s) in `# pyrefly: ignore`: {}",
-                            unused_codes.iter().cloned().collect::<Vec<_>>().join(", ")
-                        )
-                    };
-
-                    let partially_unused =
-                        !declared_codes.is_empty() && unused_codes.len() != declared_codes.len();
-                    let edit = supp.removal_edit(
-                        module.lined_buffer(),
-                        partially_unused.then_some(&unused_codes),
-                    );
+                    let edit = supp.removal_edit(module.lined_buffer(), None);
                     unused_errors.push(
                         Error::new(
                             module.dupe(),
                             edit.range,
-                            msg,
+                            "Unused pyre-fixme comment".to_owned(),
                             Vec::new(),
                             ErrorKind::UnusedIgnore,
                         )
                         .with_quick_fix(edit.into()),
                     );
+                    continue;
                 }
+
+                // For `# type: ignore`, line-wide bookkeeping considers it unused
+                // only if no suppression effect applies to any diagnostic on this line.
+                if tool == Tool::Type {
+                    if !used_codes.is_empty() {
+                        continue; // type: ignore is used
+                    }
+                    let edit = supp.removal_edit(module.lined_buffer(), None);
+                    unused_errors.push(
+                        Error::new(
+                            module.dupe(),
+                            edit.range,
+                            "Unused `# type: ignore` comment".to_owned(),
+                            Vec::new(),
+                            ErrorKind::UnusedTypeIgnore,
+                        )
+                        .with_quick_fix(edit.into()),
+                    );
+                    continue;
+                }
+
+                // Tool::Pyrefly: check individual error codes
+                let declared_codes: SmallSet<String> = supp.error_codes().iter().cloned().collect();
+
+                // Determine if the suppression is unused
+                let unused_codes: SmallSet<String> = if declared_codes.is_empty() {
+                    // Blanket ignore - unused if no errors were suppressed
+                    if used_codes.is_empty() {
+                        SmallSet::new() // Mark as unused (empty set signals blanket unused)
+                    } else {
+                        continue; // Used, skip
+                    }
+                } else {
+                    // Specific codes - find which are unused
+                    let unused: SmallSet<String> = declared_codes
+                        .iter()
+                        .filter(|code| !used_codes.contains(*code))
+                        .cloned()
+                        .collect();
+                    if unused.is_empty() {
+                        continue; // All codes used, skip
+                    }
+                    unused
+                };
+
+                let msg = if declared_codes.is_empty() {
+                    "Unused `# pyrefly: ignore` comment".to_owned()
+                } else if unused_codes.len() == declared_codes.len() {
+                    format!(
+                        "Unused `# pyrefly: ignore` comment for code(s): {}",
+                        unused_codes.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                } else {
+                    format!(
+                        "Unused error code(s) in `# pyrefly: ignore`: {}",
+                        unused_codes.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                };
+
+                let partially_unused =
+                    !declared_codes.is_empty() && unused_codes.len() != declared_codes.len();
+                let edit = supp.removal_edit(
+                    module.lined_buffer(),
+                    partially_unused.then_some(&unused_codes),
+                );
+                unused_errors.push(
+                    Error::new(
+                        module.dupe(),
+                        edit.range,
+                        msg,
+                        Vec::new(),
+                        ErrorKind::UnusedIgnore,
+                    )
+                    .with_quick_fix(edit.into()),
+                );
             }
         }
 
@@ -946,6 +914,7 @@ mod tests {
     use crate::state::load::FileContents;
     use crate::state::require::Require;
     use crate::state::state::State;
+    use crate::test::util::TestEnv;
 
     impl Errors {
         pub fn check_var_leak(&self) -> anyhow::Result<()> {
@@ -1044,6 +1013,37 @@ def f() -> int:
         assert!(unused.ordinary.is_empty());
         assert_eq!(unused.disabled.len(), 1);
         assert_eq!(unused.disabled[0].severity(), Severity::Ignore);
+    }
+
+    #[test]
+    fn test_unused_ignores_are_isolated_by_module() {
+        let mut env = TestEnv::new();
+        env.add(
+            "used",
+            r#"
+def f() -> int:
+    # pyrefly: ignore [bad-return]
+    return "x"
+"#,
+        );
+        env.add(
+            "unused",
+            r#"
+def f() -> int:
+    # pyrefly: ignore [bad-return]
+    return 1
+"#,
+        );
+        let (state, handle) = env.to_state();
+        let handles = [handle("used"), handle("unused")];
+        let transaction = state.transaction();
+        let errors = transaction.get_errors(&handles);
+        let collected = errors.collect_errors();
+        let unused = errors.collect_unused_ignore_errors(&collected);
+
+        assert_eq!(unused.len(), 1);
+        assert_eq!(unused[0].module().name(), ModuleName::from_str("unused"));
+        assert!(unused[0].msg().contains("bad-return"));
     }
 
     #[test]
