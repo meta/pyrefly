@@ -35,6 +35,7 @@ use ruff_python_ast::ModModule;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::visitor::walk_expr;
 use ruff_text_size::Ranged;
+use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 
@@ -631,16 +632,53 @@ impl Errors {
         &self,
         unused: &'a [Error],
     ) -> Vec<CollectedDiagnostic<'a>> {
+        if unused.is_empty() {
+            return Vec::new();
+        }
         let config_by_path = self.config_by_path();
+        let self_suppressed = self.self_suppressed_unused_ignore_ranges();
         unused
             .iter()
             .filter_map(|error| {
+                if error.error_kind() == ErrorKind::UnusedIgnore
+                    && self_suppressed.contains(&(error.path(), error.range()))
+                {
+                    return None;
+                }
                 let config = config_by_path.get(&error.path())?;
                 let severity = config
                     .get_error_config(error.path())
                     .display_config
                     .severity(error.error_kind());
                 (severity != Severity::Ignore).then(|| CollectedDiagnostic::new(error, severity))
+            })
+            .collect()
+    }
+
+    /// The exact comment ranges that suppress their own unused-ignore diagnostics.
+    fn self_suppressed_unused_ignore_ranges(&self) -> SmallSet<(&ModulePath, TextRange)> {
+        // Match exact comment ranges so one directive cannot hide another directive's diagnostic.
+        self.loads
+            .iter()
+            .flat_map(|(load, ..)| {
+                let module = &load.module_info;
+                module
+                    .ignore()
+                    .iter()
+                    .flat_map(|(_, suppressions)| suppressions)
+                    .filter(|supp| {
+                        supp.tool() == Tool::Pyrefly
+                            && supp
+                                .error_codes()
+                                .iter()
+                                .any(|code| code == ErrorKind::UnusedIgnore.to_name())
+                    })
+                    .map(|supp| {
+                        (
+                            module.path(),
+                            supp.removal_edit(module.lined_buffer(), None).range,
+                        )
+                    })
             })
             .collect()
     }
@@ -927,10 +965,19 @@ impl Errors {
         collected: &CollectedErrors,
     ) -> CollectedErrors {
         let unused_errors = self.collect_unused_ignore_errors(collected);
+        if unused_errors.is_empty() {
+            return CollectedErrors::default();
+        }
         let mut result = CollectedErrors::default();
         let config_by_path = self.config_by_path();
+        let self_suppressed = self.self_suppressed_unused_ignore_ranges();
 
         for error in unused_errors {
+            if error.error_kind() == ErrorKind::UnusedIgnore
+                && self_suppressed.contains(&(error.path(), error.range()))
+            {
+                continue;
+            }
             if let Some(config) = config_by_path.get(&error.path()) {
                 let error_config = config.get_error_config(error.path());
                 let severity = error_config.display_config.severity(error.error_kind());
@@ -990,6 +1037,9 @@ mod tests {
     use crate::config::config::ConfigFile;
     use crate::config::finder::ConfigFinder;
     use crate::error::error::ErrorRenderer;
+    use crate::error::suppress::SerializedError;
+    use crate::error::suppress::UnusedIgnoreKind;
+    use crate::error::suppress::remove_unused_ignores_from_serialized;
     use crate::state::errors::Errors;
     use crate::state::errors::PARALLEL_COLLATION_MIN_MODULES;
     use crate::state::load::FileContents;
@@ -1030,10 +1080,18 @@ mod tests {
     }
 
     fn get_errors(contents: &str) -> (Errors, TempDir) {
+        get_errors_with_config(contents, |_| {})
+    }
+
+    fn get_errors_with_config(
+        contents: &str,
+        configure: impl FnOnce(&mut ConfigFile),
+    ) -> (Errors, TempDir) {
         let tdir = tempfile::tempdir().unwrap();
 
         let mut config = ConfigFile::default();
         config.python_environment.set_empty_to_default();
+        configure(&mut config);
         let name = "test";
         fs_anyhow::write(&get_path(&tdir), contents).unwrap();
         config.configure();
@@ -1183,6 +1241,97 @@ def f() -> int:
         let unused = errors.collect_unused_ignore_errors(&collected);
         assert_eq!(unused.len(), 1);
         assert!(unused[0].msg().contains("bad-override"));
+    }
+
+    #[test]
+    fn test_unused_ignore_self_suppression_for_display() {
+        for (contents, raw_count, visible_count, type_error_count) in [
+            ("# pyrefly: ignore[unused-ignore]\nx = 1\n", 1, 0, 0),
+            ("x = 1  # pyrefly: ignore[unused-ignore]\n", 1, 0, 0),
+            (
+                "# pyrefly: ignore[bad-assignment, unused-ignore]\nx = 1\n",
+                1,
+                0,
+                0,
+            ),
+            (
+                "# pyrefly: ignore[bad-assignment, unused-ignore]\nx: int = \"\"\n",
+                1,
+                0,
+                0,
+            ),
+            ("x: int = \"\"  # pyrefly: ignore[unused-ignore]\n", 1, 0, 1),
+            ("# pyrefly: ignore[bad-assignment]\nx = 1\n", 1, 1, 0),
+            ("# pyrefly: ignore\nx = 1\n", 1, 1, 0),
+            (
+                "# pyrefly: ignore[unused-ignore]\n# pyrefly: ignore[bad-assignment]\nx = 1\n",
+                2,
+                1,
+                0,
+            ),
+            (
+                "x = 1  # pyrefly: ignore[unused-ignore]  # pyrefly: ignore[bad-assignment]\n",
+                2,
+                1,
+                0,
+            ),
+        ] {
+            let (errors, _tdir) = get_errors_with_config(contents, |config| {
+                config
+                    .root
+                    .errors
+                    .get_or_insert_with(Default::default)
+                    .set_error_severity(ErrorKind::UnusedIgnore, Severity::Error);
+            });
+            let collected = errors.collect_errors();
+            assert_eq!(collected.ordinary.len(), type_error_count, "{contents}");
+            assert_eq!(
+                errors.collect_unused_ignore_errors(&collected).len(),
+                raw_count,
+                "{contents}",
+            );
+            let display = errors.collect_unused_ignore_errors_for_display(&collected);
+            assert_eq!(display.ordinary.len(), visible_count, "{contents}");
+            assert!(display.disabled.is_empty(), "{contents}");
+            assert!(display.hints.is_empty(), "{contents}");
+            assert_eq!(
+                errors.collect_lsp_errors_with_baselines().0.len(),
+                visible_count + type_error_count,
+                "{contents}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_unused_ignore_self_suppression_preserves_cleanup() {
+        for (contents, expected) in [
+            (
+                "x = 1  # pyrefly: ignore[bad-assignment, unused-ignore]\n",
+                "x = 1\n",
+            ),
+            (
+                "x: int = \"\"  # pyrefly: ignore[bad-assignment, unused-ignore]\n",
+                "x: int = \"\"  # pyrefly: ignore[bad-assignment]\n",
+            ),
+        ] {
+            let (errors, tdir) = get_errors(contents);
+            let collected = errors.collect_errors();
+            let unused = errors.collect_unused_ignore_errors(&collected);
+            assert_eq!(unused.len(), 1);
+            let serialized = unused
+                .iter()
+                .filter_map(SerializedError::from_error)
+                .collect();
+            assert_eq!(
+                remove_unused_ignores_from_serialized(serialized, UnusedIgnoreKind::Pyrefly)
+                    .unwrap(),
+                1,
+            );
+            assert_eq!(
+                fs_anyhow::read_to_string(&get_path(&tdir)).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
