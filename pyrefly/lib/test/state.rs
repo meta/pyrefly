@@ -47,6 +47,7 @@ use crate::config::config::ConfigSource;
 use crate::config::error_kind::ErrorKind;
 use crate::config::error_kind::Severity;
 use crate::config::finder::ConfigFinder;
+use crate::error::error::Error;
 use crate::error::error::print_errors;
 use crate::lsp::non_wasm::server::resolve_export_location;
 use crate::module::bundled::BundledStub;
@@ -1061,6 +1062,88 @@ fn test_change_require() {
         2
     );
     assert!(state.transaction().get_answers(&handle).is_some());
+}
+
+#[test]
+fn test_explicit_any_override_dependency_becomes_checked() {
+    for enabled in [false, true] {
+        let mut env = TestEnv::one("main", "from dependency import Child\nChild().f(1)");
+        if enabled {
+            env = env.enable_explicit_any_error();
+        }
+        env.add(
+            "dependency",
+            r#"
+from typing import Any, override
+
+class Base:
+    def f(self, value: Any) -> Any:
+        return value
+
+class Child(Base):
+    @override
+    def f(self, value: Any) -> Any:
+        return value
+
+class Extra(Base):
+    @override
+    def f(self, value: Any, extra: Any = None) -> Any:
+        return value
+"#,
+        );
+        let state = State::new(env.config_finder(), TEST_THREAD_COUNT);
+        let main = Handle::new(
+            ModuleName::from_str("main"),
+            ModulePath::memory(PathBuf::from("main.py")),
+            env.sys_info(),
+        );
+        let dependency = Handle::new(
+            ModuleName::from_str("dependency"),
+            ModulePath::memory(PathBuf::from("dependency.py")),
+            env.sys_info(),
+        );
+        let mut transaction = state.new_committable_transaction(Require::Exports, None);
+        transaction.as_mut().set_memory(env.get_memory());
+        transaction.as_mut().run(&[main], Require::Errors, None);
+        state.commit_transaction(transaction, None);
+        let before_activation = state
+            .transaction()
+            .get_errors([&dependency])
+            .collect_errors();
+        assert!(before_activation.ordinary.is_empty());
+        assert!(before_activation.disabled.is_empty());
+
+        // Raising Require rebuilds answers collected while the module was silent.
+        state.run(
+            &[dependency.dupe()],
+            RequireLevels {
+                specified: Require::Errors,
+                default: Require::Exports,
+            },
+            None,
+            None,
+            None,
+        );
+        let collected = state
+            .transaction()
+            .get_errors([&dependency])
+            .collect_errors();
+        let explicit_any_count = |errors: &[Error]| {
+            errors
+                .iter()
+                .filter(|e| e.error_kind() == ErrorKind::ExplicitAny)
+                .count()
+        };
+        assert_eq!(
+            explicit_any_count(&collected.ordinary),
+            if enabled { 3 } else { 0 }
+        );
+        // Disabled diagnostics on an active module are still collected and filtered.
+        assert_eq!(
+            explicit_any_count(&collected.disabled),
+            if enabled { 0 } else { 3 }
+        );
+    }
 }
 
 #[test]
