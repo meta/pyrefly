@@ -13,6 +13,7 @@ use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::AssignmentTargetKind;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
+use pyrefly_python::docstring::parse_sphinx_param_types;
 use pyrefly_python::dunder;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
@@ -26,6 +27,7 @@ use ruff_python_ast::ExceptHandler;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
 use ruff_python_ast::Identifier;
+use ruff_python_ast::Operator;
 use ruff_python_ast::Parameters;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtExpr;
@@ -38,6 +40,8 @@ use ruff_python_ast::visitor::source_order::walk_expr;
 use ruff_python_ast::visitor::source_order::walk_stmt;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
+use ruff_text_size::TextSize;
+use starlark_map::Hashed;
 use starlark_map::small_map::SmallMap;
 use thin_vec::ThinVec;
 
@@ -69,12 +73,15 @@ use crate::binding::binding::ReturnImplicit;
 use crate::binding::binding::ReturnType;
 use crate::binding::binding::ReturnTypeKind;
 use crate::binding::bindings::BindingsBuilder;
+use crate::binding::bindings::InitializationStatus;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::classmethod::FunctionDecorators;
 use crate::binding::expr::Usage;
 use crate::binding::pattern::match_case_always_matches;
 use crate::binding::scope::FlowStyle;
 use crate::binding::scope::InstanceAttribute;
+use crate::binding::scope::MethodAttribute;
+use crate::binding::scope::NameReadInfo;
 use crate::binding::scope::Scope;
 use crate::binding::scope::UnusedParameter;
 use crate::binding::scope::UnusedVariable;
@@ -90,6 +97,7 @@ struct Decorators {
     is_abstract_method: bool,
     is_override: bool,
     is_classmethod: bool,
+    is_staticmethod: bool,
     decorator_kind: FunctionDecorators,
     decorators: Box<[Idx<KeyDecorator>]>,
 }
@@ -173,8 +181,34 @@ impl<'a, 'b> SourceOrderVisitor<'a> for SuperMethodCallFinder<'b> {
 
 pub struct SelfAssignments {
     pub method_name: Name,
-    pub instance_attributes: SmallMap<Name, InstanceAttribute>,
+    pub instance_attributes: SmallMap<Name, MethodAttribute>,
     pub nn_module_registrations: NNModuleRegistrations,
+}
+
+/// Whether `x` only uses the type syntax that docstrings commonly contain: names, attribute
+/// accesses, `None`, `...`, `|` unions, and subscripts of those. Appends each name that `x`
+/// reads to `names`.
+fn is_simple_type_expr<'a>(x: &'a Expr, names: &mut Vec<&'a Name>) -> bool {
+    match x {
+        Expr::Name(x) => {
+            names.push(&x.id);
+            true
+        }
+        Expr::NoneLiteral(_) | Expr::EllipsisLiteral(_) => true,
+        Expr::Attribute(x) => is_simple_type_expr(&x.value, names),
+        Expr::BinOp(x) => {
+            x.op == Operator::BitOr
+                && is_simple_type_expr(&x.left, names)
+                && is_simple_type_expr(&x.right, names)
+        }
+        Expr::Subscript(x) => {
+            is_simple_type_expr(&x.value, names)
+                && Ast::unpack_slice(&x.slice)
+                    .iter()
+                    .all(|x| is_simple_type_expr(x, names))
+        }
+        _ => false,
+    }
 }
 
 /// Determine whether a function definition is annotated.
@@ -266,12 +300,15 @@ impl<'a> SelfAttrNames<'a> {
             .map(|(n, r)| {
                 (
                     n,
-                    InstanceAttribute(
-                        vec![ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))],
-                        None,
-                        r,
-                        MethodSelfKind::Instance,
-                    ),
+                    MethodAttribute {
+                        attribute: InstanceAttribute(
+                            vec![ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))],
+                            None,
+                            r,
+                            MethodSelfKind::Instance,
+                        ),
+                        initialized: InitializationStatus::Initialized,
+                    },
                 )
             })
             .collect();
@@ -290,11 +327,13 @@ impl<'a> BindingsBuilder<'a> {
         undecorated_idx: Idx<KeyUndecoratedFunction>,
         class_key: Option<Idx<KeyClass>>,
         method_self_kind: MethodSelfKind,
+        has_receiver: bool,
+        override_func: Option<Idx<KeyUndecoratedFunction>>,
         ignore_annotations: bool,
     ) {
         let mut self_name = None;
         for x in x.iter_non_variadic_params() {
-            if class_key.is_some() && self_name.is_none() {
+            if has_receiver && self_name.is_none() {
                 self_name = Some(x.parameter.name.clone());
             }
             self.bind_function_param(
@@ -303,6 +342,7 @@ impl<'a> BindingsBuilder<'a> {
                 undecorated_idx,
                 class_key,
                 false,
+                override_func,
                 ignore_annotations,
             );
         }
@@ -313,6 +353,7 @@ impl<'a> BindingsBuilder<'a> {
                 undecorated_idx,
                 class_key,
                 true,
+                override_func,
                 ignore_annotations,
             );
         }
@@ -323,6 +364,7 @@ impl<'a> BindingsBuilder<'a> {
                 undecorated_idx,
                 class_key,
                 true,
+                override_func,
                 ignore_annotations,
             );
         }
@@ -330,11 +372,93 @@ impl<'a> BindingsBuilder<'a> {
             .set_self_name_if_applicable(self_name, method_self_kind);
     }
 
+    /// Binds the types that the docstring declares, with Sphinx `:param <type> <name>:` and
+    /// `:type <name>: <type>` fields, for parameters that have no annotation. This must run
+    /// in the scope of the annotations, before the parameter names are bound.
+    ///
+    /// The docstring of the class is also consulted for `__init__`, because that is where
+    /// Sphinx documents the constructor parameters. The docstring of the method itself wins.
+    ///
+    /// A declared type is only a hint for the parameter, so a docstring type that cannot be
+    /// understood is skipped instead of reported.
+    ///
+    /// Legacy type variables in a docstring type are collected like those in annotations, so
+    /// they become type parameters of the function.
+    fn bind_docstring_param_types(
+        &mut self,
+        x: &StmtFunctionDef,
+        class_docstring_range: Option<TextRange>,
+        legacy: &mut LegacyTParamCollector,
+    ) {
+        if !self.infer_param_types_from_docstring {
+            return;
+        }
+        let docstring_ranges = Docstring::range_from_stmts(&x.body)
+            .into_iter()
+            .chain(class_docstring_range.filter(|_| x.name.id == dunder::INIT))
+            .collect::<Vec<_>>();
+        let docstrings = docstring_ranges
+            .iter()
+            .map(|range| self.module_info.code_at(*range).to_owned())
+            .collect::<Vec<_>>();
+        let declared_types = docstrings
+            .iter()
+            .map(|docstring| parse_sphinx_param_types(docstring))
+            .collect::<Vec<_>>();
+        let mut bound_types: SmallMap<TextSize, Expr> = SmallMap::new();
+        for param in x.parameters.iter_non_variadic_params() {
+            let name = &param.parameter.name;
+            if param.parameter.annotation.is_some() {
+                continue;
+            }
+            let Some((range, declared)) = docstring_ranges
+                .iter()
+                .zip(&declared_types)
+                .find_map(|(range, types)| Some((range, types.get(name.id.as_str())?)))
+            else {
+                continue;
+            };
+            let start = range.start() + TextSize::new(declared.offset as u32);
+            // Parameters can share one declaration, as in NumPy's `x, y : int`. The type is
+            // bound once, because binding an expression creates keys that are unique to it.
+            let expr = if let Some(expr) = bound_types.get(&start) {
+                expr.clone()
+            } else {
+                let Ok(mut expr) = Ast::parse_expr(declared.type_text, start) else {
+                    continue;
+                };
+                let mut names = Vec::new();
+                let usage = Usage::StaticTypeInformation {
+                    is_annotation: true,
+                };
+                if !is_simple_type_expr(&expr, &mut names)
+                    || names.into_iter().any(|x| {
+                        matches!(
+                            self.look_up_name_for_read(Hashed::new(x), &usage),
+                            NameReadInfo::NotFound
+                        )
+                    })
+                {
+                    continue;
+                }
+                self.ensure_type(&mut expr, Some(&mut *legacy));
+                self.docstring_type_ranges.push(expr.range());
+                bound_types.insert(start, expr.clone());
+                expr
+            };
+            self.insert_binding(
+                KeyAnnotation::Annotation(ShortIdentifier::new(name)),
+                BindingAnnotation::DocstringParam(name.id.clone(), expr),
+            );
+        }
+    }
+
     fn to_return_annotation_with_range(
         &mut self,
         mut x: Expr,
         func_name: &Identifier,
         class_key: Option<Idx<KeyClass>>,
+        override_func: Option<Idx<KeyUndecoratedFunction>>,
         tparams_builder: Option<&mut LegacyTParamCollector>,
     ) -> (TextRange, Idx<KeyAnnotation>) {
         self.ensure_type(&mut x, tparams_builder);
@@ -346,6 +470,7 @@ impl<'a> BindingsBuilder<'a> {
                     AnnotationTarget::Return(func_name.id.clone()),
                     x,
                     class_key,
+                    override_func,
                 ),
             ),
         )
@@ -356,6 +481,8 @@ impl<'a> BindingsBuilder<'a> {
         x: &mut StmtFunctionDef,
         func_name: &Identifier,
         class_key: Option<Idx<KeyClass>>,
+        class_docstring_range: Option<TextRange>,
+        override_func: Option<Idx<KeyUndecoratedFunction>>,
         usage: &mut Usage,
         parent: &NestingContext,
     ) -> (
@@ -379,8 +506,16 @@ impl<'a> BindingsBuilder<'a> {
         }
 
         let return_ann_with_range = mem::take(&mut x.returns).map(|e| {
-            self.to_return_annotation_with_range(*e, func_name, class_key, Some(&mut legacy))
+            self.to_return_annotation_with_range(
+                *e,
+                func_name,
+                class_key,
+                override_func,
+                Some(&mut legacy),
+            )
         });
+
+        self.bind_docstring_param_types(x, class_docstring_range, &mut legacy);
 
         self.add_name_definitions(&legacy);
         let legacy_tparams = legacy.lookup_keys();
@@ -402,6 +537,8 @@ impl<'a> BindingsBuilder<'a> {
         class_key: Option<Idx<KeyClass>>,
         is_async: bool,
         method_self_kind: MethodSelfKind,
+        has_receiver: bool,
+        override_func: Option<Idx<KeyUndecoratedFunction>>,
     ) -> (
         YieldsAndReturns,
         Option<SelfAssignments>,
@@ -415,6 +552,8 @@ impl<'a> BindingsBuilder<'a> {
             undecorated_idx,
             class_key,
             method_self_kind,
+            has_receiver,
+            override_func,
             false,
         );
         self.init_static_scope(&body, false);
@@ -459,6 +598,8 @@ impl<'a> BindingsBuilder<'a> {
         class_key: Option<Idx<KeyClass>>,
         is_async: bool,
         method_self_kind: MethodSelfKind,
+        has_receiver: bool,
+        override_func: Option<Idx<KeyUndecoratedFunction>>,
         ignore_annotations: bool,
     ) -> Option<SelfAssignments> {
         // Push a scope to create the parameter keys (but do nothing else with it).
@@ -469,11 +610,13 @@ impl<'a> BindingsBuilder<'a> {
             undecorated_idx,
             class_key,
             method_self_kind,
+            has_receiver,
+            override_func,
             ignore_annotations,
         );
         self.scopes.pop();
-        // If we are in a class, use a simple visitor to find `self.<attr>` assignments.
-        if class_key.is_some() {
+        // Receiver methods use a simple visitor to find `self.<attr>` assignments.
+        if has_receiver {
             SelfAttrNames::find(func_name, parameters, body)
         } else {
             None
@@ -662,6 +805,7 @@ impl<'a> BindingsBuilder<'a> {
         let mut has_no_type_check = false;
         let mut is_abstract_method = false;
         let mut is_classmethod = false;
+        let mut is_staticmethod = false;
         let mut decorator_kind = FunctionDecorators::Undecorated;
         let mut all_receiver_overload = true;
         for d in &decorator_list {
@@ -691,6 +835,8 @@ impl<'a> BindingsBuilder<'a> {
                     special_export,
                     Some(SpecialExport::ClassMethod | SpecialExport::AbstractClassMethod)
                 );
+            is_staticmethod =
+                is_staticmethod || matches!(special_export, Some(SpecialExport::StaticMethod));
         }
         if is_overload {
             decorator_kind = if all_receiver_overload {
@@ -708,6 +854,7 @@ impl<'a> BindingsBuilder<'a> {
             is_abstract_method,
             is_override,
             is_classmethod,
+            is_staticmethod,
             decorator_kind,
             decorators,
         }
@@ -779,6 +926,9 @@ impl<'a> BindingsBuilder<'a> {
             || decorators.is_overload
             || decorators.is_override
             || decorators.is_abstract_method;
+        // `__new__` receives the class even when explicitly decorated as a staticmethod.
+        let has_receiver =
+            class_key.is_some() && (!decorators.is_staticmethod || func_name.id == dunder::NEW);
         let method_self_kind = if class_key.is_some()
             && (decorators.is_classmethod
                 || func_name.id == dunder::INIT_SUBCLASS
@@ -793,6 +943,9 @@ impl<'a> BindingsBuilder<'a> {
             !self.check_unannotated_defs && !is_annotated(&return_ann_with_range, parameters);
         let skips_body =
             decorators.has_no_type_check || (is_unannotated && !self.analyze_unannotated_for_ide);
+        let override_func =
+            (decorators.is_override && class_key.is_some()).then_some(undecorated_idx);
+        debug_assert!(override_func.is_none() || class_key.is_some());
         let (is_return_inferred, self_assignments) = if skips_body {
             self.mark_as_returns_any(func_name, class_key, is_async);
             let self_assignments = self.unchecked_function_body_scope(
@@ -804,6 +957,8 @@ impl<'a> BindingsBuilder<'a> {
                 class_key,
                 is_async,
                 method_self_kind,
+                has_receiver,
+                override_func,
                 decorators.has_no_type_check,
             );
             (false, self_assignments)
@@ -819,6 +974,8 @@ impl<'a> BindingsBuilder<'a> {
                 class_key,
                 is_async,
                 method_self_kind,
+                has_receiver,
+                override_func,
             );
             self.analyze_return_type(
                 func_name,
@@ -846,6 +1003,8 @@ impl<'a> BindingsBuilder<'a> {
                     class_key,
                     is_async,
                     method_self_kind,
+                    has_receiver,
+                    override_func,
                 );
             if !ignore_unused_parameters {
                 self.record_unused_parameters(unused_parameters);
@@ -913,6 +1072,7 @@ impl<'a> BindingsBuilder<'a> {
         let (function_idx, pred_idx, is_contiguous) = self.create_function_index(&func_name);
 
         let class_key = self.scopes.current_class_key();
+        let class_docstring_range = self.scopes.current_class_docstring_range();
         let enclosing_class = class_key.or_else(|| self.scopes.current_method_context());
         let shape_metadata = self.record_shape_function_metadata(
             &x,
@@ -924,10 +1084,22 @@ impl<'a> BindingsBuilder<'a> {
 
         let receiver_uses = self.classmethod_receiver_uses(&x);
         let decorators = self.decorators(mem::take(&mut x.decorator_list), def_idx.usage());
+        // Method annotations of an `@override` method may be dictated by the base
+        // signature; stamping the method lets the solver exempt them.
+        let override_func =
+            (decorators.is_override && class_key.is_some()).then_some(undecorated_idx);
+        debug_assert!(override_func.is_none() || class_key.is_some());
 
         self.scopes.push(Scope::annotation(x.range, false));
-        let (return_ann_with_range, legacy_tparams) =
-            self.function_header(&mut x, &func_name, class_key, def_idx.usage(), parent);
+        let (return_ann_with_range, legacy_tparams) = self.function_header(
+            &mut x,
+            &func_name,
+            class_key,
+            class_docstring_range,
+            override_func,
+            def_idx.usage(),
+            parent,
+        );
 
         let docstring_range = Docstring::range_from_stmts(x.body.as_slice());
         let calls_super_method = SuperMethodCallFinder::find(&func_name.id, &x.body);

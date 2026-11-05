@@ -911,6 +911,22 @@ class C:
         self.y = 0  # error, `y` may be undefined if `f` does not execute
 ```
 
+## inactive-code
+
+Default severity: `hint`
+
+A block of code that is inactive in the current type-checking configuration. Pyrefly does not check
+inactive code, and the IDE greys it out.
+
+```python
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+else:
+    Sequence = list  # inactive-code: This code is inactive for the current type-checking configuration
+```
+
 ## incompatible-comparison
 
 Default severity: `ignore`
@@ -1896,22 +1912,84 @@ Default severity: `ignore`
 
 The `strict` preset enables this check as an error.
 
-Pyrefly checks whether each value assigned in a class body exists when that body
-completes. Every completing path must assign the attribute. A path that raises or
-ends in a `Never` or `NoReturn` call does not require an assignment.
+Pyrefly reports an attribute that the class body or an initialization method assigns on some paths but not others, so an instance may be created without it.
 
 ```python
 class C:
     if enabled():
-        value = 1  # possibly-uninitialized-attribute
+        flag = True  # possibly-uninitialized-attribute
+
+    def __init__(self, value: int | None) -> None:
+        if value is not None:
+            self.value = value  # possibly-uninitialized-attribute
 ```
 
-Pyrefly reports the error at the definition, even if the attribute is never read.
-A later `hasattr` guard does not suppress it. An assignment in `__init__` does not
-initialize a class attribute. Inherited attributes, conditional method definitions,
-and stub (`.pyi`) files are exempt.
+The check covers the class body and the methods that initialize an instance: `__init__`, `__new__`, `__post_init__`, `__init_subclass__`, and supported test setup methods.
+Every path that completes normally must assign the attribute, including one that ends in an early `return`.
+A path that raises, or ends in a call to a `Never` or `NoReturn` function, does not need to:
 
-To disable this check while retaining other strict checks, use:
+```python
+class Checked:
+    def __init__(self, value: int | None, early: bool) -> None:
+        if value is None:
+            raise ValueError()
+        self.value = value  # OK: the other path raises
+        if early:
+            return
+        self.ready = True  # possibly-uninitialized-attribute
+```
+
+Another method also counts if it assigns the attribute on every path, even when Pyrefly cannot tell whether the constructor calls it:
+
+```python
+class Delegating:
+    def __init__(self, cfg: int | None) -> None:
+        if cfg is None:
+            self._load_defaults()
+        else:
+            self.cfg = cfg  # OK: _load_defaults always assigns cfg
+
+    def _load_defaults(self) -> None:
+        self.cfg = 0
+```
+
+These do not initialize an attribute:
+
+```python
+class NotInitialized:
+    def __init__(self) -> None:
+        def later() -> None:
+            self.a = 1  # possibly-uninitialized-attribute: later may never run
+        self.b: int  # possibly-uninitialized-attribute: an annotation is not a value
+        self.c = 1  # possibly-uninitialized-attribute
+        del self.c
+```
+
+A bare class-body annotation is checked against the methods that assign it.
+If no initialization method assigns it, [`uninitialized-instance-variable`](#uninitialized-instance-variable) reports it instead.
+
+```python
+class Annotated:
+    x: int  # possibly-uninitialized-attribute
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            self.x = 1
+```
+
+Pyrefly does not report an attribute when:
+
+- a base class, including `object`, defines it, or a base class is unresolved or `Any`;
+- the class has an instance `__getattr__`;
+- it is an annotation in a class that initializes annotated fields itself: a dataclass (except a plain `@dataclass(init=False)`), an attrs class, a pydantic model, a named tuple, or a protocol;
+- it is a `ClassVar` annotation, or an annotation on a metaclass;
+- it is a bare annotation `x: int` that `__new__` assigns on the instance it creates, such as `obj = super().__new__(cls)` followed by `obj.x = ...`;
+- it is a method or nested class defined under a condition in the class body, unless the name is also bound another way (the attributes such a method assigns are still checked);
+- it is in a stub (`.pyi`) file.
+
+A conditional class-body assignment is reported even when a method also assigns the name.
+The error is reported at the attribute's definition, even if the attribute is never read, and a later `hasattr` check does not suppress it.
+
+To disable this check while keeping other strict checks, use:
 
 ```toml
 preset = "strict"
@@ -2456,12 +2534,13 @@ def f(x: str) -> None:
 
 ## unreachable
 
-Default severity: `warn`
+Default severity: `hint`
 
-This error is raised when code can never execute because it comes after a statement that
+This diagnostic is reported when code can never execute because it comes after a statement that
 always exits the current flow, such as `return`, `raise`, `break`, or `continue`. One
 diagnostic is reported per block, covering everything from the first dead statement to the
-end of the block.
+end of the block. The [`all`](../configuration#preset-all) preset
+reports it as an error.
 
 ```python
 def example():
@@ -2540,6 +2619,72 @@ if sys.version_info < (3, 10):
 
 if sys.platform == "win32":
     print("not reported")   # live on Windows
+```
+
+A constant whose value depends on the platform or Python version doesn't decide a condition
+either. That covers a constant defined inside an `if` that tests `sys.platform`,
+`sys.version_info`, `os.name`, or `TYPE_CHECKING`, and a constant that such an `if` redefines,
+even in a branch the current configuration skips:
+
+```python
+import sys
+from typing import Final
+
+if sys.platform == "win32":
+    IS_WIN: Final = True
+else:
+    IS_WIN: Final = False
+
+if IS_WIN:
+    print("not reported")  # on Windows, `IS_WIN` is `True`
+
+DEBUG: Final = False
+if sys.platform == "win32":
+    DEBUG: Final = True
+
+if DEBUG:
+    print("not reported")  # on Windows, `DEBUG` is `True`
+```
+
+A name imported from another module, or read as an attribute of a module, counts only if the
+module that defines it declares it `Final` with a declared type: `Final[T]`, or a bare `Final`
+assigned a literal. It does not count if a module on the way to it defines or imports it under
+a test of the environment, if the module is read through anything other than an import (such
+as a variable assigned a module), or if a function or class body in the importing module
+declares the name `global`.
+
+```python
+# settings.py
+import sys
+from typing import Final
+
+DEBUG: Final = False
+TRACE: Final = False
+if sys.platform == "win32":
+    VERBOSE: Final = True
+else:
+    VERBOSE: Final = False
+
+# app.py
+import settings
+from settings import DEBUG, TRACE, VERBOSE
+
+if DEBUG:
+    print("dead")  # This code is unreachable [unreachable]
+
+if VERBOSE:
+    print("not reported")  # `settings` defines `VERBOSE` under a platform test
+
+config = settings
+if config.DEBUG:
+    print("not reported")  # `config` is a variable, not an import
+
+def enable_tracing() -> None:
+    global TRACE
+    TRACE = True
+
+if TRACE:
+    print("not reported")  # `enable_tracing` may rebind `TRACE`
 ```
 
 A dead `if` branch is skipped entirely, so nothing inside it is analysed. A `while` body is
@@ -2749,7 +2894,9 @@ Default severity: `warn`
 
 Type information for some third-party libraries is shipped in a stubs package separate from the
 library's source code. This error is emitted when we detect that a library is being used without
-the recommended stubs package being installed.
+the recommended stubs package being installed. It only applies to libraries found on the site package
+path that do not ship a `py.typed` file; modules found on the search path, such as local stubs in a
+`typings/` directory or your own code, are never reported.
 
 ## untyped-namedtuple
 
@@ -2871,7 +3018,24 @@ def parse(x: int) -> int:
 
 Default severity: `warn`
 
-The inferred variance of a type variable does not match its declared variance. This warning is raised for protocols where the way a type variable is used implies a different variance than what was declared. For example, if a protocol only uses `T` in covariant positions but `T` is declared as invariant, this warning suggests declaring `T` as covariant.
+This warning suggests covariance or contravariance for an invariant protocol
+`TypeVar` when its structural usage permits it. For example, if a protocol
+only returns `T`, the warning suggests declaring `T` as covariant. Incorrect usage
+of an explicitly covariant or contravariant `TypeVar` is reported as
+[`invalid-variance`](#invalid-variance) instead.
+
+Constrained `TypeVar`s, such as `TypeVar("T", str, bytes)`, are exempt from this
+warning. Constraints commonly describe a fixed set of unrelated alternatives, so
+invariance is often sufficient and narrower-variance suggestions are noisy. This
+is a diagnostic policy, not a prohibition on declaring variance: covariance and
+contravariance remain valid and can affect subtyping when constraints overlap,
+such as `int` and `float`. The exemption intentionally differs from the typing
+conformance suite, which includes a constrained protocol parameter that is
+expected to warn.
+
+Bounded `TypeVar`s, such as `TypeVar("T", bound=float)`, are still checked. An upper
+bound allows arbitrary subtypes of the bound rather than a fixed set of constraint
+choices.
 
 ```python
 from typing import Protocol, TypeVar

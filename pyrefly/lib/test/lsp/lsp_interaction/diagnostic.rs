@@ -3,7 +3,7 @@
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
-*/
+ */
 
 use std::fs;
 use std::path::Path;
@@ -987,7 +987,7 @@ fn test_unreachable_branch_diagnostic() {
                         "end": {"character": 12, "line": 6},
                         "start": {"character": 4, "line": 6}
                     },
-                    "severity": 2,
+                    "severity": 4,
                     "source": "Pyrefly",
                     "tags": [1]
                 }
@@ -999,10 +999,9 @@ fn test_unreachable_branch_diagnostic() {
     interaction.shutdown().unwrap();
 }
 
-/// A suite disabled by the environment carries no `unreachable` diagnostic, so it needs a
-/// hint to stay greyed out in the editor.
+/// A suite disabled by the environment is reported as `inactive-code`, which the editor greys out.
 #[test]
-fn test_unreachable_env_gated_hint_diagnostic() {
+fn test_inactive_code_diagnostic() {
     let test_files_root = get_test_files_root();
     let mut interaction = LspInteraction::new();
     interaction.set_root(test_files_root.path().to_path_buf());
@@ -1023,16 +1022,19 @@ fn test_unreachable_env_gated_hint_diagnostic() {
             {"pyrefly": {"displayTypeErrors": "force-on"}}
         ]));
 
-    interaction.client.did_open("unreachable_env_gated.py");
+    interaction.client.did_open("inactive_code.py");
 
     interaction
         .client
-        .diagnostic("unreachable_env_gated.py")
+        .diagnostic("inactive_code.py")
         .expect_response(json!({
             "items": [
                 {
-                    "code": "unreachable-code",
-                    "message": "This code is unreachable for the current configuration",
+                    "code": "inactive-code",
+                    "codeDescription": {
+                        "href": "https://pyrefly.org/en/docs/error-kinds/#inactive-code"
+                    },
+                    "message": "This code is inactive for the current type-checking configuration",
                     "range": {
                         "end": {"character": 12, "line": 8},
                         "start": {"character": 4, "line": 8}

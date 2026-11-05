@@ -37,6 +37,7 @@ use crate::error::collector::ErrorCollector;
 use crate::types::class::Class;
 use crate::types::class::ClassType;
 use crate::types::display::ClassDisplayContext;
+use crate::types::keywords::DataclassFieldKeywords;
 use crate::types::keywords::DataclassKeywords;
 use crate::types::keywords::DataclassTransformMetadata;
 use crate::types::stdlib::Stdlib;
@@ -464,6 +465,20 @@ impl ClassMetadata {
         self.dataclass_metadata.as_ref()
     }
 
+    /// Whether annotation-only fields need no assignment in the class body or a method.
+    /// Dataclasses and named tuples initialize them in a synthesized `__init__`, except for a
+    /// plain `@dataclass(init=False)`, and protocol members are declarations. attrs and pydantic
+    /// manage initialization in ways we do not model, so they are included too.
+    pub fn initializes_annotated_fields(&self) -> bool {
+        (self.dataclass_metadata.is_some()
+            || self.named_tuple_metadata.is_some()
+            || self.is_protocol())
+            && self
+                .dataclass_metadata
+                .as_ref()
+                .is_none_or(|dc| !matches!(dc.kind, DataclassKind::Dataclass { .. }) || dc.kws.init)
+    }
+
     pub fn slots_info(&self) -> Option<&SlotsInfo> {
         self.explicit_slots.slots_info()
     }
@@ -753,6 +768,14 @@ impl DataclassMetadata {
 
     pub fn is_instance_field(&self, name: &Name) -> bool {
         self.fields.contains_key(name) && !self.pseudo_field_names.contains(name)
+    }
+
+    /// Whether Pydantic lax mode converts the `__init__` input for this field.
+    pub fn is_pydantic_lax_field(&self, name: &Name, keywords: &DataclassFieldKeywords) -> bool {
+        !keywords.strict.unwrap_or(self.kws.strict)
+            && keywords.converter_param.is_none()
+            && !keywords.pydantic_has_custom_schema
+            && !self.pydantic_before_validator_fields.contains(name)
     }
 }
 

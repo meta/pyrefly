@@ -351,7 +351,9 @@ See more on [how Pyrefly does import resolution](import-resolution.mdx).
 
 When enabled, Pyrefly resolves an otherwise-unresolved import by searching each
 directory from the importing file up to the directory that contains your
-config, using the first match it finds. This is a best-effort way to make
+config, using the first match it finds. Directories that belong to a regular
+package (that is, contain an `__init__.py` or `__init__.pyi`) are skipped, since
+they cannot be import roots without truncating the package's module names. This is a best-effort way to make
 imports resolve when a module is importable relative to one of its parent
 directories but that directory isn't listed in [`search-path`](#search-path).
 
@@ -360,6 +362,8 @@ directories but that directory isn't listed in [`search-path`](#search-path).
 - Flag equivalent: `--enable-fallback-search-path`
 - Equivalent configs: none
 - Notes:
+    - The fallback is only consulted after the search path, typeshed, and the site
+      package path all fail to find the module, including as a namespace package.
     - Has no effect when [`disable-search-path-heuristics`](#disable-search-path-heuristics)
       is `true` — that flag suppresses all fallback-path consumption.
     - The search is bounded by the config root, so it cannot escape the project.
@@ -718,10 +722,17 @@ below this threshold are hidden from output. Diagnostics at or above the thresho
 displayed and cause a nonzero exit code — for example, `--min-severity warn` makes
 warnings cause a nonzero exit.
 
+When `min-severity` is not set, `pyrefly check` displays warnings and errors, and only
+errors cause a nonzero exit code. Warnings are also left out of `--suppress-errors`,
+baseline updates and the `junit-xml` report, which lists only diagnostics that cause a
+nonzero exit code.
+
 The lowest threshold, `"hint"`, also shows hint-level diagnostics such as
 [`unused-parameter`](../error-kinds#unused-parameter),
-[`unused-variable`](../error-kinds#unused-variable), and
-[`unused-import`](../error-kinds#unused-import). These are hidden by default, and
+[`unused-variable`](../error-kinds#unused-variable),
+[`unused-import`](../error-kinds#unused-import),
+[`unreachable`](../error-kinds#unreachable), and
+[`inactive-code`](../error-kinds#inactive-code). These are hidden by default, and
 showing them makes them count toward the exit code like any other displayed
 diagnostic.
 
@@ -737,7 +748,7 @@ min-severity = "warn"
 ```
 
 - Type: `"ignore"` | `"hint"` | `"info"` | `"warn"` | `"error"`
-- Default: `"error"`
+- Default: not set (warnings are displayed, and only errors cause a nonzero exit)
 - Flag equivalent: `--min-severity`
 - Notes:
     - `min-severity` is a **project-level setting** and cannot be overridden in
@@ -831,7 +842,7 @@ A minimal-checking preset used when automatic configuration selection finds no m
 - Sets [`check-unannotated-defs`](#check-unannotated-defs) `= false`, [`infer-return-types`](#infer-return-types) `= "never"`, [`infer-with-first-use`](#infer-with-first-use) `= false`, [`permissive-ignores`](#permissive-ignores) `= true`
 - Enables (as errors): [`bad-class-definition`](./error-kinds.mdx#bad-class-definition), [`bad-instantiation`](./error-kinds.mdx#bad-instantiation), [`bad-keyword-argument`](./error-kinds.mdx#bad-keyword-argument), [`bad-raise`](./error-kinds.mdx#bad-raise), [`bad-unpacking`](./error-kinds.mdx#bad-unpacking), [`division-by-zero`](./error-kinds.mdx#division-by-zero), [`invalid-annotation`](./error-kinds.mdx#invalid-annotation), [`invalid-literal`](./error-kinds.mdx#invalid-literal), [`invalid-super-call`](./error-kinds.mdx#invalid-super-call), [`invalid-syntax`](./error-kinds.mdx#invalid-syntax), [`missing-import`](./error-kinds.mdx#missing-import), [`not-async`](./error-kinds.mdx#not-async), [`parse-error`](./error-kinds.mdx#parse-error), [`unexpected-keyword`](./error-kinds.mdx#unexpected-keyword), [`unexpected-positional-argument`](./error-kinds.mdx#unexpected-positional-argument), [`unknown-name`](./error-kinds.mdx#unknown-name), [`unused-coroutine`](./error-kinds.mdx#unused-coroutine)
 - Enables (as warnings): [`fallback-search-path-relative-import`](./error-kinds.mdx#fallback-search-path-relative-import)
-- Keeps as hints: [`unused-import`](./error-kinds.mdx#unused-import), [`unused-parameter`](./error-kinds.mdx#unused-parameter), [`unused-variable`](./error-kinds.mdx#unused-variable)
+- Keeps as hints: [`inactive-code`](./error-kinds.mdx#inactive-code), [`unused-import`](./error-kinds.mdx#unused-import), [`unused-parameter`](./error-kinds.mdx#unused-parameter), [`unused-variable`](./error-kinds.mdx#unused-variable)
 - All other error kinds are silenced.
 
 #### Preset: `legacy`
@@ -862,7 +873,7 @@ For most users, we recommend using the `strict` preset and enabling individual a
 for more stability and an opt-in experience for new errors.
 :::
 
-Enables every error kind at `error` severity. Directives like `reveal-type` remain informational, and kinds that default to `hint`, like `unused-parameter`, remain hints.
+Enables every error kind at `error` severity. Directives like `reveal-type` remain informational, and hints about inactive and unused code remain hints.
 
 - Sets [`strict-callable-subtyping`](#strict-callable-subtyping) `= true`
 - Enables every error kind at `error` severity
@@ -1074,6 +1085,34 @@ set `infer-return-types` to `"never"` in your config or pass it as a flag.
 - Type: one of `"never"`, `"annotated"`, `"checked"`
 - Default: `"checked"`
 - Flag equivalent: `--infer-return-types`
+
+### `infer-param-types-from-docstring`
+
+Whether to use the parameter types that a Sphinx style docstring declares for parameters
+that have no annotation.
+
+```python
+def f(x, y=None):
+    """
+    :param int x: The x.
+    :type y: str
+    """
+```
+
+Here `x` is an `int` and `y` is a `str | None`. A parameter that defaults to `None` is
+treated as optional even when the docstring does not say so. For `__init__`, the docstring
+of the class is used as well, because that is where the constructor parameters are usually
+documented. The docstring of the method itself takes priority.
+
+A type from a docstring is only a hint for callers and for the body of the function. It is
+never used instead of an annotation, it does not make assignments to the parameter an
+error, and it is not checked against the default value. A type that Pyrefly cannot make
+sense of, such as `list of str` written as prose, an unknown name, or a type that is not
+valid for a parameter, is ignored without an error.
+
+- Type: `bool`
+- Default: `false`
+- Flag equivalent: `--infer-param-types-from-docstring`
 
 ### `strict-callable-subtyping`
 

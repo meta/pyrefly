@@ -12,7 +12,6 @@ use std::time::Instant;
 
 use anyhow::anyhow;
 use dupe::Dupe;
-use dupe::OptionDupedExt;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
@@ -23,6 +22,7 @@ use ruff_text_size::TextRange;
 
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
 use crate::error::style::ErrorStyle;
 use crate::module::bundled::BundledStub;
 use crate::module::third_party::get_bundled_third_party;
@@ -80,10 +80,11 @@ impl LspFile {
     }
 }
 
-/// The result of loading a module, including its `Module` and `ErrorCollector`.
+/// The result of loading a module, including its module data and immutable load diagnostics.
 #[derive(Debug)]
 pub struct Load {
-    pub errors: ErrorCollector,
+    pub load_errors: ModuleDiagnostics,
+    pub error_style: ErrorStyle,
     pub module_info: Module,
 }
 
@@ -94,23 +95,13 @@ impl Load {
         memory_lookup: &MemoryFilesLookup,
         timing: Option<&TransactionTimingCounters>,
     ) -> (FileContents, Option<anyhow::Error>) {
+        if let Some(contents) = memory_lookup.get(path) {
+            return (contents.as_ref().dupe(), None);
+        }
         let res = match path.details() {
-            ModulePathDetails::FileSystem(path) => {
-                if memory_lookup.filesystem_overlays()
-                    && let Some(contents) = memory_lookup.get(path)
-                {
-                    Ok(contents.as_ref().dupe())
-                } else {
-                    Self::load_from_filesystem(path, timing)
-                }
-            }
+            ModulePathDetails::FileSystem(path) => Self::load_from_filesystem(path, timing),
             ModulePathDetails::Namespace(_) => Ok(FileContents::from_source("".to_owned())),
-            ModulePathDetails::Memory(path) => memory_lookup
-                .get(path)
-                .duped()
-                .as_deref()
-                .duped()
-                .ok_or_else(|| anyhow!("memory path not found")),
+            ModulePathDetails::Memory(_) => Err(anyhow!("memory path not found")),
             ModulePathDetails::BundledTypeshed(path) => typeshed().and_then(|x| {
                 x.load(path)
                     .ok_or_else(|| anyhow!("bundled typeshed problem"))
@@ -179,9 +170,9 @@ impl Load {
                 Module::new_notebook(name, path, Arc::clone(&notebook))
             }
         };
-        let errors = ErrorCollector::new(module_info.dupe(), error_style);
+        let load_errors = ErrorCollector::new(module_info.dupe(), error_style);
         if let Some(err) = self_error {
-            errors
+            load_errors
                 .error_builder(
                     TextRange::default(),
                     ErrorKind::MissingImport,
@@ -192,8 +183,10 @@ impl Load {
                 )
                 .emit();
         }
+        let load_errors = load_errors.finish();
         Self {
-            errors,
+            load_errors,
+            error_style,
             module_info,
         }
     }

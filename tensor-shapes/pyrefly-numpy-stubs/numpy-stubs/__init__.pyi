@@ -3,8 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from builtins import bool as py_bool
-from collections.abc import Iterator, Sequence
+from builtins import bool as py_bool, str as py_str
+from collections.abc import Iterator, Mapping, Sequence
 from types import EllipsisType
 from typing import (
     Any,
@@ -393,11 +393,6 @@ from numpy.lib._utils_impl import (
     info as info,
     show_runtime as show_runtime,
 )
-from numpy.matrixlib import (
-    asmatrix as asmatrix,
-    bmat as bmat,
-    matrix as matrix,
-)
 from shape_extensions import (
     broadcast as _broadcast_shape,
     Flag,
@@ -462,7 +457,10 @@ class number(generic):
     def __mul__(self, other: _NumberScalar, /) -> number: ...
     def __rmul__(self, other: _NumberScalar, /) -> number | complex: ...
     def __truediv__(self, other: _NumberScalar, /) -> number: ...
+    @overload
     def __rtruediv__(self, other: _NumberScalar, /) -> number | complex: ...
+    @overload
+    def __rtruediv__(self, other: list[Any] | tuple[Any, ...], /) -> ndarray: ...
     def __pow__(self, other: _NumberScalar, mod: None = None, /) -> number: ...
     def __rpow__(
         self, other: _NumberScalar, mod: None = None, /
@@ -656,6 +654,8 @@ class dtype(Generic[_ScalarT_co]):
     @overload
     def __new__(cls, dtype: Any = ...) -> dtype: ...
     def __init__(self, dtype: Any = ...) -> None: ...
+    @property
+    def str(self) -> py_str: ...
 
 _DTypeT_co = TypeVar("_DTypeT_co", default=Any, covariant=True)
 
@@ -744,6 +744,11 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
         key: _ArrayIndex,
     ) -> ndarray[IntTuple, _DTypeT_co]: ...
     # Assignment preserves the receiver's shape; value broadcasting is gradual.
+    @overload
+    def __setitem__(
+        self: ndarray[_ShapeT_co, _dtype[void]], key: py_str, value: ArrayLike, /
+    ) -> None: ...
+    @overload
     def __setitem__(self, key: _ArrayIndex, value: ArrayLike, /) -> None: ...
     # Unknown-rank arrays may yield scalars, so prefer the gradual overload.
     @overload
@@ -1476,6 +1481,39 @@ def from_dlpack(
     copy: py_bool | None = None,
 ) -> ndarray: ...
 
+class matrix(ndarray[_ShapeT_co, _DTypeT_co]):
+    """The legacy 2-D array subclass.
+
+    Only the members reached through the overlay are declared; the overlay does
+    not model matrix-specific shape transforms.
+    """
+
+    def __new__(
+        cls, data: ArrayLike, dtype: Any = ..., copy: py_bool = ...
+    ) -> matrix: ...
+    def getI(self) -> matrix: ...
+    def getT(self) -> matrix: ...
+    def getA(self) -> ndarray: ...
+    def getA1(self) -> ndarray: ...
+    def getH(self) -> matrix: ...
+    @property
+    def I(self) -> matrix: ...  # noqa: E743
+    @property
+    def T(self) -> matrix: ...
+    @property
+    def A(self) -> ndarray: ...
+    @property
+    def A1(self) -> ndarray: ...
+    @property
+    def H(self) -> matrix: ...
+
+def asmatrix(data: ArrayLike, dtype: Any = ...) -> matrix: ...
+def bmat(
+    obj: py_str | Sequence[ArrayLike] | ndarray,
+    ldict: Mapping[py_str, Any] | None = ...,
+    gdict: Mapping[py_str, Any] | None = ...,
+) -> matrix: ...
+
 class _UnaryUFunc(ufunc):
     @overload
     def __call__[Shape: _Shape](
@@ -1485,6 +1523,11 @@ class _UnaryUFunc(ufunc):
     @overload
     def __call__(self, x: _ArrayScalar, /, out: Any = None, **kwargs: Any) -> Any: ...
     # Non-scalar array-likes should not fall through to the generic Any ufunc overload.
+    # A sequence input always produces an array, never a scalar.
+    @overload
+    def __call__(
+        self, x: list[Any] | tuple[Any, ...], /, out: Any = None, **kwargs: Any
+    ) -> ndarray: ...
     @overload
     def __call__(
         self, x: ArrayLike, /, out: Any = None, **kwargs: Any

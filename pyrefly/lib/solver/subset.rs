@@ -49,6 +49,7 @@ use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::callable::CallArg;
+use crate::alt::callable::CallValue;
 use crate::alt::expr::TypeOrExpr;
 use crate::solver::shape::has_int_tuple_bound;
 use crate::solver::shape::type_as_intvar_solution;
@@ -1661,7 +1662,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 match param {
                     Param::PosOnly(_, ty, required) => {
                         requiredness.push(required);
-                        fake_args.push(CallArg::Arg(TypeOrExpr::Type(ty, TextRange::default())));
+                        fake_args.push(CallArg::ty(ty, TextRange::default()));
                     }
                     // We already checked that all params are PosOnly.
                     _ => unreachable!(),
@@ -1676,7 +1677,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                         .iter()
                         .zip(requiredness.iter())
                         .map(|(arg, required)| match arg {
-                            CallArg::Arg(TypeOrExpr::Type(t, _)) => {
+                            CallArg::Arg(CallValue::Plain(TypeOrExpr::Type(t, _))) => {
                                 PrefixParam::new((**t).clone(), (**required).clone())
                             }
                             // We manually constructed the callargs above, so we know their exact shape.
@@ -2187,7 +2188,11 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 self.is_subset_type_to_int_tuple(got, want)
             }
             (_, Type::Quantified(_)) => Err(SubsetError::Other),
-            (l, Type::Intersect(u)) => all(u.0.iter(), |u| self.is_subset_eq(l, u)),
+            // A truthiness marker only records when a boolean operand is returned, for narrowing.
+            // It does not restrict which values are assignable.
+            (l, Type::Intersect(u)) => all(u.0.iter().filter(|u| !u.is_truthiness_marker()), |u| {
+                self.is_subset_eq(l, u)
+            }),
             (l, Type::Union(u_union)) => {
                 let ordered_us = self.solver.partial_sort_by_vars(&u_union.members);
                 let mut error = None;
@@ -2808,6 +2813,16 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 Ok(())
             }
             (Type::QuantifiedValue(_), Type::ClassType(cls)) if is_int_class_type(cls) => Ok(()),
+            // Enum literal expansion makes a sole non-Flag member equivalent to its enum type.
+            (Type::ClassType(got_cls), Type::Literal(lit))
+                if let Lit::Enum(enum_lit) = &lit.value
+                    && got_cls.class_object() == enum_lit.class.class_object()
+                    && self
+                        .type_order
+                        .enum_literal_covers_class(got_cls.class_object(), &enum_lit.member) =>
+            {
+                Ok(())
+            }
             (Type::Literal(l_lit), Type::Literal(u_lit)) => {
                 ok_or(l_lit.value == u_lit.value, SubsetError::Other)
             }

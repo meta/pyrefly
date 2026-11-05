@@ -5,10 +5,14 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::borrow::Cow;
 use std::cmp;
+use std::fmt;
 use std::fmt::Debug;
+use std::fmt::Display;
 use std::io;
 use std::io::Write;
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use itertools::Itertools;
@@ -28,6 +32,7 @@ use pyrefly_util::display::number_thousands;
 use pyrefly_util::lined_buffer::DisplayRange;
 use pyrefly_util::lined_buffer::LineNumber;
 use pyrefly_util::lined_buffer::LinedBuffer;
+use rayon::prelude::*;
 use ruff_annotate_snippets::Annotation;
 use ruff_annotate_snippets::AnnotationKind;
 use ruff_annotate_snippets::Group;
@@ -44,6 +49,7 @@ use yansi::Paint;
 
 use crate::config::error_kind::ErrorKind;
 use crate::config::error_kind::Severity;
+use crate::config::error_kind::ShownSeverity;
 use crate::error::legacy::LegacyError;
 
 /// A secondary annotation that labels a span in the same file as the primary error.
@@ -96,6 +102,29 @@ pub enum BaselineStatus {
     Unmatched,
     /// The error matched the loaded baseline.
     Matched,
+}
+
+/// A diagnostic as it is reported: an error, with the severity and baseline status it is
+/// reported with. These can differ from the error's own, so reporting can borrow an error
+/// rather than copy it to change them. Reports are built in parallel, hence `Sync`.
+pub trait ReportedError: Sync {
+    fn error(&self) -> &Error;
+    fn severity(&self) -> Severity;
+    fn baseline_status(&self) -> BaselineStatus;
+}
+
+impl ReportedError for Error {
+    fn error(&self) -> &Error {
+        self
+    }
+
+    fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    fn baseline_status(&self) -> BaselineStatus {
+        self.baseline_status
+    }
 }
 
 impl BaselineStatus {
@@ -200,6 +229,22 @@ impl Ranged for Error {
     }
 }
 
+/// Where an error is, as rendered: its path, and its cell for an error in a notebook.
+struct Origin<'a> {
+    path: &'a Path,
+    cell: Option<NonZeroU32>,
+}
+
+impl Display for Origin<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.path.to_string_lossy())?;
+        if let Some(cell) = self.cell {
+            write!(f, "#{cell}")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct ErrorRenderer<W> {
     writer: W,
@@ -239,25 +284,76 @@ impl<W: Write> ErrorRenderer<W> {
         }
     }
 
-    pub fn write(&mut self, error: &Error, project_root: &Path, verbose: bool) -> io::Result<()> {
-        if !error.severity.is_enabled() {
+    fn with_mode(writer: W, mode: ErrorRenderMode) -> Self {
+        match mode {
+            ErrorRenderMode::Plain => Self::plain(writer),
+            ErrorRenderMode::Color => Self::styled(writer),
+        }
+    }
+
+    pub fn write(
+        &mut self,
+        reported: &impl ReportedError,
+        project_root: &Path,
+        verbose: bool,
+    ) -> io::Result<()> {
+        let severity = reported.severity();
+        if !severity.is_enabled() {
             return Ok(());
         }
-        let origin = error.path_string_with_fragment(project_root);
+        let error = reported.error();
         let metadata = RenderMetadata {
-            severity: error.severity,
+            severity,
             header: &error.msg_header,
             name: error.error_kind.to_name(),
-            baselined: error.baseline_status == BaselineStatus::Matched,
+            baselined: reported.baseline_status() == BaselineStatus::Matched,
         };
         if verbose {
+            let origin = error.path_string_with_fragment(project_root);
             self.write_header(&metadata)?;
             self.write_snippet(error.render_snippets(&origin))?;
             if let Some(details) = &error.msg_details {
                 writeln!(self.writer, "{details}")?;
             }
         } else {
-            self.write_concise(&metadata, &origin, &error.display_range.to_string())?;
+            self.write_concise(&metadata, error.origin(project_root), &error.display_range)?;
+        }
+        Ok(())
+    }
+
+    /// Write every error in `errors`, in order. Many errors are rendered in parallel, each
+    /// chunk into its own buffer, and the buffers are written in order. The work is done in
+    /// waves, so only a wave's buffers are held at once.
+    pub fn write_all(
+        &mut self,
+        errors: &[impl ReportedError],
+        project_root: &Path,
+        verbose: bool,
+    ) -> io::Result<()> {
+        const CHUNK: usize = 256;
+        if errors.len() <= CHUNK {
+            for error in errors {
+                self.write(error, project_root, verbose)?;
+            }
+            return Ok(());
+        }
+        let mode = self.mode;
+        for wave in errors.chunks(CHUNK * rayon::current_num_threads() * 4) {
+            let buffers: Vec<Vec<u8>> = wave
+                .par_chunks(CHUNK)
+                .map(|chunk| {
+                    let mut renderer = ErrorRenderer::with_mode(Vec::new(), mode);
+                    for error in chunk {
+                        renderer
+                            .write(error, project_root, verbose)
+                            .expect("writing to a `Vec` cannot fail");
+                    }
+                    renderer.writer
+                })
+                .collect();
+            for buffer in buffers {
+                self.writer.write_all(&buffer)?;
+            }
         }
         Ok(())
     }
@@ -285,7 +381,7 @@ impl<W: Write> ErrorRenderer<W> {
                 writeln!(self.writer, "{details}")?;
             }
         } else {
-            self.write_concise(&metadata, &error.origin, &legacy_error.display_range())?;
+            self.write_concise(&metadata, &error.origin, legacy_error.display_range())?;
         }
         Ok(())
     }
@@ -329,8 +425,8 @@ impl<W: Write> ErrorRenderer<W> {
     fn write_concise(
         &mut self,
         metadata: &RenderMetadata,
-        origin: &str,
-        display_range: &str,
+        origin: impl Display,
+        display_range: impl Display,
     ) -> io::Result<()> {
         let RenderMetadata {
             severity,
@@ -338,7 +434,11 @@ impl<W: Write> ErrorRenderer<W> {
             name,
             baselined,
         } = *metadata;
-        let header = header.lines().map(str::trim).join(" ");
+        let header: Cow<str> = if header.contains('\n') {
+            Cow::Owned(header.lines().map(str::trim).join(" "))
+        } else {
+            Cow::Borrowed(header.trim())
+        };
         match self.mode {
             ErrorRenderMode::Plain => writeln!(
                 self.writer,
@@ -355,10 +455,10 @@ impl<W: Write> ErrorRenderer<W> {
                     self.writer,
                     "{} {}:{}: {} {}",
                     severity.painted(),
-                    Paint::blue(origin),
-                    Paint::dim(display_range),
+                    Paint::blue(&origin),
+                    Paint::dim(&display_range),
                     Paint::new(&header),
-                    Paint::dim(format!("[{name}]").as_str()),
+                    Paint::dim(&format_args!("[{name}]")),
                 )?;
                 if baselined {
                     write!(self.writer, " {}", Paint::dim("[baselined]"))?;
@@ -413,12 +513,16 @@ impl<W: Write> ErrorRenderer<W> {
 impl Error {
     /// Return the path with a cell fragment if the error is in a notebook cell.
     pub fn path_string_with_fragment(&self, project_root: &Path) -> String {
+        self.origin(project_root).to_string()
+    }
+
+    /// The path relative to `project_root`, with a cell fragment if the error is in a
+    /// notebook cell.
+    fn origin(&self, project_root: &Path) -> Origin<'_> {
         let path = self.path().as_path();
-        let path = path.strip_prefix(project_root).unwrap_or(path);
-        if let Some(cell) = self.display_range.start.cell() {
-            format!("{}#{cell}", path.to_string_lossy())
-        } else {
-            path.to_string_lossy().to_string()
+        Origin {
+            path: path.strip_prefix(project_root).unwrap_or(path),
+            cell: self.display_range.start.cell(),
         }
     }
 
@@ -610,13 +714,14 @@ impl Error {
     }
 
     /// The tag editors use to draw this diagnostic in their own way: struck
-    /// through for a deprecated name, greyed out for unreachable or unused code.
+    /// through for a deprecated name, greyed out for inactive, unreachable, or unused code.
     pub fn editor_tag(&self) -> Option<DiagnosticTag> {
         if self.deprecated_tag {
             Some(DiagnosticTag::Deprecated)
         } else if matches!(
             self.error_kind(),
-            ErrorKind::Unreachable
+            ErrorKind::InactiveCode
+                | ErrorKind::Unreachable
                 | ErrorKind::UnusedImport
                 | ErrorKind::UnusedParameter
                 | ErrorKind::UnusedVariable
@@ -627,8 +732,14 @@ impl Error {
         }
     }
 
-    /// Create a diagnostic suitable for use in LSP.
-    pub fn to_diagnostic(&self) -> Diagnostic {
+    /// Create a diagnostic suitable for use in LSP, or `None` for an ignored error.
+    pub fn to_diagnostic(&self) -> Option<Diagnostic> {
+        self.to_diagnostic_with_severity(self.severity)
+    }
+
+    /// Like `to_diagnostic`, but with `severity` in place of this error's own severity.
+    pub(crate) fn to_diagnostic_with_severity(&self, severity: Severity) -> Option<Diagnostic> {
+        let severity = severity.shown()?;
         let code = self.error_kind().to_name().to_owned();
         let code_description = Uri::parse(&self.error_kind().docs_url())
             .ok()
@@ -636,18 +747,15 @@ impl Error {
         let tag = self.editor_tag();
         // TODO: Map secondary_annotations to DiagnosticRelatedInformation for LSP clients.
         // This requires constructing a Uri from the module path, which may not always succeed.
-        Diagnostic {
+        Some(Diagnostic {
             range: self.module.to_lsp_range(self.range()),
-            severity: Some(match self.severity() {
-                Severity::Error => DiagnosticSeverity::Error,
-                Severity::Warn => DiagnosticSeverity::Warning,
-                Severity::Info => DiagnosticSeverity::Information,
-                // Editors show an untagged LSP hint as faint dots at most, so a hint
-                // without its own look is shown like `info`.
-                Severity::Hint if tag.is_some() => DiagnosticSeverity::Hint,
-                Severity::Hint => DiagnosticSeverity::Information,
-                // Ignored errors shouldn't be here
-                Severity::Ignore => DiagnosticSeverity::Information,
+            severity: Some(match severity {
+                ShownSeverity::Error => DiagnosticSeverity::Error,
+                ShownSeverity::Warn => DiagnosticSeverity::Warning,
+                ShownSeverity::Hint if tag.is_some() => DiagnosticSeverity::Hint,
+                // VS Code draws an untagged LSP hint as three small dots under its first
+                // characters, with no underline, so a hint without a tag is shown like `info`.
+                ShownSeverity::Info | ShownSeverity::Hint => DiagnosticSeverity::Information,
             }),
             source: Some("Pyrefly".to_owned()),
             message: self.msg().to_owned().into(),
@@ -655,7 +763,7 @@ impl Error {
             code_description,
             tags: tag.map(|tag| vec![tag]),
             ..Default::default()
-        }
+        })
     }
 
     pub fn get_notebook_cell(&self) -> Option<usize> {
@@ -685,10 +793,10 @@ pub fn print_errors(project_root: &Path, errors: &[Error]) {
     }
 }
 
-fn count_error_kinds(errors: &[Error]) -> Vec<(ErrorKind, usize)> {
+fn count_error_kinds(errors: &[impl ReportedError]) -> Vec<(ErrorKind, usize)> {
     let mut map = SmallMap::new();
     for err in errors {
-        let kind = err.error_kind();
+        let kind = err.error().error_kind();
         *map.entry(kind).or_default() += 1;
     }
     let mut res = map.into_iter().collect::<Vec<_>>();
@@ -696,7 +804,7 @@ fn count_error_kinds(errors: &[Error]) -> Vec<(ErrorKind, usize)> {
     res
 }
 
-pub fn print_error_counts(errors: &[Error], limit: usize) {
+pub fn print_error_counts(errors: &[impl ReportedError], limit: usize) {
     let items = count_error_kinds(errors);
     let limit = if limit > 0 { limit } else { items.len() };
     for (error, count) in items.iter().rev().take(limit) {
@@ -899,6 +1007,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use dupe::Dupe;
     use pyrefly_python::module_name::ModuleName;
     use ruff_text_size::TextSize;
 
@@ -922,6 +1031,56 @@ mod tests {
             renderer.write_serializable(&error, verbose).unwrap();
         }
         str::from_utf8(&output).unwrap().to_owned()
+    }
+
+    /// Errors in two modules, enough of them that `ErrorRenderer::write_all` renders them in
+    /// parallel, some with details and some with a header spanning lines.
+    fn many_errors() -> Vec<Error> {
+        let contents = Arc::new("x = 1\n".repeat(1000));
+        ["foo", "bar"]
+            .into_iter()
+            .flat_map(|name| {
+                let module = Module::new(
+                    ModuleName::from_str(name),
+                    ModulePath::filesystem(PathBuf::from(format!("/root/{name}.py"))),
+                    contents.dupe(),
+                );
+                (0..400u32).map(move |i| {
+                    let start = TextSize::new(i * 6);
+                    Error::new(
+                        module.dupe(),
+                        TextRange::new(start, start + TextSize::new(1)),
+                        format!("error {i} with \"quotes\"\n  over two lines"),
+                        if i % 2 == 0 {
+                            vec![format!("detail {i}")]
+                        } else {
+                            Vec::new()
+                        },
+                        ErrorKind::BadAssignment,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_write_all_matches_writing_each_error() {
+        let errors = many_errors();
+        for verbose in [false, true] {
+            let mut each = Vec::new();
+            let mut renderer = ErrorRenderer::plain(&mut each);
+            for error in &errors {
+                renderer.write(error, Path::new("/root"), verbose).unwrap();
+            }
+            let mut all = Vec::new();
+            ErrorRenderer::plain(&mut all)
+                .write_all(&errors, Path::new("/root"), verbose)
+                .unwrap();
+            assert!(
+                all == each,
+                "rendering in parallel should not change the output (verbose: {verbose})"
+            );
+        }
     }
 
     #[test]
@@ -1132,6 +1291,7 @@ def f(x: None) -> None:
             )
             .with_severity(Severity::Hint)
             .to_diagnostic()
+            .expect("a severity other than ignore is shown")
         };
         let unused = diagnostic(ErrorKind::UnusedImport);
         assert_eq!(unused.severity, Some(DiagnosticSeverity::Hint));
@@ -1141,9 +1301,31 @@ def f(x: None) -> None:
         assert_eq!(assignment.tags, None);
     }
 
+    #[test]
+    fn test_ignored_error_has_no_lsp_diagnostic() {
+        let module_info = Module::new(
+            ModuleName::from_str("test"),
+            ModulePath::filesystem(PathBuf::from("test.py")),
+            Arc::new("x".to_owned()),
+        );
+        let error = Error::new(
+            module_info,
+            TextRange::new(TextSize::new(0), TextSize::new(1)),
+            "message".to_owned(),
+            Vec::new(),
+            ErrorKind::BadAssignment,
+        );
+        assert!(error.to_diagnostic().is_some());
+        assert!(
+            error
+                .with_severity(Severity::Ignore)
+                .to_diagnostic()
+                .is_none(),
+            "an ignored error is never published"
+        );
+    }
+
     // https://github.com/facebook/pyrefly/issues/5113
-    // bug: at their default severity, `deprecated` and `unreachable` are LSP
-    // warnings; the team agreed on 2026-10-29 that they should be hints.
     #[test]
     fn test_deprecated_and_unreachable_in_lsp() {
         let module_info = Module::new(
@@ -1160,12 +1342,13 @@ def f(x: None) -> None:
                 kind,
             )
             .to_diagnostic()
+            .expect("a severity other than ignore is shown")
         };
         let deprecated = diagnostic(ErrorKind::Deprecated);
         assert_eq!(deprecated.severity, Some(DiagnosticSeverity::Warning));
         assert_eq!(deprecated.tags, Some(vec![DiagnosticTag::Deprecated]));
         let unreachable = diagnostic(ErrorKind::Unreachable);
-        assert_eq!(unreachable.severity, Some(DiagnosticSeverity::Warning));
+        assert_eq!(unreachable.severity, Some(DiagnosticSeverity::Hint));
         assert_eq!(unreachable.tags, Some(vec![DiagnosticTag::Unnecessary]));
     }
 }

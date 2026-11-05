@@ -1231,7 +1231,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 | Type::ShapedArray(_)
                 | Type::NNModule(_)
                 | Type::DataFrame(_)
-                | Type::Series(_) => {
+                | Type::Series(_)
+                | Type::Intersect(_) => {
                     self.call_method_or_error(t, method, x.range, &[], &[], errors, Some(&context))
                 }
                 Type::Literal(lit) if let Lit::Enum(lit_enum) = &lit.value => self

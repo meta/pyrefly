@@ -1592,7 +1592,7 @@ impl Query {
         // First, make sure that the types are well-formed and importable, return `Err` if not
         let code = format!("{imports}\n{snippet}\n");
         t.set_memory(vec![(
-            path.clone(),
+            ModulePath::memory(path.clone()),
             Some(Arc::new(FileContents::from_source(code))),
         )]);
         t.run(&[handle.dupe()], Require::Everything, None);

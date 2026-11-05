@@ -145,6 +145,100 @@ fn test_notebook_did_open() {
 }
 
 #[test]
+fn test_notebook_backwards_version_is_rejected() {
+    let root = get_test_files_root();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(Some(
+                json!([{"pyrefly": {"displayTypeErrors": "force-on"}}]),
+            )),
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.open_notebook("notebook.ipynb", vec!["x: str = 'original'"]);
+    let cell_uri = interaction.cell_uri("notebook.ipynb", "cell1");
+    interaction.change_notebook(
+        "notebook.ipynb",
+        3,
+        json!({
+            "cells": { "textContent": [{
+                "document": { "uri": cell_uri, "version": 3 },
+                "changes": [{ "text": "x: str = 'updated'" }]
+            }] }
+        }),
+    );
+    interaction
+        .diagnostic_for_cell("notebook.ipynb", "cell1")
+        .expect_response(json!({"items": [], "kind": "full"}))
+        .unwrap();
+    interaction.change_notebook(
+        "notebook.ipynb",
+        2,
+        json!({
+            "cells": { "textContent": [{
+                "document": { "uri": cell_uri, "version": 2 },
+                "changes": [{ "text": "x: str = 1" }]
+            }] }
+        }),
+    );
+    interaction
+        .diagnostic_for_cell("notebook.ipynb", "cell1")
+        .expect_response(json!({"items": [], "kind": "full"}))
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_failed_notebook_update_does_not_advance_version() {
+    let root = get_test_files_root();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(Some(
+                json!([{"pyrefly": {"displayTypeErrors": "force-on"}}]),
+            )),
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.open_notebook("notebook.ipynb", vec!["x: str = 1"]);
+    let cell_uri = interaction.cell_uri("notebook.ipynb", "cell1");
+    let extra_cell = interaction.cell_uri("notebook.ipynb", "cell2");
+    interaction.change_notebook(
+        "notebook.ipynb",
+        10,
+        json!({
+            "cells": { "structure": {
+                "array": {
+                    "start": 5, "deleteCount": 0,
+                    "cells": [{ "kind": 2, "document": extra_cell }]
+                },
+                "didOpen": [{
+                    "uri": extra_cell, "languageId": "python", "version": 1, "text": "y = 1"
+                }]
+            } }
+        }),
+    );
+    interaction.change_notebook(
+        "notebook.ipynb",
+        2,
+        json!({
+            "cells": { "textContent": [{
+                "document": { "uri": cell_uri, "version": 2 },
+                "changes": [{ "text": "x: str = 'fixed'" }]
+            }] }
+        }),
+    );
+    interaction
+        .diagnostic_for_cell("notebook.ipynb", "cell1")
+        .expect_response(json!({"items": [], "kind": "full"}))
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
+#[test]
 fn test_notebook_completion_parse_error() {
     let root = get_test_files_root();
     let mut interaction = LspInteraction::new();

@@ -70,6 +70,14 @@ impl Docstring {
     pub fn resolve(&self) -> String {
         Self::clean(self.1.code_at(self.0))
     }
+
+    /// Whether the literal contains non-whitespace text, before Markdown rendering.
+    ///
+    /// `resolve` turns leftover spaces into `&nbsp;`, so a whitespace-only
+    /// docstring looks nonempty after rendering.
+    pub fn has_content(&self) -> bool {
+        !normalize_literal(self.1.code_at(self.0)).trim().is_empty()
+    }
 }
 
 /// Render cleaned docstring lines into markdown, adding fences for code blocks.
@@ -777,6 +785,54 @@ pub fn parse_parameter_documentation(docstring: &str) -> HashMap<String, String>
     docs
 }
 
+/// A parameter type written in a Sphinx field of a docstring.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DocstringParamType<'a> {
+    /// The type as written, for example `flask.Flask|flask.Blueprint`.
+    pub type_text: &'a str,
+    /// The byte offset of `type_text` within the docstring it was parsed from.
+    pub offset: usize,
+}
+
+/// Extract the parameter types declared by Sphinx fields, keyed by parameter name. Both
+/// `:param <type> <name>:` and `:type <name>: <type>` are recognized, and the latter wins
+/// when a parameter has both.
+///
+/// `docstring` is used as written, so `offset` can be mapped back to the source file.
+///
+/// See <https://www.sphinx-doc.org/en/master/usage/domains/python.html#info-field-lists>.
+pub fn parse_sphinx_param_types(docstring: &str) -> HashMap<&str, DocstringParamType<'_>> {
+    let mut types = HashMap::new();
+    for line in docstring.lines() {
+        let Some((head, body)) = line
+            .trim_start()
+            .strip_prefix(':')
+            .and_then(|x| x.split_once(':'))
+        else {
+            continue;
+        };
+        let (field, args) = head.split_once(char::is_whitespace).unwrap_or((head, ""));
+        let args = args.trim();
+        let (name, type_text) = match field {
+            "param" | "parameter" | "arg" | "argument" => {
+                match args.rsplit_once(char::is_whitespace) {
+                    Some((type_text, name)) => (name, type_text.trim()),
+                    None => continue,
+                }
+            }
+            "type" => (args, body.trim()),
+            _ => continue,
+        };
+        if type_text.is_empty() || (field != "type" && types.contains_key(name)) {
+            continue;
+        }
+        // Both slices borrow from `docstring`, so their distance is the byte offset.
+        let offset = type_text.as_ptr() as usize - docstring.as_ptr() as usize;
+        types.insert(name, DocstringParamType { type_text, offset });
+    }
+    types
+}
+
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
@@ -785,6 +841,7 @@ mod tests {
     use crate::docstring::Docstring;
     use crate::docstring::DocstringRenderState;
     use crate::docstring::parse_parameter_documentation;
+    use crate::docstring::parse_sphinx_param_types;
 
     #[test]
     fn test_clean_removes_double_multiline_double_quotes() {
@@ -1595,5 +1652,55 @@ result : str
         let docs = parse_parameter_documentation(doc);
         assert_eq!(docs.get("separator").unwrap(), "Used between records.");
         assert_eq!(docs.len(), 1);
+    }
+
+    fn param_types(docstring: &str) -> Vec<(String, String)> {
+        let types = parse_sphinx_param_types(docstring);
+        for x in types.values() {
+            assert_eq!(
+                &docstring[x.offset..x.offset + x.type_text.len()],
+                x.type_text
+            );
+        }
+        let mut types = types
+            .iter()
+            .map(|(name, x)| (name.to_string(), x.type_text.to_owned()))
+            .collect::<Vec<_>>();
+        types.sort();
+        types
+    }
+
+    fn expected(types: &[(&str, &str)]) -> Vec<(String, String)> {
+        types
+            .iter()
+            .map(|(name, ty)| (name.to_string(), ty.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_parse_sphinx_param_types() {
+        let doc = "Summary.\n\n    :param str name: the name\n    :param flask.Flask|flask.Blueprint app: app\n    :param untyped: no type\n    :type count: int\n    :returns: nothing\n";
+        assert_eq!(
+            param_types(doc),
+            expected(&[
+                ("app", "flask.Flask|flask.Blueprint"),
+                ("count", "int"),
+                ("name", "str"),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_sphinx_param_types_type_field_wins() {
+        let doc = ":type x: bytes\n:param str x: a\n";
+        assert_eq!(param_types(doc), expected(&[("x", "bytes")]));
+        let doc = ":param str x: a\n:type x: bytes\n";
+        assert_eq!(param_types(doc), expected(&[("x", "bytes")]));
+    }
+
+    #[test]
+    fn test_parse_sphinx_param_types_ignores_prose() {
+        let doc = "Summary : with a colon.\n\nSee also: nothing (really): at all.\n:returns: x\n";
+        assert_eq!(param_types(doc), expected(&[]));
     }
 }

@@ -43,7 +43,6 @@ use lsp_types::CallHierarchyPrepareRequest;
 use lsp_types::CallHierarchyProvider;
 use lsp_types::CancelNotification;
 use lsp_types::ChangeNotifications;
-use lsp_types::Code;
 use lsp_types::CodeAction;
 use lsp_types::CodeActionKind;
 use lsp_types::CodeActionOptions;
@@ -74,7 +73,6 @@ use lsp_types::DefinitionRequest;
 use lsp_types::DefinitionResponse;
 use lsp_types::Diagnostic;
 use lsp_types::DiagnosticSeverity;
-use lsp_types::DiagnosticTag;
 use lsp_types::DidChangeConfigurationClientCapabilities;
 use lsp_types::DidChangeConfigurationNotification;
 use lsp_types::DidChangeConfigurationParams;
@@ -289,7 +287,6 @@ use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::lsp::IndexingMode;
 use crate::config::config::ConfigFile;
 use crate::config::config::ConfigScope;
-use crate::config::error_kind::ErrorKind;
 use crate::error::baseline::BaselineWrite;
 use crate::error::baseline::StaleRowScope;
 use crate::error::baseline::write_baseline_file;
@@ -311,7 +308,6 @@ use crate::lsp::non_wasm::convert_module_package::convert_module_package_code_ac
 use crate::lsp::non_wasm::document_symbols::flatten_to_symbol_information;
 use crate::lsp::non_wasm::external_provider::ExternalProvider;
 use crate::lsp::non_wasm::external_provider::compute_qualified_name;
-use crate::lsp::non_wasm::lsp::apply_change_events;
 use crate::lsp::non_wasm::lsp::as_notification;
 use crate::lsp::non_wasm::lsp::as_request;
 use crate::lsp::non_wasm::lsp::as_request_response_pair;
@@ -333,7 +329,6 @@ use crate::lsp::non_wasm::queue::LspQueue;
 use crate::lsp::non_wasm::queue::QueuedEvent;
 use crate::lsp::non_wasm::safe_delete_file::safe_delete_file_code_actions;
 use crate::lsp::non_wasm::stdlib::should_show_stdlib_error;
-use crate::lsp::non_wasm::transaction_manager::TransactionManager;
 use crate::lsp::non_wasm::type_error_display_status::BuildSystemStatus;
 use crate::lsp::non_wasm::type_error_display_status::TypeErrorDisplayStatus;
 pub use crate::lsp::non_wasm::type_error_display_status::TypeErrorDisplayStatusChangedNotification;
@@ -358,6 +353,7 @@ use crate::lsp::non_wasm::workspace::Workspace;
 use crate::lsp::non_wasm::workspace::Workspaces;
 use crate::lsp::wasm::completion::CompletionOptions as CompletionRequestOptions;
 use crate::lsp::wasm::completion::supports_snippet_completions;
+use crate::lsp::wasm::document::apply_change_events;
 use crate::lsp::wasm::hover::HoverOptions;
 use crate::lsp::wasm::hover::HoverResult;
 use crate::lsp::wasm::hover::get_hover_with_verbosity;
@@ -382,7 +378,6 @@ use crate::state::lsp::ReferenceOptions;
 use crate::state::notebook::LspNotebook;
 use crate::state::require::Require;
 use crate::state::semantic_tokens::SemanticTokensLegends;
-use crate::state::semantic_tokens::disabled_ranges_for_module;
 use crate::state::state::CancellableTransaction;
 use crate::state::state::CommittingTransaction;
 use crate::state::state::State;
@@ -390,6 +385,7 @@ use crate::state::state::Transaction;
 use crate::state::subscriber::CompositeSubscriber;
 use crate::state::subscriber::PublishDiagnosticsSubscriber;
 use crate::state::subscriber::Subscriber;
+use crate::state::transaction_manager::TransactionManager;
 use crate::tsp::type_conversion::StdlibClasses;
 use crate::tsp::type_conversion::convert_type_with_resolvers;
 use crate::tsp::type_facts::TypeFact;
@@ -3295,7 +3291,12 @@ impl Server {
             self.open_files
                 .read()
                 .iter()
-                .map(|x| (x.0.clone(), Some(Arc::new(x.1.to_file_contents()))))
+                .map(|x| {
+                    (
+                        ModulePath::memory(x.0.clone()),
+                        Some(Arc::new(x.1.to_file_contents())),
+                    )
+                })
                 .collect::<Vec<_>>(),
         );
         transaction.run(&handles, Require::Everything, custom_thread_pool);
@@ -3315,6 +3316,7 @@ impl Server {
     fn get_diag_if_shown(
         &self,
         e: &Error,
+        severity: Severity,
         open_files: &HashMap<PathBuf, Arc<LspFile>>,
         cell_uri: Option<&Uri>, // If the file is a notebook, only show diagnostics for the matching cell
     ) -> Option<(PathBuf, Diagnostic)> {
@@ -3367,10 +3369,15 @@ impl Server {
                         {
                             None
                         } else {
-                            Some((PathBuf::from(error_cell_uri.to_string()), e.to_diagnostic()))
+                            Some((
+                                PathBuf::from(error_cell_uri.to_string()),
+                                e.to_diagnostic_with_severity(severity)?,
+                            ))
                         }
                     }
-                    LspFile::Source { .. } => Some((path.to_path_buf(), e.to_diagnostic())),
+                    LspFile::Source { .. } => {
+                        Some((path.to_path_buf(), e.to_diagnostic_with_severity(severity)?))
+                    }
                 };
             }
 
@@ -3379,13 +3386,13 @@ impl Server {
             // Only show error-severity diagnostics for non-open files; lower-severity
             // diagnostics (warnings, info) are restricted to open files.
             if open_files.get(&path).is_none()
-                && e.severity() >= Severity::Error
+                && severity >= Severity::Error
                 && self.workspaces.diagnostic_mode(&path) == DiagnosticMode::Workspace
                 && config.project_includes.covers(&path)
                 && !config.project_excludes.covers(&path)
                 && type_error_status.is_enabled()
             {
-                return Some((path.to_path_buf(), e.to_diagnostic()));
+                return Some((path.to_path_buf(), e.to_diagnostic_with_severity(severity)?));
             }
         }
         None
@@ -3516,7 +3523,6 @@ impl Server {
         for x in open_notebook_cells.keys() {
             notebook_cell_urls.insert(PathBuf::from(x.to_string()), x.clone());
         }
-        let mut open_diag_paths: HashSet<PathBuf> = HashSet::new();
         for handle in handles {
             let handle_path_buf = handle.path().as_path().to_path_buf();
             if let Some(lsp_file) = open_files.get(&handle_path_buf) {
@@ -3527,7 +3533,6 @@ impl Server {
                         }
                     }
                     LspFile::Source { .. } => {
-                        open_diag_paths.insert(handle_path_buf.clone());
                         diags.insert(handle_path_buf, Vec::new());
                     }
                 }
@@ -3540,37 +3545,33 @@ impl Server {
                 diags.insert(handle_path_buf, Vec::new());
             }
         }
-        let (normal_errors, baseline_errors) = transaction
-            .get_errors(handles)
-            .collect_lsp_errors_with_baselines();
+        let errors = transaction.get_errors(handles);
+        let mut unused = Vec::new();
+        let (normal_errors, baseline_errors) =
+            errors.collect_lsp_error_refs_with_baselines(&mut unused);
         for e in normal_errors {
-            if let Some((path, diag)) = self.get_diag_if_shown(&e, &open_files, None) {
+            if let Some((path, diag)) =
+                self.get_diag_if_shown(e.error(), e.severity(), &open_files, None)
+            {
                 diags.entry(path.to_owned()).or_default().push(diag);
             }
         }
         for e in baseline_errors {
             // Errors in open files that match a baseline file are downgraded to HINT.
-            if let Some((path, mut diag)) = self.get_diag_if_shown(&e, &open_files, None) {
-                if to_real_path(e.path()).is_some_and(|p| open_files.contains_key(&p)) {
+            if let Some((path, mut diag)) =
+                self.get_diag_if_shown(e.error(), e.severity(), &open_files, None)
+            {
+                if to_real_path(e.error().path()).is_some_and(|p| open_files.contains_key(&p)) {
                     diag.severity = Some(DiagnosticSeverity::Hint);
                 }
                 diags.entry(path.to_owned()).or_default().push(diag);
             }
         }
         drop(open_files);
-        for (path, diagnostics) in diags.iter_mut() {
+        for diagnostics in diags.values_mut() {
             for diagnostic in diagnostics.iter_mut() {
                 diagnostic.data = serde_json::to_value(source).ok()
             }
-            if notebook_cell_urls.contains_key(path) {
-                continue;
-            }
-            // Skip unreachable-code hints for non-open workspace files to reduce noise.
-            if !open_diag_paths.contains(path) {
-                continue;
-            }
-            let handle = make_open_handle(&self.state, path);
-            Self::append_unreachable_hints(transaction, &handle, diagnostics);
         }
         self.publish_diagnostics(
             diags,
@@ -4119,7 +4120,8 @@ impl Server {
                 collected.ordinary.extend(unused_ignores.hints);
                 collected.ordinary.append(&mut collected.hints);
                 let applied = errors.apply_baseline(
-                    &mut collected,
+                    &mut collected.ordinary,
+                    &mut collected.baseline,
                     Some(&baseline_path),
                     relative_to,
                     config.baseline_matching_mode,
@@ -4805,7 +4807,9 @@ impl Server {
                 let mut transaction = server
                     .state
                     .new_committable_transaction(Require::Exports, None);
-                transaction.as_mut().set_memory(vec![(path.clone(), None)]);
+                transaction
+                    .as_mut()
+                    .set_memory(vec![(ModulePath::memory(path.clone()), None)]);
                 let _ = server.validate_in_memory_for_transaction(
                     transaction.as_mut(),
                     telemetry_event,
@@ -6466,58 +6470,6 @@ impl Server {
         Ok(merged)
     }
 
-    /// Grey out code that is disabled by the current configuration but carries no
-    /// `unreachable` diagnostic of its own.
-    ///
-    /// Editors dim a region when a diagnostic covering it is tagged `UNNECESSARY`, so a
-    /// suite we deliberately do not report — one guarded by `sys.version_info`,
-    /// `sys.platform`, `os.name`, or `TYPE_CHECKING` — would otherwise lose its dimming.
-    /// Suites the real diagnostic does cover are skipped, since it carries the tag itself.
-    fn append_unreachable_hints(
-        transaction: &Transaction<'_>,
-        handle: &Handle,
-        items: &mut Vec<Diagnostic>,
-    ) {
-        let (Some(ast), Some(module_info)) = (
-            transaction.get_ast(handle),
-            transaction.get_module_info(handle),
-        ) else {
-            return;
-        };
-        let unreachable_code = Code::String(ErrorKind::Unreachable.to_name().to_owned());
-        let already_reported = items
-            .iter()
-            .filter(|d| d.code.as_ref() == Some(&unreachable_code))
-            .map(|d| d.range)
-            .collect::<Vec<_>>();
-        let mut seen = HashSet::new();
-        for range in disabled_ranges_for_module(ast.as_ref(), *handle.sys_info()) {
-            if range.is_empty() || !seen.insert(range) {
-                continue;
-            }
-            let lsp_range = module_info.to_lsp_range(range);
-            if already_reported
-                .iter()
-                .any(|r| r.start <= lsp_range.start && lsp_range.end <= r.end)
-            {
-                continue;
-            }
-            items.push(Diagnostic {
-                range: lsp_range,
-                severity: Some(DiagnosticSeverity::Hint),
-                source: Some("Pyrefly".to_owned()),
-                message: "This code is unreachable for the current configuration"
-                    .to_owned()
-                    .into(),
-                code: Some(Code::String("unreachable-code".to_owned())),
-                code_description: None,
-                related_information: None,
-                tags: Some(vec![DiagnosticTag::Unnecessary]),
-                data: None,
-            });
-        }
-    }
-
     fn docstring_ranges(
         &self,
         transaction: &Transaction<'_>,
@@ -6686,24 +6638,28 @@ impl Server {
         let handle = make_open_handle(&self.state, &path);
         let mut items = Vec::new();
         let open_files = &self.open_files.read();
-        let (normal_errors, baseline_errors) = transaction
-            .get_errors(once(&handle))
-            .collect_lsp_errors_with_baselines();
+        let errors = transaction.get_errors(once(&handle));
+        let mut unused = Vec::new();
+        let (normal_errors, baseline_errors) =
+            errors.collect_lsp_error_refs_with_baselines(&mut unused);
         for e in normal_errors {
-            if let Some((_, diag)) = self.get_diag_if_shown(&e, open_files, cell_uri) {
+            if let Some((_, diag)) =
+                self.get_diag_if_shown(e.error(), e.severity(), open_files, cell_uri)
+            {
                 items.push(diag);
             }
         }
         for e in baseline_errors {
             // Errors in open files that match a baseline file are downgraded to HINT.
-            if let Some((_, mut diag)) = self.get_diag_if_shown(&e, open_files, cell_uri) {
-                if to_real_path(e.path()).is_some_and(|p| open_files.contains_key(&p)) {
+            if let Some((_, mut diag)) =
+                self.get_diag_if_shown(e.error(), e.severity(), open_files, cell_uri)
+            {
+                if to_real_path(e.error().path()).is_some_and(|p| open_files.contains_key(&p)) {
                     diag.severity = Some(DiagnosticSeverity::Hint);
                 }
                 items.push(diag);
             }
         }
-        Self::append_unreachable_hints(transaction, &handle, &mut items);
         DocumentDiagnosticReport::RelatedFullDocumentDiagnosticReport(
             RelatedFullDocumentDiagnosticReport {
                 full_document_diagnostic_report: FullDocumentDiagnosticReport {

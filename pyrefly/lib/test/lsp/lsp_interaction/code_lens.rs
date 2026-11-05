@@ -9,6 +9,7 @@ use std::fs;
 
 use lsp_types::CodeLens;
 use lsp_types::CodeLensRequest;
+use lsp_types::Position;
 use lsp_types::Uri;
 use pyrefly_lsp_test::IndexingMode;
 use pyrefly_lsp_test::LspArgs;
@@ -17,6 +18,7 @@ use pyrefly_lsp_test::object_model::CellKind;
 use pyrefly_lsp_test::object_model::InitializeSettings;
 use pyrefly_lsp_test::object_model::LspInteraction;
 use pyrefly_lsp_test::object_model::LspInteractionArgs;
+use pyrefly_lsp_test::object_model::TestTelemetry;
 use serde_json::Value;
 use serde_json::json;
 use tempfile::TempDir;
@@ -24,6 +26,7 @@ use tempfile::TempDir;
 use crate::lsp::non_wasm::code_lens::OverrideCodeLensRequest;
 use crate::lsp::non_wasm::code_lens::OverrideCodeLensTargets;
 use crate::test::lsp::lsp_interaction::util::get_test_files_root;
+use crate::test::lsp::lsp_interaction::util::wait_for_disk_invalidation;
 
 fn runnable_code_lens_config() -> serde_json::Value {
     json!([{
@@ -530,6 +533,62 @@ fn test_override_code_lens_refresh_after_indexed_file_change() {
         .send_request::<OverrideCodeLensRequest>(params)
         .expect_response_with(|targets: Vec<OverrideCodeLensTargets>| {
             targets.len() == 1 && targets[0].implementations.is_empty()
+        })
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
+// https://github.com/meta/pyrefly/issues/5485
+#[test]
+fn test_override_code_lens_parent_after_defining_file_shifts() {
+    let root = TempDir::with_prefix("pyrefly_override_code_lens_parent_shift").unwrap();
+    let base = "class Base:\n    def f(self): pass\n";
+    fs::write(root.path().join("base.py"), base).unwrap();
+    fs::write(
+        root.path().join("child.py"),
+        "from base import Base\nclass Child(Base):\n    def f(self): pass\n",
+    )
+    .unwrap();
+    let uri = Uri::from_file_path(root.path().join("child.py")).unwrap();
+
+    let telemetry = TestTelemetry::new();
+    let telemetry_events = telemetry.subscribe();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        telemetry: Box::new(telemetry),
+        ..Default::default()
+    });
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("base.py");
+    interaction.client.did_open("child.py");
+    let params = json!({
+        "textDocument": {"uri": uri.to_string(), "version": 1},
+        "ranges": [{"start": {"line": 2, "character": 8}, "end": {"line": 2, "character": 9}}]
+    });
+    interaction
+        .client
+        .send_request::<OverrideCodeLensRequest>(params.clone())
+        .expect_response_with(|targets: Vec<OverrideCodeLensTargets>| {
+            targets.len() == 1
+                && targets[0].parents.len() == 1
+                && targets[0].parents[0].location.range.start == Position::new(1, 8)
+        })
+        .unwrap();
+
+    // `child.py` imports the disk copy of `base.py`, so save the edit as an editor does.
+    let shifted_base = base.replacen("\n", "\n\n", 1);
+    fs::write(root.path().join("base.py"), &shifted_base).unwrap();
+    interaction.client.did_change("base.py", &shifted_base);
+    interaction.client.did_save("base.py");
+    wait_for_disk_invalidation(&telemetry_events);
+    // BUG: the parent declaration is now at 2:8.
+    interaction
+        .client
+        .send_request::<OverrideCodeLensRequest>(params)
+        .expect_response_with(|targets: Vec<OverrideCodeLensTargets>| {
+            targets.len() == 1
+                && targets[0].parents.len() == 1
+                && targets[0].parents[0].location.range.start == Position::new(1, 9)
         })
         .unwrap();
     interaction.shutdown().unwrap();

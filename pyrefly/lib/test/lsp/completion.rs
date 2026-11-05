@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::slice;
+
 use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::CompletionItemTag;
@@ -55,6 +57,55 @@ fn is_object_attribute(item: &CompletionItem) -> bool {
     item.sort_text
         .as_deref()
         .is_some_and(|sort_text| sort_text.starts_with("3a"))
+}
+
+#[test]
+fn completion_setattr_literal_name_boundaries() {
+    let source = r#"
+class C:
+    def __init__(self) -> None:
+        setattr(self, "x", 1)
+        setattr(self, "foo-bar", 1)
+        setattr(self, "class", 1)
+        setattr(self, "con" "cat", 1)
+        setattr(self, "esca\x70ed", 1)
+        setattr(self, "K", 1)
+        setattr(self, "match", 1)
+
+C().
+"#;
+    let (state, handle) = TestEnv::one("main", source).to_state();
+    let handle = handle("main");
+    let mut transaction = state.transaction();
+    transaction.run(slice::from_ref(&handle), Require::Everything, None);
+    let position = TextSize::try_from(source.rfind("C().").unwrap() + "C().".len()).unwrap();
+    let mut names = transaction
+        .completion(&handle, position, ImportFormat::Absolute, true, None)
+        .into_iter()
+        .map(|item| item.label)
+        .filter(|name| {
+            [
+                "x", "foo-bar", "class", "concat", "escaped", "K", "K", "match",
+            ]
+            .contains(&name.as_str())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["match", "x"]);
+}
+
+#[test]
+fn completion_setattr_line_continuation_name() {
+    let source = "class C:\n    def __init__(self) -> None:\n        setattr(self, \"\\\ncontinued\", 1)\n\nC().\n";
+    let (handles, state) = mk_multi_file_state(&[("main", source)], Require::Everything, false);
+    let handle = handles.get("main").unwrap();
+    let position = TextSize::try_from(source.rfind("C().").unwrap() + "C().".len()).unwrap();
+    let has_field = state
+        .transaction()
+        .completion(handle, position, ImportFormat::Absolute, true, None)
+        .iter()
+        .any(|item| item.label == "continued");
+    assert!(!has_field);
 }
 
 #[test]
@@ -380,6 +431,145 @@ Completion Results:
         .trim(),
         report.trim(),
     );
+}
+
+#[test]
+fn dot_complete_from_getattr_literal_parameter() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    def __getattr__(self, item: Literal["A", "B"]) -> object: ...
+
+A().
+#   ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let position = extract_cursors_for_test(code)[0];
+    assert_eq!(
+        dict_field_labels(&state.transaction(), &handles["main"], position),
+        ["A", "B"],
+    );
+}
+
+#[test]
+fn dot_complete_from_getattr_literal_parameter_filters_invalid_identifiers() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    def __getattr__(
+        self, item: Literal["good", "bad-name", "class", ""]
+    ) -> object: ...
+
+A().
+#   ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let position = extract_cursors_for_test(code)[0];
+    assert_eq!(
+        dict_field_labels(&state.transaction(), &handles["main"], position),
+        ["good"],
+    );
+}
+
+#[test]
+fn dot_complete_from_getattr_literal_parameter_union_receivers() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    def __getattr__(self, name: Literal["a", "shared"]) -> int: ...
+
+class B:
+    def __getattr__(self, name: Literal["b", "shared"]) -> str: ...
+
+class C: pass
+
+class Static:
+    @staticmethod
+    def __getattr__(name: Literal["static"]) -> bool: ...
+
+def f(both: A | B, missing: A | C, mixed_binding: A | Static):
+    both.
+#        ^
+    missing.
+#           ^
+    mixed_binding.
+#                 ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let txn = state.transaction();
+    let fields: Vec<Vec<String>> = extract_cursors_for_test(code)
+        .into_iter()
+        .map(|position| {
+            txn.completion(
+                &handles["main"],
+                position,
+                ImportFormat::Absolute,
+                true,
+                None,
+            )
+            .into_iter()
+            .filter(|item| {
+                // The method itself is a union and is classified as a field.
+                item.kind == Some(CompletionItemKind::Field)
+                    && !is_object_attribute(item)
+                    && item.label != "__getattr__"
+            })
+            .map(|item| format!("{}: {}", item.label, item.detail.unwrap()))
+            .collect()
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            vec!["a: int", "b: str", "shared: int | str"],
+            vec!["a: int", "shared: int"],
+            vec!["a: int", "shared: int", "static: bool"],
+        ],
+    );
+}
+
+#[test]
+fn dot_complete_from_getattr_literal_parameter_preserves_defined_fields() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    real: str = ""
+    def __getattr__(self, name: Literal["real", "virtual"]) -> int: ...
+
+class B(A): pass
+
+B().
+#   ^
+B.
+# ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let txn = state.transaction();
+    let positions = extract_cursors_for_test(code);
+    assert_eq!(
+        dict_field_labels(&txn, &handles["main"], positions[0]),
+        ["real", "virtual"],
+    );
+    assert_eq!(
+        dict_field_labels(&txn, &handles["main"], positions[1]),
+        ["real"],
+    );
+    let real = txn
+        .completion(
+            &handles["main"],
+            positions[0],
+            ImportFormat::Absolute,
+            true,
+            None,
+        )
+        .into_iter()
+        .find(|item| item.label == "real")
+        .unwrap();
+    assert_eq!(real.detail.as_deref(), Some("str"));
 }
 
 #[test]
@@ -2719,6 +2909,40 @@ for article in Article.objects.annotate(extra_title=models.F("title")):
         completions.iter().any(|item| item.label == "extra_title"),
         "annotate() extra attribute missing from {completions:?}"
     );
+}
+
+#[test]
+fn completion_django_queryset_manager_methods() {
+    let code = r#"
+from django.db import models
+
+class Q(models.QuerySet["M"]):
+    def active(self) -> int:
+        return 1
+
+    def _private(self) -> int:
+        return 1
+
+class M(models.Model):
+    objects = Q.as_manager()
+
+M.objects.
+#         ^
+"#;
+    let mut env = django_env();
+    env.add("main", code);
+    let (state, handle) = env.with_default_require_level(Require::Exports).to_state();
+    let completions = state.transaction().completion(
+        &handle("main"),
+        extract_cursors_for_test(code)[0],
+        ImportFormat::Absolute,
+        true,
+        None,
+    );
+    assert!(completions.iter().any(|item| item.label == "active"));
+    assert!(completions.iter().any(|item| item.label == "db_manager"));
+    assert!(!completions.iter().any(|item| item.label == "_private"));
+    assert!(!completions.iter().any(|item| item.label == "delete"));
 }
 
 #[test]

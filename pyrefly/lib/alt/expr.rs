@@ -6,6 +6,7 @@
  */
 
 use std::cell::LazyCell;
+use std::cell::RefCell;
 use std::fmt;
 use std::fmt::Display;
 use std::iter::once;
@@ -87,6 +88,7 @@ use vec1::vec1;
 
 use crate::alt::answers::AttributeReferenceKind;
 use crate::alt::answers::LookupAnswer;
+use crate::alt::answers::TraceSideEffects;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::answers_solver::TypeCheckOptions;
 use crate::alt::call::CallStyle;
@@ -100,6 +102,7 @@ use crate::alt::shape_extension::is_int_tuple_bound;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::solve::UntypeContext;
 use crate::alt::unwrap::HintRef;
+use crate::alt::unwrap::MAX_HINT_WIDTH;
 use crate::binding::binding::Binding;
 use crate::binding::binding::BindingClass;
 use crate::binding::binding::Key;
@@ -145,9 +148,30 @@ pub enum TypeOrExpr<'a> {
     Expr(&'a Expr),
 }
 
-pub(crate) enum PreparedExprCall {
+/// Inference under concrete hints, owned by one constructor argument.
+/// The key preserves hint member order and distinguishes inference without a hint.
+#[derive(Debug, Default)]
+pub struct ArgumentCache {
+    outcomes: RefCell<SmallMap<Option<Vec<Type>>, CachedArgument>>,
+}
+
+#[derive(Debug)]
+struct CachedArgument {
+    ty: TypeInfo,
+    errors: ErrorCollector,
+    hint_errors: ErrorCollector,
+    traces: Option<TraceSideEffects>,
+}
+
+pub(crate) enum PreparedExprCall<'a> {
     Resolved(Type),
-    Callee(Type),
+    Callee(ExprCallee<'a>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ExprCallee<'a> {
+    pub ty: Type,
+    pub expr: &'a ExprCall,
 }
 
 /// Where a dimension expression appears, which controls whether a plain
@@ -224,22 +248,6 @@ impl<'a> TypeOrExpr<'a> {
             TypeOrExpr::Type(ty, _) => ty.clone(),
             TypeOrExpr::Expr(x) => solver.expr_infer(x, errors),
         }
-    }
-
-    pub fn transform<Ans: LookupAnswer>(
-        &self,
-        solver: &AnswersSolver<Ans>,
-        errors: &ErrorCollector,
-        owner: &'a Owner<Type>,
-        transformation: impl Fn(&Type) -> Type,
-    ) -> (Self, bool) {
-        let ty = self.infer(solver, errors);
-        let transformed = transformation(&ty);
-        let changed = ty != transformed;
-        (
-            TypeOrExpr::Type(owner.push(transformed), self.range()),
-            changed,
-        )
     }
 }
 
@@ -834,6 +842,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Infer a type for an expression, with options to influence the inference and control whether
     /// and how the type is checked against an expected type.
     pub fn expr_with_options(&self, x: &Expr, options: ExprOptions<'_, '_, '_>) -> TypeInfo {
+        self.expr_with_argument_cache(x, options, None)
+    }
+
+    /// Checks the argument in its current context and reuses only compatible cached inference.
+    pub(crate) fn expr_with_argument_cache(
+        &self,
+        x: &Expr,
+        options: ExprOptions<'_, '_, '_>,
+        cache: Option<&ArgumentCache>,
+    ) -> TypeInfo {
         match options.expectation {
             ExprExpectation::Check {
                 want,
@@ -841,11 +859,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 context,
                 call_context,
             } if !want.is_any() => {
-                let got = self.expr_infer_impl(
+                let got = self.expr_infer_argument(
                     x,
                     Some(HintRef::new(want, Some(errors))),
                     options.errors,
                     options.type_form_context,
+                    cache,
                 );
                 let check_options = match call_context {
                     Some(call_context) => {
@@ -863,12 +882,73 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             ExprExpectation::Check { .. } => {
-                self.expr_infer_impl(x, None, options.errors, options.type_form_context)
+                self.expr_infer_argument(x, None, options.errors, options.type_form_context, cache)
             }
             ExprExpectation::Infer(hint) => {
-                self.expr_infer_impl(x, hint, options.errors, options.type_form_context)
+                self.expr_infer_argument(x, hint, options.errors, options.type_form_context, cache)
             }
         }
+    }
+
+    /// Shares successful inference under the same closed hint, excluding first-use state.
+    fn expr_infer_argument(
+        &self,
+        x: &Expr,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+        type_form_context: Option<TypeFormContext<'_>>,
+        cache: Option<&ArgumentCache>,
+    ) -> TypeInfo {
+        let Some(cache) = cache.filter(|_| {
+            type_form_context.is_none()
+                && hint.is_none_or(|hint| {
+                    hint.errors().is_some()
+                        && !hint.types().iter().any(Type::may_contain_placeholder_var)
+                })
+                && self.active_first_use_types().is_empty()
+        }) else {
+            return self.expr_infer_impl(x, hint, errors, type_form_context);
+        };
+        let key = hint.map(|hint| hint.types().to_vec());
+        if let Some(cached) = cache.outcomes.borrow().get(&key)
+            && (cached.traces.is_some() || !self.current().tracing_enabled())
+        {
+            errors.extend_from(&cached.errors);
+            if let Some(errors) = hint.as_ref().and_then(HintRef::errors) {
+                errors.extend_from(&cached.hint_errors);
+            }
+            if let Some(traces) = &cached.traces {
+                self.trace_state().replay_traces(traces);
+            }
+            return cached.ty.clone();
+        }
+        let local_errors = self.error_collector();
+        let local_hint_errors = self.error_collector();
+        let local_hint = hint.map(|hint| hint.with_errors(Some(&local_hint_errors)));
+        let (ty, traces) = self.trace_state().capture_traces(|| {
+            self.expr_infer_impl(x, local_hint, &local_errors, type_form_context)
+        });
+        errors.extend_from(&local_errors);
+        if let Some(errors) = hint.as_ref().and_then(HintRef::errors) {
+            errors.extend_from(&local_hint_errors);
+        }
+        if !ty.has_facets()
+            && !ty.ty().may_contain_placeholder_var()
+            && !local_errors.has_hard()
+            && !local_hint_errors.has_hard()
+            && cache.outcomes.borrow().len() < MAX_HINT_WIDTH
+        {
+            cache.outcomes.borrow_mut().insert(
+                key,
+                CachedArgument {
+                    ty: ty.clone(),
+                    errors: local_errors,
+                    hint_errors: local_hint_errors,
+                    traces,
+                },
+            );
+        }
+        ty
     }
 
     /// The core logic for inferring a type for an expression.
@@ -903,8 +983,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         type_form_context: Option<TypeFormContext<'_>>,
     ) -> TypeInfo {
-        // The value of an assignment expression is checked separately.
-        let mut check_deprecation = !matches!(x, Expr::Named(..));
+        // Assignment values and branches of conditional and boolean expressions are checked separately.
+        let mut check_deprecation = !matches!(x, Expr::Named(..) | Expr::If(..) | Expr::BoolOp(..));
         let res = match x {
             Expr::Name(x) => {
                 if Ast::is_synthesized_empty_name(x) {
@@ -940,13 +1020,32 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         // already been checked.
                         check_deprecation = false;
                     }
-                    self.subscript_infer(
-                        &base,
-                        &x.slice,
-                        x.range(),
-                        type_form_context.unwrap_or(TypeFormContext::TypeExpression),
-                        errors,
-                    )
+                    // A qualifier like `NotRequired[int]` is a legal runtime value, which
+                    // typeshed types as `object`.
+                    if type_form_context.is_none()
+                        && let Type::Type(inner) = base.ty()
+                        && matches!(
+                            **inner,
+                            Type::SpecialForm(
+                                SpecialForm::ClassVar
+                                    | SpecialForm::Final
+                                    | SpecialForm::ReadOnly
+                                    | SpecialForm::Required
+                                    | SpecialForm::NotRequired
+                            )
+                        )
+                    {
+                        self.expr_infer(&x.slice, errors);
+                        TypeInfo::of_ty(self.heap.mk_class_type(self.stdlib.object().clone()))
+                    } else {
+                        self.subscript_infer(
+                            &base,
+                            &x.slice,
+                            x.range(),
+                            type_form_context.unwrap_or(TypeFormContext::TypeExpression),
+                            errors,
+                        )
+                    }
                 }
             }
             Expr::Named(x) => match &*x.target {
@@ -1375,7 +1474,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                 }
                 let prepared = self.prepare_expr_call(x, errors);
-                self.finish_prepared_expr_call(x, prepared, hint, errors)
+                self.finish_prepared_expr_call(prepared, hint, errors)
             }
             Expr::FString(x) => {
                 let mut all_literal_strings = true;
@@ -1467,11 +1566,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    pub(crate) fn prepare_expr_call(
+    pub(crate) fn prepare_expr_call<'a>(
         &self,
-        x: &ExprCall,
+        x: &'a ExprCall,
         errors: &ErrorCollector,
-    ) -> PreparedExprCall {
+    ) -> PreparedExprCall<'a> {
         if let Some(ty) = self.synthesized_functional_class_type(x) {
             return PreparedExprCall::Resolved(ty);
         }
@@ -1490,17 +1589,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             self.expr_infer(&x.func, errors)
         };
-        PreparedExprCall::Callee(callee_ty)
+        PreparedExprCall::Callee(ExprCallee {
+            ty: callee_ty,
+            expr: x,
+        })
     }
 
     pub(crate) fn finish_prepared_expr_call(
         &self,
-        x: &ExprCall,
         prepared: PreparedExprCall,
         hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> Type {
-        let mut callee_ty = match prepared {
+        let mut callee = match prepared {
             PreparedExprCall::Resolved(ty) => return ty,
             PreparedExprCall::Callee(callee_ty) => callee_ty,
         };
@@ -1508,48 +1609,50 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Instantiating a subscripted generic whose type argument is an out-of-scope legacy
         // TypeVar (e.g. `list[T]()` at module scope) is an error: `T` is not bound by any
         // enclosing generic scope. Only subscript callees can introduce such a raw TypeVar.
-        if matches!(&*x.func, Expr::Subscript(_)) {
-            self.quantify_call_base_legacy_typevars(&mut callee_ty, x.func.range());
-            self.check_legacy_typevar_scoping(&mut callee_ty, x.func.range(), errors);
+        if matches!(&*callee.expr.func, Expr::Subscript(_)) {
+            self.quantify_call_base_legacy_typevars(&mut callee.ty, callee.expr.func.range());
+            self.check_legacy_typevar_scoping(&mut callee.ty, callee.expr.func.range(), errors);
         }
 
-        self.check_pytorch_tensor_item_call(x, &callee_ty, errors);
-        self.check_pytorch_tensor_cuda_call(x, &callee_ty, errors);
-        self.check_pytorch_print_tensor(x, &callee_ty, errors);
-        self.check_pytorch_redundant_to_call(x, &callee_ty, errors);
-        self.check_sqlalchemy_keyword_call(x, errors);
-        if let Some(d) = self.call_to_dict(&callee_ty, &x.arguments) {
-            self.dict_infer(&d, hint, x.range(), errors)
+        self.check_pytorch_tensor_item_call(callee.expr, &callee.ty, errors);
+        self.check_pytorch_tensor_cuda_call(callee.expr, &callee.ty, errors);
+        self.check_pytorch_print_tensor(callee.expr, &callee.ty, errors);
+        self.check_pytorch_redundant_to_call(callee.expr, &callee.ty, errors);
+        self.check_sqlalchemy_keyword_call(callee.expr, errors);
+        if let Some(d) = self.call_to_dict(&callee.ty, &callee.expr.arguments) {
+            self.dict_infer(&d, hint, callee.expr.range(), errors)
         } else if let Some(ty) = self
             .anonymous_typed_dict_get_or_setdefault_with_literal(
-                &x.func,
-                &x.arguments,
+                &callee.expr.func,
+                &callee.expr.arguments,
                 "get",
                 errors,
             )
             .or_else(|| {
                 self.anonymous_typed_dict_get_or_setdefault_with_literal(
-                    &x.func,
-                    &x.arguments,
+                    &callee.expr.func,
+                    &callee.expr.arguments,
                     "setdefault",
                     errors,
                 )
             })
         {
             ty
-        } else if let Some(ty) =
-            self.anonymous_typed_dict_pop_with_literal(&x.func, &x.arguments, errors)
-        {
+        } else if let Some(ty) = self.anonymous_typed_dict_pop_with_literal(
+            &callee.expr.func,
+            &callee.expr.arguments,
+            errors,
+        ) {
             ty
         } else if let Some((obj_ty, key_expr, key)) =
-            self.is_dict_get_with_literal(&x.func, &x.arguments, errors)
+            self.is_dict_get_with_literal(&callee.expr.func, &callee.expr.arguments, errors)
         {
             let facet = FacetKind::Key(key.to_string());
             if obj_ty.has_value_less_presence(&facet) {
                 self.subscript_infer_for_type_with_key_present(
                     obj_ty.ty(),
                     key_expr,
-                    x.range(),
+                    callee.expr.range(),
                     errors,
                     true,
                     TypeFormContext::TypeExpression,
@@ -1557,19 +1660,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             } else {
                 obj_ty
                     .at_facet(&facet, || {
-                        self.expr_call_infer(x, callee_ty.clone(), hint, errors)
+                        self.expr_call_infer(callee.clone(), hint, errors)
                     })
                     .into_ty()
             }
         } else {
-            let regex_pattern = Self::regex_pattern_argument(&x.arguments);
+            let regex_pattern = Self::regex_pattern_argument(&callee.expr.arguments);
             let regex_flags_position =
-                regex_pattern.and_then(|_| self.regex_flags_position(&callee_ty));
-            let ret = self.expr_call_infer(x, callee_ty, hint, errors);
+                regex_pattern.and_then(|_| self.regex_flags_position(&callee.ty));
             if let (Some(pattern), Some(flags_position)) = (regex_pattern, regex_flags_position) {
-                self.regex_validate_pattern_argument(pattern, &x.arguments, flags_position, errors);
+                self.regex_validate_pattern_argument(
+                    pattern,
+                    &callee.expr.arguments,
+                    flags_position,
+                    errors,
+                );
             }
-            ret
+            self.expr_call_infer(callee, hint, errors)
         }
     }
 
@@ -1637,6 +1744,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Report references to deprecated classes, functions, and methods.
     fn check_for_deprecated_call(&self, ty: &Type, range: TextRange, errors: &ErrorCollector) {
+        if let Type::Union(union) = ty {
+            for member in &union.members {
+                self.check_for_deprecated_call(member, range, errors);
+            }
+            return;
+        }
         if ty.property_metadata().is_some() {
             // This prevents misfiring deprecation warnings on property setters and deleters.
             return;
@@ -2640,6 +2753,31 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
+    /// Intersect each class instance in `ty` whose truthiness is not statically known with
+    /// `Truthy` or `Falsy`. `x and y` returns `x` only when it is falsy, and `x or y` only when it
+    /// is truthy, so this lets a narrow of the result to the other truthiness remove `x`.
+    ///
+    /// `int`, `str` and `bytes` are not marked: their falsy values are the literals `0`, `""` and
+    /// `b""`, which a falsy narrow already produces, and an unmarked class lets a literal default
+    /// such as the `""` in `x or ""` collapse into it.
+    fn mark_truthiness(&self, ty: &Type, truthy: bool, range: TextRange) -> Type {
+        let swallow = self.error_swallower();
+        let marker = if truthy { Type::Truthy } else { Type::Falsy };
+        self.distribute_over_union(ty, |t| match t {
+            Type::ClassType(cls)
+                if ["int", "str", "bytes"]
+                    .iter()
+                    .any(|name| cls.is_builtin(name)) =>
+            {
+                t.clone()
+            }
+            Type::ClassType(_) if self.as_bool(t, range, &swallow).is_none() => self
+                .heap
+                .mk_intersect(vec![t.clone(), marker.clone()], t.clone()),
+            _ => t.clone(),
+        })
+    }
+
     // Helper method for inferring the type of a boolean operation over a sequence of values.
     fn boolop(
         &self,
@@ -2693,7 +2831,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         Some(acc) => self.union(acc, t.clone()),
                     });
                     let t = if i != last_index {
-                        self.atomic_narrow(&t, &result_narrow, value.range(), errors)
+                        let t = self.atomic_narrow(&t, &result_narrow, value.range(), errors);
+                        self.mark_truthiness(&t, target, value.range())
                     } else {
                         t
                     };

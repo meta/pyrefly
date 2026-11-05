@@ -73,9 +73,12 @@ use crate::binding::binding::KeyClassSynthesizedFields;
 use crate::binding::binding::KeyExpect;
 use crate::binding::binding::KeyTParams;
 use crate::binding::binding::KeyVariance;
+use crate::binding::binding::MethodSelfKind;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
+use crate::binding::bindings::InitializedInClass;
 use crate::binding::bindings::LegacyTParamCollector;
+use crate::binding::django::collect_django_queryset_only;
 use crate::binding::expr::Usage;
 use crate::binding::pydantic::PydanticConfigDict;
 use crate::binding::scope::ClassIndices;
@@ -452,6 +455,7 @@ impl<'a> BindingsBuilder<'a> {
             class_indices.clone(),
             x.name.clone(),
             has_protocol_base,
+            docstring_range,
         ));
         let previous_tracking = self.begin_classmethod_receivers(&body);
         // Record the class body range for solve-time `typing.Self` resolution.
@@ -463,14 +467,25 @@ impl<'a> BindingsBuilder<'a> {
             self.class_scopes
                 .push((body_range, class_indices.class_idx));
         }
+        let django_queryset_only = collect_django_queryset_only(&body);
         self.init_static_scope(&body, false);
         self.stmts(
             body,
             &NestingContext::class(ShortIdentifier::new(&x.name), parent.dupe()),
         );
         self.finish_classmethod_receivers();
-        let (field_definitions, nn_module_registrations, uninitialized_fields) =
+        let (field_definitions, nn_module_registrations, redefinitions) =
             self.scopes.finish_class_and_get_field_definitions();
+        for (name, new, existing) in redefinitions {
+            self.insert_binding(
+                KeyExpect::Redefinition(self.idx_to_key(new).range()),
+                BindingExpect::Redefinition {
+                    new,
+                    existing,
+                    name,
+                },
+            );
+        }
         self.track_classmethod_uses = previous_tracking;
         self.insert_binding_idx(
             class_indices.synthesized_fields_idx,
@@ -484,7 +499,8 @@ impl<'a> BindingsBuilder<'a> {
         let django_field_info = self.extract_django_fields_from_class_body(&field_definitions);
         let mut fields = SmallMap::with_capacity(field_definitions.len());
         let mut django_relation_fields = Vec::new();
-        for (name, (definition, range)) in field_definitions.into_iter_hashed() {
+
+        for (name, (definition, range, initialized)) in field_definitions.into_iter_hashed() {
             if let ClassFieldDefinition::AssignedInBody { value, .. } = &definition
                 && let ExprOrBinding::Expr(e) = value.as_ref()
             {
@@ -508,17 +524,39 @@ impl<'a> BindingsBuilder<'a> {
             let attrs_field_specifier =
                 self.attrs_field_specifier(&definition, name.key(), range, &attrs_decorators);
 
+            let defined_in_helper = matches!(
+                &definition,
+                ClassFieldDefinition::DefinedInMethod { method, .. }
+                    if !method.recognized_attribute_defining_method
+            );
             // Stub files declare attributes without runtime initialization.
             if !self.module_info.path().is_interface()
-                && let Some(termination_keys) = uninitialized_fields.get(name.key())
+                && !defined_in_helper
+                && let InitializedInClass::IfAny(initializations) = initialized
             {
+                let declared_annotation = match &definition {
+                    ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => {
+                        Some(*annotation)
+                    }
+                    _ => None,
+                };
+                let is_instance = declared_annotation.is_some()
+                    || matches!(
+                        &definition,
+                        ClassFieldDefinition::DefinedInMethod {
+                            receiver_kind: MethodSelfKind::Instance,
+                            ..
+                        }
+                    );
                 self.insert_binding(
                     KeyExpect::UninitializedAttributeCheck(range),
                     BindingExpect::UninitializedAttributeCheck {
                         name: name.key().clone(),
                         range,
                         class: class_indices.class_idx,
-                        termination_keys: termination_keys.clone(),
+                        is_instance,
+                        declared_annotation,
+                        initializations,
                     },
                 );
             }
@@ -532,7 +570,8 @@ impl<'a> BindingsBuilder<'a> {
                     attrs_field_specifier,
                     range,
                     docstring_range,
-                ),
+                )
+                .with_django_queryset_only(django_queryset_only.get(name.key()).copied()),
             );
             let key_field = KeyClassField(class_indices.def_index, name.clone().into_key());
             let binding = BindingClassField {
@@ -1056,6 +1095,7 @@ impl<'a> BindingsBuilder<'a> {
                     BindingAnnotation::AnnotateExpr(
                         AnnotationTarget::ClassMember(member_name.clone()),
                         annotation_expr,
+                        None,
                         None,
                     ),
                 )

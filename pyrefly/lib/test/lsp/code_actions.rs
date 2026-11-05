@@ -2716,7 +2716,16 @@ x = x
 }
 
 fn unused_import_action_after(code: &str, cursor_offset: usize) -> Option<String> {
-    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    unused_import_action_after_with_env(TestEnv::new(), code, cursor_offset)
+}
+
+fn unused_import_action_after_with_env(
+    env: TestEnv,
+    code: &str,
+    cursor_offset: usize,
+) -> Option<String> {
+    let (handles, state) =
+        mk_multi_file_state_with_env(env, &[("main", code)], Require::Exports, false);
     let handle = handles.get("main")?;
     let transaction = state.transaction();
     let module_info = transaction.get_module_info(handle)?;
@@ -2743,6 +2752,27 @@ fn unused_import_action_after(code: &str, cursor_offset: usize) -> Option<String
     }
     let (_before, after) = apply_patch(&module_info, range, patch);
     Some(after)
+}
+
+/// An import used only by a docstring type is not unused when docstring types are inferred, so
+/// the quick fix must not offer to remove it.
+#[test]
+fn remove_unused_import_quickfix_keeps_import_used_by_docstring_type() {
+    let code = "from collections import OrderedDict\n\n\ndef f(x):\n    \"\"\"\n    :type x: OrderedDict\n    \"\"\"\n    return x\n";
+    let cursor_offset = code.find("OrderedDict").unwrap();
+    let env = TestEnv::new().enable_infer_param_types_from_docstring();
+    assert_eq!(
+        None,
+        unused_import_action_after_with_env(env, code, cursor_offset)
+    );
+    // Without the option, the docstring is only text, so the import is unused.
+    assert_eq!(
+        Some(
+            "\n\ndef f(x):\n    \"\"\"\n    :type x: OrderedDict\n    \"\"\"\n    return x\n"
+                .to_owned()
+        ),
+        unused_import_action_after(code, cursor_offset)
+    );
 }
 
 #[test]
@@ -3038,6 +3068,254 @@ fn redundant_cast_action_after(code: &str, cursor_offset: usize) -> Option<Strin
     }
     let (_before, after) = apply_patch(&module_info, range, patch);
     Some(after)
+}
+
+fn remove_unused_variable_action(code: &str, cursor_offset: usize) -> Option<(String, String)> {
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let handle = handles.get("main")?;
+    let transaction = state.transaction();
+    let module_info = transaction.get_module_info(handle)?;
+    let position = TextSize::try_from(cursor_offset).ok()?;
+    let actions = transaction
+        .local_quickfix_code_actions_sorted(
+            handle,
+            TextRange::new(position, position),
+            ImportFormat::Absolute,
+            None,
+        )
+        .unwrap_or_default();
+    let (title, edits) = actions
+        .into_iter()
+        .find(|(title, _)| title.starts_with("Remove unused variable `"))?;
+    let (module, range, patch) = edits.into_iter().next()?;
+    if module.path() != module_info.path() {
+        return None;
+    }
+    let (_before, after) = apply_patch(&module_info, range, patch);
+    Some((title, after))
+}
+
+#[test]
+fn remove_unused_variable_quickfix() {
+    let code = "def f() -> int:\n    unused = 1\n    return 2\n";
+    let (title, after) = remove_unused_variable_action(code, code.find("unused").unwrap()).unwrap();
+    assert_eq!("Remove unused variable `unused`", title);
+    assert_eq!("def f() -> int:\n    return 2\n", after);
+}
+
+#[test]
+fn remove_unused_variable_inserts_pass_for_empty_body() {
+    let code = "def f() -> None:\n    unused = 1\n";
+    let (_title, after) =
+        remove_unused_variable_action(code, code.find("unused").unwrap()).unwrap();
+    assert_eq!("def f() -> None:\n    pass\n", after);
+}
+
+#[test]
+fn remove_unused_variable_skips_unpacking_assignment() {
+    let code = "def f(pair):\n    unused, used = pair\n    return used\n";
+    assert!(remove_unused_variable_action(code, code.find("unused").unwrap()).is_none());
+}
+
+#[test]
+fn remove_unused_variable_keeps_required_evaluation() {
+    for code in [
+        "def f():\n    unused = print('important')\n",
+        "def f():\n    unused = yield 1\n",
+        "def f():\n    unused = yield from [1]\n",
+        "async def f():\n    unused = await compute()\n",
+        "def f() -> int:\n    unused = (used := 1)\n    return used\n",
+        "def f():\n    unused = 1 / 0\n",
+        "def f():\n    unused = f'{print(1)}'\n",
+        "def f():\n    unused: int = print('important')\n",
+    ] {
+        assert!(
+            remove_unused_variable_action(code, code.find("unused").unwrap()).is_none(),
+            "Unexpected deletion for {code:?}"
+        );
+    }
+}
+
+#[test]
+fn remove_unused_variable_skips_shared_lines() {
+    for code in [
+        "def f() -> int:\n    unused = 1; return 2\n",
+        "def f() -> int:\n    print(1); unused = 1\n    return 2\n",
+        "def f() -> None: unused = 1\n",
+        "def f():\n    unused = 1;\n",
+        "def f():\n    print(1); \\\n        unused = 1\n",
+    ] {
+        assert!(
+            remove_unused_variable_action(code, code.find("unused").unwrap()).is_none(),
+            "Unexpected deletion for {code:?}"
+        );
+    }
+}
+
+#[test]
+fn remove_unused_variable_keeps_referenced_names() {
+    for code in [
+        "def f():\n    def g(): return unused\n    unused = 1\n    return g\n",
+        "def f():\n    for i in range(2):\n        if i:\n            print(unused)\n        unused = 1\n",
+        "def f():\n    g = lambda: unused\n    unused = 1\n    return g\n",
+        "def f():\n    del unused\n    unused = 1\n",
+    ] {
+        let cursor = code.rfind("unused =").unwrap();
+        assert!(
+            remove_unused_variable_action(code, cursor).is_none(),
+            "Unexpected deletion for {code:?}"
+        );
+    }
+}
+
+#[test]
+fn remove_unused_variable_keeps_nonlocal_binding() {
+    for code in [
+        "def f():\n    unused = 1\n    def g():\n        nonlocal unused\n    return g\n",
+        "def f():\n    unused = 1\n    other = 2\n    def g():\n        if True:\n            nonlocal other, unused\n    return g\n",
+    ] {
+        assert!(
+            remove_unused_variable_action(code, code.find("unused").unwrap()).is_none(),
+            "Unexpected deletion for {code:?}"
+        );
+    }
+}
+
+#[test]
+fn remove_unused_variable_allows_unrelated_nonlocal() {
+    let code = "def f():\n    unused = 1\n    other = 2\n    def g():\n        nonlocal other\n    return g\n";
+    let (_, after) = remove_unused_variable_action(code, code.find("unused").unwrap()).unwrap();
+    assert_eq!(
+        "def f():\n    other = 2\n    def g():\n        nonlocal other\n    return g\n",
+        after
+    );
+}
+
+#[test]
+fn remove_unused_variable_skips_intentionally_unused_names() {
+    for name in ["_", "_unused", "__tracebackhide__"] {
+        let code = format!("def f():\n    {name} = 1\n");
+        assert!(remove_unused_variable_action(&code, code.find(name).unwrap()).is_none());
+    }
+}
+
+#[test]
+fn remove_unused_variable_standalone_lines() {
+    for (code, expected) in [
+        ("def f():\n    unused: int = 1\n", "def f():\n    pass\n"),
+        (
+            "def f():\n    unused = (\n        1\n    )\n",
+            "def f():\n    pass\n",
+        ),
+        (
+            "def f():\n    unused = 1 # comment\n",
+            "def f():\n    pass\n",
+        ),
+        ("def f():\n    unused = 1", "def f():\n    pass\n"),
+        ("def f():\r\n    unused = 1\r\n", "def f():\r\n    pass\r\n"),
+    ] {
+        let (_, after) = remove_unused_variable_action(code, code.find("unused").unwrap()).unwrap();
+        assert_eq!(expected, after);
+    }
+}
+
+#[test]
+fn remove_unused_variable_parameter_overwrites() {
+    for parameters in ["unused, /", "unused", "*unused", "*, unused", "**unused"] {
+        let code = format!("def f({parameters}):\n    unused = None\n    yield 'tick'\n");
+        assert!(remove_unused_variable_action(&code, code.find("unused =").unwrap()).is_none());
+    }
+    for code in [
+        "def f(unused):\n    if True:\n        unused = None\n    yield 'tick'\n",
+        "class C:\n    def f(self, unused):\n        unused: object = None\n        yield 'tick'\n",
+        "def outer():\n    def inner(unused):\n        unused = None\n        yield 'tick'\n    return inner\n",
+    ] {
+        assert!(remove_unused_variable_action(code, code.rfind("unused").unwrap()).is_none());
+    }
+}
+
+#[test]
+fn remove_unused_variable_uses_innermost_function_parameters() {
+    let code = "def outer(unused):\n    def inner():\n        unused = 1\n        return 2\n    return inner\n";
+    let (_, after) = remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+    assert_eq!(
+        "def outer(unused):\n    def inner():\n        return 2\n    return inner\n",
+        after,
+    );
+}
+
+#[test]
+fn remove_unused_variable_docstring_position() {
+    for (code, expected) in [
+        (
+            "def f():\n    unused = 1\n    'not a docstring'\n    return 2\n",
+            "def f():\n    pass\n    'not a docstring'\n    return 2\n",
+        ),
+        (
+            "def f():\r\n    unused = 1\r\n    'not a docstring'\r\n    return 2\r\n",
+            "def f():\r\n    pass\r\n    'not a docstring'\r\n    return 2\r\n",
+        ),
+        (
+            "class C:\n    def f(self):\n        unused = 1\n        'not a docstring'\n        return 2\n",
+            "class C:\n    def f(self):\n        pass\n        'not a docstring'\n        return 2\n",
+        ),
+        (
+            "def outer():\n    def inner():\n        unused = 1\n        'not a docstring'\n        return 2\n    return inner\n",
+            "def outer():\n    def inner():\n        pass\n        'not a docstring'\n        return 2\n    return inner\n",
+        ),
+    ] {
+        let (_, after) =
+            remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+        assert_eq!(expected, after);
+    }
+}
+
+#[test]
+fn remove_unused_variable_preserves_existing_docstring_and_nested_suites() {
+    for (code, expected) in [
+        (
+            "def f():\n    'existing docstring'\n    unused = 1\n    return 2\n",
+            "def f():\n    'existing docstring'\n    return 2\n",
+        ),
+        (
+            "def f(flag):\n    if flag:\n        unused = 1\n        'ordinary expression'\n        return 2\n",
+            "def f(flag):\n    if flag:\n        'ordinary expression'\n        return 2\n",
+        ),
+        (
+            "def f(flag):\n    if flag:\n        unused = 1\n",
+            "def f(flag):\n    if flag:\n        pass\n",
+        ),
+        (
+            "def f():\n    try:\n        unused = 1\n    finally:\n        pass\n",
+            "def f():\n    try:\n        pass\n    finally:\n        pass\n",
+        ),
+    ] {
+        let (_, after) =
+            remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+        assert_eq!(expected, after);
+    }
+}
+
+#[test]
+fn remove_unused_variable_unrelated_scopes() {
+    for (code, expected) in [
+        (
+            "def f():\n    unused = 1\n    return 2\ndef g():\n    unused = 2\n    return 3\n",
+            "def f():\n    return 2\ndef g():\n    unused = 2\n    return 3\n",
+        ),
+        (
+            "def outer(unused):\n    def inner():\n        unused = 1\n        return 2\n    print(unused)\n    return inner\n",
+            "def outer(unused):\n    def inner():\n        return 2\n    print(unused)\n    return inner\n",
+        ),
+        (
+            "class C:\n    def f(self):\n        unused = 1\n        return 2\n    def g(self):\n        unused = 2\n        return 3\n",
+            "class C:\n    def f(self):\n        return 2\n    def g(self):\n        unused = 2\n        return 3\n",
+        ),
+    ] {
+        let (_, after) =
+            remove_unused_variable_action(code, code.find("unused =").unwrap()).unwrap();
+        assert_eq!(expected, after);
+    }
 }
 
 #[test]

@@ -44,6 +44,7 @@ use pyrefly_types::types::TParamsSource;
 use pyrefly_util::display::pluralize;
 use pyrefly_util::owner::Owner;
 use pyrefly_util::prelude::SliceExt;
+use pyrefly_util::prelude::VecExt;
 use pyrefly_util::visit::Visit;
 use ruff_python_ast::Expr;
 use ruff_python_ast::Identifier;
@@ -65,6 +66,7 @@ use crate::alt::types::decorated_function::Decorator;
 use crate::alt::types::decorated_function::SpecialDecorator;
 use crate::alt::types::decorated_function::UndecoratedFunction;
 use crate::alt::unwrap::HintRef;
+use crate::binding::binding::AnnotationTarget;
 use crate::binding::binding::Binding;
 use crate::binding::binding::FunctionDefData;
 use crate::binding::binding::FunctionParameter;
@@ -73,6 +75,7 @@ use crate::binding::binding::KeyClass;
 use crate::binding::binding::KeyDecoratedFunction;
 use crate::binding::binding::KeyDecorator;
 use crate::binding::binding::KeyLegacyTypeParam;
+use crate::binding::binding::KeyUndecoratedFunction;
 use crate::binding::classmethod::MethodReceiverKind;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
@@ -153,6 +156,44 @@ struct FunctionParamsResult {
     paramspec: Option<Quantified>,
     /// Maps parameter names to their resolved types for unannotated parameters.
     resolved_param_types: SmallMap<Name, Type>,
+}
+
+/// Annotation positions in the override's written signature. Positional indices
+/// include its receiver; matching normalizes that slot separately on each side.
+enum OverrideCorrespondence {
+    PositionalOnly(usize),
+    PositionalOrKeyword { index: usize, name: Name },
+    KeywordOnly(Name),
+    Return,
+    Varargs,
+    Kwargs,
+}
+
+impl OverrideCorrespondence {
+    fn for_target(def: &FunctionDefData, target: &AnnotationTarget) -> Option<Self> {
+        match target {
+            AnnotationTarget::Return(_) => Some(Self::Return),
+            AnnotationTarget::ArgsParam(_) => Some(Self::Varargs),
+            AnnotationTarget::KwargsParam(_) => Some(Self::Kwargs),
+            AnnotationTarget::Param(name) => {
+                let params = &def.parameters;
+                if let Some(index) = params.posonlyargs.iter().position(|p| &p.name().id == name) {
+                    return Some(Self::PositionalOnly(index));
+                }
+                if let Some(index) = params.args.iter().position(|p| &p.name().id == name) {
+                    return Some(Self::PositionalOrKeyword {
+                        index: params.posonlyargs.len() + index,
+                        name: name.clone(),
+                    });
+                }
+                if params.kwonlyargs.iter().any(|p| &p.name().id == name) {
+                    return Some(Self::KeywordOnly(name.clone()));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
 }
 
 struct ParentParamHints {
@@ -1117,6 +1158,112 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ty
     }
 
+    /// Exempt a repeated whole-annotation `Any` when the effective inherited
+    /// position has explicit-style `Any`. This includes inference, inherited
+    /// hints, and generic substitution, but not an unannotated implicit `Any`.
+    pub(crate) fn override_base_dictates_any(
+        &self,
+        override_func: Idx<KeyUndecoratedFunction>,
+        target: &AnnotationTarget,
+    ) -> bool {
+        let func = self.bindings().get(override_func);
+        let class_key = func
+            .class_key
+            .expect("an override annotation belongs to a method");
+        let class = self.get_idx(class_key);
+        let Some(cls) = &class.0 else {
+            return false;
+        };
+        let Some(correspondence) = OverrideCorrespondence::for_target(&func.def, target) else {
+            return false;
+        };
+        // Read decorators without solving the function itself: its signature
+        // depends on the annotation whose diagnostic is being filtered.
+        let mut child_has_receiver = true;
+        let mut accessor = None;
+        for idx in &func.decorators {
+            match self.get_special_decorator(self.get_idx(*idx)) {
+                Some(SpecialDecorator::StaticMethod(_)) => child_has_receiver = false,
+                Some(SpecialDecorator::Property(_) | SpecialDecorator::CachedProperty(_)) => {
+                    accessor = Some(PropertyRole::Getter);
+                }
+                Some(SpecialDecorator::PropertySetter(_)) => accessor = Some(PropertyRole::Setter),
+                Some(SpecialDecorator::PropertyDeleter(_)) => {
+                    accessor = Some(PropertyRole::DeleterDecorator);
+                }
+                _ => {}
+            }
+        }
+        // __new__ receives cls even though it is represented as a staticmethod.
+        let is_new = func.def.name.id == dunder::NEW;
+        child_has_receiver |= is_new;
+        let Some(base) = self.inherited_callable_for_override(cls, &func.def.name.id, accessor)
+        else {
+            return false;
+        };
+        let base_has_receiver = is_new || matches!(&base, Type::BoundMethod(_));
+        // Only async declarations introduce an implicit coroutine wrapper.
+        let unwrap_base_coroutine = func.def.is_async
+            && base
+                .toplevel_func_metadata()
+                .is_some_and(|meta| meta.flags.is_async);
+        let is_explicit_any = |ty: &Type| matches!(ty, Type::Any(AnyStyle::Explicit));
+        base.toplevel_callable_signatures().any(|(sig, _)| {
+            let items: &[Param] = match &sig.params {
+                Params::List(params) | Params::Partial(params) => params.items(),
+                _ => &[],
+            };
+            // Stored signatures include the receiver consumed by binding (or by
+            // __new__). A variadic receiver shares its slot with caller arguments.
+            let base_receiver = base_has_receiver
+                && matches!(items.first(), Some(Param::Pos(..) | Param::PosOnly(..)));
+            let caller_items = &items[usize::from(base_receiver)..];
+            let positional_dictates = |index: usize| {
+                if child_has_receiver && index == 0 {
+                    return base_receiver && is_explicit_any(items[0].as_type());
+                }
+                let index = index - usize::from(child_has_receiver);
+                caller_items
+                    .iter()
+                    .filter_map(|p| match p {
+                        Param::Pos(_, ty, _) | Param::PosOnly(_, ty, _) => Some(ty),
+                        _ => None,
+                    })
+                    .nth(index)
+                    .is_some_and(is_explicit_any)
+            };
+            let keyword_dictates = |name: &Name| {
+                caller_items.iter().any(|p| match p {
+                    Param::Pos(param_name, ty, _) | Param::KwOnly(param_name, ty, _) => {
+                        param_name == name && is_explicit_any(ty)
+                    }
+                    _ => false,
+                })
+            };
+            match &correspondence {
+                OverrideCorrespondence::Return => {
+                    is_explicit_any(&sig.ret)
+                        || (unwrap_base_coroutine
+                            && self
+                                .unwrap_coroutine(&sig.ret)
+                                .is_some_and(|(_, _, ret)| is_explicit_any(&ret)))
+                }
+                OverrideCorrespondence::PositionalOnly(index) => positional_dictates(*index),
+                OverrideCorrespondence::PositionalOrKeyword { index, name } => {
+                    positional_dictates(*index)
+                        || (!(child_has_receiver && *index == 0) && keyword_dictates(name))
+                }
+                OverrideCorrespondence::KeywordOnly(name) => keyword_dictates(name),
+                OverrideCorrespondence::Varargs => caller_items
+                    .iter()
+                    .any(|p| matches!(p, Param::Varargs(_, ty) if is_explicit_any(ty))),
+                OverrideCorrespondence::Kwargs => caller_items
+                    .iter()
+                    .any(|p| matches!(p, Param::Kwargs(_, ty) if is_explicit_any(ty))),
+            }
+        })
+    }
+
     pub fn get_special_decorator<'a>(
         &'a self,
         decorator: &'a Decorator,
@@ -1387,7 +1534,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let required = self.get_requiredness(default, check, is_stub, errors);
                 (param_ty, required, false)
             }
-            FunctionParameter::Unannotated(_, _, _) => {
+            FunctionParameter::Unannotated(_, _, _, docstring_annotation) => {
                 let required = self.get_requiredness(default, None, is_stub, errors);
                 // If this is the first parameter and there is a self type, resolve to `Self`.
                 // We only try to resolve the first param for now. Other unannotated params
@@ -1397,6 +1544,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ty.clone()
                 } else if let Some(hint) = hint {
                     hint.clone()
+                } else if let Some(ty) =
+                    docstring_annotation.and_then(|idx| self.get_idx(idx).annotation.ty.clone())
+                {
+                    // Docstrings rarely say that a parameter defaulting to `None` is optional.
+                    match &required {
+                        Required::Optional(Some(default_val)) if default_val.ty.is_none() => {
+                            self.union(ty, self.heap.mk_none())
+                        }
+                        _ => ty,
+                    }
                 } else if let Required::Optional(Some(default_val)) = &required {
                     self.union(
                         self.heap.mk_any_implicit(),
@@ -1997,6 +2154,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 original_decoratee.clone()
             }
+            Type::Union(u) => self.unions(u.members.into_map(|member| {
+                self.decorate_returned_callable(member, metadata, original_decoratee)
+            })),
             returned_ty => returned_ty,
         }
     }

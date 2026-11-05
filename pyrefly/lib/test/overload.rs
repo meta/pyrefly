@@ -11,6 +11,24 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_overload_expansion_keeps_lambda_context,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable, overload, assert_type
+
+@overload
+def f(callback: Callable[[int], None], value: int) -> int: ...
+@overload
+def f(callback: Callable[[str], None], value: str) -> str: ...
+def f(callback, value) -> int | str: ...
+
+def g(value: int | str) -> None:
+    assert_type(f(lambda arg: None, value), int | str)
+    assert_type(f(value=value, callback=lambda arg: None), int | str)
+"#,
+);
+
+testcase!(
     test_py,
     r#"
 from typing import overload, assert_type
@@ -1366,6 +1384,47 @@ def f(x: E) -> str:
 def g(x: E):
     assert_type(f(x), Literal['X', 'Y'])
     "#,
+);
+
+testcase!(
+    test_do_not_expand_flag_arguments,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal, assert_type, overload
+
+class BaseFlag(Flag):
+    pass
+
+class Bits(BaseFlag):
+    A = 1
+    B = 2
+
+class IntBits(IntFlag):
+    A = 1
+    B = 2
+
+@overload
+def choose(value: Literal[Bits.A]) -> Literal["A"]: ...
+@overload
+def choose(value: Literal[Bits.B]) -> Literal["B"]: ...
+def choose(value: Bits) -> str:
+    return value.name or ""
+
+@overload
+def choose_int(value: Literal[IntBits.A]) -> Literal["A"]: ...
+@overload
+def choose_int(value: Literal[IntBits.B]) -> Literal["B"]: ...
+def choose_int(value: IntBits) -> str:
+    return value.name or ""
+
+def check(value: Bits, int_value: IntBits) -> None:
+    choose(value)  # E: No matching overload found for function `choose`
+    choose_int(int_value)  # E: No matching overload found for function `choose_int`
+
+def check_members(value: Literal[Bits.A, Bits.B], int_value: Literal[IntBits.A, IntBits.B]) -> None:
+    assert_type(choose(value), Literal["A", "B"])
+    assert_type(choose_int(int_value), Literal["A", "B"])
+"#,
 );
 
 testcase!(

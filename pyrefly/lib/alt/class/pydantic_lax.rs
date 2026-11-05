@@ -9,12 +9,17 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::keywords::ConverterMap;
+use pyrefly_types::literal::Lit;
+use pyrefly_types::quantified::Quantified;
 use pyrefly_types::tuple::Tuple;
 use ruff_python_ast::name::Name;
 use starlark_map::ordered_map::OrderedMap;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
+use crate::alt::types::class_metadata::DataclassKind;
+use crate::binding::pydantic::GET_PYDANTIC_CORE_SCHEMA;
+use crate::module::typeshed::typeshed;
 use crate::types::class::Class;
 use crate::types::types::Type;
 
@@ -135,6 +140,42 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    /// Check each union alternative with its lax conversion and refine bool's literal inputs.
+    pub fn pydantic_lax_accepts_literal(&self, expected: &Type, literal: &Type) -> bool {
+        if let Type::Union(union) = expected {
+            return union
+                .members
+                .iter()
+                .any(|member| self.pydantic_lax_accepts_literal(member, literal));
+        }
+        if let Type::ClassType(cls) = expected
+            && cls == self.stdlib.bool()
+            && let Type::Literal(lit) = literal
+        {
+            match &lit.value {
+                Lit::Int(value) => return matches!(value.as_i64(), Some(0 | 1)),
+                Lit::Str(value) => {
+                    return matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        "0" | "1"
+                            | "f"
+                            | "false"
+                            | "n"
+                            | "no"
+                            | "off"
+                            | "on"
+                            | "t"
+                            | "true"
+                            | "y"
+                            | "yes"
+                    );
+                }
+                _ => {}
+            }
+        }
+        self.is_subset_eq(literal, &self.expand_type_for_lax_mode(expected))
+    }
+
     fn get_container_lax_conversion(
         &self,
         class_obj: &Class,
@@ -189,7 +230,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    fn expand_type_for_lax_mode(&self, ty: &Type) -> Type {
+    pub fn expand_type_for_lax_mode(&self, ty: &Type) -> Type {
         match ty {
             Type::None => ty.clone(),
             // Literal types have no lax coercion - they require exact values
@@ -200,9 +241,43 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::Tuple(tuple) => self
                 .heap
                 .mk_class_type(self.stdlib.iterable(self.get_tuple_element_type(tuple))),
-            // Container types: recursively expand all type arguments
-            Type::ClassType(cls) if !cls.targs().as_slice().is_empty() => {
+            Type::ClassType(cls) => {
+                if let Some(converted) = self.get_atomic_lax_conversion(ty) {
+                    return converted;
+                }
                 let class_obj = cls.class_object();
+                // BaseModel's built-in hook preserves model validation. Other hooks may accept any input.
+                if self
+                    .get_non_synthesized_class_member_and_defining_class(
+                        class_obj,
+                        &GET_PYDANTIC_CORE_SCHEMA,
+                    )
+                    .is_some_and(|member| {
+                        !member
+                            .defining_class
+                            .has_toplevel_qname(ModuleName::pydantic().as_str(), "BaseModel")
+                    })
+                {
+                    return self.heap.mk_any_explicit();
+                }
+                let metadata = self.get_metadata_for_class(class_obj);
+                if metadata.is_pydantic_model()
+                    || metadata.dataclass_metadata().is_some_and(|dataclass| {
+                        matches!(
+                            dataclass.kind,
+                            DataclassKind::Dataclass {
+                                is_stdlib_dataclass: true,
+                                ..
+                            }
+                        )
+                    })
+                {
+                    let mapping = self.heap.mk_class_type(self.stdlib.mapping(
+                        self.heap.mk_class_type(self.stdlib.str().clone()),
+                        self.heap.mk_any_explicit(),
+                    ));
+                    return self.union(ty.clone(), mapping);
+                }
                 let targs = cls.targs().as_slice();
 
                 // Special handling for dict and Mapping: don't expand key type
@@ -238,16 +313,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     return converted;
                 }
-                self.heap.mk_any_explicit()
+
+                // Enums and namedtuples have built-in schemas that accept more than instances,
+                // as do some stdlib classes whose lax conversions we don't model precisely, so
+                // we map all stdlib classes to `Any` as a conservative approximation. Pydantic
+                // validates other classes with `isinstance`.
+                if metadata.is_enum()
+                    || metadata.named_tuple_metadata().is_some()
+                    || typeshed().is_ok_and(|ts| ts.has_module(class_obj.module_name()))
+                {
+                    return self.heap.mk_any_explicit();
+                }
+                let mut instance_ty = cls.clone();
+                for (param, targ) in instance_ty.targs_mut().iter_paired_mut() {
+                    *targ = Quantified::as_gradual_type_helper(param.kind(), None);
+                }
+                self.heap.mk_class_type(instance_ty)
             }
             Type::Union(f) => {
                 let expanded_members = self.expand_types(&f.members);
                 self.unions(expanded_members)
             }
-            // Known atomic types with conversion tables, or Any for everything else
-            _ => self
-                .get_atomic_lax_conversion(ty)
-                .unwrap_or_else(|| self.heap.mk_any_explicit()),
+            // Runtime validation determines whether unsupported forms such as callables are valid.
+            _ => self.heap.mk_any_explicit(),
         }
     }
 

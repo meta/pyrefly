@@ -3,7 +3,7 @@
   "pass": 140,
   "fail": 5,
   "pass_rate": 0.97,
-  "differences": 23,
+  "differences": 24,
   "passing": [
     "aliases_explicit.py",
     "aliases_implicit.py",
@@ -151,7 +151,7 @@
     "annotations_future_import.py": 2,
     "generics_paramspec_variance.py": 9,
     "generics_typevartuple_variance.py": 9,
-    "protocols_variance.py": 1
+    "protocols_variance.py": 2
   },
   "comment": "@generated"
 }

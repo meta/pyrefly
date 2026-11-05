@@ -1767,6 +1767,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 dependencies = [
  "scopeguard",
+ "serde",
 ]
 
 [[package]]
@@ -2308,9 +2309,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags 2.13.2",
  "getopts",
@@ -2327,7 +2328,7 @@ checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "pyrefly"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anstream 0.6.21",
  "anyhow",
@@ -2400,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_bench_harness"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "pyrefly",
  "pyrefly_config",
@@ -2409,7 +2410,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_build"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anyhow",
  "derive_more",
@@ -2431,7 +2432,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_bundled"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anyhow",
  "sha2",
@@ -2442,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_config"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2478,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_derive"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2487,7 +2488,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_glean_schema"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2496,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_graph"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "dupe",
  "pyrefly_util",
@@ -2505,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_lsp_test"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anstream 0.6.21",
  "anyhow",
@@ -2520,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_python"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2549,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_types"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "compact_str",
  "dupe",
@@ -2569,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "pyrefly_util"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "anstream 0.6.21",
  "anyhow",
@@ -2631,7 +2632,7 @@ dependencies = [
  "tar",
  "uuid",
  "wasm-bindgen",
- "zstd 0.13.3",
+ "zstd 0.13.4",
 ]
 
 [[package]]
@@ -2966,9 +2967,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
@@ -3692,7 +3693,7 @@ dependencies = [
 
 [[package]]
 name = "tsp_types"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 dependencies = [
  "lsp-server",
  "serde",
@@ -4269,11 +4270,11 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "cdb02c3132d251ab1606e9fc913a7da6c6ed08cc263df15edf082e1dc497d157"
 dependencies = [
- "zstd-safe 7.3.0",
+ "zstd-safe 7.4.0",
 ]
 
 [[package]]
@@ -4287,9 +4288,9 @@ dependencies = [
 
 [[package]]
 name = "zstd-safe"
-version = "7.3.0"
+version = "7.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+checksum = "1c8ea04668f5de8d8d51051714ba560c9536519cadcdb8829bba4fe2ad159b03"
 dependencies = [
  "zstd-sys",
 ]

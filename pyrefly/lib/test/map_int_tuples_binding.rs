@@ -135,7 +135,7 @@ fn map_int_tuples_mapper_parameter_is_order_independent_and_incremental() {
 
     let mut transaction = state.new_committable_transaction(Require::Everything, None);
     transaction.as_mut().set_memory(vec![(
-        PathBuf::from("mapmod.py"),
+        ModulePath::memory(PathBuf::from("mapmod.py")),
         Some(Arc::new(FileContents::from_source(map_module("Item")))),
     )]);
     transaction

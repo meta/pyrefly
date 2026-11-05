@@ -754,7 +754,7 @@ class D:
 class A:
     d = D()
 class B(A):
-    d = 42  # E: `B.d` and `A.d` must both be descriptors
+    d = 42  # E: not assignable from `str`
     "#,
 );
 
@@ -767,7 +767,7 @@ class D:
 class A:
     d: D = D()
 class B(A):
-    d: int = 42  # E: `B.d` and `A.d` must both be descriptors
+    d: int = 42  # E: not assignable from `str`
     "#,
 );
 
@@ -1508,6 +1508,29 @@ class B(A):
     def f(self) -> None:
         pass
     "#,
+);
+
+testcase!(
+    test_override_classmethod_overload_narrow_signature,
+    r#"
+from typing import overload
+
+class Base:
+    @classmethod
+    @overload
+    def make(cls, x: int) -> int: ...
+    @classmethod
+    @overload
+    def make(cls, x: str) -> str: ...
+    @classmethod
+    def make(cls, x):
+        return x
+
+class Child(Base):
+    @classmethod
+    def make(cls, x: int) -> int:  # E: Class member `Child.make` overrides parent class `Base` in an inconsistent manner
+        return x
+"#,
 );
 
 testcase!(

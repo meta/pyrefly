@@ -81,6 +81,7 @@ use crate::binding::polars::polars_column_mutation;
 use crate::binding::scope::FlowStyle;
 use crate::binding::scope::LoopExit;
 use crate::binding::scope::Scope;
+use crate::binding::scope::SelfAttrAssignTarget;
 use crate::binding::scope::TerminationKind;
 use crate::config::error_kind::ErrorKind;
 use crate::export::definitions::Definitions;
@@ -825,6 +826,7 @@ impl<'a> BindingsBuilder<'a> {
                 },
                 annotation.clone(),
                 None,
+                None,
             )
         };
         self.insert_binding(ann_key, ann_val)
@@ -985,10 +987,12 @@ impl<'a> BindingsBuilder<'a> {
                         delete_idx,
                         Binding::Delete(Box::new(target.clone())),
                     );
-                    if let Expr::Attribute(_) = target
-                        && let Some((identifier, _)) = identifier_and_chain_prefix_for_expr(&target)
-                    {
-                        self.narrow_if_name_is_defined(identifier, idx);
+                    if let Expr::Attribute(attribute) = &target {
+                        self.scopes.record_self_attr_delete(attribute);
+                        if let Some((identifier, _)) = identifier_and_chain_prefix_for_expr(&target)
+                        {
+                            self.narrow_if_name_is_defined(identifier, idx);
+                        }
                     }
                 }
             }
@@ -1285,8 +1289,10 @@ impl<'a> BindingsBuilder<'a> {
                             AnnotationTarget::AttrAssign(attr_name.clone()),
                             *x.annotation,
                             None,
+                            None,
                         ),
                     );
+                    let has_value = x.value.is_some();
                     let value = match x.value {
                         Some(mut assigned) => {
                             self.bind_attr_assign(attr.clone(), &mut assigned, |_attr, value, _| {
@@ -1303,10 +1309,12 @@ impl<'a> BindingsBuilder<'a> {
                             ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))
                         }
                     };
-                    if !self
-                        .scopes
-                        .record_self_attr_assign(&attr, value.clone(), Some(ann_key))
-                    {
+                    if !self.scopes.record_self_attr_assign(
+                        &attr,
+                        value.clone(),
+                        Some(ann_key),
+                        has_value,
+                    ) {
                         self.error(
                             x.range,
                             ErrorKind::BadAssignment,
@@ -1585,6 +1593,11 @@ impl<'a> BindingsBuilder<'a> {
                 let mut contains_environment_test_with_no_else = false;
                 let mut is_first_branch = true;
                 let mut following_runtime_only_branch = false;
+                // Under another configuration, a test of the environment may choose another suite
+                // from its own clause onward, so the definitions in those suites settle no test
+                // outside the suite, and those of the suites the configuration rules out settle
+                // none at all.
+                let mut after_environment_test = false;
                 let mut branches = Ast::if_branches_owned(x);
                 while let Some((range, mut test, body)) = branches.next() {
                     self.start_branch();
@@ -1614,13 +1627,16 @@ impl<'a> BindingsBuilder<'a> {
                         }
                     }
                     is_first_branch = false;
+                    after_environment_test |=
+                        test.as_ref().is_some_and(SysInfo::depends_on_sys_info);
                     let later_branches_are_type_checking = test
                         .as_ref()
                         .is_some_and(SysInfo::is_not_type_checking_guard);
                     // A suite is only dead everywhere if its test never consults the runtime
                     // environment. A `sys.version_info`, `sys.platform`, `os.name`, or
                     // `TYPE_CHECKING` guard is dead under this configuration alone, and the
-                    // suite is live under another, so reporting it would be a false positive.
+                    // suite is live under another, so reporting it as unreachable would be a
+                    // false positive.
                     // An `else` has no test of its own and inherits the ones above it.
                     let test_is_environment_independent = test
                         .as_ref()
@@ -1634,6 +1650,9 @@ impl<'a> BindingsBuilder<'a> {
                     let new_narrow_ops = if this_branch_chosen == Some(false) {
                         if test_is_environment_independent {
                             self.report_unreachable_body(&body);
+                        } else {
+                            self.report_inactive_body(&body);
+                            self.record_environment_names(&body);
                         }
                         // Skip the body in this case - it typically means a check (e.g. a sys version,
                         // platform, or TYPE_CHECKING check) where the body is not statically analyzable.
@@ -1678,6 +1697,10 @@ impl<'a> BindingsBuilder<'a> {
                         &Usage::NonPinningValue(None),
                     );
                     negated_prev_ops.and_all(new_narrow_ops.negate());
+                    let outer_environment_suite = self.environment_suite;
+                    if after_environment_test {
+                        self.environment_suite = Some(range);
+                    }
                     if is_type_checking_branch {
                         self.type_checking_depth += 1;
                         self.stmts(body, parent);
@@ -1685,6 +1708,7 @@ impl<'a> BindingsBuilder<'a> {
                     } else {
                         self.stmts(body, parent);
                     }
+                    self.environment_suite = outer_environment_suite;
                     if let Some((test, runs_when)) = decided_by {
                         let end = self.insert_binding(
                             Key::BranchEnd(range),
@@ -1726,6 +1750,9 @@ impl<'a> BindingsBuilder<'a> {
                             });
                             if report_all_remaining || unconditional == Some(false) {
                                 self.report_unreachable_body(&body);
+                            } else {
+                                self.report_inactive_body(&body);
+                                self.record_environment_names(&body);
                             }
                             report_all_remaining |= unconditional == Some(true);
                             if Ast::body_contains_yield(&body) {
@@ -2264,6 +2291,11 @@ impl<'a> BindingsBuilder<'a> {
             Stmt::Expr(mut x) => {
                 let mut current = self.declare_current_idx(Key::StmtExpr(x.value.range()));
                 self.ensure_expr(&mut x.value, current.usage());
+                let special_export = if let Expr::Call(ExprCall { func, .. }) = &*x.value {
+                    self.as_special_export(func)
+                } else {
+                    None
+                };
                 // Rebind bare-name receivers after in-place column mutations.
                 let mutated_receiver = if let Expr::Call(call) = &*x.value
                     && let Expr::Attribute(func) = &*call.func
@@ -2310,11 +2342,52 @@ impl<'a> BindingsBuilder<'a> {
                         );
                     }
                 }
-                let special_export = if let Expr::Call(ExprCall { func, .. }) = &*x.value {
-                    self.as_special_export(func)
-                } else {
-                    None
-                };
+                // `object.__setattr__(self, "attr", value)` and `setattr(self, "attr", value)`
+                // initialize instance attributes the same way `self.attr = value` does.
+                // Frozen dataclasses commonly use this pattern in `__init__`.
+                if let Expr::Call(call) = x.value.as_ref()
+                    && call.arguments.keywords.is_empty()
+                    && let [
+                        receiver @ Expr::Name(_),
+                        Expr::StringLiteral(attr_name),
+                        value,
+                    ] = &*call.arguments.args
+                    && !value.is_starred_expr()
+                {
+                    let is_object_setattr = matches!(
+                        call.func.as_ref(),
+                        Expr::Attribute(func)
+                            if func.attr.id.as_str() == "__setattr__"
+                                && self.as_special_export(&func.value)
+                                    == Some(SpecialExport::BuiltinsObject)
+                    );
+                    let is_builtin_setattr = special_export == Some(SpecialExport::SetAttr);
+                    // A field definition must spell the runtime name as an unchanged source identifier.
+                    if (is_object_setattr || is_builtin_setattr)
+                        && let Some(literal) = attr_name.as_single_part_string()
+                        && self.module_info.code_at(literal.content_range())
+                            == literal.value.as_ref()
+                        && let Ok(Expr::Name(name)) =
+                            Ast::parse_expr(literal.value.as_ref(), TextSize::new(0))
+                        && name.id.as_str() == literal.value.as_ref()
+                        && !Ast::is_mangled_attr(&name.id)
+                    {
+                        let name = Identifier::new(name.id, literal.content_range());
+                        if self.scopes.record_self_attr_assign_named(
+                            SelfAttrAssignTarget {
+                                receiver,
+                                name: &name,
+                                instance_only: is_object_setattr,
+                            },
+                            ExprOrBinding::Expr(value.clone()),
+                            None,
+                            true,
+                        ) && let Some(literals) = &mut self.setattr_name_literals
+                        {
+                            literals.push((name, receiver.range()));
+                        }
+                    }
+                }
                 let key = self
                     .insert_binding_current(current, Binding::StmtExpr(x.value, special_export));
                 // Track this StmtExpr as the trailing statement for type-based termination

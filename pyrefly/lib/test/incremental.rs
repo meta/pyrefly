@@ -24,6 +24,7 @@ use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
 use starlark_map::small_map::SmallMap;
 
 use crate::config::config::ConfigFile;
+use crate::config::error::ErrorDisplayConfig;
 use crate::config::finder::ConfigFinder;
 use crate::error::error::print_errors;
 use crate::state::errors::Errors;
@@ -32,6 +33,7 @@ use crate::state::require::Require;
 use crate::state::state::State;
 use crate::state::subscriber::TestSubscriber;
 use crate::test::util::init_test;
+use crate::test::util::report_unreachable_at_warn;
 
 #[derive(Default, Clone, Dupe, Debug)]
 struct IncrementalData(Arc<Mutex<SmallMap<ModuleName, Arc<String>>>>);
@@ -92,6 +94,12 @@ impl Incremental {
             );
         }
         config.source_db = Some(ArcId::new(Box::new(sourcedb)));
+        report_unreachable_at_warn(
+            config
+                .root
+                .errors
+                .get_or_insert_with(ErrorDisplayConfig::default),
+        );
         config.configure();
         let config = ArcId::new(config);
 
@@ -134,7 +142,7 @@ impl Incremental {
                 .lock()
                 .insert(ModuleName::from_str(&file), contents.dupe());
             transaction.as_mut().set_memory(vec![(
-                PathBuf::from(file),
+                ModulePath::memory(PathBuf::from(file)),
                 Some(Arc::new(FileContents::Source(contents))),
             )]);
         }
@@ -1307,6 +1315,20 @@ fn test_fine_grained_related_export_recompute() {
 
     // Change `x` - main SHOULD be recomputed since it imports `x`
     i.set("foo", "x: str = 'changed'\ny: int = 2");
+    i.check(&["main"], &["foo", "main"]);
+}
+
+#[test]
+fn test_parse_error_survives_dependency_recompute() {
+    let mut i = Incremental::new();
+    i.set("foo", "x: int = 1");
+    i.set(
+        "main",
+        "from foo import x\nprint(x)\nif  # E: Parse error: Expected an expression",
+    );
+    i.check(&["main"], &["main", "foo"]);
+
+    i.set("foo", "x: str = 'changed'");
     i.check(&["main"], &["foo", "main"]);
 }
 
@@ -3076,4 +3098,96 @@ def first(shapes: IntTuple) -> IntTuple:
     let changed = i.unchecked(&["consumer", "helpers"]);
     changed.check_recompute(&["consumer", "helpers", "main"]);
     changed.check_errors();
+}
+
+/// Whether an imported `Final` settles a test depends on whether a module on the way to it defines
+/// or star-imports it under a test of the environment, which can change without changing its type.
+#[test]
+fn test_final_moved_under_environment_test_rechecks_importer() {
+    let mut i = Incremental::new();
+    let errors = |i: &mut Incremental| {
+        i.unchecked(&["main"])
+            .errors
+            .collect_display_errors()
+            .map(|error| error.msg().to_owned())
+    };
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("foo", "from bar import DEBUG as DEBUG");
+    i.set(
+        "main",
+        "from foo import DEBUG\nif DEBUG:\n    x = 1\nelse:\n    x = ''\nobserved: str = x",
+    );
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "bar",
+        "import sys\nfrom typing import Final\nif sys.platform != 'win32':\n    DEBUG: Final = False",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("foo", "from bar import *");
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "foo",
+        "import sys\nfrom bar import *\nif sys.platform == 'win32':\n    DEBUG = True",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+
+    i.set("foo", "from bar import *");
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "foo",
+        "import sys\nif sys.platform != 'win32':\n    from bar import *",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+}
+
+/// A star import in a suite this configuration rules out brings in whatever the other module
+/// defines, so defining the constant there must recheck the importer.
+#[test]
+fn test_constant_defined_behind_skipped_star_import_rechecks_importer() {
+    let mut i = Incremental::new();
+    let errors = |i: &mut Incremental| {
+        i.unchecked(&["main"])
+            .errors
+            .collect_display_errors()
+            .map(|error| error.msg().to_owned())
+    };
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("baz", "");
+    i.set(
+        "foo",
+        "import sys\nfrom bar import DEBUG as DEBUG\nif sys.platform == 'win32':\n    from baz import *",
+    );
+    i.set(
+        "main",
+        "from foo import DEBUG\nif DEBUG:\n    x = 1\nelse:\n    x = ''\nobserved: str = x",
+    );
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set("baz", "from typing import Final\nDEBUG: Final = True");
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
 }

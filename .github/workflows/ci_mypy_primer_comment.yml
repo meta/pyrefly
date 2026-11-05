@@ -57,11 +57,10 @@ jobs:
         run: |
           python scripts/primer_presets.py fulldiff.txt | tee preset_summary.txt
 
-      - name: Post comment
-        id: post-comment
+      - name: Write comment
+        id: write-comment
         uses: actions/github-script@v8
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const MAX_CHARACTERS = 100000
             const MAX_CHARACTERS_PER_PROJECT = MAX_CHARACTERS / 4
@@ -123,19 +122,16 @@ jobs:
             } else {
               body = "According to [mypy_primer](https://github.com/hauntsaninja/mypy_primer), this change doesn't affect type check results on a corpus of open source code. ✅"
             }
-            const prNumber = parseInt(fs.readFileSync("pr_number.txt", { encoding: "utf8" }))
-            await github.rest.issues.createComment({
-              issue_number: prNumber,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body
-            })
-            return prNumber
+            fs.writeFileSync('comment.md', body)
+            return parseInt(fs.readFileSync("pr_number.txt", { encoding: "utf8" }))
 
-      - name: Hide old comments
-        # v0.4.0
-        uses: kanga333/comment-hider@c12bb20b48aeb8fc098e35967de8d4f8018fffdf
+      # Posts the comment and minimizes the previous one.
+      - name: Post comment
+        # v3.0.5
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          leave_visible: 1
-          issue_number: ${{ steps.post-comment.outputs.result }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          header: mypy_primer
+          number_force: ${{ steps.write-comment.outputs.result }}
+          path: comment.md
+          hide_and_recreate: true

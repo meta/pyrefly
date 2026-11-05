@@ -683,3 +683,60 @@ z = 3 if sys.version_info >= (3, 0) else (r := 4)
 w = [(s := 5) if sys.version_info >= (3, 99) else 6 for _ in range(1)]
 "#,
 );
+
+testcase!(
+    test_inactive_code,
+    TestEnv::new().enable_inactive_code_error(),
+    r#"
+import sys
+import typing
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    X = int
+else:
+    class X: ...  # E: This code is inactive for the current type-checking configuration
+    Y = 1
+
+if not typing.TYPE_CHECKING:
+    Z = 1  # E: inactive
+
+if sys.version_info < (3, 0):
+    print(1)  # E: inactive
+elif sys.version_info >= (3, 0):
+    print(2)
+else:
+    print(3)  # E: inactive
+
+# A `while` body guarded by the environment is still checked, so it is not inactive.
+while sys.version_info < (3, 0):
+    w: int = ""  # E: `Literal['']` is not assignable to `int`
+"#,
+);
+
+testcase!(
+    test_inactive_code_in_unreachable_code,
+    TestEnv::new().enable_inactive_code_error(),
+    r#"
+import sys
+
+def f() -> None:
+    return
+    if sys.version_info < (3, 0):  # E: This code is unreachable
+        print(1)
+"#,
+);
+
+testcase!(
+    test_inactive_code_suppression,
+    TestEnv::new().enable_inactive_code_error(),
+    r#"
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass
+else:
+    x = 1  # pyrefly: ignore[inactive-code]
+    y = 2
+"#,
+);

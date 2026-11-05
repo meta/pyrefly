@@ -244,22 +244,30 @@ impl TParams {
     }
 }
 
+/// The type arguments of a class instance, together with the class's type parameters.
+///
+/// Invariant: the field is `None` exactly when there are no type arguments. Most class
+/// types are not generic, so they carry no allocation, and cloning or dropping them
+/// touches no reference count shared with other threads.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[derive(TypeEq)]
-pub struct TArgs(Arc<(Arc<TParams>, Box<[Type]>)>);
+pub struct TArgs(Option<Arc<(Arc<TParams>, Box<[Type]>)>>);
 
 impl Visit<Type> for TArgs {
     fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
         // TParams describe the declaration; only applied arguments are contained types.
-        self.0.1.visit(f);
+        for ty in self.as_slice() {
+            ty.visit(f);
+        }
     }
 }
 
 impl VisitMut<Type> for TArgs {
     fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
         // Arc<TParams> has a no-op VisitMut, so we only need to visit the types.
-        let inner = Arc::make_mut(&mut self.0);
-        inner.1.visit_mut(f);
+        for ty in self.as_mut() {
+            ty.visit_mut(f);
+        }
     }
 }
 
@@ -268,41 +276,57 @@ impl TArgs {
         if tparams.len() != targs.len() {
             panic!("TParams and TArgs must have the same length");
         }
-        Self(Arc::new((tparams, targs.into_boxed_slice())))
+        if targs.is_empty() {
+            return Self(None);
+        }
+        Self(Some(Arc::new((tparams, targs.into_boxed_slice()))))
     }
 
     pub fn tparams(&self) -> &TParams {
-        &self.0.0
+        match &self.0 {
+            Some(inner) => &inner.0,
+            None => TParams::empty_ref(),
+        }
     }
 
     pub fn iter_paired(&self) -> impl ExactSizeIterator<Item = (&Quantified, &Type)> {
-        self.0.0.iter().zip(self.0.1.iter())
+        self.tparams().iter().zip(self.as_slice().iter())
     }
 
     pub fn iter_paired_mut(&mut self) -> impl ExactSizeIterator<Item = (&Quantified, &mut Type)> {
-        let inner = Arc::make_mut(&mut self.0);
-        inner.0.iter().zip(inner.1.iter_mut())
+        let (tparams, targs) = self.split_mut();
+        tparams.iter().zip(targs.iter_mut())
     }
 
     pub fn len(&self) -> usize {
-        self.0.1.len()
+        self.as_slice().len()
     }
 
     pub fn as_slice(&self) -> &[Type] {
-        &self.0.1
+        match &self.0 {
+            Some(inner) => &inner.1,
+            None => &[],
+        }
     }
 
     pub fn as_mut(&mut self) -> &mut [Type] {
-        &mut Arc::make_mut(&mut self.0).1
+        self.split_mut().1
     }
 
+    /// Mutable access to the arguments. Without arguments this neither allocates nor
+    /// touches a reference count; with them, a shared allocation is copied first.
     pub fn split_mut(&mut self) -> (&TParams, &mut [Type]) {
-        let inner = Arc::make_mut(&mut self.0);
-        (&inner.0, &mut inner.1)
+        match &mut self.0 {
+            Some(inner) => {
+                let inner = Arc::make_mut(inner);
+                (&inner.0, &mut inner.1)
+            }
+            None => (TParams::empty_ref(), &mut []),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.1.is_empty()
+        self.0.is_none()
     }
 
     /// Returns the number of type arguments to display, stripping trailing args
@@ -329,13 +353,14 @@ impl TArgs {
     /// Unions in the substituted arguments are simplified, so type arguments that differ only in
     /// the order, nesting or duplication of union members compare equal.
     pub fn substitute_with(&self, substitution: &Substitution) -> Self {
+        let Some((tparams, targs)) = self.0.as_deref() else {
+            return Self::default();
+        };
         if substitution.0.is_empty() {
             return self.clone();
         }
         let heap = TypeHeap::new();
-        let tys = self
-            .0
-            .1
+        let tys = targs
             .iter()
             .map(|ty| {
                 let mut ty = substitution.substitute_into(ty.clone());
@@ -351,7 +376,7 @@ impl TArgs {
                 ty
             })
             .collect();
-        Self::new(self.0.0.dupe(), tys)
+        Self::new(tparams.dupe(), tys)
     }
 
     pub fn substitution_map(&self) -> SmallMap<&Quantified, &Type> {
@@ -1075,6 +1100,14 @@ pub enum Type {
     ///
     /// See https://typing.python.org/en/latest/spec/glossary.html#term-materialize.
     Materialization,
+    /// Every value that is always falsy. It appears only as a member of an intersection: the left
+    /// operand `x: A` of `x and y` is returned only when it is falsy, so it contributes `A & Falsy`
+    /// to the result, and a later truthy narrow removes that member.
+    Falsy,
+    /// Every value that is always truthy. It appears only as a member of an intersection: the left
+    /// operand `x: A` of `x or y` is returned only when it is truthy, so it contributes
+    /// `A & Truthy` to the result, and a later falsy narrow removes that member.
+    Truthy,
     None,
 }
 
@@ -1129,7 +1162,7 @@ impl Visit for Type {
             Type::KwargsValue(x) => x.visit(f),
             Type::Type(x) => x.visit(f),
             Type::TypeForm(x) => x.visit(f),
-            Type::Ellipsis => {}
+            Type::Ellipsis | Type::Falsy | Type::Truthy => {}
             Type::Any(x) => x.visit(f),
             Type::Never(x) => x.visit(f),
             Type::TypeAlias(x) => x.visit(f),
@@ -1193,7 +1226,7 @@ impl VisitMut for Type {
             Type::KwargsValue(x) => x.visit_mut(f),
             Type::Type(x) => x.visit_mut(f),
             Type::TypeForm(x) => x.visit_mut(f),
-            Type::Ellipsis => {}
+            Type::Ellipsis | Type::Falsy | Type::Truthy => {}
             Type::Any(x) => x.visit_mut(f),
             Type::Never(x) => x.visit_mut(f),
             Type::TypeAlias(x) => x.visit_mut(f),
@@ -2316,6 +2349,44 @@ impl Type {
         self
     }
 
+    /// Whether this type only records the truthiness of a boolean operand for narrowing. Such a
+    /// type is ignored by `assert_type`.
+    pub fn is_truthiness_marker(&self) -> bool {
+        matches!(self, Type::Falsy | Type::Truthy)
+    }
+
+    /// For an intersection of a type and a truthiness marker, the type users see: the type without
+    /// the marker. For any other type, the type itself.
+    pub fn ignoring_truthiness_marker(&self) -> &Type {
+        if let Type::Intersect(x) = self
+            && let [a, b] = x.0.as_slice()
+        {
+            if b.is_truthiness_marker() {
+                return a;
+            }
+            if a.is_truthiness_marker() {
+                return b;
+            }
+        }
+        self
+    }
+
+    /// Remove truthiness markers from every intersection.
+    pub fn without_truthiness_markers(self) -> Type {
+        self.transform(&mut |t| {
+            if let Type::Intersect(x) = t
+                && x.0.iter().any(Type::is_truthiness_marker)
+            {
+                let mut members = x.0.clone();
+                members.retain(|m| !m.is_truthiness_marker());
+                *t = match members.as_slice() {
+                    [member] => member.clone(),
+                    _ => Type::Intersect(Box::new((members, x.1.clone()))),
+                };
+            }
+        })
+    }
+
     /// Replace every DataFrame and Series schema with its plain underlying class. The schema forms
     /// (`DataFrame[a: Int64, ...]`, `Series[Int64]`) are not valid annotation syntax, so a surface
     /// that emits a type as source must strip them first.
@@ -2403,8 +2474,8 @@ impl Type {
             Type::Literal(lit) if let Lit::Int(x) = &lit.value => Some(x.as_bool()),
             Type::Literal(lit) if let Lit::Bytes(x) = &lit.value => Some(!x.is_empty()),
             Type::Literal(lit) if let Lit::Str(x) = &lit.value => Some(!x.is_empty()),
-            Type::Type(_) => Some(true),
-            Type::None => Some(false),
+            Type::Type(_) | Type::Truthy => Some(true),
+            Type::None | Type::Falsy => Some(false),
             Type::Sentinel(_) => Some(true),
             Type::Tuple(Tuple::Concrete(elements)) => Some(!elements.is_empty()),
             Type::Union(u) => {
@@ -2420,6 +2491,10 @@ impl Type {
                 }
                 answer
             }
+            // Every value of an intersection is a value of each member, so one member with a known
+            // truthiness decides it. If two members disagree, the intersection has no values, and
+            // either answer is correct.
+            Type::Intersect(x) => x.0.iter().find_map(Type::as_bool),
             Type::ClassType(cls) => {
                 // `Never` containers cannot hold any items; they are always empty; they are always falsy.
                 const CONTAINER_NAMES: &[&str] = &["set", "frozenset", "list", "dict"];
@@ -2508,6 +2583,8 @@ impl Type {
             | Type::SelfType(_)
             | Type::KwCall(_)
             | Type::Materialization
+            | Type::Falsy
+            | Type::Truthy
             | Type::None => false,
         })
     }

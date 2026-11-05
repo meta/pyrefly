@@ -110,6 +110,8 @@ pub struct ClassFieldProperties {
     // The field is defined in the class body (not in a method via self.x = ...)
     is_defined_in_class_body: bool,
     attrs_field_specifier: Option<AttrsFieldSpecifier>,
+    /// An explicit Django method-copy policy set in the class body.
+    django_queryset_only: Option<bool>,
     range: TextRange,
     // The range of the docstring following this field, if present
     docstring_range: Option<TextRange>,
@@ -134,6 +136,7 @@ impl ClassFieldProperties {
             is_initialized_on_class: has_default_value,
             is_defined_in_class_body,
             attrs_field_specifier,
+            django_queryset_only: None,
             range,
             docstring_range,
         }
@@ -143,6 +146,11 @@ impl ClassFieldProperties {
         self.is_initialized_on_class
     }
 
+    /// Attach the method-copy policy found during binding.
+    pub fn with_django_queryset_only(mut self, value: Option<bool>) -> Self {
+        self.django_queryset_only = value;
+        self
+    }
     pub fn is_defined_in_class_body(&self) -> bool {
         self.is_defined_in_class_body
     }
@@ -203,6 +211,11 @@ impl ClassFields {
 
     pub fn is_field_annotated(&self, name: &Name) -> bool {
         self.0.get(name).is_some_and(|prop| prop.is_annotated)
+    }
+
+    /// Return the explicit Django method-copy policy, if present.
+    pub fn django_queryset_only(&self, name: &Name) -> Option<bool> {
+        self.0.get(name).and_then(|prop| prop.django_queryset_only)
     }
 
     pub fn is_attrs_field_specifier(&self, name: &Name) -> bool {
@@ -417,14 +430,10 @@ impl Class {
         self.0.qname.module()
     }
 
-    pub fn has_qname(&self, module: &str, parent: &NestingContext, name: &str) -> bool {
-        self.0.qname.module_name().as_str() == module
-            && self.0.qname.parent() == parent
-            && self.0.qname.id() == name
-    }
-
     pub fn has_toplevel_qname(&self, module: &str, name: &str) -> bool {
-        self.has_qname(module, &NestingContext::toplevel(), name)
+        self.0.qname.module_name().as_str() == module
+            && self.0.qname.parent().is_toplevel()
+            && self.0.qname.id() == name
     }
 
     pub fn is_builtin(&self, name: &str) -> bool {
@@ -450,7 +459,66 @@ impl Class {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[derive(Visit, VisitMut, TypeEq)]
-pub struct ClassType(Class, TArgs);
+pub struct ClassType(Class, TArgs, Option<Arc<DjangoClassMetadata>>);
+
+/// Construction-time Django specializations on nominal class instances.
+///
+/// The manager resolves generated members against its queryset. A specialized class uses
+/// its effective base for inherited members and nominal upcasts. Type traversal and substitution
+/// include this data, and instance binding preserves it when replacing `Self`. Explicit method
+/// return types stand alone: neither their model nor their row is rebound to the manager's model.
+/// Fields retain construction-specific accessor and override contracts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(TypeEq)]
+pub enum DjangoClassMetadata {
+    Manager {
+        queryset: ClassType,
+    },
+    SpecializedBase {
+        base: ClassType,
+    },
+    Field {
+        get_type: Type,
+        set_type: Type,
+        override_type: Type,
+    },
+}
+
+impl Visit<Type> for Arc<DjangoClassMetadata> {
+    fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
+        match self.as_ref() {
+            DjangoClassMetadata::Manager { queryset } => queryset.visit(f),
+            DjangoClassMetadata::SpecializedBase { base } => base.visit(f),
+            DjangoClassMetadata::Field {
+                get_type,
+                set_type,
+                override_type,
+            } => {
+                f(get_type);
+                f(set_type);
+                f(override_type);
+            }
+        }
+    }
+}
+
+impl VisitMut<Type> for Arc<DjangoClassMetadata> {
+    fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
+        match Arc::make_mut(self) {
+            DjangoClassMetadata::Manager { queryset } => queryset.visit_mut(f),
+            DjangoClassMetadata::SpecializedBase { base } => base.visit_mut(f),
+            DjangoClassMetadata::Field {
+                get_type,
+                set_type,
+                override_type,
+            } => {
+                f(get_type);
+                f(set_type);
+                f(override_type);
+            }
+        }
+    }
+}
 
 impl Display for ClassType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -462,7 +530,7 @@ impl ClassType {
     /// Create a class type.
     /// The `targs` must match the `tparams`, if this fails we will panic.
     pub fn new(class: Class, targs: TArgs) -> Self {
-        Self(class, targs)
+        Self(class, targs, None)
     }
 
     pub fn class_object(&self) -> &Class {
@@ -490,7 +558,23 @@ impl ClassType {
     /// This is used to propagate instantiation of base class type parameters when computing
     /// the MRO.
     pub fn substitute_with(&self, substitution: &Substitution) -> Self {
-        Self(self.0.dupe(), self.1.substitute_with(substitution))
+        let mut result = self.clone();
+        result.1 = self.1.substitute_with(substitution);
+        if let Some(metadata) = &mut result.2 {
+            metadata.recurse_mut(&mut |ty| substitution.substitute_into_mut(ty));
+        }
+        result
+    }
+
+    /// Attach a Django specialization to this nominal class instance.
+    pub fn with_django_metadata(mut self, metadata: DjangoClassMetadata) -> Self {
+        self.2 = Some(Arc::new(metadata));
+        self
+    }
+
+    /// Return the construction-time Django specialization, if present.
+    pub fn django_metadata(&self) -> Option<&DjangoClassMetadata> {
+        self.2.as_deref()
     }
 
     pub fn substitution(&self) -> Substitution<'_> {

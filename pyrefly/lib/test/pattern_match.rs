@@ -197,6 +197,88 @@ def no_cascade_after_wildcard(x: int) -> None:
 "#,
 );
 
+// Reachability is not checked on `object` subjects, because structural patterns can narrow
+// `object` to `Never` incorrectly.
+testcase!(
+    bug = "`case bool()` after `case int()` on an `object` subject is not reported",
+    test_match_case_unreachable_subsumed_object,
+    r#"
+def f(x: object) -> None:
+    match x:
+        case int():
+            pass
+        case bool():
+            pass
+"#,
+);
+
+testcase!(
+    test_match_case_unreachable_subsumed_by_sibling_pattern,
+    r#"
+from typing import Any
+
+def shadowed_after_parent_any(x: Any) -> None:
+    match x:
+        case int():
+            pass
+        case bool():  # E: Case pattern can never match subject of type
+            pass
+
+def ok_subclass_first_any(x: Any) -> None:
+    match x:
+        case bool():
+            pass
+        case int():
+            pass
+
+def ok_guarded_predecessor_any(x: Any, flag: bool) -> None:
+    match x:
+        case int() if flag:
+            pass
+        case bool():
+            pass
+
+class A:
+    x: int
+
+class B(A):
+    pass
+
+# A partial class pattern does not subsume its subclass pattern.
+def ok_partial_class_predecessor_any(x: Any) -> None:
+    match x:
+        case A(x=1):
+            pass
+        case B():
+            pass
+
+def duplicate_literal_any(x: Any) -> None:
+    match x:
+        case 1:
+            pass
+        case 1:  # E: Case pattern can never match subject of type
+            pass
+
+def or_pattern_any(x: Any) -> None:
+    match x:
+        case int() | str():
+            pass
+        case bool():  # E: Case pattern can never match subject of type
+            pass
+
+class Holder:
+    a: Any
+
+def attribute_any(h: Holder) -> None:
+    match h.a:
+        case int():
+            pass
+        case bool():  # E: Case pattern can never match subject of type
+            pass
+
+"#,
+);
+
 testcase!(
     test_pattern_dict_key_enum,
     r#"
@@ -2154,4 +2236,36 @@ def f(item: tuple[str, int | None]) -> None:
             case (_, b):
                 assert_type(b, int | None)
     "#,
+);
+
+testcase!(
+    test_nested_exhaustive_match_in_match_arm_binds_sibling_name,
+    r#"
+from dataclasses import dataclass
+from typing import final
+
+@final
+@dataclass
+class Ok[T]:
+    value: T
+
+@final
+@dataclass
+class Err[E]:
+    error: E
+
+class NotFoundError(Exception): ...
+
+def get() -> Ok[int] | Err[NotFoundError]: ...
+
+def g() -> int:
+    match get():
+        case Ok(value):
+            pass
+        case Err(err):
+            match err:
+                case NotFoundError():
+                    raise ValueError("should not happen")
+    return value
+"#,
 );
