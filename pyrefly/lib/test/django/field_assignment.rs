@@ -10,6 +10,28 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 django_testcase!(
+    bug = "Constructor inference replaces the field assignment contract",
+    test_field_db_default_assignment_contract,
+    r#"
+from typing import assert_type
+from django.db import models
+from django.db.models import F
+
+class Record(models.Model):
+    count = models.IntegerField(db_default=0)
+    optional_count = models.IntegerField(null=True, db_default=0)
+
+assert_type(Record().optional_count, int | None)
+
+def update(record: Record) -> None:
+    record.count = 1
+    record.count = F("count") + 1  # E: is not assignable to attribute `count`
+    record.optional_count = None  # E: is not assignable to attribute `optional_count`
+    record.count = "bad"  # E: is not assignable to attribute `count`
+"#,
+);
+
+django_testcase!(
     test_field_intersection_gradual_setter,
     r#"
 from typing import Any
