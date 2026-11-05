@@ -49,3 +49,24 @@ assert_type(book.authors.create(name="Alice"), Author)
 book.authors.add("wrong type") # E: Argument `Literal['wrong type']` is not assignable to parameter `*objs` with type `Author | int` 
 "#,
 );
+
+django_testcase!(
+    test_add_remove_set_with_uuid_pk,
+    r#"
+import uuid
+from django.db import models
+
+class Author(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+
+class Book(models.Model):
+    authors = models.ManyToManyField(Author)
+
+book = Book()
+author_id = uuid.uuid4()
+book.authors.add(author_id)
+book.authors.remove(author_id)
+book.authors.set([author_id])
+book.authors.add(42)  # E: Argument `Literal[42]` is not assignable to parameter `*objs` with type `Author | UUID`
+"#,
+);
