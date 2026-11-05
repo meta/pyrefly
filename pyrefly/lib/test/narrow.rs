@@ -983,7 +983,7 @@ def generic(x: MyList[int] | list[int]):
 testcase!(
     test_type_eq_keeps_subclasses_when_unsure,
     r#"
-from typing import NewType, reveal_type
+from typing import NewType, Protocol, reveal_type, runtime_checkable
 
 class A: ...
 class B(A): ...
@@ -999,6 +999,16 @@ def new_type(x: UserId | str):
     # At runtime, `type(UserId(1))` is `int`.
     if type(x) is int:
         reveal_type(x)  # E: revealed type: UserId
+
+@runtime_checkable
+class P(Protocol): ...
+class Q(P, Protocol): ...
+class Impl(P): ...
+
+def protocols(x: Q | Impl | int):
+    # Protocols are structural, so we leave these to `isinstance` narrowing.
+    if type(x) is P:
+        reveal_type(x)  # E: revealed type: Impl | P | int
     "#,
 );
 

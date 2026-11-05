@@ -1093,6 +1093,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let Type::ClassDef(cls) = &right else {
             return narrowed;
         };
+        // Protocols are structural, so a nominal subclass check says nothing about runtime classes.
+        if cls.is_protocol() {
+            return narrowed;
+        }
         self.distribute_over_union(&narrowed, |t| {
             let member = match t {
                 Type::ClassType(c) => Some(c.class_object()),
@@ -1106,6 +1110,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // rule it out by its declared subclass relationship.
                 Some(member)
                     if member != cls
+                        && !member.is_protocol()
                         && !self.get_metadata_for_class(member).is_new_type()
                         && self.has_superclass(member, cls) =>
                 {
