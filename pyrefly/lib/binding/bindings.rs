@@ -3217,6 +3217,7 @@ impl<'a> BindingsBuilder<'a> {
         undecorated_idx: Idx<KeyUndecoratedFunction>,
         class_key: Option<Idx<KeyClass>>,
         is_variadic: bool,
+        override_func: Option<Idx<KeyUndecoratedFunction>>,
         ignore_annotation: bool,
     ) {
         let name = x.name();
@@ -3229,7 +3230,12 @@ impl<'a> BindingsBuilder<'a> {
             x.annotation().map(|x| {
                 self.insert_binding(
                     KeyAnnotation::Annotation(ShortIdentifier::new(name)),
-                    BindingAnnotation::AnnotateExpr(target.clone(), x.clone(), class_key),
+                    BindingAnnotation::AnnotateExpr(
+                        target.clone(),
+                        x.clone(),
+                        class_key,
+                        override_func,
+                    ),
                 )
             })
         };

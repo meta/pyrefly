@@ -826,6 +826,7 @@ impl<'a> BindingsBuilder<'a> {
                 },
                 annotation.clone(),
                 None,
+                None,
             )
         };
         self.insert_binding(ann_key, ann_val)
@@ -1287,6 +1288,7 @@ impl<'a> BindingsBuilder<'a> {
                         BindingAnnotation::AnnotateExpr(
                             AnnotationTarget::AttrAssign(attr_name.clone()),
                             *x.annotation,
+                            None,
                             None,
                         ),
                     );

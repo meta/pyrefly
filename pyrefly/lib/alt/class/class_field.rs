@@ -2878,7 +2878,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if ty.is_some_and(Self::is_proxy_method_type) {
             return true;
         }
-        let BindingAnnotation::AnnotateExpr(_, expr, _) = self.bindings().get(annotation) else {
+        let BindingAnnotation::AnnotateExpr(_, expr, _, _) = self.bindings().get(annotation) else {
             return false;
         };
         Self::proxy_method_annotation_syntax_mentions_name(expr)
@@ -2890,7 +2890,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         annotation: Idx<KeyAnnotation>,
     ) -> ProxyMethodAnnotationForm {
-        let BindingAnnotation::AnnotateExpr(_, expr, _) = self.bindings().get(annotation) else {
+        let BindingAnnotation::AnnotateExpr(_, expr, _, _) = self.bindings().get(annotation) else {
             return ProxyMethodAnnotationForm::Other;
         };
         self.proxy_method_annotation_expr_form(expr)
@@ -5311,25 +5311,40 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             })
     }
 
+    /// Return the mapped value for the first inherited member for `name`
+    /// accepted by `accept`, walking the MRO once. Only members defined on
+    /// each ancestor are examined: a recursive lookup would find a shadowed
+    /// member of an earlier ancestor's own bases first (e.g. `A.f` instead of
+    /// `D.f` for `class C(B, D)`). Generic substitutions are preserved via
+    /// instantiation against each ancestor.
+    pub(crate) fn inherited_member_where<T>(
+        &self,
+        cls: &Class,
+        name: &Name,
+        accept: impl Fn(Type) -> Option<T>,
+    ) -> Option<T> {
+        let derived_instance = self.instantiate(cls);
+        for ancestor in self.get_mro_for_class(cls).ancestors(self.stdlib) {
+            let parent_cls = ancestor.class_object();
+            let Some(field) = self.get_field_from_current_class_only(parent_cls, name) else {
+                continue;
+            };
+            let instance = Instance::of_protocol(ancestor, derived_instance.clone());
+            let instantiated = field.instantiate_for(self.heap, &instance);
+            if let Some(mapped) = accept(instantiated.ty()) {
+                return Some(mapped);
+            }
+        }
+        None
+    }
+
     /// Return the first inherited method signature (parameters and flags) for `name`.
     pub(crate) fn inherited_method_signature(
         &self,
         cls: &Class,
         name: &Name,
     ) -> Option<(ParamList, FuncFlags)> {
-        let derived_instance = self.instantiate(cls);
-        for ancestor in self.get_mro_for_class(cls).ancestors(self.stdlib) {
-            let parent_cls = ancestor.class_object();
-            let Some(member) = self.get_class_member(parent_cls, name) else {
-                continue;
-            };
-            let instance = Instance::of_protocol(ancestor, derived_instance.clone());
-            let instantiated = member.instantiate_for(self.heap, &instance);
-            if let Some(sig) = Self::callable_params_and_flags(instantiated.ty()) {
-                return Some(sig);
-            }
-        }
-        None
+        self.inherited_member_where(cls, name, Self::callable_params_and_flags)
     }
 
     /// Test raw metaclass fields without binding methods or applying descriptors.

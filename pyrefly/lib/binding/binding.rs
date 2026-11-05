@@ -3494,7 +3494,17 @@ impl AnnotationTarget {
 pub enum BindingAnnotation {
     /// The type is annotated to be this key, will have the outer type removed.
     /// Optionally occurring within a class, in which case Self refers to this class.
-    AnnotateExpr(AnnotationTarget, Expr, Option<Idx<KeyClass>>),
+    /// For a parameter/return annotation of an `@override` method, the final field
+    /// identifies the method itself, so the solver can compare against the base
+    /// signature (e.g. to exempt dictated annotations from `explicit-any`); `None`
+    /// otherwise. This implies the class field is `Some`. Name, async-ness and
+    /// parameter shape are read from the function binding, not duplicated here.
+    AnnotateExpr(
+        AnnotationTarget,
+        Expr,
+        Option<Idx<KeyClass>>,
+        Option<Idx<KeyUndecoratedFunction>>,
+    ),
     /// The type that a docstring declares for the unannotated parameter with this name.
     /// Docstrings are informal, so a type that does not check is dropped without an error.
     DocstringParam(Name, Expr),
@@ -3505,14 +3515,18 @@ pub enum BindingAnnotation {
 impl DisplayWith<Bindings> for BindingAnnotation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Bindings) -> fmt::Result {
         match self {
-            Self::AnnotateExpr(target, x, class_key) => write!(
+            Self::AnnotateExpr(target, x, class_key, override_func) => write!(
                 f,
-                "AnnotateExpr({target}, {}, {})",
+                "AnnotateExpr({target}, {}, {}, {})",
                 ctx.module().display(x),
                 match class_key {
                     None => "None".to_owned(),
                     Some(t) => ctx.display(*t).to_string(),
-                }
+                },
+                match override_func {
+                    None => "None".to_owned(),
+                    Some(t) => ctx.get(*t).def.name.id.to_string(),
+                },
             ),
             Self::DocstringParam(name, x) => {
                 write!(f, "DocstringParam({name}, {})", ctx.module().display(x))
