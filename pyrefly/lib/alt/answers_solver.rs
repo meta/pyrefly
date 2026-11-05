@@ -1444,15 +1444,6 @@ enum BindingAction<'answer> {
     NeedsColdPlaceholder,
 }
 
-/// A rendered non-convergence error, owned independently of the SCC answers it
-/// was built from, so it can be emitted after those answers are gone.
-struct NonConvergentDiagnostic {
-    calc_id: CalcId,
-    range: TextRange,
-    message: String,
-    details: Option<Vec<String>>,
-}
-
 /// Per-SCC iteration state for iterative fixpoint solving.
 ///
 /// This tracks the current iteration number, current and warm-start answer
@@ -3258,7 +3249,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Called after the fixpoint iteration converges (or max iterations are
     /// reached).
     #[allow(clippy::mutable_key_type)]
-    fn commit_final_answers(&self, scc: Scc) -> bool {
+    fn commit_final_answers(&self, scc: Scc) {
         let members = scc.into_final_answers();
 
         let member_count = members.len();
@@ -3281,13 +3272,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Commit each winning member's side effects immediately before publishing
         // its result. Reverse order keeps the lowest successfully reserved slot
         // pending until every other result in this batch is visible.
-        let mut did_publish = false;
         guard.committing = true;
         while let Some(reserved) = guard.reserved.last_mut() {
-            did_publish |= reserved.publish();
+            reserved.publish();
             guard.reserved.pop();
         }
-        did_publish
     }
 
     /// Drive a single iteration member by calling `get_idx` for its typed index.
@@ -3452,54 +3441,36 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // the cycle was broken by returning a previous-iteration answer. Other
         // non-converging members are downstream consequences and would produce
         // noisy duplicate errors.
-        // Rendering the diagnostics before committing keeps every read of the
-        // answers in one place, so only owned values cross into the reporting
-        // loop, which cannot run until `commit_final_answers` reports whether
-        // the answers were committed at all.
-        let non_convergent_diagnostics = if exceeded_max_iterations {
-            scc.node_state
-                .iter()
-                .filter_map(|(calc_id, node_state)| match node_state {
-                    SccNodeState::Done { .. }
-                        if scc.iterative.recursion_breaks.contains(calc_id) =>
-                    {
-                        let current = scc
-                            .iterative
-                            .answers
-                            .get_current(calc_id)
-                            .expect("Done SCC node must have a current answer");
-                        let previous = scc.iterative.answers.get_previous(calc_id);
-                        dispatch_anyidx!(
-                            &calc_id.1,
-                            self,
-                            make_non_convergent_diagnostic,
-                            current,
-                            previous,
-                            &calc_id.0
-                        )
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-
-        let did_commit = self.commit_final_answers(scc);
-        if did_commit {
-            for diagnostic in non_convergent_diagnostics {
-                if self.is_same_module(&diagnostic.calc_id) {
-                    Self::emit_non_convergent_diagnostic(diagnostic, self.base_errors);
-                } else {
-                    let cross_errors = ErrorCollector::new(
-                        diagnostic.calc_id.bindings().module().dupe(),
-                        ErrorStyle::Delayed,
-                    );
-                    Self::emit_non_convergent_diagnostic(diagnostic, &cross_errors);
-                    self.base_errors.extend(cross_errors);
+        if exceeded_max_iterations {
+            for (calc_id, node_state) in &mut scc.node_state {
+                if !scc.iterative.recursion_breaks.contains(calc_id) {
+                    continue;
                 }
+                // Only a member that finished the final iteration has an answer to report.
+                let SccNodeState::Done { errors, .. } = node_state else {
+                    continue;
+                };
+                let errors = errors
+                    .as_ref()
+                    .expect("a final non-convergent SCC member must have collected errors");
+                let current = scc
+                    .iterative
+                    .answers
+                    .get_current(calc_id)
+                    .expect("Done SCC node must have a current answer");
+                let previous = scc.iterative.answers.get_previous(calc_id);
+                dispatch_anyidx!(
+                    &calc_id.1,
+                    self,
+                    report_non_convergent_member,
+                    current,
+                    previous,
+                    &calc_id.0,
+                    errors
+                );
             }
         }
+        self.commit_final_answers(scc);
     }
 
     /// Finalize a recursive answer. This takes the raw value produced by `K::solve` and calls
@@ -4243,14 +4214,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// If `PYREFLY_FIXPOINT_DETAILS` is set (to any non-empty value besides `0`),
     /// append internal debug details for bug reports (key/binding and both
     /// previous/current answers in Debug format).
-    fn make_non_convergent_diagnostic<K: Solve<Ans>>(
+    fn report_non_convergent_member<K: Solve<Ans>>(
         &self,
         idx: Idx<K>,
         current: &AnyAnswer,
         previous: Option<&AnyAnswer>,
         member_answers: &Arc<Answers>,
-    ) -> Option<NonConvergentDiagnostic>
-    where
+        errors: &ErrorCollector,
+    ) where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
         K::Answer: Debug,
@@ -4262,11 +4233,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if let Some(prev) = previous
             && self.answers_equal_typed::<K>(idx, prev, current)
         {
-            return None;
+            return;
         }
         let typed_answer = current
             .downcast_ref::<K::Answer>()
-            .expect("make_non_convergent_diagnostic: type mismatch");
+            .expect("report_non_convergent_member: type mismatch");
         // TypeInfo answers represent inferred types; other answer kinds are
         // internal results (class fields, metadata, etc.).
         let noun = if current.downcast_ref::<TypeInfo>().is_some() {
@@ -4274,24 +4245,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             "result"
         };
-        let message = format!(
-            "Fixpoint iteration did not converge. \
+        let mut builder = errors.error_builder(
+            K::range_with(idx, member_bindings),
+            ErrorKind::NonConvergentRecursion,
+            format!(
+                "Fixpoint iteration did not converge. \
                  Inferred {} `{}`. Adding annotations may help.",
-            noun, typed_answer,
+                noun, typed_answer,
+            ),
         );
         // If PYREFLY_FIXPOINT_DETAILS=1 is set, we output much more detailed information useful
         // for explaining or debugging nonconvergence in terms of Pyrefly internals.
-        let details = if Self::fixpoint_details_enabled() {
+        if Self::fixpoint_details_enabled() {
             let binding = member_bindings.get(idx);
             let previous_debug = previous
                 .map(|prev| {
                     let prev_typed = prev
                         .downcast_ref::<K::Answer>()
-                        .expect("make_non_convergent_diagnostic: previous answer type mismatch");
+                        .expect("report_non_convergent_member: previous answer type mismatch");
                     format!("{prev_typed:?}")
                 })
                 .unwrap_or_else(|| "<none>".to_owned());
-            Some(vec![
+            builder = builder.with_details(vec![
                 format!(
                     "[PYREFLY_FIXPOINT_DETAILS] key={:?} key_idx={idx:?}",
                     K::to_anyidx(idx),
@@ -4308,29 +4283,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ),
                 format!("[PYREFLY_FIXPOINT_DETAILS] previous={previous_debug}"),
                 format!("[PYREFLY_FIXPOINT_DETAILS] current={typed_answer:?}"),
-            ])
-        } else {
-            None
-        };
-        Some(NonConvergentDiagnostic {
-            calc_id: CalcId(member_answers.dupe(), K::to_anyidx(idx)),
-            range: K::range_with(idx, member_bindings),
-            message,
-            details,
-        })
-    }
-
-    fn emit_non_convergent_diagnostic(
-        diagnostic: NonConvergentDiagnostic,
-        errors: &ErrorCollector,
-    ) {
-        let mut builder = errors.error_builder(
-            diagnostic.range,
-            ErrorKind::NonConvergentRecursion,
-            diagnostic.message,
-        );
-        if let Some(details) = diagnostic.details {
-            builder = builder.with_details(details);
+            ]);
         }
         builder.emit();
     }
