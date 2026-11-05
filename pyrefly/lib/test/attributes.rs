@@ -2329,17 +2329,16 @@ def test(c: C) -> None:
 );
 
 testcase!(
-    bug = "Literal-name getattr loses contextual typing of container defaults",
     test_builtin_getattr_contextual_container_defaults,
     r#"
 class C:
     x: int
 
 def list_default(c: C) -> int | list[object]:
-    return getattr(c, "x", [1])  # E: Returned type `int | list[int]` is not assignable
+    return getattr(c, "x", [1])
 
 def dict_default(c: C) -> int | dict[str, object]:
-    return getattr(c, "x", {"key": 1})  # E: Returned type `dict[str, int] | int` is not assignable
+    return getattr(c, "x", {"key": 1})
 
 def missing_default(c: C) -> int | list[object]:
     return getattr(c, "missing", [1])
@@ -2356,7 +2355,6 @@ def incompatible_default(c: C) -> int:
 );
 
 testcase!(
-    bug = "Literal-name getattr loses contextual typing of lambda defaults",
     test_builtin_getattr_contextual_lambda_defaults,
     TestEnv::new().enable_implicit_any_lambda_error(),
     r#"
@@ -2366,19 +2364,19 @@ class C:
     callback: Callable[[str], str]
 
 def known_attribute(c: C) -> Callable[[str], str]:
-    return getattr(c, "callback", lambda x: x.upper())  # E: Type of lambda parameter `x` is unknown
+    return getattr(c, "callback", lambda x: x.upper())
 
 def missing_attribute(c: C) -> Callable[[str], str]:
-    return getattr(c, "missing", lambda x: x.upper())  # E: Type of lambda parameter `x` is unknown
+    return getattr(c, "missing", lambda x: x.upper())
 
 def nonclass_receiver(c: type[C]) -> Callable[[str], str]:
-    return getattr(c, "callback", lambda x: x.upper())  # E: Type of lambda parameter `x` is unknown
+    return getattr(c, "callback", lambda x: x.upper())
 
 def nonliteral_name(c: C, name: str) -> Callable[[str], str]:
     return getattr(c, name, lambda x: x.upper())
 
 def incompatible_body(c: object) -> Callable[[str], str]:
-    return getattr(c, "callback", lambda x: x + 1)  # E: Type of lambda parameter `x` is unknown
+    return getattr(c, "callback", lambda x: x + 1)  # E: `+` is not supported between `str` and `Literal[1]`
 
 def incompatible_body_control(c: object, name: str) -> Callable[[str], str]:
     return getattr(c, name, lambda x: x + 1)  # E: `+` is not supported between `str` and `Literal[1]`

@@ -209,9 +209,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> Type {
-        // Reuse inferred arguments for validation and lookup to keep nested calls linear.
+        // Infer each argument once and reuse its type for validation and lookup.
+        // The receiver parameter is `object`, while the default contributes to
+        // the result and needs the call's contextual hint.
         let obj_ty = obj_arg.infer(self, errors);
-        let default = default_arg.map(|arg| (arg.infer(self, errors), arg.range()));
+        let default = default_arg.map(|arg| (arg.infer_with_hint(self, hint, errors), arg.range()));
         let name_ty = Lit::Str(attr_name.as_str().into()).to_implicit_type();
         let mut args = vec![
             CallArg::ty(&obj_ty, obj_arg.range()),
