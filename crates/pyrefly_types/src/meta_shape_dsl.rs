@@ -1528,7 +1528,7 @@ fn convert_fndef(func: &ruff_python_ast::StmtFunctionDef) -> Result<DslFnDef, Ds
 // - x == None / x != None → narrows x to/from None in then/else
 
 /// Type environment mapping variable names to their inferred types.
-type TypeEnv = HashMap<String, DslType>;
+type DslTypeEnv = HashMap<String, DslType>;
 
 /// Function return types, keyed by function name.
 ///
@@ -1740,7 +1740,7 @@ fn narrow_away_none(ty: &DslType, errors: &mut Vec<String>) -> DslType {
 
 /// Analyze a condition expression for type narrowing.
 /// Returns (then_env, else_env) — the environments for the true and false branches.
-fn narrow(cond: &DslExpr, env: &TypeEnv, errors: &mut Vec<String>) -> (TypeEnv, TypeEnv) {
+fn narrow(cond: &DslExpr, env: &DslTypeEnv, errors: &mut Vec<String>) -> (DslTypeEnv, DslTypeEnv) {
     match cond {
         // isinstance(x, con)
         DslExpr::IsInstance { expr, ty } => {
@@ -1858,7 +1858,7 @@ fn arithmetic_result(a: &DslType, b: &DslType) -> DslType {
 /// Infer the element type of a list literal from its elements.
 fn infer_list_elem_type(
     elts: &[DslExpr],
-    env: &TypeEnv,
+    env: &DslTypeEnv,
     sigs: &FnRetTypes,
     errors: &mut Vec<String>,
 ) -> DslType {
@@ -1878,10 +1878,10 @@ fn infer_list_elem_type(
 fn bind_comp_vars(
     vars: &[String],
     iter: &DslExpr,
-    env: &TypeEnv,
+    env: &DslTypeEnv,
     sigs: &FnRetTypes,
     errors: &mut Vec<String>,
-) -> TypeEnv {
+) -> DslTypeEnv {
     let mut new_env = env.clone();
     match iter {
         DslExpr::Call {
@@ -1938,7 +1938,7 @@ fn bind_comp_vars(
 fn infer_call(
     func: &DslCallTarget,
     args: &[DslExpr],
-    env: &TypeEnv,
+    env: &DslTypeEnv,
     sigs: &FnRetTypes,
     errors: &mut Vec<String>,
 ) -> DslType {
@@ -2048,7 +2048,7 @@ fn infer_call(
 /// Infer the type of a DSL expression.
 fn infer_expr(
     expr: &DslExpr,
-    env: &TypeEnv,
+    env: &DslTypeEnv,
     sigs: &FnRetTypes,
     errors: &mut Vec<String>,
 ) -> DslType {
@@ -2186,7 +2186,7 @@ fn infer_expr(
 /// function has no return annotation (an error already reported elsewhere).
 fn check_body(
     body: &DslBody,
-    env: &TypeEnv,
+    env: &DslTypeEnv,
     sigs: &FnRetTypes,
     ret_ty: Option<&DslType>,
     errors: &mut Vec<String>,
@@ -2242,7 +2242,7 @@ fn type_check_program(fndefs: &[DslFnDef]) -> Result<(), Vec<DslCompileError>> {
     let sigs = build_fn_ret_types(fndefs, &mut errors);
     for fndef in fndefs {
         let mut fn_errors: Vec<String> = Vec::new();
-        let mut env = TypeEnv::new();
+        let mut env = DslTypeEnv::new();
         for param in &fndef.params {
             env.insert(param.name.clone(), param.ty.clone());
         }
