@@ -444,10 +444,12 @@ class A:
 A().
 #   ^
 "#;
-    let report =
-        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
-    assert!(report.contains("- (Field) A"), "{report}");
-    assert!(report.contains("- (Field) B"), "{report}");
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let position = extract_cursors_for_test(code)[0];
+    assert_eq!(
+        dict_field_labels(&state.transaction(), &handles["main"], position),
+        ["A", "B"],
+    );
 }
 
 #[test]
@@ -463,12 +465,12 @@ class A:
 A().
 #   ^
 "#;
-    let report =
-        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
-    assert!(report.contains("- (Field) good"), "{report}");
-    assert!(!report.contains("- (Field) bad-name"), "{report}");
-    assert!(!report.contains("- (Field) class"), "{report}");
-    assert!(!report.contains("- (Field) \n"), "{report}");
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let position = extract_cursors_for_test(code)[0];
+    assert_eq!(
+        dict_field_labels(&state.transaction(), &handles["main"], position),
+        ["good"],
+    );
 }
 
 #[test]
