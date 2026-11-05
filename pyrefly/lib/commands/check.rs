@@ -117,10 +117,32 @@ use crate::state::subscriber::TestSubscriber;
 
 /// Result data from a non-watch check run, used for telemetry logging.
 pub struct CheckResult {
-    /// CLI-visible diagnostics in the legacy JSON format, suitable for serialization.
+    /// The first `CheckResult::LOGGED_ERROR_LIMIT` CLI-visible diagnostics, in the legacy
+    /// JSON format, suitable for serialization.
     pub legacy_errors: Vec<LegacyError>,
+    /// Number of CLI-visible diagnostics, including those beyond `legacy_errors`.
+    pub error_count: usize,
     /// Number of files (modules) that were checked.
     pub checked_file_count: usize,
+}
+
+impl CheckResult {
+    /// How many diagnostics telemetry logs. Converting every diagnostic of a large run only
+    /// to log a few would cost more than collecting them.
+    pub const LOGGED_ERROR_LIMIT: usize = 300;
+
+    fn new(
+        errors: &[CollectedDiagnostic<'_>],
+        relative_to: &Path,
+        checked_file_count: usize,
+    ) -> Self {
+        let logged = &errors[..errors.len().min(Self::LOGGED_ERROR_LIMIT)];
+        Self {
+            legacy_errors: LegacyErrors::from_errors(relative_to, logged).errors,
+            error_count: errors.len(),
+            checked_file_count,
+        }
+    }
 }
 
 /// Check the given files.
@@ -1683,19 +1705,19 @@ impl CheckArgs {
         upsell: UpsellDecision,
         thread_count: ThreadCount,
     ) -> anyhow::Result<(CommandExitStatus, CheckResult)> {
-        let (status, checked_file_count, legacy_errors) = self.run_once_with(
+        let (status, checked_file_count, check_result) = self.run_once_with(
             version,
             files_to_check,
             config_finder,
             upsell,
             thread_count,
-            |errors, relative_to| LegacyErrors::from_errors(relative_to, errors).errors,
+            |errors, relative_to| CheckResult::new(errors, relative_to, 0),
         )?;
         Ok((
             status,
             CheckResult {
-                legacy_errors,
                 checked_file_count,
+                ..check_result
             },
         ))
     }
@@ -1810,7 +1832,7 @@ impl CheckArgs {
             Some(Arc::new(FileContents::from_source(code))),
         )]);
 
-        let (status, legacy_errors) = self.run_inner(
+        let (status, check_result) = self.run_inner(
             Timings::new(),
             transaction.as_mut(),
             version,
@@ -1820,15 +1842,9 @@ impl CheckArgs {
             require_levels.specified,
             // Snippet checks are interactive ad-hoc inputs — never upsell.
             UpsellDecision::Skip,
-            |errors, relative_to| LegacyErrors::from_errors(relative_to, errors).errors,
+            |errors, relative_to| CheckResult::new(errors, relative_to, 1),
         )?;
-        Ok((
-            status,
-            CheckResult {
-                legacy_errors,
-                checked_file_count: 1,
-            },
-        ))
+        Ok((status, check_result))
     }
 
     fn get_required_levels(&self) -> RequireLevels {
