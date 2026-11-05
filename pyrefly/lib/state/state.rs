@@ -935,25 +935,28 @@ impl<'a> Transaction<'a> {
         self.with_module_inner(handle, |x| x.get_answers())
     }
 
-    /// Look up the `ClassFields` for a class, which may be defined in another module.
+    /// Look up the `BindingsMetadata` of a module.
     /// Falls back to `Solutions` metadata when answers are evicted (e.g. during `coverage`).
+    pub fn get_bindings_metadata(&self, handle: &Handle) -> Option<Arc<BindingsMetadata>> {
+        match self.get_answers(handle) {
+            Some(answers) => Some(answers.bindings().metadata().dupe()),
+            None => Some(self.get_solutions(handle)?.metadata().dupe()),
+        }
+    }
+
+    /// Look up the `ClassFields` for a class, which may be defined in another module.
     pub fn get_class_fields(&self, source_handle: &Handle, class: &Class) -> Option<ClassFields> {
         let handle = Handle::new(
             class.module_name(),
             class.module_path().dupe(),
             source_handle.sys_info().dupe(),
         );
-        if let Some(answers) = self.get_answers(&handle) {
-            answers.bindings().get_class_fields(class.index()).cloned()
-        } else {
-            Some(
-                self.get_solutions(&handle)?
-                    .metadata()
-                    .get_class_checked(class.index())?
-                    .fields
-                    .clone(),
-            )
-        }
+        Some(
+            self.get_bindings_metadata(&handle)?
+                .get_class_checked(class.index())?
+                .fields
+                .clone(),
+        )
     }
 
     pub fn get_ast(&self, handle: &Handle) -> Option<Arc<ruff_python_ast::ModModule>> {
