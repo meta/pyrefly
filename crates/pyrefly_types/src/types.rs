@@ -244,22 +244,30 @@ impl TParams {
     }
 }
 
+/// The type arguments of a class instance, together with the class's type parameters.
+///
+/// Invariant: the field is `None` exactly when there are no type arguments. Most class
+/// types are not generic, so they carry no allocation, and cloning or dropping them
+/// touches no reference count shared with other threads.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[derive(TypeEq)]
-pub struct TArgs(Arc<(Arc<TParams>, Box<[Type]>)>);
+pub struct TArgs(Option<Arc<(Arc<TParams>, Box<[Type]>)>>);
 
 impl Visit<Type> for TArgs {
     fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
         // TParams describe the declaration; only applied arguments are contained types.
-        self.0.1.visit(f);
+        for ty in self.as_slice() {
+            ty.visit(f);
+        }
     }
 }
 
 impl VisitMut<Type> for TArgs {
     fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
         // Arc<TParams> has a no-op VisitMut, so we only need to visit the types.
-        let inner = Arc::make_mut(&mut self.0);
-        inner.1.visit_mut(f);
+        for ty in self.as_mut() {
+            ty.visit_mut(f);
+        }
     }
 }
 
@@ -268,41 +276,57 @@ impl TArgs {
         if tparams.len() != targs.len() {
             panic!("TParams and TArgs must have the same length");
         }
-        Self(Arc::new((tparams, targs.into_boxed_slice())))
+        if targs.is_empty() {
+            return Self(None);
+        }
+        Self(Some(Arc::new((tparams, targs.into_boxed_slice()))))
     }
 
     pub fn tparams(&self) -> &TParams {
-        &self.0.0
+        match &self.0 {
+            Some(inner) => &inner.0,
+            None => TParams::empty_ref(),
+        }
     }
 
     pub fn iter_paired(&self) -> impl ExactSizeIterator<Item = (&Quantified, &Type)> {
-        self.0.0.iter().zip(self.0.1.iter())
+        self.tparams().iter().zip(self.as_slice().iter())
     }
 
     pub fn iter_paired_mut(&mut self) -> impl ExactSizeIterator<Item = (&Quantified, &mut Type)> {
-        let inner = Arc::make_mut(&mut self.0);
-        inner.0.iter().zip(inner.1.iter_mut())
+        let (tparams, targs) = self.split_mut();
+        tparams.iter().zip(targs.iter_mut())
     }
 
     pub fn len(&self) -> usize {
-        self.0.1.len()
+        self.as_slice().len()
     }
 
     pub fn as_slice(&self) -> &[Type] {
-        &self.0.1
+        match &self.0 {
+            Some(inner) => &inner.1,
+            None => &[],
+        }
     }
 
     pub fn as_mut(&mut self) -> &mut [Type] {
-        &mut Arc::make_mut(&mut self.0).1
+        self.split_mut().1
     }
 
+    /// Mutable access to the arguments. Without arguments this neither allocates nor
+    /// touches a reference count; with them, a shared allocation is copied first.
     pub fn split_mut(&mut self) -> (&TParams, &mut [Type]) {
-        let inner = Arc::make_mut(&mut self.0);
-        (&inner.0, &mut inner.1)
+        match &mut self.0 {
+            Some(inner) => {
+                let inner = Arc::make_mut(inner);
+                (&inner.0, &mut inner.1)
+            }
+            None => (TParams::empty_ref(), &mut []),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.1.is_empty()
+        self.0.is_none()
     }
 
     /// Returns the number of type arguments to display, stripping trailing args
@@ -329,13 +353,14 @@ impl TArgs {
     /// Unions in the substituted arguments are simplified, so type arguments that differ only in
     /// the order, nesting or duplication of union members compare equal.
     pub fn substitute_with(&self, substitution: &Substitution) -> Self {
+        let Some((tparams, targs)) = self.0.as_deref() else {
+            return Self::default();
+        };
         if substitution.0.is_empty() {
             return self.clone();
         }
         let heap = TypeHeap::new();
-        let tys = self
-            .0
-            .1
+        let tys = targs
             .iter()
             .map(|ty| {
                 let mut ty = substitution.substitute_into(ty.clone());
@@ -351,7 +376,7 @@ impl TArgs {
                 ty
             })
             .collect();
-        Self::new(self.0.0.dupe(), tys)
+        Self::new(tparams.dupe(), tys)
     }
 
     pub fn substitution_map(&self) -> SmallMap<&Quantified, &Type> {
