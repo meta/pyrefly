@@ -161,7 +161,7 @@ fn checked_state() -> (State, Vec<Handle>) {
     let mut transaction = state.new_committable_transaction(Require::Exports, None);
     transaction.as_mut().set_memory(
         (0..MODULES)
-            .map(|index| (memory_path(index), Some(Arc::new(contents(index)))))
+            .map(|index| (module_path(index), Some(Arc::new(contents(index)))))
             .collect(),
     );
     transaction.as_mut().run(&handles, Require::Errors, None);
@@ -212,7 +212,7 @@ fn prepare_all<'a>(
                 let mut text = source(index);
                 text.push_str(&format!("\n_touch{nonce}: int = {nonce}\n"));
                 (
-                    memory_path(index),
+                    module_path(index),
                     Some(Arc::new(FileContents::from_source(text))),
                 )
             })

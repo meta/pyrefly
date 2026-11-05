@@ -63,6 +63,78 @@ use crate::state::state::State;
 use crate::test::util::TestEnv;
 
 #[test]
+fn test_memory_source_updates_preserve_filesystem_imports() {
+    let directory = TempDir::new().unwrap();
+    let helper = directory.path().join("helper.py");
+    let main = directory.path().join("main.py");
+    fs::write(&helper, "value: int = 1\n").unwrap();
+    fs::write(&main, "from helper import value\ncheck: int = value\n").unwrap();
+    let mut config = ConfigFile {
+        search_path_from_args: vec![directory.path().to_owned()],
+        disable_search_path_heuristics: true,
+        ..Default::default()
+    };
+    config.python_environment.set_empty_to_default();
+    config.interpreters.skip_interpreter_query = true;
+    assert!(config.configure().is_empty());
+    let sys_info = config.get_sys_info();
+    let filesystem = Handle::new(
+        ModuleName::from_str("helper"),
+        ModulePath::filesystem(helper.clone()),
+        sys_info.dupe(),
+    );
+    let memory = Handle::new(
+        filesystem.module(),
+        ModulePath::memory(helper),
+        sys_info.dupe(),
+    );
+    let importer = Handle::new(
+        ModuleName::from_str("main"),
+        ModulePath::filesystem(main),
+        sys_info,
+    );
+    let state = State::new(
+        ConfigFinder::new_constant(ArcId::new(config)),
+        TEST_THREAD_COUNT,
+    );
+    let mut transaction = state.new_committable_transaction(Require::Everything, None);
+    for contents in ["value: str = 'unsaved'\n", "value: float = 1.5\n"] {
+        transaction.as_mut().set_memory(vec![(
+            memory.path().dupe(),
+            Some(Arc::new(FileContents::from_source(contents.to_owned()))),
+        )]);
+        transaction
+            .as_mut()
+            .run(&[importer.dupe(), memory.dupe()], Require::Everything, None);
+        assert_eq!(
+            transaction
+                .as_ref()
+                .get_module_info(&memory)
+                .unwrap()
+                .contents()
+                .as_str(),
+            contents
+        );
+        assert_eq!(
+            transaction
+                .as_ref()
+                .get_module_info(&filesystem)
+                .unwrap()
+                .contents()
+                .as_str(),
+            "value: int = 1\n"
+        );
+        assert!(
+            transaction
+                .as_ref()
+                .get_errors([&importer])
+                .collect_display_errors()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
 fn test_fallback_search_path_relative_import_emits_dedicated_diagnostic() {
     let tdir = TempDir::new().unwrap();
     let root = tdir.path();
@@ -465,7 +537,7 @@ fn test_multiple_path() {
     let mut transaction = state.new_transaction(Require::Exports, None);
     transaction.set_memory(FILES.map(|(_, path, contents)| {
         (
-            PathBuf::from(path),
+            ModulePath::memory(PathBuf::from(path)),
             Some(Arc::new(FileContents::from_source((*contents).to_owned()))),
         )
     }));
@@ -782,7 +854,7 @@ fn test_tensor_shapes_source_db_rebuild_rechecks_marker_availability() {
     );
     let memory = vec![
         (
-            PathBuf::from("main.py"),
+            ModulePath::memory(PathBuf::from("main.py")),
             Some(Arc::new(FileContents::from_source(
                 r#"
 from torch import Tensor
@@ -795,7 +867,7 @@ def f(x: Tensor[[2, 3]]) -> None:
             ))),
         ),
         (
-            PathBuf::from("torch.pyi"),
+            ModulePath::memory(PathBuf::from("torch.pyi")),
             Some(Arc::new(FileContents::from_source(
                 r#"
 from shape_extensions import IntTuple
@@ -806,7 +878,7 @@ class Tensor[Shape: IntTuple]: ...
             ))),
         ),
         (
-            PathBuf::from("jaxtyping.pyi"),
+            ModulePath::memory(PathBuf::from("jaxtyping.pyi")),
             Some(Arc::new(FileContents::from_source(
                 r#"
 class Float[*Shape]: ...
@@ -815,7 +887,7 @@ class Float[*Shape]: ...
             ))),
         ),
         (
-            PathBuf::from("shape_extensions.pyi"),
+            ModulePath::memory(PathBuf::from("shape_extensions.pyi")),
             Some(Arc::new(FileContents::from_source(
                 r#"
 from typing import Any
@@ -1157,7 +1229,7 @@ fn test_crash_on_search() {
     // Now we dirty the module `foo`
     let mut t = state.new_committable_transaction(REQUIRE, None);
     t.as_mut().set_memory(vec![(
-        PathBuf::from("foo.py"),
+        ModulePath::memory(PathBuf::from("foo.py")),
         Some(Arc::new(FileContents::from_source("x = 3".to_owned()))),
     )]);
     t.as_mut().run(&[], Require::Everything, None); // This run breaks reproduction (but is now required)
@@ -1308,7 +1380,7 @@ y: dict[str, int] = {**DuckMapping()}
 
     let mut transaction = state.new_transaction(Require::Everything, None);
     transaction.set_memory(vec![(
-        PathBuf::from("test_module.py"),
+        ModulePath::memory(PathBuf::from("test_module.py")),
         Some(Arc::new(FileContents::from_source(test_code.to_owned()))),
     )]);
     transaction.run(&[handle.dupe()], Require::Everything, None);
@@ -1403,7 +1475,7 @@ class MethodType(Generic[_P_default, _R_default]):"#,
     );
     let mut transaction = state.new_transaction(Require::Everything, None);
     transaction.set_memory(vec![(
-        PathBuf::from("main.py"),
+        ModulePath::memory(PathBuf::from("main.py")),
         Some(Arc::new(FileContents::from_source(
             r#"
 from types import MethodType

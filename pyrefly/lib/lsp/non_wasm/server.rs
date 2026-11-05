@@ -3291,7 +3291,12 @@ impl Server {
             self.open_files
                 .read()
                 .iter()
-                .map(|x| (x.0.clone(), Some(Arc::new(x.1.to_file_contents()))))
+                .map(|x| {
+                    (
+                        ModulePath::memory(x.0.clone()),
+                        Some(Arc::new(x.1.to_file_contents())),
+                    )
+                })
                 .collect::<Vec<_>>(),
         );
         transaction.run(&handles, Require::Everything, custom_thread_pool);
@@ -4802,7 +4807,9 @@ impl Server {
                 let mut transaction = server
                     .state
                     .new_committable_transaction(Require::Exports, None);
-                transaction.as_mut().set_memory(vec![(path.clone(), None)]);
+                transaction
+                    .as_mut()
+                    .set_memory(vec![(ModulePath::memory(path.clone()), None)]);
                 let _ = server.validate_in_memory_for_transaction(
                     transaction.as_mut(),
                     telemetry_event,

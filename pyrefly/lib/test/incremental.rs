@@ -142,7 +142,7 @@ impl Incremental {
                 .lock()
                 .insert(ModuleName::from_str(&file), contents.dupe());
             transaction.as_mut().set_memory(vec![(
-                PathBuf::from(file),
+                ModulePath::memory(PathBuf::from(file)),
                 Some(Arc::new(FileContents::Source(contents))),
             )]);
         }

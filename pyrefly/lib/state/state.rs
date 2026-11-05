@@ -2589,12 +2589,12 @@ impl<'a> Transaction<'a> {
 
     /// Called if the `load_from_memory` portion of loading might have changed.
     /// Specify which in-memory files might have changed, use None to say they don't exist anymore.
-    pub fn set_memory(&mut self, files: Vec<(PathBuf, Option<Arc<FileContents>>)>) {
+    pub fn set_memory(&mut self, files: Vec<(ModulePath, Option<Arc<FileContents>>)>) {
         let mut changed = SmallSet::new();
         for (path, contents) in files {
             if self.memory_lookup().get(&path) != contents.as_ref() {
                 self.data.memory_overlay.set(path.clone(), contents);
-                changed.insert(ModulePath::memory(path));
+                changed.insert(path);
             }
         }
         self.stats.lock().set_memory_dirty = changed.len();
