@@ -2162,7 +2162,7 @@ impl<Ans: LookupAnswer> ReservedSlot<'_, '_, '_, Ans> {
         (self.errors.take(), self.traces.take())
     }
 
-    fn publish(&mut self) -> bool {
+    fn publish(&mut self) {
         self.solver.publish_reserved_single(self)
     }
 }
@@ -2847,7 +2847,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // the result slot. No recursive placeholder can exist because
             // placeholders are stored only in SCC-local SccNodeState::HasPlaceholder.
             K::before_record(self, idx);
-            let (answer, did_write) = match solve_result {
+            match solve_result {
                 SolveResult::Answer(raw_answer) => {
                     self.sanitize_answer_vars::<K>(&raw_answer, range, &local_errors);
                     let raw_answer = self.force_exported_answer::<K>(raw_answer);
@@ -2855,6 +2855,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         idx,
                         AnswerBox::new(raw_answer),
                         self.retain_annotated_metadata_errors(range, local_errors),
+                        trace_side_effects,
                     )
                 }
                 // The target was sanitized and forced when it was recorded, so
@@ -2863,12 +2864,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     idx,
                     target,
                     self.retain_annotated_metadata_errors(range, local_errors),
+                    trace_side_effects,
                 ),
-            };
-            if did_write && let Some(traces) = trace_side_effects {
-                self.current().merge_trace_side_effects(traces);
             }
-            answer
         }
     }
 
@@ -3142,7 +3140,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Publish a result slot previously reserved by this SCC.
-    fn publish_reserved_single(&self, reserved: &mut ReservedSlot<'_, '_, '_, Ans>) -> bool {
+    fn publish_reserved_single(&self, reserved: &mut ReservedSlot<'_, '_, '_, Ans>) {
         let calc_id = reserved.calc_id().dupe();
         let CalcId(_, ref any_idx) = calc_id;
         if self.is_same_module(&calc_id) {
@@ -3163,19 +3161,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         idx: Idx<K>,
         errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
-    ) -> bool
-    where
+    ) where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
         // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
         // which proves ownership of the reservation.
-        let did_write = unsafe { self.current().publish_reserved(idx, errors) };
-        if did_write && let Some(traces) = traces {
-            self.current().merge_trace_side_effects(traces);
-        }
-        did_write
+        unsafe { self.current().publish_reserved(idx, errors, traces) }
     }
 
     /// Roll back a reservation if it is still pending.

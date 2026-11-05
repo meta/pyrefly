@@ -1242,10 +1242,8 @@ pub trait LookupAnswer: Sized {
 
     /// Publish a cross-module result slot previously reserved by this SCC.
     ///
-    /// Default implementation returns false (not supported).
-    fn publish_reserved_in_module(&self, _reserved: &mut ReservedSlot<'_, '_, '_, Self>) -> bool {
-        false
-    }
+    /// Default implementation does nothing (not supported).
+    fn publish_reserved_in_module(&self, _reserved: &mut ReservedSlot<'_, '_, '_, Self>) {}
 
     /// Look up the class fields for a class, which may be defined in another
     /// module. The fields are populated during the binding phase and can be
@@ -1332,44 +1330,55 @@ impl Answers {
         }
     }
 
-    /// Publish `answer` for `idx`, appending `errors` to this table's
-    /// collector if and only if this write wins.
+    /// Publish `answer` for `idx`, committing `errors` and `traces` to this
+    /// table if and only if this write wins.
     pub(crate) fn record<K: Keyed>(
         &self,
         idx: Idx<K>,
         answer: AnswerBox<K::Answer>,
         errors: ErrorCollector,
-    ) -> (&K::Answer, bool)
+        traces: Option<TraceSideEffects>,
+    ) -> &K::Answer
     where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
-        self.answer_slot(idx).record_with_errors(
+        let (answer, did_write) = self.answer_slot(idx).record_with_errors(
             answer,
             errors,
             &self.errors,
             AnswerSlot::try_record,
-        )
+        );
+        if did_write && let Some(traces) = traces {
+            self.merge_trace_side_effects(traces);
+        }
+        answer
     }
 
-    /// Publish `target`'s answer for `idx`, appending `errors` to this table's
-    /// collector if and only if this write wins.
+    /// Publish `target`'s answer for `idx`, committing `errors` and `traces` to
+    /// this table if and only if this write wins.
     pub(crate) fn record_alias<K: Keyed>(
         &self,
         idx: Idx<K>,
         target: Idx<K>,
         errors: ErrorCollector,
-    ) -> (&K::Answer, bool)
+        traces: Option<TraceSideEffects>,
+    ) -> &K::Answer
     where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
         let target = self.answer_slot(target);
-        self.answer_slot(idx)
-            .record_with_errors((), errors, &self.errors, |slot, ()| {
-                // SAFETY: Both slots belong to this Answers table and are dropped together.
-                unsafe { slot.try_record_alias(target) }
-            })
+        let (answer, did_write) =
+            self.answer_slot(idx)
+                .record_with_errors((), errors, &self.errors, |slot, ()| {
+                    // SAFETY: Both slots belong to this Answers table and are dropped together.
+                    unsafe { slot.try_record_alias(target) }
+                });
+        if did_write && let Some(traces) = traces {
+            self.merge_trace_side_effects(traces);
+        }
+        answer
     }
 
     pub(crate) fn reserve<K: Keyed>(&self, idx: Idx<K>, answer: AnswerBox<K::Answer>) -> bool
@@ -1387,13 +1396,13 @@ impl Answers {
         &self,
         idx: Idx<K>,
         errors: Option<ErrorCollector>,
-    ) -> bool
-    where
+        traces: Option<TraceSideEffects>,
+    ) where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
         let slot = self.answer_slot(idx);
-        if let Some(errors) = errors {
+        let did_write = if let Some(errors) = errors {
             self.errors
                 .extend_if(errors, || {
                     // SAFETY: Forwarded from the caller.
@@ -1403,6 +1412,9 @@ impl Answers {
         } else {
             // SAFETY: Forwarded from the caller.
             unsafe { slot.publish_reserved() }
+        };
+        if did_write && let Some(traces) = traces {
+            self.merge_trace_side_effects(traces);
         }
     }
 
@@ -1650,10 +1662,11 @@ impl Answers {
         &self,
         reserved: &mut ReservedSlot<'_, '_, '_, Ans>,
         errors: Option<ErrorCollector>,
-    ) -> bool {
+        traces: Option<TraceSideEffects>,
+    ) {
         let CalcId(_, any_idx) = reserved.calc_id().dupe();
         // SAFETY: `reserved` proves that this SCC owns the pending slot.
-        unsafe { dispatch_anyidx!(&any_idx, self, publish_reserved_typed, errors) }
+        unsafe { dispatch_anyidx!(&any_idx, self, publish_reserved_typed, errors, traces) }
     }
 
     /// Roll back a slot reserved by an SCC batch if it is still pending.
@@ -1685,14 +1698,14 @@ impl Answers {
         &self,
         idx: Idx<K>,
         errors: Option<ErrorCollector>,
-    ) -> bool
-    where
+        traces: Option<TraceSideEffects>,
+    ) where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
         // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
         // which proves ownership of the reservation.
-        unsafe { self.publish_reserved(idx, errors) }
+        unsafe { self.publish_reserved(idx, errors, traces) }
     }
 
     /// # Safety

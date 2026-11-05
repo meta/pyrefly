@@ -3420,25 +3420,20 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
         }
     }
 
-    fn publish_reserved_in_module(&self, reserved: &mut ReservedSlot<'_, '_, '_, Self>) -> bool {
+    fn publish_reserved_in_module(&self, reserved: &mut ReservedSlot<'_, '_, '_, Self>) {
         let calc_id = reserved.calc_id().dupe();
         match self.lookup_target_answers(&calc_id) {
-            TargetAnswers::ModuleNotFound => false,
+            TargetAnswers::ModuleNotFound => {}
             TargetAnswers::Evicted => {
                 // An identical contender would wait on our first shared pending
                 // slot. Reaching Solutions here therefore requires a worker with
                 // a non-equivalent SCC that did not need this reservation. Its
                 // result and side effects won; discard ours.
                 drop(reserved.take_side_effects());
-                false
             }
             TargetAnswers::Available { answers, .. } => {
                 let (errors, traces) = reserved.take_side_effects();
-                let did_write = answers.publish_reserved_preliminary(reserved, errors);
-                if did_write && let Some(traces) = traces {
-                    answers.merge_trace_side_effects(traces);
-                }
-                did_write
+                answers.publish_reserved_preliminary(reserved, errors, traces);
             }
         }
     }
