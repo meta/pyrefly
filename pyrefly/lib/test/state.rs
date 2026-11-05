@@ -41,6 +41,8 @@ use tempfile::TempDir;
 
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
+use crate::binding::binding::KeyExport;
+use crate::binding::binding::KeyTParams;
 use crate::commands::config_finder::default_config_finder;
 use crate::config::config::ConfigFile;
 use crate::config::config::ConfigSource;
@@ -61,6 +63,8 @@ use crate::state::require::Require;
 use crate::state::require::RequireLevels;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
+use crate::types::class::Class;
+use crate::types::types::Type;
 
 #[test]
 fn test_fallback_search_path_relative_import_emits_dedicated_diagnostic() {
@@ -425,6 +429,95 @@ fn test_cross_module_literal_promotion() {
         .get_errors(&handles)
         .check_against_expectations()
         .unwrap();
+}
+
+/// Check `main`, and also `foo` if `check_foo`, then read the type parameters of classes that
+/// `foo` defines through the `TypeEnv` of `main`.
+fn assert_type_env_reads_tparams_from_other_module(check_foo: bool) {
+    let mut test_env = TestEnv::new();
+    test_env.add(
+        "foo",
+        r#"
+from typing import Generic, TypeVar
+T = TypeVar("T")
+class LegacyBox(Generic[T]): ...
+class Box[S]: ...
+class Plain: ...
+"#,
+    );
+    test_env.add("main", "from foo import LegacyBox, Box, Plain");
+    let config_file = test_env.config();
+    let sys_info = test_env.sys_info();
+    let handle = |name: &str| {
+        let name = ModuleName::from_str(name);
+        let path = find_import(
+            &config_file,
+            name,
+            FindImportOptions::new(&DirEntryCache::new()),
+        )
+        .finding()
+        .unwrap();
+        Handle::new(name, path, sys_info.dupe())
+    };
+    let main = handle("main");
+    let foo = handle("foo");
+    let state = State::new(test_env.config_finder(), TEST_THREAD_COUNT);
+    let mut transaction = state.new_transaction(Require::Exports, None);
+    transaction.set_memory(test_env.get_memory());
+    let checked = if check_foo {
+        vec![main.dupe(), foo.dupe()]
+    } else {
+        vec![main.dupe()]
+    };
+    transaction.run(&checked, Require::Everything, None);
+    assert_eq!(
+        transaction.get_solutions(&foo).is_some(),
+        check_foo,
+        "`foo` is fully solved exactly when it is checked"
+    );
+
+    let solutions = transaction.get_solutions(&main).unwrap();
+    let class = |name: &str| match solutions.get(&KeyExport(Name::new(name))) {
+        Type::ClassDef(cls) => cls.dupe(),
+        ty => panic!("`{name}` should be a class, got `{ty}`"),
+    };
+    let type_env = transaction.type_env(&main);
+    let tparam_names = |cls: &Class| {
+        cls.tparams_in(&type_env)
+            .iter()
+            .map(|q| q.name().to_string())
+            .collect::<Vec<_>>()
+    };
+    let legacy_box = class("LegacyBox");
+    assert_eq!(legacy_box.module_name(), ModuleName::from_str("foo"));
+    if !check_foo {
+        let answers = transaction.get_answers(&foo).unwrap();
+        let idx = answers
+            .bindings()
+            .key_to_idx(&KeyTParams(legacy_box.index()));
+        assert!(
+            answers.get_idx(idx).is_none(),
+            "checking `main` does not need the type parameters of `LegacyBox`"
+        );
+        assert_eq!(tparam_names(&legacy_box), ["T"]);
+        assert!(
+            answers.get_idx(idx).is_some(),
+            "the env solves them on demand"
+        );
+    }
+    assert_eq!(tparam_names(&legacy_box), ["T"]);
+    assert_eq!(tparam_names(&class("Box")), ["S"]);
+    assert!(class("Plain").tparams_in(&type_env).is_empty());
+}
+
+#[test]
+fn test_type_env_class_tparams_from_solved_module() {
+    assert_type_env_reads_tparams_from_other_module(true);
+}
+
+#[test]
+fn test_type_env_class_tparams_solved_on_demand() {
+    assert_type_env_reads_tparams_from_other_module(false);
 }
 
 #[test]

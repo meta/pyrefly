@@ -149,6 +149,7 @@ use crate::types::class::Class;
 use crate::types::class::ClassDefIndex;
 use crate::types::class::ClassFields;
 use crate::types::class::PrecomputedTParams;
+use crate::types::env::TypeEnv;
 use crate::types::function::Deprecation;
 use crate::types::stdlib::Stdlib;
 use crate::types::types::TParams;
@@ -957,6 +958,18 @@ impl<'a> Transaction<'a> {
                 .fields
                 .clone(),
         )
+    }
+
+    /// A `TypeEnv` for reading the definition data of types in `handle`'s answers.
+    pub fn type_env(&self, handle: &Handle) -> TransactionTypeEnv<'_> {
+        let config = self.get_module(handle).config.read();
+        TransactionTypeEnv {
+            transaction: self,
+            handle: handle.dupe(),
+            stdlib: self.get_stdlib(handle),
+            thread_state: ThreadState::new(config.recursion_limit_config()),
+            answer_scope: AnswerScope::new(),
+        }
     }
 
     pub fn get_ast(&self, handle: &Handle) -> Option<Arc<ruff_python_ast::ModModule>> {
@@ -2822,6 +2835,52 @@ impl<'a> Transaction<'a> {
             .get_answers(handle)
             .expect("answers must be available to build cinderx_solutions");
         crate::report::cinderx::CinderxSolutions::build_from_answers(&answers)
+    }
+}
+
+/// A `TypeEnv` that reads definition data from a transaction, for use after solving.
+///
+/// It reads a class's answers from its module's `Solutions`, or from its `Answers`, solving the
+/// answer on demand if the module has not been fully solved. `answer_scope` retains the
+/// `Solutions` or `Answers` of every module read, and it is append-only and lives as long as the
+/// env. So every borrow the env returns stays valid for the env's lifetime, even if the
+/// transaction later replaces a module's `Answers` with its `Solutions`. Like `AnswerScope`, the
+/// env is not `Sync`.
+pub struct TransactionTypeEnv<'a> {
+    transaction: &'a Transaction<'a>,
+    /// The module this env was created for. Other modules are looked up with its `SysInfo`.
+    handle: Handle,
+    stdlib: Arc<Stdlib>,
+    thread_state: ThreadState,
+    answer_scope: Box<AnswerScope>,
+}
+
+impl TypeEnv for TransactionTypeEnv<'_> {
+    fn stdlib(&self) -> &Stdlib {
+        &self.stdlib
+    }
+
+    fn class_tparams<'b>(&'b self, cls: &'b Class) -> &'b TParams {
+        let key = match cls.precomputed_tparams() {
+            PrecomputedTParams::NotGeneric => return TParams::empty_ref(),
+            PrecomputedTParams::Precomputed(tparams) => return tparams,
+            PrecomputedTParams::FromBinding => KeyTParams(cls.index()),
+        };
+        let handle = Handle::new(
+            cls.module_name(),
+            cls.module_path().dupe(),
+            self.handle.sys_info().dupe(),
+        );
+        // There is no answer only if the class's module was rebuilt without this class, in which
+        // case the solver also treats the class as having no type parameters.
+        self.transaction
+            .lookup_answer(
+                self.transaction.get_module(&handle),
+                &key,
+                &self.thread_state,
+                &self.answer_scope,
+            )
+            .map_or(TParams::empty_ref(), |tparams| &**tparams)
     }
 }
 
