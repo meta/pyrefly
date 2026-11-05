@@ -994,8 +994,18 @@ mod tests {
 
     impl Errors {
         pub fn check_var_leak(&self) -> anyhow::Result<()> {
-            let regex = Regex::new(r"@\d+").unwrap();
-            for error in self.collect_errors().ordinary {
+            // Match variable ids such as `@12`, but not source locations such as
+            // `@128:7-21` that qualified names in messages can carry.
+            let regex = Regex::new(r"@\d+(?:$|[^0-9:])").unwrap();
+            let errors = self.collect_errors();
+            for error in errors
+                .ordinary
+                .iter()
+                .chain(&errors.hints)
+                .chain(&errors.directives)
+                .chain(&errors.suppressed)
+                .chain(&errors.disabled)
+            {
                 let msg = error.msg();
                 if regex.is_match(&msg) {
                     return Err(anyhow::anyhow!(
