@@ -1,0 +1,115 @@
+{
+  "name": "test",
+  "path": "test.py",
+  "names": [
+    "test.logger",
+    "test.wrapped_logger",
+    "test.PATTERN",
+    "test.lookalike",
+    "test.make_logger",
+    "test.Lookalike.getLogger",
+    "test.Lookalike"
+  ],
+  "line_count": 24,
+  "symbol_reports": [
+    {
+      "kind": "attr",
+      "name": "test.logger",
+      "n_typable": 0,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 19,
+        "column": 1
+      }
+    },
+    {
+      "kind": "attr",
+      "name": "test.wrapped_logger",
+      "n_typable": 0,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 20,
+        "column": 1
+      }
+    },
+    {
+      "kind": "attr",
+      "name": "test.PATTERN",
+      "n_typable": 0,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 21,
+        "column": 1
+      }
+    },
+    {
+      "kind": "attr",
+      "name": "test.lookalike",
+      "n_typable": 1,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 1,
+      "location": {
+        "line": 23,
+        "column": 1
+      }
+    },
+    {
+      "kind": "function",
+      "name": "test.make_logger",
+      "n_typable": 1,
+      "n_typed": 1,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 10,
+        "column": 1
+      }
+    },
+    {
+      "kind": "function",
+      "name": "test.Lookalike.getLogger",
+      "n_typable": 1,
+      "n_typed": 1,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 15,
+        "column": 5
+      }
+    },
+    {
+      "kind": "class",
+      "name": "test.Lookalike",
+      "n_typable": 0,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 14,
+        "column": 1
+      }
+    }
+  ],
+  "type_ignores": [],
+  "n_typable": 3,
+  "n_typed": 2,
+  "n_any": 0,
+  "n_untyped": 1,
+  "coverage": 66.66666666666666,
+  "strict_coverage": 66.66666666666666,
+  "n_functions": 1,
+  "n_methods": 1,
+  "n_function_params": 0,
+  "n_method_params": 0,
+  "n_classes": 1,
+  "n_attrs": 4,
+  "n_properties": 0,
+  "n_type_ignores": 0
+}
