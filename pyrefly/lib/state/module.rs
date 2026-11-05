@@ -465,6 +465,14 @@ pub trait ModuleStateReader {
                     .map(|solutions| solutions.parse_errors().dupe())
             })
     }
+    fn binding_errors(&self) -> Option<ModuleDiagnostics> {
+        self.get_answers()
+            .map(|answers| answers.bindings().binding_errors().dupe())
+            .or_else(|| {
+                self.get_solutions()
+                    .map(|solutions| solutions.binding_errors().dupe())
+            })
+    }
     fn module_ranges(&self) -> Option<Arc<ModuleRanges>>;
 }
 

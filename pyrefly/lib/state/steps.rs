@@ -552,7 +552,7 @@ impl Step {
             &solver,
             ctx.lookup,
             *ctx.sys_info,
-            &load.errors,
+            load.errors.style(),
             enable_trace,
             ctx.check_unannotated_defs,
             ctx.require.keep_index(),

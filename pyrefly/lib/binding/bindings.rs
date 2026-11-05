@@ -130,6 +130,7 @@ use crate::config::base::InferReturnTypes;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::collector::ModuleDiagnostics;
+use crate::error::style::ErrorStyle;
 use crate::export::definitions::Definitions;
 use crate::export::definitions::MutableCaptureKind;
 use crate::export::exports::Exports;
@@ -434,6 +435,7 @@ table! {
 pub struct Bindings {
     module_info: ModuleInfo,
     parse_errors: ModuleDiagnostics,
+    binding_errors: ModuleDiagnostics,
     sys_info: SysInfo,
     table: BindingTable,
     metadata: Arc<BindingsMetadata>,
@@ -546,7 +548,7 @@ pub struct BindingsBuilder<'a> {
     pub func_count: u32,
     type_alias_count: u32,
     await_context: AwaitContext,
-    errors: &'a ErrorCollector,
+    errors: ErrorCollector,
     solver: &'a Solver,
     pub has_docstring: bool,
     pub scopes: Scopes,
@@ -697,6 +699,7 @@ impl Bindings {
         Self {
             module_info,
             parse_errors: ModuleDiagnostics::default(),
+            binding_errors: ModuleDiagnostics::default(),
             sys_info: SysInfo::default(),
             table,
             metadata: Arc::new(BindingsMetadata::new()),
@@ -750,6 +753,10 @@ impl Bindings {
 
     pub fn parse_errors(&self) -> &ModuleDiagnostics {
         &self.parse_errors
+    }
+
+    pub fn binding_errors(&self) -> &ModuleDiagnostics {
+        &self.binding_errors
     }
 
     pub fn sys_info(&self) -> &SysInfo {
@@ -1108,7 +1115,7 @@ impl Bindings {
         solver: &Solver,
         lookup: &dyn LookupExport,
         sys_info: SysInfo,
-        errors: &ErrorCollector,
+        error_style: ErrorStyle,
         enable_trace: bool,
         check_unannotated_defs: bool,
         analyze_unannotated_for_ide: bool,
@@ -1122,6 +1129,8 @@ impl Bindings {
         // needed later for error collection, which runs after the AST may
         // have been evicted.
         let module_ranges = Arc::new(ModuleRanges::compute(&x, &module_info));
+        let errors = ErrorCollector::new(module_info.dupe(), error_style);
+        let shape_comments = ShapeComments::new(&x, &module_info, &errors);
         let mut builder = BindingsBuilder {
             module_info: module_info.dupe(),
             annotated_metadata_ranges: Vec::new(),
@@ -1161,7 +1170,7 @@ impl Bindings {
             call_base_classes: Vec::new(),
             class_field_definitions: SmallMap::new(),
             shape_declarations: ShapeDeclarations::default(),
-            shape_comments: ShapeComments::new(&x, &module_info, errors),
+            shape_comments,
             shape_string_annotation: None,
             subsequently_initialized: SmallSet::new(),
             adjacent_namedtuple_defaults: None,
@@ -1295,6 +1304,7 @@ impl Bindings {
         Self {
             module_info,
             parse_errors,
+            binding_errors: builder.errors.finish(),
             sys_info: builder.sys_info,
             table: builder.table,
             metadata: Arc::new(builder.metadata),

@@ -988,8 +988,15 @@ impl<'a> Transaction<'a> {
                     self.with_module_config_inner(handle, |config, x| {
                         let load = x.get_load()?;
                         let parse_errors = x.parse_errors();
+                        let binding_errors = x.binding_errors();
                         let module_ranges = x.module_ranges();
-                        Some((load, parse_errors, module_ranges, config.dupe()))
+                        Some((
+                            load,
+                            parse_errors,
+                            binding_errors,
+                            module_ranges,
+                            config.dupe(),
+                        ))
                     })
                 })
                 .collect(),
@@ -1006,8 +1013,15 @@ impl<'a> Transaction<'a> {
                     .filter_map(|x| {
                         let load = x.state.get_load()?;
                         let parse_errors = x.state.parse_errors();
+                        let binding_errors = x.state.binding_errors();
                         let module_ranges = x.state.module_ranges();
-                        Some((load, parse_errors, module_ranges, x.config.dupe()))
+                        Some((
+                            load,
+                            parse_errors,
+                            binding_errors,
+                            module_ranges,
+                            x.config.dupe(),
+                        ))
                     })
                     .collect(),
             );
@@ -1019,8 +1033,15 @@ impl<'a> Transaction<'a> {
             .filter_map(|x| {
                 let load = x.1.state.get_load()?;
                 let parse_errors = x.1.state.parse_errors();
+                let binding_errors = x.1.state.binding_errors();
                 let module_ranges = x.1.state.module_ranges();
-                Some((load, parse_errors, module_ranges, x.1.config.read().dupe()))
+                Some((
+                    load,
+                    parse_errors,
+                    binding_errors,
+                    module_ranges,
+                    x.1.config.read().dupe(),
+                ))
             })
             .collect::<Vec<_>>();
         for (k, v) in self.readable.modules.iter() {
@@ -1028,8 +1049,15 @@ impl<'a> Transaction<'a> {
                 && let Some(load) = v.state.get_load()
             {
                 let parse_errors = v.state.parse_errors();
+                let binding_errors = v.state.binding_errors();
                 let module_ranges = v.state.module_ranges();
-                res.push((load, parse_errors, module_ranges, v.config.dupe()));
+                res.push((
+                    load,
+                    parse_errors,
+                    binding_errors,
+                    module_ranges,
+                    v.config.dupe(),
+                ));
             }
         }
         Errors::new(res)
@@ -1403,6 +1431,7 @@ impl<'a> Transaction<'a> {
             && let Some(old_load) = guard.get_load()
         {
             guard.store_load(Some(Arc::new(Load {
+                load_errors: old_load.load_errors.dupe(),
                 errors: ErrorCollector::new(old_load.module_info.dupe(), old_load.errors.style()),
                 module_info: old_load.module_info.clone(),
             })));
@@ -1454,6 +1483,7 @@ impl<'a> Transaction<'a> {
                 // Create new ErrorCollector to clear old errors from the previous config
                 if let Some(old_load) = guard.get_load() {
                     guard.store_load(Some(Arc::new(Load {
+                        load_errors: old_load.load_errors.dupe(),
                         errors: ErrorCollector::new(
                             old_load.module_info.dupe(),
                             old_load.errors.style(),

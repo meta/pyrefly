@@ -282,6 +282,7 @@ pub struct Errors {
     loads: Vec<(
         Arc<Load>,
         Option<ModuleDiagnostics>,
+        Option<ModuleDiagnostics>,
         Option<Arc<ModuleRanges>>,
         ArcId<ConfigFile>,
     )>,
@@ -349,6 +350,7 @@ impl Errors {
         mut loads: Vec<(
             Arc<Load>,
             Option<ModuleDiagnostics>,
+            Option<ModuleDiagnostics>,
             Option<Arc<ModuleRanges>>,
             ArcId<ConfigFile>,
         )>,
@@ -375,7 +377,7 @@ impl Errors {
 
     pub fn collect_errors(&self) -> CollectedErrors {
         let mut errors = CollectedErrors::default();
-        for (load, parse_errors, module_ranges, config) in &self.loads {
+        for (load, parse_errors, binding_errors, module_ranges, config) in &self.loads {
             if load.errors.style() == ErrorStyle::Never {
                 continue;
             }
@@ -386,10 +388,14 @@ impl Errors {
             let parse_errors = parse_errors
                 .as_ref()
                 .expect("a module with module_ranges must have parse diagnostics");
-            // Parsing precedes the later phases, so parse diagnostics go first at an
-            // equal range.
+            // Collect in the order the phases run, so diagnostics at an equal range
+            // stay in phase order.
+            let snapshots: Vec<&ModuleDiagnostics> = [&load.load_errors, parse_errors]
+                .into_iter()
+                .chain(binding_errors)
+                .collect();
             load.errors.collect_into(
-                &[parse_errors],
+                &snapshots,
                 &error_config,
                 &ranges.multi_line,
                 &ranges.ignore_all,
@@ -444,8 +450,8 @@ impl Errors {
             let checked_paths: HashSet<_> = self
                 .loads
                 .iter()
-                .filter(|(load, _, _, _)| load.errors.style() != ErrorStyle::Never)
-                .map(|(load, _, _, _)| {
+                .filter(|(load, _, _, _, _)| load.errors.style() != ErrorStyle::Never)
+                .map(|(load, _, _, _, _)| {
                     normalize_baseline_path(load.module_info.path().as_path(), relative_to)
                 })
                 .collect();
@@ -490,7 +496,7 @@ impl Errors {
         let config_by_path: SmallMap<&ModulePath, &ArcId<ConfigFile>> = self
             .loads
             .iter()
-            .map(|(load, _, _, config)| (load.module_info.path(), config))
+            .map(|(load, _, _, _, config)| (load.module_info.path(), config))
             .collect();
         let mut errors = collected;
         let mut ordinary = Vec::new();
@@ -549,7 +555,7 @@ impl Errors {
 
     pub fn collect_ignores(&self) -> SmallMap<&ModulePath, &Ignore> {
         let mut ignore_collection: SmallMap<&ModulePath, &Ignore> = SmallMap::new();
-        for (load, _, _, _) in &self.loads {
+        for (load, _, _, _, _) in &self.loads {
             let module_path = load.module_info.path();
             let ignores = load.module_info.ignore();
             ignore_collection.insert(module_path, ignores);
@@ -577,8 +583,8 @@ impl Errors {
         let fstring_ranges_by_module: SmallMap<&ModulePath, &[(LineNumber, LineNumber)]> = self
             .loads
             .iter()
-            .filter(|(load, _, _, _)| load.errors.style() != ErrorStyle::Never)
-            .map(|(load, _, module_ranges, _)| {
+            .filter(|(load, _, _, _, _)| load.errors.style() != ErrorStyle::Never)
+            .map(|(load, _, _, module_ranges, _)| {
                 (
                     load.module_info.path(),
                     module_ranges
@@ -593,7 +599,7 @@ impl Errors {
         let enabled_ignores_by_module: SmallMap<&ModulePath, SmallSet<Tool>> = self
             .loads
             .iter()
-            .map(|(load, _, _, config)| {
+            .map(|(load, _, _, _, config)| {
                 let path = load.module_info.path();
                 (path, config.enabled_ignores(path).into_owned())
             })
@@ -605,7 +611,7 @@ impl Errors {
         > = self
             .loads
             .iter()
-            .map(|(load, _, _, config)| {
+            .map(|(load, _, _, _, config)| {
                 let path = load.module_info.path();
                 (path, config.type_ignore_unknown_tag_behavior(path))
             })
@@ -694,7 +700,7 @@ impl Errors {
         }
 
         // Iterate over each module and check for unused ignores
-        for (load, _, ranges, config) in &self.loads {
+        for (load, _, _, ranges, config) in &self.loads {
             let module = &load.module_info;
             let module_path = module.path();
             let ignore = module.ignore();
@@ -846,7 +852,7 @@ impl Errors {
         let config_by_path: SmallMap<&ModulePath, &ArcId<ConfigFile>> = self
             .loads
             .iter()
-            .map(|(load, _, _, config)| (load.module_info.path(), config))
+            .map(|(load, _, _, _, config)| (load.module_info.path(), config))
             .collect();
 
         for error in unused_errors {
@@ -868,7 +874,7 @@ impl Errors {
     }
 
     pub fn check_against_expectations(&self) -> anyhow::Result<()> {
-        for (load, parse_errors, module_ranges, config) in &self.loads {
+        for (load, parse_errors, binding_errors, module_ranges, config) in &self.loads {
             if load.errors.style() == ErrorStyle::Never {
                 continue;
             }
@@ -880,8 +886,12 @@ impl Errors {
             let parse_errors = parse_errors
                 .as_ref()
                 .expect("a module with module_ranges must have parse diagnostics");
+            let snapshots: Vec<&ModuleDiagnostics> = [&load.load_errors, parse_errors]
+                .into_iter()
+                .chain(binding_errors)
+                .collect();
             load.errors.collect_into(
-                &[parse_errors],
+                &snapshots,
                 &error_config,
                 &ranges.multi_line,
                 &ranges.ignore_all,
@@ -931,19 +941,15 @@ mod tests {
     impl Errors {
         pub fn check_var_leak(&self) -> anyhow::Result<()> {
             let regex = Regex::new(r"@\d+").unwrap();
-            for (load, _, _, config) in &self.loads {
-                let error_config = config.get_error_config(load.module_info.path());
-                let errors = load.errors.collect(&error_config).ordinary;
-                for error in errors {
-                    let msg = error.msg();
-                    if regex.is_match(&msg) {
-                        return Err(anyhow::anyhow!(
-                            "{}:{}: variable ids leaked into error message: {}",
-                            error.path(),
-                            error.display_range(),
-                            msg,
-                        ));
-                    }
+            for error in self.collect_errors().ordinary {
+                let msg = error.msg();
+                if regex.is_match(&msg) {
+                    return Err(anyhow::anyhow!(
+                        "{}:{}: variable ids leaked into error message: {}",
+                        error.path(),
+                        error.display_range(),
+                        msg,
+                    ));
                 }
             }
             Ok(())
