@@ -34,6 +34,7 @@ use std::slice;
 
 use pyrefly_python::ast::Ast;
 use pyrefly_types::dimension::Int;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
 use pyrefly_types::shaped_array::tuple_carrier_to_shape;
@@ -215,7 +216,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return self.expr_untype(shape_expr, type_form_context, errors);
         }
         match &base {
-            Type::ClassType(cls) if cls.is_builtin("int") => {
+            Type::ClassType(cls) if cls.is(KnownClass::Int) => {
                 errors.extend(base_errors);
                 // `Shaped[int, "N"]` is `Int[N]`.
                 return match self.parse_int_type(

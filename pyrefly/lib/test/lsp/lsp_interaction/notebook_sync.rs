@@ -144,8 +144,9 @@ fn test_notebook_did_open() {
     interaction.shutdown().unwrap();
 }
 
-#[test]
-fn test_notebook_backwards_version_is_rejected() {
+/// Rejects a notebook change whose version is lower than the stored version.
+/// A `textDocument/didClose` for a notebook is ignored and must keep the stored version.
+fn check_backwards_notebook_version_is_rejected(text_document_did_close: bool) {
     let root = get_test_files_root();
     let mut interaction = LspInteraction::new();
     interaction.set_root(root.path().to_path_buf());
@@ -173,6 +174,9 @@ fn test_notebook_backwards_version_is_rejected() {
         .diagnostic_for_cell("notebook.ipynb", "cell1")
         .expect_response(json!({"items": [], "kind": "full"}))
         .unwrap();
+    if text_document_did_close {
+        interaction.client.did_close("notebook.ipynb");
+    }
     interaction.change_notebook(
         "notebook.ipynb",
         2,
@@ -188,6 +192,16 @@ fn test_notebook_backwards_version_is_rejected() {
         .expect_response(json!({"items": [], "kind": "full"}))
         .unwrap();
     interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_notebook_backwards_version_is_rejected() {
+    check_backwards_notebook_version_is_rejected(false);
+}
+
+#[test]
+fn test_notebook_backwards_version_is_rejected_after_text_document_did_close() {
+    check_backwards_notebook_version_is_rejected(true);
 }
 
 #[test]

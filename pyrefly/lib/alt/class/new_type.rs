@@ -6,6 +6,7 @@
  */
 
 use pyrefly_python::dunder;
+use pyrefly_types::known_class::KnownClass;
 use ruff_python_ast::name::Name;
 use starlark_map::smallmap;
 
@@ -24,7 +25,7 @@ use crate::types::types::Type;
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn base_type_for_newtype(&self, class: &Class, base_class: &Class) -> Type {
-        if base_class.is_builtin("tuple")
+        if base_class.is(KnownClass::Tuple)
             && let Some(tuple_ancestor) = self.get_base_types_for_class(class).tuple_ancestor()
         {
             // In order to make `__new__` and `__init__` accept only the exact right shape

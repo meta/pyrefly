@@ -15,6 +15,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::function::BodyKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::meta_shape_dsl::ShapeTransform;
 use pyrefly_types::quantified::Quantified;
@@ -1620,7 +1621,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Normalize builtins.tuple instances to structural Type::Tuple so downstream
         // match arms (concat, unpacking, except, etc.) handle them directly.
         if let Type::ClassType(ref ct) = result
-            && ct.class_object().is_builtin("tuple")
+            && ct.class_object().is(KnownClass::Tuple)
             && ct.targs().as_slice().len() == 1
         {
             let targ = ct.targs().as_slice()[0].clone();
@@ -1858,11 +1859,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) {
-        let builtin_names = ["str", "int", "bool", "bytes"];
-        if !builtin_names
-            .iter()
-            .any(|name| cls.has_qname("builtins", name))
-        {
+        if !matches!(
+            cls.known(),
+            Some(KnownClass::Str | KnownClass::Int | KnownClass::Bool | KnownClass::Bytes)
+        ) {
             return;
         }
         if let Some(arg_ty) = self.first_arg_type(args, errors) {
@@ -1976,7 +1976,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let wrapped_arg = self.functools_wrapped_arg(metadata, args, keywords, errors);
         let outcome = match call_target {
             CallTarget::Class(cls, constructor_kind, as_quantified_bound) => {
-                if cls.has_qname("typing", "Any") {
+                if cls.is(KnownClass::TypingAny) {
                     return CallOutcome::of_ty(self.error_with_context(
                         call_errors,
                         arguments_range,
@@ -2034,7 +2034,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         );
                     }
                 }
-                if cls.has_qname("builtins", "bool") {
+                if cls.is(KnownClass::Bool) {
                     match self.first_arg_type(args, errors) {
                         None => (),
                         Some(ty) => {
@@ -3081,7 +3081,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let polars_call =
             self.infer_polars_call_specialization(&callee.ty, &callee.expr.arguments, errors);
 
-        let result = if matches!(&callee.ty, Type::ClassDef(cls) if cls.is_builtin("super")) {
+        let result = if matches!(&callee.ty, Type::ClassDef(cls) if cls.is(KnownClass::Super)) {
             // Because we have to construct a binding for super in order to fill in implicit arguments,
             // we can't handle things like local aliases to super. If we hit a case where the binding
             // wasn't constructed, fall back to `Any`.
@@ -3118,7 +3118,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
             let result = self.distribute_over_union(&callee.ty, |ty| {
                 // NotImplemented is a singleton constant, not a callable class.
-                if matches!(ty, Type::ClassType(cls) if cls.is_builtin("_NotImplementedType") || cls.has_qname("types", "NotImplementedType"))
+                if matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::NotImplementedType) || cls.is(KnownClass::TypesNotImplementedType))
                 {
                     return self.error(
                         errors,
@@ -3367,7 +3367,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 _ if let Some(ret) = self.call_builtin_enumerate(ty, callee.expr, errors) => ret,
                 // `functools.partial(func, ...)` synthesizes the remaining callable instead of the
                 // opaque stub, so calls on the result are checked (see `alt::functools`).
-                _ if matches!(ty, Type::ClassDef(cls) if cls.has_toplevel_qname("functools", "partial")) =>
+                _ if matches!(ty, Type::ClassDef(cls) if cls.is(KnownClass::FunctoolsPartial)) =>
                 {
                     self.call_functools_partial(
                         ty,
@@ -3459,7 +3459,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let Type::ClassType(cls) = callee_ty else {
             return;
         };
-        if !cls.has_qname("unittest.mock", "_patcher") {
+        if !cls.is(KnownClass::UnittestMockPatcher) {
             return;
         }
         if arguments.args.len() > 1 || arguments.keywords.iter().any(|kw| kw.arg.is_none()) {
@@ -3646,7 +3646,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Option<Type> {
         // `enumerate` is a class in the bundled typeshed, so `ClassDef` is the normal path. The
         // `builtins.enumerate` function form is accepted defensively for alternate stubs.
-        let is_enumerate = matches!(ty, Type::ClassDef(cls) if cls.is_builtin("enumerate"))
+        let is_enumerate = matches!(ty, Type::ClassDef(cls) if cls.is(KnownClass::Enumerate))
             || matches!(
                 ty.callee_kind(),
                 Some(CalleeKind::Function(FunctionKind::Def(func)))

@@ -17,6 +17,7 @@ use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
 use pyrefly_python::dunder;
 use pyrefly_types::function::Deprecation;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::typed_dict::ExtraItems;
 use pyrefly_util::display::commas_iter;
@@ -382,7 +383,7 @@ impl ClassMetadata {
 
     pub fn is_explicitly_abstract(&self) -> bool {
         for base in self.base_class_objects() {
-            if base.has_toplevel_qname("abc", "ABC") {
+            if base.is(KnownClass::Abc) {
                 return true;
             }
         }

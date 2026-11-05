@@ -12,6 +12,8 @@
  */
 
 use pyrefly_python::dunder;
+use pyrefly_types::display::TypeDisplayContext;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
 use pyrefly_types::shaped_array::is_tuple_carrier_shape_middle;
@@ -264,11 +266,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             type_info.visit_mut(&mut |ty| {
                 *ty = self.for_display(ty.clone());
             });
+            let mut types = Vec::new();
+            type_info.visit(&mut |ty| types.push(ty));
+            let mut ctx = TypeDisplayContext::new(&types);
+            if self.solver().config.reveal_type_qualified_names {
+                ctx.always_display_module_name_except_builtins();
+            }
             self.error(
                 errors,
                 range,
                 ErrorKind::RevealType,
-                format!("revealed type: {type_info}"),
+                format!("revealed type: {}", type_info.display_with(&ctx)),
             );
             ret
         } else {
@@ -616,7 +624,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Decompose class_info, which could be a union or tuple
         for class_info_ty in self.as_class_info(class_info) {
             if let Type::ClassDef(class_info_cls) = &class_info_ty {
-                if class_info_cls.has_toplevel_qname("typing", "Any") {
+                if class_info_cls.is(KnownClass::TypingAny) {
                     self.error(
                         errors,
                         range,

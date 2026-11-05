@@ -20,6 +20,7 @@ use crate::dimension::canonicalize;
 use crate::dimension::gradual_size;
 use crate::dimension::is_gradual_size;
 use crate::dimension::is_gradual_size_bound_type_var;
+use crate::known_class::KnownClass;
 use crate::lit_int::LitInt;
 use crate::literal::Lit;
 use crate::quantified::QuantifiedKind;
@@ -967,7 +968,7 @@ fn carrier_element_to_dim(carrier: &Type) -> Option<Int> {
         _ if is_gradual_size_bound_type_var(carrier) => Some(Int::Int),
         Type::Var(_) => Some(Int::Int),
         Type::Any(_) => Some(Int::Int),
-        Type::ClassType(cls) if cls.is_builtin("int") => Some(Int::Int),
+        Type::ClassType(cls) if cls.is(KnownClass::Int) => Some(Int::Int),
         _ => None,
     }
 }
@@ -1030,7 +1031,7 @@ fn is_unresolved_shape_middle(ty: &Type) -> bool {
 }
 
 fn unbounded_middle_element_to_dim(elt: &Type) -> Int {
-    if elt.is_any() || matches!(elt, Type::ClassType(cls) if cls.is_builtin("int")) {
+    if elt.is_any() || matches!(elt, Type::ClassType(cls) if cls.is(KnownClass::Int)) {
         Int::Int
     } else {
         carrier_element_to_dim(elt).unwrap_or(Int::Int)

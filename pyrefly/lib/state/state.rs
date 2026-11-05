@@ -149,6 +149,7 @@ use crate::types::class::Class;
 use crate::types::class::ClassDefIndex;
 use crate::types::class::ClassFields;
 use crate::types::class::PrecomputedTParams;
+use crate::types::env::TypeEnv;
 use crate::types::function::Deprecation;
 use crate::types::stdlib::Stdlib;
 use crate::types::types::TParams;
@@ -959,6 +960,18 @@ impl<'a> Transaction<'a> {
         )
     }
 
+    /// A `TypeEnv` for reading the definition data of types in `handle`'s answers.
+    pub fn type_env(&self, handle: &Handle) -> TransactionTypeEnv<'_> {
+        let config = self.get_module(handle).config.read();
+        TransactionTypeEnv {
+            transaction: self,
+            handle: handle.dupe(),
+            stdlib: self.get_stdlib(handle),
+            thread_state: ThreadState::new(config.recursion_limit_config()),
+            answer_scope: AnswerScope::new(),
+        }
+    }
+
     pub fn get_ast(&self, handle: &Handle) -> Option<Arc<ruff_python_ast::ModModule>> {
         self.with_module_inner(handle, |x| x.get_ast())
     }
@@ -1620,6 +1633,7 @@ impl<'a> Transaction<'a> {
                 treat_all_caps_as_final: config.treat_all_caps_as_final(module_data.handle.path()),
                 infer_param_types_from_docstring: config
                     .infer_param_types_from_docstring(module_data.handle.path()),
+                reveal_type_qualified_names: config.reveal_type_qualified_names,
                 recursion_limit_config: config.recursion_limit_config(),
                 pysa_context,
                 cinderx_enabled: self.data.cinderx_reporter.is_some(),
@@ -2681,6 +2695,7 @@ impl<'a> Transaction<'a> {
                 treat_all_caps_as_final: config.treat_all_caps_as_final(m.handle.path()),
                 infer_param_types_from_docstring: config
                     .infer_param_types_from_docstring(m.handle.path()),
+                reveal_type_qualified_names: config.reveal_type_qualified_names,
                 recursion_limit_config: config.recursion_limit_config(),
                 pysa_context: None,
                 cinderx_enabled: false,
@@ -2825,6 +2840,52 @@ impl<'a> Transaction<'a> {
     }
 }
 
+/// A `TypeEnv` that reads definition data from a transaction, for use after solving.
+///
+/// It reads a class's answers from its module's `Solutions`, or from its `Answers`, solving the
+/// answer on demand if the module has not been fully solved. `answer_scope` retains the
+/// `Solutions` or `Answers` of every module read, and it is append-only and lives as long as the
+/// env. So every borrow the env returns stays valid for the env's lifetime, even if the
+/// transaction later replaces a module's `Answers` with its `Solutions`. Like `AnswerScope`, the
+/// env is not `Sync`.
+pub struct TransactionTypeEnv<'a> {
+    transaction: &'a Transaction<'a>,
+    /// The module this env was created for. Other modules are looked up with its `SysInfo`.
+    handle: Handle,
+    stdlib: Arc<Stdlib>,
+    thread_state: ThreadState,
+    answer_scope: Box<AnswerScope>,
+}
+
+impl TypeEnv for TransactionTypeEnv<'_> {
+    fn stdlib(&self) -> &Stdlib {
+        &self.stdlib
+    }
+
+    fn class_tparams<'b>(&'b self, cls: &'b Class) -> &'b TParams {
+        let key = match cls.precomputed_tparams() {
+            PrecomputedTParams::NotGeneric => return TParams::empty_ref(),
+            PrecomputedTParams::Precomputed(tparams) => return tparams,
+            PrecomputedTParams::FromBinding => KeyTParams(cls.index()),
+        };
+        let handle = Handle::new(
+            cls.module_name(),
+            cls.module_path().dupe(),
+            self.handle.sys_info().dupe(),
+        );
+        // There is no answer only if the class's module was rebuilt without this class, in which
+        // case the solver also treats the class as having no type parameters.
+        self.transaction
+            .lookup_answer(
+                self.transaction.get_module(&handle),
+                &key,
+                &self.thread_state,
+                &self.answer_scope,
+            )
+            .map_or(TParams::empty_ref(), |tparams| &**tparams)
+    }
+}
+
 pub(crate) struct TransactionHandle<'a> {
     transaction: &'a Transaction<'a>,
     module_data: &'a ArcId<ModuleDataMut>,
@@ -2873,15 +2934,25 @@ impl<'a> TransactionHandle<'a> {
         path: Option<&ModulePath>,
         dep: ModuleDep,
     ) -> FindingOrError<&'a ArcId<ModuleDataMut>> {
-        let handle = match path {
-            Some(path) => {
-                // Explicit path — already resolved. Bypass imports entirely.
-                FindingOrError::new_finding(Handle::new(
-                    module,
-                    path.dupe(),
-                    self.module_data.handle.sys_info().dupe(),
-                ))
-            }
+        let resolve = move |path: &ModulePath| {
+            let handle = Handle::new(
+                module,
+                path.dupe(),
+                self.module_data.handle.sys_info().dupe(),
+            );
+            let res = self.transaction.get_imported_module(&handle);
+            self.deferred_deps
+                .borrow_mut()
+                .entry(handle.path().dupe())
+                .or_insert_with(|| (handle, ModuleDeps::default()))
+                .1
+                .add_dep(dep);
+            res
+        };
+        match path {
+            // Explicit path — already resolved. Bypass imports entirely. Most lookups take this
+            // path, so it resolves directly rather than through a `FindingOrError`.
+            Some(path) => FindingOrError::new_finding(resolve(path)),
             None => {
                 // No path — needs find_import. Check imports cache first.
                 let imports_read = self.module_data.imports.read();
@@ -2912,26 +2983,9 @@ impl<'a> TransactionHandle<'a> {
                         finding
                     }
                 };
-                path.map(|path| {
-                    Handle::new(
-                        module,
-                        path.dupe(),
-                        self.module_data.handle.sys_info().dupe(),
-                    )
-                })
+                path.map(|path| resolve(&path))
             }
-        };
-
-        handle.map(|handle| {
-            let res = self.transaction.get_imported_module(&handle);
-            self.deferred_deps
-                .borrow_mut()
-                .entry(handle.path().dupe())
-                .or_insert_with(|| (handle, ModuleDeps::default()))
-                .1
-                .add_dep(dep);
-            res
-        })
+        }
     }
 
     /// Helper to get exports for a module with the correct lookup context.

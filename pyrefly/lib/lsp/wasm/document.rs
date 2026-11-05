@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::RwLockReadGuard;
 
 use anyhow::anyhow;
 use lsp_types::TextDocumentContentChangeEvent;
@@ -72,21 +73,10 @@ impl OpenFiles {
         self.0.read().get(path).map(|file| file.version)
     }
 
-    pub fn paths(&self) -> Vec<PathBuf> {
-        self.0.read().keys().cloned().collect()
-    }
-
-    pub fn versions(&self) -> HashMap<PathBuf, i32> {
-        self.0
-            .read()
-            .iter()
-            .map(|(path, file)| (path.clone(), file.version))
-            .collect()
-    }
-
-    /// Copy contents and versions from a single read view.
-    pub fn snapshot(&self) -> HashMap<PathBuf, OpenFile> {
-        self.0.read().clone()
+    /// Read every open document under one lock, so contents and versions stay consistent.
+    /// Writes go through the methods above, which keep each entry's contents and version together.
+    pub fn read(&self) -> RwLockReadGuard<'_, HashMap<PathBuf, OpenFile>> {
+        self.0.read()
     }
 
     /// Replace contents and version together only when `f` succeeds.
@@ -175,7 +165,6 @@ pub fn apply_change_events(original: &str, changes: Vec<TextDocumentContentChang
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::slice;
     use std::sync::Barrier;
     use std::thread;
 
@@ -235,15 +224,15 @@ mod tests {
         assert!(files.close(&path).is_none());
         files.open(path.clone(), 7, Arc::new(source("old")));
         assert!(files.contains(&path));
-        assert_eq!(files.paths().as_slice(), slice::from_ref(&path));
+        assert_eq!(files.read().keys().collect::<Vec<_>>(), [&path]);
         files.open(path.clone(), 1, Arc::new(source("new")));
         assert_eq!(files.get(&path).unwrap().get_string(), "new");
-        assert_eq!(files.versions()[&path], 1);
+        assert_eq!(files.version(&path).unwrap(), 1);
         let closed = files.close(&path).unwrap();
         assert_eq!(closed.contents.get_string(), "new");
         assert_eq!(closed.version, 1);
         assert!(files.is_empty());
-        assert!(files.versions().is_empty());
+        assert!(files.version(&path).is_none());
     }
 
     #[test]
@@ -252,12 +241,12 @@ mod tests {
         let path = PathBuf::from("main.py");
         let old = Arc::new(source("x = 1\n"));
         files.open(path.clone(), 3, Arc::clone(&old));
-        let snapshot = files.snapshot();
+        let snapshot = files.read().clone();
         let changes = serde_json::from_value(serde_json::json!([{ "text": "x = 2\n" }])).unwrap();
         files
             .update(&path, 4, |file| file.contents.apply_text_changes(changes))
             .unwrap();
-        let file = files.snapshot().remove(&path).unwrap();
+        let file = files.read()[&path].clone();
         assert_eq!(file.version, 4);
         assert_eq!(file.contents.get_string(), "x = 2\n");
         assert!(
@@ -270,7 +259,7 @@ mod tests {
                 file.contents.apply_text_changes(Vec::new())
             })
             .unwrap();
-        assert_eq!(files.versions()[&path], 1);
+        assert_eq!(files.version(&path).unwrap(), 1);
     }
 
     #[test]
@@ -284,7 +273,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.to_string(), "Rejected update");
         assert!(Arc::ptr_eq(&files.get(&path).unwrap(), &old));
-        assert_eq!(files.versions()[&path], 2);
+        assert_eq!(files.version(&path).unwrap(), 2);
         let called = Cell::new(false);
         let missing = PathBuf::from("missing.py");
         assert!(
@@ -297,7 +286,7 @@ mod tests {
         );
         assert!(!called.get());
         assert!(!files.contains(&missing));
-        assert_eq!(files.versions().len(), 1);
+        assert_eq!(files.read().len(), 1);
     }
 
     #[test]
@@ -308,7 +297,7 @@ mod tests {
         files.open(path.clone(), 2, Arc::clone(&old));
         assert!(files.close_if(&path, |_| false).is_none());
         assert!(Arc::ptr_eq(&files.get(&path).unwrap(), &old));
-        assert_eq!(files.versions()[&path], 2);
+        assert_eq!(files.version(&path).unwrap(), 2);
     }
 
     #[test]
@@ -335,7 +324,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.to_string(), "Expected text file, but got notebook");
         assert!(Arc::ptr_eq(&files.get(&path).unwrap(), &contents));
-        assert_eq!(files.versions()[&path], 1);
+        assert_eq!(files.version(&path).unwrap(), 1);
     }
 
     #[test]
@@ -360,13 +349,13 @@ mod tests {
                 scope.spawn(|| {
                     start.wait();
                     for _ in 0..100 {
-                        let snapshot = files.snapshot();
-                        let file = &snapshot[&path];
+                        let files = files.read();
+                        let file = &files[&path];
                         assert_eq!(file.contents.get_string(), file.version.to_string());
                     }
                 });
             }
         });
-        assert_eq!(files.versions()[&path], 100);
+        assert_eq!(files.version(&path).unwrap(), 100);
     }
 }
