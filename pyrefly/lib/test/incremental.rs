@@ -1318,7 +1318,6 @@ fn test_fine_grained_related_export_recompute() {
     i.check(&["main"], &["foo", "main"]);
 }
 
-// BUG: Recomputing a module from a reused AST loses its parse diagnostics.
 #[test]
 fn test_parse_error_survives_dependency_recompute() {
     let mut i = Incremental::new();
@@ -1330,11 +1329,7 @@ fn test_parse_error_survives_dependency_recompute() {
     i.check(&["main"], &["main", "foo"]);
 
     i.set("foo", "x: str = 'changed'");
-    let result = i.check_ignoring_expectations(&["main"], &["foo", "main"]);
-    assert!(
-        result.errors.collect_display_errors().is_empty(),
-        "the parse error is currently lost when the cached AST is reused"
-    );
+    i.check(&["main"], &["foo", "main"]);
 }
 
 /// Test fine-grained tracking with unused `import foo` style.

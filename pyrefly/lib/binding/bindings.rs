@@ -129,6 +129,7 @@ use crate::binding::table::TableKeyed;
 use crate::config::base::InferReturnTypes;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
 use crate::export::definitions::Definitions;
 use crate::export::definitions::MutableCaptureKind;
 use crate::export::exports::Exports;
@@ -432,6 +433,7 @@ table! {
 #[derive(Debug)]
 pub struct Bindings {
     module_info: ModuleInfo,
+    parse_errors: ModuleDiagnostics,
     sys_info: SysInfo,
     table: BindingTable,
     metadata: Arc<BindingsMetadata>,
@@ -694,6 +696,7 @@ impl Bindings {
             bind_functools_wrapper_mutation(&mut table, TextRange::default(), false);
         Self {
             module_info,
+            parse_errors: ModuleDiagnostics::default(),
             sys_info: SysInfo::default(),
             table,
             metadata: Arc::new(BindingsMetadata::new()),
@@ -743,6 +746,10 @@ impl Bindings {
     /// Stored factory applications, arbitrary attribute writes, and cross-module effects are not tracked.
     pub fn functools_wrapper_mutation(&self) -> Idx<Key> {
         self.functools_wrapper_mutation
+    }
+
+    pub fn parse_errors(&self) -> &ModuleDiagnostics {
+        &self.parse_errors
     }
 
     pub fn sys_info(&self) -> &SysInfo {
@@ -1096,6 +1103,7 @@ impl Bindings {
     pub fn new(
         x: ModModule,
         module_info: ModuleInfo,
+        parse_errors: ModuleDiagnostics,
         exports: &Exports,
         solver: &Solver,
         lookup: &dyn LookupExport,
@@ -1286,6 +1294,7 @@ impl Bindings {
         );
         Self {
             module_info,
+            parse_errors,
             sys_info: builder.sys_info,
             table: builder.table,
             metadata: Arc::new(builder.metadata),

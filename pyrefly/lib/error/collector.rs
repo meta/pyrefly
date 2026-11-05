@@ -7,6 +7,7 @@
 
 use std::fmt::Debug;
 use std::mem;
+use std::sync::Arc;
 
 use dupe::Dupe;
 use pyrefly_config::error_kind::ErrorKind;
@@ -33,6 +34,16 @@ struct ModuleErrors {
     /// Set to `true` when we have no duplicates and are sorted.
     clean: bool,
     items: Vec<Error>,
+}
+
+/// Finalized diagnostics produced by one computation step.
+#[derive(Clone, Dupe, Debug, Default)]
+pub struct ModuleDiagnostics(Arc<[Error]>);
+
+impl ModuleDiagnostics {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Error> {
+        self.0.iter()
+    }
 }
 
 impl ModuleErrors {
@@ -77,37 +88,6 @@ impl ModuleErrors {
         }
     }
 
-    /// For each error, whether it is an `unknown-from-error` error that a counted error within its
-    /// range explains. Such an error reports a value whose type comes from another error, and an
-    /// error within its range is the cause or a more precise report of the same unknown value. At an
-    /// equal range, only an error of another kind counts.
-    fn unknown_from_error_explained(&mut self, counts: impl Fn(ErrorKind) -> bool) -> Vec<bool> {
-        self.cleanup();
-        // `self.items` is sorted by range, so the candidates for each error start at the first item
-        // that does not start before it.
-        self.items
-            .iter()
-            .map(|x| {
-                if x.error_kind() != ErrorKind::UnknownFromError {
-                    return false;
-                }
-                let range = x.range();
-                let first = self
-                    .items
-                    .partition_point(|y| y.range().start() < range.start());
-                // `x` itself has an equal range and the same kind, so the last condition skips it.
-                self.items[first..]
-                    .iter()
-                    .take_while(|y| y.range().start() <= range.end())
-                    .any(|y| {
-                        counts(y.error_kind())
-                            && range.contains_range(y.range())
-                            && (y.range() != range || y.error_kind() != ErrorKind::UnknownFromError)
-                    })
-            })
-            .collect()
-    }
-
     fn is_empty(&self) -> bool {
         // No need to do cleanup if it's empty.
         self.items.is_empty()
@@ -136,6 +116,33 @@ impl ModuleErrors {
         self.cleanup();
         self.items.iter()
     }
+}
+
+/// For each error, whether it is an `unknown-from-error` error that a counted error within its
+/// range explains. Such an error reports a value whose type comes from another error, and an
+/// error within its range is the cause or a more precise report of the same unknown value. At an
+/// equal range, only an error of another kind counts. `items` must be sorted by range.
+fn unknown_from_error_explained(items: &[&Error], counts: impl Fn(ErrorKind) -> bool) -> Vec<bool> {
+    // The candidates for each error start at the first item that does not start before it.
+    items
+        .iter()
+        .map(|x| {
+            if x.error_kind() != ErrorKind::UnknownFromError {
+                return false;
+            }
+            let range = x.range();
+            let first = items.partition_point(|y| y.range().start() < range.start());
+            // `x` itself has an equal range and the same kind, so the last condition skips it.
+            items[first..]
+                .iter()
+                .take_while(|y| y.range().start() <= range.end())
+                .any(|y| {
+                    counts(y.error_kind())
+                        && range.contains_range(y.range())
+                        && (y.range() != range || y.error_kind() != ErrorKind::UnknownFromError)
+                })
+        })
+        .collect()
 }
 
 #[derive(Debug, Default)]
@@ -180,6 +187,12 @@ impl ErrorCollector {
 
     pub fn is_active(&self) -> bool {
         self.style != ErrorStyle::Never
+    }
+
+    pub fn finish(self) -> ModuleDiagnostics {
+        let mut errors = self.errors.into_inner();
+        errors.cleanup();
+        ModuleDiagnostics(errors.items.into())
     }
 
     pub fn extend(&self, other: ErrorCollector) {
@@ -361,8 +374,12 @@ impl ErrorCollector {
         effect
     }
 
+    /// Classify this collector's diagnostics together with finalized `snapshots` of
+    /// the same module, so that an error in one can explain an `unknown-from-error`
+    /// error in another.
     pub fn collect_into(
         &self,
+        snapshots: &[&ModuleDiagnostics],
         error_config: &ErrorConfig,
         fstring_ranges: &[(LineNumber, LineNumber)],
         ignore_all: &[Suppression],
@@ -370,17 +387,40 @@ impl ErrorCollector {
         result: &mut CollectedErrors,
     ) {
         let mut errors = self.errors.lock();
+        let mut all: Vec<&Error> = snapshots
+            .iter()
+            .flat_map(|snapshot| snapshot.iter())
+            .chain(errors.iter())
+            .collect();
+        // Each source is sorted by range and the sort is stable, so diagnostics at an
+        // equal range keep the order of `snapshots`, followed by this collector.
+        all.sort_by_key(|error| (error.range().start(), error.range().end()));
+        self.collect_iter(&all, error_config, fstring_ranges, ignore_all, result);
+        if !(self.module_info.is_generated() && error_config.ignore_errors_in_generated_code) {
+            self.collect_misplaced_ignores(misplaced, error_config, result);
+        }
+    }
+
+    /// Classify `errors`, which must be sorted by range.
+    fn collect_iter(
+        &self,
+        errors: &[&Error],
+        error_config: &ErrorConfig,
+        fstring_ranges: &[(LineNumber, LineNumber)],
+        ignore_all: &[Suppression],
+        result: &mut CollectedErrors,
+    ) {
         if !(self.module_info.is_generated() && error_config.ignore_errors_in_generated_code) {
             // Only errors that are shown or suppressed explain an `unknown-from-error` error, so an
             // error whose kind is disabled never hides one. A soft error never produces an error
             // `Any`, so only hard errors and nested `unknown-from-error` errors count.
             let shown = |kind| error_config.display_config.severity(kind) != Severity::Ignore;
             let explained = shown(ErrorKind::UnknownFromError).then(|| {
-                errors.unknown_from_error_explained(|kind: ErrorKind| {
+                unknown_from_error_explained(errors, |kind: ErrorKind| {
                     shown(kind) && (!kind.is_soft() || kind == ErrorKind::UnknownFromError)
                 })
             });
-            for (i, err) in errors.iter().enumerate() {
+            for (i, err) in errors.iter().copied().enumerate() {
                 if explained.as_ref().is_some_and(|explained| explained[i]) {
                     continue;
                 }
@@ -414,7 +454,6 @@ impl ErrorCollector {
                     }
                 }
             }
-            self.collect_misplaced_ignores(misplaced, error_config, result);
         }
     }
 
@@ -472,7 +511,7 @@ impl ErrorCollector {
 
     pub fn collect(&self, error_config: &ErrorConfig) -> CollectedErrors {
         let mut result = CollectedErrors::default();
-        self.collect_into(error_config, &[], &[], &[], &mut result);
+        self.collect_into(&[], error_config, &[], &[], &[], &mut result);
         result
     }
 }
@@ -839,13 +878,16 @@ mod tests {
             Tool::default_enabled(),
             TypeIgnoreUnknownTagBehavior::NoEffect,
         );
-        assert!(
-            errors
-                .collect(&config1)
-                .ordinary
-                .map(|x| x.msg())
-                .is_empty()
+        let mut result = CollectedErrors::default();
+        errors.collect_into(
+            &[],
+            &config1,
+            &[],
+            &[],
+            &[LineNumber::new(2).expect("line number should be valid")],
+            &mut result,
         );
+        assert!(result.ordinary.is_empty());
     }
 
     #[test]

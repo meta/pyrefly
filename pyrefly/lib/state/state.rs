@@ -987,8 +987,9 @@ impl<'a> Transaction<'a> {
                 .filter_map(|handle| {
                     self.with_module_config_inner(handle, |config, x| {
                         let load = x.get_load()?;
+                        let parse_errors = x.parse_errors();
                         let module_ranges = x.module_ranges();
-                        Some((load, module_ranges, config.dupe()))
+                        Some((load, parse_errors, module_ranges, config.dupe()))
                     })
                 })
                 .collect(),
@@ -1004,8 +1005,9 @@ impl<'a> Transaction<'a> {
                     .values()
                     .filter_map(|x| {
                         let load = x.state.get_load()?;
+                        let parse_errors = x.state.parse_errors();
                         let module_ranges = x.state.module_ranges();
-                        Some((load, module_ranges, x.config.dupe()))
+                        Some((load, parse_errors, module_ranges, x.config.dupe()))
                     })
                     .collect(),
             );
@@ -1016,16 +1018,18 @@ impl<'a> Transaction<'a> {
             .iter_unordered()
             .filter_map(|x| {
                 let load = x.1.state.get_load()?;
+                let parse_errors = x.1.state.parse_errors();
                 let module_ranges = x.1.state.module_ranges();
-                Some((load, module_ranges, x.1.config.read().dupe()))
+                Some((load, parse_errors, module_ranges, x.1.config.read().dupe()))
             })
             .collect::<Vec<_>>();
         for (k, v) in self.readable.modules.iter() {
             if self.data.updated_modules.get(k).is_none()
                 && let Some(load) = v.state.get_load()
             {
+                let parse_errors = v.state.parse_errors();
                 let module_ranges = v.state.module_ranges();
-                res.push((load, module_ranges, v.config.dupe()));
+                res.push((load, parse_errors, module_ranges, v.config.dupe()));
             }
         }
         Errors::new(res)

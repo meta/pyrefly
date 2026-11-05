@@ -28,6 +28,8 @@ use crate::alt::answers::Solutions;
 use crate::binding::bindings::Bindings;
 use crate::config::base::InferReturnTypes;
 use crate::config::base::RecursionLimitConfig;
+use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
 use crate::error::style::ErrorStyle;
 use crate::export::exports::Exports;
 use crate::export::exports::LookupExport;
@@ -84,13 +86,15 @@ pub struct Context<'a, Lookup> {
 pub struct ParsedModule {
     module: Arc<ModModule>,
     tokens: Option<Arc<Tokens>>,
+    errors: ModuleDiagnostics,
 }
 
 impl ParsedModule {
-    pub fn new(module: ModModule, tokens: Option<Tokens>) -> Self {
+    pub fn new(module: ModModule, tokens: Option<Tokens>, errors: ModuleDiagnostics) -> Self {
         Self {
             module: Arc::new(module),
             tokens: tokens.map(Arc::new),
+            errors,
         }
     }
 
@@ -100,6 +104,10 @@ impl ParsedModule {
 
     pub fn tokens(&self) -> Option<Arc<Tokens>> {
         self.tokens.dupe()
+    }
+
+    pub fn errors(&self) -> &ModuleDiagnostics {
+        &self.errors
     }
 }
 
@@ -250,6 +258,14 @@ macro_rules! compute_step {
         let $input = $steps.$input.clone_arc();
         compute_step!(@exec $steps, $ctx, $output, [$($acc)* $input] $($($rest)*)?);
     }};
+    // Some steps need the parser-owned diagnostics as well as the AST.
+    (@exec $steps:ident, $ctx:ident, $output:ident, [$($acc:ident)*] parsed_ast $(, $($rest:tt)*)?) => {{
+        let parsed_ast = $steps
+            .ast
+            .clone_arc()
+            .expect("parsed module must exist after the AST step");
+        compute_step!(@exec $steps, $ctx, $output, [$($acc)* parsed_ast] $($($rest)*)?);
+    }};
     // Required input (name): load and unwrap.
     (@exec $steps:ident, $ctx:ident, $output:ident, [$($acc:ident)*] $input:ident $(, $($rest:tt)*)?) => {{
         let $input = $steps.$input.clone_arc().unwrap();
@@ -348,7 +364,7 @@ impl StepsMut {
             Step::Load => compute_step!(self, ctx, load =),
             Step::Ast => compute_step!(self, ctx, ast = load),
             Step::Exports => compute_step!(self, ctx, exports = load, ast),
-            Step::Answers => compute_step!(self, ctx, answers = load, ast, exports),
+            Step::Answers => compute_step!(self, ctx, answers = load, parsed_ast, exports),
             Step::Solutions => compute_step!(self, ctx, solutions = load, ast?, answers),
         }
         // Release-store current_step: readers seeing this value are guaranteed
@@ -482,15 +498,16 @@ impl Step {
 
     #[inline(never)]
     fn step_ast<Lookup>(ctx: &Context<Lookup>, load: Arc<Load>) -> Arc<ParsedModule> {
+        let errors = ErrorCollector::new(load.module_info.dupe(), load.errors.style());
         let (module, tokens, ignore) = module_parse(
             load.module_info.contents(),
             ctx.sys_info.version(),
             load.module_info.source_type(),
-            &load.errors,
+            &errors,
             ctx.require.keep_ast(),
         );
         load.module_info.initialize_ignore(ignore);
-        Arc::new(ParsedModule::new(module, tokens))
+        Arc::new(ParsedModule::new(module, tokens, errors.finish()))
     }
 
     #[inline(never)]
@@ -513,7 +530,7 @@ impl Step {
     fn step_answers<Lookup: LookupExport>(
         ctx: &Context<Lookup>,
         load: Arc<Load>,
-        ast: Arc<ParsedModule>,
+        parsed_ast: Arc<ParsedModule>,
         exports: Arc<Exports>,
     ) -> Arc<Answers> {
         let solver = Solver::new(SolverConfig {
@@ -524,13 +541,13 @@ impl Step {
             spec_compliant_overloads: ctx.spec_compliant_overloads,
             legacy_overload_expansion: ctx.legacy_overload_expansion,
         });
-        let ast = ast.module();
         let enable_index = ctx.require.keep_index();
         let enable_trace =
             ctx.require.keep_answers_trace() || ctx.pysa_context.is_some() || ctx.cinderx_enabled;
         let bindings = Bindings::new(
-            Arc::unwrap_or_clone(ast),
+            Arc::unwrap_or_clone(parsed_ast.module()),
             load.module_info.dupe(),
+            parsed_ast.errors().dupe(),
             &exports,
             &solver,
             ctx.lookup,

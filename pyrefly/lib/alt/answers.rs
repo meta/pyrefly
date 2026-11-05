@@ -62,6 +62,7 @@ use crate::binding::table::TableKeyed;
 use crate::config::base::RecursionLimitConfig;
 use crate::dispatch_anyidx;
 use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
 use crate::error::style::ErrorStyle;
 use crate::export::exports::LookupExport;
 use crate::module::module_info::ModuleInfo;
@@ -821,6 +822,7 @@ impl SolutionsData {
 #[derive(Debug, Clone)]
 pub struct Solutions {
     module_info: ModuleInfo,
+    parse_errors: ModuleDiagnostics,
     data: Arc<SolutionsData>,
     metadata: Arc<BindingsMetadata>,
     /// Multi-line ranges and ignore-all directives.
@@ -918,6 +920,10 @@ impl Solutions {
 
     pub fn metadata(&self) -> &Arc<BindingsMetadata> {
         &self.metadata
+    }
+
+    pub fn parse_errors(&self) -> &ModuleDiagnostics {
+        &self.parse_errors
     }
 
     pub fn module_ranges(&self) -> &Arc<ModuleRanges> {
@@ -1503,6 +1509,7 @@ impl Answers {
 
         Solutions {
             module_info: bindings.module().dupe(),
+            parse_errors: bindings.parse_errors().dupe(),
             data: self.solutions.dupe(),
             metadata: bindings.metadata().dupe(),
             module_ranges: bindings.module_ranges().dupe(),
