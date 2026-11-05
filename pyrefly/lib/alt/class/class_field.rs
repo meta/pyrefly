@@ -4781,18 +4781,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 Err(error) => {
                     let mut diff_lines = Vec::new();
-                    // An Invariant failure is only about mutability when the override
-                    // narrows: the read direction holds and only the write direction
-                    // fails. Widening and mutually incompatible pairs fail the read
-                    // direction too (as recorded by the engine, using the same
-                    // any-branch overload semantics as the original check), so
-                    // report those as plain `bad-override` with a covariant message.
+                    // Read-incompatible overrides are invalid even without mutability.
                     let error = match *error {
                         AttrSubsetError::Invariant {
                             got,
                             want,
                             subset_error,
-                            read_failed: true,
+                            read_compatible: false,
                         } => Box::new(AttrSubsetError::Covariant {
                             got,
                             want,
@@ -6311,7 +6306,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .expect("`Overloaded` has at least one branch"),
                     _ => is_subset(got, want),
                 };
-                let read_failed = assignable.is_err();
+                let read_compatible = assignable.is_ok();
                 let subset_error = assignable
                     .map_or_else(Some, |_| is_subset(want, got).map_or_else(Some, |_| None));
                 if let Some(subset_error) = subset_error {
@@ -6319,7 +6314,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         got: got.clone(),
                         want: want.clone(),
                         subset_error,
-                        read_failed,
+                        read_compatible,
                     }))
                 } else {
                     Ok(())

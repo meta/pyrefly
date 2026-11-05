@@ -121,10 +121,8 @@ pub enum AttrSubsetError {
         got: Type,
         want: Type,
         subset_error: SubsetError,
-        // Whether the read direction (`got <: want`, any-branch for overloads)
-        // failed. When false, only the write direction failed, i.e. the
-        // override narrows and the failure is purely about mutability.
-        read_failed: bool,
+        // Allows override diagnostics to distinguish read and write failures.
+        read_compatible: bool,
     },
     // `want` is not a subtype of `got`
     // applies to property setters
@@ -211,7 +209,7 @@ impl AttrSubsetError {
                 got,
                 want,
                 subset_error: _,
-                read_failed: _,
+                read_compatible: _,
             } => {
                 format!(
                     "`{child_class}.{attr_name}` has type `{}`, which is not consistent with `{}` in `{parent_class}.{attr_name}` (the type of read-write attributes cannot be changed)",
