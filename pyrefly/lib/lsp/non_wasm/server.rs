@@ -3989,6 +3989,11 @@ impl Server {
                 if handle.path().is_memory() {
                     return false;
                 }
+                // Skip copies checked in an importer's Python environment. The file's diagnostics
+                // come from checking it in its own environment.
+                if handle.importer_site_package_path().is_some() {
+                    return false;
+                }
                 let path = handle.path().as_path();
                 // Skip open files — they get diagnostics through the normal path
                 if open_files.contains_key(&path.to_path_buf()) {
