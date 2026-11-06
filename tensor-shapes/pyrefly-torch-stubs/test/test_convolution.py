@@ -83,19 +83,17 @@ def test_conv_transpose3d_controls() -> None:
     assert_shape(defaults.shape, (2, 8, 5, 10, 10))
     assert_shape(scalar.shape, (2, 8, 7, 17, 17))
 
-    # TODO: BUG: Torch accepts per-axis tuples, but the overlay rejects them.
     per_axis = nn.ConvTranspose3d(
         4,
         8,
-        kernel_size=(1, 3, 3),  # E: not assignable to parameter `kernel_size`
-        stride=(1, 2, 2),  # E: not assignable to parameter `stride`
-        padding=(0, 1, 1),  # E: not assignable to parameter `padding`
-        output_padding=(0, 1, 1),  # E: not assignable to parameter `output_padding`
+        kernel_size=(1, 3, 3),
+        stride=(1, 2, 2),
+        padding=(0, 1, 1),
+        output_padding=(0, 1, 1),
     )(volume)
     assert_shape(per_axis.shape, (2, 8, int, int, int), runtime=(2, 8, 3, 16, 16))
-    # TODO: BUG: The rejected tuple stride also falls back to the scalar default.
-    stride = nn.ConvTranspose3d(4, 8, 3, stride=(1, 2, 2))(volume)  # E: not assignable
-    assert_shape(stride.shape, (2, 8, 5, 10, 10), runtime=(2, 8, 5, 17, 17))
+    stride = nn.ConvTranspose3d(4, 8, 3, stride=(1, 2, 2))(volume)
+    assert_shape(stride.shape, (2, 8, int, int, int), runtime=(2, 8, 5, 17, 17))
 
 
 def test_functional_convolution_rejects_invalid_arguments() -> None:

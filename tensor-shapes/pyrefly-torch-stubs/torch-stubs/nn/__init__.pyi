@@ -808,16 +808,18 @@ class ConvTranspose2d[
 class ConvTranspose3d[
     InC: IntVar,
     OutC: IntVar,
-    K: IntVar,
-    S: IntVar = 1,
-    P: IntVar = 0,
-    OP: IntVar = 0,
-    D: IntVar = 1,
+    K: IntVar = int,
+    S: IntVar = int,
+    P: IntVar = int,
+    OP: IntVar = int,
+    D: IntVar = int,
 ](Module):
-    """3D transposed convolution. Tracks channel and spatial dimensions.
+    """3D transposed convolution with precise scalar-argument shape tracking.
 
     Type parameters S, P, OP, D are bound from constructor arguments via _Int[T].
-    PEP 696 defaults apply when arguments are omitted.
+    Omitted arguments use their precise scalar defaults. Tuple-valued dimensions
+    leave the corresponding spatial output dimensions gradual, as do type
+    parameters omitted from an explicit annotation.
     """
 
     weight: Tensor[[InC, OutC, K, K, K]]
@@ -826,13 +828,13 @@ class ConvTranspose3d[
         self,
         in_channels: _Int[InC],
         out_channels: _Int[OutC],
-        kernel_size: _Int[K],
-        stride: _Int[S] = 1,
-        padding: _Int[P] = 0,
-        output_padding: _Int[OP] = 0,
+        kernel_size: _Int[K] | tuple[int, int, int],
+        stride: _Int[S] | tuple[int, int, int] = 1,
+        padding: _Int[P] | tuple[int, int, int] = 0,
+        output_padding: _Int[OP] | tuple[int, int, int] = 0,
         groups: int = 1,
         bias: bool = True,
-        dilation: _Int[D] = 1,
+        dilation: _Int[D] | tuple[int, int, int] = 1,
         padding_mode: str = "zeros",
         device: Any = None,
         dtype: Any = None,
