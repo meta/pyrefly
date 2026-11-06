@@ -250,17 +250,21 @@ def test_rounding_preserves_shape() -> None:
 
 
 def test_round_scalars_and_sequences() -> None:
-    rounded_float = np.round(0.234, decimals=2)  # E: parameter `a`
-    rounded_int = np.round(3)  # E: parameter `a`
-    rounded_float32 = np.round(np.float32(1.25), 1)  # E: parameter `a`
-    rounded_list = np.round([1.24, 2.56], decimals=1)  # E: parameter `a`
+    rounded_float = np.round(0.234, decimals=2)
+    rounded_int = np.round(3)
+    rounded_float32 = np.round(np.float32(1.25), 1)
+    rounded_list = np.round([1.24, 2.56], decimals=1)
+    assert_type(rounded_float, Any)
+    assert_type(rounded_int, Any)
+    assert_type(rounded_float32, np.float32)
+    assert_type(rounded_list, np.ndarray)
     assert isinstance(rounded_float, np.float64)
     assert rounded_float == 0.23
     assert isinstance(rounded_int, np.int64)
     assert isinstance(rounded_float32, np.float32)
     assert rounded_list.tolist() == [1.2, 2.6]
     with assert_raises(TypeError):
-        np.round(None)  # E: parameter `a`
+        np.round(None)  # E: No matching overload
 
 
 def test_round_array_dtypes() -> None:
@@ -273,10 +277,12 @@ def test_round_array_dtypes() -> None:
     )
     unknown_rank = cast(np.ndarray, floats)
 
-    assert_type(np.round(floats, 1), np.ndarray[[2, 3], Any])
-    assert_type(np.round(integers, -1), np.ndarray[[2, 3], Any])
-    assert_type(np.round(complexes, decimals=1), np.ndarray[[2, 3], Any])
-    assert_type(np.round(booleans), np.ndarray[[2, 3], Any])
+    assert_type(np.round(floats, 1), np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_type(np.round(integers, -1), np.ndarray[[2, 3], np.dtype[np.int8]])
+    assert_type(
+        np.round(complexes, decimals=1), np.ndarray[[2, 3], np.dtype[np.complex64]]
+    )
+    assert_type(np.round(booleans), np.ndarray[[2, 3], np.dtype[np.float16]])
     assert_type(np.round(gradual_dtype, 1), np.ndarray[[2, 3], Any])
     assert_shape(np.round(unknown_rank).shape, IntTuple, runtime=(2, 3))
     assert np.round(floats, 1).dtype == np.dtype(np.float64)
@@ -291,19 +297,22 @@ def test_round_rank_zero_and_sequence_inputs() -> None:
     unknown_scalar = cast(np.ndarray, np.ones(()))
 
     rounded = np.round(scalar_array, 1)
-    assert_type(rounded, np.ndarray[[], Any])
+    assert_type(rounded, Any)
+    assert_type(np.round(unknown_scalar), Any)
     assert_shape(scalar_array.shape, ())
     assert isinstance(rounded, np.float64)
     assert isinstance(np.round(unknown_scalar), np.float64)
 
-    rounded_tuple = np.round((1.24, 2.56), 1)  # E: parameter `a`
-    nested = np.round([[1.25], [2.5]])  # E: parameter `a`
+    rounded_tuple = np.round((1.24, 2.56), 1)
+    nested = np.round([[1.25], [2.5]])
+    assert_type(rounded_tuple, np.ndarray)
+    assert_type(nested, np.ndarray)
     assert rounded_tuple.tolist() == [1.2, 2.6]
     assert nested.tolist() == [[1.0], [2.0]]
     with assert_raises(TypeError):
-        np.round("1.5")  # E: parameter `a`
+        np.round("1.5")  # E: No matching overload
     with assert_raises(TypeError):
-        np.round(["1.5"])  # E: parameter `a`
+        np.round(["1.5"])  # E: No matching overload
 
 
 class ArrayUfuncDispatch:

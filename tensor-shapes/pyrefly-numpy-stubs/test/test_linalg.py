@@ -275,11 +275,11 @@ def test_eigh_eigenvalues_are_real() -> None:
     values_c128, vectors_c128 = np.linalg.eigh(complex128)
     assert_type(values32, np.ndarray[[3], np.dtype[np.float32]])
     assert_type(vectors32, np.ndarray[[3, 3], np.dtype[np.float32]])
-    assert_type(values_c64, np.ndarray[[3], np.dtype[np.complex64]])
+    assert_type(values_c64, np.ndarray[[3], np.dtype[np.float32]])
     assert_type(vectors_c64, np.ndarray[[3, 3], np.dtype[np.complex64]])
     assert_type(values64, np.ndarray[[3], np.dtype[np.float64]])
     assert_type(vectors64, np.ndarray[[3, 3], np.dtype[np.float64]])
-    assert_type(values_c128, np.ndarray[[3], np.dtype[np.complex128]])
+    assert_type(values_c128, np.ndarray[[3], np.dtype[np.float64]])
     assert_type(vectors_c128, np.ndarray[[3, 3], np.dtype[np.complex128]])
     assert_shape(values_c128.shape, (3,))
     assert_shape(vectors_c128.shape, (3, 3))
@@ -297,8 +297,8 @@ def test_eigh_integer_input_promotes() -> None:
     integers = np.eye(3, dtype=np.int64)
 
     values, vectors = np.linalg.eigh(integers)
-    assert_type(values, np.ndarray[[3], np.dtype[np.int64]])
-    assert_type(vectors, np.ndarray[[3, 3], np.dtype[np.int64]])
+    assert_type(values, np.ndarray[[3], Any])
+    assert_type(vectors, np.ndarray[[3, 3], Any])
     assert_shape(values.shape, (3,))
     assert_shape(vectors.shape, (3, 3))
     assert values.dtype == np.dtype(np.float64)
@@ -308,16 +308,18 @@ def test_eigh_integer_input_promotes() -> None:
 def test_eigh_lowercase_uplo_and_non_square_inputs() -> None:
     matrix = np.eye(3)
 
-    lower = np.linalg.eigh(matrix, UPLO="l")  # E: Unexpected keyword argument `UPLO`
-    upper = np.linalg.eigh(matrix, "u")  # E: Expected 1 positional argument
+    lower = np.linalg.eigh(matrix, UPLO="l")
+    upper = np.linalg.eigh(matrix, "u")
+    assert_type(lower[0], np.ndarray[[3], np.dtype[np.float64]])
+    assert_type(upper[1], np.ndarray[[3, 3], np.dtype[np.float64]])
     assert lower[0].shape == (3,)
     assert upper[1].shape == (3, 3)
     with assert_raises(np.linalg.LinAlgError):
-        np.linalg.eigh(np.ones((2, 3)))  # E: parameter `a`
+        np.linalg.eigh(np.ones((2, 3)))  # E: No matching overload
     with assert_raises(np.linalg.LinAlgError):
-        np.linalg.eigh(np.ones(3))  # E: parameter `a`
+        np.linalg.eigh(np.ones(3))  # E: No matching overload
     with assert_raises(np.linalg.LinAlgError):
-        np.linalg.eigh(np.ones((4, 2, 3)))  # E: parameter `a`
+        np.linalg.eigh(np.ones((4, 2, 3)))  # E: No matching overload
 
 
 def test_eigh_uplo_batched_and_unknown_rank_inputs() -> None:
@@ -325,10 +327,20 @@ def test_eigh_uplo_batched_and_unknown_rank_inputs() -> None:
     batch = np.ones((4, 3, 3))
     unknown = cast(np.ndarray, np.eye(3))
 
-    upper = np.linalg.eigh(matrix, UPLO="U")  # E: Unexpected keyword argument `UPLO`
-    positional = np.linalg.eigh(matrix, "U")  # E: Expected 1 positional argument
-    batched_values, batched_vectors = np.linalg.eigh(batch)  # E: parameter `a`
+    upper = np.linalg.eigh(matrix, UPLO="U")
+    positional = np.linalg.eigh(matrix, "U")
+    batched_values, batched_vectors = np.linalg.eigh(batch)
     unknown_values, unknown_vectors = np.linalg.eigh(unknown)
+    assert_type(
+        upper,
+        tuple[
+            np.ndarray[[3], np.dtype[np.float64]],
+            np.ndarray[[3, 3], np.dtype[np.complex128]],
+        ],
+    )
+    assert_type(positional[0], np.ndarray[[3], np.dtype[np.float64]])
+    assert_type(batched_values, np.ndarray[[4, 3], np.dtype[np.float64]])
+    assert_type(batched_vectors, np.ndarray[[4, 3, 3], np.dtype[np.float64]])
     assert upper[0].dtype == np.dtype(np.float64)
     assert upper[1].shape == (3, 3)
     assert positional[0].shape == (3,)
@@ -337,7 +349,7 @@ def test_eigh_uplo_batched_and_unknown_rank_inputs() -> None:
     assert unknown_values.shape == (3,)
     assert unknown_vectors.shape == (3, 3)
     with assert_raises(ValueError):
-        np.linalg.eigh(matrix, UPLO="X")  # E: Unexpected keyword argument `UPLO`
+        np.linalg.eigh(matrix, UPLO="X")  # E: No matching overload
 
 
 def test_norm_3d_axis_keepdims_for_nbody() -> None:

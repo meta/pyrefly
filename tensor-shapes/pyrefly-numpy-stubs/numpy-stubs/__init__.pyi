@@ -1914,7 +1914,36 @@ def asarray(
     copy: py_bool | None = ...,
     like: Any,
 ) -> Any: ...
+
+# Rounding a rank-zero array produces a NumPy scalar, and an unknown rank may be zero,
+# so both return `Any`. Positive-rank results preserve numeric and object dtypes but
+# promote booleans to `float16`.
+@overload
+def round(a: ndarray[[]], decimals: int = 0) -> Any: ...
+@overload
+def round[Shape: _Shape](
+    a: ndarray[Shape, dtype[bool_]], decimals: int = 0
+) -> ndarray[Shape, dtype[float16]]: ...
+@overload
+def round[Shape: _Shape, ScalarT: number | object_](
+    a: ndarray[Shape, dtype[ScalarT]], decimals: int = 0
+) -> ndarray[Shape, dtype[ScalarT]]: ...
+@overload
 def round[Shape: _Shape](a: ndarray[Shape], decimals: int = 0) -> ndarray[Shape]: ...
+@overload
+def round[ScalarT: number](a: ScalarT, decimals: int = 0) -> ScalarT: ...
+@overload
+def round(a: _NumberScalar, decimals: int = 0) -> Any: ...
+
+# Numeric sequences always produce arrays. String leaves are rejected, but `bytes`
+# is a `Sequence[int]` and is therefore accepted.
+@overload
+def round(
+    a: RegularNestedList[IntTuple, _NumberScalar]
+    | Sequence[_NumberScalar]
+    | Sequence[Sequence[_NumberScalar]],
+    decimals: int = 0,
+) -> ndarray: ...
 
 # Interpolation tracks query shapes and leaves the result dtype gradual.
 @overload
