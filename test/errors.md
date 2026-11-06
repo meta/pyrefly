@@ -231,6 +231,18 @@ ERROR */unused/test.py:1:7-8: Parameter `x` is unused [unused-parameter] (glob)
 [1]
 ```
 
+## `only` in config file filters reported errors
+
+```scrut {output_stream: stdout}
+$ mkdir -p $TMPDIR/only_config && \
+> printf 'x: str = 1\ndef f() -> int:\n    return "a"\n' > $TMPDIR/only_config/main.py && \
+> printf 'only = ["bad-assignment"]\n' > $TMPDIR/only_config/pyrefly.toml && \
+> cd $TMPDIR/only_config && \
+> $PYREFLY check main.py --config pyrefly.toml --summary=none --output-format=min-text
+ERROR main.py:1:10-11: * [bad-assignment] (glob)
+[1]
+```
+
 ## `--output-format junit-xml` emits well-formed XML
 
 ```scrut {output_stream: stdout}

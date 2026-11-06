@@ -173,3 +173,16 @@ ERROR */pyrefly.toml: Pyrefly * does not satisfy `required-version = "<0"` (glob
 Fatal configuration error
 [4]
 ```
+
+## `only` in config file should not be empty
+
+```scrut {output_stream: stderr}
+$ mkdir $TMPDIR/only_cannot_be_empty && \
+> printf 'only = []\n' > $TMPDIR/only_cannot_be_empty/empty_only.toml && \
+> printf 'x: str = 1\ndef f() -> int:\n    return "a"\n' > $TMPDIR/only_cannot_be_empty/main.py && \
+> cd $TMPDIR/only_cannot_be_empty && $PYREFLY check --config empty_only.toml
+ INFO Checking project configured at `*/empty_only.toml` (glob)
+ERROR */empty_only.toml: a config with a value is required for `only` (glob)
+Fatal configuration error
+[1]
+```
