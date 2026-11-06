@@ -59,84 +59,15 @@ use crate::module::finder::FindImportOptions;
 use crate::module::finder::find_import;
 use crate::module::typeshed::typeshed;
 use crate::state::load::FileContents;
+use crate::state::memory::MemoryFiles;
+use crate::state::memory::MemoryFilesLookup;
+use crate::state::memory::MemoryFilesOverlay;
 use crate::state::require::Require;
 use crate::state::require::RequireLevels;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
 use crate::types::class::Class;
 use crate::types::types::Type;
-
-#[test]
-fn test_memory_source_updates_preserve_filesystem_imports() {
-    let directory = TempDir::new().unwrap();
-    let helper = directory.path().join("helper.py");
-    let main = directory.path().join("main.py");
-    fs::write(&helper, "value: int = 1\n").unwrap();
-    fs::write(&main, "from helper import value\ncheck: int = value\n").unwrap();
-    let mut config = ConfigFile {
-        search_path_from_args: vec![directory.path().to_owned()],
-        disable_search_path_heuristics: true,
-        ..Default::default()
-    };
-    config.python_environment.set_empty_to_default();
-    config.interpreters.skip_interpreter_query = true;
-    assert!(config.configure().is_empty());
-    let sys_info = config.get_sys_info();
-    let filesystem = Handle::new(
-        ModuleName::from_str("helper"),
-        ModulePath::filesystem(helper.clone()),
-        sys_info.dupe(),
-    );
-    let memory = Handle::new(
-        filesystem.module(),
-        ModulePath::memory(helper),
-        sys_info.dupe(),
-    );
-    let importer = Handle::new(
-        ModuleName::from_str("main"),
-        ModulePath::filesystem(main),
-        sys_info,
-    );
-    let state = State::new(
-        ConfigFinder::new_constant(ArcId::new(config)),
-        TEST_THREAD_COUNT,
-    );
-    let mut transaction = state.new_committable_transaction(Require::Everything, None);
-    for contents in ["value: str = 'unsaved'\n", "value: float = 1.5\n"] {
-        transaction.as_mut().set_memory(vec![(
-            memory.path().dupe(),
-            Some(Arc::new(FileContents::from_source(contents.to_owned()))),
-        )]);
-        transaction
-            .as_mut()
-            .run(&[importer.dupe(), memory.dupe()], Require::Everything, None);
-        assert_eq!(
-            transaction
-                .as_ref()
-                .get_module_info(&memory)
-                .unwrap()
-                .contents()
-                .as_str(),
-            contents
-        );
-        assert_eq!(
-            transaction
-                .as_ref()
-                .get_module_info(&filesystem)
-                .unwrap()
-                .contents()
-                .as_str(),
-            "value: int = 1\n"
-        );
-        assert!(
-            transaction
-                .as_ref()
-                .get_errors([&importer])
-                .collect_display_errors()
-                .is_empty()
-        );
-    }
-}
 
 #[test]
 fn test_fallback_search_path_relative_import_emits_dedicated_diagnostic() {
@@ -1956,4 +1887,105 @@ fn test_stdlib_cached_on_recheck() {
         "Cached stdlib should skip pre-warming entirely"
     );
     state.commit_transaction(t2, None);
+}
+
+#[test]
+fn test_memory_lookup_keeps_module_identities_and_pending_removals_separate() {
+    let path = PathBuf::from("same.py");
+    let memory = ModulePath::memory(path.clone());
+    let filesystem = ModulePath::filesystem(path);
+    let memory_contents = Arc::new(FileContents::from_source("memory".to_owned()));
+    let filesystem_contents = Arc::new(FileContents::from_source("filesystem".to_owned()));
+    let mut base = MemoryFiles::default();
+    let mut initial = MemoryFilesOverlay::default();
+    initial.set(memory.clone(), Some(Arc::clone(&memory_contents)));
+    initial.set(filesystem.clone(), Some(Arc::clone(&filesystem_contents)));
+    base.apply_overlay(initial);
+
+    let mut overlay = MemoryFilesOverlay::default();
+    let lookup = MemoryFilesLookup::new(&base, &overlay);
+    assert_eq!(lookup.get(&memory), Some(&memory_contents));
+    assert_eq!(lookup.get(&filesystem), Some(&filesystem_contents));
+    overlay.set(filesystem.clone(), None);
+    let lookup = MemoryFilesLookup::new(&base, &overlay);
+    assert!(lookup.get(&filesystem).is_none());
+    assert_eq!(lookup.get(&memory), Some(&memory_contents));
+
+    base.apply_overlay(overlay);
+    let empty = MemoryFilesOverlay::default();
+    let lookup = MemoryFilesLookup::new(&base, &empty);
+    assert!(lookup.get(&filesystem).is_none());
+    assert_eq!(lookup.get(&memory), Some(&memory_contents));
+}
+
+#[test]
+fn test_memory_source_updates_preserve_filesystem_imports() {
+    let directory = TempDir::new().unwrap();
+    let helper = directory.path().join("helper.py");
+    let main = directory.path().join("main.py");
+    fs::write(&helper, "value: int = 1\n").unwrap();
+    fs::write(&main, "from helper import value\ncheck: int = value\n").unwrap();
+    let mut config = ConfigFile {
+        search_path_from_args: vec![directory.path().to_owned()],
+        disable_search_path_heuristics: true,
+        ..Default::default()
+    };
+    config.python_environment.set_empty_to_default();
+    config.interpreters.skip_interpreter_query = true;
+    assert!(config.configure().is_empty());
+    let sys_info = config.get_sys_info();
+    let filesystem = Handle::new(
+        ModuleName::from_str("helper"),
+        ModulePath::filesystem(helper.clone()),
+        sys_info.dupe(),
+    );
+    let memory = Handle::new(
+        filesystem.module(),
+        ModulePath::memory(helper),
+        sys_info.dupe(),
+    );
+    let importer = Handle::new(
+        ModuleName::from_str("main"),
+        ModulePath::filesystem(main),
+        sys_info,
+    );
+    let state = State::new(
+        ConfigFinder::new_constant(ArcId::new(config)),
+        TEST_THREAD_COUNT,
+    );
+    let mut transaction = state.new_committable_transaction(Require::Everything, None);
+    for contents in ["value: str = 'unsaved'\n", "value: float = 1.5\n"] {
+        transaction.as_mut().set_memory(vec![(
+            memory.path().dupe(),
+            Some(Arc::new(FileContents::from_source(contents.to_owned()))),
+        )]);
+        transaction
+            .as_mut()
+            .run(&[importer.dupe(), memory.dupe()], Require::Everything, None);
+        assert_eq!(
+            transaction
+                .as_ref()
+                .get_module_info(&memory)
+                .unwrap()
+                .contents()
+                .as_str(),
+            contents
+        );
+        assert_eq!(
+            transaction
+                .as_ref()
+                .get_module_info(&filesystem)
+                .unwrap()
+                .contents()
+                .as_str(),
+            "value: int = 1\n"
+        );
+        assert!(
+            transaction
+                .as_ref()
+                .get_errors([&importer])
+                .collect_display_errors()
+                .is_empty()
+        );
+    }
 }

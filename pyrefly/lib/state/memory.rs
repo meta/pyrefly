@@ -53,39 +53,3 @@ impl<'a> MemoryFilesLookup<'a> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-
-    #[test]
-    fn lookup_keeps_module_identities_and_pending_removals_separate() {
-        let path = PathBuf::from("same.py");
-        let memory = ModulePath::memory(path.clone());
-        let filesystem = ModulePath::filesystem(path);
-        let memory_contents = Arc::new(FileContents::from_source("memory".to_owned()));
-        let filesystem_contents = Arc::new(FileContents::from_source("filesystem".to_owned()));
-        let mut base = MemoryFiles::default();
-        let mut initial = MemoryFilesOverlay::default();
-        initial.set(memory.clone(), Some(Arc::clone(&memory_contents)));
-        initial.set(filesystem.clone(), Some(Arc::clone(&filesystem_contents)));
-        base.apply_overlay(initial);
-
-        let mut overlay = MemoryFilesOverlay::default();
-        let lookup = MemoryFilesLookup::new(&base, &overlay);
-        assert_eq!(lookup.get(&memory), Some(&memory_contents));
-        assert_eq!(lookup.get(&filesystem), Some(&filesystem_contents));
-        overlay.set(filesystem.clone(), None);
-        let lookup = MemoryFilesLookup::new(&base, &overlay);
-        assert!(lookup.get(&filesystem).is_none());
-        assert_eq!(lookup.get(&memory), Some(&memory_contents));
-
-        base.apply_overlay(overlay);
-        let empty = MemoryFilesOverlay::default();
-        let lookup = MemoryFilesLookup::new(&base, &empty);
-        assert!(lookup.get(&filesystem).is_none());
-        assert_eq!(lookup.get(&memory), Some(&memory_contents));
-    }
-}
