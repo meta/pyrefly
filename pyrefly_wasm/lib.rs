@@ -11,9 +11,6 @@
 //! call passes a JSON request in guest memory and receives a JSON response in
 //! guest memory. The host frees the response with `pyrefly_free`.
 
-/// The `wasm32-unknown-unknown` bindings. `wasm-bindgen` compiles them out on WASI.
-mod bindgen;
-
 use std::cell::RefCell;
 
 use pyrefly::playground::Playground;

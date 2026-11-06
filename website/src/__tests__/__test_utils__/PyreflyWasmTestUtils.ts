@@ -9,6 +9,8 @@
 
 'use strict';
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { PyreflyState } from '../../sandbox/Sandbox';
 import { PyreflyErrorMessage } from '../../sandbox/SandboxResults';
 
@@ -40,7 +42,13 @@ export async function createPyreflyWasmModule(): Promise<{
         // Use type assertion since the stub file doesn't have proper types
         const pyreflyWasmModule = (await import(
             '../wasm/pyrefly_wasm_for_testing'
-        )) as unknown as { State: new (pythonVersion: string) => PyreflyState };
+        )) as unknown as {
+            default: (source: Uint8Array) => Promise<void>;
+            State: new (pythonVersion: string) => PyreflyState;
+        };
+        await pyreflyWasmModule.default(
+            fs.readFileSync(path.join(__dirname, '../wasm/pyrefly_wasm_bg.wasm'))
+        );
         return pyreflyWasmModule;
     } catch (error) {
         console.error('Error initializing pyrefly_wasm:', error);

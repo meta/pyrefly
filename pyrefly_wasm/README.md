@@ -1,7 +1,9 @@
 # Pyrefly WASM Build
 
 Pyrefly's WASM build is used in browser-based applications like the
-[Pyrefly sandbox](https://pyrefly.org/sandbox/).
+[Pyrefly sandbox](https://pyrefly.org/sandbox/). It targets `wasm32-wasip1`.
+`pyrefly_wasm.js` loads the module, provides the WASI imports, and exposes the
+`State` class.
 
 ## Prerequisites
 
