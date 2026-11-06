@@ -69,7 +69,7 @@ class C:
     interaction
         .client
         .references("lib.py", 2, 9, false)
-        .expect_response(user_references)
+        .expect_response(user_references.clone())
         .unwrap();
 
     // `user.py` imports the disk copy of `lib.py`, so save the edit as an editor does.
@@ -78,11 +78,22 @@ class C:
     interaction.client.did_change("lib.py", &shifted_lib);
     interaction.client.did_save("lib.py");
     wait_for_disk_invalidation(&telemetry_events);
-    // BUG: the references in `user.py` are missing.
     interaction
         .client
         .references("lib.py", 3, 9, false)
-        .expect_response(json!([]))
+        .expect_response(user_references.clone())
+        .unwrap();
+
+    // A class above `Tools` changes the `ClassDefIndex` that the index of `user.py` stores.
+    let reindexed_lib = format!("class Other: ...\n{shifted_lib}");
+    fs::write(root.path().join("lib.py"), &reindexed_lib).unwrap();
+    interaction.client.did_change("lib.py", &reindexed_lib);
+    interaction.client.did_save("lib.py");
+    wait_for_disk_invalidation(&telemetry_events);
+    interaction
+        .client
+        .references("lib.py", 4, 9, false)
+        .expect_response(user_references)
         .unwrap();
 
     interaction.shutdown().unwrap();

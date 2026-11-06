@@ -80,6 +80,7 @@ use crate::table_mut_for_each;
 use crate::table_try_for_each;
 use crate::types::callable::Callable;
 use crate::types::class::Class;
+use crate::types::class::ClassDefIndex;
 use crate::types::class::ClassFields;
 use crate::types::equality::TypeEq;
 use crate::types::equality::TypeEqCtx;
@@ -101,16 +102,26 @@ pub struct Index {
     /// in the current module.
     pub renamed_imports: SmallMap<(ModuleName, Name), Vec<TextRange>>,
     /// A map from (attribute definition module) to a list of pairs of
-    /// (range of attribute definition in the definition, range of reference in the current module).
-    pub externally_defined_attribute_references: SmallMap<ModulePath, Vec<(TextRange, TextRange)>>,
+    /// (attribute definition, range of reference in the current module).
+    pub externally_defined_attribute_references:
+        SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
     /// A map from (constructor definition module) to a list of pairs of
-    /// (range of the constructor definition, range of the call site in the current module).
+    /// (constructor definition, range of the call site in the current module).
     /// The call-site range spells the class name, not the definition's own name, so these are
     /// gated behind `ReferenceOptions::include_constructor_call_sites`.
-    pub constructor_references: SmallMap<ModulePath, Vec<(TextRange, TextRange)>>,
+    pub constructor_references: SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
     /// A map from (child method range) to a list of parent method definitions (ModulePath, parent method range).
     /// This is used to find reimplementations when doing find-references on parent methods.
     pub parent_methods_map: SmallMap<TextRange, Vec<(ModulePath, TextRange)>>,
+}
+
+/// An attribute definition in another module, identified by its class and name. The index does not
+/// store the definition range: a module is not rechecked when a dependency only moves code around,
+/// so a stored range can go stale. The range is looked up in the current class metadata instead.
+#[derive(Debug, Clone)]
+pub struct IndexedAttribute {
+    pub cls: ClassDefIndex,
+    pub name: Name,
 }
 
 /// How the source text at a reference range relates to the attribute it resolves to.
@@ -1873,7 +1884,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
         if let Some(index) = &self.current().index {
             for AttrInfo {
-                name: _,
+                name,
                 ty: _,
                 is_deprecated: _,
                 definition,
@@ -1884,7 +1895,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 match definition {
                     AttrDefinition::FullyResolved {
                         cls,
-                        range,
+                        range: _,
                         docstring_range: _,
                     } => match reference_kind {
                         AttributeReferenceKind::ConstructorCall => index
@@ -1892,7 +1903,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             .constructor_references
                             .entry(cls.module_path().dupe())
                             .or_default()
-                            .push((range, attribute_reference_range)),
+                            .push((
+                                IndexedAttribute {
+                                    cls: cls.index(),
+                                    name,
+                                },
+                                attribute_reference_range,
+                            )),
                         AttributeReferenceKind::Textual => {
                             // Textual references to an attribute defined in this module are
                             // recovered by scanning the AST for `<expr>.<name>`, so only
@@ -1903,7 +1920,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                     .externally_defined_attribute_references
                                     .entry(cls.module_path().dupe())
                                     .or_default()
-                                    .push((range, attribute_reference_range))
+                                    .push((
+                                        IndexedAttribute {
+                                            cls: cls.index(),
+                                            name,
+                                        },
+                                        attribute_reference_range,
+                                    ))
                             }
                         }
                     },

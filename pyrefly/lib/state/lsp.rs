@@ -78,6 +78,7 @@ use vec1::vec1;
 
 use crate::ModuleInfo;
 use crate::alt::answers::Index;
+use crate::alt::answers::IndexedAttribute;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::attr::AttrDefinition;
 use crate::alt::attr::AttrInfo;
@@ -376,23 +377,6 @@ fn definition_matcher(
             || (candidate_name == definition_name
                 && module.to_lsp_position(candidate_range.start()).line == definition_line)
     }
-}
-
-/// The references in `references_by_module` that point at the definition at `definition_range`
-/// in `module`. Both `Index` reference maps are keyed and shaped alike, so they share this scan.
-fn recorded_references(
-    references_by_module: &SmallMap<ModulePath, Vec<(TextRange, TextRange)>>,
-    module: &Module,
-    definition_range: TextRange,
-) -> Vec<TextRange> {
-    let matches_definition = definition_matcher(module, definition_range);
-    references_by_module
-        .get(module.path())
-        .into_iter()
-        .flatten()
-        .filter(|(def_range, _)| matches_definition(*def_range, module.code_at(*def_range)))
-        .map(|(_, ref_range)| *ref_range)
-        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -1993,6 +1977,39 @@ impl<'a> Transaction<'a> {
     /// was solved, and a module is not rechecked when a dependency only moves code around.
     fn class_module(&self, handle: &Handle, cls: &Class) -> Option<Module> {
         self.get_module_info(&handle.for_module(cls.module_name(), cls.module_path().dupe()))
+    }
+
+    /// The references in `references_by_module` that point at the definition at `definition_range`
+    /// in `module`. Both `Index` attribute reference maps are keyed and shaped alike, so they share
+    /// this scan.
+    fn recorded_attribute_references(
+        &self,
+        handle: &Handle,
+        references_by_module: &SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
+        module: &Module,
+        definition_range: TextRange,
+    ) -> Vec<TextRange> {
+        let Some(references) = references_by_module.get(module.path()) else {
+            return Vec::new();
+        };
+        // Recording an entry demanded `module` up to its answers, so its metadata exists except
+        // during an uncommitted rebuild, when no stored attribute can be matched anyway.
+        let Some(metadata) =
+            self.get_bindings_metadata(&handle.for_module(module.name(), module.path().dupe()))
+        else {
+            return Vec::new();
+        };
+        let matches_definition = definition_matcher(module, definition_range);
+        references
+            .iter()
+            .filter(|(IndexedAttribute { cls, name }, _)| {
+                metadata
+                    .get_class_checked(*cls)
+                    .and_then(|class| class.fields.field_decl_range(name))
+                    .is_some_and(|range| matches_definition(range, name.as_str()))
+            })
+            .map(|(_, reference_range)| *reference_range)
+            .collect()
     }
 
     pub(crate) fn resolve_attribute_definition(
@@ -4686,7 +4703,8 @@ impl<'a> Transaction<'a> {
                 references.extend(ranges.iter().copied());
             }
         }
-        references.extend(recorded_references(
+        references.extend(self.recorded_attribute_references(
+            handle,
             &index.externally_defined_attribute_references,
             module,
             definition_range,
@@ -4862,7 +4880,8 @@ impl<'a> Transaction<'a> {
         else {
             return Vec::new();
         };
-        recorded_references(
+        self.recorded_attribute_references(
+            handle,
             &index.lock().constructor_references,
             module,
             definition_range,
