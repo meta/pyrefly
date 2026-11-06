@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::iter;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,6 +33,7 @@ use ruff_python_ast::StmtFunctionDef;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
+use starlark_map::small_map::SmallMap;
 use tracing::debug;
 use vec1::Vec1;
 
@@ -357,28 +359,41 @@ impl CancellableTransaction<'_> {
         // Pass 1: work out which files reference the target at all. This is answered from
         // the index, which every rdep carries at `Require::Indexing`, so a file that never
         // mentions the target costs nothing beyond the lookup.
-        let files_with_refs = self.process_rdeps_with_definition(
-            sys_info,
-            target_definition,
-            |transaction, handle, patched_definition| {
-                let references = transaction
-                    .as_ref()
-                    .local_references_from_definition(
-                        handle,
-                        definition_kind.clone(),
-                        patched_definition.range,
-                        &patched_definition.module,
-                        ReferenceOptions::all(true),
-                    )
-                    .unwrap_or_default();
+        let options = ReferenceOptions::all(true);
+        let overridden =
+            self.overridden_definitions(sys_info, &definition_kind, target_definition, options);
+        let definitions = iter::once((target_definition.clone(), options)).chain(
+            overridden
+                .into_iter()
+                .map(|definition| (definition, options.for_overridden())),
+        );
+        let mut references_by_handle: SmallMap<Handle, Vec<TextRange>> = SmallMap::new();
+        for (definition, options) in definitions {
+            for (handle, references) in self.process_rdeps_with_definition(
+                sys_info,
+                &definition,
+                |transaction, handle, patched_definition| {
+                    let references = transaction
+                        .as_ref()
+                        .local_references_from_definition(
+                            handle,
+                            definition_kind.clone(),
+                            patched_definition.range,
+                            &patched_definition.module,
+                            options,
+                        )
+                        .unwrap_or_default();
 
-                if references.is_empty() {
-                    None
-                } else {
-                    Some((handle.dupe(), references))
-                }
-            },
-        )?;
+                    (!references.is_empty()).then(|| (handle.dupe(), references))
+                },
+            )? {
+                references_by_handle
+                    .entry(handle)
+                    .or_default()
+                    .extend(references);
+            }
+        }
+        let files_with_refs = references_by_handle.into_iter().collect::<Vec<_>>();
 
         // Attributing a call site to its enclosing function needs the AST, and the AST is
         // only retained at `Require::Everything`. A file the client never opened is held at

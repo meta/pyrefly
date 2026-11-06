@@ -340,6 +340,12 @@ pub struct ReferenceOptions {
     /// call hierarchy). Consumers that *rewrite* them — rename — must set this to false, or
     /// they would turn `Foo()` into `<new name>()`.
     pub include_constructor_call_sites: bool,
+    /// Include references to the class members that a member overrides, e.g. `base.f()` as a
+    /// reference to `Child.f`, since the call may dispatch to the override.
+    ///
+    /// Like constructor call sites, rename must set this to false, or it would rewrite the
+    /// overridden member's references.
+    pub include_overridden_references: bool,
 }
 
 impl ReferenceOptions {
@@ -349,6 +355,17 @@ impl ReferenceOptions {
             include_declaration,
             include_interface_declaration: true,
             include_constructor_call_sites: true,
+            include_overridden_references: true,
+        }
+    }
+
+    /// The options for searching a definition that the original one overrides: only calls
+    /// count, not the overridden declaration or the constructor protocol.
+    pub fn for_overridden(self) -> Self {
+        Self {
+            include_declaration: false,
+            include_constructor_call_sites: false,
+            ..self
         }
     }
 
@@ -359,6 +376,7 @@ impl ReferenceOptions {
             include_declaration,
             include_interface_declaration: true,
             include_constructor_call_sites: false,
+            include_overridden_references: false,
         }
     }
 }
@@ -5568,6 +5586,7 @@ trait RdepTransaction {
         sys_info: SysInfo,
         definition: &TextRangeWithModule,
     ) -> Option<TextRangeWithModule>;
+    fn parent_declarations(&self, handle: &Handle, range: TextRange) -> Vec<TextRangeWithModule>;
     fn local_references_from_definition(
         &self,
         handle: &Handle,
@@ -5607,6 +5626,10 @@ impl<'a> RdepTransaction for Transaction<'a> {
         definition: &TextRangeWithModule,
     ) -> Option<TextRangeWithModule> {
         self.find_corresponding_interface_definition(sys_info, definition)
+    }
+
+    fn parent_declarations(&self, handle: &Handle, range: TextRange) -> Vec<TextRangeWithModule> {
+        self.parent_declarations(handle, range)
     }
 
     fn local_references_from_definition(
@@ -5651,6 +5674,10 @@ impl<'a> RdepTransaction for CancellableTransaction<'a> {
     ) -> Option<TextRangeWithModule> {
         self.as_ref()
             .find_corresponding_interface_definition(sys_info, definition)
+    }
+
+    fn parent_declarations(&self, handle: &Handle, range: TextRange) -> Vec<TextRangeWithModule> {
+        self.as_ref().parent_declarations(handle, range)
     }
 
     fn local_references_from_definition(
@@ -5821,6 +5848,32 @@ fn process_candidate_handles_with_definition_impl<T: RdepTransaction, R>(
     results
 }
 
+/// The declarations that the class member at `definition` overrides. Calls through them may
+/// dispatch to the override, so they are references to it. Empty unless `options` asks for them.
+fn overridden_definitions_impl<T: RdepTransaction>(
+    transaction: &T,
+    sys_info: SysInfo,
+    definition_kind: &DefinitionMetadata,
+    definition: &TextRangeWithModule,
+    options: ReferenceOptions,
+) -> Vec<TextRangeWithModule> {
+    if options.include_overridden_references
+        && matches!(
+            definition_kind,
+            DefinitionMetadata::Attribute | DefinitionMetadata::VariableOrAttribute(_)
+        )
+    {
+        let handle = Handle::new(
+            definition.module.name(),
+            definition.module.path().dupe(),
+            sys_info,
+        );
+        transaction.parent_declarations(&handle, definition.range)
+    } else {
+        Vec::new()
+    }
+}
+
 fn find_global_references_from_definition_impl<T: RdepTransaction>(
     transaction: &mut T,
     sys_info: SysInfo,
@@ -5830,6 +5883,13 @@ fn find_global_references_from_definition_impl<T: RdepTransaction>(
 ) -> Result<Vec<(Module, Vec<TextRange>)>, Cancelled> {
     let interface_definition =
         transaction.find_corresponding_interface_definition(sys_info, &definition);
+    let overridden_definitions = overridden_definitions_impl(
+        transaction,
+        sys_info,
+        &definition_kind,
+        &definition,
+        options,
+    );
     let definitions = interface_definition
         .into_iter()
         .map(|definition| {
@@ -5840,11 +5900,23 @@ fn find_global_references_from_definition_impl<T: RdepTransaction>(
                         && options.include_interface_declaration,
                     ..options
                 },
+                true,
             )
         })
-        .chain(iter::once((definition, options)));
+        .chain(overridden_definitions.into_iter().map(|definition| {
+            (
+                definition,
+                ReferenceOptions {
+                    include_declaration: false,
+                    include_constructor_call_sites: false,
+                    ..options
+                },
+                false,
+            )
+        }))
+        .chain(iter::once((definition, options, true)));
     let mut results = Vec::new();
-    for (definition, options) in definitions {
+    for (definition, options, include_child_implementations) in definitions {
         let candidate_handles =
             compute_transitive_rdeps_for_definition_impl(transaction, sys_info, &definition)?;
         if definition_kind.symbol_kind() == Some(SymbolKind::Parameter) {
@@ -5874,8 +5946,12 @@ fn find_global_references_from_definition_impl<T: RdepTransaction>(
                     module_refs.push((module_info, references));
                 }
 
-                let child_implementations =
-                    find_child_implementations_impl(transaction, handle, patched_definition);
+                // An overridden definition's other children are not references to this one.
+                let child_implementations = if include_child_implementations {
+                    find_child_implementations_impl(transaction, handle, patched_definition)
+                } else {
+                    Vec::new()
+                };
                 if !child_implementations.is_empty()
                     && let Some(module_info) = transaction.module_info(handle)
                 {
@@ -5946,6 +6022,17 @@ pub struct OverrideTargets {
 }
 
 impl<'a> CancellableTransaction<'a> {
+    /// See `overridden_definitions_impl`.
+    pub(crate) fn overridden_definitions(
+        &self,
+        sys_info: SysInfo,
+        definition_kind: &DefinitionMetadata,
+        definition: &TextRangeWithModule,
+        options: ReferenceOptions,
+    ) -> Vec<TextRangeWithModule> {
+        overridden_definitions_impl(self, sys_info, definition_kind, definition, options)
+    }
+
     /// Batches override navigation for one document into one reverse-dependency search.
     pub fn override_code_lens_targets(
         &mut self,
