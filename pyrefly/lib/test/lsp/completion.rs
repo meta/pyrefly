@@ -4529,8 +4529,6 @@ Completion Results:
 }
 
 // https://github.com/facebook/pyrefly/issues/5223
-// bug: a module whose name is not made of identifiers, such as a Django migration,
-// cannot be written in an import statement, but it is still suggested.
 #[test]
 fn autoimport_skips_module_name_with_non_identifier() {
     let code = r#"
@@ -4554,8 +4552,6 @@ x = initial
 2 | T = Migration
                 ^
 Completion Results:
-- (Class) Migration: from pkg.migrations.0001_initial import Migration
-
 - (Class) Migration: from pkg.models import Migration
 
 
@@ -4563,8 +4559,6 @@ Completion Results:
               ^
 Completion Results:
 - (Module) pkg.initial_data: import pkg.initial_data
-
-- (Module) pkg.migrations.0001_initial: import pkg.migrations.0001_initial
 
 
 

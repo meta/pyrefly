@@ -852,8 +852,6 @@ BytesIO
 }
 
 // https://github.com/facebook/pyrefly/issues/5223
-// bug: a module whose name is not made of identifiers, such as a Django migration,
-// cannot be written in an import statement, but the quick fix still offers it.
 #[test]
 fn insert_import_skips_module_name_with_non_identifier() {
     let (handles, state) = mk_multi_file_state(
@@ -880,10 +878,7 @@ fn insert_import_skips_module_name_with_non_identifier() {
         .collect();
     assert_eq!(
         import_titles,
-        [
-            "Insert import: `from pkg.migrations.0001_initial import Migration`",
-            "Insert import: `from pkg.models import Migration`",
-        ]
+        ["Insert import: `from pkg.models import Migration`"]
     );
 }
 

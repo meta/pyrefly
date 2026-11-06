@@ -3694,8 +3694,8 @@ impl<'a> Transaction<'a> {
         for module_name in module_names {
             let module_name_str = module_name.as_str();
 
-            // Skip builtins module
-            if module_name_str == "builtins" {
+            // Skip builtins, and modules no import statement can name.
+            if module_name_str == "builtins" || !module_name.is_importable() {
                 continue;
             }
 
@@ -5263,6 +5263,9 @@ impl<'a> Transaction<'a> {
     ) -> Result<Vec<(Handle, Name, Export)>, Cancelled> {
         self.search_exports(
             |handle, exports_data, exports| {
+                if !handle.module().is_importable() {
+                    return Vec::new();
+                }
                 let name = Name::new(name);
                 match exports.get(&name) {
                     Some(location) => {
@@ -5361,6 +5364,9 @@ impl<'a> Transaction<'a> {
     ) -> Result<Vec<(Handle, Handle, Name, Export)>, Cancelled> {
         let mut res = self.search_exports(
             |handle, exports_data, exports| {
+                if !handle.module().is_importable() {
+                    return Vec::new();
+                }
                 let matcher = SkimMatcherV2::default().smart_case();
                 self.fuzzy_match_exports(handle, exports_data, exports, &matcher, pattern)
             },
