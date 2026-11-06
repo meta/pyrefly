@@ -28,3 +28,12 @@ ERROR m.py:1:* (glob)
 *packages/a/vendor/m.py:1:* (glob)
 [1]
 ```
+
+## `--extend-project-excludes` adds to the excludes of the config
+
+```scrut
+$ cd $TMPDIR/workspace && $PYREFLY check --extend-project-excludes=packages/b --python-version 3.13.0 --output-format=min-text
+ERROR m.py:1:* (glob)
+*packages/a/m.py:1:* (glob)
+[1]
+```

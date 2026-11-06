@@ -210,7 +210,8 @@ or remove `project-excludes`.
 - Default: `["**/node_modules", "**/__pycache__", "**/venv/**", "**/.[!/.]*/**"]` +
   anything in your `site-packages-path` (even from the interpreter) unless it would
   exclude items in your [`search-path`](#search-path).
-- Flag equivalent: `--project-excludes`
+- Flag equivalent: `--project-excludes`, which replaces `project-excludes`.
+  `--extend-project-excludes` adds patterns to `project-excludes` instead.
 - Equivalent configs: `exclude` in Pyright and mypy
 - Notes:
     - While not explicitly part of `project-excludes`, there are several patterns that are
@@ -267,7 +268,8 @@ project setting when unset.
 - Type: table with `includes` and `excludes` keys, each a list of
   [filesystem glob patterns](#filesystem-globbing)
 - Default: `project-includes` / `project-excludes`
-- Flag equivalent: none, though `--project-excludes` takes precedence over `coverage.excludes`
+- Flag equivalent: none, though `--project-excludes` takes precedence over `coverage.excludes`,
+  and `--extend-project-excludes` adds to `coverage.excludes`
 - Notes:
     - Like the project globs, these are not consulted when passing in `FILES...`.
     - `coverage.excludes` gets the same default excludes appended as `project-excludes` does,

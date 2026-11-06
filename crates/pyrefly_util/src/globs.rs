@@ -1071,6 +1071,11 @@ impl FilteredGlobs {
             filter: GlobFilter::new(excludes, ignorefile_search_start, hidden_dir_filter),
         }
     }
+
+    /// Adds `excludes` to the excludes of this [`FilteredGlobs`].
+    pub fn add_excludes(&mut self, excludes: &[Glob]) {
+        self.filter.excludes.append(excludes);
+    }
 }
 
 impl Includes for FilteredGlobs {
