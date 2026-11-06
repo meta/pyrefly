@@ -7,9 +7,10 @@
 
 // JavaScript bindings for the `wasm32-wasip1` build of `lib.rs`.
 //
-// The module needs no files, environment, or arguments, so the WASI imports
-// give it an empty environment and no preopened directories. Standard output
-// and standard error go to the console.
+// The WASI imports give the module an empty environment and one preopened
+// directory, `/`, whose files live in JavaScript memory (`files` below). The
+// module can only read them: the host writes them. Standard output and
+// standard error go to the console.
 
 // The exports of the live instance. `undefined` before `init` and while a
 // new instance replaces one that crashed.
@@ -25,8 +26,21 @@ let generation = 0;
 
 const ERRNO_SUCCESS = 0;
 const ERRNO_BADF = 8;
+const ERRNO_INVAL = 28;
+const ERRNO_NOENT = 44;
 const ERRNO_NOSYS = 52;
+const ERRNO_NOTDIR = 54;
+const ERRNO_ROFS = 69;
 const CLOCKID_MONOTONIC = 1;
+const FILETYPE_CHARACTER_DEVICE = 2;
+const FILETYPE_DIRECTORY = 3;
+const FILETYPE_REGULAR_FILE = 4;
+const OFLAGS_CREAT = 1;
+const OFLAGS_DIRECTORY = 2;
+const WHENCE_CUR = 1;
+const WHENCE_END = 2;
+const PREOPEN_FD = 3;
+const ALL_RIGHTS = 0xffffffffffffffffn;
 // The most bytes that one `crypto.getRandomValues` call accepts.
 const MAX_RANDOM_BYTES = 65536;
 
@@ -52,6 +66,90 @@ function writeOutput(fd, text) {
         (fd === 1 ? console.log : console.error)(line);
     }
 }
+
+// The contents of each file in the filesystem, by absolute normalized path.
+// A directory exists while a file is under it.
+const fileContents = new Map();
+// Each open file descriptor: its path, whether it is a directory, the file
+// contents when it was opened, and the read position.
+const descriptors = new Map([[PREOPEN_FD, { path: '/', isDirectory: true }]]);
+let nextDescriptor = PREOPEN_FD + 1;
+
+function normalize(path) {
+    const parts = [];
+    for (const part of path.split('/')) {
+        if (part === '..') {
+            parts.pop();
+        } else if (part !== '' && part !== '.') {
+            parts.push(part);
+        }
+    }
+    return '/' + parts.join('/');
+}
+
+function isDirectory(path) {
+    const prefix = path === '/' ? '/' : path + '/';
+    for (const file of fileContents.keys()) {
+        if (file.startsWith(prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The names and file types of the entries of the directory at `path`.
+function directoryEntries(path) {
+    const prefix = path === '/' ? '/' : path + '/';
+    const entries = new Map();
+    for (const file of fileContents.keys()) {
+        if (file.startsWith(prefix)) {
+            const [name, ...rest] = file.slice(prefix.length).split('/');
+            entries.set(
+                name,
+                rest.length > 0 ? FILETYPE_DIRECTORY : FILETYPE_REGULAR_FILE,
+            );
+        }
+    }
+    return [...entries];
+}
+
+// Resolves the path at `ptr`/`len` against the directory descriptor `fd`.
+function resolve(fd, ptr, len) {
+    const directory = descriptors.get(fd);
+    if (directory?.isDirectory !== true) {
+        return undefined;
+    }
+    return normalize(`${directory.path}/${decoder.decode(bytes(ptr, len))}`);
+}
+
+function writeFilestat(ptr, filetype, size) {
+    bytes(ptr, 64).fill(0);
+    view().setUint8((ptr + 16) >>> 0, filetype);
+    view().setBigUint64((ptr + 24) >>> 0, 1n, true);
+    view().setBigUint64((ptr + 32) >>> 0, BigInt(size), true);
+}
+
+function stat(path, ptr) {
+    if (fileContents.has(path)) {
+        writeFilestat(ptr, FILETYPE_REGULAR_FILE, fileContents.get(path).length);
+    } else if (isDirectory(path)) {
+        writeFilestat(ptr, FILETYPE_DIRECTORY, 0);
+    } else {
+        return ERRNO_NOENT;
+    }
+    return ERRNO_SUCCESS;
+}
+
+// The filesystem that the module reads. Report each change to the workspaces
+// that read the file, with `Workspace.filesChanged`.
+export const files = {
+    write(path, text) {
+        fileContents.set(normalize(path), encoder.encode(text));
+    },
+    remove(path) {
+        fileContents.delete(normalize(path));
+    },
+};
 
 const wasi = {
     random_get(ptr, len) {
@@ -98,15 +196,170 @@ const wasi = {
     sched_yield() {
         return ERRNO_SUCCESS;
     },
-    fd_close: () => ERRNO_BADF,
-    fd_fdstat_get: () => ERRNO_BADF,
-    fd_filestat_get: () => ERRNO_BADF,
-    fd_prestat_get: () => ERRNO_BADF,
-    fd_prestat_dir_name: () => ERRNO_BADF,
-    fd_read: () => ERRNO_BADF,
-    fd_readdir: () => ERRNO_BADF,
-    path_filestat_get: () => ERRNO_BADF,
-    path_open: () => ERRNO_BADF,
+    fd_prestat_get(fd, ptr) {
+        if (fd !== PREOPEN_FD) {
+            return ERRNO_BADF;
+        }
+        view().setUint8(ptr >>> 0, 0);
+        view().setUint32((ptr + 4) >>> 0, 1, true);
+        return ERRNO_SUCCESS;
+    },
+    fd_prestat_dir_name(fd, ptr, len) {
+        if (fd !== PREOPEN_FD) {
+            return ERRNO_BADF;
+        }
+        bytes(ptr, len).set(encoder.encode('/').subarray(0, len));
+        return ERRNO_SUCCESS;
+    },
+    fd_fdstat_get(fd, ptr) {
+        const descriptor = descriptors.get(fd);
+        if (descriptor === undefined && fd > 2) {
+            return ERRNO_BADF;
+        }
+        bytes(ptr, 24).fill(0);
+        view().setUint8(
+            ptr >>> 0,
+            descriptor === undefined
+                ? FILETYPE_CHARACTER_DEVICE
+                : descriptor.isDirectory
+                  ? FILETYPE_DIRECTORY
+                  : FILETYPE_REGULAR_FILE,
+        );
+        view().setBigUint64((ptr + 8) >>> 0, ALL_RIGHTS, true);
+        view().setBigUint64((ptr + 16) >>> 0, ALL_RIGHTS, true);
+        return ERRNO_SUCCESS;
+    },
+    path_open(
+        fd,
+        _dirflags,
+        pathPtr,
+        pathLen,
+        oflags,
+        _rightsBase,
+        _rightsInheriting,
+        _fdflags,
+        fdPtr,
+    ) {
+        const path = resolve(fd, pathPtr, pathLen);
+        if (path === undefined) {
+            return ERRNO_BADF;
+        }
+        if (oflags & OFLAGS_CREAT) {
+            return ERRNO_ROFS;
+        }
+        let descriptor;
+        if (fileContents.has(path)) {
+            if (oflags & OFLAGS_DIRECTORY) {
+                return ERRNO_NOTDIR;
+            }
+            descriptor = {
+                path,
+                isDirectory: false,
+                contents: fileContents.get(path),
+                position: 0,
+            };
+        } else if (isDirectory(path)) {
+            descriptor = { path, isDirectory: true };
+        } else {
+            return ERRNO_NOENT;
+        }
+        descriptors.set(nextDescriptor, descriptor);
+        view().setUint32(fdPtr >>> 0, nextDescriptor++, true);
+        return ERRNO_SUCCESS;
+    },
+    fd_close(fd) {
+        if (fd === PREOPEN_FD || !descriptors.delete(fd)) {
+            return ERRNO_BADF;
+        }
+        return ERRNO_SUCCESS;
+    },
+    fd_read(fd, iovs, iovsLen, readPtr) {
+        const descriptor = descriptors.get(fd);
+        if (descriptor === undefined || descriptor.isDirectory) {
+            return ERRNO_BADF;
+        }
+        let read = 0;
+        for (let i = 0; i < iovsLen; i++) {
+            const iov = (iovs + i * 8) >>> 0;
+            const chunk = descriptor.contents.subarray(
+                descriptor.position,
+                descriptor.position + view().getUint32(iov + 4, true),
+            );
+            bytes(view().getUint32(iov, true), chunk.length).set(chunk);
+            descriptor.position += chunk.length;
+            read += chunk.length;
+        }
+        view().setUint32(readPtr >>> 0, read, true);
+        return ERRNO_SUCCESS;
+    },
+    fd_seek(fd, offset, whence, positionPtr) {
+        const descriptor = descriptors.get(fd);
+        if (descriptor === undefined || descriptor.isDirectory) {
+            return ERRNO_BADF;
+        }
+        const base =
+            whence === WHENCE_CUR
+                ? descriptor.position
+                : whence === WHENCE_END
+                  ? descriptor.contents.length
+                  : 0;
+        const position = base + Number(offset);
+        if (position < 0) {
+            return ERRNO_INVAL;
+        }
+        descriptor.position = position;
+        view().setBigUint64(positionPtr >>> 0, BigInt(position), true);
+        return ERRNO_SUCCESS;
+    },
+    fd_filestat_get(fd, ptr) {
+        const descriptor = descriptors.get(fd);
+        if (descriptor === undefined) {
+            return ERRNO_BADF;
+        }
+        if (descriptor.isDirectory) {
+            writeFilestat(ptr, FILETYPE_DIRECTORY, 0);
+        } else {
+            writeFilestat(ptr, FILETYPE_REGULAR_FILE, descriptor.contents.length);
+        }
+        return ERRNO_SUCCESS;
+    },
+    path_filestat_get(fd, _flags, pathPtr, pathLen, ptr) {
+        const path = resolve(fd, pathPtr, pathLen);
+        return path === undefined ? ERRNO_BADF : stat(path, ptr);
+    },
+    // There are no symbolic links.
+    path_readlink: () => ERRNO_INVAL,
+    // Each entry is a 24-byte `dirent` and then its name. An entry that does
+    // not fit is cut off, and the module reads it again with a bigger buffer.
+    fd_readdir(fd, ptr, len, cookie, usedPtr) {
+        const descriptor = descriptors.get(fd);
+        if (descriptor?.isDirectory !== true) {
+            return ERRNO_BADF;
+        }
+        const chunks = directoryEntries(descriptor.path)
+            .slice(Number(cookie))
+            .map(([name, filetype], i) => {
+                const encoded = encoder.encode(name);
+                const chunk = new Uint8Array(24 + encoded.length);
+                const dirent = new DataView(chunk.buffer);
+                dirent.setBigUint64(0, cookie + BigInt(i + 1), true);
+                dirent.setUint32(16, encoded.length, true);
+                dirent.setUint8(20, filetype);
+                chunk.set(encoded, 24);
+                return chunk;
+            });
+        let used = 0;
+        for (const chunk of chunks) {
+            const part = chunk.subarray(0, len - used);
+            bytes(ptr + used, part.length).set(part);
+            used += part.length;
+            if (used === len) {
+                break;
+            }
+        }
+        view().setUint32(usedPtr >>> 0, used, true);
+        return ERRNO_SUCCESS;
+    },
 };
 
 // A WASI function without an implementation above returns `ERRNO_NOSYS`, so
@@ -336,6 +589,42 @@ export class State {
 
     inlayHint(callArgumentNames) {
         return this.call('inlayHint', Boolean(callArgumentNames));
+    }
+}
+
+// A project in `files` under the directory `root`, which is its import root.
+// Pyrefly reads its files with filesystem paths, so the host edits a file by
+// writing it with `files` and then calling `filesChanged`, as a file watcher
+// would. A workspace does not survive a crash of the instance.
+export class Workspace {
+    constructor(root) {
+        this.handle = takeResponse(
+            callExport('pyrefly_workspace_new', ...passString(root)),
+        );
+    }
+
+    call(method, args) {
+        return takeResponse(
+            callExport(
+                'pyrefly_workspace_call',
+                this.handle,
+                ...passString(JSON.stringify({ method, args })),
+            ),
+        );
+    }
+
+    // Checks the files at the absolute `paths` from now on.
+    setFiles(paths) {
+        this.call('setFiles', paths);
+    }
+
+    // Reports which files the host created, modified, or removed in `files`.
+    filesChanged({ created = [], modified = [], removed = [] }) {
+        this.call('filesChanged', { created, modified, removed });
+    }
+
+    getErrors() {
+        return this.call('getErrors');
     }
 }
 

@@ -13,6 +13,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 dupe = "0.9.1"
 pyrefly = { path = "../pyrefly" }
+pyrefly_build = { path = "../crates/pyrefly_build" }
+pyrefly_config = { path = "../crates/pyrefly_config" }
+pyrefly_python = { path = "../crates/pyrefly_python" }
+pyrefly_util = { path = "../crates/pyrefly_util" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.154"
 starlark_map = "0.14.2"
