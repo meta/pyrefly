@@ -335,7 +335,17 @@ struct OutputArgs {
     #[arg(long, value_name = "DIR", requires = "report_glean")]
     glean_stdlib_root: Option<String>,
     /// Generate a SCIP index for the project
-    #[arg(long, value_name = "OUTPUT_FILE")]
+    #[arg(
+        long,
+        value_name = "OUTPUT_FILE",
+        conflicts_with_all = [
+            "report_glean",
+            "report_pysa",
+            "report_cinderx",
+            "report_trace",
+            "report_demand_tree",
+        ]
+    )]
     report_scip: Option<PathBuf>,
     /// Package name for the project's symbols in the SCIP index. Defaults to the name in `pyproject.toml`.
     #[arg(long, requires = "report_scip")]
@@ -1955,7 +1965,7 @@ impl CheckArgs {
                         );
                     }
                 })));
-                transaction.set_evict_after_solutions_hook(true);
+                transaction.set_evict_answers_after_scip_hook(true);
                 Some(scip)
             }
             None => None,
@@ -2410,7 +2420,7 @@ impl CheckArgs {
             && let Some(path) = &self.output.report_scip
         {
             transaction.set_solutions_hook(None);
-            transaction.set_evict_after_solutions_hook(false);
+            transaction.set_evict_answers_after_scip_hook(false);
             let scip = Arc::into_inner(scip).expect("the solutions hook holds the only other copy");
             scip.finish(transaction)
                 .and_then(|mut writer| Ok(writer.flush()?))
