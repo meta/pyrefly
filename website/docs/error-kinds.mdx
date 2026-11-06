@@ -2311,28 +2311,21 @@ two_args(a=1, b=2, c=3)
 
 Default severity: `warn`
 
-Pyrefly emits this warning when the inferred return type is `Never`, but the
-return annotation is neither `Never`, `NoReturn`, nor `None`. This includes infinite
-loops, unconditional exceptions, and calls to functions that never return.
-Pyrefly checks both explicit returns and paths that reach the end of the body.
+Pyrefly emits this warning when a function's body cannot reach its end even if
+`return`, `raise`, and failing `assert` statements count as reaching it. The
+function must have no explicit return, and its return annotation must be
+different from `Never`, `NoReturn`, and `None`.
 
 ```python
-from typing import Never
-
-def stop() -> Never:
-    raise RuntimeError
-
 def f() -> int:  # Function declared to return `int` but can never return [unexpected-never]
-    return stop()
+    while True:
+        pass
 ```
 
-Pyrefly exempts placeholder bodies, stubs, overload declarations, abstract
-methods, and overrides, including overrides without an `@override` decorator.
-For this warning, a placeholder body can be a single `raise` statement or a
-body that ends with `raise NotImplementedError`. An optional docstring does
-not affect these exemptions.
-It also exempts generators and functions annotated `-> None`, including
-long-running event loops and methods that always raise. The declared return
+This check uses syntax, not inferred `Never` types. Calls to functions that
+never return, exception-only bodies, and failing assertions do not trigger
+the warning. Pyrefly also excludes generators and bodies whose divergence
+depends on the configured Python version or platform. The declared return
 type remains the type visible to callers.
 
 ## unexpected-positional-argument

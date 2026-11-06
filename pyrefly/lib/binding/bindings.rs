@@ -1991,7 +1991,7 @@ impl<'a> BindingsBuilder<'a> {
             // same region and walks it again for each statement nested inside, so a suite whose
             // last statement is a deep nest of compound statements is rescanned once per level.
             let paths = (!is_expr_stmt && iter.peek().is_some())
-                .then(|| function_last_expressions(slice::from_ref(&x), self.sys_info))
+                .then(|| function_last_expressions(slice::from_ref(&x), self.sys_info, false))
                 .flatten()
                 // An answer the environment decided holds for this configuration only, and a
                 // suite dead under one configuration is live under another. An exhaustive `match`

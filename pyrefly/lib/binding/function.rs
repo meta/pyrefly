@@ -634,7 +634,7 @@ impl<'a> BindingsBuilder<'a> {
     /// it relies on that binding to ensure we don't have a dangling `Idx<Key>` (which could lead
     /// to a panic).
     fn implicit_return(&mut self, body: &[Stmt], func_name: &Identifier) -> Idx<Key> {
-        let last_exprs = function_last_expressions(body, self.sys_info).map(|x| {
+        let last_exprs = function_last_expressions(body, self.sys_info, false).map(|x| {
             x.clauses
                 .into_map(|clause| {
                     clause
@@ -660,7 +660,7 @@ impl<'a> BindingsBuilder<'a> {
         implicit_return: Option<Idx<Key>>,
         should_infer_return_type: bool,
         is_stub: bool,
-        check_never_return: bool,
+        diverges_without_exit: bool,
     ) {
         let is_generator = yields_and_returns.is_generator;
         let return_ann = return_ann_with_range.as_ref().map(|(_, key)| *key);
@@ -719,9 +719,6 @@ impl<'a> BindingsBuilder<'a> {
         let return_type_binding = {
             let kind = match (return_ann_with_range, implicit_return, is_stub) {
                 (Some((range, annotation)), Some(implicit_return), false) => {
-                    let function = self.idx_for_promise(KeyUndecoratedFunction(
-                        ShortIdentifier::new(func_name),
-                    ));
                     self.insert_binding(
                         KeyExpect::ValidateImplicitReturn(range),
                         BindingExpect::ValidateImplicitReturn {
@@ -729,9 +726,8 @@ impl<'a> BindingsBuilder<'a> {
                             implicit_return,
                             is_async,
                             is_generator,
-                            returns: return_keys,
-                            function,
-                            check_never_return,
+                            has_explicit_return: !return_keys.is_empty(),
+                            diverges_without_exit,
                         },
                     );
                     ReturnTypeKind::ShouldTrustAnnotation {
@@ -893,21 +889,16 @@ impl<'a> BindingsBuilder<'a> {
         } else {
             body.as_slice()
         };
-        let raises_not_implemented = match body_no_docstring.last() {
-            Some(Stmt::Raise(StmtRaise { exc: Some(exc), .. })) => {
-                self.as_special_export(match &**exc {
-                    Expr::Call(ExprCall { func, .. }) => func,
-                    other => other,
-                }) == Some(SpecialExport::NotImplementedError)
-            }
-            _ => false,
-        };
-        // A raise-only body or a terminal NotImplementedError can stand in for an implementation.
-        let check_never_return =
-            !raises_not_implemented && !matches!(body_no_docstring, [Stmt::Raise(_)]);
         let body_kind = match body_no_docstring {
             // raise NotImplementedError(...)
-            [Stmt::Raise(_)] if raises_not_implemented => BodyKind::RaiseNotImplementedError,
+            [Stmt::Raise(StmtRaise { exc: Some(exc), .. })]
+                if self.as_special_export(match &**exc {
+                    Expr::Call(ExprCall { func, .. }) => func,
+                    other => other,
+                }) == Some(SpecialExport::NotImplementedError) =>
+            {
+                BodyKind::RaiseNotImplementedError
+            }
             // return NotImplemented
             [
                 Stmt::Return(StmtReturn {
@@ -937,6 +928,10 @@ impl<'a> BindingsBuilder<'a> {
             is_overload: decorators.is_overload,
             is_in_type_checking_block: self.type_checking_depth > 0,
         };
+        let diverges_without_exit = function_last_expressions(&body, self.sys_info, true)
+            .is_some_and(|paths| {
+                !paths.decided_by_environment && paths.clauses.iter().any(Vec::is_empty)
+            });
         let ignore_unused_parameters = body_kind.is_placeholder_or_trivial()
             || decorators.is_overload
             || decorators.is_override
@@ -1001,7 +996,7 @@ impl<'a> BindingsBuilder<'a> {
                 implicit_return,
                 false,
                 facts.is_stub(),
-                check_never_return,
+                diverges_without_exit,
             );
             (false, self_assignments)
         } else {
@@ -1040,7 +1035,7 @@ impl<'a> BindingsBuilder<'a> {
                 implicit_return,
                 should_infer,
                 facts.is_stub(),
-                check_never_return,
+                diverges_without_exit,
             );
             // Mirror the `ReturnTypeKind::ShouldInferType` arm in `analyze_return_type`:
             // we infer iff there's no return annotation and inference was requested.
@@ -1252,24 +1247,53 @@ fn and_dnf<'a>(
 /// * Return None to say there are branches that fall off the end always.
 /// * Return Some with an empty clause to say that we can never reach the end (e.g. always return, raise)
 /// * Return Some(clauses) as DNF over endings that may be the last expression.
+///
+/// When `exits_fall_through` is true, return, raise, and a failing assert count as fall-through.
 pub(crate) fn function_last_expressions<'a>(
     x: &'a [Stmt],
     sys_info: SysInfo,
+    exits_fall_through: bool,
 ) -> Option<LastExpressions<'a>> {
     fn f<'a>(
         sys_info: SysInfo,
         x: &'a [Stmt],
         guards: &mut Vec<TextRange>,
         environment: &mut bool,
+        exits_fall_through: bool,
     ) -> Option<Vec<Vec<LastPathExpr<'a>>>> {
-        fn loop_body_has_break_statement(statement: &Stmt, has_break: &mut bool) {
+        fn loop_body_has_exit(
+            statement: &Stmt,
+            has_exit: &mut bool,
+            nested_loop: bool,
+            exits_fall_through: bool,
+            sys_info: SysInfo,
+            environment: &mut bool,
+        ) {
             match statement {
-                Stmt::Break(_) => {
-                    *has_break = true;
+                Stmt::Break(_) if !nested_loop => {
+                    *has_exit = true;
                 }
-                Stmt::While(_) | Stmt::For(_) => {}
-                _ => statement
-                    .recurse(&mut |statement| loop_body_has_break_statement(statement, has_break)),
+                Stmt::Return(_) | Stmt::Raise(_) if exits_fall_through => *has_exit = true,
+                Stmt::Assert(x) if exits_fall_through => {
+                    *environment |= SysInfo::depends_on_sys_info(&x.test);
+                    *has_exit |= sys_info.evaluate_bool(&x.test) == Some(false);
+                }
+                Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
+                Stmt::While(_) | Stmt::For(_) if !exits_fall_through => {}
+                _ => {
+                    let nested_loop =
+                        nested_loop || matches!(statement, Stmt::While(_) | Stmt::For(_));
+                    statement.recurse(&mut |statement| {
+                        loop_body_has_exit(
+                            statement,
+                            has_exit,
+                            nested_loop,
+                            exits_fall_through,
+                            sys_info,
+                            environment,
+                        )
+                    });
+                }
             }
         }
 
@@ -1279,10 +1303,20 @@ pub(crate) fn function_last_expressions<'a>(
                 expr: &x.value,
                 guards: guards.as_slice().into(),
             }]]),
-            Stmt::Return(_) | Stmt::Raise(_) => Some(vec![vec![]]),
+            Stmt::Return(_) | Stmt::Raise(_) => {
+                if exits_fall_through {
+                    None
+                } else {
+                    Some(vec![vec![]])
+                }
+            }
             Stmt::Assert(x) if sys_info.evaluate_bool(&x.test) == Some(false) => {
                 *environment |= SysInfo::depends_on_sys_info(&x.test);
-                Some(vec![vec![]])
+                if exits_fall_through {
+                    None
+                } else {
+                    Some(vec![vec![]])
+                }
             }
             Stmt::With(x) => {
                 let kind = IsAsync::new(x.is_async);
@@ -1294,33 +1328,49 @@ pub(crate) fn function_last_expressions<'a>(
                         guards: guards.as_slice().into(),
                     });
                 }
-                let body = f(sys_info, &x.body, guards, environment)?;
+                let body = f(sys_info, &x.body, guards, environment, exits_fall_through)?;
                 and_dnf(Some(vec![with_clause]), Some(body))
             }
             Stmt::While(x) => {
                 let test_value = sys_info.evaluate_bool(&x.test);
                 *environment |= SysInfo::depends_on_sys_info(&x.test);
-                let mut has_break = false;
+                let mut has_exit = false;
                 if test_value != Some(false) {
-                    x.body
-                        .visit(&mut |stmt| loop_body_has_break_statement(stmt, &mut has_break));
+                    x.body.visit(&mut |stmt| {
+                        loop_body_has_exit(
+                            stmt,
+                            &mut has_exit,
+                            false,
+                            exits_fall_through,
+                            sys_info,
+                            environment,
+                        )
+                    });
                 }
-                if test_value == Some(true) && !has_break {
+                if test_value == Some(true) && !has_exit {
                     Some(vec![vec![]])
-                } else if has_break || x.orelse.is_empty() {
+                } else if has_exit || x.orelse.is_empty() {
                     None
                 } else {
-                    f(sys_info, &x.orelse, guards, environment)
+                    f(sys_info, &x.orelse, guards, environment, exits_fall_through)
                 }
             }
             Stmt::For(x) => {
-                let mut has_break = false;
-                x.body
-                    .visit(&mut |stmt| loop_body_has_break_statement(stmt, &mut has_break));
-                if has_break || x.orelse.is_empty() {
+                let mut has_exit = false;
+                x.body.visit(&mut |stmt| {
+                    loop_body_has_exit(
+                        stmt,
+                        &mut has_exit,
+                        false,
+                        exits_fall_through,
+                        sys_info,
+                        environment,
+                    )
+                });
+                if has_exit || x.orelse.is_empty() {
                     None
                 } else {
-                    f(sys_info, &x.orelse, guards, environment)
+                    f(sys_info, &x.orelse, guards, environment, exits_fall_through)
                 }
             }
             Stmt::If(x) => {
@@ -1343,10 +1393,10 @@ pub(crate) fn function_last_expressions<'a>(
                     // evaluates as false.
                     // Neither can be dead by its test, so it needs no guard.
                     let branch = if index == 0 && test.is_none() {
-                        f(sys_info, body, guards, environment)?
+                        f(sys_info, body, guards, environment, exits_fall_through)?
                     } else {
                         guards.push(range);
-                        let branch = f(sys_info, body, guards, environment);
+                        let branch = f(sys_info, body, guards, environment, exits_fall_through);
                         guards.pop();
                         branch.unwrap_or_else(|| {
                             vec![vec![LastPathExpr {
@@ -1385,7 +1435,13 @@ pub(crate) fn function_last_expressions<'a>(
                     } else {
                         &x.orelse
                     };
-                    match f(sys_info, body_suite, guards, environment) {
+                    match f(
+                        sys_info,
+                        body_suite,
+                        guards,
+                        environment,
+                        exits_fall_through,
+                    ) {
                         None => body_acc = None,
                         Some(p) => body_acc = and_dnf(body_acc, Some(p)),
                     }
@@ -1393,7 +1449,13 @@ pub(crate) fn function_last_expressions<'a>(
                         for handler in &x.handlers {
                             match handler {
                                 ExceptHandler::ExceptHandler(h) => {
-                                    match f(sys_info, &h.body, guards, environment) {
+                                    match f(
+                                        sys_info,
+                                        &h.body,
+                                        guards,
+                                        environment,
+                                        exits_fall_through,
+                                    ) {
                                         None => {
                                             body_acc = None;
                                             break;
@@ -1409,7 +1471,13 @@ pub(crate) fn function_last_expressions<'a>(
                 if x.finalbody.is_empty() {
                     body_paths
                 } else {
-                    let finally_paths = f(sys_info, &x.finalbody, guards, environment);
+                    let finally_paths = f(
+                        sys_info,
+                        &x.finalbody,
+                        guards,
+                        environment,
+                        exits_fall_through,
+                    );
                     or_dnf(finally_paths, body_paths)
                 }
             }
@@ -1417,7 +1485,13 @@ pub(crate) fn function_last_expressions<'a>(
                 let mut syntactically_exhaustive = false;
                 let mut acc: Option<Vec<Vec<LastPathExpr<'a>>>> = Some(vec![vec![]]);
                 for case in x.cases.iter() {
-                    let branch = f(sys_info, &case.body, guards, environment)?;
+                    let branch = f(
+                        sys_info,
+                        &case.body,
+                        guards,
+                        environment,
+                        exits_fall_through,
+                    )?;
                     acc = and_dnf(acc, Some(branch));
                     if match_case_always_matches(&case.pattern, &x.subject, case.guard.as_deref()) {
                         syntactically_exhaustive = true;
@@ -1439,7 +1513,13 @@ pub(crate) fn function_last_expressions<'a>(
     }
 
     let mut environment = false;
-    let clauses = f(sys_info, x, &mut Vec::new(), &mut environment)?;
+    let clauses = f(
+        sys_info,
+        x,
+        &mut Vec::new(),
+        &mut environment,
+        exits_fall_through,
+    )?;
     Some(LastExpressions {
         clauses,
         decided_by_environment: environment,

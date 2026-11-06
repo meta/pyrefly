@@ -189,7 +189,7 @@ from typing import NoReturn
 def fail() -> NoReturn:
     raise Exception()
 
-def f() -> int:  # E: Function declared to return `int` but can never return
+def f() -> int:
    fail()
 "#,
 );
@@ -349,7 +349,7 @@ def event_loop() -> None:
     while True:
         pass
 
-def unreachable_return() -> int:  # E: Function declared to return `int` but can never return
+def unreachable_return() -> int:
     while True:
         continue
         return 1  # E: This code is unreachable
@@ -370,10 +370,10 @@ from typing import Any, AsyncIterator, Iterator, Never, NoReturn, Protocol, asse
 def fatal() -> Never:
     raise RuntimeError
 
-def calls_fatal() -> int:  # E: Function declared to return `int` but can never return
+def calls_fatal() -> int:
     fatal()
 
-def returns_fatal() -> str:  # E: Function declared to return `str` but can never return
+def returns_fatal() -> str:
     return fatal()
 
 def raises() -> int:
@@ -383,23 +383,23 @@ def raises_with_docstring() -> int:
     """This operation is unsupported."""
     raise ValueError
 
-def raises_after_work() -> int:  # E: Function declared to return `int` but can never return
+def raises_after_work() -> int:
     print("starting")
     raise ValueError
 
 def raises_none() -> None:
     raise ValueError
 
-async def async_fatal() -> int:  # E: Function declared to return `int` but can never return
+async def async_fatal() -> int:
     return fatal()
 
-def finally_fatal() -> int:  # E: Function declared to return `int` but can never return
+def finally_fatal() -> int:
     try:
         pass
     finally:
         fatal()
 
-def branches(flag: bool) -> int:  # E: Function declared to return `int` but can never return
+def branches(flag: bool) -> int:
     if flag:
         return fatal()
     else:
@@ -410,7 +410,7 @@ def returns_normally(flag: bool) -> int:
         fatal()
     return 1
 
-def gradual() -> Any:  # E: Function declared to return `Any` but can never return
+def gradual() -> Any:
     fatal()
 
 def placeholder() -> int:
@@ -438,7 +438,7 @@ async def async_generator() -> AsyncIterator[int]:
 def overloaded(x: int) -> int: ...
 @overload
 def overloaded(x: str) -> str: ...
-def overloaded(x: int | str) -> int | str:  # E: Function declared to return `int | str` but can never return
+def overloaded(x: int | str) -> int | str:
     fatal()
 
 class Base(ABC):
@@ -461,7 +461,7 @@ class Child(Base):
         """This operation is unsupported."""
         raise ValueError
 
-    def calls_fatal(self) -> int:  # E: Function declared to return `int` but can never return
+    def calls_fatal(self) -> int:
         fatal()
 
 class Interface(Protocol):
@@ -469,6 +469,91 @@ class Interface(Protocol):
 
 # The published type must still follow the annotation.
 assert_type(calls_fatal(), int)
+"#,
+);
+
+testcase!(
+    test_return_diverges_without_exit,
+    r#"
+import sys
+
+def branches_loop(flag: bool) -> int:  # E: Function declared to return `int` but can never return
+    if flag:
+        while True:
+            pass
+    else:
+        while True:
+            pass
+
+def branch_raises(flag: bool) -> int:
+    if flag:
+        while True:
+            pass
+    else:
+        raise RuntimeError
+
+def finally_loops() -> int:  # E: Function declared to return `int` but can never return
+    try:
+        pass
+    finally:
+        while True:
+            pass
+
+def match_loops(flag: bool) -> int:  # E: Function declared to return `int` but can never return
+    match flag:
+        case True:
+            while True:
+                pass
+        case _:
+            while True:
+                pass
+
+def version_gated_loop() -> int:
+    while sys.version_info >= (3, 0):
+        pass
+
+def version_gated_branch() -> int:
+    if sys.version_info >= (3, 0):
+        while True:
+            pass
+    else:
+        raise RuntimeError
+
+def raises_in_loop() -> int:
+    while True:
+        raise RuntimeError
+
+def asserts_in_loop() -> int:
+    while True:
+        assert False
+
+def raises_in_nested_loop() -> int:
+    while True:
+        while True:
+            raise RuntimeError
+
+def nested_break() -> int:  # E: Function declared to return `int` but can never return
+    while True:
+        while True:
+            break
+
+def nested_function() -> int:  # E: Function declared to return `int` but can never return
+    while True:
+        def placeholder() -> int:
+            raise RuntimeError
+
+def version_gated_assert() -> int:
+    while True:
+        assert sys.version_info >= (3, 0)
+
+def inferred_never():
+    raise RuntimeError
+
+def calls_inferred_never() -> int:
+    inferred_never()
+
+def failing_assert() -> int:
+    assert False
 "#,
 );
 

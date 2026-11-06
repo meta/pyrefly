@@ -467,7 +467,7 @@ pub enum ErrorKind {
     UnboundName,
     /// An error caused by a keyword argument used in the wrong place.
     UnexpectedKeyword,
-    /// A function's inferred return type is `Never`, contrary to its annotation.
+    /// A function diverges without an explicit exit, contrary to its return annotation.
     UnexpectedNever,
     /// An error caused by passing a positional argument for a keyword-only parameter.
     UnexpectedPositionalArgument,

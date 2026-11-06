@@ -1003,7 +1003,7 @@ testcase!(
 from typing import assert_type
 
 def make_it() -> int | tuple[int, str] | tuple[bool] | tuple[str]:
-    ...
+    assert False
 
 def test():
     c = make_it()
@@ -1027,7 +1027,7 @@ testcase!(
 from typing import assert_type
 
 def make_it() -> int | list[int] | list[bool] | list[str]:
-    ...
+    assert False
 
 def test():
     c = make_it()
@@ -1087,7 +1087,7 @@ testcase!(
 from typing import assert_type, Iterable
 
 def make_it() -> int | tuple[int, str] | list[bool] | list[str]:
-    ...
+    assert False
 
 def test():
     c = make_it()

@@ -1912,7 +1912,7 @@ assert_type(vari, Literal["test"]) # E: `vari` is uninitialized
 testcase!(
     test_assert_false_terminates_flow,
     r#"
-def test1() -> int:  # E: Function declared to return `int` but can never return
+def test1() -> int:
     assert False
 def test2() -> int:  # E: Function declared to return `int` but is missing an explicit `return`
     assert True

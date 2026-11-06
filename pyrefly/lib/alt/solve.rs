@@ -13,7 +13,6 @@ use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
-use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_python::sys_info::SysInfo;
 use pyrefly_types::dimension::Int;
@@ -3187,9 +3186,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 implicit_return,
                 is_async,
                 is_generator,
-                returns,
-                function,
-                check_never_return,
+                has_explicit_return,
+                diverges_without_exit,
             } => {
                 let annotation = self.get_idx(*annotation).annotation.get_type().clone();
                 let implicit_return = self.get_idx(*implicit_return);
@@ -3198,49 +3196,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     &annotation,
                     *is_async,
                     *is_generator,
-                    !returns.is_empty(),
+                    *has_explicit_return,
                     range,
                     errors,
                 );
-                if *check_never_return
+                if *diverges_without_exit
+                    && !has_explicit_return
                     && !is_generator
                     && !annotation.is_never()
                     && !annotation.is_none()
-                    && implicit_return.ty().is_never()
-                    && returns.iter().all(|key| self.get_idx(*key).ty().is_never())
                 {
-                    let function = self.get_idx(*function);
-                    let flags = &function.metadata.flags;
-                    // Overrides keep the parent's return contract even when this body never returns.
-                    let is_override = flags.is_override
-                        || function.defining_cls.as_ref().is_some_and(|cls| {
-                            self.get_mro_for_class(cls)
-                                .ancestors(self.stdlib)
-                                .any(|base| {
-                                    self.get_class_member(
-                                        base.class_object(),
-                                        &function.metadata.kind.function_name(),
-                                    )
-                                    .is_some()
-                                })
-                        });
-                    if !flags.facts().is_stub()
-                        && !flags.body_kind.is_placeholder_or_trivial()
-                        && !flags.is_overload
-                        && !flags.is_abstract_method
-                        && flags.module_style != ModuleStyle::Interface
-                        && !is_override
-                    {
-                        self.error(
-                            errors,
-                            range,
-                            ErrorKind::UnexpectedNever,
-                            format!(
-                                "Function declared to return `{}` but can never return",
-                                self.for_display(annotation.clone())
-                            ),
-                        );
-                    }
+                    self.error(
+                        errors,
+                        range,
+                        ErrorKind::UnexpectedNever,
+                        format!(
+                            "Function declared to return `{}` but can never return",
+                            self.for_display(annotation.clone())
+                        ),
+                    );
                 }
             }
             BindingExpect::MatchExhaustiveness {
