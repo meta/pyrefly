@@ -616,8 +616,25 @@ impl Ast {
         name == "__tracebackhide__"
     }
 
-    pub fn is_list_literal_or_comprehension(expr: &Expr) -> bool {
-        matches!(expr, Expr::List(_) | Expr::ListComp(_))
+    fn is_container_display(x: &Expr) -> bool {
+        matches!(
+            x,
+            Expr::List(_)
+                | Expr::ListComp(_)
+                | Expr::Set(_)
+                | Expr::SetComp(_)
+                | Expr::Dict(_)
+                | Expr::DictComp(_)
+        )
+    }
+
+    pub fn contains_only_container_displays(x: &Expr) -> bool {
+        if let Expr::BinOp(x) = x {
+            Ast::contains_only_container_displays(&x.left)
+                && Ast::contains_only_container_displays(&x.right)
+        } else {
+            Ast::is_container_display(x)
+        }
     }
 
     /// Returns a description of the syntax problem if `x` is not valid
