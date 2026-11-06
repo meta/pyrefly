@@ -90,6 +90,13 @@ def test_adaptive_pooling() -> None:
     )
 
 
+def test_adaptive_max_pool2d_scalar_output_size() -> None:
+    tensor = torch.randn((2, 3, 9, 9))
+    # TODO: BUG: Torch accepts a scalar size, but the overlay requires a tuple.
+    pool = nn.AdaptiveMaxPool2d(4)  # E: not assignable to parameter `output_size`
+    assert_shape(pool(tensor).shape, (2, 3, int, int), runtime=(2, 3, 4, 4))
+
+
 def test_pooling_rejects_invalid_rank_and_controls() -> None:
     image = torch.randn((2, 3, 8, 8))
     assert_shape(image.shape, (2, 3, 8, 8))

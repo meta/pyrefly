@@ -9,7 +9,7 @@ from typing import assert_type, TYPE_CHECKING, TypedDict
 
 import torch
 import torch.nn as nn
-from shape_extensions import assert_shape, Int, IntVar
+from shape_extensions import assert_shape, Int, IntTuple, IntVar
 from torch import Tensor
 
 
@@ -68,6 +68,14 @@ def test_module_dict_typed_fields() -> None:
     embedded = module_dict["embedding"](torch.tensor([[1, 2], [3, 4]]))
     assert_shape(embedded.shape, (2, 2, 3))
     assert_shape(module_dict.dropout(projected).shape, (2, 4))
+
+
+def test_module_dict_homogeneous_mapping() -> None:
+    module_dict = nn.ModuleDict({str(i): nn.Linear(3, 4) for i in range(2)})
+    # TODO: BUG: Each value of a homogeneous mapping should be a module.
+    assert_type(module_dict["0"], dict[str, nn.Linear[3, 4]])
+    projected = module_dict["1"](torch.ones((2, 3)))  # E: Expected a callable
+    assert_shape(projected.shape, IntTuple, runtime=(2, 4))
 
 
 if TYPE_CHECKING:

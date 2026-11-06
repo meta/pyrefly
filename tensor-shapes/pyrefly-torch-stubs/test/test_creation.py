@@ -100,6 +100,19 @@ def test_generator_and_tensor_factories() -> None:
     assert_shape(torch.randperm(5, generator=generator).shape, IntTuple, runtime=(5,))
 
 
+def test_new_factories_accept_list_sizes() -> None:
+    tensor = torch.zeros((2, 3))
+    # TODO: BUG: Torch accepts list sizes, but the overlay requires tuples.
+    zeros = tensor.new_zeros([4, 5])  # E: No matching overload
+    ones = tensor.new_ones([4, 5])  # E: No matching overload
+    empty = tensor.new_empty([4, 5])  # E: No matching overload
+    full = tensor.new_full([4, 5], 1.0)  # E: not assignable to parameter `size`
+    assert_shape(zeros.shape, IntTuple, runtime=(4, 5))
+    assert_shape(ones.shape, IntTuple, runtime=(4, 5))
+    assert_shape(empty.shape, IntTuple, runtime=(4, 5))
+    assert_shape(full.shape, IntTuple, runtime=(4, 5))
+
+
 def test_arange() -> None:
     assert_shape(torch.arange(5).shape, (5,))
     assert_shape(torch.arange(2, 7).shape, (5,))
@@ -142,6 +155,21 @@ def test_spaced_ranges() -> None:
     with assert_raises(RuntimeError):
         # E: Cannot evaluate type-level shape DSL call: extent must be non-negative
         torch.logspace(0, 1, -1)
+
+
+def test_linspace_factory_kwargs() -> None:
+    out = torch.empty(5)
+    # TODO: BUG: Torch accepts these keywords, but the overlay rejects them.
+    grad = torch.linspace(0, 1, 5, requires_grad=True)  # E: Unexpected keyword
+    strided = torch.linspace(0, 1, 5, layout=torch.strided)  # E: Unexpected keyword
+    pinned = torch.linspace(0, 1, 5, pin_memory=False)  # E: Unexpected keyword
+    written = torch.linspace(0, 1, 5, out=out)  # E: Unexpected keyword
+    assert_shape(grad.shape, (5,))
+    assert_shape(strided.shape, (5,))
+    assert_shape(pinned.shape, (5,))
+    assert_shape(written.shape, (5,))
+    assert grad.requires_grad
+    assert written is out
 
 
 def test_eye() -> None:
