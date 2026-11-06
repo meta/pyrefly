@@ -379,10 +379,15 @@ def test_transpose_property_for_any_rank() -> None:
     unknown = cast(np.ndarray, cube)
 
     assert_type(matrix.T, np.ndarray[[3, 2], np.dtype[np.int8]])
-    cube_t = cube.T  # E: parameter `self`
-    vector_t = vector.T  # E: parameter `self`
-    scalar_t = scalar.T  # E: parameter `self`
-    first = cube.T[0]  # E: parameter `self`
+    cube_t = cube.T
+    vector_t = vector.T
+    scalar_t = scalar.T
+    first = cube.T[0]
+    assert_type(cube_t, np.ndarray[[4, 3, 2], np.dtype[np.float32]])
+    assert_type(vector_t, np.ndarray[[3], np.dtype[np.float64]])
+    assert_type(scalar_t, np.ndarray[[], np.dtype[np.float64]])
+    assert_type(first, np.ndarray[[3, 2], np.dtype[np.float32]])
+    assert_type(unknown.T, np.ndarray)
     assert_shape(matrix.T.shape, (3, 2))
     assert cube_t.shape == (4, 3, 2)
     assert cube_t.dtype == np.dtype(np.float32)
