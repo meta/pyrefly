@@ -11,6 +11,9 @@ Pyrefly's WASM build is used in browser-based applications like the
   - For mac: `brew install llvm`
     ([source](https://github.com/briansmith/ring/issues/1824))
   - For CentOS: `sudo dnf install clang`
+  - For Ubuntu and other Linux distributions where the C headers are not in
+    `/usr/include`: install [wasi-sdk](https://github.com/WebAssembly/wasi-sdk)
+    and set `WASI_SDK_PATH` to its folder.
 - Install Mercurial: `sudo apt install mercurial`
 
 ## Building Pyrefly for WASM
