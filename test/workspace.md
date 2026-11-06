@@ -37,3 +37,26 @@ ERROR m.py:1:* (glob)
 *packages/a/m.py:1:* (glob)
 [1]
 ```
+
+## A directory ignores the excludes of the config
+
+Bug: `pyrefly check <dir>` runs single-file mode, so the root config does not
+exclude `packages/a/vendor`, and `pyrefly check .` does not check the same files
+as `pyrefly check`.
+
+```scrut
+$ cd $TMPDIR/workspace && $PYREFLY check packages/a --python-version 3.13.0 --output-format=min-text
+*packages/a/m.py:1:* (glob)
+*packages/a/vendor/m.py:1:* (glob)
+[1]
+```
+
+```scrut
+$ cd $TMPDIR/workspace && $PYREFLY check . --python-version 3.13.0 --output-format=min-text
+ERROR m.py:1:* (glob)
+*packages/b/m.py:1:* (glob)
+*packages/a/m.py:1:* (glob)
+*packages/a/vendor/m.py:1:* (glob)
+*packages/b/vendor/m.py:1:* (glob)
+[1]
+```
