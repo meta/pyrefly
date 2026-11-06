@@ -194,6 +194,11 @@ let docsSidebar = [
                 id: 'scip',
                 label: 'SCIP Indexing',
             },
+            {
+                type: 'doc' as const,
+                id: 'query',
+                label: 'Semantic Queries',
+            },
         ],
     },
     {

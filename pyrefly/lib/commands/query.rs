@@ -5,10 +5,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
+use anyhow::ensure;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
@@ -18,23 +20,31 @@ use lsp_types::CallHierarchyItem;
 use lsp_types::CallHierarchyOutgoingCall;
 use lsp_types::Location;
 use lsp_types::Position;
-use lsp_types::Uri;
 use pyrefly_build::handle::Handle;
 use pyrefly_config::args::ConfigOverrideArgs;
+use pyrefly_config::config::ConfigScope;
 use pyrefly_python::module::TextRangeWithModule;
+use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::module_name::ModuleNameWithKind;
+use pyrefly_python::module_path::ModulePath;
 use pyrefly_util::absolutize::Absolutize as _;
+use pyrefly_util::includes::Includes;
 use pyrefly_util::thread_pool::ThreadCount;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::commands::check::Handles;
 use crate::commands::config_finder::ConfigConfigurerWrapper;
-use crate::commands::files::FilesArgs;
+use crate::commands::config_finder::default_config_finder_with_overrides;
+use crate::commands::files::add_config_errors;
+use crate::commands::files::get_explicit_config;
 use crate::commands::util::CommandExitStatus;
+use crate::config::finder::ConfigFinder;
 use crate::lsp::non_wasm::call_hierarchy::find_function_at_position_in_ast;
 use crate::lsp::non_wasm::call_hierarchy::prepare_call_hierarchy_item;
 use crate::lsp::non_wasm::call_hierarchy::transform_incoming_calls;
 use crate::lsp::non_wasm::call_hierarchy::transform_outgoing_calls;
+use crate::lsp::non_wasm::module_helpers::module_info_to_uri;
 use crate::lsp::wasm::hover::get_hover;
 use crate::state::lsp::FindPreference;
 use crate::state::lsp::ImportBehavior;
@@ -44,6 +54,9 @@ use crate::state::state::State;
 
 /// Query semantic information about a source position.
 #[derive(Clone, Debug, Parser)]
+#[command(
+    after_help = "Experimental interface. Inputs use one-based lines and UTF-16 columns. JSON results use file URIs and zero-based LSP ranges. To query a returned location, convert its URI to a path and add 1 to its line and character."
+)]
 pub struct QueryArgs {
     /// Semantic query to run.
     #[command(subcommand)]
@@ -85,10 +98,10 @@ struct QueryPosition {
     /// Python file containing the position.
     file: PathBuf,
 
-    /// One-based line number.
+    /// One-based line number. JSON results use zero-based lines.
     line: u32,
 
-    /// One-based UTF-16 column number, matching editor and LSP positions.
+    /// One-based UTF-16 column number. JSON results use zero-based characters.
     column: u32,
 }
 
@@ -146,12 +159,36 @@ impl QueryArgs {
         };
         let target_path = position.file.absolutize();
         let lsp_position = position.to_lsp_position()?;
+        let metadata = fs::metadata(&target_path)
+            .with_context(|| format!("cannot access target `{}`", target_path.display()))?;
+        ensure!(
+            metadata.is_file(),
+            "target `{}` is not a file",
+            target_path.display()
+        );
 
-        let (files_to_check, config_finder, _) =
-            FilesArgs::get(Vec::new(), self.config, self.config_override, wrapper)?;
-        let mut files = config_finder
-            .checkpoint(files_to_check.files_iter())?
-            .collect::<Vec<_>>();
+        let config_finder = match self.config {
+            Some(path) => {
+                let (config, errors) = get_explicit_config(&path, self.config_override);
+                let finder = ConfigFinder::new_constant(config);
+                add_config_errors(&finder, errors)?;
+                finder
+            }
+            None => default_config_finder_with_overrides(self.config_override, false, wrapper),
+        };
+        let config = config_finder.python_file(
+            ModuleNameWithKind::guaranteed(ModuleName::unknown()),
+            &ModulePath::filesystem(target_path.clone()),
+        );
+        add_config_errors(&config_finder, config_finder.errors())?;
+        let mut files = Vec::new();
+        if !matches!(self.query, Query::Hover(_)) {
+            let mut includes = config.get_filtered_globs(None, ConfigScope::Default);
+            files.extend(config_finder.checkpoint(includes.files_iter())?);
+            if let Some(error) = includes.errors().into_iter().next() {
+                return Err(error.context("cannot list query project files"));
+            }
+        }
         files.push(target_path.clone());
         let handles = Handles::new(files);
         let (handles, _, sourcedb_errors) = handles.all(&config_finder);
@@ -161,6 +198,8 @@ impl QueryArgs {
             }
             return Err(anyhow::anyhow!("failed to query sourcedb"));
         }
+        add_config_errors(&config_finder, config_finder.errors())?;
+        config_finder.print_errors();
         let target = handles
             .iter()
             .find(|handle| handle.path().as_path() == target_path)
@@ -168,17 +207,54 @@ impl QueryArgs {
             .with_context(|| format!("could not resolve `{}`", target_path.display()))?;
 
         let state = State::new(config_finder, thread_count);
-        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        let mut transaction = state.new_committable_transaction(Require::Exports, None);
+        if !matches!(self.query, Query::Hover(_)) {
+            transaction.as_mut().run(&handles, Require::Indexing, None);
+        }
         transaction
             .as_mut()
-            .run(&handles, Require::Everything, None);
+            .run(&[target.dupe()], Require::Everything, None);
         state.commit_transaction(transaction, None);
 
         let mut transaction = state.cancellable_transaction();
-        let module = transaction
+        let load = transaction
             .as_ref()
-            .get_module_info(&target)
+            .get_load(&target)
             .with_context(|| format!("could not load `{}`", target_path.display()))?;
+        if let Some(error) = load.load_errors.iter().next() {
+            return Err(anyhow::anyhow!("cannot load target: {}", error.msg()));
+        }
+        let module = &load.module_info;
+        ensure!(
+            module.notebook().is_none(),
+            "notebook query targets are not supported"
+        );
+        let line = module
+            .contents()
+            .split('\n')
+            .nth(lsp_position.line as usize)
+            .with_context(|| {
+                format!(
+                    "line {} is outside `{}`",
+                    lsp_position.line + 1,
+                    target_path.display()
+                )
+            })?;
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let mut character = 0;
+        for c in line.chars() {
+            if character >= lsp_position.character {
+                break;
+            }
+            character += c.len_utf16() as u32;
+        }
+        ensure!(
+            character == lsp_position.character,
+            "column {} is not a valid UTF-16 position on line {} in `{}`",
+            lsp_position.character + 1,
+            lsp_position.line + 1,
+            target_path.display()
+        );
         let position = module.from_lsp_position(lsp_position, None);
 
         match self.query {
@@ -205,10 +281,8 @@ impl QueryArgs {
                     .map_err(|reason| {
                         anyhow::anyhow!("no definition found at the requested position: {reason:?}")
                     })?
-                    .into_vec()
-                    .into_iter()
-                    .next()
-                    .expect("find_definition always returns a nonempty Vec1");
+                    .first()
+                    .clone();
                 let references = transaction
                     .as_mut()
                     .find_global_references_from_definition(
@@ -220,8 +294,8 @@ impl QueryArgs {
                     .map_err(|_| anyhow::anyhow!("reference query was cancelled"))?;
                 let mut locations = Vec::new();
                 for (module, ranges) in references {
-                    let uri = Uri::from_file_path(module.path().as_path()).map_err(|()| {
-                        anyhow::anyhow!("reference in `{}` does not have a file URL", module.path())
+                    let uri = module_info_to_uri(&module, None).with_context(|| {
+                        format!("cannot materialize reference in `{}`", module.path())
                     })?;
                     locations.extend(
                         ranges
@@ -245,15 +319,16 @@ impl QueryArgs {
                     .map_err(|reason| {
                         anyhow::anyhow!("no definition found at the requested position: {reason:?}")
                     })?
-                    .into_vec()
-                    .into_iter()
-                    .next()
-                    .expect("find_definition always returns a nonempty Vec1");
+                    .first()
+                    .clone();
                 let definition_handle = Handle::new(
                     definition.module.name(),
                     definition.module.path().dupe(),
                     target.sys_info().dupe(),
                 );
+                transaction
+                    .run(&[definition_handle.dupe()], Require::Everything, None)
+                    .map_err(|_| anyhow::anyhow!("definition query was cancelled"))?;
                 let ast = transaction
                     .as_ref()
                     .get_ast(&definition_handle)
@@ -261,9 +336,9 @@ impl QueryArgs {
                 let function =
                     find_function_at_position_in_ast(&ast, definition.definition_range.start())
                         .context("the requested symbol is not a function or method")?;
-                let uri = Uri::from_file_path(definition.module.path().as_path())
-                    .map_err(|()| anyhow::anyhow!("definition does not have a file URL"))?;
-                let item = prepare_call_hierarchy_item(function, &definition.module, uri.clone());
+                let uri = module_info_to_uri(&definition.module, None)
+                    .context("cannot materialize the definition")?;
+                let item = prepare_call_hierarchy_item(function, &definition.module, uri);
                 let incoming = transaction
                     .find_global_incoming_calls_from_function_definition(
                         *target.sys_info(),
@@ -281,7 +356,7 @@ impl QueryArgs {
                     )
                     .map_err(|_| anyhow::anyhow!("outgoing call query was cancelled"))?;
                 let mut incoming = transform_incoming_calls(incoming, None);
-                let mut outgoing = transform_outgoing_calls(outgoing, &definition.module, &uri);
+                let mut outgoing = transform_outgoing_calls(outgoing, &definition.module, None);
                 incoming.sort_by_cached_key(|call| {
                     serde_json::to_string(call)
                         .expect("LSP call hierarchy results are always serializable")
