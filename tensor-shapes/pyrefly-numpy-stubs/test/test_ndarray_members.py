@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any, assert_type, Literal, TYPE_CHECKING
+from typing import Any, assert_type, cast, Literal, TYPE_CHECKING
 
 import numpy as np
 from shape_extensions import assert_shape, IntTuple, IntVar
@@ -369,3 +369,25 @@ def test_ndarray_mutating_methods() -> None:
     assert_type(a.setflags(write=True), None)
     assert_type(a.sort(), None)
     assert_shape(a.shape, (2, 3))
+
+
+def test_transpose_property_for_any_rank() -> None:
+    matrix = np.ones((2, 3), dtype=np.int8)
+    cube = np.ones((2, 3, 4), dtype=np.float32)
+    vector = np.ones(3)
+    scalar = np.ones(())
+    unknown = cast(np.ndarray, cube)
+
+    assert_type(matrix.T, np.ndarray[[3, 2], np.dtype[np.int8]])
+    cube_t = cube.T  # E: parameter `self`
+    vector_t = vector.T  # E: parameter `self`
+    scalar_t = scalar.T  # E: parameter `self`
+    first = cube.T[0]  # E: parameter `self`
+    assert_shape(matrix.T.shape, (3, 2))
+    assert cube_t.shape == (4, 3, 2)
+    assert cube_t.dtype == np.dtype(np.float32)
+    assert vector_t.shape == (3,)
+    assert isinstance(scalar_t, np.ndarray)
+    assert scalar_t.shape == ()
+    assert first.shape == (3, 2)
+    assert unknown.T.shape == (4, 3, 2)
