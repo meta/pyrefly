@@ -22,6 +22,7 @@ use pyrefly_build::handle::Handle;
 use pyrefly_build::source_db::map_db::MapDatabase;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
+use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_python::sys_info::SysInfo;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::lined_buffer::DisplayPos;
@@ -208,6 +209,18 @@ fn to_monaco_completion_kind(kind: CompletionItemKind) -> i32 {
         CompletionItemKind::Snippet => 27,
         _ => unreachable!("unknown LSP CompletionItemKind"),
     }
+}
+
+/// A definition, in a sandbox file or in a file that comes with Pyrefly.
+#[derive(Serialize)]
+pub struct Location {
+    /// The sandbox filename, or the path of a stub that comes with Pyrefly.
+    filename: String,
+    range: Range,
+    /// The text of a file that is not a sandbox file, so that the sandbox can show it.
+    /// Set only when the caller asks for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contents: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -486,7 +499,9 @@ impl Playground {
         SemanticTokensLegends::lsp_semantic_token_legends()
     }
 
-    pub fn goto_definition(&mut self, pos: Position) -> Vec<Range> {
+    /// Returns the definitions at `pos`. With `with_contents`, a definition in a
+    /// file that is not a sandbox file comes with the text of that file.
+    pub fn goto_definition(&mut self, pos: Position, with_contents: bool) -> Vec<Location> {
         let handle = match self.handles.get(&self.active_filename) {
             Some(handle) => handle,
             None => return Vec::new(),
@@ -500,7 +515,39 @@ impl Playground {
             .goto_definition(handle, position)
             .unwrap_or_default()
             .into_iter()
-            .map(|r| Range::new(r.module.display_range(r.range)))
+            .filter_map(|r| {
+                // Bundled stubs keep the path relative to their own root, so the
+                // root goes in front of it to make the filename unique.
+                let (filename, is_sandbox_file) = match r.module.path().details() {
+                    ModulePathDetails::Memory(path) => (path.to_path_buf(), true),
+                    ModulePathDetails::FileSystem(path) => (path.to_path_buf(), false),
+                    ModulePathDetails::BundledTypeshed(path) => {
+                        (Path::new("typeshed/stdlib").join(path.as_path()), false)
+                    }
+                    ModulePathDetails::BundledTypeshedThirdParty(path) => {
+                        (Path::new("typeshed/stubs").join(path.as_path()), false)
+                    }
+                    ModulePathDetails::BundledThirdParty(path) => {
+                        (Path::new("stubs").join(path.as_path()), false)
+                    }
+                    // A namespace package is a directory, with no text to show.
+                    ModulePathDetails::Namespace(_) => return None,
+                };
+                let filename = filename.to_string_lossy();
+                // A stub path uses the native separator, but the sandbox reads the
+                // filename of a stub as a URI path.
+                let filename = if is_sandbox_file {
+                    filename.into_owned()
+                } else {
+                    filename.replace('\\', "/")
+                };
+                Some(Location {
+                    filename,
+                    range: Range::new(r.module.display_range(r.range)),
+                    contents: (with_contents && !is_sandbox_file)
+                        .then(|| r.module.contents().to_string()),
+                })
+            })
             .collect()
     }
 
@@ -601,6 +648,50 @@ mod tests {
                 .inlay_hint(true)
                 .iter()
                 .any(|hint| hint.label == "value= ")
+        );
+    }
+
+    #[test]
+    fn test_goto_definition_in_other_files() {
+        let mut state = Playground::new(None).unwrap();
+        let mut files = SmallMap::new();
+        files.insert(
+            "sandbox.py".to_owned(),
+            "import os\nfrom utils import helper\nhelper()\nos.getcwd()\n".to_owned(),
+        );
+        files.insert(
+            "utils.py".to_owned(),
+            "\n\ndef helper() -> None: ...\n".to_owned(),
+        );
+        state.update_sandbox_files(files, true);
+        state.set_active_file("sandbox.py");
+
+        let definitions = state.goto_definition(Position::new(3, 1), true);
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].filename, "utils.py");
+        assert_eq!(definitions[0].range.start_line, 3);
+        assert_eq!(definitions[0].range.start_col, 5);
+        assert!(
+            definitions[0].contents.is_none(),
+            "a sandbox file needs no contents"
+        );
+
+        let definitions = state.goto_definition(Position::new(4, 4), true);
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].filename, "typeshed/stdlib/os/__init__.pyi");
+        assert!(
+            definitions[0]
+                .contents
+                .as_ref()
+                .expect("a stub should come with its contents")
+                .contains("def getcwd()")
+        );
+
+        let definitions = state.goto_definition(Position::new(4, 4), false);
+        assert_eq!(definitions.len(), 1);
+        assert!(
+            definitions[0].contents.is_none(),
+            "a stub should come without its contents when the caller does not ask"
         );
     }
 

@@ -132,17 +132,50 @@ movie: Movie = {'name': 'Blade Runner',
             if (!wasmAvailable) return;
             pyreService.setActiveFile('main.py');
             // Position of "test" in "reveal_type(test(42))" on line 6
-            const definitions = pyreService.gotoDefinition(6, 13);
+            const definitions = pyreService.gotoDefinition(6, 13, true);
 
             expect(definitions).toBeDefined();
             expect(definitions).not.toBeNull();
             expect(definitions!.length).toBeGreaterThan(0);
 
             const definition = definitions![0];
-            expect(definition.startLineNumber).toBe(3);
-            expect(definition.startColumn).toBe(5);
-            expect(definition.endLineNumber).toBe(3);
-            expect(definition.endColumn).toBe(9);
+            expect(definition.filename).toBe('main.py');
+            expect(definition.range).toEqual({
+                startLineNumber: 3,
+                startColumn: 5,
+                endLineNumber: 3,
+                endColumn: 9,
+            });
+            expect(definition.contents).toBeUndefined();
+        });
+
+        it('should return the file of a definition in another file', () => {
+            if (!wasmAvailable) return;
+            pyreService.updateSandboxFiles(
+                {
+                    'main.py':
+                        'import os\nfrom utils import f\nf()\nos.getcwd()\n',
+                    'utils.py': '\n\ndef f() -> None: ...\n',
+                },
+                true
+            );
+            pyreService.setActiveFile('main.py');
+            expect(pyreService.gotoDefinition(3, 1, true)).toEqual([
+                {
+                    filename: 'utils.py',
+                    range: {
+                        startLineNumber: 3,
+                        startColumn: 5,
+                        endLineNumber: 3,
+                        endColumn: 6,
+                    },
+                },
+            ]);
+            const [stub] = pyreService.gotoDefinition(4, 4, true)!;
+            expect(stub.filename).toBe('typeshed/stdlib/os/__init__.pyi');
+            expect(stub.contents).toContain('def getcwd()');
+            const [stubOnly] = pyreService.gotoDefinition(4, 4, false)!;
+            expect(stubOnly.contents).toBeUndefined();
         });
     });
 

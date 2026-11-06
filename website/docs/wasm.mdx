@@ -91,7 +91,7 @@ are the authoritative API reference. The current JavaScript names are:
 | `setActiveFile(filename)` | Choose which file later queries apply to. |
 | `getErrors()` | Type errors for the project. |
 | `hover(line, column)` | Hover payload at a 0-based position, or `null`. |
-| `gotoDefinition(line, column)` | Definition ranges, or `null`. |
+| `gotoDefinition(line, column, withContents)` | Definitions, each with a `filename` and a `range`, or `null`. With `withContents`, a definition in a bundled stub also has the stub's text. |
 | `autoComplete(line, column)` | Completions. |
 | `inlayHint(callArgumentNames)` | Inlay hints. |
 | `semanticTokens(range)` | Semantic tokens for an optional range. |

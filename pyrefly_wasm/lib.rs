@@ -84,8 +84,10 @@ impl State {
     }
 
     #[wasm_bindgen(js_name=gotoDefinition)]
-    pub fn goto_definition(&mut self, line: i32, column: i32) -> JsValue {
-        let results = self.0.goto_definition(Position::new(line, column));
+    pub fn goto_definition(&mut self, line: i32, column: i32, with_contents: bool) -> JsValue {
+        let results = self
+            .0
+            .goto_definition(Position::new(line, column), with_contents);
         if results.is_empty() {
             JsValue::NULL
         } else {
