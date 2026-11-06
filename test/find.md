@@ -145,7 +145,7 @@ $ mkdir $TMPDIR/pyi-order && mkdir $TMPDIR/pyi-order/pyi && \
 
 ## Relative imports in a file whose name starts with a digit
 
-bug: the relative import is reported as missing (https://github.com/facebook/pyrefly/issues/5223).
+The import resolves, so assigning the `int` to a `str` is reported.
 
 ```scrut
 $ mkdir -p $TMPDIR/digit_filename/pkg/migrations && cd $TMPDIR/digit_filename && \
@@ -153,6 +153,6 @@ $ mkdir -p $TMPDIR/digit_filename/pkg/migrations && cd $TMPDIR/digit_filename &&
 > echo "x: int = 1" > pkg/models.py && \
 > printf 'from ..models import x\ny: str = x\n' > pkg/migrations/0001_initial.py && \
 > $PYREFLY check --python-version 3.13.0 pkg/migrations/0001_initial.py --output-format=min-text
-ERROR */0001_initial.py:1:* [missing-import] (glob)
+ERROR */0001_initial.py:2:10-11: `int` is not assignable to `str` [bad-assignment] (glob)
 [1]
 ```

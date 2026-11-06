@@ -232,7 +232,11 @@ pub fn will_rename_files(
         );
 
         let new_module_name = match new_module_name {
-            Some(name) => name,
+            Some(name) if name.is_importable() => name,
+            Some(name) => {
+                info!("    New module name {name} cannot be imported, skipping");
+                continue;
+            }
             None => {
                 info!("    Could not determine new module name, skipping");
                 continue;
