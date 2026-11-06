@@ -6,6 +6,7 @@
  */
 
 use std::num::NonZeroU32;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -329,11 +330,16 @@ impl Playground {
                 ".py"
             };
             // Use from_relative_path to properly convert file paths like "folder/file.py"
-            // to module names like "folder.file" (instead of incorrectly creating "folder/file")
-            let module_name = ModuleName::from_relative_path(Path::new(filename.as_str()))
-                .unwrap_or_else(|_| {
-                    ModuleName::from_str(filename.strip_suffix(suffix).unwrap_or(filename))
-                });
+            // to module names like "folder.file" (instead of incorrectly creating "folder/file").
+            // Only the normal components count, so `./folder//file.py` and `/folder/file.py`
+            // give the same module name.
+            let relative_path: PathBuf = Path::new(filename.as_str())
+                .components()
+                .filter(|component| matches!(component, Component::Normal(_)))
+                .collect();
+            let module_name = ModuleName::from_relative_path(&relative_path).unwrap_or_else(|_| {
+                ModuleName::from_str(filename.strip_suffix(suffix).unwrap_or(filename))
+            });
             let module_path = PathBuf::from(filename.clone());
             let memory_path = ModulePath::memory(module_path.clone());
 
@@ -692,6 +698,30 @@ mod tests {
         assert!(
             definitions[0].contents.is_none(),
             "a stub should come without its contents when the caller does not ask"
+        );
+    }
+
+    #[test]
+    fn test_import_file_with_unnormalized_name() {
+        let mut state = Playground::new(None).unwrap();
+        let mut files = SmallMap::new();
+        files.insert(
+            "sandbox.py".to_owned(),
+            "from utils import helper\nfrom pkg.mod import value\nhelper()\nprint(value)\n"
+                .to_owned(),
+        );
+        files.insert(
+            "./utils.py".to_owned(),
+            "def helper() -> None: ...\n".to_owned(),
+        );
+        files.insert("/pkg//mod.py".to_owned(), "value = 1\n".to_owned());
+        state.update_sandbox_files(files, true);
+
+        let errors = state.get_errors();
+        assert!(
+            errors.is_empty(),
+            "`./utils.py` and `/pkg//mod.py` should be importable as `utils` and `pkg.mod`, got: {:?}",
+            errors.iter().map(|e| &e.message_header).collect::<Vec<_>>()
         );
     }
 

@@ -288,6 +288,11 @@ export default function Sandbox({
             }
 
             const finalName = inputValue.trim();
+            // Monaco reads a backslash in a file URI as a path separator on
+            // Windows, so the model path would differ from the file name.
+            if (finalName.includes('\\')) {
+                return false;
+            }
             if (
                 !finalName.endsWith('.py') &&
                 !finalName.endsWith('.pyi') &&
