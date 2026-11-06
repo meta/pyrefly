@@ -15,11 +15,23 @@
 //! operation, so the instance is not usable after it.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 
+use dupe::Dupe;
 use pyrefly::playground::Playground;
 use pyrefly::playground::Position;
 use pyrefly::playground::Range;
+use pyrefly::state::require::Require;
+use pyrefly::state::state::State;
+use pyrefly_build::handle::Handle;
+use pyrefly_config::config::ConfigFile;
+use pyrefly_config::finder::ConfigFinder;
+use pyrefly_python::module_path::ModulePath;
+use pyrefly_util::arc_id::ArcId;
+use pyrefly_util::events::CategorizedEvents;
+use pyrefly_util::thread_pool::ThreadCount;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use starlark_map::small_map::SmallMap;
@@ -39,10 +51,118 @@ enum Request {
     InlayHint(bool),
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "method", content = "args", rename_all = "camelCase")]
+enum WorkspaceRequest {
+    SetFiles(Vec<PathBuf>),
+    FilesChanged {
+        created: Vec<PathBuf>,
+        modified: Vec<PathBuf>,
+        removed: Vec<PathBuf>,
+    },
+    GetErrors,
+}
+
 thread_local! {
     /// Live playgrounds, indexed by the handle that `pyrefly_new` returns.
     /// Handles are never reused. A slot is `None` after `pyrefly_drop`.
     static PLAYGROUNDS: RefCell<Vec<Option<Playground>>> = const { RefCell::new(Vec::new()) };
+    /// Live workspaces, indexed by the handle that `pyrefly_workspace_new` returns.
+    static WORKSPACES: RefCell<Vec<Workspace>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A project in the WASI filesystem of the host. Pyrefly finds and reads its
+/// files through ordinary filesystem paths, so the host edits a file by writing
+/// it to the filesystem and reporting the change, as a file watcher does.
+struct Workspace {
+    state: State,
+    config: ArcId<ConfigFile>,
+    /// The files to check, as the host last set them.
+    handles: Vec<Handle>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceError {
+    path: String,
+    line: u32,
+    message: String,
+}
+
+impl Workspace {
+    fn new(root: PathBuf) -> Self {
+        let mut config = ConfigFile {
+            search_path_from_args: vec![root],
+            disable_search_path_heuristics: true,
+            ..Default::default()
+        };
+        config.python_environment.set_empty_to_default();
+        config.interpreters.skip_interpreter_query = true;
+        config.configure();
+        let config = ArcId::new(config);
+        Self {
+            state: State::new(
+                ConfigFinder::new_constant(config.dupe()),
+                ThreadCount::default(),
+            ),
+            config,
+            handles: Vec::new(),
+        }
+    }
+
+    fn dispatch(&mut self, request: WorkspaceRequest) -> serde_json::Result<Value> {
+        let mut transaction = self
+            .state
+            .new_committable_transaction(Require::Exports, None);
+        match request {
+            WorkspaceRequest::SetFiles(paths) => {
+                self.handles = paths
+                    .into_iter()
+                    .map(|path| {
+                        self.config
+                            .handle_from_module_path(ModulePath::filesystem(path))
+                    })
+                    .collect();
+            }
+            WorkspaceRequest::FilesChanged {
+                created,
+                modified,
+                removed,
+            } => {
+                transaction.as_mut().invalidate_events(&CategorizedEvents {
+                    created,
+                    modified,
+                    removed,
+                    unknown: Vec::new(),
+                });
+            }
+            WorkspaceRequest::GetErrors => {
+                let errors = self
+                    .state
+                    .transaction()
+                    .get_errors(&self.handles)
+                    .collect_errors();
+                return serde_json::to_value(
+                    errors
+                        .ordinary
+                        .iter()
+                        .map(|error| WorkspaceError {
+                            path: error.path().as_path().display().to_string(),
+                            line: error.display_range().start.line_within_file().get(),
+                            message: error.msg(),
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        self.state.run_with_committing_transaction(
+            transaction,
+            &self.handles,
+            Require::Errors,
+            None,
+            None,
+        );
+        Ok(Value::Null)
+    }
 }
 
 fn dispatch(playground: &mut Playground, request: Request) -> serde_json::Result<Value> {
@@ -134,6 +254,44 @@ pub unsafe extern "C" fn pyrefly_new(ptr: *mut u8, len: usize) -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn pyrefly_drop(handle: usize) {
     PLAYGROUNDS.with_borrow_mut(|playgrounds| playgrounds[handle] = None);
+}
+
+/// Creates a workspace whose import root is the path in the UTF-8 string at
+/// `ptr`/`len`, and frees that string. Returns the packed JSON response
+/// `{"ok": handle}`.
+///
+/// # Safety
+///
+/// `ptr` and `len` must describe a buffer from `pyrefly_alloc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pyrefly_workspace_new(ptr: *mut u8, len: usize) -> u64 {
+    let root = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) };
+    let workspace = Workspace::new(PathBuf::from(String::from_utf8_lossy(&root).into_owned()));
+    let handle = WORKSPACES.with_borrow_mut(|workspaces| {
+        workspaces.push(workspace);
+        workspaces.len() - 1
+    });
+    into_host(json!({ "ok": handle }).to_string().into_bytes())
+}
+
+/// Runs the JSON `WorkspaceRequest` at `ptr`/`len` against the workspace for
+/// `handle`, and frees the request. Returns the packed JSON response
+/// `{"ok": value}` or `{"err": message}`.
+///
+/// # Safety
+///
+/// `ptr` and `len` must describe a buffer from `pyrefly_alloc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pyrefly_workspace_call(handle: usize, ptr: *mut u8, len: usize) -> u64 {
+    let request = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) };
+    let result = serde_json::from_slice(&request).and_then(|request| {
+        WORKSPACES.with_borrow_mut(|workspaces| workspaces[handle].dispatch(request))
+    });
+    let response = match result {
+        Ok(value) => json!({ "ok": value }),
+        Err(e) => json!({ "err": e.to_string() }),
+    };
+    into_host(response.to_string().into_bytes())
 }
 
 /// Runs the JSON `Request` at `ptr`/`len` against the playground for `handle`,

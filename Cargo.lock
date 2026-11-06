@@ -2625,6 +2625,10 @@ version = "0.0.0"
 dependencies = [
  "dupe",
  "pyrefly",
+ "pyrefly_build",
+ "pyrefly_config",
+ "pyrefly_python",
+ "pyrefly_util",
  "serde",
  "serde_json",
  "starlark_map",
