@@ -872,13 +872,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         let members = &f.members;
                         let mut targets = Vec::new();
                         for member in members {
-                            if let CallTargetLookup::Ok(target) = self.as_call_target_impl(
-                                member.clone(),
-                                Some(
-                                    q.clone()
-                                        .with_restriction(Restriction::Bound(member.clone())),
-                                ),
-                            ) {
+                            // The receiver is `q` narrowed to `member`, which binding a member
+                            // expresses as the intersection of the two.
+                            if let CallTargetLookup::Ok(target) =
+                                self.as_call_target_impl(member.clone(), Some((*q).clone()))
+                            {
                                 targets.push(*target);
                             } else {
                                 return CallTargetLookup::Error(Type::Quantified(q), vec![]);
@@ -893,12 +891,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Restriction::Constraints(constraints) => {
                     let mut targets = Vec::new();
                     for constraint in constraints {
-                        if let CallTargetLookup::Ok(target) = self.as_call_target_impl(
-                            constraint.clone(),
-                            Some(q.clone().with_restriction(Restriction::Constraints(vec![
-                                constraint.clone(),
-                            ]))),
-                        ) {
+                        if let CallTargetLookup::Ok(target) =
+                            self.as_call_target_impl(constraint.clone(), Some((*q).clone()))
+                        {
                             targets.push(*target);
                         } else {
                             return CallTargetLookup::Error(Type::Quantified(q), vec![]);
