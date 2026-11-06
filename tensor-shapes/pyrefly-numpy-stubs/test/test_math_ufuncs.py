@@ -249,6 +249,41 @@ def test_rounding_preserves_shape() -> None:
     assert_shape(np.clip(a, -1.0, 2.0).shape, (5,))
 
 
+class ArrayUfuncDispatch:
+    def __array__(self, dtype: Any = None, copy: Any = None) -> np.ndarray[[2], Any]:
+        return np.ones(2)
+
+    def __array_ufunc__(
+        self, ufunc: Any, method: str, *inputs: Any, **kwargs: Any
+    ) -> str:
+        return "custom result"
+
+
+class ExternalObject:
+    pass
+
+
+def test_unary_ufunc_external_dispatch() -> None:
+    values = ArrayUfuncDispatch()
+    signed = np.sign(values)
+    logged = np.log1p(values)
+    assert_type(signed, np.generic | np.ndarray)
+    assert_type(logged, np.generic | np.ndarray)
+    assert signed == logged == "custom result"
+    assert_shape(values.__array__().shape, (2,))
+
+
+def test_nan_to_num_external_objects() -> None:
+    external = ExternalObject()
+    union = cast("list[ExternalObject] | np.ndarray | ExternalObject", np.ones((2, 3)))
+    result = np.nan_to_num(union)  # E: No matching overload
+    untouched = np.nan_to_num(external)  # E: No matching overload
+    assert_type(result, Any)
+    assert_type(untouched, Any)
+    assert untouched is external
+    assert_shape(result.shape, IntTuple, runtime=(2, 3))
+
+
 def test_clip_scalar_or_none_bounds() -> None:
     x = np.ones((2, 3))
 

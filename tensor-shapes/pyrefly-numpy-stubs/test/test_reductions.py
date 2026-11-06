@@ -324,6 +324,23 @@ def test_reduce_higher_rank_keepdims() -> None:
     assert_shape(np.min(a, axis=0, keepdims=True).shape, (1, 3, 4))
 
 
+def test_sum_object_without_losing_array_precision() -> None:
+    values = np.ones((2, 3), dtype=np.float32)
+    masked = cast(object, values)
+    total = np.sum(masked)  # E: object
+    explicit = np.sum(masked, axis=None)  # E: object
+    assert_type(total, np.ndarray[[], Any])
+    assert_type(explicit, np.ndarray[[], Any])
+    assert float(cast(Any, total)) == 6.0
+    assert float(cast(Any, explicit)) == 6.0
+    assert_type(np.sum(values), np.ndarray[[], Any])
+    assert_type(np.sum(values, axis=-1, keepdims=True), np.ndarray[[2, 1], Any])
+    assert_shape(np.sum(values, keepdims=True).shape, (1, 1))
+    assert_shape(np.sum(values, axis=-1, keepdims=True).shape, (2, 1))
+    with assert_raises(ValueError):
+        np.sum(values, axis=-3)  # E: axis out of bounds
+
+
 def test_keepdims_reduction_broadcasts_over_matrix() -> None:
     a = np.ones((3, 4))
     row_totals = np.sum(a, axis=1, keepdims=True)
