@@ -4528,6 +4528,57 @@ Completion Results:
     );
 }
 
+// https://github.com/facebook/pyrefly/issues/5223
+// bug: a module whose name is not made of identifiers, such as a Django migration,
+// cannot be written in an import statement, but it is still suggested.
+#[test]
+fn autoimport_skips_module_name_with_non_identifier() {
+    let code = r#"
+T = Migration
+#           ^
+x = initial
+#         ^
+"#;
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[
+            ("main", code),
+            ("pkg.migrations.0001_initial", "class Migration: ...\n"),
+            ("pkg.models", "class Migration: ...\n"),
+            ("pkg.initial_data", ""),
+        ],
+        get_test_report(Default::default(), ImportFormat::Absolute),
+    );
+    assert_eq!(
+        r#"
+# main.py
+2 | T = Migration
+                ^
+Completion Results:
+- (Class) Migration: from pkg.migrations.0001_initial import Migration
+
+- (Class) Migration: from pkg.models import Migration
+
+
+4 | x = initial
+              ^
+Completion Results:
+- (Module) pkg.initial_data: import pkg.initial_data
+
+- (Module) pkg.migrations.0001_initial: import pkg.migrations.0001_initial
+
+
+
+# pkg.migrations.0001_initial.py
+
+# pkg.models.py
+
+# pkg.initial_data.py
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
 #[test]
 fn autoimport_completions_set_label_details() {
     let code = r#"
