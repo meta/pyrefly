@@ -15,6 +15,12 @@ Pyrefly's WASM build is used in browser-based applications like the
 
 Run `./build.sh`
 
+## Benchmarking the WASM build
+
+After `./build.sh`, run `node bench.mjs`. It prints the module size, the time
+to load the module and check a program, and the time of the calls that the
+sandbox makes on each edit.
+
 ## Common issues with the build
 
 Certain features that are allowed in the other builds are unavailable in the
