@@ -101,17 +101,17 @@ impl Range {
         }
     }
 
+    /// Returns `None` for a range that is not valid, including one that ends before it starts.
     fn to_display_range(&self) -> Option<DisplayRange> {
-        Some(DisplayRange {
-            start: DisplayPos::Source {
-                line: LineNumber::new(u32::try_from(self.start_line).ok()?)?,
-                column: NonZeroU32::new(u32::try_from(self.start_col).ok()?)?,
-            },
-            end: DisplayPos::Source {
-                line: LineNumber::new(u32::try_from(self.end_line).ok()?)?,
-                column: NonZeroU32::new(u32::try_from(self.end_col).ok()?)?,
-            },
-        })
+        let start = DisplayPos::Source {
+            line: LineNumber::new(u32::try_from(self.start_line).ok()?)?,
+            column: NonZeroU32::new(u32::try_from(self.start_col).ok()?)?,
+        };
+        let end = DisplayPos::Source {
+            line: LineNumber::new(u32::try_from(self.end_line).ok()?)?,
+            column: NonZeroU32::new(u32::try_from(self.end_col).ok()?)?,
+        };
+        (start <= end).then_some(DisplayRange { start, end })
     }
 }
 
@@ -601,6 +601,27 @@ mod tests {
                 .inlay_hint(true)
                 .iter()
                 .any(|hint| hint.label == "value= ")
+        );
+    }
+
+    #[test]
+    fn test_semantic_tokens_ignores_reversed_range() {
+        let mut state = Playground::new(None).unwrap();
+        let mut files = SmallMap::new();
+        files.insert("sandbox.py".to_owned(), "x = 1\ny = 2\n".to_owned());
+        state.update_sandbox_files(files, true);
+        state.set_active_file("sandbox.py");
+
+        let reversed = Range {
+            start_line: 2,
+            start_col: 1,
+            end_line: 1,
+            end_col: 1,
+        };
+        assert_eq!(
+            state.semantic_tokens(Some(reversed)).unwrap().data,
+            state.semantic_tokens(None).unwrap().data,
+            "a reversed range should give the tokens of the whole file"
         );
     }
 
