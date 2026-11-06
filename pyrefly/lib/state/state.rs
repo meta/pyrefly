@@ -596,7 +596,7 @@ struct StateData {
     stdlib: SmallMap<SysInfo, Arc<Stdlib>>,
     modules: HashMap<Handle, ModuleData>,
     loaders: SmallMap<ArcId<ConfigFile>, Arc<LoaderFindCache>>,
-    /// The contents for ModulePath::memory values
+    /// In-memory contents that override each module path's usual source.
     memory: MemoryFiles,
     /// The current epoch, gets incremented every time we recompute
     now: Epoch,
@@ -1432,7 +1432,11 @@ impl<'a> Transaction<'a> {
                 if matches!(
                     module_data.handle.path().details(),
                     ModulePathDetails::FileSystem(_)
-                ) {
+                ) && self
+                    .memory_lookup()
+                    .get(module_data.handle.path())
+                    .is_none()
+                {
                     self.data.inputs_changed.store(true, Ordering::Relaxed);
                 }
                 guard.store_load(Some(Arc::new(Load::load_from_data(
