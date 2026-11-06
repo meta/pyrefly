@@ -93,6 +93,14 @@ struct DocstringRenderState {
     output: Vec<String>,
     pending_literal_block: bool,
     pending_literal_block_indent: usize,
+    /// Language of the pending literal block. Empty when the block has no language.
+    pending_literal_block_language: String,
+    /// True from a code directive until its option lines (such as `:linenos:`) end.
+    in_directive_options: bool,
+    /// The indent of the admonition whose body is being written, if any.
+    admonition_indent: Option<usize>,
+    /// The indent of the first body line of that admonition.
+    admonition_body_indent: Option<usize>,
     code_block: Option<CodeBlockKind>,
     code_block_indent: usize,
     literal_block_marker_indent: usize,
@@ -106,6 +114,10 @@ impl DocstringRenderState {
             output: Vec::new(),
             pending_literal_block: false,
             pending_literal_block_indent: 0,
+            pending_literal_block_language: String::new(),
+            in_directive_options: false,
+            admonition_indent: None,
+            admonition_body_indent: None,
             code_block: None,
             code_block_indent: 0,
             literal_block_marker_indent: 0,
@@ -115,13 +127,36 @@ impl DocstringRenderState {
 
     /// Process one normalized docstring line, updating fence state and output.
     fn handle_line(&mut self, line: &str, is_first: bool, min_indent: usize) {
-        let raw_leading_spaces = leading_space_count(line);
+        // The first line starts right after the quotes, but it sits at the indent of the body.
+        let raw_leading_spaces = if is_first {
+            min_indent
+        } else {
+            leading_space_count(line)
+        };
         let base_line = dedent_docstring_line(line, min_indent, is_first);
         let mut current = base_line.to_owned();
 
         // Inside a fenced code block, a line ending in `::` is code, not a literal-block marker.
+        // A directive such as `.. toctree::` also ends in `::`, but it does not open a literal
+        // block.
         let saw_literal_marker = self.code_block != Some(CodeBlockKind::Fenced)
+            && split_directive(base_line).is_none()
             && self.apply_literal_block_marker(&mut current, raw_leading_spaces);
+
+        // Dedent the body of an admonition, which ends at the first line that is not indented
+        // deeper than the directive.
+        if let Some(indent) = self.admonition_indent
+            && !current.trim().is_empty()
+        {
+            if raw_leading_spaces > indent {
+                let body_indent = *self
+                    .admonition_body_indent
+                    .get_or_insert(raw_leading_spaces);
+                current = strip_leading_spaces(&current, body_indent - indent).to_owned();
+            } else {
+                self.admonition_indent = None;
+            }
+        }
 
         let trimmed_start = current.trim_start();
         let is_blank = trimmed_start.is_empty();
@@ -130,6 +165,29 @@ impl DocstringRenderState {
 
         if self.write_code_block_line(is_blank, is_doctest_prompt, raw_leading_spaces, &current) {
             return;
+        }
+
+        if let Some(heading) = admonition_heading(base_line) {
+            self.pending_literal_block = false;
+            self.admonition_indent = Some(raw_leading_spaces);
+            self.admonition_body_indent = None;
+            self.output.push(heading);
+            return;
+        }
+
+        if let Some(language) = code_directive_language(base_line) {
+            self.pending_literal_block = true;
+            self.pending_literal_block_indent = raw_leading_spaces;
+            self.pending_literal_block_language = language.to_owned();
+            self.in_directive_options = true;
+            return;
+        }
+
+        if self.in_directive_options {
+            if trimmed_start.starts_with(':') {
+                return;
+            }
+            self.in_directive_options = false;
         }
 
         if self.maybe_start_code_block(
@@ -157,6 +215,7 @@ impl DocstringRenderState {
             *current = updated;
             self.pending_literal_block = true;
             self.pending_literal_block_indent = raw_leading_spaces;
+            self.pending_literal_block_language.clear();
             return true;
         }
         false
@@ -242,7 +301,8 @@ impl DocstringRenderState {
             self.code_block = Some(CodeBlockKind::Literal);
             self.code_block_indent = leading_spaces;
             self.literal_block_marker_indent = self.pending_literal_block_indent;
-            self.output.push("```".to_owned());
+            self.output
+                .push(format!("```{}", self.pending_literal_block_language));
             self.output
                 .push(strip_code_indent(current, self.code_block_indent));
             self.pending_literal_block = false;
@@ -331,6 +391,73 @@ fn code_fence_opening(line: &str) -> Option<usize> {
 fn is_closing_code_fence(line: &str, backticks: usize) -> bool {
     let line = line.trim();
     line.len() >= backticks && line.bytes().all(|b| b == b'`')
+}
+
+/// Split a reStructuredText directive such as `.. note:: text` into its name and argument.
+fn split_directive(line: &str) -> Option<(&str, &str)> {
+    let (name, argument) = line.trim_start().strip_prefix(".. ")?.split_once("::")?;
+    (!name.is_empty() && !name.contains(char::is_whitespace)).then_some((name, argument.trim()))
+}
+
+/// If this line is a reStructuredText directive whose body is code, such as
+/// `.. code-block:: python`, return the language of the code. The language is empty when the
+/// directive names none. The body of `.. math::` is LaTeX.
+fn code_directive_language(line: &str) -> Option<&str> {
+    match split_directive(line)? {
+        ("code-block" | "code" | "sourcecode", argument) => {
+            Some(argument.split_whitespace().next().unwrap_or(""))
+        }
+        ("math", "") => Some("latex"),
+        _ => None,
+    }
+}
+
+/// The titles of reStructuredText admonitions, which take an optional text after the directive.
+const ADMONITIONS: [(&str, &str); 11] = [
+    ("note", "Note"),
+    ("warning", "Warning"),
+    ("tip", "Tip"),
+    ("important", "Important"),
+    ("caution", "Caution"),
+    ("danger", "Danger"),
+    ("attention", "Attention"),
+    ("hint", "Hint"),
+    ("error", "Error"),
+    ("seealso", "See also"),
+    ("todo", "Todo"),
+];
+
+/// The titles of Sphinx directives that mark a version, which take the version as their argument.
+const VERSION_DIRECTIVES: [(&str, &str); 4] = [
+    ("versionadded", "New in version"),
+    ("versionchanged", "Changed in version"),
+    ("versionremoved", "Removed in version"),
+    ("deprecated", "Deprecated since version"),
+];
+
+/// If this line is an admonition such as `.. note::`, `.. admonition:: Title` or
+/// `.. versionadded:: 1.2`, return the Markdown heading to show in its place.
+fn admonition_heading(line: &str) -> Option<String> {
+    let (name, argument) = split_directive(line)?;
+    // The generic admonition takes its title as the argument.
+    if name == "admonition" && !argument.is_empty() {
+        return Some(format!("**{argument}**"));
+    }
+    if let Some((_, title)) = ADMONITIONS.iter().find(|(directive, _)| *directive == name) {
+        return Some(if argument.is_empty() {
+            format!("**{title}**")
+        } else {
+            format!("**{title}:** {argument}")
+        });
+    }
+    let (_, title) = VERSION_DIRECTIVES
+        .iter()
+        .find(|(directive, _)| *directive == name)?;
+    Some(if argument.is_empty() {
+        format!("**{title}**")
+    } else {
+        format!("**{title} {argument}**")
+    })
 }
 
 /// Strip a reStructuredText literal-block marker (`::`) and return the updated line.
@@ -916,8 +1043,9 @@ mod tests {
     #[test]
     fn test_docstring_code_block_line_less_indented_than_fence_starts_with_multibyte_char() {
         assert_eq!(
-            Docstring::clean("\"\"\"Tree::\n\n      root\n    ├── a\"\"\"").as_str(),
-            "Tree:  \n  \n```  \nroot  \n├── a  \n```"
+            Docstring::clean("\"\"\"Summary\n\n    Tree::\n\n          root\n        ├── a\"\"\"")
+                .as_str(),
+            "Summary  \n  \nTree:  \n  \n```  \nroot  \n├── a  \n```"
         );
     }
 
@@ -976,6 +1104,179 @@ test = Test(
 )
 ```
 "#
+        );
+    }
+
+    #[test]
+    fn test_docstring_code_block_directive_uses_fence_with_language() {
+        let docstring = r#""""
+    For example:
+
+    .. code-block:: python
+
+        import os
+
+        monkeypatch.setattr(os, "getcwd", lambda: "/")
+
+    The code above replaces it.
+    """"#;
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            r#"
+For example:
+
+
+```python
+import os
+
+monkeypatch.setattr(os, "getcwd", lambda: "/")
+
+```
+The code above replaces it.
+"#
+        );
+    }
+
+    #[test]
+    fn test_docstring_code_directive_variants() {
+        for directive in [".. code::", ".. sourcecode::", ".. code-block::"] {
+            let docstring = format!("\"\"\"Example\n\n{directive}\n\n    x = 1\"\"\"");
+            assert_eq!(
+                Docstring::clean(&docstring).replace("  \n", "\n"),
+                "Example\n\n\n```\nx = 1\n```",
+                "{directive}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_docstring_code_directive_skips_option_lines() {
+        let docstring = "\"\"\"Example\n\n.. code-block:: python\n    :linenos:\n    :caption: demo\n\n    x = 1\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Example\n\n\n```python\nx = 1\n```"
+        );
+    }
+
+    #[test]
+    fn test_docstring_code_directive_after_literal_block() {
+        // A directive that ends a literal block still opens its own block.
+        let docstring = "\"\"\"A::\n\n    x = 1\n.. code-block:: python\n\n    y = 2\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "A:\n\n```\nx = 1\n```\n\n```python\ny = 2\n```"
+        );
+    }
+
+    #[test]
+    fn test_docstring_literal_block_marker_on_first_line() {
+        // The first line starts right after the quotes, but it sits at the indent of the body, so
+        // a body line at that indent ends the block.
+        let docstring = "\"\"\"Summary::\n\n        code\n\n    after\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Summary:\n\n```\ncode\n\n```\nafter"
+        );
+    }
+
+    #[test]
+    fn test_docstring_admonition_body_is_text() {
+        let docstring = r#""""
+    Summary.
+
+    .. note::
+
+        First paragraph.
+
+        Second paragraph.
+
+    After.
+    """"#;
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "\nSummary.\n\n**Note**\n\nFirst paragraph.\n\nSecond paragraph.\n\nAfter.\n"
+        );
+    }
+
+    #[test]
+    fn test_docstring_admonition_with_inline_text() {
+        assert_eq!(
+            Docstring::clean("\"\"\"Summary.\n\n.. warning:: Be careful.\n\nAfter.\"\"\"")
+                .replace("  \n", "\n"),
+            "Summary.\n\n**Warning:** Be careful.\n\nAfter."
+        );
+    }
+
+    #[test]
+    fn test_docstring_version_directives() {
+        for (directive, heading) in [
+            (".. versionadded:: 1.2", "**New in version 1.2**"),
+            (".. versionchanged:: 2.0", "**Changed in version 2.0**"),
+            (".. versionremoved:: 4.0", "**Removed in version 4.0**"),
+            (".. deprecated:: 3.1", "**Deprecated since version 3.1**"),
+        ] {
+            let docstring = format!("\"\"\"Summary.\n\n{directive}\n    Use `new` instead.\"\"\"");
+            assert_eq!(
+                Docstring::clean(&docstring).replace("  \n", "\n"),
+                format!("Summary.\n\n{heading}\nUse `new` instead."),
+                "{directive}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_docstring_generic_admonition_uses_its_title() {
+        let docstring =
+            "\"\"\"Summary.\n\n.. admonition:: Custom title\n\n    Body text.\n\nAfter.\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Summary.\n\n**Custom title**\n\nBody text.\n\nAfter."
+        );
+    }
+
+    #[test]
+    fn test_docstring_math_directive_is_latex() {
+        let docstring = "\"\"\"Summary.\n\n.. math::\n    :label: euler\n\n    e^{i\\pi} + 1 = 0\n\nAfter.\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Summary.\n\n\n```latex\ne^{i\\pi} + 1 = 0\n\n```\nAfter."
+        );
+    }
+
+    #[test]
+    fn test_docstring_unknown_directive_is_shown_as_written() {
+        // An unknown directive ends in `::` but opens no literal block, so its body stays text.
+        let docstring = "\"\"\"Summary.\n\n.. toctree::\n\n    intro\n    usage\n\nAfter.\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Summary.\n\n.. toctree::\n\n&nbsp;&nbsp;&nbsp;&nbsp;intro\n&nbsp;&nbsp;&nbsp;&nbsp;usage\n\nAfter."
+        );
+    }
+
+    #[test]
+    fn test_docstring_math_directive_with_inline_content_is_shown_as_written() {
+        assert_eq!(
+            Docstring::clean("\"\"\"Summary.\n\n.. math:: x = 1\"\"\"").replace("  \n", "\n"),
+            "Summary.\n\n.. math:: x = 1"
+        );
+    }
+
+    #[test]
+    fn test_docstring_admonition_body_can_hold_a_code_block() {
+        let docstring =
+            "\"\"\"Summary.\n\n.. tip::\n\n    Try this::\n\n        x = 1\n\nAfter.\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Summary.\n\n**Tip**\n\nTry this:\n\n```\nx = 1\n\n```\nAfter."
+        );
+    }
+
+    #[test]
+    fn test_docstring_unknown_directive_is_not_an_admonition() {
+        let docstring = "\"\"\"Summary.\n\n.. image:: logo.png\n\nAfter.\"\"\"";
+        assert_eq!(
+            Docstring::clean(docstring).replace("  \n", "\n"),
+            "Summary.\n\n.. image:: logo.png\n\nAfter."
         );
     }
 
