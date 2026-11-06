@@ -66,7 +66,6 @@ use ruff_python_ast::StmtClassDef;
 use ruff_python_ast::StmtImportFrom;
 use ruff_python_ast::UnaryOp;
 use ruff_python_ast::name::Name;
-use ruff_python_parser::typing::parse_type_annotation;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -394,17 +393,6 @@ fn recorded_references(
         .filter(|(def_range, _)| matches_definition(*def_range, module.code_at(*def_range)))
         .map(|(_, ref_range)| *ref_range)
         .collect()
-}
-
-/// Parses a forward-reference string such as `"list[Foo]"` into the expression the binder
-/// built from it. Only strings whose contents map exactly onto the source are parsed: escapes
-/// or implicit concatenation leave no exact position for the identifiers inside.
-fn parse_forward_ref(literal: &ExprStringLiteral, source: &str) -> Option<Expr> {
-    let parsed = parse_type_annotation(literal, source).ok()?;
-    parsed
-        .kind()
-        .is_simple()
-        .then(|| parsed.expression().clone())
 }
 
 #[derive(Clone, Debug)]
@@ -1018,14 +1006,7 @@ impl<'a> Transaction<'a> {
         let covering_nodes = Ast::locate_node(&module, position);
         let mut ranges = Vec::new();
 
-        // The binder parses forward-reference strings with `Ast::parse_type_literal`, so
-        // parsing again yields the same ranges under which types were recorded.
-        if let Some(AnyNodeRef::ExprStringLiteral(literal)) = covering_nodes
-            .iter()
-            .find(|node| matches!(node, AnyNodeRef::ExprStringLiteral(_)))
-            && let Some(info) = self.get_module_info(handle)
-            && let Ok(parsed) = Ast::parse_type_literal(literal, info.contents())
-        {
+        if let Some(parsed) = self.forward_ref_at(handle, &covering_nodes) {
             ranges.extend(
                 Ast::locate_node_in(AnyNodeRef::from(&parsed), position)
                     .iter()
@@ -1100,7 +1081,7 @@ impl<'a> Transaction<'a> {
     ) -> Option<IdentifierWithContext> {
         let mod_module = self.get_ast(handle)?;
         let covering_nodes = Ast::locate_node(&mod_module, position);
-        if let Some(forward_ref) = self.forward_ref_at(handle, &covering_nodes) {
+        if let Some(forward_ref) = self.type_forward_ref_at(handle, &covering_nodes) {
             return Self::identifier_from_covering_nodes(&Ast::locate_node_in(
                 AnyNodeRef::from(&forward_ref),
                 position,
@@ -1109,23 +1090,27 @@ impl<'a> Transaction<'a> {
         Self::identifier_from_covering_nodes(&covering_nodes)
     }
 
-    /// The type expression parsed from the forward-reference string in `covering_nodes`, such
-    /// as `list[Foo]` from `x: "list[Foo]"`. Its nodes carry source ranges, so the identifiers
-    /// inside resolve through the same keys and traces as an unquoted annotation.
-    ///
-    /// The binder only parses strings in type positions, so a string counts only if a name in
-    /// it has a key: ordinary strings and `Literal["..."]` values stay strings.
+    /// The string literal in `covering_nodes` parsed as a forward reference, such as `list[Foo]`
+    /// from `x: "list[Foo]"`. It is parsed with `Ast::parse_type_literal`, as in the binder, so
+    /// its nodes carry the ranges under which keys and types were recorded.
     fn forward_ref_at(&self, handle: &Handle, covering_nodes: &[AnyNodeRef]) -> Option<Expr> {
+        let literal = covering_nodes.iter().find_map(|node| match node {
+            AnyNodeRef::ExprStringLiteral(literal) => Some(*literal),
+            _ => None,
+        })?;
+        Ast::parse_type_literal(literal, self.get_module_info(handle)?.contents()).ok()
+    }
+
+    /// Like `forward_ref_at`, but only for strings the binder treated as types. The binder only
+    /// parses strings in type positions, so a string counts only if a name in it has a key:
+    /// ordinary strings and `Literal["..."]` values stay strings.
+    fn type_forward_ref_at(&self, handle: &Handle, covering_nodes: &[AnyNodeRef]) -> Option<Expr> {
         fn any_name(x: &Expr, f: &impl Fn(&ExprName) -> bool) -> bool {
             let mut found = matches!(x, Expr::Name(name) if f(name));
             x.recurse(&mut |x| found = found || any_name(x, f));
             found
         }
-        let literal = covering_nodes.iter().find_map(|node| match node {
-            AnyNodeRef::ExprStringLiteral(literal) => Some(*literal),
-            _ => None,
-        })?;
-        let parsed = parse_forward_ref(literal, self.get_module_info(handle)?.contents())?;
+        let parsed = self.forward_ref_at(handle, covering_nodes)?;
         let answers = self.get_answers(handle)?;
         let bindings = answers.bindings();
         any_name(&parsed, &|name| {
@@ -3044,7 +3029,7 @@ impl<'a> Transaction<'a> {
         };
         let covering_nodes = Ast::locate_node(&mod_module, position);
         // Inside a forward-reference string, resolve against the type expression parsed from it.
-        let forward_ref = self.forward_ref_at(handle, &covering_nodes);
+        let forward_ref = self.type_forward_ref_at(handle, &covering_nodes);
         let covering_nodes = match &forward_ref {
             Some(forward_ref) => Ast::locate_node_in(AnyNodeRef::from(forward_ref), position),
             None => covering_nodes,
@@ -5094,8 +5079,15 @@ impl<'a> Transaction<'a> {
     ) -> Option<Vec<TextRange>> {
         let mut references = Vec::new();
         if let Some(mod_module) = self.get_ast(handle) {
+            let module_info = self.get_module_info(handle);
             let is_valid_use = |x: &ExprName| {
+                // Escapes or implicit concatenation shift the ranges of names parsed from a
+                // forward-reference string, so a name counts only where its range covers its
+                // own text in the source.
                 if x.id() == expected_name
+                    && module_info
+                        .as_ref()
+                        .is_some_and(|info| info.code_at(x.range()) == expected_name.as_str())
                     && let Some((def_handle, Export { location, .. })) = self
                         .find_export_for_key(
                             handle,
@@ -5115,12 +5107,11 @@ impl<'a> Transaction<'a> {
                     false
                 }
             };
-            let module_info = self.get_module_info(handle);
             // Only strings that mention the name can hold a forward reference to it.
             let forward_ref = |x: &ExprStringLiteral| {
                 let source = module_info.as_ref()?.contents();
                 if x.value.to_str().contains(expected_name.as_str()) {
-                    parse_forward_ref(x, source)
+                    Ast::parse_type_literal(x, source).ok()
                 } else {
                     None
                 }

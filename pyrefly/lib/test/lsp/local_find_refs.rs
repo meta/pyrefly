@@ -767,6 +767,7 @@ b: "dict[str, list[Model]]"
 c: list["Model"]
 d: Literal["Model"]
 e = "Model"
+f: "\x6cist[Model]"
 "#;
     let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
         get_test_report(state, handle, position, true)
