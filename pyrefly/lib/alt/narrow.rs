@@ -551,7 +551,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Whether two types have no possible runtime value in common for the `invalid-cast` check.
     ///
     /// This is intentionally incomplete: uncertain type forms return `false` to avoid noisy
-    /// diagnostics.
+    /// diagnostics. Also gates parameter widening in `make_bound_method`, where returning `true`
+    /// when unsure would be unsound.
     pub fn is_provably_disjoint(&self, left: &Type, right: &Type) -> bool {
         // Normalize types with a precise nominal runtime class, where disjointness is high signal.
         // Return `None` for structural and gradual forms to avoid noisy invalid-cast diagnostics.

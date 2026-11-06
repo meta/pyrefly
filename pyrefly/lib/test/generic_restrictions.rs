@@ -928,18 +928,17 @@ def merge[T: (A, B)](x: T, y: T) -> None:
 // method called with an argument of type `T` returns `T`. `h` shows the parameter types printed
 // when an argument is rejected.
 testcase!(
-    bug = "`a += b` and `a.startswith(b)` should not error in `f` or `g`",
     test_constrained_typevar_argument_shares_receiver_constraint,
     r#"
 from typing import AnyStr, assert_type, final
 
 def f(a: AnyStr, b: AnyStr) -> bool:
-    a += b  # E: `+=` is not supported between `AnyStr` and `AnyStr`
-    return a.startswith(b)  # E: Argument `AnyStr` is not assignable to parameter `prefix` with type `Buffer | tuple[Buffer, ...]`
+    a += b
+    return a.startswith(b)
 
 def g(a: AnyStr, b: AnyStr) -> None:
     if isinstance(a, bytes):
-        a.startswith(b)  # E: Argument `AnyStr` is not assignable to parameter `prefix` with type `Buffer | tuple[Buffer, ...]`
+        a.startswith(b)
 
 @final
 class A:
@@ -953,7 +952,7 @@ def f1[T: (A, B)](a: T, b: T) -> None:
     assert_type(a.pick(b), T)
 
 def h(a: AnyStr) -> None:
-    a.startswith(1)  # E: Argument `Literal[1]` is not assignable to parameter `prefix` with type `Buffer | tuple[Buffer, ...]` # E: Argument `Literal[1]` is not assignable to parameter `prefix` with type `str | tuple[str, ...] | AnyStr`
+    a.startswith(1)  # E: Argument `Literal[1]` is not assignable to parameter `prefix` with type `Buffer | tuple[Buffer, ...] | AnyStr` # E: Argument `Literal[1]` is not assignable to parameter `prefix` with type `str | tuple[str, ...] | AnyStr`
     "#,
 );
 

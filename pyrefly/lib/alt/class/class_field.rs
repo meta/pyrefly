@@ -6,6 +6,7 @@
  */
 
 use std::borrow::Cow;
+use std::cell::LazyCell;
 use std::fmt;
 use std::fmt::Display;
 use std::iter;
@@ -854,9 +855,13 @@ impl ClassField {
         }
     }
 
-    fn as_special_method_type(&self, heap: &TypeHeap, instance: &Instance) -> Option<Type> {
-        self.as_raw_special_method_type(heap, instance)
-            .and_then(|ty| make_bound_method(heap, instance, ty).ok())
+    fn as_special_method_type<Ans: LookupAnswer>(
+        &self,
+        solver: &AnswersSolver<Ans>,
+        instance: &Instance,
+    ) -> Option<Type> {
+        self.as_raw_special_method_type(solver.heap, instance)
+            .and_then(|ty| make_bound_method(solver, instance, ty).ok())
     }
 
     pub fn is_property(&self) -> bool {
@@ -1399,22 +1404,40 @@ fn make_bound_classmethod(heap: &TypeHeap, cls: &ClassBase, attr: Type) -> Resul
     make_bound_method_helper(heap, cls.clone().to_type(heap), attr, &should_bind)
 }
 
-fn make_bound_method(heap: &TypeHeap, instance: &Instance, attr: Type) -> Result<Type, Type> {
+fn make_bound_method<Ans: LookupAnswer>(
+    solver: &AnswersSolver<Ans>,
+    instance: &Instance,
+    attr: Type,
+) -> Result<Type, Type> {
+    let heap = solver.heap;
     let should_bind =
         |meta: &FuncMetadata| !meta.flags.is_staticmethod && !meta.flags.is_classmethod;
     make_bound_method_helper(heap, instance.to_type(heap), attr, &should_bind).map(|mut method| {
-        method.transform_toplevel_callable_signatures(|callable, _| {
-            if let InstanceKind::TypeVar(q) = &instance.kind
-                && matches!(q.restriction(), Restriction::Constraints(_))
-            {
-                let is_constraint = |ty: &Type| {
-                    matches!(ty, Type::ClassType(cls) if cls.class_object() == instance.class && cls.targs() == instance.targs)
-                };
+        if let InstanceKind::TypeVar(q) = &instance.kind
+            && let Restriction::Constraints(constraints) = q.restriction()
+        {
+            let is_constraint = |ty: &Type| {
+                matches!(ty, Type::ClassType(cls) if cls.class_object() == instance.class && cls.targs() == instance.targs)
+            };
+            let class_type =
+                heap.mk_class_type(ClassType::new(instance.class.dupe(), instance.targs.clone()));
+            // If each constraint is either the receiver's class `C` or disjoint from it,
+            // this binding only applies when the TypeVar is `C`.
+            let typevar_is_class = LazyCell::new(|| {
+                constraints.iter().all(|constraint| {
+                    is_constraint(constraint)
+                        || solver.is_provably_disjoint(constraint, &class_type)
+                })
+            });
+            method.transform_toplevel_callable_signatures(|callable, _| {
                 // Arguments with the receiver's TypeVar share its active constraint.
-                // Keep the declared type so concrete arguments remain valid.
+                // Keep the declared type so concrete arguments remain valid. When the TypeVar
+                // must be `C`, every parameter that accepts `C` also accepts the TypeVar, such
+                // as `Buffer` for `bytes`.
                 callable.params.visit_mut(&mut |ty| {
                     if is_constraint(ty)
                         || matches!(ty, Type::Union(union) if union.members.iter().any(is_constraint))
+                        || (solver.is_subset_eq(&class_type, ty) && *typevar_is_class)
                     {
                         *ty = unions(vec![ty.clone(), q.clone().to_type(heap)], heap);
                     }
@@ -1423,8 +1446,8 @@ fn make_bound_method(heap: &TypeHeap, instance: &Instance, attr: Type) -> Result
                     // A return type that matches the active constraint preserves the TypeVar.
                     callable.ret = instance.to_type(heap);
                 }
-            }
-        });
+            });
+        }
         method
     })
 }
@@ -2695,7 +2718,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if let Some(dm) = metadata.dataclass_metadata()
             && name == &dunder::POST_INIT
             && let Some(post_init) = class_field.as_special_method_type(
-                self.heap,
+                self,
                 &Instance::of_class(&self.as_class_type_unchecked(class)),
             )
         {
@@ -3405,7 +3428,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             .into_inner()
                         } else {
                             make_bound_method(
-                                self.heap,
+                                self,
                                 &Instance::of_class(
                                     &self.promote_nontypeddict_silently_to_classtype(class),
                                 ),
@@ -3832,14 +3855,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if let Some(getter) = ty.is_property_setter_with_getter() {
                     // Property with a setter: bind both getter and setter
                     ClassAttribute::property(
-                        make_bound_method(self.heap, instance, getter).into_inner(),
-                        Some(make_bound_method(self.heap, instance, ty.clone()).into_inner()),
+                        make_bound_method(self, instance, getter).into_inner(),
+                        Some(make_bound_method(self, instance, ty.clone()).into_inner()),
                         instance.class.dupe(),
                     )
                 } else {
                     // Property getter only (no setter)
                     ClassAttribute::property(
-                        make_bound_method(self.heap, instance, ty.clone()).into_inner(),
+                        make_bound_method(self, instance, ty.clone()).into_inner(),
                         None,
                         instance.class.dupe(),
                     )
@@ -3879,7 +3902,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if let Some(quantified) = self_quantified {
                     ty = self.wrap_with_quantified(ty, quantified);
                 }
-                let ty = make_bound_method(self.heap, instance, ty).unwrap_or_else(|ty| {
+                let ty = make_bound_method(self, instance, ty).unwrap_or_else(|ty| {
                     make_bound_classmethod(self.heap, &instance.to_class_base(), ty).into_inner()
                 });
                 if is_classvar {
@@ -5740,9 +5763,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let init_method =
             self.get_class_member_with_defining_class(instance.class, &dunder::INIT)?;
         if get_object_init || !init_method.is_defined_on(KnownClass::Object) {
-            init_method
-                .value
-                .as_special_method_type(self.heap, instance)
+            init_method.value.as_special_method_type(self, instance)
         } else {
             None
         }
@@ -5818,7 +5839,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let instance = Instance::of_metaclass(ClassBase::ClassType(cls.clone()), metaclass);
             attr.value
                 .as_raw_special_method_type(self.heap, &instance)
-                .and_then(|ty| make_bound_method(self.heap, &instance, ty).ok())
+                .and_then(|ty| make_bound_method(self, &instance, ty).ok())
         }
     }
 
