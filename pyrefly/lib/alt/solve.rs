@@ -7587,35 +7587,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         if matches!(&decorator.ty, Type::Any(AnyStyle::Error)) {
                             continue;
                         }
-                        if behavior == ClassDecoratorBehavior::TypedOnly {
-                            let instance_call = match &decorator.ty {
-                                Type::ClassType(instance) => self.instance_as_dunder_call(instance),
-                                _ => None,
-                            };
-                            let callable = instance_call.as_ref().unwrap_or(&decorator.ty);
-                            let preserves_class = matches!(callable, Type::Any(_))
-                                || callable
-                                    .toplevel_callable_signatures()
-                                    .any(|(signature, _)| {
-                                        matches!(&signature.ret, Type::Any(_))
-                                            || signature.ret.has_top_level_implicit_any()
-                                            || callable.toplevel_func_metadata().is_some_and(
-                                                |meta| {
-                                                    meta.flags.is_return_inferred
-                                                        && matches!(
-                                                            &signature.ret,
-                                                            Type::Type(inner) if matches!(
-                                                                &**inner,
-                                                                Type::Any(AnyStyle::Explicit)
-                                                            )
-                                                        )
-                                                },
-                                            )
-                                    });
-                            if preserves_class {
-                                continue;
-                            }
-                        }
                         let range = self.bindings().idx_to_key(*decorator_key).range();
                         ty = self.apply_class_decorator(decorator.ty.clone(), ty, range, errors);
                     }
