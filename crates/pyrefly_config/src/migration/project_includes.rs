@@ -24,14 +24,20 @@ impl ConfigOptionMigrater for ProjectIncludes {
     ) -> anyhow::Result<()> {
         // https://mypy.readthedocs.io/en/latest/config_file.html#import-discovery
         // files, packages, modules can only be set in the top level `[mypy]` global section
-        let files = util::string_to_array(&mypy_cfg.get("mypy", "files"));
-        let packages = util::string_to_array(&mypy_cfg.get("mypy", "packages"));
-        let modules = util::string_to_array(&mypy_cfg.get("mypy", "modules"));
-
-        let includes: Vec<String> = [files, packages, modules]
+        let files = util::string_to_array(&mypy_cfg.get("mypy", "files"))
             .into_iter()
-            .flatten()
-            .map(|s| util::expand_config_file_dir(&s))
+            .map(|file| util::expand_config_file_dir(&file));
+        // `packages` and `modules` are dotted module names, not paths.
+        let packages = util::string_to_array(&mypy_cfg.get("mypy", "packages"))
+            .into_iter()
+            .map(|package| package.replace('.', "/"));
+        let modules = util::string_to_array(&mypy_cfg.get("mypy", "modules"))
+            .into_iter()
+            .map(|module| format!("{}.py*", module.replace('.', "/")));
+
+        let includes: Vec<String> = files
+            .chain(packages)
+            .chain(modules)
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -77,8 +83,8 @@ mod tests {
     fn test_migrate_from_mypy() {
         let mut mypy_cfg = Ini::new();
         mypy_cfg.set("mypy", "files", Some("src,test/some_test.py".to_owned()));
-        mypy_cfg.set("mypy", "packages", Some("package1,package2".to_owned()));
-        mypy_cfg.set("mypy", "modules", Some("module1,module2".to_owned()));
+        mypy_cfg.set("mypy", "packages", Some("package1,nion.utils".to_owned()));
+        mypy_cfg.set("mypy", "modules", Some("module1,pkg.module2".to_owned()));
 
         let mut pyrefly_cfg = ConfigFile::default();
 
@@ -89,9 +95,9 @@ mod tests {
             "src".to_owned(),
             "test/some_test.py".to_owned(),
             "package1".to_owned(),
-            "package2".to_owned(),
-            "module1".to_owned(),
-            "module2".to_owned(),
+            "nion/utils".to_owned(),
+            "module1.py*".to_owned(),
+            "pkg/module2.py*".to_owned(),
         ])
         .unwrap();
         assert_eq!(pyrefly_cfg.project_includes, expected_includes);
