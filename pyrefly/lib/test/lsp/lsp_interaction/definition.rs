@@ -486,16 +486,15 @@ m["name"]
     interaction.client.did_change("lib.py", &shifted_lib);
     interaction.client.did_save("lib.py");
     wait_for_disk_invalidation(&telemetry_events);
-    // BUG: the definitions are now at 4:8-4:14 and 7:4-7:8.
     interaction
         .client
         .definition("user.py", 2, 7)
-        .expect_definition_response_from_root("lib.py", 3, 9, 3, 15)
+        .expect_definition_response_from_root("lib.py", 4, 8, 4, 14)
         .unwrap();
     interaction
         .client
         .definition("user.py", 4, 4)
-        .expect_definition_response_from_root("lib.py", 6, 5, 6, 9)
+        .expect_definition_response_from_root("lib.py", 7, 4, 7, 8)
         .unwrap();
 
     interaction.shutdown().unwrap();

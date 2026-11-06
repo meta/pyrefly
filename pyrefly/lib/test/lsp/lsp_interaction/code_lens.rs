@@ -581,14 +581,13 @@ fn test_override_code_lens_parent_after_defining_file_shifts() {
     interaction.client.did_change("base.py", &shifted_base);
     interaction.client.did_save("base.py");
     wait_for_disk_invalidation(&telemetry_events);
-    // BUG: the parent declaration is now at 2:8.
     interaction
         .client
         .send_request::<OverrideCodeLensRequest>(params)
         .expect_response_with(|targets: Vec<OverrideCodeLensTargets>| {
             targets.len() == 1
                 && targets[0].parents.len() == 1
-                && targets[0].parents[0].location.range.start == Position::new(1, 9)
+                && targets[0].parents[0].location.range.start == Position::new(2, 8)
         })
         .unwrap();
     interaction.shutdown().unwrap();

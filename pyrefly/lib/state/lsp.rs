@@ -33,6 +33,7 @@ use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_python::sys_info::SysInfo;
+use pyrefly_types::class::Class;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::function::FuncMetadata;
 use pyrefly_types::function::FunctionKind;
@@ -1987,6 +1988,13 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// The current `Module` of the module that defines `cls`. Use it, not `cls.module()`, with
+    /// ranges read from current class metadata: a `Class` keeps the `Module` from when its type
+    /// was solved, and a module is not rechecked when a dependency only moves code around.
+    fn class_module(&self, handle: &Handle, cls: &Class) -> Option<Module> {
+        self.get_module_info(&handle.for_module(cls.module_name(), cls.module_path().dupe()))
+    }
+
     pub(crate) fn resolve_attribute_definition(
         &self,
         handle: &Handle,
@@ -2003,7 +2011,7 @@ impl<'a> Transaction<'a> {
                 // If prefer_pyi is false and the current module is a .pyi file,
                 // try to find the corresponding .py file
                 let text_range_with_module_info =
-                    TextRangeWithModule::new(cls.module().dupe(), range);
+                    TextRangeWithModule::new(self.class_module(handle, &cls)?, range);
                 if !preference.prefer_pyi
                     && cls.module_path().is_interface()
                     && let Some((exec_module, exec_range, exec_docstring)) = self
@@ -2762,7 +2770,7 @@ impl<'a> Transaction<'a> {
                 .find_map(|class| {
                     let fields = solver.get_class_fields(class)?;
                     Some((
-                        class.module().dupe(),
+                        self.class_module(handle, class)?,
                         fields.field_decl_range(name)?,
                         fields.field_docstring_range(name),
                     ))
@@ -3485,7 +3493,6 @@ impl<'a> Transaction<'a> {
     }
 
     /// Finds ancestor declarations directly from class fields and the MRO.
-    /// Each range belongs to the module snapshot stored on its declaring class.
     pub fn parent_declarations(
         &self,
         handle: &Handle,
@@ -3514,8 +3521,9 @@ impl<'a> Transaction<'a> {
                     .filter_map(|ancestor| {
                         let class = ancestor.class_object();
                         let range = solver.get_class_fields(class)?.field_decl_range(name)?;
-                        seen.insert((class.module().path().dupe(), range))
-                            .then(|| TextRangeWithModule::new(class.module().dupe(), range))
+                        let module = self.class_module(handle, class)?;
+                        seen.insert((class.module_path().dupe(), range))
+                            .then(|| TextRangeWithModule::new(module, range))
                     })
                     .collect(),
             )
@@ -3584,7 +3592,7 @@ impl<'a> Transaction<'a> {
             return Some(
                 bindings
                     .function_def_range(func_id.def_index)
-                    .map(|range| TextRangeWithModule::new(func_id.qname.module().dupe(), range))
+                    .map(|range| TextRangeWithModule::new(bindings.module().dupe(), range))
                     .ok_or_else(not_found),
             );
         }
