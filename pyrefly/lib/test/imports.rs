@@ -3301,6 +3301,38 @@ from foo import b  # E: `b` is not exported from module `foo`
 "#,
 );
 
+fn env_implicit_reexport_submodule_forms() -> TestEnv {
+    let mut t = TestEnv::new();
+    t.add_with_path(
+        "foo",
+        "foo/__init__.py",
+        r#"
+from foo import a
+from foo import c as cc
+"#,
+    );
+    t.add_with_path("foo.a", "foo/a.py", "x: int = 1");
+    t.add_with_path("foo.c", "foo/c.py", "x: int = 1");
+    t.add_with_path("foo.x", "foo/x.py", "from . import a");
+    t.add_with_path("bar", "bar/__init__.pyi", "from . import a");
+    t.add_with_path("bar.a", "bar/a.pyi", "x: int");
+    t
+}
+
+// A `from` import of the package itself, in that package's `__init__`, binds a
+// submodule, with or without an alias. A `from .` import in any other module
+// does not.
+testcase!(
+    test_implicit_reexport_submodule_forms,
+    env_implicit_reexport_submodule_forms().enable_implicit_reexport_error(),
+    r#"
+from foo import a
+from bar import a as a2
+from foo import cc
+from foo.x import a as a3  # E: `a` is not exported from module `foo.x`
+"#,
+);
+
 // A directory import without an alias binds its first component, like any other
 // dotted import.
 testcase!(
