@@ -18,8 +18,7 @@ def test_float_dtype_alias() -> None:
 
 
 def test_unsigned_dtype() -> None:
-    # TODO: BUG: The overlay omits Torch's uint16 dtype.
-    dtype = torch.uint16  # E: No attribute `uint16`
+    dtype = torch.uint16
     tensor = torch.ones((2, 3)).to(dtype)
     assert tensor.dtype == dtype
     assert_shape(tensor.shape, (2, 3))

@@ -159,11 +159,10 @@ def test_spaced_ranges() -> None:
 
 def test_linspace_factory_kwargs() -> None:
     out = torch.empty(5)
-    # TODO: BUG: Torch accepts these keywords, but the overlay rejects them.
-    grad = torch.linspace(0, 1, 5, requires_grad=True)  # E: Unexpected keyword
-    strided = torch.linspace(0, 1, 5, layout=torch.strided)  # E: Unexpected keyword
-    pinned = torch.linspace(0, 1, 5, pin_memory=False)  # E: Unexpected keyword
-    written = torch.linspace(0, 1, 5, out=out)  # E: Unexpected keyword
+    grad = torch.linspace(0, 1, 5, requires_grad=True)
+    strided = torch.linspace(0, 1, 5, layout=torch.strided)
+    pinned = torch.linspace(0, 1, 5, pin_memory=False)
+    written = torch.linspace(0, 1, 5, out=out)
     assert_shape(grad.shape, (5,))
     assert_shape(strided.shape, (5,))
     assert_shape(pinned.shape, (5,))

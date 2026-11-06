@@ -35,8 +35,7 @@ def test_tensor_base_members(tensor: Tensor) -> None:
 
 def test_scalar_formatting_runtime() -> None:
     scalar: Tensor[[]] = torch.ones(())
-    # TODO: BUG: The overlay omits Tensor's scalar formatting protocol.
-    formatted = f"{scalar:.3e}"  # E: doesn't support format specifiers
+    formatted = f"{scalar:.3e}"
     assert_type(formatted, str)
     assert formatted == "1.000e+00"
     assert_shape(scalar.shape, ())
@@ -51,13 +50,12 @@ def test_shape_preserving_tensor_base_members() -> None:
 
 
 def test_memory_format_constants() -> None:
-    # TODO: BUG: Torch exports these memory formats, but the overlay omits them.
-    contiguous = torch.contiguous_format  # E: No attribute `contiguous_format`
-    preserve = torch.preserve_format  # E: No attribute `preserve_format`
-    channels_last_3d = torch.channels_last_3d  # E: No attribute `channels_last_3d`
-    assert isinstance(contiguous, torch.memory_format)
-    assert isinstance(preserve, torch.memory_format)
-    assert isinstance(channels_last_3d, torch.memory_format)
+    assert_type(torch.contiguous_format, torch.memory_format)
+    assert_type(torch.preserve_format, torch.memory_format)
+    assert_type(torch.channels_last_3d, torch.memory_format)
+    assert isinstance(torch.contiguous_format, torch.memory_format)
+    assert isinstance(torch.preserve_format, torch.memory_format)
+    assert isinstance(torch.channels_last_3d, torch.memory_format)
 
 
 def test_torch_module_types(value: torch.FloatTensor) -> None:

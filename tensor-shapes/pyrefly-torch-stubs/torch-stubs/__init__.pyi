@@ -702,9 +702,13 @@ int16: Any
 int32: Any
 int64: Any
 uint8: Any
+uint16: dtype
 int: Any
 bool: Any
+contiguous_format: memory_format
 channels_last: memory_format
+channels_last_3d: memory_format
+preserve_format: memory_format
 strided: layout
 ops: Any
 
@@ -907,6 +911,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def __int__(self) -> builtins.int: ...
     def __index__(self) -> builtins.int: ...
     def __len__(self) -> builtins.int: ...
+    def __format__(self, format_spec: str) -> str: ...
 
     # ==== Comparison Operations ====
 
@@ -3073,8 +3078,12 @@ def linspace[Steps: IntVar](
     end: builtins.float,
     steps: _Int[Steps],
     *,
+    out: Tensor | None = None,
     dtype: Any = None,
+    layout: Any = None,
     device: Any = None,
+    pin_memory: builtins.bool = False,
+    requires_grad: builtins.bool = False,
 ) -> Tensor[[nonnegative_extent(_Int[Steps])]]:
     """Create a 1D tensor with one linearly spaced value per step."""
     ...
