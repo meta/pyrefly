@@ -1014,8 +1014,11 @@ class AdaptiveMaxPool1d[OL: IntVar](Module):
         self, input: Tensor[[B, C, Any]]
     ) -> Tensor[[B, C, OL]]: ...
 
-class AdaptiveMaxPool2d[OH: IntVar, OW: IntVar](Module):
+class AdaptiveMaxPool2d[OH: IntVar, OW: IntVar = OH](Module):
     """2D adaptive max pooling"""
+    @overload
+    def __init__(self, output_size: _Int[OH], return_indices: bool = False) -> None: ...
+    @overload
     def __init__(
         self, output_size: tuple[_Int[OH], _Int[OW]], return_indices: bool = False
     ) -> None: ...
