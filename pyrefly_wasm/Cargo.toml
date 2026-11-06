@@ -10,10 +10,6 @@ license = "MIT"
 path = "lib.rs"
 crate-type = ["cdylib", "rlib"]
 
-[build-dependencies]
-tar = "0.4.44"
-zstd = { version = "0.13" }
-
 [dependencies]
 dupe = "0.9.1"
 pyrefly = { path = "../pyrefly" }

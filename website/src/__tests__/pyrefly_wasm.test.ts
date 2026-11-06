@@ -375,4 +375,17 @@ tes
             expect(pyreService.semanticTokens({} as any).data).toEqual(whole);
         });
     });
+
+    it('should check 450 levels of nested lists', () => {
+        if (!wasmAvailable) return;
+        // With Rust's default 1 MiB wasm stack, this fails with `memory
+        // access out of bounds`.
+        const depth = 450;
+        pyreService.updateSingleFile(
+            'main.py',
+            `x = ${'['.repeat(depth)}${']'.repeat(depth)}\n`
+        );
+        pyreService.setActiveFile('main.py');
+        expect(pyreService.getErrors()).toEqual([]);
+    });
 });

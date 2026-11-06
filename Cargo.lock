@@ -2628,7 +2628,6 @@ dependencies = [
  "serde",
  "serde_json",
  "starlark_map",
- "tar",
  "zstd 0.13.4",
 ]
 
