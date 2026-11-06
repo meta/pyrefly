@@ -59,10 +59,16 @@ use crate::module::finder::FindImportOptions;
 use crate::module::finder::find_import;
 use crate::module::typeshed::typeshed;
 use crate::state::load::FileContents;
+use crate::state::load::Load;
+use crate::state::memory::MemoryFiles;
+use crate::state::memory::MemoryFilesLookup;
+use crate::state::memory::MemoryFilesOverlay;
 use crate::state::require::Require;
 use crate::state::require::RequireLevels;
 use crate::state::state::State;
+use crate::state::state::Transaction;
 use crate::test::util::TestEnv;
+use crate::test::util::mk_filesystem_import_state;
 use crate::types::class::Class;
 use crate::types::types::Type;
 
@@ -1958,314 +1964,174 @@ fn test_stdlib_cached_on_recheck() {
     state.commit_transaction(t2, None);
 }
 
-mod module_path_overlay_tests {
-    use super::*;
-    use crate::state::state::Transaction;
+const SAVED: &str = "value: int = 1\n";
+const UNSAVED: &str = "value: str = 'unsaved'\n";
 
-    const SAVED: &str = "value: int = 1\n";
-    const UNSAVED: &str = "value: str = 'unsaved'\n";
-
-    fn setup(root: &Path) -> (State, [Handle; 2]) {
-        fs::write(root.join("helper.py"), SAVED).unwrap();
-        fs::write(
-            root.join("main.py"),
-            "from helper import value\ncheck: int = value\n",
-        )
-        .unwrap();
-        let mut config = ConfigFile {
-            search_path_from_args: vec![root.to_owned()],
-            disable_search_path_heuristics: true,
-            ..Default::default()
-        };
-        config.python_environment.set_empty_to_default();
-        config.interpreters.skip_interpreter_query = true;
-        assert!(config.configure().is_empty());
-        let sys_info = config.get_sys_info();
-        let handles = ["main", "helper"].map(|name| {
-            Handle::new(
-                ModuleName::from_str(name),
-                ModulePath::filesystem(root.join(format!("{name}.py"))),
-                sys_info.dupe(),
-            )
-        });
-        (
-            State::new(
-                ConfigFinder::new_constant(ArcId::new(config)),
-                TEST_THREAD_COUNT,
-            ),
-            handles,
-        )
-    }
-
-    fn source(contents: &str) -> Option<Arc<FileContents>> {
-        Some(Arc::new(FileContents::from_source(contents.to_owned())))
-    }
-
-    fn check(transaction: &mut Transaction, handles: &[Handle; 2], contents: &str, errors: usize) {
-        transaction.run(&[handles[0].dupe()], Require::Everything, None);
-        assert_eq!(
-            transaction
-                .get_module_info(&handles[1])
-                .unwrap()
-                .contents()
-                .as_str(),
-            contents
-        );
-        assert_eq!(
-            transaction
-                .import_handle(&handles[0], ModuleName::from_str("helper"), None)
-                .finding()
-                .unwrap(),
-            handles[1]
-        );
-        let actual = transaction.get_errors([&handles[0]]).collect_errors();
-        assert_eq!(actual.ordinary.len(), errors, "{actual:?}");
-    }
-
-    #[test]
-    fn memory_and_filesystem_overrides_are_independent() {
-        let directory = TempDir::new().unwrap();
-        let (state, handles) = setup(directory.path());
-        let memory = Handle::new(
-            handles[1].module(),
-            ModulePath::memory(directory.path().join("helper.py")),
-            handles[1].sys_info().dupe(),
-        );
-        let mut transaction = state.new_transaction(Require::Everything, None);
-        transaction.set_memory(vec![(
-            memory.path().dupe(),
-            source("value: bytes = b'editor'\n"),
-        )]);
-        check(&mut transaction, &handles, SAVED, 0);
-        transaction.run(&[memory.dupe()], Require::Everything, None);
-        assert_eq!(
-            transaction
-                .get_module_info(&memory)
-                .unwrap()
-                .contents()
-                .as_str(),
-            "value: bytes = b'editor'\n"
-        );
-
-        transaction.set_memory(vec![(handles[1].path().dupe(), source(UNSAVED))]);
-        check(&mut transaction, &handles, UNSAVED, 1);
-        transaction.run(&[memory.dupe()], Require::Everything, None);
-        assert_eq!(
-            transaction
-                .get_module_info(&memory)
-                .unwrap()
-                .contents()
-                .as_str(),
-            "value: bytes = b'editor'\n"
-        );
-        transaction.set_memory(vec![(memory.path().dupe(), source(SAVED))]);
-        check(&mut transaction, &handles, UNSAVED, 1);
-        transaction.run(&[memory.dupe()], Require::Everything, None);
-        assert_eq!(
-            transaction
-                .get_module_info(&memory)
-                .unwrap()
-                .contents()
-                .as_str(),
-            SAVED
-        );
-        transaction.set_memory(vec![(handles[1].path().dupe(), None)]);
-        check(&mut transaction, &handles, SAVED, 0);
-        transaction.run(&[memory.dupe()], Require::Everything, None);
-        assert_eq!(
-            transaction
-                .get_module_info(&memory)
-                .unwrap()
-                .contents()
-                .as_str(),
-            SAVED
-        );
-        assert_eq!(
-            fs::read_to_string(directory.path().join("helper.py")).unwrap(),
-            SAVED
-        );
-    }
-
-    #[test]
-    fn filesystem_overrides_invalidate_importers_and_return_to_disk() {
-        let directory = TempDir::new().unwrap();
-        let (state, handles) = setup(directory.path());
-        let path = directory.path().join("helper.py");
-        let mut transaction = state.new_committable_transaction(Require::Everything, None);
-        check(transaction.as_mut(), &handles, SAVED, 0);
-        state.commit_transaction(transaction, None);
-
-        let mut transaction = state.new_committable_transaction(Require::Everything, None);
-        transaction
-            .as_mut()
-            .set_memory(vec![(handles[1].path().dupe(), source(UNSAVED))]);
-        check(transaction.as_mut(), &handles, UNSAVED, 1);
-        state.commit_transaction(transaction, None);
-
-        const DISK_UPDATE: &str = "value: float = 1.5\n";
-        fs::write(&path, DISK_UPDATE).unwrap();
-        let mut transaction = state.new_committable_transaction(Require::Everything, None);
-        transaction
-            .as_mut()
-            .invalidate_disk(std::slice::from_ref(&path));
-        check(transaction.as_mut(), &handles, UNSAVED, 1);
-        state.commit_transaction(transaction, None);
-
-        let mut transaction = state.new_committable_transaction(Require::Everything, None);
-        transaction
-            .as_mut()
-            .set_memory(vec![(handles[1].path().dupe(), None)]);
-        check(transaction.as_mut(), &handles, DISK_UPDATE, 1);
-        state.commit_transaction(transaction, None);
-
-        fs::write(&path, SAVED).unwrap();
-        let mut transaction = state.new_committable_transaction(Require::Everything, None);
-        transaction
-            .as_mut()
-            .invalidate_disk(std::slice::from_ref(&path));
-        check(transaction.as_mut(), &handles, SAVED, 0);
-    }
-
-    #[test]
-    fn pending_removal_masks_committed_override_without_committing() {
-        let directory = TempDir::new().unwrap();
-        let (state, handles) = setup(directory.path());
-        let mut transaction = state.new_committable_transaction(Require::Everything, None);
-        transaction
-            .as_mut()
-            .set_memory(vec![(handles[1].path().dupe(), source(UNSAVED))]);
-        check(transaction.as_mut(), &handles, UNSAVED, 1);
-        state.commit_transaction(transaction, None);
-
-        {
-            let mut transaction = state.new_transaction(Require::Everything, None);
-            transaction.set_memory(vec![(handles[1].path().dupe(), None)]);
-            check(&mut transaction, &handles, SAVED, 0);
-            transaction.set_memory(vec![(handles[1].path().dupe(), source(SAVED))]);
-            check(&mut transaction, &handles, SAVED, 0);
-        }
-        let mut transaction = state.new_transaction(Require::Everything, None);
-        check(&mut transaction, &handles, UNSAVED, 1);
-    }
+fn override_source(contents: &str) -> Option<Arc<FileContents>> {
+    Some(Arc::new(FileContents::from_source(contents.to_owned())))
 }
 
-mod memory_files_tests {
-    use std::fs;
-    use std::path::PathBuf;
-    use std::sync::Arc;
+fn check_filesystem_override(
+    transaction: &mut Transaction,
+    handles: &[Handle; 2],
+    contents: &str,
+    errors: usize,
+) {
+    transaction.run(&[handles[0].dupe()], Require::Everything, None);
+    assert_eq!(
+        transaction
+            .get_module_info(&handles[1])
+            .unwrap()
+            .contents()
+            .as_str(),
+        contents
+    );
+    assert_eq!(
+        transaction
+            .import_handle(&handles[0], ModuleName::from_str("foo"), None)
+            .finding()
+            .unwrap(),
+        handles[1]
+    );
+    let actual = transaction.get_errors([&handles[0]]).collect_errors();
+    assert_eq!(actual.ordinary.len(), errors, "{actual:?}");
+}
 
-    use pyrefly_python::module_path::ModulePath;
-    use tempfile::TempDir;
+#[test]
+fn test_memory_and_filesystem_overrides_are_independent() {
+    let directory = TempDir::new().unwrap();
+    let (state, handles) = mk_filesystem_import_state(directory.path());
+    let memory = Handle::new(
+        handles[1].module(),
+        ModulePath::memory(directory.path().join("foo.py")),
+        handles[1].sys_info().dupe(),
+    );
+    let mut transaction = state.new_transaction(Require::Everything, None);
+    transaction.set_memory(vec![(
+        memory.path().dupe(),
+        override_source("value: bytes = b'editor'\n"),
+    )]);
+    check_filesystem_override(&mut transaction, &handles, SAVED, 0);
+    transaction.run(&[memory.dupe()], Require::Everything, None);
+    assert_eq!(
+        transaction
+            .get_module_info(&memory)
+            .unwrap()
+            .contents()
+            .as_str(),
+        "value: bytes = b'editor'\n"
+    );
 
-    use crate::state::load::FileContents;
-    use crate::state::load::Load;
-    use crate::state::memory::MemoryFiles;
-    use crate::state::memory::MemoryFilesLookup;
-    use crate::state::memory::MemoryFilesOverlay;
+    transaction.set_memory(vec![(handles[1].path().dupe(), override_source(UNSAVED))]);
+    check_filesystem_override(&mut transaction, &handles, UNSAVED, 1);
+    transaction.run(&[memory.dupe()], Require::Everything, None);
+    assert_eq!(
+        transaction
+            .get_module_info(&memory)
+            .unwrap()
+            .contents()
+            .as_str(),
+        "value: bytes = b'editor'\n"
+    );
+    transaction.set_memory(vec![(memory.path().dupe(), override_source(SAVED))]);
+    check_filesystem_override(&mut transaction, &handles, UNSAVED, 1);
+    transaction.run(&[memory.dupe()], Require::Everything, None);
+    assert_eq!(
+        transaction
+            .get_module_info(&memory)
+            .unwrap()
+            .contents()
+            .as_str(),
+        SAVED
+    );
+    transaction.set_memory(vec![(handles[1].path().dupe(), None)]);
+    check_filesystem_override(&mut transaction, &handles, SAVED, 0);
+    transaction.run(&[memory.dupe()], Require::Everything, None);
+    assert_eq!(
+        transaction
+            .get_module_info(&memory)
+            .unwrap()
+            .contents()
+            .as_str(),
+        SAVED
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("foo.py")).unwrap(),
+        SAVED
+    );
+}
 
-    #[test]
-    fn lookup_keeps_module_identities_and_pending_removals_separate() {
-        let path = PathBuf::from("same.py");
-        let memory = ModulePath::memory(path.clone());
-        let filesystem = ModulePath::filesystem(path);
-        let memory_contents = Arc::new(FileContents::from_source("memory".to_owned()));
-        let filesystem_contents = Arc::new(FileContents::from_source("filesystem".to_owned()));
-        let mut base = MemoryFiles::default();
-        let mut initial = MemoryFilesOverlay::default();
-        initial.set(memory.clone(), Some(Arc::clone(&memory_contents)));
-        initial.set(filesystem.clone(), Some(Arc::clone(&filesystem_contents)));
-        base.apply_overlay(initial);
+#[test]
+fn test_pending_removal_masks_committed_override_without_committing() {
+    let directory = TempDir::new().unwrap();
+    let (state, handles) = mk_filesystem_import_state(directory.path());
+    let mut transaction = state.new_committable_transaction(Require::Everything, None);
+    transaction
+        .as_mut()
+        .set_memory(vec![(handles[1].path().dupe(), override_source(UNSAVED))]);
+    check_filesystem_override(transaction.as_mut(), &handles, UNSAVED, 1);
+    state.commit_transaction(transaction, None);
 
-        let mut overlay = MemoryFilesOverlay::default();
-        let lookup = MemoryFilesLookup::new(&base, &overlay);
-        assert_eq!(lookup.get(&memory), Some(&memory_contents));
-        assert_eq!(lookup.get(&filesystem), Some(&filesystem_contents));
-        overlay.set(filesystem.clone(), None);
-        let lookup = MemoryFilesLookup::new(&base, &overlay);
-        assert!(lookup.get(&filesystem).is_none());
-        assert_eq!(lookup.get(&memory), Some(&memory_contents));
-
-        base.apply_overlay(overlay);
-        let empty = MemoryFilesOverlay::default();
-        let lookup = MemoryFilesLookup::new(&base, &empty);
-        assert!(lookup.get(&filesystem).is_none());
-        assert_eq!(lookup.get(&memory), Some(&memory_contents));
+    {
+        let mut transaction = state.new_transaction(Require::Everything, None);
+        transaction.set_memory(vec![(handles[1].path().dupe(), None)]);
+        check_filesystem_override(&mut transaction, &handles, SAVED, 0);
+        transaction.set_memory(vec![(handles[1].path().dupe(), override_source(SAVED))]);
+        check_filesystem_override(&mut transaction, &handles, SAVED, 0);
     }
+    let mut transaction = state.new_transaction(Require::Everything, None);
+    check_filesystem_override(&mut transaction, &handles, UNSAVED, 1);
+}
 
-    #[test]
-    fn exact_overrides_and_removal_preserve_each_variants_normal_loader() {
-        let directory = TempDir::new().unwrap();
-        let file = directory.path().join("source.py");
-        fs::write(&file, "saved\n").unwrap();
-        let paths = [
-            ModulePath::filesystem(file.clone()),
-            ModulePath::memory(file.clone()),
-            ModulePath::namespace(file),
-            ModulePath::bundled_typeshed(PathBuf::from("builtins.pyi")),
-            ModulePath::bundled_typeshed_third_party(PathBuf::from("__overlay_probe__.pyi")),
-            ModulePath::bundled_third_party(PathBuf::from("__overlay_probe__.pyi")),
-        ];
-        let mut base = MemoryFiles::default();
-        let empty = MemoryFilesOverlay::default();
-        let normal: Vec<_> = paths
-            .iter()
-            .map(|path| {
-                let (contents, error) =
-                    Load::load_from_path(path, &MemoryFilesLookup::new(&base, &empty), None);
-                (contents, error.map(|error| error.to_string()))
-            })
-            .collect();
-        let mut initial = MemoryFilesOverlay::default();
-        for (index, path) in paths.iter().enumerate() {
-            initial.set(
-                path.clone(),
-                Some(Arc::new(FileContents::from_source(format!(
-                    "override {index}\n"
-                )))),
-            );
-        }
-        base.apply_overlay(initial);
-        for (index, path) in paths.iter().enumerate() {
-            let (contents, error) =
-                Load::load_from_path(path, &MemoryFilesLookup::new(&base, &empty), None);
-            assert!(error.is_none(), "{path:?}: {error:?}");
-            assert_eq!(
-                contents,
-                FileContents::from_source(format!("override {index}\n"))
-            );
-            let mut removed = MemoryFilesOverlay::default();
-            removed.set(path.clone(), None);
-            let (contents, error) =
-                Load::load_from_path(path, &MemoryFilesLookup::new(&base, &removed), None);
-            assert_eq!(
-                (contents, error.map(|error| error.to_string())),
-                normal[index]
-            );
-        }
-    }
+#[test]
+fn test_memory_lookup_keeps_module_identities_and_pending_removals_separate() {
+    let path = PathBuf::from("same.py");
+    let memory = ModulePath::memory(path.clone());
+    let filesystem = ModulePath::filesystem(path);
+    let memory_contents = Arc::new(FileContents::from_source("memory".to_owned()));
+    let filesystem_contents = Arc::new(FileContents::from_source("filesystem".to_owned()));
+    let mut base = MemoryFiles::default();
+    let mut initial = MemoryFilesOverlay::default();
+    initial.set(memory.clone(), Some(Arc::clone(&memory_contents)));
+    initial.set(filesystem.clone(), Some(Arc::clone(&filesystem_contents)));
+    base.apply_overlay(initial);
 
-    #[test]
-    fn removing_an_override_exposes_missing_filesystem_source() {
-        let directory = TempDir::new().unwrap();
-        let path = ModulePath::filesystem(directory.path().join("missing.py"));
-        let mut base = MemoryFiles::default();
-        let mut initial = MemoryFilesOverlay::default();
-        initial.set(
-            path.clone(),
-            Some(Arc::new(FileContents::from_source("buffer\n".to_owned()))),
-        );
-        base.apply_overlay(initial);
-        let mut pending = MemoryFilesOverlay::default();
-        let (contents, error) =
-            Load::load_from_path(&path, &MemoryFilesLookup::new(&base, &pending), None);
-        assert!(error.is_none());
-        assert_eq!(contents, FileContents::from_source("buffer\n".to_owned()));
-        pending.set(path.clone(), None);
-        let (_, error) =
-            Load::load_from_path(&path, &MemoryFilesLookup::new(&base, &pending), None);
-        assert!(
-            error.is_some(),
-            "Removing an override must expose the missing saved source"
-        );
-    }
+    let mut overlay = MemoryFilesOverlay::default();
+    let lookup = MemoryFilesLookup::new(&base, &overlay);
+    assert_eq!(lookup.get(&memory), Some(&memory_contents));
+    assert_eq!(lookup.get(&filesystem), Some(&filesystem_contents));
+    overlay.set(filesystem.clone(), None);
+    let lookup = MemoryFilesLookup::new(&base, &overlay);
+    assert!(lookup.get(&filesystem).is_none());
+    assert_eq!(lookup.get(&memory), Some(&memory_contents));
+
+    base.apply_overlay(overlay);
+    let empty = MemoryFilesOverlay::default();
+    let lookup = MemoryFilesLookup::new(&base, &empty);
+    assert!(lookup.get(&filesystem).is_none());
+    assert_eq!(lookup.get(&memory), Some(&memory_contents));
+}
+
+#[test]
+fn test_removing_an_override_exposes_missing_filesystem_source() {
+    let directory = TempDir::new().unwrap();
+    let path = ModulePath::filesystem(directory.path().join("missing.py"));
+    let mut base = MemoryFiles::default();
+    let mut initial = MemoryFilesOverlay::default();
+    initial.set(
+        path.clone(),
+        Some(Arc::new(FileContents::from_source("buffer\n".to_owned()))),
+    );
+    base.apply_overlay(initial);
+    let mut pending = MemoryFilesOverlay::default();
+    let (contents, error) =
+        Load::load_from_path(&path, &MemoryFilesLookup::new(&base, &pending), None);
+    assert!(error.is_none());
+    assert_eq!(contents, FileContents::from_source("buffer\n".to_owned()));
+    pending.set(path.clone(), None);
+    let (_, error) = Load::load_from_path(&path, &MemoryFilesLookup::new(&base, &pending), None);
+    assert!(
+        error.is_some(),
+        "Removing an override must expose the missing saved source"
+    );
 }

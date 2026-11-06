@@ -1401,6 +1401,38 @@ pub fn mk_state(code: &str) -> (Handle, State) {
     (handle("main"), state)
 }
 
+pub fn mk_filesystem_import_state(root: &Path) -> (State, [Handle; 2]) {
+    init_test();
+    fs_anyhow::write(&root.join("foo.py"), "value: int = 1\n").unwrap();
+    fs_anyhow::write(
+        &root.join("main.py"),
+        "from foo import value\ncheck: int = value\n",
+    )
+    .unwrap();
+    let mut config = ConfigFile {
+        search_path_from_args: vec![root.to_owned()],
+        disable_search_path_heuristics: true,
+        ..Default::default()
+    };
+    config.python_environment.set_empty_to_default();
+    config.interpreters.skip_interpreter_query = true;
+    assert!(config.configure().is_empty());
+    let handles = ["main", "foo"].map(|name| {
+        Handle::new(
+            ModuleName::from_str(name),
+            ModulePath::filesystem(root.join(format!("{name}.py"))),
+            config.get_sys_info(),
+        )
+    });
+    (
+        State::new(
+            ConfigFinder::new_constant(ArcId::new(config)),
+            TEST_THREAD_COUNT,
+        ),
+        handles,
+    )
+}
+
 pub fn get_class(name: &str, handle: &Handle, reader: &StateReader) -> Class {
     let solutions = reader.get_solutions(handle).unwrap();
 

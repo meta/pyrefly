@@ -35,6 +35,7 @@ use crate::state::require::Require;
 use crate::state::state::State;
 use crate::state::subscriber::TestSubscriber;
 use crate::test::util::init_test;
+use crate::test::util::mk_filesystem_import_state;
 use crate::test::util::report_unreachable_at_warn;
 
 #[derive(Default, Clone, Dupe, Debug)]
@@ -3196,35 +3197,9 @@ fn test_constant_defined_behind_skipped_star_import_rechecks_importer() {
 
 #[test]
 fn test_filesystem_overrides_preserve_incrementality_and_generation() {
-    init_test();
     let directory = TempDir::new().unwrap();
-    let root = directory.path();
-    let foo = root.join("foo.py");
-    fs::write(&foo, "value: int = 1\n").unwrap();
-    fs::write(
-        root.join("main.py"),
-        "from foo import value\ncheck: int = value\n",
-    )
-    .unwrap();
-    let mut config = ConfigFile {
-        search_path_from_args: vec![root.to_owned()],
-        disable_search_path_heuristics: true,
-        ..Default::default()
-    };
-    config.python_environment.set_empty_to_default();
-    config.interpreters.skip_interpreter_query = true;
-    assert!(config.configure().is_empty());
-    let handles = ["main", "foo"].map(|name| {
-        Handle::new(
-            ModuleName::from_str(name),
-            ModulePath::filesystem(root.join(format!("{name}.py"))),
-            config.get_sys_info(),
-        )
-    });
-    let state = State::new(
-        ConfigFinder::new_constant(ArcId::new(config)),
-        TEST_THREAD_COUNT,
-    );
+    let (state, handles) = mk_filesystem_import_state(directory.path());
+    let foo = directory.path().join("foo.py");
     let check = |step: &str,
                  memory: Option<Option<&str>>,
                  disk: Option<&str>,
