@@ -543,6 +543,130 @@ class C:
 "#,
 );
 
+// attrs treats `converter=None` as no converter: https://github.com/facebook/pyrefly/issues/5283
+attrs_testcase!(
+    bug = "A `None`-typed converter makes the `__init__` param `Unknown`",
+    test_attrs_field_converter_none_init_param,
+    r#"
+from typing import reveal_type
+import attr
+from attrs import define, field
+
+NO_CONVERTER = None
+
+def to_int(s: str) -> int:
+    return int(s)
+
+@define
+class C:
+    a: int = field(converter=None)
+    b: int = attr.ib(converter=None)
+    c: int = field(converter=NO_CONVERTER)
+    d: int = field()
+    e: int = field(converter=to_int)
+
+reveal_type(C.__init__)  # E: revealed type: (self: C, a: Unknown, b: Unknown, c: Unknown, d: int, e: str) -> None
+"#,
+);
+
+// attrs treats `converter=None` as no converter: https://github.com/facebook/pyrefly/issues/5283
+attrs_testcase!(
+    bug = "A `None`-typed converter skips the check of the default against the field type",
+    test_attrs_field_converter_none_default_type_check,
+    r#"
+import attr
+from attrs import define, field
+
+NO_CONVERTER = None
+
+def make_str() -> str: ...
+
+@define
+class C:
+    a: int = field(default="nope", converter=None)
+    b: int = attr.ib(default="nope", converter=None)
+    c: int = field(default="nope", converter=NO_CONVERTER)
+    d: int = field(default="nope")  # E: `Literal['nope']` is not assignable to `int`
+    f: int = field(factory=make_str, converter=None)
+"#,
+);
+
+// When the converter is `None` at runtime, attrs stores the value unconverted, so the `None`
+// member of a converter's type should contribute the field type: `x: str | int`.
+attrs_testcase!(
+    bug = "The `None` member of a converter's type makes the `__init__` param partly `Unknown`",
+    test_attrs_field_converter_or_none_init_param,
+    r#"
+from typing import Callable, reveal_type
+from attrs import define, field
+
+def pick() -> Callable[[str], int] | None: ...
+
+@define
+class C:
+    x: int = field(converter=pick())
+
+reveal_type(C.__init__)  # E: revealed type: (self: C, x: str | Unknown) -> None
+"#,
+);
+
+// attrs treats `converter=None` as no converter: https://github.com/facebook/pyrefly/issues/5283
+attrs_testcase!(
+    bug = "`converter=None` skips the `@x.default` return check and the `@x.converter` decorator",
+    test_attrs_field_converter_none_decorators,
+    r#"
+from typing import reveal_type
+from attrs import define, field
+
+@define
+class C:
+    a: int = field(converter=None)
+    b: int = field(converter=None)
+
+    @a.converter
+    def _a(self, attribute, value: str) -> int:
+        return int(value)
+
+    @b.default
+    def _b(self) -> str:
+        return "nope"
+
+reveal_type(C.__init__)  # E: revealed type: (self: C, a: Unknown, b: Unknown = ...) -> None
+"#,
+);
+
+// attrs treats `converter=None` as no converter: https://github.com/facebook/pyrefly/issues/5283
+attrs_testcase!(
+    bug = "`converter=None` skips the check of an assignment to the attribute",
+    test_attrs_field_converter_none_attribute_assignment,
+    r#"
+from attrs import define, field
+
+@define
+class C:
+    a: int = field(converter=None)
+
+C(1).a = "nope"
+"#,
+);
+
+// The default check for attrs field specifiers runs even in a class that isn't an attrs class,
+// where no converter is stored, so it must look at the call's own `converter=` argument.
+attrs_testcase!(
+    test_attrs_field_default_with_converter_not_checked_outside_attrs_class,
+    r#"
+import attr
+from attrs import field
+
+def to_int(s: str) -> int:
+    return int(s)
+
+class C:
+    x: int = field(default="5", converter=to_int)
+    y: int = attr.ib(default="5", converter=to_int)
+"#,
+);
+
 // A `converter=` that is itself a type constructor (`converter=int`) is supported: the init
 // parameter accepts the constructor's input types while the attribute keeps the converted output
 // type, and an argument the constructor can't accept is rejected.
