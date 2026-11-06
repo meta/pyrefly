@@ -1135,7 +1135,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     @overload
     def new_zeros(
         self,
-        size: tuple[builtins.int, ...],
+        size: Sequence[builtins.int],
         *,
         dtype: Any = None,
         layout: Any = None,
@@ -1163,7 +1163,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     @overload
     def new_ones(
         self,
-        size: tuple[builtins.int, ...],
+        size: Sequence[builtins.int],
         *,
         dtype: Any = None,
         layout: Any = None,
@@ -1198,7 +1198,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     @overload
     def new_empty(
         self,
-        size: tuple[builtins.int, ...],
+        size: Sequence[builtins.int],
         *,
         dtype: Any = None,
         device: Any = None,
@@ -1218,7 +1218,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
 
     def new_full(
         self,
-        size: tuple[builtins.int, ...],
+        size: Sequence[builtins.int],
         fill_value: _Scalar,
         dtype: Any = None,
         device: Any = None,

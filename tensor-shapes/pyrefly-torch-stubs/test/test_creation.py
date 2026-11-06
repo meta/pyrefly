@@ -102,11 +102,10 @@ def test_generator_and_tensor_factories() -> None:
 
 def test_new_factories_accept_list_sizes() -> None:
     tensor = torch.zeros((2, 3))
-    # TODO: BUG: Torch accepts list sizes, but the overlay requires tuples.
-    zeros = tensor.new_zeros([4, 5])  # E: No matching overload
-    ones = tensor.new_ones([4, 5])  # E: No matching overload
-    empty = tensor.new_empty([4, 5])  # E: No matching overload
-    full = tensor.new_full([4, 5], 1.0)  # E: not assignable to parameter `size`
+    zeros = tensor.new_zeros([4, 5])
+    ones = tensor.new_ones([4, 5])
+    empty = tensor.new_empty([4, 5])
+    full = tensor.new_full([4, 5], 1.0)
     assert_shape(zeros.shape, IntTuple, runtime=(4, 5))
     assert_shape(ones.shape, IntTuple, runtime=(4, 5))
     assert_shape(empty.shape, IntTuple, runtime=(4, 5))
