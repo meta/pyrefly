@@ -160,12 +160,13 @@ pub fn transform_incoming_calls(
 pub fn transform_outgoing_calls(
     callees: Vec<(Module, Vec<(TextRange, TextRange)>)>,
     source_module: &Module,
-    fallback_uri: &lsp_types::Uri,
+    path_remapper: Option<&PathRemapper>,
 ) -> Vec<CallHierarchyOutgoingCall> {
     let mut outgoing_calls = Vec::new();
     for (target_module, calls) in callees {
-        let target_uri = lsp_types::Uri::from_file_path(target_module.path().as_path())
-            .unwrap_or_else(|()| fallback_uri.clone());
+        let Some(target_uri) = module_info_to_uri(&target_module, path_remapper) else {
+            continue;
+        };
 
         for (call_range, target_def_range) in calls {
             let target_name_short = target_module.code_at(target_def_range);

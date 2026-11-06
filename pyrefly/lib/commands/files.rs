@@ -94,7 +94,7 @@ fn absolutize(globs: Globs) -> Globs {
     globs.from_root(&PathBuf::new().absolutize())
 }
 
-fn get_explicit_config(
+pub(super) fn get_explicit_config(
     path: &Path,
     args: ConfigOverrideArgs,
 ) -> (ArcId<ConfigFile>, Vec<ConfigError>) {
@@ -106,7 +106,10 @@ fn get_explicit_config(
     )
 }
 
-fn add_config_errors(config_finder: &ConfigFinder, errors: Vec<ConfigError>) -> anyhow::Result<()> {
+pub(super) fn add_config_errors(
+    config_finder: &ConfigFinder,
+    errors: Vec<ConfigError>,
+) -> anyhow::Result<()> {
     if errors.iter().any(|e| e.severity() == Severity::Error) {
         for e in &errors {
             e.print();

@@ -189,6 +189,11 @@ let docsSidebar = [
                 id: 'stubgen',
                 label: 'Generating Stub Files',
             },
+            {
+                type: 'doc' as const,
+                id: 'query',
+                label: 'Semantic Queries',
+            },
         ],
     },
     {
