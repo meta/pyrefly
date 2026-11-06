@@ -355,6 +355,35 @@ tes
             ).toBe(true);
         });
 
+        it('should open each playground again after a crash', async () => {
+            if (!wasmAvailable) return;
+            const pyreflyWasm = await createPyreflyWasmModule();
+            const state = new pyreflyWasm.State('3.12');
+            state.updateSandboxFiles({ 'main.py': 'x: int = ""\n' }, true);
+            state.setActiveFile('main.py');
+            // Nesting this deep overflows the stack.
+            const deep = `x = ${'['.repeat(5000)}${']'.repeat(5000)}\n`;
+            expect(() => state.updateSingleFile('main.py', deep)).toThrow();
+            expect(() => state.getErrors()).toThrow('not ready');
+
+            // Waits for the new instance.
+            await createPyreflyWasmModule();
+            // The playground opens with the last input that did not crash.
+            expect(state.getErrors().length).toBe(1);
+
+            // New input after a crash replaces the files of the last input
+            // that did not crash.
+            expect(() => state.updateSingleFile('main.py', deep)).toThrow();
+            await createPyreflyWasmModule();
+            state.updateSingleFile('main.py', 'y: str = 1\nz: int = ""\n');
+            expect(state.getErrors().length).toBe(2);
+
+            pyreService.setActiveFile('main.py');
+            expect(
+                findError(pyreService.getErrors(), 'revealed type:')
+            ).toBeDefined();
+        });
+
         it('should check text with a lone surrogate', () => {
             if (!wasmAvailable) return;
             pyreService.updateSingleFile(

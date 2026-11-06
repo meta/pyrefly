@@ -11,7 +11,17 @@
 // give it an empty environment and no preopened directories. Standard output
 // and standard error go to the console.
 
+// The exports of the live instance. `undefined` before `init` and while a
+// new instance replaces one that crashed.
 let wasm;
+// The compiled module, which replaces an instance that crashed.
+let wasmModule;
+// Resolves when `wasm` is set. `undefined` before `init` and after a failed
+// attempt, so that the next `init` tries again.
+let ready;
+// Increases with each new instance, so that a `State` can tell that its
+// playground is gone.
+let generation = 0;
 
 const ERRNO_SUCCESS = 0;
 const ERRNO_BADF = 8;
@@ -105,9 +115,46 @@ const wasiImports = new Proxy(wasi, {
     get: (target, name) => target[name] ?? (() => ERRNO_NOSYS),
 });
 
+// Compiles the module from `source` if it is not compiled yet, and makes a new
+// instance of it.
+function load(source) {
+    const promise = (async () => {
+        wasmModule ??= await compile(source);
+        const instance = await WebAssembly.instantiate(wasmModule, {
+            wasi_snapshot_preview1: wasiImports,
+        });
+        wasm = instance.exports;
+        generation++;
+    })();
+    ready = promise;
+    promise.catch(() => {
+        if (ready === promise) {
+            ready = undefined;
+        }
+    });
+    return promise;
+}
+
+// Calls the export `name`. A trap or a stack overflow can stop Rust code in
+// the middle of any operation, so the memory of the instance is no longer
+// usable. A new instance replaces it, and each `State` opens its playground
+// again in the new instance.
+function callExport(name, ...args) {
+    if (wasm === undefined) {
+        throw new Error('pyrefly_wasm is not ready: wait for init()');
+    }
+    try {
+        return wasm[name](...args);
+    } catch (e) {
+        wasm = undefined;
+        load();
+        throw e;
+    }
+}
+
 function passString(text) {
     const encoded = encoder.encode(text);
-    const ptr = wasm.pyrefly_alloc(encoded.length) >>> 0;
+    const ptr = callExport('pyrefly_alloc', encoded.length) >>> 0;
     bytes(ptr, encoded.length).set(encoded);
     return [ptr, encoded.length];
 }
@@ -118,7 +165,7 @@ function takeResponse(packed) {
     const ptr = Number(unsigned >> 32n);
     const len = Number(unsigned & 0xffffffffn);
     const response = JSON.parse(decoder.decode(bytes(ptr, len)));
-    wasm.pyrefly_free(ptr, len);
+    callExport('pyrefly_free', ptr, len);
     if ('err' in response) {
         throw new Error(response.err);
     }
@@ -126,10 +173,24 @@ function takeResponse(packed) {
 }
 
 export function version() {
-    return takeResponse(wasm.pyrefly_version());
+    return takeResponse(callExport('pyrefly_version'));
 }
 
-const registry = new FinalizationRegistry((handle) => wasm.pyrefly_drop(handle));
+// Drops a playground that is still in the live instance. A playground in an
+// instance that crashed is gone with that instance.
+function drop({ handle, generation: playgroundGeneration }) {
+    if (wasm !== undefined && playgroundGeneration === generation) {
+        callExport('pyrefly_drop', handle);
+    }
+}
+
+const registry = new FinalizationRegistry((playground) => {
+    // A finalizer must not throw. If the drop crashes, `callExport` already
+    // replaced the instance.
+    try {
+        drop(playground);
+    } catch {}
+});
 
 // `serde_json` rejects a lone surrogate, so it becomes U+FFFD, as in the
 // `wasm-bindgen` bindings. `String.prototype.toWellFormed` does the same, but
@@ -144,36 +205,93 @@ function toWellFormed(text) {
 
 export class State {
     constructor(version) {
-        this.handle = takeResponse(wasm.pyrefly_new(...passString(version)));
-        registry.register(this, this.handle, this);
+        this.version = version;
+        // The files and the active file to open the playground again with
+        // after a crash. A call that crashes does not change them.
+        this.files = {};
+        this.activeFile = undefined;
+        this.open();
+    }
+
+    open() {
+        this.generation = generation;
+        this.handle = takeResponse(
+            callExport('pyrefly_new', ...passString(this.version)),
+        );
+        registry.register(
+            this,
+            { handle: this.handle, generation: this.generation },
+            this,
+        );
     }
 
     // Drops the playground now, instead of when the garbage collector frees
     // this `State`. The `State` must not be used after this.
     free() {
         registry.unregister(this);
-        wasm.pyrefly_drop(this.handle);
+        drop(this);
     }
 
     // The methods below convert numbers with `| 0` and flags with `Boolean`,
     // as `wasm-bindgen` converts `i32` and `bool` arguments.
     call(method, args) {
+        if (this.generation !== generation) {
+            args = this.reopen(method, args);
+        }
         const request = JSON.stringify({ method, args }, (_key, value) =>
             typeof value === 'string' ? toWellFormed(value) : value,
         );
-        return takeResponse(wasm.pyrefly_call(this.handle, ...passString(request)));
+        return takeResponse(
+            callExport('pyrefly_call', this.handle, ...passString(request)),
+        );
+    }
+
+    // Opens the playground in the new instance after a crash, and returns the
+    // arguments to run `method` with. The new playground gets the files and
+    // the active file of the last call that did not crash, with the new input
+    // of `method` applied, so that new input can replace files that crash.
+    reopen(method, args) {
+        registry.unregister(this);
+        this.open();
+        if (method === 'updateSandboxFiles') {
+            // The new playground has no files to keep, so the update is forced.
+            return [args[0], true];
+        }
+        const files = { ...this.files };
+        if (method === 'updateSingleFile' && args[0] in files) {
+            files[args[0]] = args[1];
+        }
+        this.call('updateSandboxFiles', [files, true]);
+        if (this.activeFile !== undefined) {
+            this.call('setActiveFile', this.activeFile);
+        }
+        return args;
     }
 
     updateSandboxFiles(files, forceUpdate) {
-        return this.call('updateSandboxFiles', [files, Boolean(forceUpdate)]);
+        const version = this.call('updateSandboxFiles', [
+            files,
+            Boolean(forceUpdate),
+        ]);
+        // `null` means that the playground kept its files.
+        if (version !== null) {
+            this.files = { ...files };
+            this.activeFile = undefined;
+        }
+        return version;
     }
 
     updateSingleFile(filename, content) {
         this.call('updateSingleFile', [filename, content]);
+        if (filename in this.files) {
+            this.files[filename] = content;
+            this.activeFile = filename;
+        }
     }
 
     setActiveFile(filename) {
         this.call('setActiveFile', filename);
+        this.activeFile = filename;
     }
 
     getErrors() {
@@ -249,15 +367,10 @@ async function compile(source) {
 }
 
 // Instantiates the module from `source`, which `compile` describes. The
-// default is `pyrefly_wasm_bg.wasm` next to this file.
-export default async function init(
+// default is `pyrefly_wasm_bg.wasm` next to this file. After a crash, the
+// returned promise resolves when the new instance is ready.
+export default function init(
     source = new URL('pyrefly_wasm_bg.wasm', import.meta.url),
 ) {
-    if (wasm !== undefined) {
-        return;
-    }
-    const instance = await WebAssembly.instantiate(await compile(source), {
-        wasi_snapshot_preview1: wasiImports,
-    });
-    wasm = instance.exports;
+    return ready ?? load(source);
 }

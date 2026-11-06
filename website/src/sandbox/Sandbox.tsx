@@ -115,6 +115,8 @@ export default function Sandbox({
     const [errors, setErrors] =
         useState<ReadonlyArray<PyreflyErrorMessage> | null>([]);
     const [internalError, setInternalError] = useState('');
+    // Increases when the module is ready again after a crash.
+    const [wasmRestarts, setWasmRestarts] = useState(0);
     const [loading, setLoading] = useState(true);
     const [pyreService, setPyreService] = useState<PyreflyState | null>(null);
     const [editorHeightforCodeSnippet, setEditorHeightforCodeSnippet] =
@@ -741,7 +743,7 @@ export default function Sandbox({
     // Recheck when pyre service or model changes
     useEffect(() => {
         forceRecheck();
-    }, [pyreService, model, showParameterHints]);
+    }, [pyreService, model, showParameterHints, wasmRestarts]);
 
     function updateAllFiles(forceUpdate: boolean): boolean {
         if (models.size > 0 && pyreService && model) {
@@ -847,8 +849,18 @@ export default function Sandbox({
             setErrors(errors);
         } catch (e) {
             console.error(e);
-            setInternalError(JSON.stringify(e));
+            setInternalError(String(e));
             setErrors([]);
+            // An edit while the module replaces an instance that crashed
+            // throws `not ready`. Check again when the module is ready, so that
+            // the results do not wait for the next edit. A check that crashes
+            // is not run again, because it would crash again.
+            if (String(e).includes('not ready')) {
+                pyreflyWasmInitializedPromise
+                    ?.then((pyrefly) => pyrefly.default())
+                    .then(() => setWasmRestarts((count) => count + 1))
+                    .catch((initError) => setInternalError(String(initError)));
+            }
         }
     }
 
