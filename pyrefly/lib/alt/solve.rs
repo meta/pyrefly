@@ -204,7 +204,8 @@ use crate::types::types::Type;
 
 /// Collects each legacy type parameter once, retaining its declaration range for ordering.
 /// The alias anchor keeps quantifications of the same variable in different aliases distinct.
-/// Declaration-range starts provide deterministic ordinals within each alias.
+/// Within an alias, a parameter's index is the order in which the collector first meets it. The
+/// declaration's offset would not do: variables declared in different modules can share it.
 struct LegacyTypeParamCollector {
     module: ModuleName,
     alias_anchor: TextRange,
@@ -233,7 +234,7 @@ impl LegacyTypeParamCollector {
                 let range = tv.qname().range();
                 let identity = QuantifiedIdentity::new(
                     self.module,
-                    AnchorIndex::new(self.alias_anchor, u32::from(range.start())),
+                    AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
                     QuantifiedOrigin::ScopedLegacy,
                 );
                 let q = Quantified::from_type_var(tv, identity);
@@ -251,7 +252,7 @@ impl LegacyTypeParamCollector {
                 let range = tvt.qname().range();
                 let identity = QuantifiedIdentity::new(
                     self.module,
-                    AnchorIndex::new(self.alias_anchor, u32::from(range.start())),
+                    AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
                     QuantifiedOrigin::ScopedLegacy,
                 );
                 let q = Quantified::type_var_tuple(
@@ -273,7 +274,7 @@ impl LegacyTypeParamCollector {
                 let range = ps.qname().range();
                 let identity = QuantifiedIdentity::new(
                     self.module,
-                    AnchorIndex::new(self.alias_anchor, u32::from(range.start())),
+                    AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
                     QuantifiedOrigin::ScopedLegacy,
                 );
                 let q = Quantified::param_spec(
