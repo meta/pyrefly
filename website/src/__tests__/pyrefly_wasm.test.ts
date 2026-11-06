@@ -12,6 +12,7 @@ import { PyreflyState } from '../sandbox/Sandbox';
 import { DEFAULT_SANDBOX_PROGRAM } from '../sandbox/DefaultSandboxProgram';
 import {
     createPyreflyState,
+    createPyreflyWasmModule,
     findError,
     isPyreflyWasmAvailable,
 } from './__test_utils__/PyreflyWasmTestUtils';
@@ -27,6 +28,11 @@ describe('pyrefly_wasm', () => {
 
     beforeAll(async () => {
         wasmAvailable = await isPyreflyWasmAvailable();
+        if (!wasmAvailable && process.env.PYREFLY_WASM_REQUIRED) {
+            throw new Error(
+                'PYREFLY_WASM_REQUIRED is set, but the wasm module is not built.'
+            );
+        }
         if (!wasmAvailable) {
             console.log(
                 'Skipping pyrefly_wasm tests: wasm module not built. ' +
@@ -265,6 +271,108 @@ tes
                     .inlayHint(true)
                     .some((hint: any) => hint.label === 'value= ')
             ).toBe(true);
+        });
+    });
+
+    describe('semanticTokens', () => {
+        it('should return tokens that use the legend', () => {
+            if (!wasmAvailable) return;
+            pyreService.setActiveFile('main.py');
+            const legend = pyreService.semanticTokensLegend();
+            expect(legend.tokenTypes).toContain('function');
+            expect(
+                pyreService.semanticTokens(null).data.length
+            ).toBeGreaterThan(0);
+        });
+    });
+
+    describe('bindings', () => {
+        it('should return the Pyrefly version', async () => {
+            if (!wasmAvailable) return;
+            const pyreflyWasm = await createPyreflyWasmModule();
+            expect(pyreflyWasm.version()).toMatch(/^\d+\.\d+\.\d+/);
+        });
+
+        it('should throw for an unsupported Python version', async () => {
+            if (!wasmAvailable) return;
+            const pyreflyWasm = await createPyreflyWasmModule();
+            expect(() => new pyreflyWasm.State('2.7')).toThrow('not supported');
+        });
+
+        it('should keep each state separate', async () => {
+            if (!wasmAvailable) return;
+            const pyreflyWasm = await createPyreflyWasmModule();
+            const other = new pyreflyWasm.State('3.12');
+            other.updateSandboxFiles({ 'main.py': 'x: int = ""\n' }, true);
+            other.setActiveFile('main.py');
+            expect(other.getErrors().length).toBe(1);
+            pyreService.setActiveFile('main.py');
+            expect(
+                findError(pyreService.getErrors(), 'is not assignable to `int`')
+            ).toBeUndefined();
+        });
+
+        it('should return ENOSYS for an unimplemented WASI import', async () => {
+            if (!wasmAvailable) return;
+            const compile = jest
+                .spyOn(WebAssembly, 'compile')
+                .mockResolvedValue({} as WebAssembly.Module);
+            const instantiate = jest
+                .spyOn(WebAssembly, 'instantiate')
+                .mockResolvedValue({ exports: {} } as any);
+            try {
+                // A fresh copy of the bindings, because `init` instantiates only once.
+                await jest.isolateModulesAsync(async () => {
+                    const pyreflyWasm = (await import(
+                        './wasm/pyrefly_wasm_for_testing'
+                    )) as unknown as {
+                        default: (source: Uint8Array) => Promise<void>;
+                    };
+                    await pyreflyWasm.default(new Uint8Array());
+                });
+                const wasi = instantiate.mock.calls[0][1]!
+                    .wasi_snapshot_preview1 as Record<string, () => number>;
+                // ERRNO_NOSYS
+                expect(wasi.args_get()).toBe(52);
+                // ERRNO_BADF, which ends the preopened directory scan in wasi-libc.
+                expect(wasi.fd_prestat_get()).toBe(8);
+            } finally {
+                compile.mockRestore();
+                instantiate.mockRestore();
+            }
+        });
+
+        it('should omit unset completion fields', () => {
+            if (!wasmAvailable) return;
+            pyreService.updateSingleFile('main.py', 'value = 1\nval');
+            pyreService.setActiveFile('main.py');
+            const items = pyreService.autoComplete(2, 4);
+            const value = items.find((item: any) => item.label === 'value');
+            expect(value).toBeDefined();
+            expect('additionalTextEdits' in value).toBe(false);
+            expect(
+                items.every((item: any) => !Object.values(item).includes(null))
+            ).toBe(true);
+        });
+
+        it('should check text with a lone surrogate', () => {
+            if (!wasmAvailable) return;
+            pyreService.updateSingleFile(
+                'main.py',
+                'from typing import reveal_type\nreveal_type("\ud800")\n'
+            );
+            pyreService.setActiveFile('main.py');
+            expect(
+                findError(pyreService.getErrors(), "Literal['\ufffd']")
+            ).toBeDefined();
+        });
+
+        it('should convert arguments as wasm-bindgen does', () => {
+            if (!wasmAvailable) return;
+            pyreService.setActiveFile('main.py');
+            expect(pyreService.hover(NaN, undefined as any)).toBeNull();
+            const whole = pyreService.semanticTokens(null).data;
+            expect(pyreService.semanticTokens({} as any).data).toEqual(whole);
         });
     });
 });

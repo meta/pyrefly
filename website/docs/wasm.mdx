@@ -37,10 +37,9 @@ The website wires it into the sandbox under `website/src/sandbox/`.
 
 - Linux or macOS (website WASM workflows are not supported on native Windows;
   use WSL).
-- [Rust](https://rustup.rs/) with `wasm32-unknown-unknown`.
-- [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/) and
-  [`wasm-opt`](https://github.com/WebAssembly/binaryen) (`wasm-opt` must be on
-  `PATH`; `wasm-pack`’s bundled optimizer is disabled because it is outdated).
+- [Rust](https://rustup.rs/) with `wasm32-wasip1`. With `rustup`, `build.sh`
+  adds the target.
+- [`wasm-opt`](https://github.com/WebAssembly/binaryen) on `PATH`.
 - Clang / LLVM. On macOS: `brew install llvm`. On Fedora/CentOS:
   `sudo dnf install clang`. If zstd fails to compile on a Mac, put Homebrew
   LLVM first on `PATH` (`llvm-config --version` should resolve).
@@ -55,11 +54,12 @@ cd pyrefly_wasm
 ./build.sh
 ```
 
-That runs `wasm-pack` for the `web` target and then `wasm-opt -Os`. Pass
-`--BUILD_FOR_TEST` to target `nodejs` (used by website Jest tests).
+That runs `cargo build --release --target wasm32-wasip1` and then
+`wasm-opt -Os`. The same module works in the browser and in Node.js, which the
+website Jest tests use.
 
-Output lands in `pyrefly_wasm/target/` (`pyrefly_wasm.js` and
-`pyrefly_wasm_bg.wasm`). Copy those into the sandbox (or test) paths the
+Output lands in `pyrefly_wasm/target/` (`pyrefly_wasm.js`, the JavaScript
+bindings, and `pyrefly_wasm_bg.wasm.opt`, the module). Copy those into the sandbox (or test) paths the
 website README describes when you need a local rebuild.
 
 ### Test changes in the sandbox
@@ -79,8 +79,10 @@ affected sandbox behavior after changing its implementation or API.
 
 ## Current API
 
-`pyrefly_wasm` exports a `State` class (`new State(version)`) wrapping the
-in-tree playground. The exports in
+`pyrefly_wasm.js` exports `init(source)`, which loads the module, and a `State`
+class (`new State(version)`) wrapping the in-tree playground. `source` is a URL,
+a `Response`, the module bytes, or a compiled `WebAssembly.Module`; the default
+is `pyrefly_wasm_bg.wasm` next to `pyrefly_wasm.js`. The exports in
 [`pyrefly_wasm/lib.rs`](https://github.com/facebook/pyrefly/blob/main/pyrefly_wasm/lib.rs)
 are the authoritative API reference. The current JavaScript names are:
 
@@ -96,10 +98,11 @@ are the authoritative API reference. The current JavaScript names are:
 | `inlayHint(callArgumentNames)` | Inlay hints. |
 | `semanticTokens(range)` | Semantic tokens for an optional range. |
 | `semanticTokensLegend()` | Token types/modifiers legend. |
+| `free()` | Drop the playground now, instead of when the `State` is garbage-collected. |
 
-Positions match the playground (`line` / `column` as `i32`). Payloads are
-serde-serialized into JS; there is no TypeScript `.d.ts` from `wasm-pack`
-(`--no-typescript`). The sandbox keeps a local
+Positions match the playground (`line` / `column` as `i32`). Each call passes a
+JSON request to the module and returns its JSON response; there is no
+TypeScript `.d.ts`. The sandbox keeps a local
 [`PyreflyState`](https://github.com/facebook/pyrefly/blob/main/website/src/sandbox/Sandbox.tsx)
 interface.
 

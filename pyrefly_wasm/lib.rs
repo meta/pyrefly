@@ -14,9 +14,6 @@
 //! A panic aborts, which traps. A trap can stop Rust code in the middle of any
 //! operation, so the instance is not usable after it.
 
-/// The `wasm32-unknown-unknown` bindings. `wasm-bindgen` compiles them out on WASI.
-mod bindgen;
-
 use std::cell::RefCell;
 
 use pyrefly::playground::Playground;
