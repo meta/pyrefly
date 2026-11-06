@@ -254,7 +254,7 @@ def test_clip_scalar_or_none_bounds() -> None:
 
     scalar = np.ones(())
     assert_type(np.clip(scalar, 0.0, None), Any)
-    assert_type(np.clip(scalar, 0.0, 1.0), np.ndarray[[]])
+    assert_type(np.clip(scalar, 0.0, 1.0), Any)
     assert isinstance(np.clip(scalar, 0.0, None), np.float64)
     assert isinstance(np.clip(scalar, 0.0, 1.0), np.float64)
     unknown_rank = cast(np.ndarray, scalar)
@@ -263,12 +263,12 @@ def test_clip_scalar_or_none_bounds() -> None:
     lower = np.clip(x, 0.0, None)
     upper = np.clip(x, None, 1.0)
     unbounded = np.clip(x, None, None)
-    assert_type(lower, Any)
-    assert_type(upper, Any)
-    assert_type(unbounded, Any)
-    assert_shape(lower.shape, IntTuple, runtime=(2, 3))
-    assert_shape(upper.shape, IntTuple, runtime=(2, 3))
-    assert_shape(unbounded.shape, IntTuple, runtime=(2, 3))
+    assert_type(lower, np.ndarray[[2, 3], Any])
+    assert_type(upper, np.ndarray[[2, 3], Any])
+    assert_type(unbounded, np.ndarray[[2, 3], Any])
+    assert_shape(lower.shape, (2, 3))
+    assert_shape(upper.shape, (2, 3))
+    assert_shape(unbounded.shape, (2, 3))
     assert_shape(x.clip(0, None).shape, (2, 3))
     assert_type(np.clip(x, 0, 1), np.ndarray[[2, 3], Any])
 
@@ -278,10 +278,10 @@ def test_clip_keyword_bounds() -> None:
 
     lower = np.clip(a=x, a_min=0.0, a_max=None)
     upper = np.clip(x, a_max=1.0, a_min=None)
-    assert_type(lower, Any)
-    assert_type(upper, Any)
-    assert_shape(lower.shape, IntTuple, runtime=(2, 3))
-    assert_shape(upper.shape, IntTuple, runtime=(2, 3))
+    assert_type(lower, np.ndarray[[2, 3], Any])
+    assert_type(upper, np.ndarray[[2, 3], Any])
+    assert_shape(lower.shape, (2, 3))
+    assert_shape(upper.shape, (2, 3))
 
 
 def test_clip_numpy_scalar_and_optional_bounds() -> None:
@@ -291,12 +291,12 @@ def test_clip_numpy_scalar_and_optional_bounds() -> None:
     numpy_scalar = np.clip(x, np.float32(0.0), np.int64(1))
     optional = np.clip(x, bound, None)
     complex_scalar = np.clip(x, 0j, None)
-    assert_type(numpy_scalar, Any)
-    assert_type(optional, Any)
-    assert_type(complex_scalar, Any)
-    assert_shape(numpy_scalar.shape, IntTuple, runtime=(2, 3))
-    assert_shape(optional.shape, IntTuple, runtime=(2, 3))
-    assert_shape(complex_scalar.shape, IntTuple, runtime=(2, 3))
+    assert_type(numpy_scalar, np.ndarray[[2, 3], Any])
+    assert_type(optional, np.ndarray[[2, 3], Any])
+    assert_type(complex_scalar, np.ndarray[[2, 3], Any])
+    assert_shape(numpy_scalar.shape, (2, 3))
+    assert_shape(optional.shape, (2, 3))
+    assert_shape(complex_scalar.shape, (2, 3))
 
 
 def test_clip_array_bounds_remain_gradual() -> None:
@@ -320,9 +320,9 @@ def test_clip_float_bounds_can_promote_integer_dtype() -> None:
 
     clipped = np.clip(x, 0.5, None)
     bounded = np.clip(x, 0.5, 1.5)
-    assert_type(clipped, Any)
+    assert_type(clipped, np.ndarray[[2, 3], Any])
     assert_type(bounded, np.ndarray[[2, 3], Any])
-    assert_shape(clipped.shape, IntTuple, runtime=(2, 3))
+    assert_shape(clipped.shape, (2, 3))
     assert_shape(bounded.shape, (2, 3))
     assert clipped.dtype == np.dtype(np.float64)
     assert bounded.dtype == np.dtype(np.float64)

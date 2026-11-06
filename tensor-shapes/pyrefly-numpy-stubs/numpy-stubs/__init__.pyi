@@ -1902,10 +1902,14 @@ def interp(
     right: Any = ...,
     period: Any = ...,
 ) -> Any: ...
+
+# Scalar bounds preserve shape, but clipping can promote the result dtype.
+@overload
+def clip(a: ndarray[[]], a_min: _ArrayScalar, a_max: _ArrayScalar) -> Any: ...
 @overload
 def clip[Shape: _Shape](
-    a: ndarray[Shape], a_min: int | float, a_max: int | float
-) -> ndarray[Shape]: ...
+    a: ndarray[Shape], a_min: _ArrayScalar, a_max: _ArrayScalar
+) -> ndarray[Shape, Any]: ...
 @overload
 def clip(a: ArrayLike, a_min: ArrayLike | None, a_max: ArrayLike | None) -> Any: ...
 def fill_diagonal[N: IntVar, DType](
