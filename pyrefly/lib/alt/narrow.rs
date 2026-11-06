@@ -60,6 +60,8 @@ use crate::binding::narrow::NarrowSource;
 use crate::binding::narrow::NarrowingSubject;
 use crate::error::collector::ErrorCollector;
 use crate::error::style::ErrorStyle;
+use crate::types::callable::Param;
+use crate::types::callable::Params;
 use crate::types::class::ClassType;
 use crate::types::function::FunctionKind;
 use crate::types::lit_int::LitInt;
@@ -67,7 +69,10 @@ use crate::types::literal::Lit;
 use crate::types::tuple::Tuple;
 use crate::types::type_info::TypeInfo;
 use crate::types::type_var::Restriction;
+use crate::types::types::BoundMethodType;
 use crate::types::types::CalleeKind;
+use crate::types::types::Forallable;
+use crate::types::types::OverloadType;
 use crate::types::types::TParams;
 use crate::types::types::Type;
 
@@ -105,6 +110,60 @@ fn extend_facet_chain(resolved_chain: Option<&FacetChain>, facet: FacetKind) -> 
             facets
         }
         None => Vec1::new(facet),
+    }
+}
+
+/// Whether a call to `func` written as `<kw>=<value>` binds `<value>` to the function's
+/// first parameter, which is what a `TypeGuard`/`TypeIs` result narrows. Only a
+/// positional-or-keyword first parameter qualifies; positional-only parameters reject
+/// keyword binding, and gradual signatures are handled conservatively.
+fn keyword_binds_first_param(func: &Type, kw: &Name) -> bool {
+    fn first_param_name(params: &Params, skip_self: bool) -> Option<&Name> {
+        let (Params::List(list) | Params::Partial(list)) = params else {
+            // `...`, materializations, and ParamSpecs are gradual: don't narrow.
+            return None;
+        };
+        let mut items = list.items().iter();
+        if skip_self {
+            // A bound method's first parameter is the bound `self`.
+            items.next()?;
+        }
+        match items.next()? {
+            Param::Pos(name, _, _) => Some(name),
+            _ => None,
+        }
+    }
+    fn signature_matches(sig: &Params, skip_self: bool, kw: &Name) -> bool {
+        first_param_name(sig, skip_self).is_some_and(|name| name == kw)
+    }
+    match func {
+        Type::Function(f) => signature_matches(&f.signature.params, false, kw),
+        Type::Callable(c) => signature_matches(&c.params, false, kw),
+        Type::Forall(f) => match &f.body {
+            Forallable::Function(f) => signature_matches(&f.signature.params, false, kw),
+            Forallable::Callable(c) => signature_matches(&c.params, false, kw),
+            Forallable::TypeAlias(_) => false,
+        },
+        Type::BoundMethod(bm) => match &bm.func {
+            BoundMethodType::Function(f) => signature_matches(&f.signature.params, true, kw),
+            BoundMethodType::Forall(f) => signature_matches(&f.body.signature.params, true, kw),
+            BoundMethodType::Overload(o) => o
+                .signatures
+                .iter()
+                .any(|sig| match sig {
+                    OverloadType::Function(f) => {
+                        signature_matches(&f.signature.params, true, kw)
+                    }
+                    OverloadType::Forall(f) => {
+                        signature_matches(&f.body.signature.params, true, kw)
+                    }
+                }),
+        },
+        Type::Overload(o) => o.signatures.iter().any(|sig| match sig {
+            OverloadType::Function(f) => signature_matches(&f.signature.params, false, kw),
+            OverloadType::Forall(f) => signature_matches(&f.body.signature.params, false, kw),
+        }),
+        _ => false,
     }
 }
 
@@ -670,6 +729,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         func: &Expr,
         args: &Arguments,
+        kw: Option<&Name>,
         errors: &ErrorCollector,
     ) -> Option<AtomicNarrowOp> {
         let func_ty = self.expr_infer(func, errors);
@@ -686,6 +746,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             };
             if op.is_some() {
                 return op;
+            }
+        }
+        if let Some(kw) = kw {
+            // The subject is the value of a keyword argument, so it only narrows if that
+            // keyword binds the callee's first parameter (and no positional argument is
+            // present that could bind it instead).
+            if !args.args.is_empty() || !keyword_binds_first_param(&func_ty, kw) {
+                return None;
             }
         }
         if func_ty.is_typeis() {
@@ -2111,8 +2179,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ty.clone()
                 }
             }
-            AtomicNarrowOp::Call(func, args) | AtomicNarrowOp::NotCall(func, args) => {
-                if let Some(resolved_op) = self.resolve_narrowing_call(func, args, errors) {
+            AtomicNarrowOp::Call(func, args, kw) | AtomicNarrowOp::NotCall(func, args, kw) => {
+                if let Some(resolved_op) = self.resolve_narrowing_call(func, args, kw.as_ref(), errors) {
                     if matches!(op, AtomicNarrowOp::Call(..)) {
                         self.atomic_narrow(ty, &resolved_op, range, errors)
                     } else {
@@ -2421,11 +2489,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     return type_info.clone();
                 };
                 let Some(op_for_narrow) = (match op {
-                    AtomicNarrowOp::Call(func, args) => {
-                        self.resolve_narrowing_call(func.as_ref(), args, errors)
+                    AtomicNarrowOp::Call(func, args, kw) => {
+                        self.resolve_narrowing_call(func.as_ref(), args, kw.as_ref(), errors)
                     }
-                    AtomicNarrowOp::NotCall(func, args) => self
-                        .resolve_narrowing_call(func.as_ref(), args, errors)
+                    AtomicNarrowOp::NotCall(func, args, kw) => self
+                        .resolve_narrowing_call(func.as_ref(), args, kw.as_ref(), errors)
                         .map(|resolved_op| resolved_op.negate()),
                     _ => Some(op.clone()),
                 }) else {
