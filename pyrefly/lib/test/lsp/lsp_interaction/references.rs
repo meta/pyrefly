@@ -100,7 +100,6 @@ class C:
 }
 
 // https://github.com/meta/pyrefly/issues/5485
-// BUG: after `base.py` shifts, find-references on `Base.method` misses the override in `child.py`.
 #[test]
 fn test_references_to_parent_method_after_defining_file_shifts() {
     let root = TempDir::with_prefix("pyrefly_references_parent_method_shift").unwrap();
@@ -120,6 +119,12 @@ class Child(Base):
     let child_uri = Uri::from_file_path(root.path().join("child.py"))
         .unwrap()
         .to_string();
+    let child_override = json!([
+        {
+            "range": {"start":{"line":4,"character":8},"end":{"line":4,"character":14}},
+            "uri": child_uri
+        },
+    ]);
 
     let telemetry = TestTelemetry::new();
     let telemetry_events = telemetry.subscribe();
@@ -134,12 +139,7 @@ class Child(Base):
     interaction
         .client
         .references("base.py", 1, 9, false)
-        .expect_response(json!([
-            {
-                "range": {"start":{"line":4,"character":8},"end":{"line":4,"character":14}},
-                "uri": child_uri
-            },
-        ]))
+        .expect_response(child_override.clone())
         .unwrap();
 
     // `child.py` imports the disk copy of `base.py`, so save the edit as an editor does.
@@ -151,7 +151,7 @@ class Child(Base):
     interaction
         .client
         .references("base.py", 2, 9, false)
-        .expect_response(json!([]))
+        .expect_response(child_override)
         .unwrap();
 
     interaction.shutdown().unwrap();

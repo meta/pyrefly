@@ -110,18 +110,28 @@ pub struct Index {
     /// The call-site range spells the class name, not the definition's own name, so these are
     /// gated behind `ReferenceOptions::include_constructor_call_sites`.
     pub constructor_references: SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
-    /// A map from (child method range) to a list of parent method definitions (ModulePath, parent method range).
+    /// A map from (child method range) to a list of parent method definitions (ModulePath, parent method).
     /// This is used to find reimplementations when doing find-references on parent methods.
-    pub parent_methods_map: SmallMap<TextRange, Vec<(ModulePath, TextRange)>>,
+    pub parent_methods_map: SmallMap<TextRange, Vec<(ModulePath, IndexedAttribute)>>,
 }
 
-/// An attribute definition in another module, identified by its class and name. The index does not
-/// store the definition range: a module is not rechecked when a dependency only moves code around,
-/// so a stored range can go stale. The range is looked up in the current class metadata instead.
+/// An attribute definition, identified by its class and name. The index does not store the
+/// definition range: a module is not rechecked when a dependency only moves code around, so a
+/// stored range can go stale. The range is looked up in the current class metadata instead.
 #[derive(Debug, Clone)]
 pub struct IndexedAttribute {
     pub cls: ClassDefIndex,
     pub name: Name,
+}
+
+impl IndexedAttribute {
+    /// The current declaration range of this attribute, read from the metadata of its module.
+    pub fn current_range(&self, metadata: &BindingsMetadata) -> Option<TextRange> {
+        metadata
+            .get_class_checked(self.cls)?
+            .fields
+            .field_decl_range(&self.name)
+    }
 }
 
 /// How the source text at a reference range relates to the attribute it resolves to.
@@ -1820,7 +1830,7 @@ impl Answers {
         &self,
         child_range: TextRange,
         parent_module: ModulePath,
-        parent_range: TextRange,
+        parent: IndexedAttribute,
     ) {
         if let Some(index) = &self.index {
             index
@@ -1828,7 +1838,7 @@ impl Answers {
                 .parent_methods_map
                 .entry(child_range)
                 .or_default()
-                .push((parent_module, parent_range));
+                .push((parent_module, parent));
         }
     }
 }

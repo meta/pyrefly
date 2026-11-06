@@ -85,6 +85,7 @@ use crate::alt::attr::AttrInfo;
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
+use crate::binding::metadata::BindingsMetadata;
 use crate::config::error_kind::ErrorKind;
 use crate::error::error::ErrorQuickFix;
 use crate::error::suppress::detect_line_ending;
@@ -1999,11 +2000,10 @@ impl<'a> Transaction<'a> {
         let matches_definition = definition_matcher(module, definition_range);
         references
             .iter()
-            .filter(|(IndexedAttribute { cls, name }, _)| {
-                metadata
-                    .get_class_checked(*cls)
-                    .and_then(|class| class.fields.field_decl_range(name))
-                    .is_some_and(|range| matches_definition(range, name.as_str()))
+            .filter(|(attribute, _)| {
+                attribute
+                    .current_range(&metadata)
+                    .is_some_and(|range| matches_definition(range, attribute.name.as_str()))
             })
             .map(|(_, reference_range)| *reference_range)
             .collect()
@@ -5557,6 +5557,7 @@ fn reduce_symbol_matches(results: &mut Vec<SymbolMatch>, memory_paths: &HashSet<
 
 trait RdepTransaction {
     fn solutions_index(&self, handle: &Handle) -> Option<Arc<Mutex<Index>>>;
+    fn bindings_metadata(&self, handle: &Handle) -> Option<Arc<BindingsMetadata>>;
     fn module_info(&self, handle: &Handle) -> Option<Module>;
     fn transitive_rdeps(&self, handle: Handle) -> HashSet<Handle>;
     fn run_for_handles(&mut self, handles: &[Handle], require: Require) -> Result<(), Cancelled>;
@@ -5579,6 +5580,10 @@ impl<'a> RdepTransaction for Transaction<'a> {
     fn solutions_index(&self, handle: &Handle) -> Option<Arc<Mutex<Index>>> {
         self.get_solutions(handle)
             .and_then(|solutions| solutions.get_index())
+    }
+
+    fn bindings_metadata(&self, handle: &Handle) -> Option<Arc<BindingsMetadata>> {
+        self.get_bindings_metadata(handle)
     }
 
     fn module_info(&self, handle: &Handle) -> Option<Module> {
@@ -5619,6 +5624,10 @@ impl<'a> RdepTransaction for CancellableTransaction<'a> {
         self.as_ref()
             .get_solutions(handle)
             .and_then(|solutions| solutions.get_index())
+    }
+
+    fn bindings_metadata(&self, handle: &Handle) -> Option<Arc<BindingsMetadata>> {
+        self.as_ref().get_bindings_metadata(handle)
     }
 
     fn module_info(&self, handle: &Handle) -> Option<Module> {
@@ -5665,22 +5674,29 @@ fn find_child_implementations_impl<T: RdepTransaction>(
     handle: &Handle,
     definition: &TextRangeWithModule,
 ) -> Vec<TextRange> {
-    let mut child_implementations = Vec::new();
-
-    if let Some(index) = transaction.solutions_index(handle) {
-        let index_lock = index.lock();
-        for (child_range, parent_methods) in &index_lock.parent_methods_map {
-            for (parent_module_path, parent_range) in parent_methods {
-                if parent_module_path == definition.module.path()
-                    && *parent_range == definition.range
-                {
-                    child_implementations.push(*child_range);
-                }
-            }
-        }
-    }
-
-    child_implementations
+    let Some(index) = transaction.solutions_index(handle) else {
+        return Vec::new();
+    };
+    let Some(metadata) = transaction.bindings_metadata(
+        &handle.for_module(definition.module.name(), definition.module.path().dupe()),
+    ) else {
+        return Vec::new();
+    };
+    let matches_definition = definition_matcher(&definition.module, definition.range);
+    let index = index.lock();
+    index
+        .parent_methods_map
+        .iter()
+        .filter(|(_, parents)| {
+            parents.iter().any(|(parent_path, parent)| {
+                parent_path == definition.module.path()
+                    && parent
+                        .current_range(&metadata)
+                        .is_some_and(|range| matches_definition(range, parent.name.as_str()))
+            })
+        })
+        .map(|(child_range, _)| *child_range)
+        .collect()
 }
 
 fn compute_transitive_rdeps_for_definition_impl<T: RdepTransaction>(
@@ -5973,6 +5989,10 @@ impl<'a> CancellableTransaction<'a> {
                 methods.insert((patched.module.path().dupe(), patched.range), i);
             }
         }
+        let metadata_by_path: SmallMap<ModulePath, Arc<BindingsMetadata>> = iter::once(handle)
+            .chain(filesystem_handle.as_ref())
+            .filter_map(|h| Some((h.path().dupe(), self.as_ref().get_bindings_metadata(h)?)))
+            .collect();
         for candidate in candidates {
             if cancellation.is_cancelled() {
                 return Err(Cancelled);
@@ -5991,8 +6011,11 @@ impl<'a> CancellableTransaction<'a> {
                 if cancellation.is_cancelled() {
                     return Err(Cancelled);
                 }
-                for (parent_path, parent_range) in parents {
-                    if let Some(i) = methods.get(&(parent_path.dupe(), *parent_range)) {
+                for (parent_path, parent) in parents {
+                    if let Some(metadata) = metadata_by_path.get(parent_path)
+                        && let Some(range) = parent.current_range(metadata)
+                        && let Some(i) = methods.get(&(parent_path.dupe(), range))
+                    {
                         results[*i]
                             .implementations
                             .push(TextRangeWithModule::new(child_module.dupe(), *child_range));

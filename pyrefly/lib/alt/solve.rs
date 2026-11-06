@@ -57,6 +57,7 @@ use starlark_map::small_set::SmallSet;
 use vec1::Vec1;
 
 use crate::alt::answers::AttributeReferenceKind;
+use crate::alt::answers::IndexedAttribute;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::answers_solver::TypeCheckOptions;
@@ -3690,16 +3691,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
             if let Some(child_range) = cls_fields.field_decl_range(field_name) {
                 for ancestor in mro.ancestors(self.stdlib) {
-                    let ancestor_fields = self.get_class_fields(ancestor.class_object());
-                    if let Some(ancestor_range) =
-                        ancestor_fields.and_then(|f| f.field_decl_range(field_name))
+                    let ancestor_class = ancestor.class_object();
+                    if self
+                        .get_class_fields(ancestor_class)
+                        .is_some_and(|f| f.contains(field_name))
                     {
-                        let ancestor_module_path = ancestor.class_object().module().path();
+                        let ancestor_module_path = ancestor_class.module_path();
                         if ancestor_module_path.is_first_party_for_indexing() {
                             self.current().add_parent_method_mapping(
                                 child_range,
                                 ancestor_module_path.dupe(),
-                                ancestor_range,
+                                IndexedAttribute {
+                                    cls: ancestor_class.index(),
+                                    name: field_name.clone(),
+                                },
                             );
                         }
                     }
