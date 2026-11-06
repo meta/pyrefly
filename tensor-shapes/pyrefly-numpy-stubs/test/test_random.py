@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import assert_type
 
 import numpy as np
-from shape_extensions import assert_shape
+from shape_extensions import assert_raises, assert_shape, Int, IntTuple, IntVar
 
 
 def test_randn_1d_shape() -> None:
@@ -37,3 +37,70 @@ def test_randn_4d_shape() -> None:
 
 def check_randn_no_args_returns_float() -> None:
     assert_type(np.random.randn(), float)
+
+
+def test_multivariate_normal_without_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.multivariate_normal(np.zeros(3), np.eye(3))
+    assert_type(result, np.ndarray[[3], np.dtype[np.float64]])
+    assert_shape(result.shape, (3,))
+
+
+def test_multivariate_normal_int_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.multivariate_normal(np.zeros(3), np.eye(3), 5)
+    assert_type(result, np.ndarray[[5, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (5, 3))
+
+
+def test_multivariate_normal_tuple_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.multivariate_normal(np.zeros(3), np.eye(3), (5, 2))
+    assert_type(result, np.ndarray[[5, 2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (5, 2, 3))
+
+
+def test_multivariate_normal_unshaped_parameters() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.multivariate_normal([0.0, 0.0, 0.0], np.eye(3).tolist(), 5)
+    assert_type(result, np.ndarray[IntTuple, np.dtype[np.float64]])
+    assert_shape(result.shape, IntTuple, runtime=(5, 3))
+
+
+def test_multivariate_normal_mismatched_parameters() -> None:
+    rng = np.random.default_rng(0)
+    with assert_raises(ValueError):
+        rng.multivariate_normal(np.zeros(3), np.eye(2))  # E: same length
+
+
+def test_multivariate_normal_two_dimensional_mean() -> None:
+    rng = np.random.default_rng(0)
+    with assert_raises(ValueError):
+        rng.multivariate_normal(np.zeros((2, 3)), np.eye(3))  # E: must be 1-D
+
+
+def test_multivariate_normal_non_square_covariance() -> None:
+    rng = np.random.default_rng(0)
+    with assert_raises(ValueError):
+        rng.multivariate_normal(np.zeros(3), np.zeros((3, 4)))  # E: same length
+
+
+def check_multivariate_normal_symbolic_size[N: IntVar, M: IntVar](
+    mean: np.ndarray[[M], np.dtype[np.float64]],
+    cov: np.ndarray[[M, M], np.dtype[np.float64]],
+    n: Int[N],
+) -> None:
+    rng = np.random.default_rng(0)
+    assert_type(
+        rng.multivariate_normal(mean, cov, n),
+        np.ndarray[[N, M], np.dtype[np.float64]],
+    )
+
+
+def test_multivariate_normal_keyword_arguments() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.multivariate_normal(
+        np.zeros(3), np.eye(3), 5, check_valid="raise", method="cholesky"
+    )
+    assert_type(result, np.ndarray[[5, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (5, 3))
