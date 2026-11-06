@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, assert_type, cast, Literal
 
 import numpy as np
-from shape_extensions import assert_shape, IntTuple
+from shape_extensions import assert_raises, assert_shape, IntTuple
 
 
 def make_array(shape: Any, value: Any = 1.0) -> Any:
@@ -247,6 +247,63 @@ def test_rounding_preserves_shape() -> None:
     assert_shape(np.round(a=a, decimals=-1).shape, (5,))
     assert_shape(np.trunc(a).shape, (5,))
     assert_shape(np.clip(a, -1.0, 2.0).shape, (5,))
+
+
+def test_round_scalars_and_sequences() -> None:
+    rounded_float = np.round(0.234, decimals=2)  # E: parameter `a`
+    rounded_int = np.round(3)  # E: parameter `a`
+    rounded_float32 = np.round(np.float32(1.25), 1)  # E: parameter `a`
+    rounded_list = np.round([1.24, 2.56], decimals=1)  # E: parameter `a`
+    assert isinstance(rounded_float, np.float64)
+    assert rounded_float == 0.23
+    assert isinstance(rounded_int, np.int64)
+    assert isinstance(rounded_float32, np.float32)
+    assert rounded_list.tolist() == [1.2, 2.6]
+    with assert_raises(TypeError):
+        np.round(None)  # E: parameter `a`
+
+
+def test_round_array_dtypes() -> None:
+    floats = np.ones((2, 3))
+    integers = np.full((2, 3), 7, dtype=np.int8)
+    complexes = np.full((2, 3), 1.25 + 2.5j, dtype=np.complex64)
+    booleans = np.ones((2, 3), dtype=np.bool_)
+    gradual_dtype = cast(
+        "np.ndarray[tuple[Literal[2], Literal[3]]]", make_array((2, 3), 1.25)
+    )
+    unknown_rank = cast(np.ndarray, floats)
+
+    assert_type(np.round(floats, 1), np.ndarray[[2, 3], Any])
+    assert_type(np.round(integers, -1), np.ndarray[[2, 3], Any])
+    assert_type(np.round(complexes, decimals=1), np.ndarray[[2, 3], Any])
+    assert_type(np.round(booleans), np.ndarray[[2, 3], Any])
+    assert_type(np.round(gradual_dtype, 1), np.ndarray[[2, 3], Any])
+    assert_shape(np.round(unknown_rank).shape, IntTuple, runtime=(2, 3))
+    assert np.round(floats, 1).dtype == np.dtype(np.float64)
+    assert np.round(integers, -1).tolist() == [[10, 10, 10], [10, 10, 10]]
+    assert np.round(integers, -1).dtype == np.dtype(np.int8)
+    assert np.round(complexes, decimals=1).dtype == np.dtype(np.complex64)
+    assert np.round(booleans).dtype == np.dtype(np.float16)
+
+
+def test_round_rank_zero_and_sequence_inputs() -> None:
+    scalar_array = np.ones(())
+    unknown_scalar = cast(np.ndarray, np.ones(()))
+
+    rounded = np.round(scalar_array, 1)
+    assert_type(rounded, np.ndarray[[], Any])
+    assert_shape(scalar_array.shape, ())
+    assert isinstance(rounded, np.float64)
+    assert isinstance(np.round(unknown_scalar), np.float64)
+
+    rounded_tuple = np.round((1.24, 2.56), 1)  # E: parameter `a`
+    nested = np.round([[1.25], [2.5]])  # E: parameter `a`
+    assert rounded_tuple.tolist() == [1.2, 2.6]
+    assert nested.tolist() == [[1.0], [2.0]]
+    with assert_raises(TypeError):
+        np.round("1.5")  # E: parameter `a`
+    with assert_raises(TypeError):
+        np.round(["1.5"])  # E: parameter `a`
 
 
 class ArrayUfuncDispatch:
