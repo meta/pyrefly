@@ -1431,11 +1431,8 @@ impl<'a> Transaction<'a> {
             if code_at_range != identifier.id.as_str() {
                 return None;
             }
-            let definition_handle = Handle::new(
-                item.module.name(),
-                item.module.path().dupe(),
-                handle.sys_info().dupe(),
-            );
+            let definition_handle =
+                handle.for_module(item.module.name(), item.module.path().dupe());
             let id = Identifier::new(Name::new(code_at_range), item.definition_range);
             Some(ResolutionKind::KeyInModule(
                 definition_handle,
@@ -2969,11 +2966,7 @@ impl<'a> Transaction<'a> {
         handle: &Handle,
         module: &ModuleInfo,
     ) -> Arc<ModModule> {
-        let module_handle = Handle::new(
-            module.name(),
-            module.path().dupe(),
-            handle.sys_info().dupe(),
-        );
+        let module_handle = handle.for_module(module.name(), module.path().dupe());
         self.get_ast(&module_handle)
             .unwrap_or_else(|| Ast::parse(module.contents(), module.source_type()).0.into())
     }
@@ -3595,10 +3588,9 @@ impl<'a> Transaction<'a> {
         };
 
         if let Some(func_id) = metadata.kind.as_func_def_id() {
-            let def_handle = Handle::new(
+            let def_handle = handle.for_module(
                 func_id.qname.module_name(),
                 func_id.qname.module_path().dupe(),
-                handle.sys_info().dupe(),
             );
             // The binding table already holds the `def` name, so this stays a
             // read-only lookup with nothing to solve.
@@ -5728,10 +5720,9 @@ fn compute_transitive_rdeps_for_definition_impl<T: RdepTransaction>(
     for fs_counterpart_of_in_memory_handles in transitive_rdeps
         .iter()
         .filter_map(|handle| match handle.path().details() {
-            ModulePathDetails::Memory(path_buf) => Some(Handle::new(
+            ModulePathDetails::Memory(path_buf) => Some(handle.for_module(
                 handle.module(),
                 ModulePath::filesystem((**path_buf).clone()),
-                handle.sys_info().dupe(),
             )),
             _ => None,
         })
@@ -5755,11 +5746,9 @@ fn patch_definition_for_handle_impl<T: RdepTransaction>(
     match definition.module.path().details() {
         ModulePathDetails::Memory(path_buf) if handle.path() != definition.module.path() => {
             let TextRangeWithModule { module, range } = definition;
-            let new_module = if let Some(info) = transaction.module_info(&Handle::new(
-                module.name(),
-                ModulePath::filesystem((**path_buf).clone()),
-                handle.sys_info().dupe(),
-            )) {
+            let new_module = if let Some(info) = transaction.module_info(
+                &handle.for_module(module.name(), ModulePath::filesystem((**path_buf).clone())),
+            ) {
                 info
             } else {
                 return TextRangeWithModule {
@@ -5968,11 +5957,9 @@ impl<'a> CancellableTransaction<'a> {
             compute_transitive_rdeps_for_definition_impl(self, *handle.sys_info(), &definition)?;
         let mut methods = HashMap::new();
         let filesystem_handle = match module.path().details() {
-            ModulePathDetails::Memory(path) => Some(Handle::new(
-                module.name(),
-                ModulePath::filesystem((**path).clone()),
-                *handle.sys_info(),
-            )),
+            ModulePathDetails::Memory(path) => {
+                Some(handle.for_module(module.name(), ModulePath::filesystem((**path).clone())))
+            }
             _ => None,
         };
         for (i, range) in ranges.iter().enumerate() {

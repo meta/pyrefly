@@ -947,11 +947,7 @@ impl<'a> Transaction<'a> {
 
     /// Look up the `ClassFields` for a class, which may be defined in another module.
     pub fn get_class_fields(&self, source_handle: &Handle, class: &Class) -> Option<ClassFields> {
-        let handle = Handle::new(
-            class.module_name(),
-            class.module_path().dupe(),
-            source_handle.sys_info().dupe(),
-        );
+        let handle = source_handle.for_module(class.module_name(), class.module_path().dupe());
         Some(
             self.get_bindings_metadata(&handle)?
                 .get_class_checked(class.index())?
