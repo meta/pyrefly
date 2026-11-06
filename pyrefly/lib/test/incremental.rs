@@ -7,6 +7,7 @@
 
 //! Tests of the `State` object.
 
+use std::fs;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use pyrefly_util::lock::Mutex;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
 use starlark_map::small_map::SmallMap;
+use tempfile::TempDir;
 
 use crate::config::config::ConfigFile;
 use crate::config::error::ErrorDisplayConfig;
@@ -33,6 +35,7 @@ use crate::state::require::Require;
 use crate::state::state::State;
 use crate::state::subscriber::TestSubscriber;
 use crate::test::util::init_test;
+use crate::test::util::mk_filesystem_import_state;
 use crate::test::util::report_unreachable_at_warn;
 
 #[derive(Default, Clone, Dupe, Debug)]
@@ -142,7 +145,7 @@ impl Incremental {
                 .lock()
                 .insert(ModuleName::from_str(&file), contents.dupe());
             transaction.as_mut().set_memory(vec![(
-                PathBuf::from(file),
+                ModulePath::memory(PathBuf::from(file)),
                 Some(Arc::new(FileContents::Source(contents))),
             )]);
         }
@@ -3190,4 +3193,89 @@ fn test_constant_defined_behind_skipped_star_import_rechecks_importer() {
         unsettled[0].contains("not assignable to `str`"),
         "{unsettled:?}"
     );
+}
+
+#[test]
+fn test_filesystem_overrides_preserve_incrementality_and_generation() {
+    let directory = TempDir::new().unwrap();
+    let (state, handles) = mk_filesystem_import_state(directory.path());
+    let foo = directory.path().join("foo.py");
+    let check = |step: &str,
+                 memory: Option<Option<&str>>,
+                 disk: Option<&str>,
+                 rechecked: &[&str],
+                 errors: usize,
+                 generation_delta: u64| {
+        let generation = state.generation();
+        let subscriber = TestSubscriber::new();
+        let mut transaction =
+            state.new_committable_transaction(Require::Exports, Some(Box::new(subscriber.dupe())));
+        if let Some(contents) = memory {
+            transaction.as_mut().set_memory(vec![(
+                handles[1].path().dupe(),
+                contents.map(|contents| Arc::new(FileContents::from_source(contents.to_owned()))),
+            )]);
+        }
+        if let Some(contents) = disk {
+            fs::write(&foo, contents).unwrap();
+            transaction
+                .as_mut()
+                .invalidate_disk(std::slice::from_ref(&foo));
+        }
+        state.run_with_committing_transaction(
+            transaction,
+            std::slice::from_ref(&handles[0]),
+            Require::Everything,
+            None,
+            None,
+        );
+        let actual_errors = state
+            .transaction()
+            .get_errors([&handles[0]])
+            .collect_errors();
+        assert_eq!(
+            actual_errors.ordinary.len(),
+            errors,
+            "{step}: {actual_errors:?}"
+        );
+        let mut actual_rechecked = Vec::new();
+        for (handle, (count, _)) in subscriber.finish() {
+            if handles.contains(&handle) {
+                for _ in 0..count {
+                    actual_rechecked.push(handle.module().as_str().to_owned());
+                }
+            }
+        }
+        actual_rechecked.sort();
+        assert_eq!(actual_rechecked, rechecked, "{step}");
+        assert_eq!(state.generation(), generation + generation_delta, "{step}");
+    };
+
+    check("initial", None, None, &["foo", "main"], 0, 0);
+    check(
+        "interface change",
+        Some(Some("value: str = 'editor'\n")),
+        None,
+        &["foo", "main"],
+        1,
+        0,
+    );
+    check(
+        "comment-only change",
+        Some(Some("value: str = 'editor'\n# same interface\n")),
+        None,
+        &["foo"],
+        1,
+        0,
+    );
+    check(
+        "disk change under override",
+        None,
+        Some("value: int = 2\n"),
+        &[],
+        1,
+        0,
+    );
+    check("remove override", Some(None), None, &["foo", "main"], 0, 1);
+    check("remove absent override", Some(None), None, &[], 0, 0);
 }

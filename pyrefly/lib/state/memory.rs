@@ -7,17 +7,17 @@
 
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
+
+use pyrefly_python::module_path::ModulePath;
 
 use crate::state::load::FileContents;
 
 #[derive(Debug, Clone, Default)]
-pub struct MemoryFiles(HashMap<PathBuf, Arc<FileContents>>);
+pub struct MemoryFiles(HashMap<ModulePath, Arc<FileContents>>);
 
 #[derive(Debug, Default, Clone)]
-pub struct MemoryFilesOverlay(HashMap<PathBuf, Option<Arc<FileContents>>>);
+pub struct MemoryFilesOverlay(HashMap<ModulePath, Option<Arc<FileContents>>>);
 
 impl MemoryFiles {
     pub fn apply_overlay(&mut self, overlay: MemoryFilesOverlay) {
@@ -31,7 +31,7 @@ impl MemoryFiles {
 }
 
 impl MemoryFilesOverlay {
-    pub fn set(&mut self, path: PathBuf, contents: Option<Arc<FileContents>>) {
+    pub fn set(&mut self, path: ModulePath, contents: Option<Arc<FileContents>>) {
         self.0.insert(path, contents);
     }
 }
@@ -46,7 +46,7 @@ impl<'a> MemoryFilesLookup<'a> {
         Self { base, overlay }
     }
 
-    pub fn get(&self, path: &Path) -> Option<&'a Arc<FileContents>> {
+    pub fn get(&self, path: &ModulePath) -> Option<&'a Arc<FileContents>> {
         match self.overlay.0.get(path) {
             Some(contents) => contents.as_ref(), // Might be a None if deleted
             None => self.base.0.get(path),

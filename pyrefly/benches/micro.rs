@@ -94,7 +94,7 @@ static SHARED_STATE: LazyLock<State> = LazyLock::new(|| {
     );
     let mut t = state.new_committable_transaction(Require::Errors, None);
     t.as_mut().set_memory(vec![(
-        PathBuf::from("_bench_init.py"),
+        ModulePath::memory(PathBuf::from("_bench_init.py")),
         Some(Arc::new(FileContents::from_source(String::new()))),
     )]);
     t.as_mut().run(&[h], Require::Errors, None);
@@ -130,7 +130,7 @@ fn check_module_error_counts(
         sys_info,
     );
     let mut t = SHARED_STATE.transaction();
-    t.set_memory(vec![(PathBuf::from(path), Some(code))]);
+    t.set_memory(vec![(ModulePath::memory(PathBuf::from(path)), Some(code))]);
     t.run(&[h.dupe()], require, None);
     let errors = t.get_errors([&h]);
     let collected = errors.collect_errors();

@@ -3293,7 +3293,7 @@ impl Server {
                 (
                     make_open_handle(&self.state, path),
                     (
-                        path.clone(),
+                        ModulePath::memory(path.clone()),
                         Some(Arc::new(file.contents.to_file_contents())),
                     ),
                 )
@@ -4764,7 +4764,9 @@ impl Server {
                 let mut transaction = server
                     .state
                     .new_committable_transaction(Require::Exports, None);
-                transaction.as_mut().set_memory(vec![(path.clone(), None)]);
+                transaction
+                    .as_mut()
+                    .set_memory(vec![(ModulePath::memory(path.clone()), None)]);
                 let _ = server.validate_in_memory_for_transaction(
                     transaction.as_mut(),
                     telemetry_event,

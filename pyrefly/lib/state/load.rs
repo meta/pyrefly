@@ -12,7 +12,6 @@ use std::time::Instant;
 
 use anyhow::anyhow;
 use dupe::Dupe;
-use dupe::OptionDupedExt;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
@@ -96,15 +95,13 @@ impl Load {
         memory_lookup: &MemoryFilesLookup,
         timing: Option<&TransactionTimingCounters>,
     ) -> (FileContents, Option<anyhow::Error>) {
+        if let Some(contents) = memory_lookup.get(path) {
+            return (contents.as_ref().dupe(), None);
+        }
         let res = match path.details() {
             ModulePathDetails::FileSystem(path) => Self::load_from_filesystem(path, timing),
             ModulePathDetails::Namespace(_) => Ok(FileContents::from_source("".to_owned())),
-            ModulePathDetails::Memory(path) => memory_lookup
-                .get(path)
-                .duped()
-                .as_deref()
-                .duped()
-                .ok_or_else(|| anyhow!("memory path not found")),
+            ModulePathDetails::Memory(_) => Err(anyhow!("memory path not found")),
             ModulePathDetails::BundledTypeshed(path) => typeshed().and_then(|x| {
                 x.load(path)
                     .ok_or_else(|| anyhow!("bundled typeshed problem"))

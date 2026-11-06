@@ -861,11 +861,11 @@ impl TestEnv {
         SysInfo::new(self.version, self.platform.clone())
     }
 
-    pub fn get_memory(&self) -> Vec<(PathBuf, Option<Arc<FileContents>>)> {
+    pub fn get_memory(&self) -> Vec<(ModulePath, Option<Arc<FileContents>>)> {
         self.modules
             .iter()
             .filter_map(|(_, path, contents)| match path.details() {
-                ModulePathDetails::Memory(path) => Some(((**path).clone(), contents.dupe())),
+                ModulePathDetails::Memory(_) => Some((path.dupe(), contents.dupe())),
                 _ => None,
             })
             .collect()
@@ -1362,7 +1362,7 @@ pub fn testcase_for_macro(
                 env.sys_info(),
             );
             t.set_memory(vec![(
-                PathBuf::from(file),
+                ModulePath::memory(PathBuf::from(file)),
                 Some(Arc::new(FileContents::from_source(contents.clone()))),
             )]);
             t.run(&[h.dupe()], Require::Everything, None);
@@ -1399,6 +1399,38 @@ pub fn testcase_for_macro(
 pub fn mk_state(code: &str) -> (Handle, State) {
     let (state, handle) = TestEnv::one("main", code).to_state();
     (handle("main"), state)
+}
+
+pub fn mk_filesystem_import_state(root: &Path) -> (State, [Handle; 2]) {
+    init_test();
+    fs_anyhow::write(&root.join("foo.py"), "value: int = 1\n").unwrap();
+    fs_anyhow::write(
+        &root.join("main.py"),
+        "from foo import value\ncheck: int = value\n",
+    )
+    .unwrap();
+    let mut config = ConfigFile {
+        search_path_from_args: vec![root.to_owned()],
+        disable_search_path_heuristics: true,
+        ..Default::default()
+    };
+    config.python_environment.set_empty_to_default();
+    config.interpreters.skip_interpreter_query = true;
+    assert!(config.configure().is_empty());
+    let handles = ["main", "foo"].map(|name| {
+        Handle::new(
+            ModuleName::from_str(name),
+            ModulePath::filesystem(root.join(format!("{name}.py"))),
+            config.get_sys_info(),
+        )
+    });
+    (
+        State::new(
+            ConfigFinder::new_constant(ArcId::new(config)),
+            TEST_THREAD_COUNT,
+        ),
+        handles,
+    )
 }
 
 pub fn get_class(name: &str, handle: &Handle, reader: &StateReader) -> Class {

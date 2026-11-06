@@ -130,7 +130,7 @@ fn run_test(test: &LazinessTest) -> String {
     for (name, contents) in &test.files {
         let contents = Arc::new(contents.clone());
         transaction.as_mut().set_memory(vec![(
-            PathBuf::from(name),
+            ModulePath::memory(PathBuf::from(name)),
             Some(Arc::new(FileContents::Source(contents))),
         )]);
     }

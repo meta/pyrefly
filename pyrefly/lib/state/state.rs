@@ -596,7 +596,7 @@ struct StateData {
     stdlib: SmallMap<SysInfo, Arc<Stdlib>>,
     modules: HashMap<Handle, ModuleData>,
     loaders: SmallMap<ArcId<ConfigFile>, Arc<LoaderFindCache>>,
-    /// The contents for ModulePath::memory values
+    /// In-memory contents that override each module path's usual source.
     memory: MemoryFiles,
     /// The current epoch, gets incremented every time we recompute
     now: Epoch,
@@ -1432,7 +1432,11 @@ impl<'a> Transaction<'a> {
                 if matches!(
                     module_data.handle.path().details(),
                     ModulePathDetails::FileSystem(_)
-                ) {
+                ) && self
+                    .memory_lookup()
+                    .get(module_data.handle.path())
+                    .is_none()
+                {
                     self.data.inputs_changed.store(true, Ordering::Relaxed);
                 }
                 guard.store_load(Some(Arc::new(Load::load_from_data(
@@ -2601,14 +2605,15 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    /// Called if the `load_from_memory` portion of loading might have changed.
-    /// Specify which in-memory files might have changed, use None to say they don't exist anymore.
-    pub fn set_memory(&mut self, files: Vec<(PathBuf, Option<Arc<FileContents>>)>) {
+    /// Override sources by their exact module identity without changing import discovery.
+    /// None removes an override so that the module returns to its normal source.
+    /// Updating an override does not write or delete any filesystem source.
+    pub fn set_memory(&mut self, files: Vec<(ModulePath, Option<Arc<FileContents>>)>) {
         let mut changed = SmallSet::new();
         for (path, contents) in files {
             if self.memory_lookup().get(&path) != contents.as_ref() {
                 self.data.memory_overlay.set(path.clone(), contents);
-                changed.insert(ModulePath::memory(path));
+                changed.insert(path);
             }
         }
         self.stats.lock().set_memory_dirty = changed.len();
