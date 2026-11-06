@@ -167,13 +167,21 @@ pub struct CompletionTextEdit {
 #[derive(Serialize)]
 pub struct AutoCompletionItem {
     label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
     /// A Monaco `CompletionItemKind`, whose numbering differs from LSP's.
+    #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<i32>,
-    #[serde(rename(serialize = "sortText"))]
+    #[serde(
+        rename(serialize = "sortText"),
+        skip_serializing_if = "Option::is_none"
+    )]
     sort_text: Option<String>,
     /// Without these, accepting an import completion does nothing visible.
-    #[serde(rename(serialize = "additionalTextEdits"))]
+    #[serde(
+        rename(serialize = "additionalTextEdits"),
+        skip_serializing_if = "Option::is_none"
+    )]
     import_edits: Option<Vec<CompletionTextEdit>>,
 }
 

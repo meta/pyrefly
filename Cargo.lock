@@ -2659,6 +2659,7 @@ dependencies = [
  "pyrefly",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "starlark_map",
  "tar",
  "uuid",
