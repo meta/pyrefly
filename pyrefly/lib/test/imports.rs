@@ -3280,21 +3280,23 @@ fn env_implicit_reexport_submodule() -> TestEnv {
         "foo/__init__.py",
         r#"
 from . import a
+from . import c as cc
 from .b import b
 "#,
     );
     t.add_with_path("foo.a", "foo/a.py", "x: int = 1");
     t.add_with_path("foo.b", "foo/b.py", "b: int = 1");
+    t.add_with_path("foo.c", "foo/c.py", "x: int = 1");
     t
 }
 
 // https://github.com/facebook/pyrefly/issues/5134
 testcase!(
-    bug = "`from . import a` in `foo/__init__.py` binds the submodule `foo.a`",
     test_implicit_reexport_submodule,
     env_implicit_reexport_submodule().enable_implicit_reexport_error(),
     r#"
-from foo import a  # E: `a` is not exported from module `foo`
+from foo import a
+from foo import cc
 from foo import b  # E: `b` is not exported from module `foo`
 "#,
 );
