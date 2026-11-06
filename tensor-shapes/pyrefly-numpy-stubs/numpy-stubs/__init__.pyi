@@ -61,12 +61,10 @@ from numpy._core.fromnumeric import (
     amin as amin,
     any as any,
     argpartition as argpartition,
-    argsort as argsort,
     around as around,
     choose as choose,
     compress as compress,
     cumprod as cumprod,
-    cumsum as cumsum,
     cumulative_prod as cumulative_prod,
     cumulative_sum as cumulative_sum,
     diagonal as diagonal,
@@ -198,6 +196,7 @@ from numpy._shapes import (
     diagonal_shape,
     dot_shape,
     expand_dims_shape,
+    flatten_shape,
     matmul_shape,
     matvec_shape,
     nonzero_shapes,
@@ -378,7 +377,6 @@ from numpy.lib._type_check_impl import (
     isreal as isreal,
     isrealobj as isrealobj,
     mintypecode as mintypecode,
-    nan_to_num as nan_to_num,
     real as real,
     real_if_close as real_if_close,
     typename as typename,
@@ -732,6 +730,16 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
             ndarray[[I], _dtype[ColumnIndexScalar]],
         ],
     ) -> ndarray[[I], _DTypeT_co]: ...
+    # An integer index array replaces the first axis with its own shape. A rank-one
+    # boolean mask selects a data-dependent number of entries along that axis.
+    @overload
+    def __getitem__[K: IntVar, Rest: _Shape = []](
+        self, key: ndarray[[K, *Rest], _dtype[integer]], /
+    ) -> ndarray[take_shape(_ShapeT_co, IntTuple[K, *Rest], 0), _DTypeT_co]: ...
+    @overload
+    def __getitem__[K: IntVar](
+        self, key: ndarray[[K], _dtype[bool_]], /
+    ) -> ndarray[take_shape(_ShapeT_co, IntTuple[int], 0), _DTypeT_co]: ...
     @overload
     def __getitem__[I: Index](
         self: ndarray[_ShapeT_co, _DTypeT_co], key: I
@@ -1957,6 +1965,139 @@ def arange(
 def expand_dims[Shape: _Shape, DType, Axis: Flag[int]](
     a: ndarray[Shape, DType], axis: Axis
 ) -> ndarray[expand_dims_shape(Shape, Axis), DType]: ...
+
+# Sorting preserves positive-rank shapes. `axis=None` sorts the flattened input.
+@overload
+def argsort[Shape: _Shape](
+    a: ndarray[Shape],
+    axis: None,
+    kind: str | None = None,
+    order: Any = None,
+    *,
+    stable: py_bool | None = None,
+    descending: py_bool = ...,
+) -> ndarray[flatten_shape(Shape), dtype[intp]]: ...
+@overload
+def argsort(
+    a: ArrayLike,
+    axis: None,
+    kind: str | None = None,
+    order: Any = None,
+    *,
+    stable: py_bool | None = None,
+    descending: py_bool = ...,
+) -> ndarray[[int], dtype[intp]]: ...
+@overload
+def argsort[N: IntVar, Rest: _Shape = []](
+    a: ndarray[[N, *Rest]],
+    axis: int = -1,
+    kind: str | None = None,
+    order: Any = None,
+    *,
+    stable: py_bool | None = None,
+    descending: py_bool = ...,
+) -> ndarray[[N, *Rest], dtype[intp]]: ...
+@overload
+def argsort(
+    a: ArrayLike,
+    axis: int = -1,
+    kind: str | None = None,
+    order: Any = None,
+    *,
+    stable: py_bool | None = None,
+    descending: py_bool = ...,
+) -> ndarray[IntTuple, dtype[intp]]: ...
+
+# Accumulation preserves inexact dtypes but can promote boolean and integer dtypes,
+# whose results stay gradual. `axis=None` accumulates over the flattened input.
+@overload
+def cumsum[N: IntVar, ScalarT: inexact, Rest: _Shape = []](
+    a: ndarray[[N, *Rest], dtype[ScalarT]],
+    axis: int,
+    dtype: None = None,
+    out: None = None,
+) -> ndarray[[N, *Rest], dtype[ScalarT]]: ...
+@overload
+def cumsum[N: IntVar, Rest: _Shape = []](
+    a: ndarray[[N, *Rest]],
+    axis: int,
+    dtype: DTypeLike | None = None,
+    out: None = None,
+) -> ndarray[[N, *Rest]]: ...
+@overload
+def cumsum[Shape: _Shape, ScalarT: inexact](
+    a: ndarray[Shape, dtype[ScalarT]],
+    axis: None = None,
+    dtype: None = None,
+    out: None = None,
+) -> ndarray[flatten_shape(Shape), dtype[ScalarT]]: ...
+@overload
+def cumsum[Shape: _Shape](
+    a: ndarray[Shape],
+    axis: None = None,
+    dtype: DTypeLike | None = None,
+    out: None = None,
+) -> ndarray[flatten_shape(Shape)]: ...
+@overload
+def cumsum(
+    a: ArrayLike,
+    axis: None = None,
+    dtype: DTypeLike | None = None,
+    out: None = None,
+) -> ndarray[[int]]: ...
+@overload
+def cumsum(
+    a: ArrayLike,
+    axis: int,
+    dtype: DTypeLike | None = None,
+    out: None = None,
+) -> ndarray: ...
+@overload
+def cumsum[Out: ndarray](
+    a: ArrayLike, axis: int | None, dtype: DTypeLike | None, out: Out
+) -> Out: ...
+@overload
+def cumsum[Out: ndarray](
+    a: ArrayLike,
+    axis: int | None = None,
+    dtype: DTypeLike | None = None,
+    *,
+    out: Out,
+) -> Out: ...
+
+# Rank-zero arrays and scalars produce scalars.
+@overload
+def nan_to_num(
+    x: _ArrayScalar,
+    copy: py_bool = True,
+    nan: float = 0.0,
+    posinf: float | None = None,
+    neginf: float | None = None,
+) -> Any: ...
+@overload
+def nan_to_num[N: IntVar, DType, Rest: _Shape = []](
+    x: ndarray[[N, *Rest], DType],
+    copy: py_bool = True,
+    nan: float = 0.0,
+    posinf: float | None = None,
+    neginf: float | None = None,
+) -> ndarray[[N, *Rest], DType]: ...
+@overload
+def nan_to_num(
+    x: Sequence[ArrayLike],
+    copy: py_bool = True,
+    nan: float = 0.0,
+    posinf: float | None = None,
+    neginf: float | None = None,
+) -> ndarray: ...
+@overload
+def nan_to_num(
+    x: ArrayLike,
+    copy: py_bool = True,
+    nan: float = 0.0,
+    posinf: float | None = None,
+    neginf: float | None = None,
+) -> Any: ...
 
 # These stubs track reduction shapes but leave reduction dtype gradual.
 def sum[

@@ -166,9 +166,8 @@ def test_array_indexing_falls_back_gradually() -> None:
     values = np.ones((5, 3))
     rows = np.arange(2)
 
-    # An array index has no statically knowable content, so the result rank is
-    # unknown rather than merely imprecise.
-    assert_shape(values[rows].shape, IntTuple, runtime=(2, 3))
+    assert_shape(values[rows].shape, (2, 3))
+    # Other array-valued keys still have an unknown result rank.
     assert_shape(values[rows, :].shape, IntTuple, runtime=(2, 3))
     assert_shape(values[True].shape, IntTuple, runtime=(1, 5, 3))
     assert_shape(values[rows, (0, 1)].shape, IntTuple, runtime=(2,))
@@ -179,8 +178,8 @@ def test_vector_integer_array_gather_uses_index_shape() -> None:
     rows = np.zeros(3, dtype=np.intp)
     grid = np.zeros((2, 4), dtype=np.int64)
 
-    assert_shape(values[rows].shape, IntTuple, runtime=(3,))
-    assert_shape(values[grid].shape, IntTuple, runtime=(2, 4))
+    assert_shape(values[rows].shape, (3,))
+    assert_shape(values[grid].shape, (2, 4))
     assert_type(values[rows].dtype, np.dtype[np.float64])
 
 
@@ -190,7 +189,7 @@ def test_vector_boolean_mask_has_data_dependent_length() -> None:
 
     assert_shape(mask.shape, (5,))
     # The selected length depends on the mask's values, not on its length.
-    assert_shape(values[mask].shape, IntTuple, runtime=(3,))
+    assert_shape(values[mask].shape, (int,), runtime=(3,))
     assert_type(values[mask].dtype, np.dtype[np.float64])
 
 
@@ -210,7 +209,7 @@ def test_array_index_rejects_rank_zero_receiver() -> None:
 
     assert_shape(scalar.shape, ())
     try:
-        scalar[rows]
+        scalar[rows]  # E: axis out of bounds
     except IndexError:
         pass
     else:

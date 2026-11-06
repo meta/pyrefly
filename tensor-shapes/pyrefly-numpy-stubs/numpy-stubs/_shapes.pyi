@@ -92,6 +92,10 @@ def repeat_sequence_shape(
     )
 
 @type_shape_dsl_function
+def flatten_shape(shape: IntTuple) -> IntTuple:
+    return dsl.IntTuple((dsl.prod(shape),))
+
+@type_shape_dsl_function
 def take_shape(shape: IntTuple, indices: IntTuple, axis: int | None) -> IntTuple:
     if axis is None:
         return indices
