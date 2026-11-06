@@ -1032,6 +1032,12 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_qname(cls.qname())?;
                 output.write_str("]")
             }
+            Type::SpecializedClassDef(class_type) => {
+                output.write_str("type[")?;
+                output.write_qname(class_type.qname())?;
+                output.write_targs(class_type.targs())?;
+                output.write_str("]")
+            }
             Type::ClassType(class_type)
                 if class_type.is(KnownClass::Tuple) && class_type.targs().as_slice().len() == 1 =>
             {

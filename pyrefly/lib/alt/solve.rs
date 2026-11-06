@@ -1642,7 +1642,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.tvars_to_tparams_for_type_alias(t, collector);
                 }
             }
-            Type::ClassType(cls) => {
+            Type::ClassType(cls) | Type::SpecializedClassDef(cls) => {
                 for t in cls.targs_mut().as_mut() {
                     self.tvars_to_tparams_for_type_alias(t, collector);
                 }
@@ -1683,6 +1683,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if !self.has_valid_annotation_syntax(expr, errors) {
             return TypeAlias::error(name.clone(), style);
         }
+        // Preserve exact class expressions through chains of legacy aliases.
+        let ty = if let Type::TypeAlias(alias) = &ty
+            && let value @ Type::SpecializedClassDef(_) =
+                self.get_type_alias(alias).as_value(self.stdlib)
+        {
+            value
+        } else {
+            ty
+        };
         let annotated_metadata = match &ty {
             Type::Annotated(_, metadata) => Some(metadata.clone()),
             _ => self
@@ -1691,6 +1700,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .shaped_annotation_metadata(range)
                 .map(|shape| vec![Lit::Str(shape.into()).to_implicit_type()].into_boxed_slice()),
         };
+        let is_specialized_class = matches!(&ty, Type::SpecializedClassDef(_));
         let untyped = self.untype_opt(ty.clone(), range, errors);
         let ty = if let Some(untyped) = untyped {
             let validated =
@@ -1712,6 +1722,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // been interpreted as a shape in this declaration.
         let stored_ty = if let Some(metadata) = annotated_metadata {
             Type::Annotated(Box::new(ty), metadata)
+        } else if is_specialized_class && let Type::ClassType(cls) = ty {
+            Type::SpecializedClassDef(cls)
         } else {
             self.heap.mk_type_of(ty)
         };
@@ -3458,7 +3470,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ) || matches!(&result_ty, Type::Type(f) if matches!(&**f, Type::ClassType(_))))
                         || {
                             let callable_ty = self.expr_infer(&call.func, &swallower);
-                            matches!(&callable_ty, Type::ClassDef(_))
+                            matches!(
+                                &callable_ty,
+                                Type::ClassDef(_) | Type::SpecializedClassDef(_)
+                            )
                         }
                 } else {
                     false
@@ -3564,9 +3579,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         owners: &[Class],
     ) -> bool {
         value_type.clone().into_unions().into_iter().any(|ty| {
+            let ty = match ty {
+                Type::TypeAlias(alias) => self.get_type_alias(&alias).as_value(self.stdlib),
+                ty => ty,
+            };
             let accessed_class = match ty {
                 Type::ClassDef(cls) => Some(cls),
-                Type::ClassType(cls) | Type::SelfType(cls) => Some(cls.into_class_object()),
+                Type::ClassType(cls) | Type::SelfType(cls) | Type::SpecializedClassDef(cls) => {
+                    Some(cls.into_class_object())
+                }
                 Type::Type(inner) => match *inner {
                     Type::ClassType(cls) | Type::SelfType(cls) => Some(cls.into_class_object()),
                     _ => None,
@@ -7213,7 +7234,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // when there is no annotation, so that `mylist = list` is treated
         // like a value assignment rather than a type alias?
         match ty {
-            Type::Type(_)
+            Type::SpecializedClassDef(_)
+            | Type::Type(_)
             | Type::TypeVar(_)
             | Type::ParamSpec(_)
             | Type::TypeVarTuple(_)

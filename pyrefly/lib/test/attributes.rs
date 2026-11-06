@@ -3248,6 +3248,42 @@ class Unrelated:
 );
 
 testcase!(
+    test_protected_specialized_class_def,
+    TestEnv::new().enable_protected_access_error(),
+    r#"
+class C[T]:
+    _p: int = 0
+
+C[int]._p  # E: Protected attribute `_p` cannot be accessed
+Alias = C[int]
+Alias._p  # E: Protected attribute `_p` cannot be accessed
+
+def f() -> None:
+    X = C[int]
+    X._p  # E: Protected attribute `_p` cannot be accessed
+
+class Child(C[int]):
+    value = C[int]._p
+"#,
+);
+
+testcase!(
+    test_generic_alias_runtime_args,
+    r#"
+from typing import Any, assert_type
+
+assert_type(tuple[int, str].__args__, tuple[Any, ...])
+assert_type(tuple[int, ...].__args__, tuple[Any, ...])
+
+class C[T]: ...
+assert_type(C[int].__args__, tuple[Any, ...])
+
+def f(cls: type[C[int]]) -> None:
+    cls.__args__  # E: has no class attribute `__args__`
+"#,
+);
+
+testcase!(
     test_same_named_protected_attribute_from_unrelated_class,
     TestEnv::new().enable_protected_access_error(),
     r#"
@@ -3548,7 +3584,6 @@ ty(C).m(0) # E: Class `type` has no class attribute `m`
 );
 
 testcase!(
-    bug = "We get the wrong metaclass for a specialized generic",
     test_attribute_access_on_generic_alias,
     r#"
 # handy hack to get a type[X] for any X
@@ -3558,12 +3593,12 @@ class C[T]:
     @classmethod
     def m(cls, x: T): ...
 
-# In Python 3.12, the type of a generic class is either `typing._GenericAlias` or `types.GenericAlias`:
-# https://github.com/python/cpython/blob/9621a7d0170bf1ec48bcfc35825007cdf75265ea/Lib/typing.py#L1373-L1397
-# We don't model this, so Pyrefly mistakenly thinks the metaclass is just `type`.
-# This actually gets us the right behavior in this case (there's no `m` attribute on either generic
-# alias class), but the error message shows the incorrect inference.
-ty(C[int]).m(0)  # E: Class `type` has no class attribute `m`
+ty(C[int]).m(0)  # E: Class `GenericAlias` has no class attribute `m`
+ty(C[int]).__args__
+
+from types import GenericAlias
+from typing import assert_type
+assert_type(ty(C[int])(C, (str,)), GenericAlias)
     "#,
 );
 

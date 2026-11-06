@@ -387,8 +387,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             && kws.is_empty()
         {
             // Keep the `ClassType` when present so a generic `type[C[int]]` substitutes its targs.
-            let (cls, class_type) = match obj_arg.infer(self, errors) {
+            let ty = match obj_arg.infer(self, errors) {
+                Type::TypeAlias(alias) => self.get_type_alias(&alias).as_value(self.stdlib),
+                ty => ty,
+            };
+            let (cls, class_type) = match ty {
                 Type::ClassDef(cls) => (Some(cls), None),
+                Type::SpecializedClassDef(c) => (Some(c.class_object().clone()), Some(c)),
                 Type::Type(inner) => match *inner {
                     Type::ClassType(c) => (Some(c.class_object().clone()), Some(c)),
                     _ => (None, None),

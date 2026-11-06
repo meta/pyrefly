@@ -1452,7 +1452,10 @@ impl DirectCall {
                     Self::from_bool(false)
                 }
                 Some(Type::BoundMethod(bm))
-                    if matches!(bm.obj, Type::ClassDef(_) | Type::Type(_)) =>
+                    if matches!(
+                        bm.obj,
+                        Type::ClassDef(_) | Type::SpecializedClassDef(_) | Type::Type(_)
+                    ) =>
                 {
                     Self::from_bool(true)
                 }

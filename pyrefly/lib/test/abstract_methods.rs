@@ -24,6 +24,62 @@ shape = Shape()  # E: Cannot instantiate `Shape`
 );
 
 testcase!(
+    test_generic_abstract_class_instantiation_error,
+    r#"
+from abc import ABC, abstractmethod
+
+class Shape[T](ABC):
+    @abstractmethod
+    def area(self) -> T:
+        pass
+
+class ConcreteShape(Shape[int]):
+    def area(self) -> int:
+        return 0
+
+shape = Shape[int]()  # E: Cannot instantiate `Shape`
+ShapeCtor = Shape[int]
+shape_from_alias = ShapeCtor()  # E: Cannot instantiate `Shape`
+
+def construct(cls: type[Shape[int]]) -> Shape[int]:
+    return cls()
+
+classes: tuple[type[Shape[int]], ...] = (ConcreteShape,)
+concrete_shape = classes[0]()
+"#,
+);
+
+testcase!(
+    test_abstract_class_alias_specialization,
+    r#"
+from abc import ABC, abstractmethod
+from typing import TypeAlias
+
+class A(ABC):
+    @abstractmethod
+    def method(self) -> int: ...
+
+class G[T](ABC):
+    @abstractmethod
+    def method(self) -> T: ...
+
+AA: TypeAlias = A
+GA: TypeAlias = G
+AA()
+GA()
+
+Specialized: TypeAlias = G[int]
+Specialized()  # E: Cannot instantiate `G`
+Again: TypeAlias = Specialized
+Again()  # E: Cannot instantiate `G`
+
+def f() -> None:
+    Local = G[int]
+    Local()  # E: Cannot instantiate `G`
+"#,
+);
+
+testcase!(
     test_concrete_subclass_instantiation_ok,
     r#"
 from abc import ABC, abstractmethod
@@ -59,10 +115,32 @@ class DirectABCMeta(metaclass=ABCMeta):
 class IndirectABCMeta(DirectABCMeta):
     pass
 
+class DirectGenericABC[T](ABC):
+    pass
+
+class DirectGenericABCMeta[T](metaclass=ABCMeta):
+    pass
+
+class IndirectGenericABC(DirectGenericABC[int]):
+    pass
+
+class IndirectGenericABCMeta(DirectGenericABCMeta[int]):
+    pass
+
 direct_abc = DirectABC()  # E: Cannot instantiate `DirectABC`
 indirect_abc = IndirectABC()
 direct_abc_meta = DirectABCMeta()  # E: Cannot instantiate `DirectABCMeta`
 indirect_abc_meta = IndirectABCMeta()
+direct_generic_abc = DirectGenericABC[int]()  # E: Cannot instantiate `DirectGenericABC`
+direct_generic_abc_meta = DirectGenericABCMeta[int]()  # E: Cannot instantiate `DirectGenericABCMeta`
+indirect_generic_abc = IndirectGenericABC()
+indirect_generic_abc_meta = IndirectGenericABCMeta()
+
+Alias = DirectGenericABC[int]
+Alias()  # E: Cannot instantiate `DirectGenericABC`
+
+def construct(cls: type[DirectGenericABC[int]]) -> DirectGenericABC[int]:
+    return cls()
 "#,
 );
 

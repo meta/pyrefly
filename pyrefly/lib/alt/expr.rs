@@ -1767,6 +1767,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let cls = match ty {
             Type::ClassDef(cls) => Some(cls),
             _ if let Some(TypeAliasData::Value(alias)) = alias
+                && let Type::SpecializedClassDef(cls) = alias.as_type_ref() =>
+            {
+                Some(cls.class_object())
+            }
+            _ if let Some(TypeAliasData::Value(alias)) = alias
                 && let Type::Type(inner) = alias.as_type_ref()
                 && let Type::ClassType(cls) = &**inner =>
             {
@@ -3124,6 +3129,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // All other classes (including Tensor) get promoted and wrapped in type_form
                     *ty = self.heap.mk_type_of(self.promote(cls, range, errors));
                 }
+            }
+            Type::SpecializedClassDef(cls) => {
+                *ty = self.heap.mk_type_of(Type::ClassType(cls.clone()));
             }
             Type::ClassType(cls) if cls.is(KnownClass::Type) => {
                 *ty = self.heap.mk_type_of(self.heap.mk_any_implicit());
@@ -5511,8 +5519,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             result
         } else {
             let targs = self.parse_class_type_args(cls, xs.iter(), type_form_context, errors);
-            self.heap
-                .mk_type_of(self.specialize(cls, targs, range, errors))
+            match self.specialize(cls, targs, range, errors) {
+                Type::ClassType(class_type) => Type::SpecializedClassDef(class_type),
+                Type::TypedDict(typed_dict) => self.heap.mk_type_of(Type::TypedDict(typed_dict)),
+                _ => unreachable!("specializing a class produces a class or TypedDict instance"),
+            }
         }
     }
 

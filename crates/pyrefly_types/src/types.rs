@@ -980,12 +980,14 @@ pub enum Type {
     /// up the class `tparams` and setting defaults using gradual types: for
     /// example `list` in an annotation position means `list[Any]`.
     ClassDef(Class),
+    /// An exact class object with explicit type arguments, such as the value of
+    /// the expression `C[int]`.
+    SpecializedClassDef(ClassType),
     /// A value that indicates a concrete, instantiated type with known type
     /// arguments that are validated against the class type parameters. If the
     /// class is not generic, the arguments are empty.
     ///
-    /// Instances of classes have this type, and a term of the form `C[arg1, arg2]`
-    /// would have the form `Type::Type(box Type::ClassType(C, [arg1, arg2]))`.
+    /// Instances of classes have this type.
     ClassType(ClassType),
     /// Instances of TypedDicts have this type, and a term of the form `TD[arg1, arg2]`
     /// would have the form `Type::Type(box Type::TypedDict(TD, [arg1, arg2]))`. Note
@@ -1126,6 +1128,7 @@ impl Visit for Type {
             Type::Union(x) => x.visit(f),
             Type::Intersect(x) => x.visit(f),
             Type::ClassDef(x) => x.visit(f),
+            Type::SpecializedClassDef(x) => x.visit(f),
             Type::ClassType(x) => x.visit(f),
             Type::TypedDict(x) => x.visit(f),
             Type::PartialTypedDict(x) => x.visit(f),
@@ -1190,6 +1193,7 @@ impl VisitMut for Type {
             Type::Union(x) => x.visit_mut(f),
             Type::Intersect(x) => x.visit_mut(f),
             Type::ClassDef(x) => x.visit_mut(f),
+            Type::SpecializedClassDef(x) => x.visit_mut(f),
             Type::ClassType(x) => x.visit_mut(f),
             Type::TypedDict(x) => x.visit_mut(f),
             Type::PartialTypedDict(x) => x.visit_mut(f),
@@ -1830,6 +1834,7 @@ impl Type {
             Type::Callable(_) => Some(CalleeKind::Callable),
             Type::Function(func) => Some(CalleeKind::Function(func.metadata.kind.clone())),
             Type::ClassDef(c) => Some(CalleeKind::Class(c.kind())),
+            Type::SpecializedClassDef(c) => Some(CalleeKind::Class(c.class_object().kind())),
             Type::Forall(forall) => forall.body.clone().as_type().callee_kind(),
             Type::Overload(overload) => Some(CalleeKind::Function(overload.metadata.kind.clone())),
             Type::KwCall(call) => call.return_ty.callee_kind(),
@@ -2460,6 +2465,7 @@ impl Type {
     pub fn qname(&self) -> Option<&QName> {
         match self {
             Type::ClassDef(cls) => Some(cls.qname()),
+            Type::SpecializedClassDef(c) => Some(c.qname()),
             Type::ClassType(c) => Some(c.qname()),
             Type::TypedDict(TypedDict::TypedDict(c)) => Some(c.qname()),
             Type::PartialTypedDict(TypedDict::TypedDict(c)) => Some(c.qname()),
@@ -2480,7 +2486,7 @@ impl Type {
             Type::Literal(lit) if let Lit::Int(x) = &lit.value => Some(x.as_bool()),
             Type::Literal(lit) if let Lit::Bytes(x) = &lit.value => Some(!x.is_empty()),
             Type::Literal(lit) if let Lit::Str(x) = &lit.value => Some(!x.is_empty()),
-            Type::Type(_) | Type::Truthy => Some(true),
+            Type::SpecializedClassDef(_) | Type::Type(_) | Type::Truthy => Some(true),
             Type::None | Type::Falsy => Some(false),
             Type::Sentinel(_) => Some(true),
             Type::Tuple(Tuple::Concrete(elements)) => Some(!elements.is_empty()),
@@ -2556,6 +2562,7 @@ impl Type {
             | Type::Overload(_)
             | Type::Union(_)
             | Type::ClassDef(_)
+            | Type::SpecializedClassDef(_)
             | Type::ClassType(_)
             | Type::TypedDict(_)
             | Type::PartialTypedDict(_)
