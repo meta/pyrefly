@@ -25,6 +25,27 @@ def test_functional_pooling() -> None:
     )
 
 
+def test_avg_pool2d_list_controls() -> None:
+    image = torch.randn(2, 3, 4, 8)
+    # TODO: BUG: Torch accepts lists, but the overlay rejects these controls.
+    kernel = F.avg_pool2d(image, [1, 2])  # E: not a valid
+    stride = F.avg_pool2d(image, 2, stride=[1, 2])  # E: not a valid
+    padding = F.avg_pool2d(image, 2, padding=[0, 1])  # E: not a valid
+    # E: not a valid
+    positional = F.avg_pool2d(image, [1, 2], [1, 2])  # E: not a valid
+    unbatched = F.avg_pool2d(image[0], [1, 2])  # E: not a valid
+    assert_type(kernel, Tensor[IntTuple])
+    assert_type(stride, Tensor[IntTuple])
+    assert_type(padding, Tensor[IntTuple])
+    assert_type(positional, Tensor[IntTuple])
+    assert_type(unbatched, Tensor[IntTuple])
+    assert_shape(kernel.shape, IntTuple, runtime=(2, 3, 4, 4))
+    assert_shape(stride.shape, IntTuple, runtime=(2, 3, 3, 4))
+    assert_shape(padding.shape, IntTuple, runtime=(2, 3, 2, 5))
+    assert_shape(positional.shape, IntTuple, runtime=(2, 3, 4, 4))
+    assert_shape(unbatched.shape, IntTuple, runtime=(3, 4, 4))
+
+
 def test_pooling_modules() -> None:
     tensor = torch.randn((2, 3, 8, 9))
     assert_shape(nn.MaxPool2d(2)(tensor).shape, (2, 3, 4, 4))
