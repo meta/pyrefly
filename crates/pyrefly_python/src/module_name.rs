@@ -766,6 +766,22 @@ mod tests {
         );
     }
 
+    // https://github.com/facebook/pyrefly/issues/5223
+    // bug: a filename that starts with a digit gets no module name, so the
+    // relative imports inside it (common in Django migrations) cannot resolve.
+    #[test]
+    fn test_module_from_path_digit_leading_filename() {
+        let includes = [PathBuf::from("/project")];
+        assert_eq!(
+            ModuleName::from_path(
+                Path::new("/project/pkg/migrations/0001_initial.py"),
+                includes.iter(),
+                &[]
+            ),
+            None
+        );
+    }
+
     #[test]
     fn test_module_from_path_extra_extensions() {
         let includes = [PathBuf::from("/root")];
