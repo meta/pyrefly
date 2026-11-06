@@ -1192,10 +1192,11 @@ Controls how class decorators affect the type bound to a class name.
 - `"ignore"`: Ignore decorator return types and preserve the class type. Use this
   mode for compatibility with mypy's treatment of class decorators.
 - `"typed-only"` (default): Apply typed decorators. Preserve the class type
-  when a decorator has type `Any` or returns `Any` or `Unknown`. This mode follows
-  the class-decorator behavior used by Pyright and ty. An explicitly annotated
-  `type[Any]` return still erases the class interface. An inferred `type[Any]`
-  return preserves it.
+  when a decorator has type `Any` or returns `Any` or `Unknown`. For a decorator
+  with a union type, any untyped member preserves the class type. This mode
+  follows the class-decorator behavior used by Pyright and ty. An explicitly
+  annotated `type[Any]` return still erases the class interface. An inferred
+  `type[Any]` return preserves it.
 - `"all"`: Apply all decorator return types, including `Any` and `Unknown`.
   Decorators apply from the bottom of the decorator list to the top.
 

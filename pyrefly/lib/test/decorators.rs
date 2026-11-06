@@ -1198,6 +1198,76 @@ assert_type(Instance, type[Instance])
 );
 
 testcase!(
+    test_class_decorator_behavior_typed_only_union,
+    r#"
+from typing import Any, Callable, assert_type
+
+def inferred_factory(value):
+    if value:
+        return lambda cls: cls
+    return value
+
+@inferred_factory(True)
+class Inferred:
+    def method(self) -> int:
+        return 1
+
+assert_type(Inferred, type[Inferred])
+assert_type(Inferred().method(), int)
+value: str = Inferred().method()  # E: `int` is not assignable to `str`
+
+def to_int(cls: type) -> int: ...
+def to_str(cls: type) -> str: ...
+
+def typed_factory(flag: bool) -> Callable[[type], int] | Callable[[type], str]:
+    return to_int if flag else to_str
+
+@typed_factory(True)
+class Typed: ...
+
+assert_type(Typed, int | str)
+
+def any_factory(value: Any) -> Callable[[type], int] | Any:
+    return value
+
+@any_factory(to_int)
+class ExplicitAny: ...
+
+assert_type(ExplicitAny, type[ExplicitAny])
+
+class UntypedDecorator:
+    def __call__(self, cls):
+        return cls
+
+def instance_factory(flag: bool) -> Callable[[type], int] | UntypedDecorator:
+    return to_int if flag else UntypedDecorator()
+
+@instance_factory(False)
+class Instance: ...
+
+assert_type(Instance, type[Instance])
+"#,
+);
+
+testcase!(
+    test_class_decorator_behavior_all_union,
+    TestEnv::new().with_class_decorator_behavior(ClassDecoratorBehavior::All),
+    r#"
+from typing import Any, assert_type
+
+def factory(value):
+    if value:
+        return lambda cls: cls
+    return value
+
+@factory(True)
+class C: ...
+
+assert_type(C, Any)
+"#,
+);
+
+testcase!(
     test_class_decorator_behavior_default,
     r#"
 from typing import assert_type

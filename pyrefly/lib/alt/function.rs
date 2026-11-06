@@ -74,6 +74,7 @@ use crate::binding::binding::KeyDecorator;
 use crate::binding::binding::KeyLegacyTypeParam;
 use crate::binding::binding::KeyUndecoratedFunction;
 use crate::binding::classmethod::MethodReceiverKind;
+use crate::config::base::ClassDecoratorBehavior;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::TypeCheckContext;
@@ -2301,6 +2302,36 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Type {
         if self.stdlib.is_bootstrapping() {
             return decoratee;
+        }
+        if self.solver().config.class_decorator_behavior == ClassDecoratorBehavior::TypedOnly {
+            // Any untyped union member must preserve the class type.
+            let preserves_class = decorator.clone().into_unions().into_iter().any(|member| {
+                let instance_call = match &member {
+                    Type::ClassType(instance) => self.instance_as_dunder_call(instance),
+                    _ => None,
+                };
+                let callable = instance_call.as_ref().unwrap_or(&member);
+                matches!(callable, Type::Any(_))
+                    || callable
+                        .toplevel_callable_signatures()
+                        .any(|(signature, _)| {
+                            matches!(&signature.ret, Type::Any(_))
+                                || signature.ret.has_top_level_implicit_any()
+                                || callable.toplevel_func_metadata().is_some_and(|meta| {
+                                    meta.flags.is_return_inferred
+                                        && matches!(
+                                            &signature.ret,
+                                            Type::Type(inner) if matches!(
+                                                &**inner,
+                                                Type::Any(AnyStyle::Explicit)
+                                            )
+                                        )
+                                })
+                        })
+            });
+            if preserves_class {
+                return decoratee;
+            }
         }
         let preserves_class = match &decorator {
             Type::KwCall(call) => {
