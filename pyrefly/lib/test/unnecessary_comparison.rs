@@ -138,3 +138,57 @@ def f(x: Hashable):
         pass
 "#,
 );
+
+// A comparison is settled only by its operands' declarations. A flag assigned a literal and
+// reassigned through `global` or `nonlocal` keeps its literal type in flow analysis, which
+// does not see the reassignment. See https://github.com/meta/pyrefly/issues/5495.
+testcase!(
+    test_no_report_for_operands_only_inference_settles,
+    r#"
+import asyncio
+from typing import Literal
+
+FLAG = False
+
+def enable() -> None:
+    global FLAG
+    FLAG = True
+
+def reads_module_flag() -> None:
+    assert FLAG is True
+
+async def nonlocal_flag() -> None:
+    flag = False
+    async def worker() -> None:
+        nonlocal flag
+        flag = True
+    await asyncio.gather(worker())
+    assert flag is True
+
+def nonlocal_none() -> None:
+    x = None
+    def setter() -> None:
+        nonlocal x
+        x = 1
+    setter()
+    if x is not None:
+        pass
+
+class Resource:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def check(self) -> None:
+        self.close()
+        assert self.closed is True
+
+def declared(x: Literal[False], y: None) -> None:
+    if x is True:  # E: Identity comparison `False is True` is always False
+        pass
+    if y is True:  # E: Identity comparison `None is True` is always False
+        pass
+"#,
+);

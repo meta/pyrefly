@@ -13364,7 +13364,7 @@ def conditional_helper(shape: IntTuple, keep: bool, choose_branch: bool) -> IntT
 @type_shape_dsl_function
 def bool_local_is_not_none(shape: IntTuple) -> IntTuple:
     local = True
-    if local is None:  # E: Identity comparison
+    if local is None:
         return dsl.IntTuple((1,))
     return shape
 

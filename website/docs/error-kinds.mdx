@@ -2533,6 +2533,10 @@ def test1(user: User) -> None:
 ```
 
 This check is relatively conservative and only warns on limited cases where the comparison is highly likely to be redundant.
+An operand's type counts only when declarations fix it: a literal, an annotated variable or parameter,
+`def`, `class`, or a declared attribute or return type. A type that comes only from inference or flow
+narrowing does not count. For example, flow analysis does not see a variable assigned `False` being
+reassigned through `global` or `nonlocal`, so comparing that variable with `True` is not reported.
 
 ## unnecessary-type-conversion
 
