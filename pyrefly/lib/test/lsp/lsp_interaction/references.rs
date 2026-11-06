@@ -99,6 +99,64 @@ class C:
     interaction.shutdown().unwrap();
 }
 
+// https://github.com/meta/pyrefly/issues/5485
+// BUG: after `base.py` shifts, find-references on `Base.method` misses the override in `child.py`.
+#[test]
+fn test_references_to_parent_method_after_defining_file_shifts() {
+    let root = TempDir::with_prefix("pyrefly_references_parent_method_shift").unwrap();
+    let base = "class Base:\n    def method(self):\n        pass\n";
+    fs::write(root.path().join("base.py"), base).unwrap();
+    fs::write(
+        root.path().join("child.py"),
+        r#"from base import Base
+
+
+class Child(Base):
+    def method(self):
+        pass
+"#,
+    )
+    .unwrap();
+    let child_uri = Uri::from_file_path(root.path().join("child.py"))
+        .unwrap()
+        .to_string();
+
+    let telemetry = TestTelemetry::new();
+    let telemetry_events = telemetry.subscribe();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        telemetry: Box::new(telemetry),
+        ..Default::default()
+    });
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("base.py");
+    interaction.client.did_open("child.py");
+    interaction
+        .client
+        .references("base.py", 1, 9, false)
+        .expect_response(json!([
+            {
+                "range": {"start":{"line":4,"character":8},"end":{"line":4,"character":14}},
+                "uri": child_uri
+            },
+        ]))
+        .unwrap();
+
+    // `child.py` imports the disk copy of `base.py`, so save the edit as an editor does.
+    let shifted_base = base.replacen("\n", "\n\n", 1);
+    fs::write(root.path().join("base.py"), &shifted_base).unwrap();
+    interaction.client.did_change("base.py", &shifted_base);
+    interaction.client.did_save("base.py");
+    wait_for_disk_invalidation(&telemetry_events);
+    interaction
+        .client
+        .references("base.py", 2, 9, false)
+        .expect_response(json!([]))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
 #[test]
 fn test_parameter_references_in_unopened_file() {
     let root = get_test_files_root();
