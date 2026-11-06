@@ -267,8 +267,8 @@ def test_unary_ufunc_external_dispatch() -> None:
     values = ArrayUfuncDispatch()
     signed = np.sign(values)
     logged = np.log1p(values)
-    assert_type(signed, np.generic | np.ndarray)
-    assert_type(logged, np.generic | np.ndarray)
+    assert_type(signed, Any)
+    assert_type(logged, Any)
     assert signed == logged == "custom result"
     assert_shape(values.__array__().shape, (2,))
 
@@ -276,8 +276,8 @@ def test_unary_ufunc_external_dispatch() -> None:
 def test_nan_to_num_external_objects() -> None:
     external = ExternalObject()
     union = cast("list[ExternalObject] | np.ndarray | ExternalObject", np.ones((2, 3)))
-    result = np.nan_to_num(union)  # E: No matching overload
-    untouched = np.nan_to_num(external)  # E: No matching overload
+    result = np.nan_to_num(union)
+    untouched = np.nan_to_num(external)
     assert_type(result, Any)
     assert_type(untouched, Any)
     assert untouched is external

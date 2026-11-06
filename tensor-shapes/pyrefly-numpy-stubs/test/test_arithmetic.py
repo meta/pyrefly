@@ -193,33 +193,33 @@ def test_integer_array_shifts() -> None:
     values = np.full((2, 1), 8, dtype=np.uint64)
     counts = np.ones((1, 3), dtype=np.uint64)
 
-    right = values >> np.uint64(1)  # E: not supported
-    left = values << np.uint64(1)  # E: not supported
-    reflected_right = np.uint64(16) >> values  # E: not supported
-    reflected_left = np.uint64(1) << values  # E: not supported
-    broadcasted = values >> counts  # E: not supported
-    assert_type(right, Any)
-    assert_type(left, Any)
-    assert_shape(right.shape, IntTuple, runtime=(2, 1))
-    assert_shape(left.shape, IntTuple, runtime=(2, 1))
-    assert_shape(reflected_right.shape, IntTuple, runtime=(2, 1))
-    assert_shape(reflected_left.shape, IntTuple, runtime=(2, 1))
-    assert_shape(broadcasted.shape, IntTuple, runtime=(2, 3))
+    right = values >> np.uint64(1)
+    left = values << np.uint64(1)
+    reflected_right = np.uint64(16) >> values
+    reflected_left = np.uint64(1) << values
+    broadcasted = values >> counts
+    assert_type(right, np.ndarray[[2, 1], Any])
+    assert_type(left, np.ndarray[[2, 1], Any])
+    assert_shape(right.shape, (2, 1))
+    assert_shape(left.shape, (2, 1))
+    assert_shape(reflected_right.shape, (2, 1))
+    assert_shape(reflected_left.shape, (2, 1))
+    assert_shape(broadcasted.shape, (2, 3))
     assert right.tolist() == [[4], [4]]
     assert left.tolist() == [[16], [16]]
     with assert_raises(ValueError):
-        values >> np.ones((3, 2), dtype=np.uint64)  # E: not supported
+        values >> np.ones((3, 2), dtype=np.uint64)  # E: Cannot broadcast
     with assert_raises(TypeError):
         values >> 0.5  # E: not supported
 
 
 def test_shift_dtype_promotion_and_scalar_result() -> None:
     values = np.ones((2, 3), dtype=np.int8)
-    promoted = values << np.int64(1)  # E: not supported
-    scalar = np.array(8, dtype=np.uint64) >> np.uint64(1)  # E: not supported
-    assert_type(promoted, Any)
+    promoted = values << np.int64(1)
+    scalar = np.array(8, dtype=np.uint64) >> np.uint64(1)
+    assert_type(promoted, np.ndarray[[2, 3], Any])
     assert_type(scalar, Any)
-    assert_shape(promoted.shape, IntTuple, runtime=(2, 3))
+    assert_shape(promoted.shape, (2, 3))
     assert_shape(scalar.shape, IntTuple, runtime=())
     assert promoted.dtype == np.dtype(np.int64)
     assert isinstance(scalar, np.uint64)

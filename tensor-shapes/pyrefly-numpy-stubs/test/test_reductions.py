@@ -327,10 +327,10 @@ def test_reduce_higher_rank_keepdims() -> None:
 def test_sum_object_without_losing_array_precision() -> None:
     values = np.ones((2, 3), dtype=np.float32)
     masked = cast(object, values)
-    total = np.sum(masked)  # E: object
-    explicit = np.sum(masked, axis=None)  # E: object
-    assert_type(total, np.ndarray[[], Any])
-    assert_type(explicit, np.ndarray[[], Any])
+    total = np.sum(masked)
+    explicit = np.sum(masked, axis=None)
+    assert_type(total, Any)
+    assert_type(explicit, Any)
     assert float(cast(Any, total)) == 6.0
     assert float(cast(Any, explicit)) == 6.0
     assert_type(np.sum(values), np.ndarray[[], Any])

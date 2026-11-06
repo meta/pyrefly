@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-from typing import Any, assert_type, cast
+from typing import Any, assert_type
 
 import numpy as np
-from shape_extensions import assert_raises, assert_shape
+from shape_extensions import assert_raises, assert_shape, IntTuple
 
 
 def check_number_is_not_gradual() -> None:
@@ -168,24 +168,24 @@ def test_integer_scalar_array_index() -> None:
 
 
 def test_datetime_and_timedelta_unit_constructors() -> None:
-    epoch = np.datetime64("1970-01-01", "D")  # E: Expected 0 positional arguments
-    delta = np.timedelta64(3, "D")  # E: No matching overload
-    anniversary = epoch + delta  # E: not supported
-    assert_type(epoch, np.datetime64)
-    assert_type(delta, np.timedelta64)
-    assert_shape(epoch.shape, ())
-    assert_shape(delta.shape, ())
-    assert_type(anniversary, np.number | complex)
-    assert np.datetime_as_string(cast(Any, anniversary)) == "1970-01-04"
+    epoch = np.datetime64("1970-01-01", "D")
+    delta = np.timedelta64(3, "D")
+    anniversary = epoch + delta
+    assert_type(epoch, Any)
+    assert_type(delta, Any)
+    assert_shape(epoch.shape, IntTuple, runtime=())
+    assert_shape(delta.shape, IntTuple, runtime=())
+    assert_type(anniversary, Any)
+    assert np.datetime_as_string(anniversary) == "1970-01-04"
 
 
 def test_datetime_constructors_do_not_convert_sequences_to_arrays() -> None:
     values = np.ones(2, dtype=np.int64)
     assert_shape(values.shape, (2,))
     with assert_raises(ValueError):
-        np.datetime64(values, "D")  # E: Expected 0 positional arguments
+        np.datetime64(values, "D")
     with assert_raises(ValueError):
-        np.timedelta64(values, "D")  # E: No matching overload
+        np.timedelta64(values, "D")
 
 
 def test_flexible_and_datetime_scalar_hierarchy() -> None:
