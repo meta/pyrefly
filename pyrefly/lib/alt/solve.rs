@@ -82,6 +82,7 @@ use crate::alt::types::legacy_lookup::LegacyTypeParameterLookup;
 use crate::alt::types::yields::YieldFromResult;
 use crate::alt::types::yields::YieldResult;
 use crate::alt::unwrap::HintRef;
+use crate::binding::base_class::BaseClassExpr;
 use crate::binding::binding::AnnAssignHasValue;
 use crate::binding::binding::AnnotationStyle;
 use crate::binding::binding::AnnotationTarget;
@@ -3053,7 +3054,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.expr_infer(x, errors);
             }
             BindingExpect::TypeCheckBaseClassExpr(x) => {
-                self.expr_untype(x, TypeFormContext::BaseClassList, errors);
+                let ty = self.expr_untype(x, TypeFormContext::BaseClassList, errors);
+                if self
+                    .bindings()
+                    .shape_declarations
+                    .commented_bases
+                    .contains_key(&x.range())
+                    && let Some(base) = BaseClassExpr::from_expr(x)
+                {
+                    self.preserve_comment_base_identity(&base, ty, errors);
+                }
             }
             BindingExpect::Bool(x) => {
                 self.check_bool_expr(x, errors);

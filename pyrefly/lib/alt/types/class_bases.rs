@@ -224,6 +224,41 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         direct_base: bool,
         errors: &ErrorCollector,
     ) -> (TypeInfo, bool) {
+        if let Some(comment) = self
+            .bindings()
+            .shape_declarations
+            .comment_targets
+            .get(&expr.range())
+        {
+            let base_context = TypeFormContext::BaseClassList;
+            let context = if direct_base {
+                base_context
+            } else {
+                TypeFormContext::TypeArgument(&base_context)
+            };
+            let ty = self.comment_shaped_type(&expr.to_expr(), comment, context, errors);
+            // Preserve strict-alias metadata and the direct `int` base without repeating
+            // missing-argument errors that the comment's additional arguments may resolve.
+            let base_errors = self.error_collector();
+            let (base, nested_strict) =
+                self.base_class_expr_infer_without_shape_comment(expr, direct_base, &base_errors);
+            let has_strict =
+                nested_strict || self.is_type_alias_with_pydantic_strict_metadata(base.ty());
+            let inherited = match ty {
+                Type::Int(_) if direct_base => base.into_ty(),
+                ty => self.heap.mk_type_of(ty),
+            };
+            return (TypeInfo::of_ty(inherited), has_strict);
+        }
+        self.base_class_expr_infer_without_shape_comment(expr, direct_base, errors)
+    }
+
+    fn base_class_expr_infer_without_shape_comment(
+        &self,
+        expr: &BaseClassExpr,
+        direct_base: bool,
+        errors: &ErrorCollector,
+    ) -> (TypeInfo, bool) {
         match expr {
             BaseClassExpr::Name(x) => (
                 self.get(&Key::BoundName(ShortIdentifier::expr_name(x)))
@@ -281,6 +316,55 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    /// Comments may specialize a written base, but cannot change its nominal ancestry.
+    pub(crate) fn preserve_comment_base_identity(
+        &self,
+        base: &BaseClassExpr,
+        ty: Type,
+        errors: &ErrorCollector,
+    ) -> Type {
+        let Some(&comment_range) = self
+            .bindings()
+            .shape_declarations
+            .commented_bases
+            .get(&base.range())
+        else {
+            return ty;
+        };
+        let metadata_errors = self.error_collector();
+        let nominal = self.base_class_expr_infer_for_metadata(base, &metadata_errors);
+        let Some(original) = self.untype_opt(nominal, base.range(), &metadata_errors) else {
+            return ty;
+        };
+        let class_of = |ty: &Type| match ty {
+            Type::ClassType(class) => Some(class.class_object().dupe()),
+            Type::Tuple(_) => Some(self.stdlib.tuple_object().dupe()),
+            Type::TypedDict(TypedDict::TypedDict(dict)) => Some(dict.class_object().dupe()),
+            Type::ShapedArray(array) => Some(array.base_class.class_object().dupe()),
+            Type::Int(_) => Some(self.stdlib.int().class_object().dupe()),
+            _ => None,
+        };
+        if let Some(original_class) = class_of(&original) {
+            let same_class = match class_of(&ty) {
+                Some(class) => class == original_class,
+                None => ty.is_any(),
+            };
+            if !same_class {
+                self.error(
+                    errors,
+                    comment_range,
+                    ErrorKind::InvalidAnnotation,
+                    "A shape comment cannot change the nominal base class".to_owned(),
+                );
+                return original;
+            }
+            if matches!(ty, Type::Int(_)) {
+                return original;
+            }
+        }
+        ty
+    }
+
     fn is_type_alias_with_pydantic_strict_metadata(&self, ty: &Type) -> bool {
         if let Type::TypeAlias(ta) = ty {
             let alias = self.get_type_alias(ta);
@@ -314,10 +398,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .is_type_alias_with_pydantic_strict_metadata(inferred_ty.ty())
             || has_strict_from_infer;
         let ty = self.untype(inferred_ty.into_ty(), range, errors);
-        (
-            self.validate_type_form(ty, range, type_form_context, errors),
-            has_pydantic_strict_metadata,
-        )
+        let ty = if matches!(type_form_context, TypeFormContext::BaseClassList) {
+            self.preserve_comment_base_identity(base_expr, ty, errors)
+        } else {
+            ty
+        };
+        let ty = self.validate_type_form(ty, range, type_form_context, errors);
+        let ty = match ty {
+            Type::ShapedArray(array)
+                if matches!(type_form_context, TypeFormContext::BaseClassList)
+                    && self
+                        .bindings()
+                        .shape_declarations
+                        .commented_bases
+                        .contains_key(&range) =>
+            {
+                self.heap.mk_class_type(array.base_class)
+            }
+            ty => ty,
+        };
+        (ty, has_pydantic_strict_metadata)
     }
 
     /// Replace raw legacy type variables in a call-base type with the class's type parameters.

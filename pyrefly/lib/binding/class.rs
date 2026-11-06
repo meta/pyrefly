@@ -312,6 +312,25 @@ impl<'a> BindingsBuilder<'a> {
         let mut legacy = LegacyTParamCollector::new(x.type_params.is_some());
         let bases = x.bases().map(|base| {
             let mut base = base.clone();
+            if self.shape_comments.annotations.contains_key(&base.range())
+                && !matches!(
+                    self.base_class_of(base.clone(), BaseClassSite::ClassStatement),
+                    BaseClass::BaseClassExpr(_)
+                )
+            {
+                let comments = self
+                    .shape_comments
+                    .annotations
+                    .shift_remove(&base.range())
+                    .expect("the base has shape comments");
+                for comment in comments {
+                    self.error(
+                        comment.range,
+                        ErrorKind::InvalidAnnotation,
+                        "Shape comments cannot specialize this base class form".to_owned(),
+                    );
+                }
+            }
             // If this base was pre-synthesized as a namedtuple, return the synthesized base
             // directly, skipping ensure_type and base_class_of (already processed during synthesis).
             if let Expr::Call(call) = &base
@@ -336,8 +355,16 @@ impl<'a> BindingsBuilder<'a> {
                 }
                 _ => {}
             }
+            let base_comment_range = self
+                .shape_comments
+                .annotations
+                .get(&base.range())
+                .and_then(|comments| comments.first())
+                .map(|comment| comment.range);
             // If it's really obvious this can't be a legacy type var then don't even record it.
             let legacy = match &base {
+                // A comment can introduce type variables even when its written base is bare.
+                _ if base_comment_range.is_some() => Some(&mut legacy),
                 Expr::Subscript(ExprSubscript { value, slice, .. }) => {
                     // Syntactically, this may be a legacy type var.
                     if matches!(&**slice, Expr::Name(x) if scoped_type_param_names.contains(&x.id))
@@ -364,6 +391,11 @@ impl<'a> BindingsBuilder<'a> {
                 },
             );
 
+            if let Some(comment_range) = base_comment_range {
+                self.shape_declarations
+                    .commented_bases
+                    .insert(base.range(), comment_range);
+            }
             let base_class = self.base_class_of(base.clone(), BaseClassSite::ClassStatement);
             if matches!(base_class, BaseClass::Call(..)) {
                 self.call_base_classes

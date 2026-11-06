@@ -747,7 +747,6 @@ def check(e: Encoder[3], x: ndarray[[3]]) -> None:
 );
 
 testcase!(
-    bug = "Shape comments cannot specialize base classes",
     test_shaped_comments_base_dependent_and_concrete,
     shaped_env(),
     r#"
@@ -762,12 +761,12 @@ class Base:
 
 # shapes: K
 class Derived(
-    Base,  # shaped: K, K + 1  # E: must end the line
+    Base,  # shaped: K, K + 1
 ):
     own: ndarray  # shaped: [K]
 
 class Fixed(
-    Base,  # shaped: 4, 8  # E: must end the line
+    Base,  # shaped: 4, 8
 ): ...
 
 # Matching spellings do not implicitly connect a subclass to its base.
@@ -776,22 +775,20 @@ class Gradual(Base): ...
 
 def check(d: Derived[3], f: Fixed, g: Gradual[3, 4]) -> None:
     assert_type(d.own, ndarray[[3]])
-    assert_type(d.weight, ndarray[[int, int]])
-    assert_type(d.output(), ndarray[[int, int]])
-    assert_type(f.weight, ndarray[[int, int]])
+    assert_type(d.weight, ndarray[[3, 4]])
+    assert_type(d.output(), ndarray[[4, 3]])
+    assert_type(f.weight, ndarray[[4, 8]])
     assert_type(g.weight, ndarray[[int, int]])
 "#,
 );
 
 testcase!(
-    bug = "Shape comments cannot specialize base classes",
     test_shaped_comments_base_ordinary_and_variadic_parameters,
     shaped_env(),
     r#"
 # enable-shape-type-comments
 from typing import Generic, TypeVar, assert_type
 from arrays import ndarray
-from shape_extensions import IntTuple
 
 T = TypeVar("T")
 
@@ -802,21 +799,22 @@ class Base(Generic[T]):
 
 # shapes: *Batch, N
 class Derived[T](
-    Base[T],  # shaped: Batch, N + 1  # E: must end the line
+    Base[T],  # shaped: Batch, N + 1
 ): ...
 
 class Fixed(
-    Base[str],  # shaped: [2, 7], 4  # E: must end the line
+    Base[str],  # shaped: [2, 7], 4
 ): ...
 
 def check(d: Derived[int, [2, 7], 3], f: Fixed) -> None:
     assert_type(d.item, int)
+    assert_type(d.value, ndarray[[2, 7, 4]])
     assert_type(f.item, str)
+    assert_type(f.value, ndarray[[2, 7, 4]])
 "#,
 );
 
 testcase!(
-    bug = "Shape comments cannot refine base type arguments",
     test_shaped_comments_base_nested_components,
     shaped_env(),
     r#"
@@ -830,18 +828,18 @@ class Envelope[T]:
 # shapes: M
 class Derived(
     Envelope[list[
-        ndarray[tuple[int, int], float],  # shaped: [0] = [M, M + 1]  # E: must end the line
+        ndarray[tuple[int, int], float],  # shaped: [0] = [M, M + 1]
     ]],
 ): ...
 
 # shapes: M
 class Selected(
-    Envelope[ndarray[tuple[int, int], float]],  # shaped: [0][0] = [M, M + 1]  # E: must end the line
+    Envelope[ndarray[tuple[int, int], float]],  # shaped: [0][0] = [M, M + 1]
 ): ...
 
 def check(d: Derived[3], s: Selected[3]) -> None:
-    assert_type(d.item, list[ndarray[[int, int], float]])
-    assert_type(s.item, ndarray[[int, int], float])
+    assert_type(d.item, list[ndarray[[3, 4], float]])
+    assert_type(s.item, ndarray[[3, 4], float])
 "#,
 );
 
@@ -850,17 +848,16 @@ testcase!(
     shaped_env(),
     r#"
 # enable-shape-type-comments
-from arrays import ndarray
 
 class Base[T = int]:
     item: T
 class Other: ...
 
 class Replaced(
-    Base,  # shaped: = Other  # E: must end the line
+    Base,  # shaped: = Other  # E: cannot replace a whole base class
 ): ...
 
-class Ambiguous(Base, Other): ...  # shaped: int  # E: must end the line
+class Ambiguous(Base, Other): ...  # shaped: int  # E: could belong to several
 
 class Keywords(
     Base,
@@ -870,13 +867,12 @@ class Keywords(
 # shapes: M
 class Nested:
     class Inner(
-        Base,  # shaped: M  # E: must end the line
+        Base,  # shaped: M  # E: Could not find name `M`
     ): ...
 "#,
 );
 
 testcase!(
-    bug = "Shape comments cannot compose generic bases",
     test_shaped_comments_base_composition_and_recursion,
     shaped_env(),
     r#"
@@ -895,13 +891,13 @@ class Right:
 
 # shapes: K
 class Combined(
-    Left,  # shaped: K  # E: must end the line
-    Right,  # shaped: K + 1  # E: must end the line
+    Left,  # shaped: K
+    Right,  # shaped: K + 1
 ): ...
 
 # shapes: K
 class Chained(
-    Combined,  # shaped: K + 1  # E: must end the line
+    Combined,  # shaped: K + 1
 ): ...
 
 # shapes: M
@@ -911,20 +907,20 @@ class Tree[T = object]:
 
 # shapes: N
 class Recursive(
-    Tree,  # shaped: Recursive[N], N  # E: must end the line
+    Tree,  # shaped: Recursive[N], N
 ): ...
 
 class SizedInt(
-    int,  # shaped: 3  # E: must end the line
+    int,  # shaped: 3
 ): ...
 
 def check(c: Combined[3], chain: Chained[3], r: Recursive[3], i: SizedInt) -> int:
-    assert_type(c.left, Int[int])
-    assert_type(c.right, Int[int])
-    assert_type(chain.left, Int[int])
-    assert_type(chain.right, Int[int])
-    assert_type(r.child, object)
-    assert_type(r.value, ndarray[[int]])
+    assert_type(c.left, Int[3])
+    assert_type(c.right, Int[4])
+    assert_type(chain.left, Int[4])
+    assert_type(chain.right, Int[5])
+    assert_type(r.child, Recursive[3])
+    assert_type(r.value, ndarray[[3]])
     return i
 "#,
 );
@@ -943,39 +939,38 @@ class Base[T = int]: ...
 class Bounded[N: IntVar]: ...
 
 class TooMany(
-    Base,  # shaped: int, int  # E: must end the line
+    Base,  # shaped: int, int  # E: Expected 1 type argument
 ): ...
 
 class WrongBound(
-    Bounded,  # shaped: str  # E: must end the line
+    Bounded,  # shaped: str  # E: Tensor shape dimensions must be integer literals or type variables
 ): ...
 
 class OutOfRange(
-    Base[int],  # shaped: [1] = str  # E: must end the line
+    Base[int],  # shaped: [1] = str  # E: out of range
 ): ...
 
 class GenericForm(
-    Generic[T],  # shaped: int  # E: must end the line
+    Generic[T],  # shaped: int  # E: cannot specialize this base class form
 ): ...
 
 class ProtocolForm(
-    Protocol[T],  # shaped: int  # E: must end the line
+    Protocol[T],  # shaped: int  # E: cannot specialize this base class form
 ):
     value: T
 
 class NamedTupleForm(
-    namedtuple("Record", ["item"]),  # shaped: int  # E: must end the line
+    namedtuple("Record", ["item"]),  # shaped: int  # E: cannot specialize this base class form
 ): ...
 
 def factory() -> type[Base[int]]: ...
 class DynamicForm(
-    factory(),  # shaped: int  # E: must end the line
+    factory(),  # shaped: int  # E: cannot specialize this base class form
 ): ...
 "#,
 );
 
 testcase!(
-    bug = "Base-comment payloads are not yet supported",
     test_shaped_comments_base_payload_typevars,
     shaped_env(),
     r#"
@@ -988,14 +983,14 @@ class Namespace:
     class Box[U = object]:
         item: U
 class Child(
-    Box,  # shaped: T  # E: must end the line
+    Box,  # shaped: T
 ): ...
 class Qualified(
-    Namespace.Box,  # shaped: T  # E: must end the line
+    Namespace.Box,  # shaped: T
 ): ...
-def check(c: Child, q: Qualified) -> None:
-    assert_type(c.item, object)
-    assert_type(q.item, object)
+def check(c: Child[int], q: Qualified[str]) -> None:
+    assert_type(c.item, int)
+    assert_type(q.item, str)
 "#,
 );
 
@@ -1012,15 +1007,15 @@ class A:
 class B:
     b: str
 class Selected(
-    Identity[A],  # shaped: [0] = B  # E: must end the line
+    Identity[A],  # shaped: [0] = B  # E: cannot change the nominal base class
 ): ...
 class Component(
     Identity[
-        A,  # shaped: = B  # E: must end the line
+        A,  # shaped: = B  # E: cannot change the nominal base class
     ],
 ): ...
 class Tupled(
-    tuple[int, int],  # shaped: [3, 4]  # E: must end the line
+    tuple[int, int],  # shaped: [3, 4]  # E: tuple base must refine its type arguments
 ): ...
 def check(s: Selected, c: Component, p: Tupled) -> None:
     assert_type(s.a, int)
@@ -1048,11 +1043,13 @@ class Tree[T: Comparable]:
 # shapes: N
 class Recursive(
     Comparable,
-    Tree,  # shaped: Recursive[N], N  # E: must end the line
+    Tree,  # shaped: Recursive[N], N
 ): ...
 def takes_comparable(c: Comparable) -> None: ...
 def check(i: Inline[3], r: Recursive[3]) -> None:
     assert_type(i.value, Int[3])
+    assert_type(r.child, Recursive[3])
+    assert_type(r.value, Int[3])
     takes_comparable(r)
 "#,
 );
@@ -1066,13 +1063,12 @@ class Box[T, U = int]: ...
 type Alias[T, U = int] = Box[T, U]
 class Plain(Alias[int]): ...  # E: Cannot use scoped type alias
 class Commented(
-    Alias[int],  # shaped: str  # E: must end the line  # E: Cannot use scoped type alias
+    Alias[int],  # shaped: str  # E: Cannot use scoped type alias
 ): ...
 "#,
 );
 
 testcase!(
-    bug = "Shape comments cannot specialize registered array bases",
     test_shaped_comments_base_registered_array,
     legacy_shaped_array_env(),
     r#"
@@ -1083,10 +1079,10 @@ from shape_extensions import IntTuple, shaped_array
 class Array[Shape: IntTuple = IntTuple]:
     shape: Shape
 class Image(
-    Array,  # shaped: [3, 4]  # E: must end the line  # E: Invalid base class
+    Array,  # shaped: [3, 4]
 ): ...
 def check(i: Image) -> None:
-    assert_type(i.shape, tuple[Literal[3], Literal[4]])  # E: assert_type
+    assert_type(i.shape, tuple[Literal[3], Literal[4]])
 "#,
 );
 

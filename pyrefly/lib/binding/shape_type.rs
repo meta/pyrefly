@@ -164,6 +164,8 @@ pub struct ShapeDeclarations {
     scopes: Vec<(TextRange, Arc<ShapeDeclaration>)>,
     classes: Vec<(TextRange, Idx<KeyClass>)>,
     pub(crate) comment_targets: SmallMap<TextRange, BoundShapeComment>,
+    /// A diagnostic range for each commented base, avoiding scans of unrelated annotations.
+    pub(crate) commented_bases: SmallMap<TextRange, TextRange>,
     /// Binding replaces shape strings with parsed syntax, so keep their original
     /// metadata for aliases that must represent the runtime `Annotated` value.
     shaped_annotations: SmallMap<TextRange, Box<str>>,

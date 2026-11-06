@@ -1593,7 +1593,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     // To avoid circular computation on targs, we have a special version of `expr_infer` that does not look into any subscript of any expr
-    fn base_class_expr_infer_for_metadata(
+    pub(crate) fn base_class_expr_infer_for_metadata(
         &self,
         expr: &BaseClassExpr,
         errors: &ErrorCollector,
@@ -1659,7 +1659,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             && matches!(quantified.restriction(), Restriction::Unrestricted)
                             && let Some(tparam) = forall.tparams.as_vec().first()
                             && *quantified == *tparam
-                            && let Some(subscript_base_expr) = BaseClassExpr::from_expr(slice) =>
+                            && let [argument] = Ast::unpack_slice(slice)
+                            && let Some(subscript_base_expr) =
+                                BaseClassExpr::from_expr(argument) =>
                     {
                         self.base_class_expr_infer_for_metadata(&subscript_base_expr, errors)
                     }
@@ -1808,6 +1810,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 match self.untype_opt(ty.clone(), x.range(), &errors) {
                     None => BaseClassParseResult::InvalidType(ty, x.range()),
+                    Some(Type::ShapedArray(array))
+                        if self
+                            .bindings()
+                            .shape_declarations
+                            .commented_bases
+                            .contains_key(&x.range()) =>
+                    {
+                        parse_base_class_type(self.heap.mk_class_type(array.base_class))
+                    }
                     Some(ty) => parse_base_class_type(ty),
                 }
             }
