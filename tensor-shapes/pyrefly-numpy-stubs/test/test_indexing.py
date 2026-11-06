@@ -174,6 +174,49 @@ def test_array_indexing_falls_back_gradually() -> None:
     assert_shape(values[rows, (0, 1)].shape, IntTuple, runtime=(2,))
 
 
+def test_vector_integer_array_gather_uses_index_shape() -> None:
+    values = np.ones(5)
+    rows = np.zeros(3, dtype=np.intp)
+    grid = np.zeros((2, 4), dtype=np.int64)
+
+    assert_shape(values[rows].shape, IntTuple, runtime=(3,))
+    assert_shape(values[grid].shape, IntTuple, runtime=(2, 4))
+    assert_type(values[rows].dtype, np.dtype[np.float64])
+
+
+def test_vector_boolean_mask_has_data_dependent_length() -> None:
+    values = np.ones(5)
+    mask = np.arange(5) % 2 == 0
+
+    assert_shape(mask.shape, (5,))
+    # The selected length depends on the mask's values, not on its length.
+    assert_shape(values[mask].shape, IntTuple, runtime=(3,))
+    assert_type(values[mask].dtype, np.dtype[np.float64])
+
+
+def test_array_index_on_unknown_rank_stays_gradual() -> None:
+    def check_unknown(
+        values: np.ndarray, rows: np.ndarray[[3], np.dtype[np.intp]]
+    ) -> None:
+        # An unknown-rank receiver may have trailing axes.
+        assert_shape(values[rows].shape, IntTuple, runtime=(3, 2))
+
+    check_unknown(np.ones((5, 2)), np.zeros(3, dtype=np.intp))
+
+
+def test_array_index_rejects_rank_zero_receiver() -> None:
+    scalar = np.ones(())
+    rows = np.zeros(3, dtype=np.intp)
+
+    assert_shape(scalar.shape, ())
+    try:
+        scalar[rows]
+    except IndexError:
+        pass
+    else:
+        raise AssertionError("expected NumPy to reject indexing a rank-zero array")
+
+
 def test_other_valid_indices_fall_back_gradually() -> None:
     values = np.ones((5, 3))
     scalar = np.int64()

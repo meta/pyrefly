@@ -326,3 +326,29 @@ def test_clip_float_bounds_can_promote_integer_dtype() -> None:
     assert_shape(bounded.shape, (2, 3))
     assert clipped.dtype == np.dtype(np.float64)
     assert bounded.dtype == np.dtype(np.float64)
+
+
+def test_nan_to_num_preserves_array_shape() -> None:
+    vector = np.full(3, np.nan)
+    matrix = np.ones((2, 3))
+
+    assert_shape(np.nan_to_num(vector).shape, (3,))
+    assert_shape(
+        np.nan_to_num(matrix, copy=False, nan=0.0, posinf=1.0, neginf=-1.0).shape,
+        (2, 3),
+    )
+    assert_type(np.nan_to_num(matrix).dtype, np.dtype[np.float64])
+    assert_shape(np.nan_to_num([1.0, np.nan]).shape, IntTuple, runtime=(2,))
+    assert np.nan_to_num(vector).tolist() == [0.0, 0.0, 0.0]
+
+
+def test_nan_to_num_rank_zero_array_returns_scalar() -> None:
+    scalar = np.ones(())
+
+    string_scalar = np.str_("hello")
+    assert_type(np.nan_to_num(string_scalar), np.str_)
+    assert isinstance(np.nan_to_num(string_scalar), np.str_)
+
+    assert_shape(scalar.shape, ())
+    assert_type(np.nan_to_num(scalar), np.ndarray[[], np.dtype[np.float64]])
+    assert isinstance(np.nan_to_num(scalar), np.float64)
