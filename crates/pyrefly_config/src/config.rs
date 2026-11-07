@@ -622,6 +622,10 @@ pub struct ConfigFile {
     #[serde(skip)]
     pub search_path_from_args: Vec<PathBuf>,
 
+    /// Set only by the `--reveal-type-qualified-names` command-line flag.
+    #[serde(skip)]
+    pub reveal_type_qualified_names: bool,
+
     /// The list of directories where imports are
     /// imported from, including type checked files.
     /// Does not include command-line overrides or the import root!
@@ -801,6 +805,7 @@ impl Default for ConfigFile {
                 skip_interpreter_query: false,
             },
             search_path_from_args: Vec::new(),
+            reveal_type_qualified_names: false,
             search_path_from_file: Vec::new(),
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -1148,17 +1153,30 @@ impl ConfigFile {
         ));
         if !self.disable_search_path_heuristics {
             result.push(ImportLookupPathPart::ImportRoot(self.import_root.as_ref()));
-            result.push(ImportLookupPathPart::FallbackSearchPath(
+        }
+        let fallback_search_path = (!self.disable_search_path_heuristics).then(|| {
+            ImportLookupPathPart::FallbackSearchPath(
                 &self.fallback_search_path,
                 origin.and_then(|p| p.parent()),
-            ));
-        }
+            )
+        });
+        // A directory-relative fallback search path is only consulted when everything
+        // else fails, so it comes after the site package path.
+        let (fallback_before_site_packages, fallback_after_site_packages) =
+            match self.fallback_search_path {
+                FallbackSearchPath::DirectoryRelative(_) => (None, fallback_search_path),
+                FallbackSearchPath::Explicit(_) | FallbackSearchPath::Empty => {
+                    (fallback_search_path, None)
+                }
+            };
+        result.extend(fallback_before_site_packages);
         result.push(ImportLookupPathPart::SitePackagePath(
             self.python_environment.site_package_path.as_ref().unwrap(),
         ));
         result.push(ImportLookupPathPart::InterpreterSitePackagePath(
             &self.python_environment.interpreter_site_package_path,
         ));
+        result.extend(fallback_after_site_packages);
         result
     }
 
@@ -1309,6 +1327,14 @@ impl ConfigFile {
                  // we can use unwrap here, because the value in the root config must
                  // be set in `ConfigFile::configure()`.
                  self.root.treat_all_caps_as_final.unwrap())
+    }
+
+    pub fn infer_param_types_from_docstring(&self, path: &ModulePath) -> bool {
+        self.get_from_config_overrides(ConfigBase::get_infer_param_types_from_docstring, path)
+            .unwrap_or_else(||
+                 // we can use unwrap here, because the value in the root config must
+                 // be set in `ConfigFile::configure()`.
+                 self.root.infer_param_types_from_docstring.unwrap())
     }
 
     pub fn enabled_ignores(&self, path: &ModulePath) -> Cow<'_, SmallSet<Tool>> {
@@ -1802,6 +1828,7 @@ impl ConfigFile {
             apply_preset_default!(type_ignore_unknown_tag_behavior);
             apply_preset_default!(replace_untyped_imports_with_any);
             apply_preset_default!(treat_all_caps_as_final);
+            apply_preset_default!(infer_param_types_from_docstring);
         }
 
         if self.root.errors.is_none() {
@@ -1870,6 +1897,10 @@ impl ConfigFile {
 
         if self.root.treat_all_caps_as_final.is_none() {
             self.root.treat_all_caps_as_final = Some(false);
+        }
+
+        if self.root.infer_param_types_from_docstring.is_none() {
+            self.root.infer_param_types_from_docstring = Some(false);
         }
 
         if self.root.type_ignore_unknown_tag_behavior.is_none() {
@@ -2725,6 +2756,7 @@ mod tests {
                 .unwrap(),
                 project_excludes: Globs::new(vec!["tests/untyped/**".to_owned()]).unwrap(),
                 search_path_from_args: Vec::new(),
+                reveal_type_qualified_names: false,
                 search_path_from_file: vec![PathBuf::from("../..")],
                 disable_search_path_heuristics: false,
                 enable_fallback_search_path: false,
@@ -2786,6 +2818,7 @@ mod tests {
                     spec_compliant_overloads: None,
                     legacy_overload_expansion: None,
                     treat_all_caps_as_final: None,
+                    infer_param_types_from_docstring: None,
                 },
                 source_db: Default::default(),
                 target_configs: Default::default(),
@@ -2817,6 +2850,7 @@ mod tests {
                         spec_compliant_overloads: None,
                         legacy_overload_expansion: None,
                         treat_all_caps_as_final: None,
+                        infer_param_types_from_docstring: None,
                     }
                 }],
                 coverage: CoverageConfig {
@@ -3135,6 +3169,7 @@ mod tests {
                 .unwrap(),
             project_excludes: Globs::new(vec!["tests/untyped/**".to_owned()]).unwrap(),
             search_path_from_args: Vec::new(),
+            reveal_type_qualified_names: false,
             search_path_from_file: vec![PathBuf::from("../..")],
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -3224,6 +3259,7 @@ mod tests {
                 skip_interpreter_query: false,
             },
             search_path_from_args: Vec::new(),
+            reveal_type_qualified_names: false,
             search_path_from_file: search_path,
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -3511,6 +3547,7 @@ output-format = "omit-errors"
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
                 treat_all_caps_as_final: None,
+                infer_param_types_from_docstring: None,
             },
             sub_configs: vec![
                 SubConfig {
@@ -4014,6 +4051,20 @@ output-format = "omit-errors"
             errors.severity(ErrorKind::BadOverrideParamName),
             Severity::Ignore
         );
+    }
+
+    #[test]
+    fn test_infer_param_types_from_docstring() {
+        let path = ModulePath::filesystem(PathBuf::from("/project/foo.py"));
+
+        let mut config = ConfigFile::default();
+        config.configure();
+        assert!(!config.infer_param_types_from_docstring(&path));
+
+        let mut config =
+            ConfigFile::parse_config("infer-param-types-from-docstring = true").unwrap();
+        config.configure();
+        assert!(config.infer_param_types_from_docstring(&path));
     }
 
     #[test]
@@ -4891,6 +4942,7 @@ output-format = "omit-errors"
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
                 treat_all_caps_as_final: None,
+                infer_param_types_from_docstring: None,
             },
             sub_configs: vec![],
             ..Default::default()
@@ -4935,6 +4987,7 @@ output-format = "omit-errors"
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
                 treat_all_caps_as_final: None,
+                infer_param_types_from_docstring: None,
             },
             sub_configs: vec![],
             ..Default::default()
@@ -5592,6 +5645,7 @@ bad-override = "error"
 
         let mut config = ConfigFile {
             search_path_from_args: vec![mylib_dir.clone()],
+            reveal_type_qualified_names: false,
             import_root: Some(root.path().to_path_buf()),
             interpreters: Interpreters {
                 skip_interpreter_query: true,

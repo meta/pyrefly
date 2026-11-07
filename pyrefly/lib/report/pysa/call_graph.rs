@@ -21,6 +21,7 @@ use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::callable::Param;
 use pyrefly_types::callable::Params;
 use pyrefly_types::class::Class;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_types::typed_dict::TypedDict;
 use pyrefly_types::types::BoundMethod;
@@ -1451,7 +1452,10 @@ impl DirectCall {
                     Self::from_bool(false)
                 }
                 Some(Type::BoundMethod(bm))
-                    if matches!(bm.obj, Type::ClassDef(_) | Type::Type(_)) =>
+                    if matches!(
+                        bm.obj,
+                        Type::ClassDef(_) | Type::SpecializedClassDef(_) | Type::Type(_)
+                    ) =>
                 {
                     Self::from_bool(true)
                 }
@@ -1483,7 +1487,7 @@ impl DirectCall {
 fn loosely_matches_class(ty: &Type, class: &Class, context: &ModuleContext) -> bool {
     match ty {
         Type::ClassType(class_type) => {
-            !class_type.is_builtin("object")
+            !class_type.is(KnownClass::Object)
                 && has_superclass(class, class_type.class_object(), context)
         }
         Type::Union(union) => union

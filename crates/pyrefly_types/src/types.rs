@@ -54,6 +54,7 @@ use crate::function::PropertyRole;
 use crate::heap::TypeHeap;
 use crate::identity::IdentityIgnored;
 use crate::keywords::KwCall;
+use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::literal::LitStyle;
 use crate::literal::Literal;
@@ -244,22 +245,30 @@ impl TParams {
     }
 }
 
+/// The type arguments of a class instance, together with the class's type parameters.
+///
+/// Invariant: the field is `None` exactly when there are no type arguments. Most class
+/// types are not generic, so they carry no allocation, and cloning or dropping them
+/// touches no reference count shared with other threads.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[derive(TypeEq)]
-pub struct TArgs(Arc<(Arc<TParams>, Box<[Type]>)>);
+pub struct TArgs(Option<Arc<(Arc<TParams>, Box<[Type]>)>>);
 
 impl Visit<Type> for TArgs {
     fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
         // TParams describe the declaration; only applied arguments are contained types.
-        self.0.1.visit(f);
+        for ty in self.as_slice() {
+            ty.visit(f);
+        }
     }
 }
 
 impl VisitMut<Type> for TArgs {
     fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
         // Arc<TParams> has a no-op VisitMut, so we only need to visit the types.
-        let inner = Arc::make_mut(&mut self.0);
-        inner.1.visit_mut(f);
+        for ty in self.as_mut() {
+            ty.visit_mut(f);
+        }
     }
 }
 
@@ -268,41 +277,57 @@ impl TArgs {
         if tparams.len() != targs.len() {
             panic!("TParams and TArgs must have the same length");
         }
-        Self(Arc::new((tparams, targs.into_boxed_slice())))
+        if targs.is_empty() {
+            return Self(None);
+        }
+        Self(Some(Arc::new((tparams, targs.into_boxed_slice()))))
     }
 
     pub fn tparams(&self) -> &TParams {
-        &self.0.0
+        match &self.0 {
+            Some(inner) => &inner.0,
+            None => TParams::empty_ref(),
+        }
     }
 
     pub fn iter_paired(&self) -> impl ExactSizeIterator<Item = (&Quantified, &Type)> {
-        self.0.0.iter().zip(self.0.1.iter())
+        self.tparams().iter().zip(self.as_slice().iter())
     }
 
     pub fn iter_paired_mut(&mut self) -> impl ExactSizeIterator<Item = (&Quantified, &mut Type)> {
-        let inner = Arc::make_mut(&mut self.0);
-        inner.0.iter().zip(inner.1.iter_mut())
+        let (tparams, targs) = self.split_mut();
+        tparams.iter().zip(targs.iter_mut())
     }
 
     pub fn len(&self) -> usize {
-        self.0.1.len()
+        self.as_slice().len()
     }
 
     pub fn as_slice(&self) -> &[Type] {
-        &self.0.1
+        match &self.0 {
+            Some(inner) => &inner.1,
+            None => &[],
+        }
     }
 
     pub fn as_mut(&mut self) -> &mut [Type] {
-        &mut Arc::make_mut(&mut self.0).1
+        self.split_mut().1
     }
 
+    /// Mutable access to the arguments. Without arguments this neither allocates nor
+    /// touches a reference count; with them, a shared allocation is copied first.
     pub fn split_mut(&mut self) -> (&TParams, &mut [Type]) {
-        let inner = Arc::make_mut(&mut self.0);
-        (&inner.0, &mut inner.1)
+        match &mut self.0 {
+            Some(inner) => {
+                let inner = Arc::make_mut(inner);
+                (&inner.0, &mut inner.1)
+            }
+            None => (TParams::empty_ref(), &mut []),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.1.is_empty()
+        self.0.is_none()
     }
 
     /// Returns the number of type arguments to display, stripping trailing args
@@ -329,13 +354,14 @@ impl TArgs {
     /// Unions in the substituted arguments are simplified, so type arguments that differ only in
     /// the order, nesting or duplication of union members compare equal.
     pub fn substitute_with(&self, substitution: &Substitution) -> Self {
+        let Some((tparams, targs)) = self.0.as_deref() else {
+            return Self::default();
+        };
         if substitution.0.is_empty() {
             return self.clone();
         }
         let heap = TypeHeap::new();
-        let tys = self
-            .0
-            .1
+        let tys = targs
             .iter()
             .map(|ty| {
                 let mut ty = substitution.substitute_into(ty.clone());
@@ -351,7 +377,7 @@ impl TArgs {
                 ty
             })
             .collect();
-        Self::new(self.0.0.dupe(), tys)
+        Self::new(tparams.dupe(), tys)
     }
 
     pub fn substitution_map(&self) -> SmallMap<&Quantified, &Type> {
@@ -954,12 +980,14 @@ pub enum Type {
     /// up the class `tparams` and setting defaults using gradual types: for
     /// example `list` in an annotation position means `list[Any]`.
     ClassDef(Class),
+    /// An exact class object with explicit type arguments, such as the value of
+    /// the expression `C[int]`.
+    SpecializedClassDef(ClassType),
     /// A value that indicates a concrete, instantiated type with known type
     /// arguments that are validated against the class type parameters. If the
     /// class is not generic, the arguments are empty.
     ///
-    /// Instances of classes have this type, and a term of the form `C[arg1, arg2]`
-    /// would have the form `Type::Type(box Type::ClassType(C, [arg1, arg2]))`.
+    /// Instances of classes have this type.
     ClassType(ClassType),
     /// Instances of TypedDicts have this type, and a term of the form `TD[arg1, arg2]`
     /// would have the form `Type::Type(box Type::TypedDict(TD, [arg1, arg2]))`. Note
@@ -1075,6 +1103,14 @@ pub enum Type {
     ///
     /// See https://typing.python.org/en/latest/spec/glossary.html#term-materialize.
     Materialization,
+    /// Every value that is always falsy. It appears only as a member of an intersection: the left
+    /// operand `x: A` of `x and y` is returned only when it is falsy, so it contributes `A & Falsy`
+    /// to the result, and a later truthy narrow removes that member.
+    Falsy,
+    /// Every value that is always truthy. It appears only as a member of an intersection: the left
+    /// operand `x: A` of `x or y` is returned only when it is truthy, so it contributes
+    /// `A & Truthy` to the result, and a later falsy narrow removes that member.
+    Truthy,
     None,
 }
 
@@ -1092,6 +1128,7 @@ impl Visit for Type {
             Type::Union(x) => x.visit(f),
             Type::Intersect(x) => x.visit(f),
             Type::ClassDef(x) => x.visit(f),
+            Type::SpecializedClassDef(x) => x.visit(f),
             Type::ClassType(x) => x.visit(f),
             Type::TypedDict(x) => x.visit(f),
             Type::PartialTypedDict(x) => x.visit(f),
@@ -1129,7 +1166,7 @@ impl Visit for Type {
             Type::KwargsValue(x) => x.visit(f),
             Type::Type(x) => x.visit(f),
             Type::TypeForm(x) => x.visit(f),
-            Type::Ellipsis => {}
+            Type::Ellipsis | Type::Falsy | Type::Truthy => {}
             Type::Any(x) => x.visit(f),
             Type::Never(x) => x.visit(f),
             Type::TypeAlias(x) => x.visit(f),
@@ -1156,6 +1193,7 @@ impl VisitMut for Type {
             Type::Union(x) => x.visit_mut(f),
             Type::Intersect(x) => x.visit_mut(f),
             Type::ClassDef(x) => x.visit_mut(f),
+            Type::SpecializedClassDef(x) => x.visit_mut(f),
             Type::ClassType(x) => x.visit_mut(f),
             Type::TypedDict(x) => x.visit_mut(f),
             Type::PartialTypedDict(x) => x.visit_mut(f),
@@ -1193,7 +1231,7 @@ impl VisitMut for Type {
             Type::KwargsValue(x) => x.visit_mut(f),
             Type::Type(x) => x.visit_mut(f),
             Type::TypeForm(x) => x.visit_mut(f),
-            Type::Ellipsis => {}
+            Type::Ellipsis | Type::Falsy | Type::Truthy => {}
             Type::Any(x) => x.visit_mut(f),
             Type::Never(x) => x.visit_mut(f),
             Type::TypeAlias(x) => x.visit_mut(f),
@@ -1433,7 +1471,7 @@ impl Type {
     }
 
     pub fn is_object(&self) -> bool {
-        matches!(self, Type::ClassType(cls) if cls.is_builtin("object"))
+        matches!(self, Type::ClassType(cls) if cls.is(KnownClass::Object))
     }
 
     pub fn is_typed_dict(&self) -> bool {
@@ -1796,6 +1834,7 @@ impl Type {
             Type::Callable(_) => Some(CalleeKind::Callable),
             Type::Function(func) => Some(CalleeKind::Function(func.metadata.kind.clone())),
             Type::ClassDef(c) => Some(CalleeKind::Class(c.kind())),
+            Type::SpecializedClassDef(c) => Some(CalleeKind::Class(c.class_object().kind())),
             Type::Forall(forall) => forall.body.clone().as_type().callee_kind(),
             Type::Overload(overload) => Some(CalleeKind::Function(overload.metadata.kind.clone())),
             Type::KwCall(call) => call.return_ty.callee_kind(),
@@ -2182,7 +2221,12 @@ impl Type {
         }
     }
 
-    fn promote_one_implicit_literal(ty: &mut Type, stdlib: &Stdlib) {
+    fn promote_one(ty: &mut Type, stdlib: &Stdlib) {
+        Self::promote_implicit_literal(ty, stdlib);
+        Self::remove_truthiness_markers(ty);
+    }
+
+    fn promote_implicit_literal(ty: &mut Type, stdlib: &Stdlib) {
         match &*ty {
             Type::Literal(lit) if lit.style == LitStyle::Implicit => {
                 *ty = lit.value.general_class_type(stdlib).clone().to_type()
@@ -2192,27 +2236,41 @@ impl Type {
         }
     }
 
-    /// Like `promote_implicit_literals` but only recurses into unions.
-    pub fn promote_shallow_implicit_literals(mut self, stdlib: &Stdlib) -> Type {
+    /// Remove the truthiness markers from `ty` if it is an intersection. This does not recurse.
+    fn remove_truthiness_markers(ty: &mut Type) {
+        if let Type::Intersect(x) = ty
+            && x.0.iter().any(Type::is_truthiness_marker)
+        {
+            x.0.retain(|m| !m.is_truthiness_marker());
+            if let [member] = x.0.as_slice() {
+                *ty = member.clone();
+            }
+        }
+    }
+
+    /// Like `promote` but only recurses into unions.
+    pub fn promote_shallow(mut self, stdlib: &Stdlib) -> Type {
         match &mut self {
             Type::Union(union) => {
                 for member in &mut union.members {
-                    Self::promote_one_implicit_literal(member, stdlib);
+                    Self::promote_one(member, stdlib);
                 }
             }
-            _ => Self::promote_one_implicit_literal(&mut self, stdlib),
+            _ => Self::promote_one(&mut self, stdlib),
         }
         self
     }
 
-    pub fn promote_implicit_literals(mut self, stdlib: &Stdlib) -> Type {
+    /// Widen an inferred type for a slot that later assignments can write, such as an attribute,
+    /// a container element or a solved type variable. This removes precision that describes only
+    /// the value of one expression: implicit literals become their class, and truthiness markers
+    /// are removed.
+    pub fn promote(mut self, stdlib: &Stdlib) -> Type {
         fn g(ty: &mut Type, f: &mut dyn FnMut(&mut Type)) {
             ty.recurse_mut(&mut |ty| g(ty, f));
             f(ty);
         }
-        g(&mut self, &mut |ty| {
-            Self::promote_one_implicit_literal(ty, stdlib)
-        });
+        g(&mut self, &mut |ty| Self::promote_one(ty, stdlib));
         self
     }
 
@@ -2316,6 +2374,32 @@ impl Type {
         self
     }
 
+    /// Whether this type only records the truthiness of a boolean operand for narrowing.
+    pub fn is_truthiness_marker(&self) -> bool {
+        matches!(self, Type::Falsy | Type::Truthy)
+    }
+
+    /// For an intersection of a type and a truthiness marker, the type users see: the type without
+    /// the marker. For any other type, the type itself.
+    pub fn ignoring_truthiness_marker(&self) -> &Type {
+        if let Type::Intersect(x) = self
+            && let [a, b] = x.0.as_slice()
+        {
+            if b.is_truthiness_marker() {
+                return a;
+            }
+            if a.is_truthiness_marker() {
+                return b;
+            }
+        }
+        self
+    }
+
+    /// Remove truthiness markers from every intersection.
+    pub fn without_truthiness_markers(self) -> Type {
+        self.transform(&mut Self::remove_truthiness_markers)
+    }
+
     /// Replace every DataFrame and Series schema with its plain underlying class. The schema forms
     /// (`DataFrame[a: Int64, ...]`, `Series[Int64]`) are not valid annotation syntax, so a surface
     /// that emits a type as source must strip them first.
@@ -2383,6 +2467,7 @@ impl Type {
     pub fn qname(&self) -> Option<&QName> {
         match self {
             Type::ClassDef(cls) => Some(cls.qname()),
+            Type::SpecializedClassDef(c) => Some(c.qname()),
             Type::ClassType(c) => Some(c.qname()),
             Type::TypedDict(TypedDict::TypedDict(c)) => Some(c.qname()),
             Type::PartialTypedDict(TypedDict::TypedDict(c)) => Some(c.qname()),
@@ -2403,8 +2488,8 @@ impl Type {
             Type::Literal(lit) if let Lit::Int(x) = &lit.value => Some(x.as_bool()),
             Type::Literal(lit) if let Lit::Bytes(x) = &lit.value => Some(!x.is_empty()),
             Type::Literal(lit) if let Lit::Str(x) = &lit.value => Some(!x.is_empty()),
-            Type::Type(_) => Some(true),
-            Type::None => Some(false),
+            Type::SpecializedClassDef(_) | Type::Type(_) | Type::Truthy => Some(true),
+            Type::None | Type::Falsy => Some(false),
             Type::Sentinel(_) => Some(true),
             Type::Tuple(Tuple::Concrete(elements)) => Some(!elements.is_empty()),
             Type::Union(u) => {
@@ -2420,11 +2505,21 @@ impl Type {
                 }
                 answer
             }
+            // Every value of an intersection is a value of each member, so one member with a known
+            // truthiness decides it. If two members disagree, the intersection has no values, and
+            // either answer is correct.
+            Type::Intersect(x) => x.0.iter().find_map(Type::as_bool),
             Type::ClassType(cls) => {
                 // `Never` containers cannot hold any items; they are always empty; they are always falsy.
-                const CONTAINER_NAMES: &[&str] = &["set", "frozenset", "list", "dict"];
-                (CONTAINER_NAMES.iter().any(|n| cls.is_builtin(n))
-                    && cls.targs().as_slice().first().is_some_and(|t| t.is_never()))
+                (matches!(
+                    cls.known(),
+                    Some(
+                        KnownClass::Set
+                            | KnownClass::FrozenSet
+                            | KnownClass::List
+                            | KnownClass::Dict
+                    )
+                ) && cls.targs().as_slice().first().is_some_and(|t| t.is_never()))
                 .then_some(false)
             }
             _ => None,
@@ -2469,6 +2564,7 @@ impl Type {
             | Type::Overload(_)
             | Type::Union(_)
             | Type::ClassDef(_)
+            | Type::SpecializedClassDef(_)
             | Type::ClassType(_)
             | Type::TypedDict(_)
             | Type::PartialTypedDict(_)
@@ -2508,6 +2604,8 @@ impl Type {
             | Type::SelfType(_)
             | Type::KwCall(_)
             | Type::Materialization
+            | Type::Falsy
+            | Type::Truthy
             | Type::None => false,
         })
     }
@@ -2589,7 +2687,7 @@ impl Type {
     /// Note the difference with `Type::Ellipsis`, which represents `...` in a type annotation,
     /// e.g., `x: Callable[Concatenate[int, ...], int]`.
     pub fn is_ellipsis_value(&self) -> bool {
-        matches!(self, Type::ClassType(cls) if cls.has_qname("types", "EllipsisType"))
+        matches!(self, Type::ClassType(cls) if cls.is(KnownClass::TypesEllipsisType))
     }
 }
 

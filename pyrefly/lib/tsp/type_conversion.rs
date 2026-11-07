@@ -247,6 +247,9 @@ impl TypeConverter<'_> {
 
             // --- Class definitions (the class object itself, e.g. `type[int]`) ---
             PyreflyType::ClassDef(cls) => convert_class_def(cls),
+            PyreflyType::SpecializedClassDef(ct) => {
+                self.convert_class_type(ct, TypeFlags::INSTANTIABLE)
+            }
 
             // --- Literals (Literal[42], Literal["hi"], etc.) ---
             PyreflyType::Literal(lit) => convert_literal(lit),
@@ -494,6 +497,9 @@ impl TypeConverter<'_> {
 
             // --- Materialization is a solver artifact ---
             PyreflyType::Materialization => builtin("unknown"),
+
+            // --- `Falsy` and `Truthy` only appear inside an intersection, which converts to its fallback ---
+            PyreflyType::Falsy | PyreflyType::Truthy => builtin("unknown"),
 
             // --- Type-level DSL calls are forced at function-call return boundaries ---
             PyreflyType::TypeLevelDslCall(_) => builtin("unknown"),

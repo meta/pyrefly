@@ -1337,13 +1337,32 @@ for a in A:  # E: Type `type[A]` is not iterable
 );
 
 testcase!(
-    bug = "Although A[int] is a generic alias and can be iterated over, type[A[int]] is a type and cannot be iterated over.",
+    test_specialized_class_def_union_display,
+    r#"
+from abc import ABC, abstractmethod
+from typing import reveal_type
+
+class C[T]: ...
+class D[T]: ...
+reveal_type([C[int], D[int]])  # E: revealed type: list[type[C[int]] | type[D[int]]]
+reveal_type([C, D])  # E: revealed type: list[type[C] | type[D]]
+
+class Shape[T](ABC):
+    @abstractmethod
+    def area(self) -> T: ...
+
+for constructor in [Shape[int], Shape[str]]:
+    constructor()  # E: Cannot instantiate `Shape`
+"#,
+);
+
+testcase!(
     test_getitem_cannot_iterate_generic_class,
     r#"
 class A[T]:
     def __getitem__(self, i: int) -> int: ...
 def f(x: type[A[int]]):
-    for a in x:  # Expect an error here
+    for a in x:  # E: Type `type[A[int]]` is not iterable
         pass
     "#,
 );
@@ -3168,4 +3187,23 @@ def main(a: DataFrame) -> None:
     for i, s in enumerate(reversed(a)):
         func(s)
     "#,
+);
+
+testcase!(
+    test_reveal_type_qualified_names,
+    TestEnv::one("foo", "class Box[T]:\n    attr: object").enable_reveal_type_qualified_names(),
+    r#"
+from typing import reveal_type
+import datetime
+from foo import Box
+
+class Local: ...
+
+def f(b: Box[datetime.date], local: Local, xs: list[int]) -> None:
+    reveal_type(b)  # E: revealed type: foo.Box[datetime.date]
+    reveal_type(local)  # E: revealed type: main.Local
+    reveal_type(xs)  # E: revealed type: list[int]
+    if isinstance(b.attr, datetime.date):
+        reveal_type(b)  # E: revealed type: foo.Box[datetime.date] (_.attr: datetime.date)
+"#,
 );

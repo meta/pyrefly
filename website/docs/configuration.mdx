@@ -210,7 +210,8 @@ or remove `project-excludes`.
 - Default: `["**/node_modules", "**/__pycache__", "**/venv/**", "**/.[!/.]*/**"]` +
   anything in your `site-packages-path` (even from the interpreter) unless it would
   exclude items in your [`search-path`](#search-path).
-- Flag equivalent: `--project-excludes`
+- Flag equivalent: `--project-excludes`, which replaces `project-excludes`.
+  `--extend-project-excludes` adds patterns to `project-excludes` instead.
 - Equivalent configs: `exclude` in Pyright and mypy
 - Notes:
     - While not explicitly part of `project-excludes`, there are several patterns that are
@@ -267,7 +268,8 @@ project setting when unset.
 - Type: table with `includes` and `excludes` keys, each a list of
   [filesystem glob patterns](#filesystem-globbing)
 - Default: `project-includes` / `project-excludes`
-- Flag equivalent: none, though `--project-excludes` takes precedence over `coverage.excludes`
+- Flag equivalent: none, though `--project-excludes` takes precedence over `coverage.excludes`,
+  and `--extend-project-excludes` adds to `coverage.excludes`
 - Notes:
     - Like the project globs, these are not consulted when passing in `FILES...`.
     - `coverage.excludes` gets the same default excludes appended as `project-excludes` does,
@@ -351,7 +353,9 @@ See more on [how Pyrefly does import resolution](import-resolution.mdx).
 
 When enabled, Pyrefly resolves an otherwise-unresolved import by searching each
 directory from the importing file up to the directory that contains your
-config, using the first match it finds. This is a best-effort way to make
+config, using the first match it finds. Directories that belong to a regular
+package (that is, contain an `__init__.py` or `__init__.pyi`) are skipped, since
+they cannot be import roots without truncating the package's module names. This is a best-effort way to make
 imports resolve when a module is importable relative to one of its parent
 directories but that directory isn't listed in [`search-path`](#search-path).
 
@@ -360,6 +364,8 @@ directories but that directory isn't listed in [`search-path`](#search-path).
 - Flag equivalent: `--enable-fallback-search-path`
 - Equivalent configs: none
 - Notes:
+    - The fallback is only consulted after the search path, typeshed, and the site
+      package path all fail to find the module, including as a namespace package.
     - Has no effect when [`disable-search-path-heuristics`](#disable-search-path-heuristics)
       is `true` — that flag suppresses all fallback-path consumption.
     - The search is bounded by the config root, so it cannot escape the project.
@@ -726,8 +732,9 @@ nonzero exit code.
 The lowest threshold, `"hint"`, also shows hint-level diagnostics such as
 [`unused-parameter`](../error-kinds#unused-parameter),
 [`unused-variable`](../error-kinds#unused-variable),
-[`unused-import`](../error-kinds#unused-import), and
-[`unreachable`](../error-kinds#unreachable). These are hidden by default, and
+[`unused-import`](../error-kinds#unused-import),
+[`unreachable`](../error-kinds#unreachable), and
+[`inactive-code`](../error-kinds#inactive-code). These are hidden by default, and
 showing them makes them count toward the exit code like any other displayed
 diagnostic.
 
@@ -837,7 +844,7 @@ A minimal-checking preset used when automatic configuration selection finds no m
 - Sets [`check-unannotated-defs`](#check-unannotated-defs) `= false`, [`infer-return-types`](#infer-return-types) `= "never"`, [`infer-with-first-use`](#infer-with-first-use) `= false`, [`permissive-ignores`](#permissive-ignores) `= true`
 - Enables (as errors): [`bad-class-definition`](./error-kinds.mdx#bad-class-definition), [`bad-instantiation`](./error-kinds.mdx#bad-instantiation), [`bad-keyword-argument`](./error-kinds.mdx#bad-keyword-argument), [`bad-raise`](./error-kinds.mdx#bad-raise), [`bad-unpacking`](./error-kinds.mdx#bad-unpacking), [`division-by-zero`](./error-kinds.mdx#division-by-zero), [`invalid-annotation`](./error-kinds.mdx#invalid-annotation), [`invalid-literal`](./error-kinds.mdx#invalid-literal), [`invalid-super-call`](./error-kinds.mdx#invalid-super-call), [`invalid-syntax`](./error-kinds.mdx#invalid-syntax), [`missing-import`](./error-kinds.mdx#missing-import), [`not-async`](./error-kinds.mdx#not-async), [`parse-error`](./error-kinds.mdx#parse-error), [`unexpected-keyword`](./error-kinds.mdx#unexpected-keyword), [`unexpected-positional-argument`](./error-kinds.mdx#unexpected-positional-argument), [`unknown-name`](./error-kinds.mdx#unknown-name), [`unused-coroutine`](./error-kinds.mdx#unused-coroutine)
 - Enables (as warnings): [`fallback-search-path-relative-import`](./error-kinds.mdx#fallback-search-path-relative-import)
-- Keeps as hints: [`unused-import`](./error-kinds.mdx#unused-import), [`unused-parameter`](./error-kinds.mdx#unused-parameter), [`unused-variable`](./error-kinds.mdx#unused-variable)
+- Keeps as hints: [`inactive-code`](./error-kinds.mdx#inactive-code), [`unused-import`](./error-kinds.mdx#unused-import), [`unused-parameter`](./error-kinds.mdx#unused-parameter), [`unused-variable`](./error-kinds.mdx#unused-variable)
 - All other error kinds are silenced.
 
 #### Preset: `legacy`
@@ -846,7 +853,7 @@ A looser, less-strict preset intended for codebases migrating from mypy. This is
 
 - Sets [`check-unannotated-defs`](#check-unannotated-defs) `= false`, [`infer-return-types`](#infer-return-types) `= "never"`, [`legacy-overload-expansion`](#legacy-overload-expansion) `= true`, [`replace-untyped-imports-with-any`](#replace-untyped-imports-with-any) `= ["*"]`
 - Sets [`type-ignore-unknown-tag-behavior`](#type-ignore-unknown-tag-behavior) `= "suppress"` so existing mypy-coded ignores retain their legacy blanket-suppression behavior.
-- Disables: [`bad-override-mutable-attribute`](./error-kinds.mdx#bad-override-mutable-attribute), [`bad-override-param-name`](./error-kinds.mdx#bad-override-param-name), [`unbound-name`](./error-kinds.mdx#unbound-name)
+- Disables: [`bad-override-mutable-attribute`](./error-kinds.mdx#bad-override-mutable-attribute), [`bad-override-param-name`](./error-kinds.mdx#bad-override-param-name), [`unbound-name`](./error-kinds.mdx#unbound-name). When both the parent and child members are plain read-write attributes, widening or incompatible types report plain `bad-override`, which this preset leaves enabled. Some overrides involving properties, including incompatible property getters, still report `bad-override-mutable-attribute` and are suppressed by this preset.
 
 #### Preset: `default`
 
@@ -868,7 +875,7 @@ For most users, we recommend using the `strict` preset and enabling individual a
 for more stability and an opt-in experience for new errors.
 :::
 
-Enables every error kind at `error` severity. Directives like `reveal-type` remain informational, and the unused-code kinds (`unused-parameter`, `unused-variable` and `unused-import`) remain hints.
+Enables every error kind at `error` severity. Directives like `reveal-type` remain informational, and hints about inactive and unused code remain hints.
 
 - Sets [`strict-callable-subtyping`](#strict-callable-subtyping) `= true`
 - Enables every error kind at `error` severity
@@ -1080,6 +1087,34 @@ set `infer-return-types` to `"never"` in your config or pass it as a flag.
 - Type: one of `"never"`, `"annotated"`, `"checked"`
 - Default: `"checked"`
 - Flag equivalent: `--infer-return-types`
+
+### `infer-param-types-from-docstring`
+
+Whether to use the parameter types that a Sphinx style docstring declares for parameters
+that have no annotation.
+
+```python
+def f(x, y=None):
+    """
+    :param int x: The x.
+    :type y: str
+    """
+```
+
+Here `x` is an `int` and `y` is a `str | None`. A parameter that defaults to `None` is
+treated as optional even when the docstring does not say so. For `__init__`, the docstring
+of the class is used as well, because that is where the constructor parameters are usually
+documented. The docstring of the method itself takes priority.
+
+A type from a docstring is only a hint for callers and for the body of the function. It is
+never used instead of an annotation, it does not make assignments to the parameter an
+error, and it is not checked against the default value. A type that Pyrefly cannot make
+sense of, such as `list of str` written as prose, an unknown name, or a type that is not
+valid for a parameter, is ignored without an error.
+
+- Type: `bool`
+- Default: `false`
+- Flag equivalent: `--infer-param-types-from-docstring`
 
 ### `strict-callable-subtyping`
 

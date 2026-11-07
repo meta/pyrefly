@@ -12,6 +12,7 @@ use pyrefly_types::dimension::Int;
 use pyrefly_types::dimension::canonicalize;
 use pyrefly_types::dimension::int_type_is_provably_nonnegative;
 use pyrefly_types::function::BodyKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::lit_int::LitInt;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::quantified::Quantified;
@@ -20,7 +21,6 @@ use pyrefly_types::simplify::intersect;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_util::prelude::VecExt;
 use ruff_python_ast::CmpOp;
-use ruff_python_ast::Expr;
 use ruff_python_ast::ExprBinOp;
 use ruff_python_ast::ExprCompare;
 use ruff_python_ast::ExprUnaryOp;
@@ -204,10 +204,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Type::TypeVar(tv) if tv.kind() == QuantifiedKind::IntVar => {
                     return Some(self.heap.mk_any_implicit());
                 }
-                Type::ClassType(cls) if cls.is_builtin("int") => {
+                Type::ClassType(cls) if cls.is(KnownClass::Int) => {
                     return Some(self.heap.mk_any_implicit());
                 }
-                Type::ClassType(cls) if cls.is_builtin("float") => {
+                Type::ClassType(cls) if cls.is(KnownClass::Float) => {
                     return Some(self.heap.mk_class_type(self.stdlib.float().clone()));
                 }
                 _ if self
@@ -253,7 +253,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Interpret a successful call without selecting another operator or a completion rule.
     fn interpret_operator_return(&self, ret: Type, inferred_placeholder: bool) -> OperatorReturn {
-        let is_not_implemented = |ty: &Type| matches!(ty, Type::ClassType(cls) if cls.is_builtin("_NotImplementedType") || cls.has_qname("types", "NotImplementedType"));
+        let is_not_implemented = |ty: &Type| matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::NotImplementedType) || cls.is(KnownClass::TypesNotImplementedType));
         match ret {
             ret if is_not_implemented(&ret) => {
                 if inferred_placeholder {
@@ -518,6 +518,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         Some(self.heap.mk_concrete_tuple(repeated))
     }
 
+    fn as_hint_for_display(lhs: &Type) -> Option<HintRef> {
+        // In an operation between `lhs` and a container display (e.g., `[3]`, `{"a": 0)]`), the
+        // type of the display should be inferred using `lhs` as a hint when the latter is a
+        // container type with a display syntax. Hinting is harmless when the types don't match.
+        (matches!(lhs, Type::ClassType(cls) if matches!(cls.class_object().known(), Some(KnownClass::List | KnownClass::Set | KnownClass::Dict)))).then(
+            || HintRef::soft(lhs))
+    }
+
     pub fn binop_infer(
         &self,
         x: &ExprBinOp,
@@ -537,32 +545,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             rhs = self
                 .expr_infer_impl(&x.right, None, errors, Some(member_context))
                 .into_ty();
-        } else if Ast::is_list_literal_or_comprehension(&x.left) && x.op == Operator::Mult {
-            // If the expression is of the form [X] * Y where Y is a number, pass down the contextual
-            // type hint when evaluating [X]
-            rhs = self.expr_infer(&x.right, errors);
-            if self.is_subset_eq(&rhs, &self.heap.mk_class_type(self.stdlib.int().clone())) {
+        } else {
+            let left_is_display = Ast::contains_only_container_displays(&x.left);
+            let right_is_display = Ast::contains_only_container_displays(&x.right);
+            if left_is_display && right_is_display {
+                // If both operands are literal container displays, pass the contextual hint down
                 lhs = self.expr_infer_with_hint(&x.left, hint, errors);
+                rhs = self.expr_infer_with_hint(&x.right, hint, errors);
+            } else if left_is_display && x.op == Operator::Mult {
+                // If the expression is of the form [X] * Y where Y is a number, pass down the contextual
+                // type hint when evaluating [X]. Hinting non-list displays is harmless.
+                rhs = self.expr_infer(&x.right, errors);
+                if self.is_subset_eq(&rhs, &self.heap.mk_class_type(self.stdlib.int().clone())) {
+                    lhs = self.expr_infer_with_hint(&x.left, hint, errors);
+                } else {
+                    lhs = self.expr_infer(&x.left, errors);
+                }
+            } else if right_is_display {
+                lhs = self.expr_infer(&x.left, errors);
+                rhs = self.expr_infer_with_hint(&x.right, Self::as_hint_for_display(&lhs), errors);
             } else {
                 lhs = self.expr_infer(&x.left, errors);
+                rhs = self.expr_infer(&x.right, errors);
             }
-        } else if x.op == Operator::Add
-            && Ast::is_list_literal_or_comprehension(&x.left)
-            && Ast::is_list_literal_or_comprehension(&x.right)
-        {
-            // If both operands are list literals, pass the contextual hint down
-            lhs = self.expr_infer_with_hint(&x.left, hint, errors);
-            rhs = self.expr_infer_with_hint(&x.right, hint, errors);
-        } else {
-            lhs = self.expr_infer(&x.left, errors);
-            rhs = if x.op == Operator::BitOr
-                && matches!(&*x.right, Expr::Dict(_))
-                && matches!(&lhs, Type::ClassType(cls) if cls.class_object().is_builtin("dict"))
-            {
-                self.expr_infer_with_hint(&x.right, Some(HintRef::soft(&lhs)), errors)
-            } else {
-                self.expr_infer(&x.right, errors)
-            };
         }
 
         // Optimisation: If we have `Union[a, b] | Union[c, d]`, instead of unioning
@@ -934,14 +939,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self.try_binop_calls(calls_to_try, range, errors, &context, None)
         };
         let base = self.expr_infer(&x.target, errors);
-        let rhs = if (x.op == Operator::BitOr
-            && matches!(&*x.value, Expr::Dict(_))
-            && matches!(&base, Type::ClassType(cls) if cls.class_object().is_builtin("dict")))
-            || (x.op == Operator::Add
-                && Ast::is_list_literal_or_comprehension(&x.value)
-                && matches!(&base, Type::ClassType(cls) if cls.class_object().is_builtin("list")))
-        {
-            self.expr_infer_with_hint(&x.value, Some(HintRef::soft(&base)), errors)
+        let rhs = if Ast::contains_only_container_displays(&x.value) {
+            self.expr_infer_with_hint(&x.value, Self::as_hint_for_display(&base), errors)
         } else {
             self.expr_infer(&x.value, errors)
         };
@@ -1231,7 +1230,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 | Type::ShapedArray(_)
                 | Type::NNModule(_)
                 | Type::DataFrame(_)
-                | Type::Series(_) => {
+                | Type::Series(_)
+                | Type::Intersect(_) => {
                     self.call_method_or_error(t, method, x.range, &[], &[], errors, Some(&context))
                 }
                 Type::Literal(lit) if let Lit::Enum(lit_enum) = &lit.value => self
@@ -1446,15 +1446,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     fn equality_compatibility_group(&self, ty: &Type) -> Option<EqualityCompatibilityGroup> {
         let class = self.equality_class(ty)?;
-        match (class.qname().module_name().as_str(), class.name().as_str()) {
-            ("builtins", "bool" | "int" | "float" | "complex")
-            | ("decimal", "Decimal")
-            | ("fractions", "Fraction") => Some(EqualityCompatibilityGroup::Numeric),
-            ("builtins", "bytes" | "bytearray" | "memoryview") => {
+        match class.known()? {
+            KnownClass::Bool
+            | KnownClass::Int
+            | KnownClass::Float
+            | KnownClass::Complex
+            | KnownClass::Decimal
+            | KnownClass::FractionsFraction => Some(EqualityCompatibilityGroup::Numeric),
+            KnownClass::Bytes | KnownClass::ByteArray | KnownClass::MemoryView => {
                 Some(EqualityCompatibilityGroup::BytesLike)
             }
-            ("builtins", "set" | "frozenset") => Some(EqualityCompatibilityGroup::SetLike),
-            ("builtins", "str") | ("collections", "UserString") => {
+            KnownClass::Set | KnownClass::FrozenSet => Some(EqualityCompatibilityGroup::SetLike),
+            KnownClass::Str | KnownClass::CollectionsUserString => {
                 Some(EqualityCompatibilityGroup::Str)
             }
             _ => None,

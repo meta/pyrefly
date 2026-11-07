@@ -7,6 +7,7 @@
 
 // @lint-ignore-every SPELL deliberately testing bad spelling
 
+use crate::state::require::Require;
 use crate::test::util::TestEnv;
 use crate::testcase;
 
@@ -103,7 +104,6 @@ class Helper:
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_inherited,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -118,7 +118,7 @@ class Child(Base):
         if t is not None:
             self.timeout = t
             self.value = t
-            self.own = t
+            self.own = t  # E: Attribute `own` may be uninitialized
 
 class Grandchild(Child):
     def __init__(self, t: int | None = None) -> None:
@@ -133,7 +133,6 @@ class ClassBody(Base):
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_trailing_noreturn,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -176,7 +175,7 @@ class EarlyReturn:
     def __init__(self, flag: bool) -> None:
         if flag:
             return
-        self.value = 1
+        self.value = 1  # E: Attribute `value` may be uninitialized
         stop()
 "#,
 );
@@ -215,7 +214,6 @@ class NotCutOff:
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_while_true_return,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -235,33 +233,32 @@ class EarlyReturn:
         while True:
             if flag:
                 return
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
             return
 
 class ReturnOrBreak:
     def __init__(self, flag: bool) -> None:
         while True:
             if flag:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
                 return
             break
 "#,
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_nested_function,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
 class NestedOnly:
     def __init__(self) -> None:
         def later() -> None:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
 
 class ConditionalOuter:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         def later() -> None:
             self.value = 2
 
@@ -275,7 +272,7 @@ class NestedMethod:
     def __init__(self) -> None:
         class Inner:
             def later(inner) -> None:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
 
 class NestedReturn:
     def __init__(self) -> None:
@@ -286,7 +283,6 @@ class NestedReturn:
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_control_flow,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -303,7 +299,7 @@ class TryExcept:
 class TryExceptMissing:
     def __init__(self, raw: str) -> None:
         try:
-            self.value = int(raw)
+            self.value = int(raw)  # E: Attribute `value` may be uninitialized
         except ValueError:
             pass
 
@@ -323,7 +319,7 @@ class WithConditional:
     def __init__(self, flag: bool) -> None:
         with nullcontext():
             if flag:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
 
 class Match:
     def __init__(self, kind: Literal["a", "b"]) -> None:
@@ -337,16 +333,16 @@ class MatchMissing:
     def __init__(self, kind: str) -> None:
         match kind:
             case "a":
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
 
 class Deleted:
     def __init__(self) -> None:
-        self.value = 1
+        self.value = 1  # E: Attribute `value` may be uninitialized
         del self.value
 
 class DeletedConditionally:
     def __init__(self, flag: bool) -> None:
-        self.value = 1
+        self.value = 1  # E: Attribute `value` may be uninitialized
         if flag:
             del self.value
 
@@ -359,7 +355,6 @@ class Reassigned:
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_class_conditions_and_hooks,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -389,7 +384,7 @@ class ConditionalPostInit:
     flag: bool
     def __post_init__(self) -> None:
         if self.flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
 
 class SubclassHook:
     def __init_subclass__(cls) -> None:
@@ -398,7 +393,7 @@ class SubclassHook:
 class ConditionalSubclassHook:
     def __init_subclass__(cls, flag: bool = False) -> None:
         if flag:
-            cls.value = 1
+            cls.value = 1  # E: Attribute `value` may be uninitialized
 
 class ClassLoop:
     for value in [1]:
@@ -428,12 +423,110 @@ testcase!(
     test_attribute_initialization_finally_after_return,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
-class C:
+def enabled() -> bool: ...
+
+class AssignedInFinally:
     def __init__(self) -> None:
         try:
             return
         finally:
             self.value = 1
+
+class UnpackedInFinally:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            self.first, [self.second, *self.rest] = 1, [2, 3]
+
+class ReturnBeforeTry:
+    def __init__(self) -> None:
+        if enabled():
+            return
+        try:
+            pass
+        finally:
+            self.value = 1  # E: Attribute `value` may be uninitialized
+
+class ReturnInFinally:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            if enabled():
+                return
+            self.value = 1  # E: Attribute `value` may be uninitialized
+
+class NestedInTry:
+    def __init__(self) -> None:
+        try:
+            try:
+                return
+            finally:
+                self.inner = 1
+        finally:
+            self.outer = 1
+
+class DeletedLaterInFinally:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            self.value = 1  # E: Attribute `value` may be uninitialized
+            if enabled():
+                del self.value
+"#,
+);
+
+// The outer `finally` may delete the attribute after the inner one assigns it.
+testcase!(
+    bug = "A `del` in an outer `finally` does not cancel an inner `finally` assignment",
+    test_attribute_initialization_finally_deleted_by_outer_finally,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def enabled() -> bool: ...
+
+class C:
+    def __init__(self) -> None:
+        try:
+            try:
+                return
+            finally:
+                self.value = 1  # Should report `value`
+        finally:
+            if enabled():
+                del self.value
+"#,
+);
+
+// The `finally` body only counts for `return` paths when it assigns the attribute directly.
+testcase!(
+    bug = "An assignment in a block inside `finally` does not count for `return` paths",
+    test_attribute_initialization_finally_nested_assignment,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def enabled() -> bool: ...
+
+class C:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            if enabled():
+                self.value = 1  # E: Attribute `value` may be uninitialized
+            else:
+                self.value = 2
+
+class NestedTryInFinally:
+    def __init__(self) -> None:
+        try:
+            return
+        finally:
+            try:
+                pass
+            finally:
+                self.inner = 1  # E: Attribute `inner` may be uninitialized
+            self.outer = 1
 "#,
 );
 
@@ -470,7 +563,6 @@ C(True).missing  # E: Object of class `C` has no attribute `missing`
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_possibly_uninitialized_attribute_suppression,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -478,15 +570,13 @@ class C:
     def __init__(self, flag: bool) -> None:
         if flag:
             self.suppressed = 1  # pyrefly: ignore[possibly-uninitialized-attribute]
-            self.reported = 1  # pyrefly: ignore[missing-attribute]
+            self.reported = 1  # pyrefly: ignore[missing-attribute]  # E: Attribute `reported` may be uninitialized
 
 C(True).missing  # pyrefly: ignore[possibly-uninitialized-attribute]  # E: Object of class `C` has no attribute `missing`
 "#,
 );
 
-testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
-    test_possibly_uninitialized_attribute_stub,
+fn env_with_conditional_stub_attribute() -> TestEnv {
     TestEnv::one_with_path(
         "foo",
         "foo.pyi",
@@ -503,7 +593,12 @@ class Stub:
             self.instance_value = 1
 "#,
     )
-    .enable_possibly_uninitialized_attribute_error(),
+    .enable_possibly_uninitialized_attribute_error()
+}
+
+testcase!(
+    test_possibly_uninitialized_attribute_stub,
+    env_with_conditional_stub_attribute(),
     r#"
 from typing import assert_type
 from foo import Stub
@@ -524,7 +619,7 @@ class Implementation:
 
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.instance_value = 1
+            self.instance_value = 1  # E: Attribute `instance_value` may be uninitialized
 "#,
 );
 
@@ -613,6 +708,404 @@ assert_type(ConditionalMethods().deferred(), int)
 
 async def use_async() -> None:
     assert_type(await ConditionalMethods().async_method(), int)
+"#,
+);
+
+testcase!(
+    test_conditionally_defined_nested_classes,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from enum import Enum
+
+def enabled() -> bool: ...
+class Other: ...
+
+class ConditionalClass:
+    if enabled():
+        class Inner: ...
+
+class ConditionalFunctionalClass:
+    if enabled():
+        Color = Enum("Color", "A B")  # E: Attribute `Color` may be uninitialized
+
+class ReassignedClass:
+    if enabled():
+        class Inner: ...
+        Inner = Other  # E: Attribute `Inner` may be uninitialized
+
+class MixedDefinitions:
+    if enabled():
+        if enabled():
+            class Inner: ...
+        else:
+            Inner = Other  # E: Attribute `Inner` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_class_annotation_initialized_in_method,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from dataclasses import dataclass
+from typing import ClassVar, NoReturn, Protocol, Self
+
+def enabled() -> bool: ...
+def stop() -> NoReturn: ...
+def proceed() -> None: ...
+
+class Conditional:
+    x: int  # E: Attribute `x` may be uninitialized
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class Complete:
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+        else:
+            self.x = 2
+
+class InitializedByHelper:
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+    def reset(self) -> None:
+        self.x = 0
+
+class NeverAssigned:
+    x: int
+
+@dataclass
+class Data:
+    x: int
+    def __post_init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class Proto(Protocol):
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+@dataclass(init=False)
+class DataWithoutInit:
+    x: int  # E: Attribute `x` may be uninitialized
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class Terminates:
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+        else:
+            stop()
+
+class Proceeds:
+    x: int  # E: Attribute `x` may be uninitialized
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+        else:
+            proceed()
+
+class WithGetattr:
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+    def __getattr__(self, name: str) -> int: ...
+
+class Base:
+    x: int
+    def __init__(self) -> None:
+        self.x = 0
+
+class Derived(Base):
+    x: int
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class ClassLevel:
+    x: ClassVar[int]
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # E: Cannot set field `x`
+
+class InitializedInNew:
+    x: int
+    def __new__(cls) -> Self:
+        instance = super().__new__(cls)
+        instance.x = 0
+        return instance
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+# Subclass bodies usually fill a metaclass's annotated attributes.
+class Meta(type):
+    key: str
+    def __init__(cls, name: str, bases: tuple[type, ...], ns: dict[str, object]) -> None:
+        if "key" not in ns:
+            cls.key = name
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_declared_only_in_base,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from dataclasses import dataclass
+from typing import Protocol, Self
+
+def enabled() -> bool: ...
+
+class Base:
+    x: int
+
+class Derived(Base):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # E: Attribute `x` may be uninitialized
+
+class DerivedRedeclare(Base):
+    x: int  # E: Attribute `x` may be uninitialized
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class P(Protocol):
+    x: int
+
+class Impl(P):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # E: Attribute `x` may be uninitialized
+
+class InitializingBase:
+    x: int
+    def __init__(self) -> None:
+        self.x = 0
+
+class DerivedFromInitializing(InitializingBase):
+    def __init__(self) -> None:
+        super().__init__()
+        if enabled():
+            self.x = 1
+
+class HelperBase:
+    x: int
+    def __init__(self) -> None:
+        self.reset()
+    def reset(self) -> None:
+        self.x = 0
+
+class DerivedFromHelper(HelperBase):
+    def __init__(self) -> None:
+        super().__init__()
+        if enabled():
+            self.x = 1
+
+class AnnotatingBase:
+    x: int  # E: Attribute `x` may be uninitialized
+    def __init__(self) -> None:
+        self.x: int
+
+class DerivedFromAnnotating(AnnotatingBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # E: Attribute `x` may be uninitialized
+
+@dataclass
+class DataBase:
+    x: int
+
+class DerivedFromDataclass(DataBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+
+class MetaBase(type):
+    key: str
+
+class MetaDerived(MetaBase):
+    def __init__(cls, name: str, bases: tuple[type, ...], ns: dict[str, object]) -> None:
+        if "key" not in ns:
+            cls.key = name
+
+class NewBase:
+    x: int
+    def __new__(cls) -> Self:
+        instance = super().__new__(cls)
+        instance.x = 0
+        return instance
+
+class DerivedFromNew(NewBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+"#,
+);
+
+// A method whose body is skipped is scanned only for the attributes it writes.
+testcase!(
+    test_attribute_initialization_declared_only_in_base_skipped_body,
+    TestEnv::new_skip_check_no_infer()
+        .with_run_require(Require::Errors)
+        .enable_possibly_uninitialized_attribute_error(),
+    r#"
+def enabled() -> bool: ...
+
+class AnnotatingBase:
+    x: int
+    def setup(self):
+        self.x: int
+
+class DerivedFromAnnotating(AnnotatingBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # E: Attribute `x` may be uninitialized
+
+class AugmentingBase:
+    x: int
+    def setup(self):
+        self.x += 1
+
+class DerivedFromAugmenting(AugmentingBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1  # E: Attribute `x` may be uninitialized
+
+class AssigningBase:
+    x: int
+    def setup(self):
+        self.x = 0
+
+class DerivedFromAssigning(AssigningBase):
+    def __init__(self) -> None:
+        if enabled():
+            self.x = 1
+"#,
+);
+
+testcase!(
+    test_class_body_initialization_termination,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def coin() -> bool: ...
+def proceed() -> None: ...
+def risky() -> int: ...
+def mode() -> str: ...
+
+class Proceeds:
+    if coin():
+        value = 1  # E: Attribute `value` may be uninitialized
+    else:
+        proceed()
+
+class Raises:
+    if coin():
+        value = 1
+    else:
+        raise ValueError()
+
+class TryAssignsOnBothPaths:
+    try:
+        value = risky()
+    except ValueError:
+        value = 0
+
+class TryMissingInHandler:
+    try:
+        value = risky()  # E: Attribute `value` may be uninitialized
+    except ValueError:
+        pass
+
+class MatchWithoutWildcard:
+    match mode():
+        case "a":
+            value = 1  # E: Attribute `value` may be uninitialized
+        case "b":
+            value = 2
+
+class MatchWithWildcard:
+    match mode():
+        case "a":
+            value = 1
+        case _:
+            value = 2
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_any_base,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import Any
+from missing_module import Unknown  # E: Cannot find module `missing_module`
+
+def coin() -> bool: ...
+
+AnyBase: Any = object
+
+class FromUnresolved(Unknown):
+    if coin():
+        value = 1
+
+class FromAny(AnyBase):
+    if coin():
+        value = 1
+
+    def __init__(self) -> None:
+        if coin():
+            self.instance_value = 1
+
+class Known:
+    if coin():
+        value = 1  # E: Attribute `value` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_inherited_from_object,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def coin() -> bool: ...
+def custom_repr(self: object) -> str: ...
+
+class Base: ...
+
+class GrandBase:
+    value = 0
+
+class Middle(GrandBase): ...
+
+class NoBase:
+    if coin():
+        __repr__ = custom_repr
+
+class WithBase(Base):
+    if coin():
+        __repr__ = custom_repr
+
+class Module:
+    def __init__(self) -> None:
+        if coin():
+            self.__module__ = "other"
+
+class NotInherited(Base):
+    if coin():
+        other = 1  # E: Attribute `other` may be uninitialized
+
+class InheritedFromGrandparent(Middle):
+    if coin():
+        value = 1
 "#,
 );
 
@@ -805,7 +1298,6 @@ def f(a: A):
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_conditional_attribute_initialized_in_helper,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -833,7 +1325,7 @@ class HelperFirst:
 class ConditionalHelper:
     def __init__(self, cfg: int | None = None) -> None:
         if cfg is not None:
-            self.cfg = cfg
+            self.cfg = cfg  # E: Attribute `cfg` may be uninitialized
 
     def _load_defaults(self, enabled: bool) -> None:
         if enabled:
@@ -868,7 +1360,6 @@ def f(a: A):
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_deferred_methods,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -908,7 +1399,7 @@ class HelperTerminates:
 class NeitherTerminates:
     def __init__(self, flag: bool) -> None:
         if flag:
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
         else:
             proceed()
 
@@ -943,7 +1434,6 @@ class ConditionalConstructor:
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_loops,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -961,7 +1451,7 @@ class BeforeLoop:
 class PossiblyEmpty:
     def __init__(self, values: list[int]) -> None:
         for value in values:
-            self.value = value
+            self.value = value  # E: Attribute `value` may be uninitialized
 
 class NonEmpty:
     def __init__(self) -> None:
@@ -979,14 +1469,14 @@ class ConditionalContinue:
         for value in [1]:
             if flag:
                 continue
-            self.value = value
+            self.value = value  # E: Attribute `value` may be uninitialized
 
 class ConditionalBreak:
     def __init__(self, flag: bool) -> None:
         while True:
             if flag:
                 break
-            self.value = 1
+            self.value = 1  # E: Attribute `value` may be uninitialized
             break
 
 class LoopElse:
@@ -1020,7 +1510,6 @@ assert_type(LoopElse([]).value, int)
 );
 
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_attribute_initialization_deferred_return_paths,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
@@ -1048,7 +1537,7 @@ class EarlyPathContinues:
     def __init__(self, early: bool, flag: bool) -> None:
         if early:
             if flag:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
             else:
                 proceed()
             return
@@ -1061,7 +1550,7 @@ class FinalPathContinues:
     def __init__(self, early: bool, flag: bool) -> None:
         if early:
             if flag:
-                self.value = 1
+                self.value = 1  # E: Attribute `value` may be uninitialized
             else:
                 stop()
             return
@@ -1362,6 +1851,17 @@ class A:
         self.x: int = x  # E: `str` is not assignable to attribute `x` with type `int`
 def f(a: A):
     assert_type(a.x, int)
+    "#,
+);
+
+testcase!(
+    test_self_attribute_redefinition_across_methods,
+    r#"
+class A:
+    def __init__(self) -> None:
+        self.foo: int | None = None
+    def calc_foo(self) -> None:
+        self.foo: int = 1  # E: `foo` cannot be annotated with `int`, it is already defined with type `int | None`
     "#,
 );
 
@@ -1932,6 +2432,171 @@ def test(foo: Foo) -> None:
     assert_type(foo.y, int)  # E: Argument `Literal['y']` is not assignable to parameter `name`
     foo.x = 1  # E: Object of class `Foo` has no attribute `x`
     del foo.y  # E: Object of class `Foo` has no attribute `y`
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_literal_attribute_name,
+    r#"
+from typing import Any, assert_type
+
+class Foo:
+    x: int
+
+    def __init__(self) -> None:
+        pass
+
+def test(foo: Foo, attr_name: str) -> None:
+    assert_type(getattr(foo, "x"), int)
+    assert_type(getattr(foo, "x", None), int | None)
+    assert_type(getattr(foo, "y"), Any)
+    assert_type(getattr(foo, "y", None), Any | None)
+    assert_type(getattr(foo, attr_name), Any)
+    assert_type(getattr(foo, attr_name, None), Any | None)
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_mangled_attribute_name,
+    r#"
+from typing import Any, assert_type
+
+class C:
+    __x: int
+
+    def __getattr__(self, name: str) -> str:
+        return "fallback"
+
+def test(c: C) -> None:
+    assert_type(getattr(c, "__x"), Any)
+    assert_type(getattr(c, "__x", None), Any | None)
+    getattr(c, "__x").upper()
+    assert_type(getattr(c, "__class__"), type[C])
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_hook_lookup_failure,
+    r#"
+from typing import Any, Literal, assert_type, overload
+
+class C:
+    @overload
+    def __getattr__(self, name: Literal["x"]) -> int: ...
+    @overload
+    def __getattr__(self, name: Literal["y"]) -> str: ...
+    def __getattr__(self, name: str) -> int | str:
+        if name == "x":
+            return 1
+        if name == "y":
+            return "value"
+        raise AttributeError(name)
+
+def test(c: C) -> None:
+    assert_type(getattr(c, "x"), int)
+    assert_type(getattr(c, "y", None), str | None)
+    assert_type(getattr(c, "missing"), Any)
+    assert_type(getattr(c, "missing", None), Any | None)
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_argument_errors,
+    r#"
+class C:
+    x: int
+
+def test(c: C) -> None:
+    getattr(undefined_receiver, "x")  # E: Could not find name `undefined_receiver`
+    getattr(c, "x", undefined_default)  # E: Could not find name `undefined_default`
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_container_defaults,
+    TestEnv::new().enable_implicit_any_empty_container_error(),
+    r#"
+from typing import Any, assert_type
+
+class C:
+    x: int
+
+def test(c: C) -> None:
+    assert_type(getattr(c, "x", []), int | list[Any])
+    assert_type(getattr(c, "x", {}), int | dict[Any, Any])
+    assert_type(getattr(c, "missing", []), Any | list[Any])
+    assert_type(getattr(c, "missing", {}), Any | dict[Any, Any])
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_contextual_container_defaults,
+    r#"
+class C:
+    x: int
+
+def list_default(c: C) -> int | list[object]:
+    return getattr(c, "x", [1])
+
+def dict_default(c: C) -> int | dict[str, object]:
+    return getattr(c, "x", {"key": 1})
+
+def missing_default(c: C) -> int | list[object]:
+    return getattr(c, "missing", [1])
+
+def nonliteral_default(c: C, name: str) -> int | list[object]:
+    return getattr(c, name, [1])
+
+def none_default(c: C) -> int | None:
+    return getattr(c, "x", None)
+
+def incompatible_default(c: C) -> int:
+    return getattr(c, "x", "wrong")  # E: Returned type `Literal['wrong'] | int` is not assignable
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_contextual_lambda_defaults,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable
+
+class C:
+    callback: Callable[[str], str]
+
+def known_attribute(c: C) -> Callable[[str], str]:
+    return getattr(c, "callback", lambda x: x.upper())
+
+def missing_attribute(c: C) -> Callable[[str], str]:
+    return getattr(c, "missing", lambda x: x.upper())
+
+def nonclass_receiver(c: type[C]) -> Callable[[str], str]:
+    return getattr(c, "callback", lambda x: x.upper())
+
+def nonliteral_name(c: C, name: str) -> Callable[[str], str]:
+    return getattr(c, name, lambda x: x.upper())
+
+def incompatible_body(c: object) -> Callable[[str], str]:
+    return getattr(c, "callback", lambda x: x + 1)  # E: `+` is not supported between `str` and `Literal[1]`
+
+def incompatible_body_control(c: object, name: str) -> Callable[[str], str]:
+    return getattr(c, name, lambda x: x + 1)  # E: `+` is not supported between `str` and `Literal[1]`
+    "#,
+);
+
+testcase!(
+    test_builtin_getattr_non_special_call_shapes,
+    r#"
+from typing import Any, assert_type
+
+class Foo:
+    x: int
+
+def test(foo: Foo) -> None:
+    assert_type(getattr(*(foo, "x")), Any)
+    assert_type(getattr(*[foo], "x"), Any)
+    assert_type(getattr(foo, "x", *(None,)), Any | None)
+    getattr(foo, "x", None, None)  # E:
     "#,
 );
 
@@ -2583,6 +3248,42 @@ class Unrelated:
 );
 
 testcase!(
+    test_protected_specialized_class_def,
+    TestEnv::new().enable_protected_access_error(),
+    r#"
+class C[T]:
+    _p: int = 0
+
+C[int]._p  # E: Protected attribute `_p` cannot be accessed
+Alias = C[int]
+Alias._p  # E: Protected attribute `_p` cannot be accessed
+
+def f() -> None:
+    X = C[int]
+    X._p  # E: Protected attribute `_p` cannot be accessed
+
+class Child(C[int]):
+    value = C[int]._p
+"#,
+);
+
+testcase!(
+    test_generic_alias_runtime_args,
+    r#"
+from typing import Any, assert_type
+
+assert_type(tuple[int, str].__args__, tuple[Any, ...])
+assert_type(tuple[int, ...].__args__, tuple[Any, ...])
+
+class C[T]: ...
+assert_type(C[int].__args__, tuple[Any, ...])
+
+def f(cls: type[C[int]]) -> None:
+    cls.__args__  # E: has no class attribute `__args__`
+"#,
+);
+
+testcase!(
     test_same_named_protected_attribute_from_unrelated_class,
     TestEnv::new().enable_protected_access_error(),
     r#"
@@ -2883,7 +3584,6 @@ ty(C).m(0) # E: Class `type` has no class attribute `m`
 );
 
 testcase!(
-    bug = "We get the wrong metaclass for a specialized generic",
     test_attribute_access_on_generic_alias,
     r#"
 # handy hack to get a type[X] for any X
@@ -2893,12 +3593,12 @@ class C[T]:
     @classmethod
     def m(cls, x: T): ...
 
-# In Python 3.12, the type of a generic class is either `typing._GenericAlias` or `types.GenericAlias`:
-# https://github.com/python/cpython/blob/9621a7d0170bf1ec48bcfc35825007cdf75265ea/Lib/typing.py#L1373-L1397
-# We don't model this, so Pyrefly mistakenly thinks the metaclass is just `type`.
-# This actually gets us the right behavior in this case (there's no `m` attribute on either generic
-# alias class), but the error message shows the incorrect inference.
-ty(C[int]).m(0)  # E: Class `type` has no class attribute `m`
+ty(C[int]).m(0)  # E: Class `GenericAlias` has no class attribute `m`
+ty(C[int]).__args__
+
+from types import GenericAlias
+from typing import assert_type
+assert_type(ty(C[int])(C, (str,)), GenericAlias)
     "#,
 );
 
@@ -5212,5 +5912,374 @@ C.readonly = 1
 assert_type(C.cached, int)
 C.cached = 1  # E: Cannot set instance variable `cached` from the class
 assert_type(C.cached, Literal[1])
+"#,
+);
+
+testcase!(
+    test_self_attribute_repeated_compatible_annotation,
+    r#"
+class A:
+    x: int
+    def __init__(self) -> None:
+        self.x: int = 0
+    def reset(self) -> None:
+        self.x: int = 1
+class B:
+    def __init__(self) -> None:
+        self.y: int = 0
+    def reset(self) -> None:
+        self.y: int = 1
+    "#,
+);
+
+testcase!(
+    test_self_attribute_redefinition_ignores_other_receivers,
+    r#"
+class Other:
+    x: str
+class A:
+    def __init__(self) -> None:
+        self.x: int = 0
+    @staticmethod
+    def build(other: Other) -> None:
+        other.x: str = ""  # E: Cannot annotate non-self attribute `other.x`
+    def nested(self) -> None:
+        def inner(self: Other) -> None:
+            self.x: str = ""  # E: Cannot annotate non-self attribute `self.x`
+    "#,
+);
+
+testcase!(
+    test_self_attribute_redefinition_constructor_ordering,
+    r#"
+class A:
+    def reset(self) -> None:
+        self.x: int = 1  # E: `x` cannot be annotated with `int`, it is already defined with type `int | None`
+    def __init__(self) -> None:
+        self.x: int | None = None
+"#,
+);
+
+testcase!(
+    test_self_attribute_compatible_unions_and_aliases,
+    r#"
+type AliasInt = int
+class A:
+    def __init__(self) -> None:
+        self.x: int | str = 0
+        self.y: AliasInt = 0
+    def reset(self) -> None:
+        self.x: str | int = ""
+        self.y: int = 1
+"#,
+);
+
+testcase!(
+    test_self_attribute_scoped_type_alias_redefinition,
+    r#"
+class T1: ...
+class T2: ...
+class A:
+    def __init__(self) -> None:
+        T = T1
+        self.x: T
+    def reset(self) -> None:
+        T = T2
+        self.x: T  # E: `x` cannot be annotated with `T2`, it is already defined with type `T1`
+"#,
+);
+
+testcase!(
+    test_self_attribute_class_body_reannotation_and_literal_narrowing,
+    r#"
+from typing import Literal
+class A:
+    x: int
+    y: Literal[0] | Literal[1]
+    def __init__(self) -> None:
+        self.x: int = 0
+        self.y: Literal[1] = 1
+    def reset(self) -> None:
+        self.x: int = 1
+        self.y: Literal[0] = 0
+"#,
+);
+
+testcase!(
+    test_nested_method_receiver_ownership,
+    r#"
+class Outer:
+    def __init__(self) -> None:
+        self.x: int = 0
+        class Inner:
+            @staticmethod
+            def static_helper(self: str) -> None:
+                self.x = ""  # E: Object of class `str` has no attribute `x`
+            def second_param(other, self: str) -> None:
+                self.x = ""  # E: Object of class `str` has no attribute `x`
+            def captured(other) -> None:
+                self.x = 1
+        def local_capture() -> None:
+            nonlocal self
+            self.x = 2
+"#,
+);
+
+testcase!(
+    test_receiver_ownership_global_comprehension_and_nonlocal_method,
+    r#"
+from typing import Final
+class Other:
+    x: int
+    y: int
+self = Other()
+class A:
+    z: Final[int]
+    def __init__(self) -> None:
+        self.z = 0
+        def uses_global() -> None:
+            global self
+            self.x: int = 1  # E: Cannot annotate non-self attribute `self.x`
+        _ = [0 for self in [Other()] for self.y in [1]]
+        class Inner:
+            def method(other) -> None:
+                nonlocal self
+                self.z = 2  # E: Cannot set field `z`
+_ = A().y  # E: Object of class `A` has no attribute `y`
+"#,
+);
+
+testcase!(
+    test_final_attribute_nested_permissions,
+    r#"
+from typing import Final
+class A:
+    x: Final[int]
+    def __init__(self) -> None:
+        self.x = 0
+        def helper() -> None:
+            self.x = 1
+        def helper_nonlocal() -> None:
+            nonlocal self
+            self.x = 2
+        class Inner:
+            def method(inner_self) -> None:
+                def f() -> None:
+                    self.x = 4  # E: Cannot set field `x`
+                f()
+            @staticmethod
+            def static_fn(self: A) -> None:
+                self.x = 3  # E: Cannot set field `x`
+"#,
+);
+
+testcase!(
+    test_no_type_check_staticmethod_skipped_body,
+    r#"
+from typing import no_type_check
+class A:
+    @no_type_check
+    @staticmethod
+    def static_func(self) -> None:
+        self.phantom = 1
+    @no_type_check
+    def normal_func(self) -> None:
+        self.real = 2
+
+a = A()
+_ = a.phantom  # E: Object of class `A` has no attribute `phantom`
+_ = a.real
+"#,
+);
+
+testcase!(
+    test_explicit_staticmethod_new_receiver,
+    r#"
+class C:
+    @staticmethod
+    def __new__(cls) -> "C":
+        cls.x: int = 0
+        return super().__new__(cls)
+
+_ = C().x
+"#,
+);
+
+testcase!(
+    test_explicit_staticmethod_new_no_type_check,
+    r#"
+from typing import no_type_check
+
+class C:
+    @no_type_check
+    @staticmethod
+    def __new__(cls) -> "C":
+        cls.x = 1
+        return super().__new__(cls)
+
+_ = C().x
+"#,
+);
+
+testcase!(
+    test_explicit_staticmethod_new_batch_skipped,
+    TestEnv::new_skip_check_no_infer().with_run_require(Require::Errors),
+    r#"
+class C:
+    @staticmethod
+    def __new__(cls):
+        cls.x = 1
+        return super().__new__(cls)
+
+_ = C().x
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_unreachable_loop_exit,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+class LoopReturns:
+    def __init__(self) -> None:
+        for _ in [1]:
+            self.value = 1
+            return
+
+class LoopReturnsInBranch:
+    def __init__(self, flag: bool) -> None:
+        if flag:
+            for _ in [1]:
+                self.value = 1
+                return
+        else:
+            self.value = 2
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_combines_every_return,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+
+class LaterReturnMisses:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            self.value = 1  # E: Attribute `value` may be uninitialized
+            return
+        if b:
+            return
+        self.value = 2
+
+class EveryReturnCutOff:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            if b:
+                self.value = 1
+            else:
+                stop()
+            return
+        if b:
+            self.value = 2
+        else:
+            stop()
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_never_call_before_return,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+def proceed() -> None: ...
+
+class StopsBeforeReturn:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            stop()
+            return  # E: This code is unreachable
+        if b:
+            self.value = 1
+            return
+        self.value = 2
+
+class StopsInEveryBranchBeforeReturn:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            if b:
+                stop()
+            else:
+                stop()
+            return  # E: This code is unreachable
+        self.value = 1
+
+class ProceedsBeforeReturn:
+    def __init__(self, a: bool) -> None:
+        if a:
+            proceed()
+            return
+        self.value = 1  # E: Attribute `value` may be uninitialized
+
+class DeletedBeforeStop:
+    def __init__(self, a: bool) -> None:
+        self.value = 1
+        if a:
+            del self.value
+            stop()
+            return  # E: This code is unreachable
+
+class DeferredBeforeStop:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            if b:
+                proceed()
+            else:
+                self.value = 1
+            stop()
+            return  # E: This code is unreachable
+        self.value = 2
+
+class ReturnInFinallyAfterStop:
+    def __init__(self, a: bool) -> None:
+        if a:
+            try:
+                stop()
+            finally:
+                return
+        self.value = 1  # E: Attribute `value` may be uninitialized
+
+class LaterReturnMisses:
+    def __init__(self, a: bool, b: bool) -> None:
+        if a:
+            stop()
+            return  # E: This code is unreachable
+        if b:
+            return
+        self.value = 1  # E: Attribute `value` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_attribute_initialization_inherited_getattr_fallback,
+    TestEnv::new().enable_possibly_uninitialized_attribute_error(),
+    r#"
+def coin() -> bool: ...
+
+class Fallback:
+    def __getattr__(self, name: str) -> int: ...
+
+class Derived(Fallback):
+    def __init__(self) -> None:
+        if coin():
+            self.value = 1
+
+class NoFallback:
+    def __init__(self) -> None:
+        if coin():
+            self.value = 1  # E: Attribute `value` may be uninitialized
 "#,
 );

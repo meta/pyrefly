@@ -5,15 +5,157 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
+
 use lsp_types::Uri;
 use pyrefly_lsp_test::IndexingMode;
 use pyrefly_lsp_test::LspArgs;
 use pyrefly_lsp_test::object_model::InitializeSettings;
 use pyrefly_lsp_test::object_model::LspInteraction;
 use pyrefly_lsp_test::object_model::LspInteractionArgs;
+use pyrefly_lsp_test::object_model::TestTelemetry;
 use serde_json::json;
+use tempfile::TempDir;
 
 use crate::test::lsp::lsp_interaction::util::get_test_files_root;
+use crate::test::lsp::lsp_interaction::util::wait_for_disk_invalidation;
+
+// https://github.com/meta/pyrefly/issues/5485
+#[test]
+fn test_references_to_class_member_after_defining_file_shifts() {
+    let root = TempDir::with_prefix("pyrefly_references_class_member_shift").unwrap();
+    let lib = "class Tools:\n    @staticmethod\n    def helper():\n        return 1\n";
+    fs::write(root.path().join("lib.py"), lib).unwrap();
+    fs::write(
+        root.path().join("user.py"),
+        r#"from lib import Tools
+
+Tools.helper()
+f = lambda: Tools.helper()
+
+class C:
+    x = Tools.helper()
+"#,
+    )
+    .unwrap();
+    let user_uri = Uri::from_file_path(root.path().join("user.py"))
+        .unwrap()
+        .to_string();
+    let user_references = json!([
+        {
+            "range": {"start":{"line":2,"character":6},"end":{"line":2,"character":12}},
+            "uri": user_uri
+        },
+        {
+            "range": {"start":{"line":3,"character":18},"end":{"line":3,"character":24}},
+            "uri": user_uri
+        },
+        {
+            "range": {"start":{"line":6,"character":14},"end":{"line":6,"character":20}},
+            "uri": user_uri
+        },
+    ]);
+
+    let telemetry = TestTelemetry::new();
+    let telemetry_events = telemetry.subscribe();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        telemetry: Box::new(telemetry),
+        ..Default::default()
+    });
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("lib.py");
+    interaction.client.did_open("user.py");
+    interaction
+        .client
+        .references("lib.py", 2, 9, false)
+        .expect_response(user_references.clone())
+        .unwrap();
+
+    // `user.py` imports the disk copy of `lib.py`, so save the edit as an editor does.
+    let shifted_lib = lib.replacen("\n", "\n\n", 1);
+    fs::write(root.path().join("lib.py"), &shifted_lib).unwrap();
+    interaction.client.did_change("lib.py", &shifted_lib);
+    interaction.client.did_save("lib.py");
+    wait_for_disk_invalidation(&telemetry_events);
+    interaction
+        .client
+        .references("lib.py", 3, 9, false)
+        .expect_response(user_references.clone())
+        .unwrap();
+
+    // A class above `Tools` changes the `ClassDefIndex` that the index of `user.py` stores.
+    let reindexed_lib = format!("class Other: ...\n{shifted_lib}");
+    fs::write(root.path().join("lib.py"), &reindexed_lib).unwrap();
+    interaction.client.did_change("lib.py", &reindexed_lib);
+    interaction.client.did_save("lib.py");
+    wait_for_disk_invalidation(&telemetry_events);
+    interaction
+        .client
+        .references("lib.py", 4, 9, false)
+        .expect_response(user_references)
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+// https://github.com/meta/pyrefly/issues/5485
+#[test]
+fn test_references_to_parent_method_after_defining_file_shifts() {
+    let root = TempDir::with_prefix("pyrefly_references_parent_method_shift").unwrap();
+    let base = "class Base:\n    def method(self):\n        pass\n";
+    fs::write(root.path().join("base.py"), base).unwrap();
+    fs::write(
+        root.path().join("child.py"),
+        r#"from base import Base
+
+
+class Child(Base):
+    def method(self):
+        pass
+"#,
+    )
+    .unwrap();
+    let child_uri = Uri::from_file_path(root.path().join("child.py"))
+        .unwrap()
+        .to_string();
+    let child_override = json!([
+        {
+            "range": {"start":{"line":4,"character":8},"end":{"line":4,"character":14}},
+            "uri": child_uri
+        },
+    ]);
+
+    let telemetry = TestTelemetry::new();
+    let telemetry_events = telemetry.subscribe();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        telemetry: Box::new(telemetry),
+        ..Default::default()
+    });
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("base.py");
+    interaction.client.did_open("child.py");
+    interaction
+        .client
+        .references("base.py", 1, 9, false)
+        .expect_response(child_override.clone())
+        .unwrap();
+
+    // `child.py` imports the disk copy of `base.py`, so save the edit as an editor does.
+    let shifted_base = base.replacen("\n", "\n\n", 1);
+    fs::write(root.path().join("base.py"), &shifted_base).unwrap();
+    interaction.client.did_change("base.py", &shifted_base);
+    interaction.client.did_save("base.py");
+    wait_for_disk_invalidation(&telemetry_events);
+    interaction
+        .client
+        .references("base.py", 2, 9, false)
+        .expect_response(child_override)
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
 
 #[test]
 fn test_parameter_references_in_unopened_file() {

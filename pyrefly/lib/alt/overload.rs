@@ -15,6 +15,7 @@ use pyrefly_types::callable::Param;
 use pyrefly_types::callable::ParamOverlay;
 use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::display::TypeDisplayContext;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::meta_shape_dsl::ShapeTransform;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::type_output::DisplayOutput;
@@ -25,6 +26,7 @@ use pyrefly_util::display::count;
 use pyrefly_util::gas::Gas;
 use pyrefly_util::owner::Owner;
 use pyrefly_util::prelude::VecExt;
+use ruff_python_ast::Expr;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use starlark_map::small_set::SmallSet;
@@ -37,6 +39,7 @@ use crate::alt::call::TargetWithTParams;
 use crate::alt::callable::ArgMap;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
+use crate::alt::callable::CallValue;
 use crate::alt::callable::CallWithTypes;
 use crate::alt::callable::ReturnTypeResolutionError;
 use crate::alt::expr::TypeOrExpr;
@@ -148,7 +151,20 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
                 return None;
             }
         };
-        let expanded_types = self.expand_type(value.infer(self.solver, errors));
+        // These expressions need parameter context and cannot produce an expandable type.
+        let expanded_types = match value.as_type_or_expr() {
+            TypeOrExpr::Expr(
+                Expr::Lambda(_)
+                | Expr::List(_)
+                | Expr::Dict(_)
+                | Expr::Set(_)
+                | Expr::ListComp(_)
+                | Expr::DictComp(_)
+                | Expr::SetComp(_)
+                | Expr::Generator(_),
+            ) => Vec::new(),
+            _ => self.expand_type(value.infer(self.solver, errors)),
+        };
         if expanded_types.is_empty() {
             // Nothing to expand here, try the next argument.
             self.expand(errors, owner)
@@ -161,14 +177,16 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
                     let mut new_keywords = keywords.clone();
                     match idx {
                         Either::Left(i) => {
-                            let new_value = TypeOrExpr::Type(ty, posargs[i].range());
+                            let new_value =
+                                CallValue::Plain(TypeOrExpr::Type(ty, posargs[i].range()));
                             new_posargs[i] = match posargs[i] {
                                 CallArg::Arg(_) => CallArg::Arg(new_value),
                                 CallArg::Star(_, range) => CallArg::Star(new_value, range),
                             }
                         }
                         Either::Right(i) => {
-                            let new_value = TypeOrExpr::Type(ty, keywords[i].range());
+                            let new_value =
+                                CallValue::Plain(TypeOrExpr::Type(ty, keywords[i].range()));
                             new_keywords[i] = CallKeyword {
                                 range: keywords[i].range(),
                                 arg: keywords[i].arg,
@@ -194,7 +212,7 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
     fn expand_type(&self, ty: Type) -> Vec<Type> {
         match ty {
             Type::Union(f) => f.members,
-            Type::ClassType(cls) if cls.is_builtin("bool") => {
+            Type::ClassType(cls) if cls.is(KnownClass::Bool) => {
                 vec![
                     Lit::Bool(true).to_implicit_type(),
                     Lit::Bool(false).to_implicit_type(),
@@ -1132,14 +1150,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             collect(obj);
         }
         for arg in args {
-            if let CallArg::Arg(TypeOrExpr::Type(ty, _))
-            | CallArg::Star(TypeOrExpr::Type(ty, _), _) = arg
-            {
+            let (CallArg::Arg(value) | CallArg::Star(value, _)) = arg;
+            if let TypeOrExpr::Type(ty, _) = value.as_type_or_expr() {
                 collect(ty);
             }
         }
         for kw in keywords {
-            if let TypeOrExpr::Type(ty, _) = &kw.value {
+            if let TypeOrExpr::Type(ty, _) = kw.value.as_type_or_expr() {
                 collect(ty);
             }
         }

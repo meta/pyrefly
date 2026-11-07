@@ -3060,7 +3060,33 @@ fn env_special_export_package_reexport() -> TestEnv {
     t.add_with_path(
         "pkg.my_typing",
         "pkg/my_typing.py",
-        "from typing import Annotated",
+        "from typing import Annotated, cast\nfrom builtins import all",
+    );
+    t.add_with_path(
+        "shadowed",
+        "shadowed/__init__.py",
+        "from typing import Iterable\nclass Checks:\n    def all(self, it: Iterable[bool]) -> bool: return True\nmy_typing = Checks()",
+    );
+    t.add_with_path(
+        "shadowed.my_typing",
+        "shadowed/my_typing.py",
+        "from builtins import all",
+    );
+    // With no child module, the imported attribute comes from the package hook.
+    t.add_with_path(
+        "dynamic",
+        "dynamic/__init__.py",
+        "from shadowed import my_typing as checks\ndef __getattr__(name: str): return checks",
+    );
+    t.add_with_path(
+        "loaded",
+        "loaded/__init__.py",
+        "from .my_typing import all\nfrom shadowed import my_typing as checks\ndef __getattr__(name: str): return checks",
+    );
+    t.add_with_path(
+        "loaded.my_typing",
+        "loaded/my_typing.py",
+        "from builtins import all",
     );
     t
 }
@@ -3071,6 +3097,51 @@ testcase!(
     r#"
 from pkg import my_typing as mt
 x: mt.Annotated[int, "metadata"] = 5
+"#,
+);
+
+testcase!(
+    test_historical_special_export_package_submodule,
+    env_special_export_package_reexport(),
+    r#"
+from typing import Any, assert_type
+
+def captured_cast(value: Any):
+    from pkg import my_typing as mt
+    saved = mt.cast
+    mt = value
+    assert_type(saved("int", value), int)
+
+def saved_builtin(values: tuple[int | None], replacement: Any):
+    from pkg import my_typing as mt
+    ok = mt.all(v is not None for v in values)
+    mt = replacement
+    if ok:
+        assert_type(values, tuple[int])
+
+def saved_custom(values: tuple[int | None], fake: Any):
+    mt = fake
+    ok = mt.all(v is not None for v in values)
+    from pkg import my_typing as mt
+    if ok:
+        assert_type(values, tuple[int | None])
+
+def exported_non_module(values: tuple[int | None]):
+    from shadowed import my_typing as mt
+    if mt.all(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+        return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def dynamic_non_module(values: tuple[int | None]):
+    from dynamic import my_typing as mt
+    if mt.all(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+        return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def already_loaded_submodule(values: tuple[int | None]):
+    from loaded import my_typing as mt
+    if mt.all(v is not None for v in values):
+        assert_type(values, tuple[int])
 "#,
 );
 
@@ -3209,22 +3280,56 @@ fn env_implicit_reexport_submodule() -> TestEnv {
         "foo/__init__.py",
         r#"
 from . import a
+from . import c as cc
 from .b import b
 "#,
     );
     t.add_with_path("foo.a", "foo/a.py", "x: int = 1");
     t.add_with_path("foo.b", "foo/b.py", "b: int = 1");
+    t.add_with_path("foo.c", "foo/c.py", "x: int = 1");
     t
 }
 
 // https://github.com/facebook/pyrefly/issues/5134
 testcase!(
-    bug = "`from . import a` in `foo/__init__.py` binds the submodule `foo.a`",
     test_implicit_reexport_submodule,
     env_implicit_reexport_submodule().enable_implicit_reexport_error(),
     r#"
-from foo import a  # E: `a` is not exported from module `foo`
+from foo import a
+from foo import cc
 from foo import b  # E: `b` is not exported from module `foo`
+"#,
+);
+
+fn env_implicit_reexport_submodule_forms() -> TestEnv {
+    let mut t = TestEnv::new();
+    t.add_with_path(
+        "foo",
+        "foo/__init__.py",
+        r#"
+from foo import a
+from foo import c as cc
+"#,
+    );
+    t.add_with_path("foo.a", "foo/a.py", "x: int = 1");
+    t.add_with_path("foo.c", "foo/c.py", "x: int = 1");
+    t.add_with_path("foo.x", "foo/x.py", "from . import a");
+    t.add_with_path("bar", "bar/__init__.pyi", "from . import a");
+    t.add_with_path("bar.a", "bar/a.pyi", "x: int");
+    t
+}
+
+// A `from` import of the package itself, in that package's `__init__`, binds a
+// submodule, with or without an alias. A `from .` import in any other module
+// does not.
+testcase!(
+    test_implicit_reexport_submodule_forms,
+    env_implicit_reexport_submodule_forms().enable_implicit_reexport_error(),
+    r#"
+from foo import a
+from bar import a as a2
+from foo import cc
+from foo.x import a as a3  # E: `a` is not exported from module `foo.x`
 "#,
 );
 

@@ -18,5 +18,5 @@ cd -- "$(dirname -- "$0")/.."
 # shellcheck source=/dev/null
 source scripts/setup_cargo.sh
 
-cargo install wasm-pack wasm-opt
+cargo install wasm-opt
 scripts/build_wasm_for_test.sh

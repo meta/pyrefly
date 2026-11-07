@@ -28,12 +28,15 @@ use crate::alt::answers::Solutions;
 use crate::binding::bindings::Bindings;
 use crate::config::base::InferReturnTypes;
 use crate::config::base::RecursionLimitConfig;
+use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
 use crate::error::style::ErrorStyle;
 use crate::export::exports::Exports;
 use crate::export::exports::LookupExport;
 use crate::module::parse::module_parse;
 use crate::solver::solver::Solver;
 use crate::solver::solver::SolverConfig;
+use crate::state::errors::ModuleRanges;
 use crate::state::load::Load;
 use crate::state::memory::MemoryFilesLookup;
 use crate::state::require::Require;
@@ -67,6 +70,8 @@ pub struct Context<'a, Lookup> {
     pub spec_compliant_overloads: bool,
     pub legacy_overload_expansion: bool,
     pub treat_all_caps_as_final: bool,
+    pub infer_param_types_from_docstring: bool,
+    pub reveal_type_qualified_names: bool,
     pub recursion_limit_config: Option<RecursionLimitConfig>,
     /// Pysa context for building PysaSolutions during the Solutions step.
     pub pysa_context: Option<PysaContext<'a>>,
@@ -83,13 +88,22 @@ pub struct Context<'a, Lookup> {
 pub struct ParsedModule {
     module: Arc<ModModule>,
     tokens: Option<Arc<Tokens>>,
+    errors: ModuleDiagnostics,
+    module_ranges: Arc<ModuleRanges>,
 }
 
 impl ParsedModule {
-    pub fn new(module: ModModule, tokens: Option<Tokens>) -> Self {
+    pub fn new(
+        module: ModModule,
+        tokens: Option<Tokens>,
+        errors: ModuleDiagnostics,
+        module_ranges: Arc<ModuleRanges>,
+    ) -> Self {
         Self {
             module: Arc::new(module),
             tokens: tokens.map(Arc::new),
+            errors,
+            module_ranges,
         }
     }
 
@@ -99,6 +113,14 @@ impl ParsedModule {
 
     pub fn tokens(&self) -> Option<Arc<Tokens>> {
         self.tokens.dupe()
+    }
+
+    pub fn errors(&self) -> &ModuleDiagnostics {
+        &self.errors
+    }
+
+    pub fn module_ranges(&self) -> &Arc<ModuleRanges> {
+        &self.module_ranges
     }
 }
 
@@ -249,6 +271,14 @@ macro_rules! compute_step {
         let $input = $steps.$input.clone_arc();
         compute_step!(@exec $steps, $ctx, $output, [$($acc)* $input] $($($rest)*)?);
     }};
+    // Some steps need the parser-owned diagnostics as well as the AST.
+    (@exec $steps:ident, $ctx:ident, $output:ident, [$($acc:ident)*] parsed_ast $(, $($rest:tt)*)?) => {{
+        let parsed_ast = $steps
+            .ast
+            .clone_arc()
+            .expect("parsed module must exist after the AST step");
+        compute_step!(@exec $steps, $ctx, $output, [$($acc)* parsed_ast] $($($rest)*)?);
+    }};
     // Required input (name): load and unwrap.
     (@exec $steps:ident, $ctx:ident, $output:ident, [$($acc:ident)*] $input:ident $(, $($rest:tt)*)?) => {{
         let $input = $steps.$input.clone_arc().unwrap();
@@ -347,7 +377,7 @@ impl StepsMut {
             Step::Load => compute_step!(self, ctx, load =),
             Step::Ast => compute_step!(self, ctx, ast = load),
             Step::Exports => compute_step!(self, ctx, exports = load, ast),
-            Step::Answers => compute_step!(self, ctx, answers = load, ast, exports),
+            Step::Answers => compute_step!(self, ctx, answers = load, parsed_ast, exports),
             Step::Solutions => compute_step!(self, ctx, solutions = load, ast?, answers),
         }
         // Release-store current_step: readers seeing this value are guaranteed
@@ -481,15 +511,23 @@ impl Step {
 
     #[inline(never)]
     fn step_ast<Lookup>(ctx: &Context<Lookup>, load: Arc<Load>) -> Arc<ParsedModule> {
+        let errors = ErrorCollector::new(load.module_info.dupe(), load.error_style);
         let (module, tokens, ignore) = module_parse(
             load.module_info.contents(),
             ctx.sys_info.version(),
             load.module_info.source_type(),
-            &load.errors,
+            &errors,
             ctx.require.keep_ast(),
         );
         load.module_info.initialize_ignore(ignore);
-        Arc::new(ParsedModule::new(module, tokens))
+        let module_ranges = Arc::new(ModuleRanges::compute(&module, &load.module_info));
+        errors.add_misplaced_ignores(&module_ranges.misplaced_ignore_all);
+        Arc::new(ParsedModule::new(
+            module,
+            tokens,
+            errors.finish(),
+            module_ranges,
+        ))
     }
 
     #[inline(never)]
@@ -512,7 +550,7 @@ impl Step {
     fn step_answers<Lookup: LookupExport>(
         ctx: &Context<Lookup>,
         load: Arc<Load>,
-        ast: Arc<ParsedModule>,
+        parsed_ast: Arc<ParsedModule>,
         exports: Arc<Exports>,
     ) -> Arc<Answers> {
         let solver = Solver::new(SolverConfig {
@@ -522,26 +560,35 @@ impl Step {
             strict_partial_subtyping: ctx.strict_partial_subtyping,
             spec_compliant_overloads: ctx.spec_compliant_overloads,
             legacy_overload_expansion: ctx.legacy_overload_expansion,
+            reveal_type_qualified_names: ctx.reveal_type_qualified_names,
         });
-        let ast = ast.module();
         let enable_index = ctx.require.keep_index();
         let enable_trace =
             ctx.require.keep_answers_trace() || ctx.pysa_context.is_some() || ctx.cinderx_enabled;
         let bindings = Bindings::new(
-            Arc::unwrap_or_clone(ast),
+            Arc::unwrap_or_clone(parsed_ast.module()),
             load.module_info.dupe(),
+            parsed_ast.errors().dupe(),
+            parsed_ast.module_ranges().dupe(),
             &exports,
             &solver,
             ctx.lookup,
             *ctx.sys_info,
-            &load.errors,
+            load.error_style,
             enable_trace,
             ctx.check_unannotated_defs,
             ctx.require.keep_index(),
             ctx.infer_return_types,
             ctx.treat_all_caps_as_final,
+            ctx.infer_param_types_from_docstring,
         );
-        Arc::new(Answers::new(bindings, solver, enable_index, enable_trace))
+        Arc::new(Answers::new(
+            bindings,
+            solver,
+            enable_index,
+            enable_trace,
+            load.error_style,
+        ))
     }
 
     #[inline(never)]
@@ -567,7 +614,7 @@ impl Step {
         let solutions = answers.solve(
             ctx.lookup,
             ctx.lookup,
-            &load.errors,
+            answers.errors(),
             ctx.stdlib,
             ctx.uniques,
             ctx.require.compute_errors()

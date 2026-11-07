@@ -33,12 +33,29 @@ def test_tensor_base_members(tensor: Tensor) -> None:
     assert_type(len(tensor), int)
 
 
+def test_scalar_formatting_runtime() -> None:
+    scalar: Tensor[[]] = torch.ones(())
+    formatted = f"{scalar:.3e}"
+    assert_type(formatted, str)
+    assert formatted == "1.000e+00"
+    assert_shape(scalar.shape, ())
+
+
 def test_shape_preserving_tensor_base_members() -> None:
     tensor = torch.ones((2, 3))
     assert_shape(tensor.fill_(0).shape, (2, 3))
     assert_shape(tensor.clone().shape, (2, 3))
     assert_shape(tensor.detach().shape, (2, 3))
     assert_shape(tensor.transpose(0, 1).contiguous().shape, (3, 2))
+
+
+def test_memory_format_constants() -> None:
+    assert_type(torch.contiguous_format, torch.memory_format)
+    assert_type(torch.preserve_format, torch.memory_format)
+    assert_type(torch.channels_last_3d, torch.memory_format)
+    assert isinstance(torch.contiguous_format, torch.memory_format)
+    assert isinstance(torch.preserve_format, torch.memory_format)
+    assert isinstance(torch.channels_last_3d, torch.memory_format)
 
 
 def test_torch_module_types(value: torch.FloatTensor) -> None:

@@ -10566,7 +10566,7 @@
       "concise_description": "Method `draw` inherited from class `PColor` has no implementation and cannot be accessed via `super()`",
       "description": "Method `draw` inherited from class `PColor` has no implementation and cannot be accessed via `super()`",
       "line": 27,
-      "name": "missing-attribute",
+      "name": "abstract-method-call",
       "severity": "error",
       "stop_column": 28,
       "stop_line": 27
@@ -11024,17 +11024,6 @@
       "severity": "warn",
       "stop_column": 17,
       "stop_line": 22
-    },
-    {
-      "code": -2,
-      "column": 7,
-      "concise_description": "Type variable `T3` in class `Protocol2` is declared as invariant, but could be contravariant based on its usage",
-      "description": "Type variable `T3` in class `Protocol2` is declared as invariant, but could be contravariant based on its usage",
-      "line": 41,
-      "name": "variance-mismatch",
-      "severity": "warn",
-      "stop_column": 16,
-      "stop_line": 41
     },
     {
       "code": -2,
@@ -12986,9 +12975,9 @@
       "code": -2,
       "column": 4,
       "concise_description": "Class member `Y1.x` overrides parent class `X1` in an inconsistent manner",
-      "description": "Class member `Y1.x` overrides parent class `X1` in an inconsistent manner\n  `Y1.x` has type `int`, which is not consistent with `str` in `X1.x` (the type of read-write attributes cannot be changed)",
+      "description": "Class member `Y1.x` overrides parent class `X1` in an inconsistent manner\n  `Y1.x` has type `int`, which is not assignable to `str`, the type of `X1.x`",
       "line": 55,
-      "name": "bad-override-mutable-attribute",
+      "name": "bad-override",
       "severity": "error",
       "stop_column": 5,
       "stop_line": 55

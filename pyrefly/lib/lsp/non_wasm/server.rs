@@ -11,7 +11,6 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::hash_map::Entry;
 use std::hash::Hasher;
 use std::io::Write;
 use std::iter::once;
@@ -27,9 +26,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::Context as _;
 use crossbeam_channel::Sender;
 use dupe::Dupe;
-use dupe::OptionDupedExt;
 use glob::Pattern;
 use itertools::Itertools;
 use lsp_server::ErrorCode;
@@ -43,7 +42,6 @@ use lsp_types::CallHierarchyPrepareRequest;
 use lsp_types::CallHierarchyProvider;
 use lsp_types::CancelNotification;
 use lsp_types::ChangeNotifications;
-use lsp_types::Code;
 use lsp_types::CodeAction;
 use lsp_types::CodeActionKind;
 use lsp_types::CodeActionOptions;
@@ -74,7 +72,6 @@ use lsp_types::DefinitionRequest;
 use lsp_types::DefinitionResponse;
 use lsp_types::Diagnostic;
 use lsp_types::DiagnosticSeverity;
-use lsp_types::DiagnosticTag;
 use lsp_types::DidChangeConfigurationClientCapabilities;
 use lsp_types::DidChangeConfigurationNotification;
 use lsp_types::DidChangeConfigurationParams;
@@ -289,7 +286,6 @@ use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::lsp::IndexingMode;
 use crate::config::config::ConfigFile;
 use crate::config::config::ConfigScope;
-use crate::config::error_kind::ErrorKind;
 use crate::error::baseline::BaselineWrite;
 use crate::error::baseline::StaleRowScope;
 use crate::error::baseline::write_baseline_file;
@@ -311,7 +307,6 @@ use crate::lsp::non_wasm::convert_module_package::convert_module_package_code_ac
 use crate::lsp::non_wasm::document_symbols::flatten_to_symbol_information;
 use crate::lsp::non_wasm::external_provider::ExternalProvider;
 use crate::lsp::non_wasm::external_provider::compute_qualified_name;
-use crate::lsp::non_wasm::lsp::apply_change_events;
 use crate::lsp::non_wasm::lsp::as_notification;
 use crate::lsp::non_wasm::lsp::as_request;
 use crate::lsp::non_wasm::lsp::as_request_response_pair;
@@ -333,7 +328,6 @@ use crate::lsp::non_wasm::queue::LspQueue;
 use crate::lsp::non_wasm::queue::QueuedEvent;
 use crate::lsp::non_wasm::safe_delete_file::safe_delete_file_code_actions;
 use crate::lsp::non_wasm::stdlib::should_show_stdlib_error;
-use crate::lsp::non_wasm::transaction_manager::TransactionManager;
 use crate::lsp::non_wasm::type_error_display_status::BuildSystemStatus;
 use crate::lsp::non_wasm::type_error_display_status::TypeErrorDisplayStatus;
 pub use crate::lsp::non_wasm::type_error_display_status::TypeErrorDisplayStatusChangedNotification;
@@ -358,6 +352,9 @@ use crate::lsp::non_wasm::workspace::Workspace;
 use crate::lsp::non_wasm::workspace::Workspaces;
 use crate::lsp::wasm::completion::CompletionOptions as CompletionRequestOptions;
 use crate::lsp::wasm::completion::supports_snippet_completions;
+use crate::lsp::wasm::document::OpenFile;
+use crate::lsp::wasm::document::OpenFiles;
+use crate::lsp::wasm::document::apply_change_events;
 use crate::lsp::wasm::hover::HoverOptions;
 use crate::lsp::wasm::hover::HoverResult;
 use crate::lsp::wasm::hover::get_hover_with_verbosity;
@@ -382,7 +379,6 @@ use crate::state::lsp::ReferenceOptions;
 use crate::state::notebook::LspNotebook;
 use crate::state::require::Require;
 use crate::state::semantic_tokens::SemanticTokensLegends;
-use crate::state::semantic_tokens::disabled_ranges_for_module;
 use crate::state::state::CancellableTransaction;
 use crate::state::state::CommittingTransaction;
 use crate::state::state::State;
@@ -390,6 +386,7 @@ use crate::state::state::Transaction;
 use crate::state::subscriber::CompositeSubscriber;
 use crate::state::subscriber::PublishDiagnosticsSubscriber;
 use crate::state::subscriber::Subscriber;
+use crate::state::transaction_manager::TransactionManager;
 use crate::tsp::type_conversion::StdlibClasses;
 use crate::tsp::type_conversion::convert_type_with_resolvers;
 use crate::tsp::type_facts::TypeFact;
@@ -1184,7 +1181,7 @@ pub struct Server {
     /// Notebook cell URIs are entirely arbitrary, and any URI received from the language client
     /// should be mapped through here in case they correspond to a cell.
     open_notebook_cells: RwLock<HashMap<Uri, PathBuf>>,
-    open_files: RwLock<HashMap<PathBuf, Arc<LspFile>>>,
+    open_files: OpenFiles,
     /// Files saved since the last recheck started, awaiting a baseline prune, each held
     /// with the buffer that was current at the save. A recheck claims the whole map
     /// before it runs, so the state it commits reflects everything it claimed; files
@@ -1223,7 +1220,6 @@ pub struct Server {
     /// Exact file paths that already have a dedicated, permanent watcher registration.
     /// These registrations are additive and never removed, so this set only grows.
     watched_exact_paths: Mutex<SmallSet<PathBuf>>,
-    version_info: Mutex<HashMap<PathBuf, i32>>,
     override_code_lens_refresh_support: AtomicBool,
     id: Uuid,
     /// The surface/entrypoint for the language server (`--from` CLI arg)
@@ -2039,7 +2035,7 @@ impl Server {
         self.open_files
             .read()
             .iter()
-            .filter_map(|(path, file)| match &**file {
+            .filter_map(|(path, file)| match &*file.contents {
                 LspFile::Notebook(notebook) => Some((path.clone(), notebook.clone())),
                 _ => None,
             })
@@ -3107,7 +3103,7 @@ impl Server {
             server_mode,
             state: State::new(config_finder, thread_count),
             open_notebook_cells: RwLock::new(HashMap::new()),
-            open_files: RwLock::new(HashMap::new()),
+            open_files: OpenFiles::default(),
             files_saved_pending_baseline_prune: Mutex::new(HashMap::new()),
             published_workspace_diagnostics: Mutex::new(HashMap::new()),
             unsaved_file_tracker: UnsavedFileTracker::new(),
@@ -3126,7 +3122,6 @@ impl Server {
             filewatcher_registered: AtomicBool::new(false),
             watched_patterns: Mutex::new(SmallSet::new()),
             watched_exact_paths: Mutex::new(SmallSet::new()),
-            version_info: Mutex::new(HashMap::new()),
             override_code_lens_refresh_support: AtomicBool::new(false),
             id: Uuid::new_v4(),
             surface,
@@ -3290,14 +3285,21 @@ impl Server {
         custom_thread_pool: Option<&ThreadPool>,
     ) -> Vec<Handle> {
         let validate_start = Instant::now();
-        let handles = self.get_open_file_handles();
-        transaction.set_memory(
-            self.open_files
-                .read()
-                .iter()
-                .map(|x| (x.0.clone(), Some(Arc::new(x.1.to_file_contents()))))
-                .collect::<Vec<_>>(),
-        );
+        let (handles, memory): (Vec<_>, Vec<_>) = self
+            .open_files
+            .read()
+            .iter()
+            .map(|(path, file)| {
+                (
+                    make_open_handle(&self.state, path),
+                    (
+                        path.clone(),
+                        Some(Arc::new(file.contents.to_file_contents())),
+                    ),
+                )
+            })
+            .unzip();
+        transaction.set_memory(memory);
         transaction.run(&handles, Require::Everything, custom_thread_pool);
         telemetry.set_validate_duration(validate_start.elapsed());
         handles
@@ -3315,7 +3317,8 @@ impl Server {
     fn get_diag_if_shown(
         &self,
         e: &Error,
-        open_files: &HashMap<PathBuf, Arc<LspFile>>,
+        severity: Severity,
+        open_files: &HashMap<PathBuf, OpenFile>,
         cell_uri: Option<&Uri>, // If the file is a notebook, only show diagnostics for the matching cell
     ) -> Option<(PathBuf, Diagnostic)> {
         if let Some(path) = to_real_path(e.path()) {
@@ -3344,13 +3347,13 @@ impl Server {
             // include paths continue to constrain their scope.
             if let Some(lsp_file) = open_files.get(&path)
                 && (config.project_includes.covers(&path)
-                    || (matches!(&**lsp_file, LspFile::Notebook(_))
+                    || (matches!(&*lsp_file.contents, LspFile::Notebook(_))
                         && config
                             .project_includes
                             .covers(&path.with_extension("ipynb")))
                     || (path.extension().is_none()
                         && matches!(
-                            &**lsp_file,
+                            &*lsp_file.contents,
                             LspFile::Source { language_id, .. }
                                 if language_id.as_ref() == "python"
                         )
@@ -3358,7 +3361,7 @@ impl Server {
                 && !config.project_excludes.covers(&path)
                 && type_error_status.is_enabled()
             {
-                return match &**lsp_file {
+                return match &*lsp_file.contents {
                     LspFile::Notebook(notebook) => {
                         let error_cell = e.get_notebook_cell()?;
                         let error_cell_uri = notebook.get_code_cell_url(error_cell)?;
@@ -3369,11 +3372,13 @@ impl Server {
                         } else {
                             Some((
                                 PathBuf::from(error_cell_uri.to_string()),
-                                e.to_diagnostic()?,
+                                e.to_diagnostic_with_severity(severity)?,
                             ))
                         }
                     }
-                    LspFile::Source { .. } => Some((path.to_path_buf(), e.to_diagnostic()?)),
+                    LspFile::Source { .. } => {
+                        Some((path.to_path_buf(), e.to_diagnostic_with_severity(severity)?))
+                    }
                 };
             }
 
@@ -3382,13 +3387,13 @@ impl Server {
             // Only show error-severity diagnostics for non-open files; lower-severity
             // diagnostics (warnings, info) are restricted to open files.
             if open_files.get(&path).is_none()
-                && e.severity() >= Severity::Error
+                && severity >= Severity::Error
                 && self.workspaces.diagnostic_mode(&path) == DiagnosticMode::Workspace
                 && config.project_includes.covers(&path)
                 && !config.project_excludes.covers(&path)
                 && type_error_status.is_enabled()
             {
-                return Some((path.to_path_buf(), e.to_diagnostic()?));
+                return Some((path.to_path_buf(), e.to_diagnostic_with_severity(severity)?));
             }
         }
         None
@@ -3519,18 +3524,16 @@ impl Server {
         for x in open_notebook_cells.keys() {
             notebook_cell_urls.insert(PathBuf::from(x.to_string()), x.clone());
         }
-        let mut open_diag_paths: HashSet<PathBuf> = HashSet::new();
         for handle in handles {
             let handle_path_buf = handle.path().as_path().to_path_buf();
             if let Some(lsp_file) = open_files.get(&handle_path_buf) {
-                match &**lsp_file {
+                match &*lsp_file.contents {
                     LspFile::Notebook(notebook) => {
                         for url in notebook.code_cell_urls() {
                             diags.insert(PathBuf::from(url.to_string()), Vec::new());
                         }
                     }
                     LspFile::Source { .. } => {
-                        open_diag_paths.insert(handle_path_buf.clone());
                         diags.insert(handle_path_buf, Vec::new());
                     }
                 }
@@ -3543,44 +3546,39 @@ impl Server {
                 diags.insert(handle_path_buf, Vec::new());
             }
         }
-        let (normal_errors, baseline_errors) = transaction
-            .get_errors(handles)
-            .collect_lsp_errors_with_baselines();
+        let errors = transaction.get_errors(handles);
+        let mut unused = Vec::new();
+        let (normal_errors, baseline_errors) =
+            errors.collect_lsp_error_refs_with_baselines(&mut unused);
         for e in normal_errors {
-            if let Some((path, diag)) = self.get_diag_if_shown(&e, &open_files, None) {
+            if let Some((path, diag)) =
+                self.get_diag_if_shown(e.error(), e.severity(), &open_files, None)
+            {
                 diags.entry(path.to_owned()).or_default().push(diag);
             }
         }
         for e in baseline_errors {
             // Errors in open files that match a baseline file are downgraded to HINT.
-            if let Some((path, mut diag)) = self.get_diag_if_shown(&e, &open_files, None) {
-                if to_real_path(e.path()).is_some_and(|p| open_files.contains_key(&p)) {
+            if let Some((path, mut diag)) =
+                self.get_diag_if_shown(e.error(), e.severity(), &open_files, None)
+            {
+                if to_real_path(e.error().path()).is_some_and(|p| open_files.contains_key(&p)) {
                     diag.severity = Some(DiagnosticSeverity::Hint);
                 }
                 diags.entry(path.to_owned()).or_default().push(diag);
             }
         }
+        let versions = open_files
+            .iter()
+            .map(|(path, file)| (path.clone(), file.version))
+            .collect();
         drop(open_files);
-        for (path, diagnostics) in diags.iter_mut() {
+        for diagnostics in diags.values_mut() {
             for diagnostic in diagnostics.iter_mut() {
                 diagnostic.data = serde_json::to_value(source).ok()
             }
-            if notebook_cell_urls.contains_key(path) {
-                continue;
-            }
-            // Skip unreachable-code hints for non-open workspace files to reduce noise.
-            if !open_diag_paths.contains(path) {
-                continue;
-            }
-            let handle = make_open_handle(&self.state, path);
-            Self::append_unreachable_hints(transaction, &handle, diagnostics);
         }
-        self.publish_diagnostics(
-            diags,
-            notebook_cell_urls,
-            self.version_info.lock().clone(),
-            source,
-        );
+        self.publish_diagnostics(diags, notebook_cell_urls, versions, source);
         if self
             .initialize_params
             .capabilities
@@ -4078,7 +4076,7 @@ impl Server {
             // one for an error still present on disk.
             if !open_files
                 .get(&path)
-                .is_some_and(|current| Arc::ptr_eq(current, &saved))
+                .is_some_and(|current| Arc::ptr_eq(&current.contents, &saved))
             {
                 continue;
             }
@@ -4122,7 +4120,8 @@ impl Server {
                 collected.ordinary.extend(unused_ignores.hints);
                 collected.ordinary.append(&mut collected.hints);
                 let applied = errors.apply_baseline(
-                    &mut collected,
+                    &mut collected.ordinary,
+                    &mut collected.baseline,
                     Some(&baseline_path),
                     relative_to,
                     config.baseline_matching_mode,
@@ -4314,7 +4313,7 @@ impl Server {
             // Record what was saved, not just that a save happened. A file with no buffer
             // is not recorded at all, because there would be nothing to check the eventual
             // prune against.
-            if let Some(saved) = self.open_files.read().get(&path).duped() {
+            if let Some(saved) = self.open_files.get(&path) {
                 self.files_saved_pending_baseline_prune
                     .lock()
                     .insert(path.clone(), saved);
@@ -4360,8 +4359,7 @@ impl Server {
         } else {
             None
         };
-        self.version_info.lock().insert(path.clone(), version);
-        self.open_files.write().insert(path.clone(), contents);
+        self.open_files.open(path.clone(), version, contents);
         self.queue_source_db_rebuild_and_recheck(telemetry, telemetry_event, false);
         if !subsequent_mutation {
             info!(
@@ -4397,57 +4395,34 @@ impl Server {
         let VersionedTextDocumentIdentifier {
             text_document_identifier: TextDocumentIdentifier { uri },
             version,
-        } = params.text_document;
-        let Some(file_path) = self.path_for_uri(&uri) else {
+        } = &params.text_document;
+        let version = *version;
+        let Some(file_path) = self.path_for_uri(uri) else {
             return Err(anyhow::anyhow!(
                 "Received textDocument/didChange for unknown uri: {uri}"
             ));
         };
 
-        let version_info = self.version_info.lock();
-        let old_version = version_info.get(&file_path).unwrap_or(&0);
-        if version < *old_version {
-            // Log a warning but proceed — some clients reset version numbers
-            // between editing sessions, and silently dropping the edit causes
-            // worse bugs than accepting an out-of-order version.
-            warn!(
-                "textDocument/didChange: version went backwards (new={version:?} < old={old_version:?}) for {uri}, applying anyway"
-            );
-        }
-        drop(version_info);
-        let mut lock = self.open_files.write();
-        let Some(original) = lock.get_mut(&file_path) else {
-            return Err(anyhow::anyhow!(
-                "File not found in open_files: {}",
-                file_path.display()
-            ));
-        };
-        let language_id = match original.as_ref() {
-            LspFile::Source { language_id, .. } => Arc::clone(language_id),
-            LspFile::Notebook(_) => {
-                return Err(anyhow::anyhow!(
-                    "Expected text file for {}, but got notebook",
-                    uri
-                ));
+        self.open_files.update(&file_path, version, |old| {
+            let old_version = old.version;
+            if version < old_version {
+                // Some clients reset versions between sessions. Dropping the edit
+                // causes worse bugs than accepting a backwards version.
+                warn!(
+                    "textDocument/didChange: version went backwards (new={version:?} < old={old_version:?}) for {uri}, applying anyway"
+                );
             }
-        };
-        *original = Arc::new(LspFile::Source {
-            contents: Arc::new(apply_change_events(
-                original.get_string(),
-                params.content_changes,
-            )),
-            language_id,
-        });
-        drop(lock);
-        // Update version_info only after the mutation has fully succeeded.
-        self.version_info.lock().insert(file_path.clone(), version);
+            old.contents
+                .apply_text_changes(params.content_changes)
+                .with_context(|| format!("Could not apply text changes to {uri}"))
+        })?;
         if !subsequent_mutation {
             info!(
                 "File {} changed, prepare to validate open files.",
                 file_path.display()
             );
             if let Ok(handle) = self.make_handle_if_enabled(
-                &uri,
+                uri,
                 Some(DidChangeTextDocumentNotification::METHOD.as_str()),
             ) {
                 self.currently_streaming_diagnostics_for_handles
@@ -4479,142 +4454,130 @@ impl Server {
             ));
         };
 
-        let version_info = self.version_info.lock();
-        let old_version = version_info.get(&file_path).unwrap_or(&0);
-        if version < *old_version {
-            return Err(anyhow::anyhow!(
-                "new_version < old_version in `notebookDocument/didChange` notification: new_version={version:?} old_version={old_version:?} notebook_document.uri={uri:?}"
-            ));
-        }
-        // Drop version_info before mutating state. We'll update it after the
-        // mutation succeeds so that version and state stay consistent on error.
-        drop(version_info);
-
-        let mut lock = self.open_files.write();
-        let Some(original) = lock.get_mut(&file_path) else {
-            return Err(anyhow::anyhow!(
-                "File not found in open_files: {}",
-                file_path.display()
-            ));
-        };
-
-        let original_notebook = match original.as_ref() {
-            LspFile::Notebook(notebook) => notebook.clone(),
-            _ => {
+        let mut opened_cell_uris = Vec::new();
+        self.open_files.update(&file_path, version, |old| {
+            let old_version = old.version;
+            if version < old_version {
                 return Err(anyhow::anyhow!(
-                    "Expected notebook file for {}, but got text file",
-                    uri
+                    "new_version < old_version in `notebookDocument/didChange` notification: new_version={version:?} old_version={old_version:?} notebook_document.uri={uri:?}"
                 ));
             }
-        };
-
-        let mut notebook_document = original_notebook.notebook_document().clone();
-        let mut cell_versions = original_notebook.cell_versions().clone();
-        let mut cell_content_map: HashMap<Uri, String> = HashMap::new();
-        // Changed metadata
-        if let Some(metadata) = &params.change.metadata {
-            notebook_document.metadata = Some(metadata.clone());
-        }
-        notebook_document.version = version;
-
-        // Track existing cell contents during both metdata-only (for kernel-switching) changes and cell-content changes
-        for cell in &notebook_document.cells {
-            let cell_contents = original_notebook
-                .get_cell_contents(&cell.document)
-                .unwrap_or_default();
-            cell_content_map.insert(cell.document.clone(), cell_contents);
-        }
-
-        // Changes to cells
-        if let Some(change) = &params.change.cells {
-            // Structural changes
-            if let Some(structure) = &change.structure {
-                let start = structure.array.start as usize;
-                let delete_count = structure.array.delete_count as usize;
-                // Delete cells
-                // Do not remove the cells from `open_notebook_cells`, since
-                // incoming requests could still reference them.
-                if delete_count > 0 {
-                    let end = min(start + delete_count, notebook_document.cells.len());
-                    notebook_document.cells.drain(start..end);
+            let original_notebook = match old.contents.as_ref() {
+                LspFile::Notebook(notebook) => notebook.clone(),
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Expected notebook file for {}, but got text file",
+                        uri
+                    ));
                 }
-                // Insert new cells
-                if let Some(new_cells) = &structure.array.cells {
-                    let cells = &mut notebook_document.cells;
-                    for (i, cell) in new_cells.iter().enumerate() {
-                        let next_index = start + i;
-                        if next_index == cells.len() {
-                            cells.push(cell.clone());
-                        } else if next_index > cells.len() {
-                            return Err(anyhow::anyhow!(
-                                "Attempted to update notebook document, but cells are missing. Tried to add cell at index {next_index} but only {} cells exist.",
-                                cells.len()
-                            ));
-                        } else {
-                            cells.insert(next_index, cell.clone());
+            };
+
+            let mut notebook_document = original_notebook.notebook_document().clone();
+            let mut cell_versions = original_notebook.cell_versions().clone();
+            let mut cell_content_map: HashMap<Uri, String> = HashMap::new();
+            // Changed metadata
+            if let Some(metadata) = &params.change.metadata {
+                notebook_document.metadata = Some(metadata.clone());
+            }
+            notebook_document.version = version;
+
+            // Track existing cell contents during both metdata-only (for kernel-switching) changes and cell-content changes
+            for cell in &notebook_document.cells {
+                let cell_contents = original_notebook
+                    .get_cell_contents(&cell.document)
+                    .unwrap_or_default();
+                cell_content_map.insert(cell.document.clone(), cell_contents);
+            }
+
+            // Changes to cells
+            if let Some(change) = &params.change.cells {
+                // Structural changes
+                if let Some(structure) = &change.structure {
+                    let start = structure.array.start as usize;
+                    let delete_count = structure.array.delete_count as usize;
+                    // Delete cells
+                    // Do not remove the cells from `open_notebook_cells`, since
+                    // incoming requests could still reference them.
+                    if delete_count > 0 {
+                        let end = min(start + delete_count, notebook_document.cells.len());
+                        notebook_document.cells.drain(start..end);
+                    }
+                    // Insert new cells
+                    if let Some(new_cells) = &structure.array.cells {
+                        let cells = &mut notebook_document.cells;
+                        for (i, cell) in new_cells.iter().enumerate() {
+                            let next_index = start + i;
+                            if next_index == cells.len() {
+                                cells.push(cell.clone());
+                            } else if next_index > cells.len() {
+                                return Err(anyhow::anyhow!(
+                                    "Attempted to update notebook document, but cells are missing. Tried to add cell at index {next_index} but only {} cells exist.",
+                                    cells.len()
+                                ));
+                            } else {
+                                cells.insert(next_index, cell.clone());
+                            }
+                        }
+                    }
+                    // Set contents for new cells
+                    if let Some(opened_cells) = &structure.did_open {
+                        for opened_cell in opened_cells {
+                            cell_versions.insert(opened_cell.uri.clone(), opened_cell.version);
+                            cell_content_map.insert(opened_cell.uri.clone(), opened_cell.text.clone());
+                            opened_cell_uris.push(opened_cell.uri.clone());
                         }
                     }
                 }
-                // Set contents for new cells
-                if let Some(opened_cells) = &structure.did_open {
-                    for opened_cell in opened_cells {
-                        cell_versions.insert(opened_cell.uri.clone(), opened_cell.version);
-                        cell_content_map.insert(opened_cell.uri.clone(), opened_cell.text.clone());
-                        self.open_notebook_cells
-                            .write()
-                            .insert(opened_cell.uri.clone(), file_path.clone());
+                // Cell metadata changes
+                if let Some(cell_data) = &change.data {
+                    for updated_cell in cell_data {
+                        if let Some(cell) = notebook_document
+                            .cells
+                            .iter_mut()
+                            .find(|c| c.document == updated_cell.document)
+                        {
+                            cell.kind = updated_cell.kind;
+                            cell.metadata = updated_cell.metadata.clone();
+                            cell.execution_summary = updated_cell.execution_summary.clone();
+                        }
+                    }
+                }
+                // Cell content changes
+                if let Some(text_content_changes) = &change.text_content {
+                    for text_change in text_content_changes {
+                        let cell_uri = text_change.document.text_document_identifier.uri.clone();
+                        let original_text = cell_content_map
+                            .get(&cell_uri)
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let content_changes: Vec<TextDocumentContentChangeEvent> = text_change
+                            .changes
+                            .iter()
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect();
+                        let new_text = apply_change_events(original_text, content_changes);
+                        cell_versions.insert(cell_uri.clone(), text_change.document.version);
+                        cell_content_map.insert(cell_uri, new_text);
                     }
                 }
             }
-            // Cell metadata changes
-            if let Some(cell_data) = &change.data {
-                for updated_cell in cell_data {
-                    if let Some(cell) = notebook_document
-                        .cells
-                        .iter_mut()
-                        .find(|c| c.document == updated_cell.document)
-                    {
-                        cell.kind = updated_cell.kind;
-                        cell.metadata = updated_cell.metadata.clone();
-                        cell.execution_summary = updated_cell.execution_summary.clone();
-                    }
-                }
-            }
-            // Cell content changes
-            if let Some(text_content_changes) = &change.text_content {
-                for text_change in text_content_changes {
-                    let cell_uri = text_change.document.text_document_identifier.uri.clone();
-                    let original_text = cell_content_map
-                        .get(&cell_uri)
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
-                    let content_changes: Vec<TextDocumentContentChangeEvent> = text_change
-                        .changes
-                        .iter()
-                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                        .collect();
-                    let new_text = apply_change_events(original_text, content_changes);
-                    cell_versions.insert(cell_uri.clone(), text_change.document.version);
-                    cell_content_map.insert(cell_uri, new_text);
-                }
+            // Convert new notebook contents into a Ruff Notebook
+            let ruff_notebook = notebook_document
+                .clone()
+                .to_ruff_notebook(&cell_content_map)?;
+
+            Ok(LspFile::Notebook(Arc::new(LspNotebook::new(
+                ruff_notebook,
+                notebook_document,
+                cell_versions,
+            ))))
+        })?;
+        if !opened_cell_uris.is_empty() {
+            let mut cells = self.open_notebook_cells.write();
+            for cell_uri in opened_cell_uris {
+                cells.insert(cell_uri, file_path.clone());
             }
         }
-        // Convert new notebook contents into a Ruff Notebook
-        let ruff_notebook = notebook_document
-            .clone()
-            .to_ruff_notebook(&cell_content_map)?;
-
-        let new_notebook = Arc::new(LspNotebook::new(
-            ruff_notebook,
-            notebook_document,
-            cell_versions,
-        ));
-        *original = Arc::new(LspFile::Notebook(new_notebook));
-        drop(lock);
-        // Update version_info only after the mutation has fully succeeded, so
-        // that on error the version stays at the old value and subsequent
-        // notifications operate against consistent state.
-        self.version_info.lock().insert(file_path.clone(), version);
 
         if !subsequent_mutation {
             info!(
@@ -4745,58 +4708,51 @@ impl Server {
         let Some(path) = self.path_for_uri(&url) else {
             return;
         };
-        let version = self
-            .version_info
-            .lock()
-            .remove(&path)
-            .map(|version| version + 1);
-        let mut open_files = self.open_files.write();
-        let Entry::Occupied(entry) = open_files.entry(path.clone()) else {
+        let closed = self
+            .open_files
+            .close_if(&path, |file| match (&*file.contents, &kind) {
+                (LspFile::Notebook(_), DidCloseKind::TextDocument) => {
+                    info!("textDocument/didClose received for file open as a notebook");
+                    false
+                }
+                (LspFile::Source { .. }, DidCloseKind::NotebookDocument) => {
+                    info!("notebookDocument/didClose received for file open in a text editor");
+                    false
+                }
+                _ => true,
+            });
+        let Some(closed) = closed else {
             return;
         };
-        match entry.get().as_ref() {
-            LspFile::Notebook(notebook) => match kind {
-                DidCloseKind::NotebookDocument => {
-                    let cell_urls: Vec<_> = notebook.code_cell_urls().to_vec();
-                    for cell in cell_urls {
-                        self.publish_diagnostics_for_uri(
-                            cell.clone(),
-                            Vec::new(),
-                            version,
-                            DiagnosticSource::DidClose,
-                        );
-                        self.open_notebook_cells.write().remove(&cell);
-                    }
-                    entry.remove();
+        let version = Some(closed.version + 1);
+        match closed.contents.as_ref() {
+            LspFile::Notebook(notebook) => {
+                let cell_urls: Vec<_> = notebook.code_cell_urls().to_vec();
+                for cell in cell_urls {
+                    self.publish_diagnostics_for_uri(
+                        cell.clone(),
+                        Vec::new(),
+                        version,
+                        DiagnosticSource::DidClose,
+                    );
+                    self.open_notebook_cells.write().remove(&cell);
                 }
-                DidCloseKind::TextDocument => {
-                    info!("textDocument/didClose received for file open as a notebook");
-                    return;
+            }
+            LspFile::Source { .. } => {
+                // In workspace diagnostic mode, don't clear diagnostics for the
+                // file — it still has diagnostics from the last workspace-wide
+                // check. The file transitions from versioned (open-file) to
+                // unversioned (workspace) diagnostics.
+                if self.workspaces.diagnostic_mode(&path) != DiagnosticMode::Workspace {
+                    self.publish_diagnostics_for_uri(
+                        url.clone(),
+                        Vec::new(),
+                        version,
+                        DiagnosticSource::DidClose,
+                    );
                 }
-            },
-            LspFile::Source { .. } => match kind {
-                DidCloseKind::NotebookDocument => {
-                    info!("notebookDocument/didClose received for file open in a text editor");
-                    return;
-                }
-                DidCloseKind::TextDocument => {
-                    // In workspace diagnostic mode, don't clear diagnostics for the
-                    // file — it still has diagnostics from the last workspace-wide
-                    // check. The file transitions from versioned (open-file) to
-                    // unversioned (workspace) diagnostics.
-                    if self.workspaces.diagnostic_mode(&path) != DiagnosticMode::Workspace {
-                        self.publish_diagnostics_for_uri(
-                            url.clone(),
-                            Vec::new(),
-                            version,
-                            DiagnosticSource::DidClose,
-                        );
-                    }
-                    entry.remove();
-                }
-            },
+            }
         }
-        drop(open_files);
         self.unsaved_file_tracker.forget_uri_path(&url);
         self.queue_source_db_rebuild_and_recheck(telemetry, telemetry_event, false);
         self.recheck_queue.queue_task(
@@ -5016,7 +4972,7 @@ impl Server {
                 return Err(HandleError::MethodDisabled);
             }
 
-            let module_path = if self.open_files.read().contains_key(&path) {
+            let module_path = if self.open_files.contains(&path) {
                 ModulePath::memory(path)
             } else {
                 ModulePath::filesystem(path)
@@ -5359,18 +5315,16 @@ impl Server {
                             let edit_cell_idx = info.to_cell_for_lsp(range.start());
                             if edit_cell_idx != Some(current_cell_idx) {
                                 // Redirect to the current cell, inserting at line 0.
-                                let open_files = self.open_files.read();
                                 let notebook_path =
                                     self.open_notebook_cells.read().get(uri).cloned();
-                                let cell_url = notebook_path.and_then(|path| {
-                                    if let Some(LspFile::Notebook(notebook)) =
-                                        open_files.get(&path).map(|f| &**f)
-                                    {
-                                        notebook.get_code_cell_url(current_cell_idx).cloned()
-                                    } else {
-                                        None
-                                    }
-                                });
+                                let cell_url = notebook_path
+                                    .and_then(|path| self.open_files.get(&path))
+                                    .and_then(|file| match &*file {
+                                        LspFile::Notebook(notebook) => {
+                                            notebook.get_code_cell_url(current_cell_idx).cloned()
+                                        }
+                                        _ => None,
+                                    });
                                 if let Some(cell_url) = cell_url {
                                     let top_of_cell = lsp_types::Range {
                                         start: lsp_types::Position::new(0, 0),
@@ -5588,8 +5542,7 @@ impl Server {
                 uri,
                 |path| {
                     self.open_files
-                        .read()
-                        .contains_key(path)
+                        .contains(path)
                         .then(|| make_open_handle(&self.state, path))
                 },
                 |location| self.to_lsp_location(location),
@@ -6110,13 +6063,13 @@ impl Server {
     fn text_document_version(&self, uri: &Uri) -> Option<i32> {
         let path = self.path_for_uri_or_notebook_cell(uri)?;
         if self.open_notebook_cells.read().contains_key(uri) {
-            let files = self.open_files.read();
-            let LspFile::Notebook(notebook) = files.get(&path)?.as_ref() else {
+            let file = self.open_files.get(&path)?;
+            let LspFile::Notebook(notebook) = file.as_ref() else {
                 return None;
             };
             notebook.cell_versions().get(uri).copied()
         } else {
-            self.version_info.lock().get(&path).copied()
+            self.open_files.version(&path)
         }
     }
 
@@ -6470,58 +6423,6 @@ impl Server {
         Ok(merged)
     }
 
-    /// Grey out code that is disabled by the current configuration but carries no
-    /// `unreachable` diagnostic of its own.
-    ///
-    /// Editors dim a region when a diagnostic covering it is tagged `UNNECESSARY`, so a
-    /// suite we deliberately do not report — one guarded by `sys.version_info`,
-    /// `sys.platform`, `os.name`, or `TYPE_CHECKING` — would otherwise lose its dimming.
-    /// Suites the real diagnostic does cover are skipped, since it carries the tag itself.
-    fn append_unreachable_hints(
-        transaction: &Transaction<'_>,
-        handle: &Handle,
-        items: &mut Vec<Diagnostic>,
-    ) {
-        let (Some(ast), Some(module_info)) = (
-            transaction.get_ast(handle),
-            transaction.get_module_info(handle),
-        ) else {
-            return;
-        };
-        let unreachable_code = Code::String(ErrorKind::Unreachable.to_name().to_owned());
-        let already_reported = items
-            .iter()
-            .filter(|d| d.code.as_ref() == Some(&unreachable_code))
-            .map(|d| d.range)
-            .collect::<Vec<_>>();
-        let mut seen = HashSet::new();
-        for range in disabled_ranges_for_module(ast.as_ref(), *handle.sys_info()) {
-            if range.is_empty() || !seen.insert(range) {
-                continue;
-            }
-            let lsp_range = module_info.to_lsp_range(range);
-            if already_reported
-                .iter()
-                .any(|r| r.start <= lsp_range.start && lsp_range.end <= r.end)
-            {
-                continue;
-            }
-            items.push(Diagnostic {
-                range: lsp_range,
-                severity: Some(DiagnosticSeverity::Hint),
-                source: Some("Pyrefly".to_owned()),
-                message: "This code is unreachable for the current configuration"
-                    .to_owned()
-                    .into(),
-                code: Some(Code::String("unreachable-code".to_owned())),
-                code_description: None,
-                related_information: None,
-                tags: Some(vec![DiagnosticTag::Unnecessary]),
-                data: None,
-            });
-        }
-    }
-
     fn docstring_ranges(
         &self,
         transaction: &Transaction<'_>,
@@ -6689,25 +6590,29 @@ impl Server {
         };
         let handle = make_open_handle(&self.state, &path);
         let mut items = Vec::new();
-        let open_files = &self.open_files.read();
-        let (normal_errors, baseline_errors) = transaction
-            .get_errors(once(&handle))
-            .collect_lsp_errors_with_baselines();
+        let open_files = self.open_files.read();
+        let errors = transaction.get_errors(once(&handle));
+        let mut unused = Vec::new();
+        let (normal_errors, baseline_errors) =
+            errors.collect_lsp_error_refs_with_baselines(&mut unused);
         for e in normal_errors {
-            if let Some((_, diag)) = self.get_diag_if_shown(&e, open_files, cell_uri) {
+            if let Some((_, diag)) =
+                self.get_diag_if_shown(e.error(), e.severity(), &open_files, cell_uri)
+            {
                 items.push(diag);
             }
         }
         for e in baseline_errors {
             // Errors in open files that match a baseline file are downgraded to HINT.
-            if let Some((_, mut diag)) = self.get_diag_if_shown(&e, open_files, cell_uri) {
-                if to_real_path(e.path()).is_some_and(|p| open_files.contains_key(&p)) {
+            if let Some((_, mut diag)) =
+                self.get_diag_if_shown(e.error(), e.severity(), &open_files, cell_uri)
+            {
+                if to_real_path(e.error().path()).is_some_and(|p| open_files.contains_key(&p)) {
                     diag.severity = Some(DiagnosticSeverity::Hint);
                 }
                 items.push(diag);
             }
         }
-        Self::append_unreachable_hints(transaction, &handle, &mut items);
         DocumentDiagnosticReport::RelatedFullDocumentDiagnosticReport(
             RelatedFullDocumentDiagnosticReport {
                 full_document_diagnostic_report: FullDocumentDiagnosticReport {
@@ -6962,7 +6867,7 @@ impl Server {
                 // the main event loop of the server. As a result, the server can do a revalidation of
                 // all the in-memory files based on the fresh main State as soon as possible.
                 // Only send RecheckFinished if there are actually open files to revalidate.
-                if !server.open_files.read().is_empty() {
+                if !server.open_files.is_empty() {
                     info!("Invalidated config, prepare to recheck open files.");
                     let _ = server.lsp_queue.send(LspEvent::RecheckFinished);
                 } else {
@@ -6981,7 +6886,6 @@ impl Server {
         will_rename_files(
             &self.state,
             transaction,
-            &self.open_files,
             params,
             supports_document_changes,
             self.path_remapper.as_ref(),
@@ -6998,7 +6902,8 @@ impl Server {
             // We only have this information for open notebooks, without being provided the URI from the client
             // we don't know what URI refers to which cell.
             let path = to_real_path(definition_module_info.path())?;
-            if let LspFile::Notebook(notebook) = &**self.open_files.read().get(&path)?
+            let file = self.open_files.get(&path)?;
+            if let LspFile::Notebook(notebook) = &*file
                 && let Some(cell_url) = notebook.get_code_cell_url(cell_idx)
             {
                 uri = cell_url.clone();
@@ -7016,7 +6921,7 @@ impl Server {
         self.open_notebook_cells
             .read()
             .get(cell_uri)
-            .and_then(|path| self.open_files.read().get(path).duped())
+            .and_then(|path| self.open_files.get(path))
             .and_then(|file| match &*file {
                 LspFile::Notebook(notebook) => notebook.get_code_cell_index(cell_uri),
                 _ => None,
@@ -7525,7 +7430,7 @@ impl Server {
         // the materialized path the client sends back rebuilds as a separate
         // filesystem module and the stub is solved twice. Opening one in the
         // editor already does the same through `ModulePath::memory`.
-        let handle = if self.open_files.read().contains_key(&path) {
+        let handle = if self.open_files.contains(&path) {
             make_open_handle(&self.state, &path)
         } else {
             handle_from_module_path(&self.state, ModulePath::filesystem(path.to_owned()))

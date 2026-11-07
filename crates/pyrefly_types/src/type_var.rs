@@ -77,7 +77,8 @@ impl Restriction {
         )
     }
 
-    fn as_type(&self, stdlib: &Stdlib, heap: &TypeHeap, kind: QuantifiedKind) -> Type {
+    /// This restriction as an upper bound for a type parameter of kind `kind`.
+    pub fn as_type(&self, stdlib: &Stdlib, heap: &TypeHeap, kind: QuantifiedKind) -> Type {
         match self {
             Self::Bound(t) => t.clone(),
             Self::Constraints(ts) => unions(ts.clone(), heap),

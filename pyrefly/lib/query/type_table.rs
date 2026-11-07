@@ -280,6 +280,10 @@ pub(super) fn type_to_indexed_shape(
             );
             insert_indexed_named(table, "typing.Type", vec![class_index], None, Vec::new())
         }
+        Type::SpecializedClassDef(class_type) => {
+            let inner = type_to_indexed_shape(context, &Type::ClassType(class_type.clone()), table);
+            insert_indexed_named(table, "typing.Type", vec![inner], None, Vec::new())
+        }
         Type::ClassType(class_type) => {
             let args = class_type
                 .targs()
@@ -333,6 +337,10 @@ pub(super) fn type_to_indexed_shape(
             type_to_indexed_shape(context, &body_type, table)
         }
         Type::Union(union) => union_to_indexed_shape(context, union, table),
+        // Truthiness markers are internal to narrowing, so query clients see the marked type itself.
+        Type::Intersect(intersection) if intersection.0.iter().any(Type::is_truthiness_marker) => {
+            type_to_indexed_shape(context, &ty.clone().without_truthiness_markers(), table)
+        }
         Type::Intersect(intersection) => {
             let (members, _fallback) = &**intersection;
             let args = members
@@ -472,6 +480,8 @@ pub(super) fn type_to_indexed_shape(
         Type::SpecialForm(special_form) => indexed_named_leaf(table, special_form.to_string()),
         Type::Ellipsis => indexed_named_leaf(table, "..."),
         Type::Materialization => indexed_named_leaf(table, "Materialization"),
+        Type::Falsy => indexed_named_leaf(table, "Falsy"),
+        Type::Truthy => indexed_named_leaf(table, "Truthy"),
         Type::Var(_) => indexed_named_leaf(table, "typing.Any"),
         Type::ShapedArray(_) => indexed_named_leaf(table, "Tensor"),
         Type::IntTuple(_) => indexed_named_leaf(table, "IntTuple"),

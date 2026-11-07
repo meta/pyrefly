@@ -182,7 +182,7 @@ fn fixture_return_type(
     }
     let stdlib = transaction.get_stdlib(handle);
     Some(
-        ty.promote_implicit_literals(&stdlib)
+        ty.promote(&stdlib)
             .explicit_any()
             .clean_var()
             .strip_library_schemas(),

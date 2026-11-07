@@ -12,6 +12,7 @@
 
 use crate::dimension::Int;
 use crate::dimension::ShapeError;
+use crate::known_class::KnownClass;
 use crate::quantified::QuantifiedKind;
 use crate::shaped_array::IntTuple;
 use crate::shaped_array::IntTupleView;
@@ -129,7 +130,7 @@ fn lower_integer_type(ty: &Type) -> IntegerTypeLowering {
     if let Some(value) = Int::from_type(ty) {
         return IntegerTypeLowering::Precise(value);
     }
-    if matches!(ty, Type::ClassType(cls) if cls.is_builtin("int")) {
+    if matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::Int)) {
         return IntegerTypeLowering::Precise(Int::Int);
     }
     if let Type::Union(union) = ty {
@@ -239,7 +240,7 @@ fn lower_slice(ty: &Type) -> IndexTypeLowering {
     let Type::ClassType(cls) = ty else {
         return IndexTypeLowering::Invalid;
     };
-    if !cls.is_builtin("slice") {
+    if !cls.is(KnownClass::Slice) {
         return IndexTypeLowering::Invalid;
     }
     let Ok([start, stop, step]) = <&[Type; 3]>::try_from(cls.targs().as_slice()) else {
@@ -437,7 +438,7 @@ fn lower_index_type_in_position(ty: &Type, position: IndexPosition) -> IndexType
     if ty.is_ellipsis_value() {
         return IndexTypeLowering::Precise(vec![IndexComponent::Ellipsis]);
     }
-    if matches!(ty, Type::ClassType(cls) if cls.is_builtin("slice")) {
+    if matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::Slice)) {
         return lower_slice(ty);
     }
     if let Type::Union(union) = ty {
@@ -520,7 +521,7 @@ fn lower_index_type_in_position(ty: &Type, position: IndexPosition) -> IndexType
         };
     }
     if let Type::ClassType(cls) = ty
-        && cls.is_builtin("list")
+        && cls.is(KnownClass::List)
         && let [member] = cls.targs().as_slice()
     {
         return match lower_integer_type(member) {

@@ -201,17 +201,19 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-wasip1
 
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: pyrefly-release-wasm
 
-      - name: Install wasm-pack and wasm-opt
+      - name: Install wasi-sdk
         run: |
-          cargo install --locked wasm-pack --version 0.15.0
-          cargo install --locked wasm-opt --version 0.116.1
+          curl -fsSL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "WASI_SDK_PATH=$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux" >> "$GITHUB_ENV"
+      - name: Install wasm-opt
+        run: cargo install --locked wasm-opt --version 0.116.1
 
       - name: Build wasm
         run: chmod +x pyrefly_wasm/build.sh && pyrefly_wasm/build.sh

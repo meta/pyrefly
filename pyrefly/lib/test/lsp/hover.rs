@@ -2155,6 +2155,20 @@ class Factory:
 }
 
 #[test]
+fn hover_on_specialized_class_def_in_closed_library() {
+    let lib = r#"
+class Target[T]:
+    """Target class documentation."""
+    def __init__(self, value: T) -> None: ...
+"#;
+    let main = "from lib import Target\ndef f():\n    X = Target[int]\n    X\n#   ^\n";
+    let report = get_test_report_with_closed_library(lib, main);
+    assert!(report.contains("value: int"), "{report}");
+    assert!(report.contains("-> Target[int]"), "{report}");
+    assert!(report.contains("Target class documentation."), "{report}");
+}
+
+#[test]
 fn hover_on_class_alias_in_closed_library() {
     let lib = "class Target:\n    \"\"\"Target class documentation.\"\"\"\n";
     let main = "from lib import Target\ncls = Target\n#^\n";
@@ -3893,6 +3907,31 @@ Box[str]("hello")
     );
 }
 
+#[test]
+fn hover_on_prepared_constructor_argument() {
+    let code = r#"
+class Base: ...
+class Child(Base): ...
+
+class Box[T]:
+    def __init__(self, value: T) -> None: ...
+
+class Receiver[T]:
+    def __init__(self, value: T, other: object) -> None: ...
+
+def identity[T](value: T) -> T:
+    return value
+
+result: Receiver[str] | Receiver[int] = Receiver(1, Box(identity(Child())))
+#                                                          ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("def identity[T](value: T) -> T"),
+        "got: {report}"
+    );
+}
+
 // Regression test for https://github.com/facebook/pyrefly/issues/3240
 #[test]
 fn hover_on_generic_metaclass_constructor_does_not_show_inference_var() {
@@ -4291,4 +4330,51 @@ Widget(1)
         "got: {report}"
     );
     assert!(!report.contains("from the stub"), "got: {report}");
+}
+
+#[test]
+fn hover_inside_quoted_annotation() {
+    // Hovering a name inside a forward-reference string shows that name, not the string.
+    let code = r#"
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lib import Helper
+
+class Model:
+    """Model docs."""
+
+a: Model
+#  ^
+b: "Model"
+#   ^
+c: list[Helper]
+#       ^
+d: "dict[str, list[Helper]]"
+#                   ^
+"#;
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    env.add("lib", "class Helper: ...\n");
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let [unquoted_model, quoted_model, unquoted_helper, quoted_helper] =
+        extract_cursors_for_test(code)[..]
+    else {
+        panic!("expected four cursors");
+    };
+    let hover = |position| get_test_report(&state, &handle, position);
+
+    assert!(
+        hover(quoted_model).contains("Model docs."),
+        "got: {}",
+        hover(quoted_model)
+    );
+    assert_eq!(hover(unquoted_model), hover(quoted_model));
+    assert!(
+        hover(quoted_helper).contains("Helper"),
+        "got: {}",
+        hover(quoted_helper)
+    );
+    assert_eq!(hover(unquoted_helper), hover(quoted_helper));
 }

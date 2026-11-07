@@ -37,8 +37,28 @@ fn rename_paired_symbol(
     shadowing_source: Option<&str>,
     position: usize,
 ) -> Vec<(String, String)> {
+    replace_paired_references(
+        source,
+        stub,
+        consumer,
+        shadowing_source,
+        position,
+        ReferenceOptions::textual_only(true),
+    )
+}
+
+/// Replaces every reference that `options` finds with `renamed`, in the same files as
+/// `rename_paired_symbol`. Rename and find references share this lookup and differ in `options`.
+fn replace_paired_references(
+    source: &str,
+    stub: &str,
+    consumer: &str,
+    shadowing_source: Option<&str>,
+    position: usize,
+    options: ReferenceOptions,
+) -> Vec<(String, String)> {
     let root = TempDir::new().unwrap();
-    let mut env = TestEnv::new();
+    let mut env = TestEnv::new().enable_infer_param_types_from_docstring();
     for (name, file, code) in [
         ("lib", "lib.py", source),
         ("lib", "lib.pyi", stub),
@@ -83,7 +103,7 @@ fn rename_paired_symbol(
             *source_handle.sys_info(),
             definition.metadata.clone(),
             TextRangeWithModule::new(definition.module.clone(), definition.definition_range),
-            ReferenceOptions::textual_only(true),
+            options,
         )
         .unwrap();
     let mut result = Vec::new();
@@ -159,6 +179,64 @@ fn test_rename_source_updates_stub_and_consumers() {
                 ("lib.py".to_owned(), source.replace(name, "renamed")),
                 ("lib.pyi".to_owned(), stub.replace(name, "renamed")),
             ],
+        );
+    }
+}
+
+#[test]
+fn test_references_ignore_docstring_types_in_other_modules() {
+    let source = "class Item:\n    pass\n";
+    let stub = "class Item: ...\n";
+    for (consumer, expected) in [
+        (
+            "from lib import Item\n\n\ndef f(x):\n    \"\"\"\n    :type x: Item\n    \"\"\"\n",
+            "from lib import renamed\n\n\ndef f(x):\n    \"\"\"\n    :type x: Item\n    \"\"\"\n",
+        ),
+        (
+            "import lib\n\ny: lib.Item\n\n\ndef f(x):\n    \"\"\"\n    :type x: lib.Item\n    \"\"\"\n",
+            "import lib\n\ny: lib.renamed\n\n\ndef f(x):\n    \"\"\"\n    :type x: lib.Item\n    \"\"\"\n",
+        ),
+    ] {
+        for options in [
+            ReferenceOptions::textual_only(true),
+            ReferenceOptions::all(true),
+        ] {
+            let references = replace_paired_references(
+                source,
+                stub,
+                consumer,
+                None,
+                source.find("Item").unwrap(),
+                options,
+            );
+            assert_eq!(
+                references.iter().find(|(path, _)| path == "consumer.py"),
+                Some(&("consumer.py".to_owned(), expected.to_owned())),
+            );
+        }
+    }
+}
+
+/// A docstring type in the defining module is left alone, like one in any other module.
+#[test]
+fn test_references_ignore_docstring_types_in_the_same_module() {
+    let source = "class Item:\n    pass\n\n\ndef f(x):\n    \"\"\"\n    :type x: Item\n    \"\"\"\n\n\ny: Item\n";
+    let expected = "class renamed:\n    pass\n\n\ndef f(x):\n    \"\"\"\n    :type x: Item\n    \"\"\"\n\n\ny: renamed\n";
+    for options in [
+        ReferenceOptions::textual_only(true),
+        ReferenceOptions::all(true),
+    ] {
+        let references = replace_paired_references(
+            source,
+            "class Item: ...\n",
+            "x = 1\n",
+            None,
+            source.find("Item").unwrap(),
+            options,
+        );
+        assert_eq!(
+            references.iter().find(|(path, _)| path == "lib.py"),
+            Some(&("lib.py".to_owned(), expected.to_owned())),
         );
     }
 }
@@ -574,6 +652,57 @@ Rename locations:
                        ^^
 17 | def h(value: tuple[*Ts]) -> None:
                          ^^
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn test_rename_from_inside_quoted_annotation() {
+    let code = r#"
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lib import Helper
+
+class Model: ...
+
+def make(helper: "Helper") -> "list[Model]":
+#                                   ^
+    return [Model()]
+x: "Helper | None" = None
+#   ^
+"#;
+    let report = get_batched_lsp_operations_report(
+        &[("main", code), ("lib", "class Helper: ...\n")],
+        get_test_report,
+    );
+    assert_eq!(
+        r#"
+# main.py
+9 | def make(helper: "Helper") -> "list[Model]":
+                                        ^
+Rename locations:
+7 | class Model: ...
+          ^^^^^
+9 | def make(helper: "Helper") -> "list[Model]":
+                                        ^^^^^
+11 |     return [Model()]
+                 ^^^^^
+
+12 | x: "Helper | None" = None
+         ^
+Rename locations:
+5 |     from lib import Helper
+                        ^^^^^^
+9 | def make(helper: "Helper") -> "list[Model]":
+                      ^^^^^^
+12 | x: "Helper | None" = None
+         ^^^^^^
+
+
+# lib.py
 "#
         .trim(),
         report.trim(),

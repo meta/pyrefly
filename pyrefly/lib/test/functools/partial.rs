@@ -698,8 +698,55 @@ q: partial[A] = partial(A, 1)
 "#,
 );
 
+functools_testcase!(
+    test_partial_specialized_class_def,
+    r#"
+from abc import ABC, ABCMeta, abstractmethod
+from functools import partial
+from typing import Protocol, reveal_type
+
+class Box[T]:
+    def __init__(self, x: T, y: T) -> None: ...
+
+p = partial(Box[int], 1)
+reveal_type(p)  # E: revealed type: (y: int) -> Box[int]
+p("bad")  # E: is not assignable to parameter `y` with type `int`
+BoxAlias = Box[int]
+partial(BoxAlias, 1)("bad")  # E: is not assignable to parameter `y` with type `int`
+
+class Shape[T](ABC):
+    @abstractmethod
+    def area(self) -> T: ...
+
+partial(Shape[int])  # E: Cannot instantiate `Shape`
+
+class P[T](Protocol):
+    def method(self) -> T: ...
+
+partial(P[int])  # E: Cannot instantiate `P` because it is a protocol
+
+class DirectABC[T](ABC): ...
+partial(DirectABC[int])  # E: Cannot instantiate `DirectABC`
+
+class DirectABCMeta[T](metaclass=ABCMeta): ...
+partial(DirectABCMeta[int])  # E: Cannot instantiate `DirectABCMeta`
+
+class IndirectABC(DirectABC[int]): ...
+partial(IndirectABC)
+
+Alias = DirectABC[int]
+partial(Alias)  # E: Cannot instantiate `DirectABC`
+
+def construct_direct(cls: type[DirectABC[int]]) -> None:
+    partial(cls)
+
+def construct(cls: type[Shape[int]]) -> None:
+    partial(cls)
+"#,
+);
+
 // Classes extending `Any` are gradual, so their constructors can be
-// partially-applied with any arguments
+// partially-applied with any arguments.
 functools_testcase!(
     test_partial_class_object_any_base_gradual,
     r#"

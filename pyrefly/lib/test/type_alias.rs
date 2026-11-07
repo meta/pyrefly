@@ -5,8 +5,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use ruff_python_ast::name::Name;
+
+use crate::binding::binding::KeyExport;
 use crate::test::util::TestEnv;
 use crate::testcase;
+use crate::types::types::Type;
 
 testcase!(
     test_type_alias_simple,
@@ -1519,3 +1523,31 @@ X: TypeAlias = int | str
 X()  # E: Expected a callable
     "#,
 );
+
+/// Type variables from different modules can be declared at the same offset. As parameters of one
+/// alias they are still different type parameters.
+#[test]
+fn test_type_alias_type_params_declared_at_same_offset_are_distinct() {
+    let mut env = TestEnv::new();
+    env.add("foo", "from typing import TypeVar\nT = TypeVar('T')\n");
+    env.add("bar", "from typing import TypeVar\nU = TypeVar('U')\n");
+    env.add(
+        "main",
+        r#"
+from typing import TypeAliasType
+from foo import T
+from bar import U
+X = TypeAliasType("X", int, type_params=(T, U))
+"#,
+    );
+    let (state, handle) = env.to_state();
+    let transaction = state.transaction();
+    let solutions = transaction.get_solutions(&handle("main")).unwrap();
+    let Type::Forall(forall) = solutions.get(&KeyExport(Name::new_static("X"))) else {
+        panic!("`X` should be a generic type alias");
+    };
+    let [t, u] = forall.tparams.as_vec() else {
+        panic!("`X` should have two type parameters");
+    };
+    assert_ne!(t, u, "`T` and `U` must not be the same type parameter");
+}

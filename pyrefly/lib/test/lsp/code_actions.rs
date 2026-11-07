@@ -851,6 +851,37 @@ BytesIO
     );
 }
 
+// https://github.com/facebook/pyrefly/issues/5223
+#[test]
+fn insert_import_skips_module_name_with_non_identifier() {
+    let (handles, state) = mk_multi_file_state(
+        &[
+            ("main", "Migration\n"),
+            ("pkg.migrations.0001_initial", "class Migration: ...\n"),
+            ("pkg.models", "class Migration: ...\n"),
+        ],
+        Require::Exports,
+        false,
+    );
+    let import_titles: Vec<String> = state
+        .transaction()
+        .local_quickfix_code_actions_sorted(
+            &handles["main"],
+            TextRange::empty(TextSize::new(0)),
+            ImportFormat::Absolute,
+            None,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(title, _)| title)
+        .filter(|title| title.starts_with("Insert import:"))
+        .collect();
+    assert_eq!(
+        import_titles,
+        ["Insert import: `from pkg.models import Migration`"]
+    );
+}
+
 #[test]
 fn import_edits_with_non_future_imports() {
     let (handles, _) = mk_multi_file_state(
@@ -2716,7 +2747,16 @@ x = x
 }
 
 fn unused_import_action_after(code: &str, cursor_offset: usize) -> Option<String> {
-    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    unused_import_action_after_with_env(TestEnv::new(), code, cursor_offset)
+}
+
+fn unused_import_action_after_with_env(
+    env: TestEnv,
+    code: &str,
+    cursor_offset: usize,
+) -> Option<String> {
+    let (handles, state) =
+        mk_multi_file_state_with_env(env, &[("main", code)], Require::Exports, false);
     let handle = handles.get("main")?;
     let transaction = state.transaction();
     let module_info = transaction.get_module_info(handle)?;
@@ -2743,6 +2783,27 @@ fn unused_import_action_after(code: &str, cursor_offset: usize) -> Option<String
     }
     let (_before, after) = apply_patch(&module_info, range, patch);
     Some(after)
+}
+
+/// An import used only by a docstring type is not unused when docstring types are inferred, so
+/// the quick fix must not offer to remove it.
+#[test]
+fn remove_unused_import_quickfix_keeps_import_used_by_docstring_type() {
+    let code = "from collections import OrderedDict\n\n\ndef f(x):\n    \"\"\"\n    :type x: OrderedDict\n    \"\"\"\n    return x\n";
+    let cursor_offset = code.find("OrderedDict").unwrap();
+    let env = TestEnv::new().enable_infer_param_types_from_docstring();
+    assert_eq!(
+        None,
+        unused_import_action_after_with_env(env, code, cursor_offset)
+    );
+    // Without the option, the docstring is only text, so the import is unused.
+    assert_eq!(
+        Some(
+            "\n\ndef f(x):\n    \"\"\"\n    :type x: OrderedDict\n    \"\"\"\n    return x\n"
+                .to_owned()
+        ),
+        unused_import_action_after(code, cursor_offset)
+    );
 }
 
 #[test]

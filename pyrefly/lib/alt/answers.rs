@@ -62,6 +62,7 @@ use crate::binding::table::TableKeyed;
 use crate::config::base::RecursionLimitConfig;
 use crate::dispatch_anyidx;
 use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
 use crate::error::style::ErrorStyle;
 use crate::export::exports::LookupExport;
 use crate::module::module_info::ModuleInfo;
@@ -79,6 +80,7 @@ use crate::table_mut_for_each;
 use crate::table_try_for_each;
 use crate::types::callable::Callable;
 use crate::types::class::Class;
+use crate::types::class::ClassDefIndex;
 use crate::types::class::ClassFields;
 use crate::types::equality::TypeEq;
 use crate::types::equality::TypeEqCtx;
@@ -100,16 +102,36 @@ pub struct Index {
     /// in the current module.
     pub renamed_imports: SmallMap<(ModuleName, Name), Vec<TextRange>>,
     /// A map from (attribute definition module) to a list of pairs of
-    /// (range of attribute definition in the definition, range of reference in the current module).
-    pub externally_defined_attribute_references: SmallMap<ModulePath, Vec<(TextRange, TextRange)>>,
+    /// (attribute definition, range of reference in the current module).
+    pub externally_defined_attribute_references:
+        SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
     /// A map from (constructor definition module) to a list of pairs of
-    /// (range of the constructor definition, range of the call site in the current module).
+    /// (constructor definition, range of the call site in the current module).
     /// The call-site range spells the class name, not the definition's own name, so these are
     /// gated behind `ReferenceOptions::include_constructor_call_sites`.
-    pub constructor_references: SmallMap<ModulePath, Vec<(TextRange, TextRange)>>,
-    /// A map from (child method range) to a list of parent method definitions (ModulePath, parent method range).
+    pub constructor_references: SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
+    /// A map from (child method range) to a list of parent method definitions (ModulePath, parent method).
     /// This is used to find reimplementations when doing find-references on parent methods.
-    pub parent_methods_map: SmallMap<TextRange, Vec<(ModulePath, TextRange)>>,
+    pub parent_methods_map: SmallMap<TextRange, Vec<(ModulePath, IndexedAttribute)>>,
+}
+
+/// An attribute definition, identified by its class and name. The index does not store the
+/// definition range: a module is not rechecked when a dependency only moves code around, so a
+/// stored range can go stale. The range is looked up in the current class metadata instead.
+#[derive(Debug, Clone)]
+pub struct IndexedAttribute {
+    pub cls: ClassDefIndex,
+    pub name: Name,
+}
+
+impl IndexedAttribute {
+    /// The current declaration range of this attribute, read from the metadata of its module.
+    pub fn current_range(&self, metadata: &BindingsMetadata) -> Option<TextRange> {
+        metadata
+            .get_class_checked(self.cls)?
+            .fields
+            .field_decl_range(&self.name)
+    }
 }
 
 /// How the source text at a reference range relates to the attribute it resolves to.
@@ -246,6 +268,7 @@ pub struct Answers {
     solver: Solver,
     table: AnswerTable,
     solutions: Arc<SolutionsData>,
+    errors: ErrorCollector,
     index: Option<Arc<Mutex<Index>>>,
     trace: Option<Mutex<Traces>>,
     /// The contextual types of lambda parameters, published by the solve that computed each
@@ -486,38 +509,28 @@ impl<T: Send> AnswerSlot<T> {
         unsafe { self.get_raw(ptr) }
     }
 
-    fn record(&self, value: AnswerBox<T>) -> (&T, bool) {
-        let mut candidate = Self::into_raw(value);
-        loop {
-            match self.ptr.compare_exchange(
-                ptr::null_mut(),
-                candidate,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    // SAFETY: This slot owns the newly published allocation.
-                    return (unsafe { self.get_raw(candidate) }, true);
-                }
-                Err(actual) => {
-                    // SAFETY: The failed CAS left the candidate allocation with us.
-                    // Owning it here keeps it live across the wait below, so an
-                    // unwind drops it, and the losing path frees it on return.
-                    let value = AnswerBox(unsafe { Box::from_raw(candidate) });
-                    match self.handle_failed_cas(actual) {
-                        ControlFlow::Break(actual) => {
-                            // SAFETY: The failed acquire CAS, or the subsequent wait,
-                            // observed a published pointer retained by this table.
-                            return (unsafe { self.get_raw(actual) }, false);
-                        }
-                        ControlFlow::Continue(()) => candidate = Self::into_raw(value),
-                    }
-                }
-            }
+    /// Publish `value` if this slot is unpublished, without waiting. If another
+    /// writer has published or reserved the slot, returns `value` along with
+    /// the pointer the failed CAS observed.
+    fn try_record(&self, value: AnswerBox<T>) -> Result<&T, (AnswerBox<T>, *mut AlignedAnswer<T>)> {
+        let candidate = Self::into_raw(value);
+        match self.ptr.compare_exchange(
+            ptr::null_mut(),
+            candidate,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            // SAFETY: This slot owns the newly published allocation.
+            Ok(_) => Ok(unsafe { self.get_raw(candidate) }),
+            // SAFETY: The failed CAS left the candidate allocation with us.
+            Err(actual) => Err((AnswerBox(unsafe { Box::from_raw(candidate) }), actual)),
         }
     }
 
-    /// Publish the same allocation as another slot in the same result table.
+    /// Publish the same allocation as another slot in the same result table if
+    /// this slot is unpublished, without waiting. If another writer has
+    /// published or reserved this slot, returns the pointer the failed CAS
+    /// observed.
     ///
     /// The caller decides to record an alias by observing the target published,
     /// and publication is permanent, so the target is still published here.
@@ -526,35 +539,56 @@ impl<T: Send> AnswerSlot<T> {
     ///
     /// `target` must belong to the same result table as `self`. The table must
     /// retain the owning canonical slot until both slots can no longer be read.
-    unsafe fn record_alias(&self, target: &Self) -> (&T, bool) {
+    unsafe fn try_record_alias(&self, target: &Self) -> Result<&T, ((), *mut AlignedAnswer<T>)> {
         let ptr = target.ptr.load(Ordering::Acquire);
         assert!(
             !ptr.is_null() && !Self::is_pending(ptr),
             "alias target must be published"
         );
         // The alias tags `target`'s pointer rather than owning an allocation of
-        // its own, so unlike `record` there is nothing to reclaim on a failed CAS.
+        // its own, so unlike `try_record` there is nothing to hand back on failure.
         let alias = Self::alias(ptr);
+        match self
+            .ptr
+            .compare_exchange(ptr::null_mut(), alias, Ordering::AcqRel, Ordering::Acquire)
+        {
+            // SAFETY: `target` retains the allocation for the lifetime
+            // guaranteed by the caller.
+            Ok(_) => Ok(unsafe { self.get_raw(alias) }),
+            Err(actual) => Err(((), actual)),
+        }
+    }
+
+    /// Publish `candidate` with `try_record`, appending `errors` to
+    /// `destination` if and only if this write wins.
+    ///
+    /// `destination`'s lock covers only the compare-and-swap, so a thread that
+    /// observes the published answer and then reads `destination` also sees
+    /// `errors`. Waiting for another writer's pending reservation happens after
+    /// the lock is released, because that writer takes the same lock to publish.
+    fn record_with_errors<C>(
+        &self,
+        mut candidate: C,
+        mut errors: ErrorCollector,
+        destination: &ErrorCollector,
+        try_record: impl Fn(&Self, C) -> Result<&T, (C, *mut AlignedAnswer<T>)>,
+    ) -> (&T, bool) {
         loop {
-            match self.ptr.compare_exchange(
-                ptr::null_mut(),
-                alias,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    // SAFETY: `target` retains the allocation for the lifetime
-                    // guaranteed by the caller.
-                    return (unsafe { self.get_raw(alias) }, true);
-                }
-                Err(actual) => match self.handle_failed_cas(actual) {
-                    ControlFlow::Break(actual) => {
+            match destination.extend_if(errors, || try_record(self, candidate)) {
+                Ok(answer) => return (answer, true),
+                Err(((returned, actual), returned_errors)) => {
+                    match self.handle_failed_cas(actual) {
                         // SAFETY: The failed acquire CAS, or the subsequent wait,
                         // observed a published pointer retained by this table.
-                        return (unsafe { self.get_raw(actual) }, false);
+                        ControlFlow::Break(actual) => {
+                            return (unsafe { self.get_raw(actual) }, false);
+                        }
+                        ControlFlow::Continue(()) => {
+                            candidate = returned;
+                            errors = returned_errors;
+                        }
                     }
-                    ControlFlow::Continue(()) => {}
-                },
+                }
             }
         }
     }
@@ -588,14 +622,15 @@ impl<T: Send> AnswerSlot<T> {
     ///
     /// # Safety
     ///
-    /// The caller must own this slot's reservation.
-    unsafe fn publish_reserved(&self) {
+    /// The caller must own this slot's reservation. This function is idempotent.
+    unsafe fn publish_reserved(&self) -> bool {
         let pending = self.ptr.load(Ordering::Acquire);
         if !Self::is_pending(pending) {
             assert!(!pending.is_null(), "reserved SCC result disappeared");
-            return;
+            return false;
         }
         self.ptr.store(Self::published(pending), Ordering::Release);
+        true
     }
 
     /// Cancel this owner's reservation if it is still pending.
@@ -809,6 +844,9 @@ impl SolutionsData {
 #[derive(Debug, Clone)]
 pub struct Solutions {
     module_info: ModuleInfo,
+    parse_errors: ModuleDiagnostics,
+    binding_errors: ModuleDiagnostics,
+    solve_errors: ModuleDiagnostics,
     data: Arc<SolutionsData>,
     metadata: Arc<BindingsMetadata>,
     /// Multi-line ranges and ignore-all directives.
@@ -906,6 +944,18 @@ impl Solutions {
 
     pub fn metadata(&self) -> &Arc<BindingsMetadata> {
         &self.metadata
+    }
+
+    pub fn parse_errors(&self) -> &ModuleDiagnostics {
+        &self.parse_errors
+    }
+
+    pub fn binding_errors(&self) -> &ModuleDiagnostics {
+        &self.binding_errors
+    }
+
+    pub(crate) fn solve_errors(&self) -> &ModuleDiagnostics {
+        &self.solve_errors
     }
 
     pub fn module_ranges(&self) -> &Arc<ModuleRanges> {
@@ -1213,10 +1263,8 @@ pub trait LookupAnswer: Sized {
 
     /// Publish a cross-module result slot previously reserved by this SCC.
     ///
-    /// Default implementation returns false (not supported).
-    fn publish_reserved_in_module(&self, _reserved: &mut ReservedSlot<'_, '_, '_, Self>) -> bool {
-        false
-    }
+    /// Default implementation does nothing (not supported).
+    fn publish_reserved_in_module(&self, _reserved: &mut ReservedSlot<'_, '_, '_, Self>) {}
 
     /// Look up the class fields for a class, which may be defined in another
     /// module. The fields are populated during the binding phase and can be
@@ -1232,7 +1280,13 @@ pub trait LookupAnswer: Sized {
 }
 
 impl Answers {
-    pub fn new(bindings: Bindings, solver: Solver, enable_index: bool, enable_trace: bool) -> Self {
+    pub fn new(
+        bindings: Bindings,
+        solver: Solver,
+        enable_index: bool,
+        enable_trace: bool,
+        error_style: ErrorStyle,
+    ) -> Self {
         fn presize<K: Keyed>(items: &mut AnswerEntry<K>, bindings: &Bindings)
         where
             BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
@@ -1245,6 +1299,7 @@ impl Answers {
         let mut table = AnswerTable::default();
         table_mut_for_each!(&mut table, |items| presize(items, &bindings));
         let solutions = Arc::new(SolutionsData::new(&bindings));
+        let errors = ErrorCollector::new(bindings.module().dupe(), error_style);
         let index = if enable_index {
             Some(Arc::new(Mutex::new(Index::default())))
         } else {
@@ -1261,6 +1316,7 @@ impl Answers {
             solver,
             table,
             solutions,
+            errors,
             index,
             trace,
             lambda_param_types: Mutex::new(SmallMap::new()),
@@ -1295,27 +1351,55 @@ impl Answers {
         }
     }
 
+    /// Publish `answer` for `idx`, committing `errors` and `traces` to this
+    /// table if and only if this write wins.
     pub(crate) fn record<K: Keyed>(
         &self,
         idx: Idx<K>,
         answer: AnswerBox<K::Answer>,
-    ) -> (&K::Answer, bool)
+        errors: ErrorCollector,
+        traces: Option<TraceSideEffects>,
+    ) -> &K::Answer
     where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
-        self.answer_slot(idx).record(answer)
+        let (answer, did_write) = self.answer_slot(idx).record_with_errors(
+            answer,
+            errors,
+            &self.errors,
+            AnswerSlot::try_record,
+        );
+        if did_write && let Some(traces) = traces {
+            self.merge_trace_side_effects(traces);
+        }
+        answer
     }
 
-    pub(crate) fn record_alias<K: Keyed>(&self, idx: Idx<K>, target: Idx<K>) -> (&K::Answer, bool)
+    /// Publish `target`'s answer for `idx`, committing `errors` and `traces` to
+    /// this table if and only if this write wins.
+    pub(crate) fn record_alias<K: Keyed>(
+        &self,
+        idx: Idx<K>,
+        target: Idx<K>,
+        errors: ErrorCollector,
+        traces: Option<TraceSideEffects>,
+    ) -> &K::Answer
     where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
-        let slot = self.answer_slot(idx);
         let target = self.answer_slot(target);
-        // SAFETY: Both slots belong to this Answers table and are dropped together.
-        unsafe { slot.record_alias(target) }
+        let (answer, did_write) =
+            self.answer_slot(idx)
+                .record_with_errors((), errors, &self.errors, |slot, ()| {
+                    // SAFETY: Both slots belong to this Answers table and are dropped together.
+                    unsafe { slot.try_record_alias(target) }
+                });
+        if did_write && let Some(traces) = traces {
+            self.merge_trace_side_effects(traces);
+        }
+        answer
     }
 
     pub(crate) fn reserve<K: Keyed>(&self, idx: Idx<K>, answer: AnswerBox<K::Answer>) -> bool
@@ -1329,13 +1413,34 @@ impl Answers {
     /// # Safety
     ///
     /// The caller must own the reservation for `idx`'s slot.
-    pub(crate) unsafe fn publish_reserved<K: Keyed>(&self, idx: Idx<K>)
-    where
+    pub(crate) unsafe fn publish_reserved<K: Keyed>(
+        &self,
+        idx: Idx<K>,
+        errors: Option<ErrorCollector>,
+        traces: Option<TraceSideEffects>,
+    ) where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
-        // SAFETY: Forwarded from the caller.
-        unsafe { self.answer_slot(idx).publish_reserved() }
+        let slot = self.answer_slot(idx);
+        let did_write = if let Some(errors) = errors {
+            self.errors
+                .extend_if(errors, || {
+                    // SAFETY: Forwarded from the caller.
+                    unsafe { slot.publish_reserved() }.then_some(()).ok_or(())
+                })
+                .is_ok()
+        } else {
+            // SAFETY: Forwarded from the caller.
+            unsafe { slot.publish_reserved() }
+        };
+        if did_write && let Some(traces) = traces {
+            self.merge_trace_side_effects(traces);
+        }
+    }
+
+    pub(crate) fn errors(&self) -> &ErrorCollector {
+        &self.errors
     }
 
     /// # Safety
@@ -1448,6 +1553,10 @@ impl Answers {
                     };
 
                 let reference_range = bindings.idx_to_key(idx).range();
+                // Docstring types are not found by AST scans, so they are not indexed either.
+                if bindings.in_docstring_type(reference_range) {
+                    continue;
+                }
                 // Sanity check: the reference should have the same text as the definition.
                 // This check helps to filter out synthetic bindings.
                 if bindings.module().code_at(reference_range) == imported_name.as_str() {
@@ -1468,6 +1577,9 @@ impl Answers {
 
         Solutions {
             module_info: bindings.module().dupe(),
+            parse_errors: bindings.parse_errors().dupe(),
+            binding_errors: bindings.binding_errors().dupe(),
+            solve_errors: self.errors.take(),
             data: self.solutions.dupe(),
             metadata: bindings.metadata().dupe(),
             module_ranges: bindings.module_ranges().dupe(),
@@ -1570,10 +1682,12 @@ impl Answers {
     pub fn publish_reserved_preliminary<Ans: LookupAnswer>(
         &self,
         reserved: &mut ReservedSlot<'_, '_, '_, Ans>,
+        errors: Option<ErrorCollector>,
+        traces: Option<TraceSideEffects>,
     ) {
         let CalcId(_, any_idx) = reserved.calc_id().dupe();
         // SAFETY: `reserved` proves that this SCC owns the pending slot.
-        unsafe { dispatch_anyidx!(&any_idx, self, publish_reserved_typed) }
+        unsafe { dispatch_anyidx!(&any_idx, self, publish_reserved_typed, errors, traces) }
     }
 
     /// Roll back a slot reserved by an SCC batch if it is still pending.
@@ -1601,14 +1715,18 @@ impl Answers {
     ///
     /// The caller must own the reservation for `idx`'s slot, which a
     /// `&mut ReservedSlot` proves.
-    unsafe fn publish_reserved_typed<K: Keyed>(&self, idx: Idx<K>)
-    where
+    unsafe fn publish_reserved_typed<K: Keyed>(
+        &self,
+        idx: Idx<K>,
+        errors: Option<ErrorCollector>,
+        traces: Option<TraceSideEffects>,
+    ) where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
         // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
         // which proves ownership of the reservation.
-        unsafe { self.publish_reserved(idx) }
+        unsafe { self.publish_reserved(idx, errors, traces) }
     }
 
     /// # Safety
@@ -1712,7 +1830,7 @@ impl Answers {
         &self,
         child_range: TextRange,
         parent_module: ModulePath,
-        parent_range: TextRange,
+        parent: IndexedAttribute,
     ) {
         if let Some(index) = &self.index {
             index
@@ -1720,7 +1838,7 @@ impl Answers {
                 .parent_methods_map
                 .entry(child_range)
                 .or_default()
-                .push((parent_module, parent_range));
+                .push((parent_module, parent));
         }
     }
 }
@@ -1771,9 +1889,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         attribute_reference_range: TextRange,
         reference_kind: AttributeReferenceKind,
     ) {
+        if self.bindings().in_docstring_type(attribute_reference_range) {
+            return;
+        }
         if let Some(index) = &self.current().index {
             for AttrInfo {
-                name: _,
+                name,
                 ty: _,
                 is_deprecated: _,
                 definition,
@@ -1784,7 +1905,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 match definition {
                     AttrDefinition::FullyResolved {
                         cls,
-                        range,
+                        range: _,
                         docstring_range: _,
                     } => match reference_kind {
                         AttributeReferenceKind::ConstructorCall => index
@@ -1792,7 +1913,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             .constructor_references
                             .entry(cls.module_path().dupe())
                             .or_default()
-                            .push((range, attribute_reference_range)),
+                            .push((
+                                IndexedAttribute {
+                                    cls: cls.index(),
+                                    name,
+                                },
+                                attribute_reference_range,
+                            )),
                         AttributeReferenceKind::Textual => {
                             // Textual references to an attribute defined in this module are
                             // recovered by scanning the AST for `<expr>.<name>`, so only
@@ -1803,7 +1930,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                     .externally_defined_attribute_references
                                     .entry(cls.module_path().dupe())
                                     .or_default()
-                                    .push((range, attribute_reference_range))
+                                    .push((
+                                        IndexedAttribute {
+                                            cls: cls.index(),
+                                            name,
+                                        },
+                                        attribute_reference_range,
+                                    ))
                             }
                         }
                     },
@@ -1850,22 +1983,65 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::sync::Barrier;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
     use std::thread;
 
+    use pyrefly_python::ignore::Tool;
+    use pyrefly_python::ignore::TypeIgnoreUnknownTagBehavior;
+    use ruff_text_size::TextSize;
+
     use super::*;
+    use crate::config::error::ErrorConfig;
+    use crate::config::error::ErrorDisplayConfig;
+    use crate::config::error_kind::ErrorKind;
+
+    fn test_module() -> ModuleInfo {
+        ModuleInfo::new(
+            ModuleName::from_name(&Name::new_static("main")),
+            ModulePath::filesystem(PathBuf::from("main.py")),
+            Arc::new("contents".to_owned()),
+        )
+    }
+
+    /// A collector holding one error per offset in `starts`.
+    fn errors_at(module: &ModuleInfo, starts: &[u32]) -> ErrorCollector {
+        let errors = ErrorCollector::new(module.dupe(), ErrorStyle::Delayed);
+        for &start in starts {
+            errors
+                .error_builder(
+                    TextRange::new(TextSize::new(start), TextSize::new(start + 1)),
+                    ErrorKind::InternalError,
+                    format!("error at {start}"),
+                )
+                .emit();
+        }
+        errors
+    }
+
+    /// Record `value` without errors, through the same path as production writes.
+    fn record<T: Send>(slot: &AnswerSlot<T>, value: T) -> (&T, bool) {
+        let module = test_module();
+        slot.record_with_errors(
+            AnswerBox::new(value),
+            ErrorCollector::new(module.dupe(), ErrorStyle::Delayed),
+            &ErrorCollector::new(module, ErrorStyle::Delayed),
+            AnswerSlot::try_record,
+        )
+    }
 
     #[test]
     fn answer_slot_publishes_one_value() {
         let slot = AnswerSlot::default();
 
-        let (answer, did_write) = slot.record(AnswerBox::new(1));
+        let (answer, did_write) = record(&slot, 1);
         assert!(did_write);
         assert_eq!(*answer, 1);
 
-        let (answer, did_write) = slot.record(AnswerBox::new(2));
+        let (answer, did_write) = record(&slot, 2);
         assert!(!did_write);
         assert_eq!(*answer, 1);
         assert_eq!(
@@ -1880,15 +2056,27 @@ mod tests {
     fn answer_slot_concurrent_publish_has_one_winner() {
         const WRITERS: usize = 8;
 
+        let module = test_module();
+        let destination = Arc::new(ErrorCollector::new(module.dupe(), ErrorStyle::Delayed));
         let slot = Arc::new(AnswerSlot::default());
         let barrier = Arc::new(Barrier::new(WRITERS));
         let writers = (0..WRITERS)
             .map(|value| {
-                let slot = slot.dupe();
-                let barrier = barrier.dupe();
+                let (module, destination, slot, barrier) = (
+                    module.dupe(),
+                    destination.dupe(),
+                    slot.dupe(),
+                    barrier.dupe(),
+                );
                 thread::spawn(move || {
+                    let errors = errors_at(&module, &[value as u32]);
                     barrier.wait();
-                    let (answer, did_write) = slot.record(AnswerBox::new(value));
+                    let (answer, did_write) = slot.record_with_errors(
+                        AnswerBox::new(value),
+                        errors,
+                        &destination,
+                        AnswerSlot::try_record,
+                    );
                     (*answer, did_write)
                 })
             })
@@ -1907,6 +2095,22 @@ mod tests {
             .find_map(|(answer, did_write)| did_write.then_some(*answer))
             .expect("one writer must win");
         assert!(results.iter().all(|(answer, _)| *answer == winner));
+        let kept = destination
+            .collect(&ErrorConfig::new(
+                Cow::Owned(ErrorDisplayConfig::default()),
+                false,
+                Tool::default_enabled(),
+                TypeIgnoreUnknownTagBehavior::NoEffect,
+            ))
+            .ordinary
+            .iter()
+            .map(|error| error.range().start())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept,
+            vec![TextSize::new(winner as u32)],
+            "only the winning writer's error should be kept"
+        );
     }
 
     #[test]
@@ -1914,7 +2118,7 @@ mod tests {
         let value = Arc::new(1);
         let weak = Arc::downgrade(&value);
         let slot = AnswerSlot::default();
-        let (answer, did_write) = slot.record(AnswerBox::new(value));
+        let (answer, did_write) = record(&slot, value);
         assert!(did_write);
         assert_eq!(**answer, 1);
         assert_eq!(
@@ -1941,10 +2145,11 @@ mod tests {
         let dropped = AtomicBool::new(false);
         {
             let slots = [AnswerSlot::default(), AnswerSlot::default()];
-            let _ = slots[0].record(AnswerBox::new(SetOnDrop(&dropped)));
+            let _ = record(&slots[0], SetOnDrop(&dropped));
             // SAFETY: The array models one result table, and both slots remain
             // live until the returned reference is discarded.
-            let _ = unsafe { slots[1].record_alias(&slots[0]) };
+            let _ = unsafe { slots[1].try_record_alias(&slots[0]) }
+                .expect("an unpublished slot should accept the alias");
         }
         assert!(dropped.load(Ordering::Relaxed));
     }
@@ -1957,7 +2162,7 @@ mod tests {
         let value = Arc::new(1);
         let weak = Arc::downgrade(&value);
 
-        target.record(AnswerBox::new(value));
+        record(&target, value);
         let target_ptr = target.ptr.load(Ordering::Acquire);
         published_alias.ptr.store(
             AnswerSlot::pending(AnswerSlot::alias(target_ptr)),
@@ -1969,7 +2174,10 @@ mod tests {
         );
 
         // SAFETY: This test installed both pending reservations above.
-        unsafe { published_alias.publish_reserved() };
+        assert!(unsafe { published_alias.publish_reserved() });
+        // SAFETY: Repeating publication of a reservation this caller originally
+        // owned is explicitly supported and does not access the stored value.
+        assert!(!unsafe { published_alias.publish_reserved() });
         // SAFETY: This test installed both pending reservations above.
         unsafe { rolled_back_alias.rollback_reserved_if_pending() };
         assert_eq!(
@@ -1993,8 +2201,105 @@ mod tests {
         unsafe { slot.rollback_reserved_if_pending() };
         assert!(slot.get().is_none());
 
-        let (answer, did_write) = slot.record(AnswerBox::new(2));
+        let (answer, did_write) = record(&slot, 2);
         assert!(did_write);
         assert_eq!(*answer, 2);
+    }
+
+    /// Start a writer that records `2` with two errors into a slot that the
+    /// caller has already reserved, and return once its compare-and-swap has
+    /// failed against that reservation.
+    fn spawn_writer(
+        module: &ModuleInfo,
+        destination: &Arc<ErrorCollector>,
+        slot: &Arc<AnswerSlot<i32>>,
+    ) -> thread::JoinHandle<(i32, bool)> {
+        let (module, destination, slot) = (module.dupe(), destination.dupe(), slot.dupe());
+        let (failed, on_failed) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let (answer, did_write) = slot.record_with_errors(
+                AnswerBox::new(2),
+                errors_at(&module, &[1, 2]),
+                &destination,
+                |slot, value| {
+                    let result = slot.try_record(value);
+                    if result.is_err() {
+                        // Unbounded, so this never blocks inside `extend_if`. The
+                        // receiver is gone by the time a retry could fail again.
+                        let _ = failed.send(());
+                    }
+                    result
+                },
+            );
+            (*answer, did_write)
+        });
+        on_failed
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the writer should find the slot reserved");
+        writer
+    }
+
+    #[test]
+    fn answer_slot_record_does_not_block_reserved_publication() {
+        let module = test_module();
+        let destination = Arc::new(ErrorCollector::new(module.dupe(), ErrorStyle::Delayed));
+        let slot = Arc::new(AnswerSlot::default());
+        assert!(slot.reserve(AnswerBox::new(1)));
+        let writer = spawn_writer(&module, &destination, &slot);
+
+        // Publish the reservation the way an SCC does, on another thread so that
+        // a deadlock fails the test instead of hanging it.
+        let (published, on_published) = mpsc::channel();
+        {
+            let (destination, slot) = (destination.dupe(), slot.dupe());
+            thread::spawn(move || {
+                let result = destination.extend_if(errors_at(&module, &[3]), || {
+                    // SAFETY: This test reserved the slot above.
+                    unsafe { slot.publish_reserved() }.then_some(()).ok_or(())
+                });
+                published
+                    .send(result.is_ok())
+                    .expect("the test should still be listening");
+            });
+        }
+        assert!(
+            on_published
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a waiting writer should not block the owner's publication"),
+            "the owner should publish its own reservation"
+        );
+
+        let (answer, did_write) = writer.join().expect("writer thread should not panic");
+        assert_eq!(answer, 1, "the writer should observe the owner's answer");
+        assert!(!did_write);
+        assert_eq!(
+            destination.len(),
+            1,
+            "only the owner's error should be kept"
+        );
+    }
+
+    #[test]
+    fn answer_slot_record_retries_after_reservation_rollback() {
+        let module = test_module();
+        let destination = Arc::new(ErrorCollector::new(module.dupe(), ErrorStyle::Delayed));
+        let slot = Arc::new(AnswerSlot::default());
+        assert!(slot.reserve(AnswerBox::new(1)));
+        let writer = spawn_writer(&module, &destination, &slot);
+
+        // SAFETY: This test reserved the slot above.
+        unsafe { slot.rollback_reserved_if_pending() };
+
+        let (answer, did_write) = writer.join().expect("writer thread should not panic");
+        assert_eq!(
+            answer, 2,
+            "the writer should win once the reservation is rolled back"
+        );
+        assert!(did_write);
+        assert_eq!(
+            destination.len(),
+            2,
+            "the winning writer's errors should be kept"
+        );
     }
 }

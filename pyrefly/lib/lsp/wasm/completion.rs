@@ -1386,7 +1386,10 @@ impl Transaction<'_> {
                             &mut result,
                             in_string_literal,
                         );
-                        self.add_dict_value_literal_completions(
+                        // The expected type of a `TypedDict` value is recorded by whichever
+                        // member of a union was checked last, so a dict value's completions
+                        // come only from the narrowed members.
+                        let dict_value_claimed = self.add_dict_value_literal_completions(
                             handle,
                             mod_module.as_ref(),
                             position,
@@ -1394,7 +1397,7 @@ impl Transaction<'_> {
                         );
                         // `dict_key_claimed` was computed up front; when a dict key was
                         // offered we skip the overload literal completions.
-                        if !dict_key_claimed {
+                        if !dict_key_claimed && !dict_value_claimed {
                             self.add_literal_completions(
                                 handle,
                                 position,

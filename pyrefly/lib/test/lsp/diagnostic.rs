@@ -10,7 +10,9 @@ use pyrefly_python::ast::Ast;
 
 use crate::state::require::Require;
 use crate::state::state::State;
+use crate::test::util::TestEnv;
 use crate::test::util::mk_multi_file_state;
+use crate::test::util::mk_multi_file_state_with_env;
 
 fn get_unused_import_diagnostics(state: &State, handle: &Handle) -> String {
     let transaction = state.transaction();
@@ -54,6 +56,24 @@ fn get_unused_variable_diagnostics(state: &State, handle: &Handle) -> String {
         }
     } else {
         "No answers".to_owned()
+    }
+}
+
+/// A type in a docstring uses its import only when docstring types are inferred.
+#[test]
+fn test_import_used_only_by_docstring_type() {
+    let code = "from collections import OrderedDict\n\n\ndef f(x):\n    \"\"\"\n    :type x: OrderedDict\n    \"\"\"\n    return x\n";
+    for (env, expected) in [
+        (
+            TestEnv::new().enable_infer_param_types_from_docstring(),
+            "No unused imports",
+        ),
+        (TestEnv::new(), "Import `OrderedDict` may be unused"),
+    ] {
+        let (handles, state) =
+            mk_multi_file_state_with_env(env, &[("main", code)], Require::Exports, true);
+        let report = get_unused_import_diagnostics(&state, handles.get("main").unwrap());
+        assert_eq!(report, expected);
     }
 }
 

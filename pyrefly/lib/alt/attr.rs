@@ -9,9 +9,11 @@ use std::iter;
 
 use dupe::Dupe;
 use pyrefly_python::dunder;
+use pyrefly_python::keywords::is_valid_identifier;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitEnum;
 use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::shaped_array::shape_to_tuple_carrier;
@@ -27,6 +29,7 @@ use pyrefly_util::suggest::best_suggestion;
 use ruff_python_ast::helpers::is_dunder;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
+use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 use vec1::Vec1;
 
@@ -119,6 +122,8 @@ pub enum AttrSubsetError {
         got: Type,
         want: Type,
         subset_error: SubsetError,
+        // Allows override diagnostics to distinguish read and write failures.
+        read_compatible: bool,
     },
     // `want` is not a subtype of `got`
     // applies to property setters
@@ -205,6 +210,7 @@ impl AttrSubsetError {
                 got,
                 want,
                 subset_error: _,
+                read_compatible: _,
             } => {
                 format!(
                     "`{child_class}.{attr_name}` has type `{}`, which is not consistent with `{}` in `{parent_class}.{attr_name}` (the type of read-write attributes cannot be changed)",
@@ -382,6 +388,18 @@ impl NoAccessReason {
                     "Proxy method `{attr_name}` of class `{class_name}` cannot resolve target method `{target}`"
                 )
             }
+        }
+    }
+
+    pub fn error_kind(&self, default: ErrorKind) -> ErrorKind {
+        match self {
+            NoAccessReason::SuperMethodNeedsImplementation(_) => ErrorKind::AbstractMethodCall,
+            NoAccessReason::ClassUseOfInstanceAttribute(_)
+            | NoAccessReason::ClassAttributeIsGeneric(_)
+            | NoAccessReason::SettingReadOnlyProperty(_)
+            | NoAccessReason::SettingReadOnlyDescriptor(_)
+            | NoAccessReason::ProxyMethodClassAccess(_)
+            | NoAccessReason::ProxyMethodTargetInvalid { .. } => default,
         }
     }
 }
@@ -648,7 +666,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             |attr_base| self.lookup_attr(attr_base, attr_name),
         );
         let mut types = Vec::new();
-        let mut error_messages = Vec::new();
+        let mut access_errors: Vec<(ErrorKind, String)> = Vec::new();
         let mut success = true;
         let (found, not_found, error) = lookup_result.decompose();
         if found.is_empty()
@@ -673,13 +691,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Ok(ty) => types.push(ty),
                 Err(err) => {
                     can_narrow_none = false;
-                    error_messages.push(err.to_error_msg(attr_name));
+                    access_errors.push((err.error_kind(error_kind), err.to_error_msg(attr_name)));
                     success = false;
                 }
             }
         }
         for err in not_found {
-            error_messages.push(err.to_error_msg(attr_name));
+            access_errors.push((error_kind, err.to_error_msg(attr_name)));
             success = false;
         }
         for err in error {
@@ -693,19 +711,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // `.register` on a singledispatch dispatcher needs the fallback's first param, only
             // available here; the tagging logic lives in `singledispatch.rs`.
             self.tag_singledispatch_register(base, attr_name, self.unions(types))
-        } else if !error_messages.is_empty() {
-            error_messages.sort();
-            error_messages.dedup();
-            let (header, mut details) = if error_messages.len() > 1 {
+        } else if !access_errors.is_empty() {
+            access_errors.sort();
+            access_errors.dedup();
+            let (kind, header, mut details) = if access_errors.len() > 1 {
                 (
+                    error_kind,
                     format!(
                         "Object of type `{}` has no attribute `{attr_name}`",
                         self.for_display(base.clone())
                     ),
-                    error_messages,
+                    access_errors.into_iter().map(|(_, msg)| msg).collect(),
                 )
             } else {
-                (error_messages.remove(0), Vec::new())
+                let (kind, msg) = access_errors.remove(0);
+                (kind, msg, Vec::new())
             };
             // Skip suggestions when we have a partial union failure to avoid suggesting
             // attributes from the types that have them when the problem is that some types
@@ -718,7 +738,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 details.push(format!("Did you mean `{suggestion}`?"));
             }
             let mut builder = errors
-                .error_builder(range, error_kind, header)
+                .error_builder(range, kind, header)
                 .with_details(details)
                 .with_context(context);
             if can_narrow_none {
@@ -1382,7 +1402,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ];
         !relevant_dunders.iter().any(|dunder: &&Name| {
             let field = self.get_class_member_with_defining_class(cls, dunder);
-            field.is_some_and(|field| !field.defining_class.is_builtin("object"))
+            field.is_some_and(|field| !field.defining_class.is(KnownClass::Object))
         })
     }
 
@@ -1553,7 +1573,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             // `as_attribute_base` promotes literals, so we should promote here too
             // In the future, we should refactor `get_protocol_attribute` to reuse the `AttributeBase`, to ensure the logic is identical
-            let got = got.clone().promote_implicit_literals(self.stdlib);
+            let got = got.clone().promote(self.stdlib);
             if (!got_attrs.is_empty())
                 && let Some(want) = self.get_protocol_attribute(protocol, got.clone(), attr_name)
             {
@@ -1776,6 +1796,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         for base_results in candidates {
             let [(attribute, _)] = base_results.as_slice() else {
                 return None;
+            };
+            let projected;
+            let attribute = if let Attribute::ClassAttribute(ClassAttribute::Descriptor(
+                desc,
+                DescriptorBase::Instance(_) | DescriptorBase::SelfInstance(_),
+            )) = attribute
+            {
+                projected = Attribute::class_attribute(self.descriptor_as_attribute(desc)?);
+                &projected
+            } else {
+                attribute
             };
             let (ty, set_type) = match attribute {
                 Attribute::Simple(ty) => (ty, None),
@@ -2053,7 +2084,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         match metaclass_attr {
                             Some(meta_attr)
                                 if self.class_attribute_is_data_descriptor(&meta_attr)
-                                    || metaclass.class_object().is_builtin("type") =>
+                                    || metaclass.class_object().is(KnownClass::Type) =>
                             {
                                 acc.found_class_attribute(meta_attr, base)
                             }
@@ -2070,7 +2101,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         {
                             let metadata = self.get_metadata_for_class(class.class_object());
                             let metaclass = metadata.metaclass(self.stdlib);
-                            if !metaclass.class_object().is_builtin("type") {
+                            if !metaclass.class_object().is(KnownClass::Type) {
                                 let metaclass_attr =
                                     self.get_metaclass_attribute(class, metaclass, attr_name);
                                 match metaclass_attr {
@@ -2217,7 +2248,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let inherited_from_object = self.field_is_inherited_from(
                     self.stdlib.generic_alias().class_object(),
                     attr_name,
-                    ("builtins", "object"),
+                    KnownClass::Object,
                 );
                 for (b, exclude) in [(&generic_alias, inherited_from_object), (&origin, false)] {
                     if exclude {
@@ -2314,7 +2345,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         metaclass.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     )
                 {
                     acc.not_found(NotFoundOn::ClassInstance(
@@ -2339,7 +2370,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let inherited_from_object = self.field_is_inherited_from(
                     self.stdlib.generic_alias().class_object(),
                     dunder_name,
-                    ("builtins", "object"),
+                    KnownClass::Object,
                 );
                 for (b, exclude) in [(&generic_alias, inherited_from_object), (&origin, false)] {
                     if exclude {
@@ -2370,7 +2401,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         cls.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(cls.class_object().clone(), base))
@@ -2385,7 +2416,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         self.stdlib.method_type().class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(
@@ -2400,7 +2431,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         tensor.base_class.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(
@@ -2710,6 +2741,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::ClassDef(cls) => acc.push(AttributeBase1::ClassObject(ClassBase::ClassDef(
                 self.as_class_type_unchecked(&cls),
             ))),
+            Type::SpecializedClassDef(class) => {
+                acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(class)));
+            }
             Type::SelfType(class_type) => acc.push(AttributeBase1::SelfType(class_type)),
             Type::Type(ty) => self.as_attribute_base1_of_type(*ty, acc),
             Type::TypedDict(TypedDict::TypedDict(td))
@@ -2989,6 +3023,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             | Type::Concatenate(_, _)
             | Type::ParamSpecValue(_)
             | Type::Materialization
+            | Type::Falsy
+            | Type::Truthy
             | Type::Ellipsis => {}
         }
     }
@@ -2996,6 +3032,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// `as_attribute_base1` helper for `Type::Type(ty)`.
     fn as_attribute_base1_of_type(&self, ty: Type, acc: &mut Vec<AttributeBase1>) {
         match ty {
+            Type::SpecializedClassDef(_) => acc.push(AttributeBase1::ClassObject(
+                ClassBase::ClassDef(self.stdlib.generic_alias().clone()),
+            )),
             Type::SelfType(class_type) => {
                 acc.push(AttributeBase1::ClassObject(ClassBase::SelfType(class_type)))
             }
@@ -3010,31 +3049,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::Literal(lit) => acc.push(AttributeBase1::ClassObject(ClassBase::ClassType(
                 lit.value.general_class_type(self.stdlib).clone(),
             ))),
-            Type::Tuple(tuple) => self.as_attribute_base1(
-                self.heap
-                    .mk_type_of(self.heap.mk_class_type(self.erase_tuple_type(tuple))),
-                acc,
-            ),
+            Type::Tuple(tuple) => acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(
+                self.erase_tuple_type(tuple),
+            ))),
             Type::ClassType(class) => {
-                let class_base = AttributeBase1::ClassObject(ClassBase::ClassType(class.clone()));
-                if !class.targs().is_empty() {
-                    // If the class type has type arguments, at runtime it's also a GenericAlias
-
-                    // FIXME:
-                    // If `C` is a generic class, then the type of the expression `C` is `type[C]`.
-                    // We're relying on this behaviour to give `C[int]` the
-                    // runtime generic alias type, but this is technically
-                    // incorrect as `type[C[int]]` should be instances of `type`
-                    // and not `GenericAlias`.
-                    // Therefore, if we ever have a value of `type[C[int]]`
-                    // (e.g. via inheritance), we should not treat it as a
-                    // `GenericAlias`. However, such cases are rare in practice.
-                    acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(
-                        class.clone(),
-                    )));
-                } else {
-                    acc.push(class_base)
-                }
+                acc.push(AttributeBase1::ClassObject(ClassBase::ClassType(class)))
             }
             Type::ClassDef(class) => {
                 // type[ClassDef(C)] is C.__class__: C's metaclass, viewed as a class object.
@@ -3361,7 +3380,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
 
         match ty {
-            Type::ClassDef(_) | Type::Type(_) => true,
+            Type::ClassDef(_) | Type::SpecializedClassDef(_) | Type::Type(_) => true,
             Type::TypeAlias(_)
             | Type::UntypedAlias(_)
             | Type::KwCall(_)
@@ -3793,7 +3812,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Vec<AttrInfo> {
         let annotated_fields = self.django_annotated_fields(&base);
         let mut res = Vec::new();
-        if let Some(base) = self.as_attribute_base(base) {
+        if let Some(base) = self.as_attribute_base(base.clone()) {
             self.completions_inner(
                 base,
                 expected_attribute_name,
@@ -3801,6 +3820,65 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 include_object,
                 &mut res,
             );
+        }
+        if expected_attribute_name.is_none() {
+            // Look up receivers separately so one missing __getattr__ does not discard the others.
+            let getattrs = base
+                .into_unions()
+                .into_iter()
+                .filter_map(|base| {
+                    self.type_of_magic_dunder_attr(
+                        &base,
+                        &dunder::GETATTR,
+                        TextRange::default(),
+                        &self.error_swallower(),
+                        None,
+                        "completion_getattr",
+                        false,
+                    )
+                })
+                .flat_map(Type::into_unions);
+            let mut literal_attrs: SmallMap<Name, Vec<Type>> = SmallMap::new();
+            for getattr in getattrs {
+                // Bound signatures retain self/cls as their first positional parameter.
+                let param_index = usize::from(matches!(&getattr, Type::BoundMethod(_)));
+                for (callable, _) in getattr.toplevel_callable_signatures() {
+                    let Some(param) = callable.get_positional_param(param_index) else {
+                        continue;
+                    };
+                    let members = match param {
+                        Type::Union(union) => union.members.as_slice(),
+                        _ => std::slice::from_ref(param),
+                    };
+                    for member in members {
+                        let Type::Literal(lit) = member else {
+                            continue;
+                        };
+                        let Lit::Str(value) = &lit.value else {
+                            continue;
+                        };
+                        if !is_valid_identifier(value.as_str()) {
+                            continue;
+                        }
+                        let name = Name::new(value);
+                        if res.iter().any(|info| info.name == name) {
+                            continue;
+                        }
+                        let types = literal_attrs.entry(name).or_default();
+                        if include_types {
+                            types.push(callable.ret.clone());
+                        }
+                    }
+                }
+            }
+            res.extend(literal_attrs.into_iter().map(|(name, types)| AttrInfo {
+                name,
+                ty: include_types.then(|| self.unions(types)),
+                is_deprecated: false,
+                definition: AttrDefinition::Synthetic,
+                is_reexport: false,
+                is_from_object: false,
+            }));
         }
         for (name, ty) in annotated_fields {
             if expected_attribute_name.is_none_or(|expected| expected == &name)

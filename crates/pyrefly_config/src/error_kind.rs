@@ -254,6 +254,9 @@ pub enum ErrorKind {
     /// do not recognize as always executing (we recognize constructors and some test setup
     /// methods).
     ImplicitlyDefinedAttribute,
+    /// A block of code that is unreachable in the current type-checking configuration - for
+    /// example, the `else` block following an `if TYPE_CHECKING: ...` block.
+    InactiveCode,
     /// Equality or inequality comparison between incompatible types.
     IncompatibleComparison,
     /// Pruning an overloaded argument's branches left none that accept what the call solved one
@@ -399,7 +402,7 @@ pub enum ErrorKind {
     /// A value whose type is not itself `Any` but contains an implicit `Any`,
     /// such as `list[Unknown]` or `Unknown | None`.
     PartiallyUnknownType,
-    /// A class-body attribute may be uninitialized on some control-flow paths.
+    /// An attribute may be uninitialized on some control-flow paths.
     PossiblyUninitializedAttribute,
     /// A potential conflict between an explicit keyword argument and a NotRequired
     /// TypedDict field. The field may be absent at runtime, so the conflict is not
@@ -464,6 +467,8 @@ pub enum ErrorKind {
     UnboundName,
     /// An error caused by a keyword argument used in the wrong place.
     UnexpectedKeyword,
+    /// A function diverges without an explicit exit, contrary to its return annotation.
+    UnexpectedNever,
     /// An error caused by passing a positional argument for a keyword-only parameter.
     UnexpectedPositionalArgument,
     /// Attempting to use a type checker directive without importing it from `typing`.
@@ -659,6 +664,7 @@ impl ErrorKind {
             ErrorKind::ImplicitImport => Severity::Warn,
             ErrorKind::ImplicitReexport => Severity::Ignore,
             ErrorKind::ImplicitlyDefinedAttribute => Severity::Ignore,
+            ErrorKind::InactiveCode => Severity::Hint,
             ErrorKind::IncompatibleComparison => Severity::Ignore,
             ErrorKind::InstanceVarAssign => Severity::Ignore,
             ErrorKind::InvalidAbstractMethod => Severity::Ignore,
@@ -695,6 +701,7 @@ impl ErrorKind {
             ErrorKind::UnannotatedAttribute => Severity::Ignore,
             ErrorKind::UnannotatedParameter => Severity::Ignore,
             ErrorKind::UnannotatedReturn => Severity::Ignore,
+            ErrorKind::UnexpectedNever => Severity::Warn,
             ErrorKind::UninitializedInstanceVariable => Severity::Ignore,
             ErrorKind::UnknownArgumentType => Severity::Ignore,
             ErrorKind::ImplicitAnyLambda => Severity::Ignore,

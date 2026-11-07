@@ -25,3 +25,4 @@ pub mod state;
 mod step_slot;
 pub mod steps;
 pub mod subscriber;
+pub mod transaction_manager;

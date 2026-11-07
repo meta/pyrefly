@@ -11,6 +11,24 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_overload_expansion_keeps_lambda_context,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable, overload, assert_type
+
+@overload
+def f(callback: Callable[[int], None], value: int) -> int: ...
+@overload
+def f(callback: Callable[[str], None], value: str) -> str: ...
+def f(callback, value) -> int | str: ...
+
+def g(value: int | str) -> None:
+    assert_type(f(lambda arg: None, value), int | str)
+    assert_type(f(value=value, callback=lambda arg: None), int | str)
+"#,
+);
+
+testcase!(
     test_py,
     r#"
 from typing import overload, assert_type
@@ -1877,6 +1895,33 @@ def g(x, y): return x
 
 g(1, "hello")  # E: No matching overload found for function `g` called with arguments: (Literal[1], Literal['hello'])
 g(x=1, y="hello")  # E: No matching overload found for function `g` called with arguments: (x=Literal[1], y=Literal['hello'])
+    "#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/5074
+testcase!(
+    bug = "Lambda arguments are shown with Unknown parameters in the first line",
+    test_overload_error_shows_lambda_argument_types,
+    r#"
+from typing import Callable, overload
+
+class Key:
+    # Returning `object` keeps `Key` from satisfying `SupportsRichComparison`.
+    def __lt__(self, other: object) -> object:
+        return object()
+
+def sort_values(values: list[Key]) -> None:
+    values.sort(key=lambda value: value)  # E: No matching overload found for function `list.sort` called with arguments: (key=(value: Unknown) -> Unknown)
+
+class C:
+    @overload
+    def m(self, callback: Callable[[int], int], y: int) -> None: ...
+    @overload
+    def m(self, callback: Callable[[str], str], y: str) -> None: ...
+    def m(self, callback, y): ...
+
+# The lambda returns `None`, so like the one above it fails its check against the closest overload.
+C().m(lambda v: None, 1.5)  # E: No matching overload found for function `C.m` called with arguments: ((v: Unknown) -> None, float)
     "#,
 );
 

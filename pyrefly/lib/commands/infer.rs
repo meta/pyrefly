@@ -308,7 +308,7 @@ fn hint_to_string(
     typing_imports: &mut BTreeSet<&'static str>,
     uses_incomplete: &mut bool,
 ) -> String {
-    let hint = hint.promote_implicit_literals(stdlib);
+    let hint = hint.promote(stdlib);
     let hint = hint.explicit_any().clean_var();
     let hint = match hint {
         Type::Union(u) => unions_with_literals(u.members, stdlib, enum_members, heap),
@@ -804,6 +804,29 @@ Example(42)
         return c
     example("a")
     "#,
+            None,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_return_intersection() -> anyhow::Result<()> {
+        // `Author & Falsy` has no annotation syntax, so its fallback type `Author` is written.
+        assert_annotations(
+            r#"
+class Genre: ...
+class Author:
+    genre: Genre | None
+def f(author: Author | None):
+    return author and author.genre
+"#,
+            r#"
+class Genre: ...
+class Author:
+    genre: Genre | None
+def f(author: Author | None) -> Author | Genre | None:
+    return author and author.genre
+"#,
             None,
         );
         Ok(())

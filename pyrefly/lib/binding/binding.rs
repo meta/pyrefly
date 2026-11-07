@@ -77,6 +77,7 @@ use crate::binding::base_class::BaseClassGeneric;
 use crate::binding::bindings::BindingEntry;
 use crate::binding::bindings::BindingTable;
 use crate::binding::bindings::Bindings;
+use crate::binding::bindings::InitializationStatus;
 use crate::binding::bindings::UnsetNodeId;
 use crate::binding::classmethod::MethodReceiverKind;
 use crate::binding::django::DjangoFieldInfo;
@@ -1300,14 +1301,15 @@ pub enum BindingExpect {
         existing: Idx<KeyAnnotation>,
         name: Name,
     },
-    /// Validate a function implementation's implicit return without making the
-    /// published return type depend on the function body.
+    /// Validate a function's return annotation without making the published
+    /// return type depend on the function body.
     ValidateImplicitReturn {
         annotation: Idx<KeyAnnotation>,
         implicit_return: Idx<Key>,
         is_async: bool,
         is_generator: bool,
         has_explicit_return: bool,
+        diverges_without_exit: bool,
     },
     /// Expression used in a boolean context (`bool()`, `if`, or `while`)
     Bool(Expr),
@@ -1316,7 +1318,7 @@ pub enum BindingExpect {
     MatchExhaustiveness {
         subject_idx: Idx<Key>,
         narrowing_subject: Option<NarrowingSubject>,
-        narrow_ops_for_fall_through: (Box<NarrowOp>, TextRange),
+        narrow_ops_for_fall_through: Box<(NarrowOp, TextRange)>,
         subject_range: TextRange,
         // Should we show the raw expression of the match subject instead of the name?
         show_subject_expr: bool,
@@ -1325,7 +1327,12 @@ pub enum BindingExpect {
     MatchCaseReachability {
         subject_idx: Idx<Key>,
         narrowing_subject: Option<NarrowingSubject>,
-        narrow_ops_for_case: (Box<NarrowOp>, TextRange),
+        narrow_ops_for_case: Box<(NarrowOp, TextRange)>,
+        /// Negations from earlier unguarded cases in the same match, in the
+        /// same subject coordinates as `narrow_ops_for_case`. Reachability
+        /// narrows by the current pattern first, then applies these, so an
+        /// `Any` subject can first become `bool` and then subtract `int`.
+        prev_case_negations: Option<Box<(NarrowOp, TextRange)>>,
         case_range: TextRange,
     },
     /// Code following one or more points in a suite that control passes only conditionally, such
@@ -1371,15 +1378,17 @@ pub enum BindingExpect {
         /// reaches the use, the variable may be uninitialized.
         unset_nodes: Vec<UnsetNodeId>,
     },
-    /// Check whether a class-body attribute is initialized on every completing path.
+    /// Check whether an attribute is initialized on every completing path.
     UninitializedAttributeCheck {
         name: Name,
         range: TextRange,
         class: Idx<KeyClass>,
-        /// The latest merges on the paths on which the attribute is unset, as for
-        /// `UninitializedCheck`. `None` means some path has no termination key, so the attribute
-        /// may be uninitialized.
-        unset_nodes: Option<Vec<UnsetNodeId>>,
+        /// Instance attributes can also be provided by `__getattr__`.
+        is_instance: bool,
+        /// The bare class-body annotation that declares the attribute, if any.
+        declared_annotation: Option<Idx<KeyAnnotation>>,
+        /// Any of these flows can establish initialization.
+        initializations: Vec<InitializationStatus>,
     },
     /// Check for forward reference string literal in union type.
     /// At runtime, `type.__or__` cannot handle string literals, so expressions
@@ -1556,15 +1565,19 @@ impl DisplayWith<Bindings> for BindingExpect {
                 name,
                 range,
                 class,
-                unset_nodes,
+                is_instance,
+                declared_annotation,
+                initializations,
             } => {
                 write!(
                     f,
-                    "UninitializedAttributeCheck({}, {}, {:?}, {:?})",
+                    "UninitializedAttributeCheck({}, {}, {:?}, {}, {:?}, {:?})",
                     name,
                     ctx.module().display(range),
                     class,
-                    unset_nodes
+                    is_instance,
+                    declared_annotation,
+                    initializations
                 )
             }
             Self::ForwardRefUnion {
@@ -2067,7 +2080,13 @@ impl IsAsync {
 #[derive(Clone, Debug)]
 pub enum FunctionParameter {
     Annotated(Idx<KeyAnnotation>),
-    Unannotated(Idx<KeyUndecoratedFunction>, AnnotationTarget, Name),
+    /// The final field is the type that the docstring declares for the parameter, if any.
+    Unannotated(
+        Idx<KeyUndecoratedFunction>,
+        AnnotationTarget,
+        Name,
+        Option<Idx<KeyAnnotation>>,
+    ),
 }
 
 #[derive(Clone, Debug)]
@@ -3103,7 +3122,7 @@ impl DisplayWith<Bindings> for Binding {
                 "FunctionParameter({})",
                 match x.as_ref() {
                     FunctionParameter::Annotated(k) => ctx.display(*k).to_string(),
-                    FunctionParameter::Unannotated(k, _, _) => ctx.display(*k).to_string(),
+                    FunctionParameter::Unannotated(k, _, _, _) => ctx.display(*k).to_string(),
                 }
             ),
             Self::SuperInstance(x) => match &x.0 {
@@ -3476,7 +3495,20 @@ impl AnnotationTarget {
 pub enum BindingAnnotation {
     /// The type is annotated to be this key, will have the outer type removed.
     /// Optionally occurring within a class, in which case Self refers to this class.
-    AnnotateExpr(AnnotationTarget, Expr, Option<Idx<KeyClass>>),
+    /// For a parameter/return annotation of an `@override` method, the final field
+    /// identifies the method itself, so the solver can compare against the base
+    /// signature (e.g. to exempt dictated annotations from `explicit-any`); `None`
+    /// otherwise. This implies the class field is `Some`. Name, async-ness and
+    /// parameter shape are read from the function binding, not duplicated here.
+    AnnotateExpr(
+        AnnotationTarget,
+        Expr,
+        Option<Idx<KeyClass>>,
+        Option<Idx<KeyUndecoratedFunction>>,
+    ),
+    /// The type that a docstring declares for the unannotated parameter with this name.
+    /// Docstrings are informal, so a type that does not check is dropped without an error.
+    DocstringParam(Name, Expr),
     /// A special form declaration like `Literal: _SpecialForm`.
     SpecialForm(AnnotationTarget, SpecialForm),
 }
@@ -3484,15 +3516,22 @@ pub enum BindingAnnotation {
 impl DisplayWith<Bindings> for BindingAnnotation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Bindings) -> fmt::Result {
         match self {
-            Self::AnnotateExpr(target, x, class_key) => write!(
+            Self::AnnotateExpr(target, x, class_key, override_func) => write!(
                 f,
-                "AnnotateExpr({target}, {}, {})",
+                "AnnotateExpr({target}, {}, {}, {})",
                 ctx.module().display(x),
                 match class_key {
                     None => "None".to_owned(),
                     Some(t) => ctx.display(*t).to_string(),
-                }
+                },
+                match override_func {
+                    None => "None".to_owned(),
+                    Some(t) => ctx.get(*t).def.name.id.to_string(),
+                },
             ),
+            Self::DocstringParam(name, x) => {
+                write!(f, "DocstringParam({name}, {})", ctx.module().display(x))
+            }
             Self::SpecialForm(target, sf) => write!(f, "SpecialForm({target}, {sf})"),
         }
     }
@@ -3555,11 +3594,13 @@ pub enum ClassFieldDefinition {
     /// `initialized_in_recognized_method` is true if the field is assigned in a recognized
     /// instance attribute-defining method (e.g., `__init__`), meaning a Final field
     /// declared here is legally initialized even without a class-body value.
+    /// `initialized_in_method` is true if any method of the class assigns the field.
     /// `initialized_on_new_instance` is true if `__new__` assigns the field on the instance
-    /// it creates. Only the `uninitialized-instance-variable` check reads it.
+    /// it creates.
     DeclaredByAnnotation {
         annotation: Idx<KeyAnnotation>,
         initialized_in_recognized_method: bool,
+        initialized_in_method: bool,
         initialized_on_new_instance: bool,
     },
     /// Declared with no annotation or assignment (this is impossible
@@ -3612,13 +3653,15 @@ impl DisplayWith<Bindings> for ClassFieldDefinition {
             Self::DeclaredByAnnotation {
                 annotation,
                 initialized_in_recognized_method,
+                initialized_in_method,
                 initialized_on_new_instance,
             } => {
                 write!(
                     f,
-                    "ClassFieldDefinition::DeclaredByAnnotation({}, initialized_in_recognized_method={}, initialized_on_new_instance={})",
+                    "ClassFieldDefinition::DeclaredByAnnotation({}, initialized_in_recognized_method={}, initialized_in_method={}, initialized_on_new_instance={})",
                     ctx.display(*annotation),
                     initialized_in_recognized_method,
+                    initialized_in_method,
                     initialized_on_new_instance,
                 )
             }

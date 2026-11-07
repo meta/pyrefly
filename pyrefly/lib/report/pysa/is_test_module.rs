@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use pyrefly_types::known_class::KnownClass;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtImportFrom;
@@ -20,7 +21,7 @@ fn is_unittest_module(context: &ModuleAnswersContext) -> bool {
         get_class_mro(&class, context)
             .ancestors_no_object()
             .iter()
-            .any(|base| base.has_qname("unittest.case", "TestCase"))
+            .any(|base| base.is(KnownClass::UnittestTestCase))
     })
 }
 

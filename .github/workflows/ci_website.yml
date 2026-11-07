@@ -16,10 +16,12 @@ on:
     branches: [ main ]
     paths:
       - 'website/**'
+      - 'pyrefly_wasm/**'
       - '.github/workflows/ci_website.yml'
   pull_request:
     paths:
       - 'website/**'
+      - 'pyrefly_wasm/**'
       - '.github/workflows/ci_website.yml'
 
 # GitHub sets `head_ref` only for a pull request. A new push to a pull request
@@ -41,10 +43,12 @@ jobs:
           node-version: "22.x"
       - name: Install yarn deps
         run: cd website && yarn install
-      - name: Install wasm-pack
+      - name: Install wasi-sdk
         run: |
-          cargo install --locked wasm-pack --version 0.15.0
-          cargo install --locked wasm-opt --version 0.116.1
+          curl -fsSL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "WASI_SDK_PATH=$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux" >> "$GITHUB_ENV"
+      - name: Install wasm-opt
+        run: cargo install --locked wasm-opt --version 0.116.1
       - name: Build
         working-directory: ./website
         run: cargo version && chmod +x scripts/build.sh && scripts/build.sh && yarn build-wasm-for-test
@@ -54,6 +58,9 @@ jobs:
       - name: Test
         working-directory: ./website
         run: yarn test
+        env:
+          # Fail instead of skipping the tests when the module is missing.
+          PYREFLY_WASM_REQUIRED: 1
       - name: Get current date
         id: date
         if: ${{ inputs.upload_artifacts }}

@@ -417,6 +417,138 @@ def f(x: int, y: str | Literal[False]):
 "#,
 );
 
+// `x and y` returns `x` only when `x` is falsy, so a truthy result is always `y`.
+testcase!(
+    test_boolean_and_result_truthy_narrow,
+    r#"
+from typing import assert_type, reveal_type
+
+class Genre: ...
+
+class Author:
+    genre: Genre | None
+
+def assigned(author: Author | None) -> None:
+    genre = author and author.genre
+    if genre:
+        assert_type(genre, Genre)
+
+def walrus(author: Author | None) -> None:
+    if genre := (author and author.genre):
+        assert_type(genre, Genre)
+
+def container(d: dict[str, int] | None) -> None:
+    value = d and d["a"]
+    if value:
+        assert_type(value, int)
+
+# A subclass can define a falsy `__bool__`, so a falsy `Author` stays in the result.
+def not_none(author: Author | None) -> None:
+    genre = author and author.genre
+    reveal_type(genre)  # E: revealed type: (Author & Falsy) | Genre | None
+    if genre is not None:
+        assert_type(genre, Author | Genre)
+"#,
+);
+
+// `object & Falsy` keeps `object`, so the `__bool__` lookup on the result has a class to search.
+testcase!(
+    test_boolean_and_object_operand,
+    r#"
+from typing import reveal_type
+
+def f(flag: bool, value: object | None, other: bool) -> None:
+    if flag or (value and other):
+        pass
+    reveal_type(value and other)  # E: revealed type: bool | (object & Falsy) | None
+"#,
+);
+
+// `x or y` returns `x` only when `x` is truthy, so a falsy result is always `y`.
+testcase!(
+    test_boolean_or_result_falsy_narrow,
+    r#"
+from typing import assert_type, reveal_type
+
+class Config: ...
+
+class Settings: ...
+
+def assigned(override: Config | None, default: Settings) -> None:
+    config = override or default
+    if not config:
+        assert_type(config, Settings)
+
+def walrus(override: Config | None, default: Settings) -> None:
+    if not (config := override or default):
+        assert_type(config, Settings)
+
+def container(items: list[int], default: Settings) -> None:
+    value = items or default
+    if not value:
+        assert_type(value, Settings)
+
+def revealed(override: Config | None, default: Settings) -> None:
+    reveal_type(override or default)  # E: revealed type: (Config & Truthy) | Settings
+"#,
+);
+
+// `str` is not marked, so the literal default `""` collapses into it.
+testcase!(
+    test_boolean_or_literal_default,
+    r#"
+from typing import reveal_type
+
+def f(name: str | None) -> None:
+    reveal_type(name or "")  # E: revealed type: str
+"#,
+);
+
+// The inferred type of an attribute or a container element does not keep a truthiness marker, so
+// it accepts every value of the operand's type.
+testcase!(
+    test_boolean_or_inferred_attribute_type,
+    r#"
+from typing import Any, assert_type
+
+class Base: ...
+class Sub(Base): ...
+
+class C:
+    def __init__(self, base: Base | None) -> None:
+        self.base = base or Sub()
+
+    def reset(self, base: Base) -> None:
+        self.base = base
+
+def scores(x: float | None) -> None:
+    d = {"a": x or 0}
+    d["b"] = 1.5
+
+def first_use(a: list[Any], b: list[bytes]) -> None:
+    out = []
+    out.extend(a or b)
+    assert_type(out, list[bytes])
+"#,
+);
+
+// A unary operator on a marked operand looks up the dunder method of the unmarked type.
+testcase!(
+    test_boolean_or_unary_operator,
+    r#"
+from enum import Flag
+from typing import assert_type
+
+class C(Flag):
+    NONE = 0
+    A = 1
+
+def f(x: C | None, y: C, z: C) -> None:
+    assert_type(~(x or y), C)
+    assert_type(~(y and z), C)
+"#,
+);
+
 // Regression test: generic function calls in `and` expressions should not
 // have the narrowed type from earlier branches used as a hint for type variable
 // inference. The narrowing of `bool` to `Literal[False]` is for the result of

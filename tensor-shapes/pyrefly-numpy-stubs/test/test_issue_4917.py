@@ -22,7 +22,11 @@ def test_pairwise_distance_comparison() -> None:
     deltas = positions[:, None, :] - positions[None, :, :]
     deltas -= size * np.round(deltas / size)
     squared_distances = (deltas**2).sum(-1)
-    assert_type(squared_distances, np.ndarray[IntTuple, np.dtype[np.float64]])
+    # `deltas` has a gradual rank, so `np.round` may produce a scalar and returns `Any`.
+    assert_type(squared_distances, Any)
+    assert isinstance(squared_distances, np.ndarray)
+    assert_shape(squared_distances.shape, IntTuple, runtime=(count, count))
+    assert squared_distances.dtype == np.dtype(np.float64)
     nearby = squared_distances < radius * radius
 
     # Comparisons with unknown shapes also match the scalar overload returning Any.

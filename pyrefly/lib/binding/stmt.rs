@@ -826,6 +826,7 @@ impl<'a> BindingsBuilder<'a> {
                 },
                 annotation.clone(),
                 None,
+                None,
             )
         };
         self.insert_binding(ann_key, ann_val)
@@ -836,7 +837,7 @@ impl<'a> BindingsBuilder<'a> {
     ///
     /// If this is the top level, report a type error about the invalid return
     /// and also create a binding to ensure we type check the expression.
-    fn record_return(&mut self, mut x: StmtReturn) {
+    fn record_return(&mut self, mut x: StmtReturn, previous_stmt_expr: Option<Idx<Key>>) {
         // PEP 765: Disallow return in finally block (Python 3.14+)
         if self.sys_info.version().at_least(3, 14) && self.scopes.in_finally() {
             self.error(
@@ -847,10 +848,12 @@ impl<'a> BindingsBuilder<'a> {
         }
         let mut ret = self.declare_current_idx(Key::ReturnExplicit(x.range()));
         self.ensure_expr_opt(x.value.as_deref_mut(), ret.usage());
-        if let Err((ret, oops_top_level)) =
-            self.scopes
-                .record_or_reject_return(ret, x, self.scopes.is_definitely_unreachable())
-        {
+        if let Err((ret, oops_top_level)) = self.scopes.record_or_reject_return(
+            ret,
+            x,
+            self.scopes.is_definitely_unreachable(),
+            previous_stmt_expr,
+        ) {
             match oops_top_level.value {
                 Some(v) => self.insert_binding_current(ret, Binding::Expr(None, v)),
                 None => self.insert_binding_current(ret, Binding::None),
@@ -930,6 +933,7 @@ impl<'a> BindingsBuilder<'a> {
     fn stmt_impl(&mut self, x: Stmt, parent: &NestingContext) {
         self.with_semantic_checker(|semantic, context| semantic.visit_stmt(&x, context));
 
+        let previous_stmt_expr = self.scopes.last_stmt_expr();
         // Clear last_stmt_expr at the start - will be set again if this is a StmtExpr
         self.scopes.set_last_stmt_expr(None);
 
@@ -952,7 +956,7 @@ impl<'a> BindingsBuilder<'a> {
             }
             Stmt::ClassDef(x) => self.class_def(x, parent),
             Stmt::Return(x) => {
-                self.record_return(x);
+                self.record_return(x, previous_stmt_expr);
             }
             Stmt::Delete(x) => {
                 let mut targets = x.targets;
@@ -986,10 +990,12 @@ impl<'a> BindingsBuilder<'a> {
                         delete_idx,
                         Binding::Delete(Box::new(target.clone())),
                     );
-                    if let Expr::Attribute(_) = target
-                        && let Some((identifier, _)) = identifier_and_chain_prefix_for_expr(&target)
-                    {
-                        self.narrow_if_name_is_defined(identifier, idx);
+                    if let Expr::Attribute(attribute) = &target {
+                        self.scopes.record_self_attr_delete(attribute);
+                        if let Some((identifier, _)) = identifier_and_chain_prefix_for_expr(&target)
+                        {
+                            self.narrow_if_name_is_defined(identifier, idx);
+                        }
                     }
                 }
             }
@@ -1286,8 +1292,10 @@ impl<'a> BindingsBuilder<'a> {
                             AnnotationTarget::AttrAssign(attr_name.clone()),
                             *x.annotation,
                             None,
+                            None,
                         ),
                     );
+                    let has_value = x.value.is_some();
                     let value = match x.value {
                         Some(mut assigned) => {
                             self.bind_attr_assign(attr.clone(), &mut assigned, |_attr, value, _| {
@@ -1304,10 +1312,12 @@ impl<'a> BindingsBuilder<'a> {
                             ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))
                         }
                     };
-                    if !self
-                        .scopes
-                        .record_self_attr_assign(&attr, value.clone(), Some(ann_key))
-                    {
+                    if !self.scopes.record_self_attr_assign(
+                        &attr,
+                        value.clone(),
+                        Some(ann_key),
+                        has_value,
+                    ) {
                         self.error(
                             x.range,
                             ErrorKind::BadAssignment,
@@ -1628,7 +1638,8 @@ impl<'a> BindingsBuilder<'a> {
                     // A suite is only dead everywhere if its test never consults the runtime
                     // environment. A `sys.version_info`, `sys.platform`, `os.name`, or
                     // `TYPE_CHECKING` guard is dead under this configuration alone, and the
-                    // suite is live under another, so reporting it would be a false positive.
+                    // suite is live under another, so reporting it as unreachable would be a
+                    // false positive.
                     // An `else` has no test of its own and inherits the ones above it.
                     let test_is_environment_independent = test
                         .as_ref()
@@ -1643,6 +1654,7 @@ impl<'a> BindingsBuilder<'a> {
                         if test_is_environment_independent {
                             self.report_unreachable_body(&body);
                         } else {
+                            self.report_inactive_body(&body);
                             self.record_environment_names(&body);
                         }
                         // Skip the body in this case - it typically means a check (e.g. a sys version,
@@ -1742,6 +1754,7 @@ impl<'a> BindingsBuilder<'a> {
                             if report_all_remaining || unconditional == Some(false) {
                                 self.report_unreachable_body(&body);
                             } else {
+                                self.report_inactive_body(&body);
                                 self.record_environment_names(&body);
                             }
                             report_all_remaining |= unconditional == Some(true);
@@ -1970,6 +1983,9 @@ impl<'a> BindingsBuilder<'a> {
             Stmt::Try(x) => {
                 // Handlers can observe writes made before an exception, not just entry values.
                 self.scopes.clear_excluded_none_pairs();
+                // A `finally` body that assigns attributes directly initializes them on the paths
+                // of the `return`s inside the statement too.
+                let before_try = self.scopes.finally_return_statuses(&x.finalbody);
                 self.start_fork_and_branch(x.range);
 
                 // We branch before the body, conservatively assuming that any statement can fail
@@ -2105,7 +2121,17 @@ impl<'a> BindingsBuilder<'a> {
                 } else {
                     None
                 };
+                // The `finally` body also runs when the last statement before it raises, so a
+                // leading `return` must not take that statement's termination key.
+                if !x.finalbody.is_empty() {
+                    self.scopes.set_last_stmt_expr(None);
+                }
+                let returns =
+                    before_try.map(|before_try| (before_try, self.scopes.take_method_returns()));
                 self.stmts(x.finalbody, parent);
+                if let Some((before_try, returns)) = returns {
+                    self.scopes.finish_try_returns(before_try, returns);
+                }
                 if let Some(termination) = termination {
                     self.scopes.restore_termination(termination);
                 }
@@ -2371,6 +2397,7 @@ impl<'a> BindingsBuilder<'a> {
                             },
                             ExprOrBinding::Expr(value.clone()),
                             None,
+                            true,
                         ) && let Some(literals) = &mut self.setattr_name_literals
                         {
                             literals.push((name, receiver.range()));

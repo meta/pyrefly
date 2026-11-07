@@ -6,6 +6,7 @@
  */
 
 use pyrefly_python::dunder;
+use pyrefly_types::known_class::KnownClass;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
@@ -19,7 +20,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if let Some(named_tuple_elements) = self.named_tuple_element_types(cls) {
             return Some(Tuple::Concrete(named_tuple_elements));
         }
-        if cls.class_object().is_builtin("tuple") && cls.targs().as_slice().len() == 1 {
+        if cls.class_object().is(KnownClass::Tuple) && cls.targs().as_slice().len() == 1 {
             let tuple_targ: Type = cls.targs().as_slice()[0].clone();
             return Some(Tuple::Unbounded(Box::new(tuple_targ)));
         }
@@ -38,13 +39,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Check if a class that inherits from tuple defines its own `__getitem__`,
     /// which should take priority over tuple's special subscript handling.
     pub fn class_overrides_tuple_getitem(&self, cls: &ClassType) -> bool {
-        if cls.class_object().is_builtin("tuple") {
+        if cls.class_object().is(KnownClass::Tuple) {
             return false;
         }
         self.get_non_synthesized_class_member_and_defining_class(
             cls.class_object(),
             &dunder::GETITEM,
         )
-        .is_some_and(|member| !member.defining_class.is_builtin("tuple"))
+        .is_some_and(|member| !member.defining_class.is(KnownClass::Tuple))
     }
 }

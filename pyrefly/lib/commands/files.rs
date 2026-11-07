@@ -74,6 +74,10 @@ pub struct FilesArgs {
     /// Files to exclude when type checking.
     #[arg(long)]
     project_excludes: Option<Vec<String>>,
+    /// Files to exclude when type checking, in addition to the `project-excludes` of the config
+    /// in project mode, or to `--project-excludes` and the default excludes when files are given.
+    #[arg(long)]
+    extend_project_excludes: Vec<String>,
     /// Skip the PEP 723 scripts that Pyrefly finds in the project or in the given directories.
     /// Files given explicitly are still checked.
     #[arg(long)]
@@ -189,6 +193,7 @@ pub fn get_config_finder_for_snippet(
 fn get_globs_and_config_for_project(
     config: Option<PathBuf>,
     project_excludes: Option<Globs>,
+    extend_project_excludes: &Globs,
     args: ConfigOverrideArgs,
     wrapper: Option<ConfigConfigurerWrapper>,
     scope: ConfigScope,
@@ -241,6 +246,7 @@ fn get_globs_and_config_for_project(
     debug!("Config is: {}", config);
 
     let mut filtered_globs = config.get_filtered_globs(project_excludes, scope);
+    filtered_globs.add_excludes(extend_project_excludes.globs());
     filtered_globs
         .errors()
         .into_iter()
@@ -268,12 +274,14 @@ fn get_globs_and_config_for_files(
     config: Option<PathBuf>,
     files_to_check: Globs,
     project_excludes: Option<Globs>,
+    extend_project_excludes: &Globs,
     args: ConfigOverrideArgs,
     wrapper: Option<ConfigConfigurerWrapper>,
 ) -> anyhow::Result<(Box<dyn Includes>, ConfigFinder, UpsellDecision)> {
     let args_disable_excludes_heuristics = args.disable_project_excludes_heuristics();
     let get_project_excludes_and_heuristics = move |config: Option<&ConfigFile>| {
         let mut project_excludes = project_excludes.unwrap_or_default();
+        project_excludes.append(extend_project_excludes.globs());
         let disable = args_disable_excludes_heuristics
             .or_else(|| Some(config?.disable_project_excludes_heuristics))
             .unwrap_or(false);
@@ -405,6 +413,7 @@ impl FilesArgs {
         } else {
             None
         };
+        let extend_project_excludes = absolutize(Globs::new(self.extend_project_excludes)?);
         let files_to_check = absolutize(Globs::new(self.files)?);
         let explicit_files = files_to_check
             .explicit_files()
@@ -414,6 +423,7 @@ impl FilesArgs {
             get_globs_and_config_for_project(
                 self.config,
                 project_excludes,
+                &extend_project_excludes,
                 config_override,
                 wrapper,
                 scope,
@@ -424,6 +434,7 @@ impl FilesArgs {
                 self.config,
                 files_to_check,
                 project_excludes,
+                &extend_project_excludes,
                 config_override,
                 wrapper,
             )?
@@ -449,6 +460,7 @@ impl FilesArgs {
             files,
             config,
             project_excludes: None,
+            extend_project_excludes: Vec::new(),
             exclude_scripts: false,
         }
         .resolve(args, wrapper)

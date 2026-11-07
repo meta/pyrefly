@@ -22,7 +22,7 @@ type AutoCompleteFunction = (line: number, column: number) => CompletionItem[];
 type GetDefFunction = (
     line: number,
     column: number
-) => ReadonlyArray<Range> | null;
+) => monaco.languages.Location[] | null;
 type HoverFunction = (line: number, column: number) => Hover | null;
 type InlayHintFunction = () => InlayHint[];
 type SemanticTokensFunction = (range: Range | null) => SemanticTokens | null;
@@ -53,7 +53,7 @@ function setAutoCompleteFunction(
 const defaultGetDefFunctionForMonaco: GetDefFunction = (
     _l: number,
     _c: number
-): ReadonlyArray<Range> | null => null;
+): monaco.languages.Location[] | null => null;
 const getDefFunctionsForMonaco = new Map<
     monaco.editor.ITextModel,
     GetDefFunction
@@ -227,14 +227,7 @@ monaco.languages.registerDefinitionProvider('python', {
             const f =
                 getDefFunctionsForMonaco.get(model) ??
                 defaultGetDefFunctionForMonaco;
-            const ranges = f(position.lineNumber, position.column);
-            if (!ranges || ranges.length === 0) {
-                return null;
-            }
-            if (ranges.length === 1) {
-                return { uri: model.uri, range: ranges[0] };
-            }
-            return ranges.map((range) => ({ uri: model.uri, range }));
+            return f(position.lineNumber, position.column);
         } catch (e) {
             console.error(e);
             return null;

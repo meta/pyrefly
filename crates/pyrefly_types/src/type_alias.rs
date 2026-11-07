@@ -43,6 +43,7 @@ pub enum TypeAliasStyle {
 #[derive(Visit, VisitMut, TypeEq)]
 pub struct TypeAlias {
     pub name: Box<Name>,
+    /// The expression type retains explicit class specialization for value access.
     ty: Box<Type>,
     pub style: TypeAliasStyle,
 }
@@ -72,9 +73,13 @@ impl TypeAlias {
     /// `type X = int` is represented as `TypeAlias(X, type[int])`, and
     /// `as_type` returns `type[int]`; the caller must turn it into `int`.
     pub fn as_type(&self) -> Type {
-        *self.ty.clone()
+        match self.ty.as_ref() {
+            Type::SpecializedClassDef(cls) => Type::type_of(Type::ClassType(cls.clone())),
+            ty => ty.clone(),
+        }
     }
 
+    /// Returns the stored expression type without normalization for annotations.
     pub fn as_type_ref(&self) -> &Type {
         &self.ty
     }

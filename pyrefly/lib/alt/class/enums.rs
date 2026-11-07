@@ -8,9 +8,9 @@
 use pyrefly_config::error_kind::ErrorKind;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
-use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::annotation::Annotation;
 use pyrefly_types::class::ClassType;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitEnum;
 use pyrefly_types::read_only::ReadOnlyReason;
 use ruff_python_ast::helpers::is_dunder;
@@ -135,11 +135,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             _ if ty.is_toplevel_callable() => false,
             // Values initialized with nonmember() or descriptor-like wrappers are not members.
             Type::ClassType(cls)
-                if cls.has_qname("enum", "nonmember")
-                    || cls.is_builtin("staticmethod")
-                    || cls.is_builtin("classmethod")
-                    || cls.has_qname("types", "DynamicClassAttribute")
-                    || cls.has_qname("enum", "property") =>
+                if cls.is(KnownClass::EnumNonmember)
+                    || cls.is(KnownClass::StaticMethod)
+                    || cls.is(KnownClass::ClassMethod)
+                    || cls.is(KnownClass::TypesDynamicClassAttribute)
+                    || cls.is(KnownClass::EnumProperty) =>
             {
                 false
             }
@@ -187,10 +187,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let enum_metadata = metadata.enum_metadata()?;
         if name == &VALUE {
             if !self.field_defining_class_matches(class.class_object(), &VALUE, |c| {
-                c.has_toplevel_qname(ModuleName::enum_().as_str(), "Enum")
-                    || c.has_toplevel_qname(ModuleName::enum_().as_str(), "IntEnum")
-                    || c.has_toplevel_qname(ModuleName::enum_().as_str(), "StrEnum")
-                    || c.has_toplevel_qname(ModuleName::django_models_enums().as_str(), "Choices")
+                c.is(KnownClass::Enum)
+                    || c.is(KnownClass::EnumIntEnum)
+                    || c.is(KnownClass::EnumStrEnum)
+                    || c.is(KnownClass::DjangoChoices)
             }) {
                 return None;
             }
@@ -202,10 +202,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Some(ClassAttribute::read_write(ty))
         } else if name == &VALUE_PROP {
             if !self.field_defining_class_matches(class.class_object(), &VALUE_PROP, |c| {
-                c.has_toplevel_qname(ModuleName::enum_().as_str(), "Enum")
-                    || c.has_toplevel_qname(ModuleName::enum_().as_str(), "IntEnum")
-                    || c.has_toplevel_qname(ModuleName::enum_().as_str(), "StrEnum")
-                    || c.has_toplevel_qname(ModuleName::django_models_enums().as_str(), "Choices")
+                c.is(KnownClass::Enum)
+                    || c.is(KnownClass::EnumIntEnum)
+                    || c.is(KnownClass::EnumStrEnum)
+                    || c.is(KnownClass::DjangoChoices)
             }) {
                 return None;
             }
@@ -272,7 +272,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let value_ty = self.enum_literal_to_value_type(lit_enum.clone(), enum_metadata.is_django);
         // Only preserve the literal type if its base class type matches the mixin exactly.
         if let Some(ref mixed_in) = mixed_in {
-            let promoted = value_ty.clone().promote_implicit_literals(self.stdlib);
+            let promoted = value_ty.clone().promote(self.stdlib);
             if &promoted == mixed_in {
                 value_ty
             } else {
@@ -310,7 +310,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 };
                 let value_ty = self.enum_literal_to_value_type(*lit_enum, enum_metadata.is_django);
                 Some(if let Some(ref mixed_in) = mixed_in {
-                    let promoted = value_ty.clone().promote_implicit_literals(self.stdlib);
+                    let promoted = value_ty.clone().promote(self.stdlib);
                     if &promoted == mixed_in {
                         value_ty
                     } else {
@@ -354,11 +354,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             } else {
                 let is_data_type = self
                     .get_class_member_with_defining_class(base.class_object(), &dunder::NEW)
-                    .is_some_and(|field| {
-                        !field
-                            .defining_class
-                            .has_toplevel_qname("builtins", "object")
-                    });
+                    .is_some_and(|field| !field.defining_class.is(KnownClass::Object));
                 if is_data_type {
                     return Some(self.heap.mk_class_type(base.clone()));
                 }
@@ -376,7 +372,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         };
         let auto_ty = self.auto_value_type(lit_enum.class.class_object());
         ty.transform(&mut |t| {
-            if matches!(t, Type::ClassType(cls) if cls.has_qname(ModuleName::enum_().as_str(), "auto")) {
+            if matches!(t, Type::ClassType(cls) if cls.is(KnownClass::EnumAuto)) {
                 *t = auto_ty.clone();
             }
         })
@@ -394,7 +390,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.get_class_member_with_defining_class(cls, &GENERATE_NEXT_VALUE)
             .and_then(|field| {
                 // `enum.Enum` declares an `Any` return, but at runtime it generates `int`
-                if field.defining_class.has_toplevel_qname("enum", "Enum") {
+                if field.defining_class.is(KnownClass::Enum) {
                     Some(self.heap.mk_class_type(self.stdlib.int().clone()))
                 } else {
                     field.value.ty().callable_return_type(self.heap)
@@ -497,7 +493,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // `member(x)` makes `x` a member, so the member's value is `x`, the same way
             // `nonmember(x)` below is just `x`.
             let value_ty = if let Type::ClassType(cls) = ty
-                && cls.has_qname("enum", "member")
+                && cls.is(KnownClass::EnumMember)
                 && let [targ] = cls.targs().as_slice()
             {
                 targ
@@ -513,7 +509,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .to_implicit_type(),
             )
         } else if let Type::ClassType(cls) = &ty
-            && cls.has_qname("enum", "nonmember")
+            && cls.is(KnownClass::EnumNonmember)
             && let [targ] = cls.targs().as_slice()
         {
             Some(targ.clone())
@@ -551,11 +547,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // see https://typing.python.org/en/latest/spec/enums.html#member-values
             return;
         }
-        if matches!(value, Type::ClassType(cls) if cls.has_qname("enum", "auto")) {
+        if matches!(value, Type::ClassType(cls) if cls.is(KnownClass::EnumAuto)) {
             return;
         }
         if let Type::ClassType(cls) = value
-            && cls.has_qname("enum", "member")
+            && cls.is(KnownClass::EnumMember)
             && let [member_targ] = cls.targs().as_slice()
         {
             value = member_targ;

@@ -35,6 +35,7 @@ use crate::data_frame::SchemaCompleteness;
 use crate::function::Function;
 use crate::function::FunctionKind;
 use crate::heap::TypeHeap;
+use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::quantified::Quantified;
 use crate::quantified::QuantifiedIdentity;
@@ -170,8 +171,9 @@ pub struct TypeDisplayContext<'a> {
     always_display_builtins_module_name: bool,
     always_display_expanded_unions: bool,
     render_self_type_as_self: bool,
-    /// Render a `DataFrame` as its plain underlying class rather than the schema form.
-    strip_library_schemas: bool,
+    /// Render a type that has no annotation syntax as one that does: a schema form as its plain
+    /// class, and an intersection as its fallback type.
+    use_annotation_syntax: bool,
     /// Render types as source annotations: valid Python that references every name it uses.
     render_source_annotation: bool,
     /// Optional stdlib reference for resolving builtin type locations
@@ -217,10 +219,12 @@ impl<'a> TypeDisplayContext<'a> {
             if let Type::Function(func) = t
                 && let FunctionKind::CallbackProtocol(cls) = &func.metadata.kind
                 && matches!(
-                    cls.qname().module_name().as_str(),
-                    "functools" | "singledispatch"
+                    cls.known(),
+                    Some(
+                        KnownClass::FunctoolsSingleDispatchCallable
+                            | KnownClass::SingleDispatchCallable
+                    )
                 )
-                && cls.name().as_str() == "_SingleDispatchCallable"
             {
                 self.add_qname(cls.qname());
             }
@@ -253,9 +257,9 @@ impl<'a> TypeDisplayContext<'a> {
         self.always_display_expanded_unions = true;
     }
 
-    /// Emit schema types as their plain class, for surfaces that write a type back as source.
-    pub fn strip_library_schemas(&mut self) {
-        self.strip_library_schemas = true;
+    /// Emit only annotation syntax, for surfaces that write a type back as source.
+    pub fn use_annotation_syntax(&mut self) {
+        self.use_annotation_syntax = true;
     }
 
     pub fn render_self_type_as_self(&mut self) {
@@ -603,7 +607,9 @@ impl<'a> TypeDisplayContext<'a> {
     /// written with the `|` syntax.
     fn needs_parens_in_sequence(&self, t: &Type) -> bool {
         match t {
-            Type::Callable(_) | Type::Function(_) | Type::Intersect(_) => true,
+            Type::Callable(_) | Type::Function(_) => true,
+            Type::Intersect(x) if self.use_annotation_syntax => self.needs_parens_in_sequence(&x.1),
+            Type::Intersect(_) => true,
             // Overloads are already wrapped in `Overload[...]`, and query mode wraps bound methods in `BoundMethod[...]`.
             Type::BoundMethod(m) => {
                 !matches!(m.func, BoundMethodType::Overload(_))
@@ -1026,10 +1032,14 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_qname(cls.qname())?;
                 output.write_str("]")
             }
+            Type::SpecializedClassDef(class_type) => {
+                output.write_str("type[")?;
+                output.write_qname(class_type.qname())?;
+                output.write_targs(class_type.targs())?;
+                output.write_str("]")
+            }
             Type::ClassType(class_type)
-                if class_type.qname().module_name().as_str() == "builtins"
-                    && class_type.qname().id().as_str() == "tuple"
-                    && class_type.targs().as_slice().len() == 1 =>
+                if class_type.is(KnownClass::Tuple) && class_type.targs().as_slice().len() == 1 =>
             {
                 output.write_qname(class_type.qname())?;
                 output.write_str("[")?;
@@ -1107,7 +1117,7 @@ impl<'a> TypeDisplayContext<'a> {
                 // Display as the class name (e.g., MaxPool2d)
                 self.fmt_helper_generic(&Type::ClassType(module.class.clone()), false, output)
             }
-            Type::DataFrame(schema) if self.strip_library_schemas => {
+            Type::DataFrame(schema) if self.use_annotation_syntax => {
                 self.fmt_helper_generic(&schema.underlying_type(), false, output)
             }
             Type::DataFrame(schema) => {
@@ -1130,7 +1140,7 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_str("]")?;
                 Ok(())
             }
-            Type::Series(schema) if self.strip_library_schemas => {
+            Type::Series(schema) if self.use_annotation_syntax => {
                 self.fmt_helper_generic(&schema.underlying_type(), false, output)
             }
             Type::Series(schema) => {
@@ -1228,10 +1238,12 @@ impl<'a> TypeDisplayContext<'a> {
                 // signature, but should still reveal as `_SingleDispatchCallable[T]`.
                 if let FunctionKind::CallbackProtocol(cls) = &metadata.kind
                     && matches!(
-                        cls.qname().module_name().as_str(),
-                        "functools" | "singledispatch"
+                        cls.known(),
+                        Some(
+                            KnownClass::FunctoolsSingleDispatchCallable
+                                | KnownClass::SingleDispatchCallable
+                        )
                     )
-                    && cls.name().as_str() == "_SingleDispatchCallable"
                 {
                     return self.fmt_helper_generic(
                         &Type::ClassType((**cls).clone()),
@@ -1563,6 +1575,9 @@ impl<'a> TypeDisplayContext<'a> {
                     self.fmt_type_sequence(union_members, " | ", true, output)
                 }
             }
+            Type::Intersect(x) if self.use_annotation_syntax => {
+                self.fmt_helper_generic(&x.1, false, output)
+            }
             Type::Intersect(x) => self.fmt_type_sequence(x.0.iter(), " & ", true, output),
             Type::Tuple(t) => {
                 if self.always_display_builtins_module_name {
@@ -1762,6 +1777,8 @@ impl<'a> TypeDisplayContext<'a> {
             }
             Type::SpecialForm(x) => write!(output, "{x}"),
             Type::Ellipsis => output.write_str("..."),
+            Type::Falsy => output.write_str("Falsy"),
+            Type::Truthy => output.write_str("Truthy"),
             Type::Any(style) => match style {
                 AnyStyle::Explicit => self.maybe_fmt_with_module("typing", "Any", output),
                 AnyStyle::Implicit | AnyStyle::Error if self.render_source_annotation => {
@@ -1899,7 +1916,7 @@ impl Display for Type {
 fn annotation_context<'a>(ty: &'a Type, stdlib: Option<&'a Stdlib>) -> TypeDisplayContext<'a> {
     let mut ctx = TypeDisplayContext::new(&[ty]);
     ctx.render_self_type_as_self();
-    ctx.strip_library_schemas();
+    ctx.use_annotation_syntax();
     if let Some(stdlib) = stdlib {
         ctx.set_stdlib(stdlib);
     }
@@ -3532,6 +3549,20 @@ def overloaded_func[T](
         ]);
         let ctx = TypeDisplayContext::new(&[&x]);
         assert_eq!(ctx.display(&x).to_string(), "(Any & LiteralString) | None");
+    }
+
+    #[test]
+    fn test_intersection_annotation_syntax() {
+        let x = Type::union(vec![
+            Type::Intersect(Box::new((
+                vec![Type::LiteralString(LitStyle::Implicit), Type::None],
+                Type::LiteralString(LitStyle::Implicit),
+            ))),
+            Type::None,
+        ]);
+        let mut ctx = TypeDisplayContext::new(&[&x]);
+        ctx.use_annotation_syntax();
+        assert_eq!(ctx.display(&x).to_string(), "LiteralString | None");
     }
 
     #[test]

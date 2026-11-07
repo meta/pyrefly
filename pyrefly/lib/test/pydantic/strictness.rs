@@ -305,6 +305,155 @@ reveal_type(Model.__init__)  # E: revealed type: (self: Model, *, y: Decimal | b
 );
 
 pydantic_testcase!(
+    test_lax_mode_coercion_union_rejects_invalid_values,
+    r#"
+from typing import Literal
+from pydantic import BaseModel
+
+class Something(BaseModel):
+    pass
+
+class OtherThing(BaseModel):
+    pass
+
+class Model(BaseModel):
+    scalar: str | bool
+    model: Something | OtherThing
+
+Model(scalar=5, model=Something())  # E: Argument value `Literal[5]` is not valid for Pydantic field `scalar` with type `bool | str`
+Model(scalar="value", model=5)  # E: Argument `Literal[5]` is not assignable to parameter `model`
+
+class BoolModel(BaseModel):
+    value: bool
+
+BoolModel(value=0)
+BoolModel(value="yes")
+BoolModel(value=2)  # E: Argument value `Literal[2]` is not valid for Pydantic field `value` with type `bool`
+BoolModel(value="maybe")  # E: Argument value `Literal['maybe']` is not valid for Pydantic field `value` with type `bool`
+
+class IntOrBoolModel(BaseModel):
+    value: int | bool
+
+IntOrBoolModel(value=5)
+IntOrBoolModel(value="123")
+
+def union_input(value: Literal[0, 5]) -> None:
+    BoolModel(value=value)  # E: Argument value `Literal[5]` is not valid
+    "#,
+);
+
+pydantic_testcase!(
+    test_lax_mode_nested_model_and_dataclass_inputs,
+    r#"
+from dataclasses import dataclass
+from typing import Any, Mapping, assert_type
+from pydantic import BaseModel
+
+class Link(BaseModel):
+    href: str
+
+@dataclass
+class Record:
+    value: int
+
+class Publication(BaseModel):
+    links: list[Link]
+    data: Link | Record
+
+links: list[dict[str, str]] = [{"href": "example"}]
+record: Mapping[str, Any] = {"value": 1}
+publication = Publication(links=links, data=record)
+Publication(links=[Link(href="example")], data=Record(1))
+Publication(links=links, data=Link(href="example"))
+Publication(links=[5], data=5)  # E: is not assignable to parameter `links` # E: is not assignable to parameter `data`
+assert_type(publication.links, list[Link])
+assert_type(publication.data, Link | Record)
+    "#,
+);
+
+pydantic_testcase!(
+    test_lax_mode_custom_schema_inputs,
+    r#"
+from typing import Any, assert_type
+from pydantic import BaseModel, ConfigDict
+
+class CustomSchema:
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler: Any) -> Any: ...
+
+class InheritedSchema(CustomSchema):
+    pass
+
+class CustomModel(BaseModel):
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler: Any) -> Any: ...
+
+class Plain:
+    pass
+
+class Model(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    pa_schema: InheritedSchema | bool
+    custom_model: CustomModel
+    plain: Plain | None
+
+m = Model(pa_schema=InheritedSchema, custom_model=5, plain=Plain())
+Model(pa_schema=5, custom_model="input", plain=None)
+Model(pa_schema=InheritedSchema, custom_model=5, plain=5)  # E: is not assignable to parameter `plain`
+assert_type(m.pa_schema, InheritedSchema | bool)
+assert_type(m.custom_model, CustomModel)
+    "#,
+);
+
+pydantic_testcase!(
+    test_lax_mode_builtin_schema_inputs,
+    r#"
+from enum import Enum, IntEnum
+from ipaddress import IPv4Address
+from typing import NamedTuple, assert_type
+from pydantic import BaseModel
+
+class Color(Enum):
+    RED = "red"
+
+class Level(IntEnum):
+    LOW = 1
+
+class Point(NamedTuple):
+    x: int
+
+class Model(BaseModel):
+    color: Color
+    level: Level
+    point: Point
+    ip: IPv4Address
+
+m = Model(color="red", level=1, point=(1,), ip="1.2.3.4")
+assert_type(m.color, Color)
+assert_type(m.point, Point)
+    "#,
+);
+
+pydantic_testcase!(
+    test_lax_mode_generic_class_inputs,
+    r#"
+from collections import defaultdict
+from pydantic import BaseModel, ConfigDict
+
+class Box[T]:
+    pass
+
+class Model(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    box: Box[int]
+    counts: defaultdict[str, int]
+
+Model(box=Box[str](), counts={})
+Model(box=5, counts={})  # E: is not assignable to parameter `box`
+    "#,
+);
+
+pydantic_testcase!(
     test_lax_mode_list_and_set_invariance,
     r#"
 from pydantic import BaseModel

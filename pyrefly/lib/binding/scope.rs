@@ -8,6 +8,7 @@
 use std::cmp::max;
 use std::fmt::Debug;
 use std::mem;
+use std::slice;
 
 use itertools::Either;
 use itertools::Itertools;
@@ -71,6 +72,8 @@ use crate::binding::binding::SuppressedException;
 use crate::binding::bindings::BindingTable;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
+use crate::binding::bindings::InitializationStatus;
+use crate::binding::bindings::InitializedInClass;
 use crate::binding::bindings::InitializedInFlow;
 use crate::binding::bindings::UnsetNodeId;
 use crate::binding::bindings::UnsetNodes;
@@ -252,9 +255,10 @@ struct StaticInfo {
     /// Both fit in padding `StaticInfo` already had, so they cost nothing.
     char_len: u32,
     char_mask: u32,
-    /// True while every definition site is a `def`. A conditionally defined method is not
-    /// reported as a possibly uninitialized class attribute.
-    function_def_only: bool,
+    /// True while every definition site is a `def` or `class` statement. A conditionally
+    /// defined method or nested class is not reported as a possibly uninitialized class
+    /// attribute.
+    definition_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -457,7 +461,7 @@ impl Static {
         range: TextRange,
         style: StaticStyle,
         last_range: TextRange,
-        function_def_only: bool,
+        definition_only: bool,
     ) {
         // Parse recovery produces empty names, such as a nameless type parameter. The
         // static scope never holds them, because `bind_name` never binds them.
@@ -473,7 +477,7 @@ impl Static {
                     last_range,
                     char_len,
                     char_mask,
-                    function_def_only,
+                    definition_only,
                 });
             }
             Entry::Occupied(mut e) => {
@@ -482,7 +486,7 @@ impl Static {
                 if last_range.start() > found.last_range.start() {
                     found.last_range = last_range;
                 }
-                found.function_def_only &= function_def_only;
+                found.definition_only &= definition_only;
                 if matches!(style, StaticStyle::PossibleLegacyTParam) {
                     // Static scopes are keyed by name, so `foo.T` and `foo.P` must share the
                     // `foo` entry. The caller links their bindings before each upsert, making
@@ -569,7 +573,7 @@ impl Static {
             // same name in this scope.
             let range = definition.range;
             let last_range = definition.last_range;
-            let function_def_only = definition.function_def_only;
+            let definition_only = definition.definition_only;
             let style = StaticStyle::of_definition(
                 name.as_ref(),
                 definition,
@@ -578,7 +582,7 @@ impl Static {
                 module_info.name(),
                 get_annotation_idx,
             );
-            self.upsert(name, range, style, last_range, function_def_only);
+            self.upsert(name, range, style, last_range, definition_only);
         }
         for (module, range, wildcard) in all_wildcards {
             // Builtins are a fallback, so they should never shadow an existing definition.
@@ -654,6 +658,9 @@ pub struct Flow {
     info: SmallMap<Name, FlowInfo>,
     /// Pairs for which the current flow excludes both values being `None`.
     excluded_none_pairs: ExcludedNonePairs,
+    /// Attribute initialization has no type to merge and needs no Phi bindings.
+    /// An absent entry means the attribute is not initialized on this path.
+    instance_attribute_initialization: SmallMap<Name, InitializationStatus>,
     // Have we seen control flow terminate?
     //
     // We continue to analyze the rest of the code after a flow terminates, but
@@ -1097,17 +1104,23 @@ pub struct ClassIndices {
 struct ScopeClass {
     name: Identifier,
     indices: ClassIndices,
-    attributes_from_recognized_methods: SmallMap<Name, SmallMap<Name, InstanceAttribute>>,
-    attributes_from_other_methods: SmallMap<Name, SmallMap<Name, InstanceAttribute>>,
+    attributes_from_recognized_methods: SmallMap<Name, SmallMap<Name, MethodAttribute>>,
+    attributes_from_other_methods: SmallMap<Name, SmallMap<Name, MethodAttribute>>,
     classmethod_receivers: Option<Box<ClassmethodReceiverState>>,
     /// Attributes that `__new__` assigns on the instance it creates.
     attributes_set_on_new_instance: SmallSet<Name>,
     nn_module_registrations: NNModuleRegistrations,
     has_protocol_base: bool,
+    docstring_range: Option<TextRange>,
 }
 
 impl ScopeClass {
-    pub fn new(name: Identifier, indices: ClassIndices, has_protocol_base: bool) -> Self {
+    pub fn new(
+        name: Identifier,
+        indices: ClassIndices,
+        has_protocol_base: bool,
+        docstring_range: Option<TextRange>,
+    ) -> Self {
         Self {
             name,
             indices,
@@ -1117,13 +1130,14 @@ impl ScopeClass {
             attributes_set_on_new_instance: SmallSet::new(),
             nn_module_registrations: SmallMap::new(),
             has_protocol_base,
+            docstring_range,
         }
     }
 
     pub fn add_attributes_defined_by_method(
         &mut self,
         method_name: Name,
-        attributes: SmallMap<Name, InstanceAttribute>,
+        attributes: SmallMap<Name, MethodAttribute>,
         nn_module_registrations: NNModuleRegistrations,
     ) {
         if is_attribute_defining_method(&method_name, &self.name.id) {
@@ -1152,27 +1166,27 @@ impl ScopeClass {
     /// unrecognized methods, and that constructors take precedence.
     pub fn method_defined_attributes(
         self,
-    ) -> impl Iterator<Item = (Hashed<Name>, MethodThatSetsAttr, InstanceAttribute)> {
+    ) -> impl Iterator<Item = (Hashed<Name>, MethodThatSetsAttr, MethodAttribute)> {
         Self::iter_attributes(self.attributes_from_recognized_methods, true).chain(
             Self::iter_attributes(self.attributes_from_other_methods, false),
         )
     }
 
     fn iter_attributes(
-        attrs: SmallMap<Name, SmallMap<Name, InstanceAttribute>>,
+        attrs: SmallMap<Name, SmallMap<Name, MethodAttribute>>,
         recognized_attribute_defining_method: bool,
-    ) -> impl Iterator<Item = (Hashed<Name>, MethodThatSetsAttr, InstanceAttribute)> {
+    ) -> impl Iterator<Item = (Hashed<Name>, MethodThatSetsAttr, MethodAttribute)> {
         {
             attrs.into_iter().flat_map(move |(method_name, attrs)| {
-                attrs.into_iter_hashed().map(move |(name, attr)| {
+                attrs.into_iter_hashed().map(move |(name, attribute)| {
                     (
                         name,
                         MethodThatSetsAttr {
                             method_name: method_name.clone(),
                             recognized_attribute_defining_method,
-                            instance_or_class: attr.3,
+                            instance_or_class: attribute.attribute.3,
                         },
-                        attr,
+                        attribute,
                     )
                 })
             })
@@ -1222,7 +1236,77 @@ pub struct InstanceAttribute(
     pub Option<Idx<KeyAnnotation>>,
     pub TextRange,
     pub MethodSelfKind,
+    /// Whether some write assigns a value, rather than only annotating the attribute.
+    pub bool,
 );
+
+/// An attribute assigned in a method, with its initialization at the end of the method.
+#[derive(Clone, Debug)]
+pub struct MethodAttribute {
+    pub attribute: InstanceAttribute,
+    pub initialized: InitializationStatus,
+}
+
+/// Attribute initialization combined over the reachable `return`s of a method.
+#[derive(Clone, Debug)]
+pub struct ReturnAttributeInitialization {
+    attributes: SmallMap<Name, InitializationStatus>,
+    /// The status of every attribute absent from `attributes`.
+    unlisted: InitializationStatus,
+}
+
+impl ReturnAttributeInitialization {
+    fn get(&self, name: &Name) -> &InitializationStatus {
+        self.attributes.get(name).unwrap_or(&self.unlisted)
+    }
+
+    /// Whether every attribute is initialized at every `return` so far, as when there is none.
+    fn initializes_everything(&self) -> bool {
+        self.attributes.is_empty() && self.unlisted == InitializationStatus::Initialized
+    }
+
+    /// Combine the `return`s of another part of the method into these.
+    fn combine(&mut self, other: Self, unset_nodes: &mut UnsetNodes) {
+        if other.initializes_everything() {
+            return;
+        }
+        if self.initializes_everything() {
+            *self = other;
+            return;
+        }
+        let unlisted = InitializationStatus::merge(
+            unset_nodes,
+            [(Some(&self.unlisted), None), (Some(&other.unlisted), None)],
+        );
+        // List the attributes that only `other` lists, unless being unlisted here already makes
+        // them uninitialized.
+        if self.unlisted != InitializationStatus::Uninitialized {
+            for name in other.attributes.keys() {
+                if !self.attributes.contains_key(name) {
+                    self.attributes.insert(name.clone(), self.unlisted.clone());
+                }
+            }
+        }
+        self.attributes.retain(|name, status| {
+            *status = InitializationStatus::merge(
+                unset_nodes,
+                [(Some(&*status), None), (Some(other.get(name)), None)],
+            );
+            *status != unlisted
+        });
+        self.unlisted = unlisted;
+    }
+}
+
+impl Default for ReturnAttributeInitialization {
+    /// With no `return` yet, no `return` misses an attribute.
+    fn default() -> Self {
+        Self {
+            attributes: SmallMap::new(),
+            unlisted: InitializationStatus::Initialized,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 struct ScopeMethod {
@@ -1233,6 +1317,8 @@ struct ScopeMethod {
     new_instance_names: SmallSet<Name>,
     instance_attributes: SmallMap<Name, InstanceAttribute>,
     nn_module_registrations: NNModuleRegistrations,
+    /// Attribute initialization combined over the reachable `return`s so far.
+    return_attribute_initialization: ReturnAttributeInitialization,
     parameters: SmallMap<Name, ParameterUsage>,
     yields_and_returns: YieldsAndReturns,
     is_async: bool,
@@ -1306,6 +1392,7 @@ impl ScopeMethod {
             new_instance_names: SmallSet::new(),
             instance_attributes: SmallMap::new(),
             nn_module_registrations: SmallMap::new(),
+            return_attribute_initialization: Default::default(),
             parameters: SmallMap::new(),
             yields_and_returns: Default::default(),
             is_async,
@@ -1555,11 +1642,17 @@ impl Scope {
         indices: ClassIndices,
         name: Identifier,
         has_protocol_base: bool,
+        docstring_range: Option<TextRange>,
     ) -> Self {
         Self::new(
             range,
             FlowBarrier::AllowFlowChecked,
-            ScopeKind::Class(ScopeClass::new(name, indices, has_protocol_base)),
+            ScopeKind::Class(ScopeClass::new(
+                name,
+                indices,
+                has_protocol_base,
+                docstring_range,
+            )),
         )
     }
 
@@ -1609,6 +1702,13 @@ impl Scope {
     fn class_key(&self) -> Option<Idx<KeyClass>> {
         match &self.kind {
             ScopeKind::Class(class_scope) => Some(class_scope.indices.class_idx),
+            _ => None,
+        }
+    }
+
+    fn class_docstring_range(&self) -> Option<TextRange> {
+        match &self.kind {
+            ScopeKind::Class(class_scope) => class_scope.docstring_range,
             _ => None,
         }
     }
@@ -1859,7 +1959,7 @@ impl Scopes {
             &mut class_scope.attributes_from_other_methods,
         ] {
             if let Some(attributes) = attributes.get_mut(method_name) {
-                for attribute in attributes.values_mut() {
+                for MethodAttribute { attribute, .. } in attributes.values_mut() {
                     if method_range.contains_range(attribute.2) {
                         attribute.3 = MethodSelfKind::Class;
                     }
@@ -2017,6 +2117,11 @@ impl Scopes {
     /// Return enclosing classes from innermost to outermost.
     pub fn enclosing_class_keys(&self) -> Vec<Idx<KeyClass>> {
         self.iter_rev().filter_map(Scope::class_key).collect()
+    }
+
+    /// The range of the docstring of the class whose body we are directly in, if it has one.
+    pub fn current_class_docstring_range(&self) -> Option<TextRange> {
+        self.current().class_docstring_range()
     }
 
     /// Are we anywhere inside a class? If so, return the class object idx.
@@ -2328,16 +2433,49 @@ impl Scopes {
         let scope = self.pop();
         let unused_variables = Self::collect_unused_variables(scope.variables.clone());
         match scope.kind {
-            ScopeKind::Method(method_scope) => (
-                method_scope.yields_and_returns,
-                Some(SelfAssignments {
-                    method_name: method_scope.name.id,
-                    instance_attributes: method_scope.instance_attributes,
-                    nn_module_registrations: method_scope.nn_module_registrations,
-                }),
-                Self::collect_unused_parameters(method_scope.parameters),
-                unused_variables,
-            ),
+            ScopeKind::Method(method_scope) => {
+                let instance_attributes = method_scope
+                    .instance_attributes
+                    .into_iter()
+                    .map(|(name, attribute)| {
+                        let final_flow = (!scope.flow.has_terminated
+                            && !scope.flow.is_definitely_unreachable)
+                            .then_some(&scope.flow);
+                        let initialized = InitializationStatus::merge(
+                            &mut self.unset_nodes,
+                            final_flow
+                                .into_iter()
+                                .map(|flow| {
+                                    (
+                                        flow.instance_attribute_initialization.get(&name),
+                                        flow.last_stmt_expr,
+                                    )
+                                })
+                                .chain([(
+                                    Some(method_scope.return_attribute_initialization.get(&name)),
+                                    None,
+                                )]),
+                        );
+                        (
+                            name,
+                            MethodAttribute {
+                                attribute,
+                                initialized,
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    method_scope.yields_and_returns,
+                    Some(SelfAssignments {
+                        method_name: method_scope.name.id,
+                        instance_attributes,
+                        nn_module_registrations: method_scope.nn_module_registrations,
+                    }),
+                    Self::collect_unused_parameters(method_scope.parameters),
+                    unused_variables,
+                )
+            }
             ScopeKind::Function(function_scope) => (
                 function_scope.yields_and_returns,
                 None,
@@ -2356,21 +2494,79 @@ impl Scopes {
         self.scopes.iter_mut().map(|node| &mut node.scope).rev()
     }
 
-    /// In methods, we track assignments to `self` attribute targets so that we can
-    /// be aware of class fields implicitly defined in methods.
+    /// Finds the method scope in `self.scopes` that owns `receiver` as its receiver parameter.
+    /// Returns `Some((method_index, crossed_method))` where:
+    /// - `method_index` is the index in `self.scopes` of the `ScopeKind::Method`.
+    /// - `crossed_method` is true if the receiver was reached across a nested method boundary
+    ///   (plain closures do not count).
     ///
-    /// We currently apply this logic in all methods, although downstream code will
-    /// often complain if an attribute is implicitly defined outside of methods
-    /// (like constructors) that we recognize as always being called.
+    /// Returns `None` if `receiver` is not attributed to any method's receiver (including when
+    /// shadowed by a local variable or non-receiver parameter in an inner scope).
+    fn find_receiver_method_index(&self, receiver: &Name) -> Option<(usize, bool)> {
+        let mut crossed_method = false;
+        for (i, node) in self.scopes.iter().enumerate().rev() {
+            let scope = &node.scope;
+            // Only function-like scopes provide receiver bindings. A `nonlocal` capture
+            // refers to the enclosing binding instead of shadowing it.
+            let binds_receiver = matches!(
+                &scope.kind,
+                ScopeKind::Method(_) | ScopeKind::Function(_) | ScopeKind::Comprehension { .. }
+            ) && scope.stat.0.get(receiver).is_some_and(|info| {
+                !matches!(
+                    info.style,
+                    StaticStyle::MutableCapture(MutableCapture {
+                        kind: MutableCaptureKind::Nonlocal,
+                        ..
+                    })
+                )
+            });
+            match &scope.kind {
+                ScopeKind::Class(_) | ScopeKind::Annotation { .. } | ScopeKind::TypeAlias => {
+                    // Intervening class namespaces and annotation/typealias scopes do not shadow
+                    // lexical receiver variables in enclosed methods.
+                }
+                ScopeKind::Method(method_scope) if binds_receiver => {
+                    // The receiver is a parameter, and every parameter is in the method's static
+                    // scope, so a method's own receiver only matches here. Any other binding (e.g.
+                    // a staticmethod parameter named `self`, or a secondary parameter) shadows
+                    // outer receivers.
+                    return method_scope
+                        .self_name
+                        .as_ref()
+                        .is_some_and(|name| &name.id == receiver)
+                        .then_some((i, crossed_method));
+                }
+                ScopeKind::Function(_) | ScopeKind::Comprehension { .. } if binds_receiver => {
+                    return None;
+                }
+                ScopeKind::Function(_) | ScopeKind::Comprehension { .. } => {
+                    // A plain closure is not a method boundary: it keeps the enclosing
+                    // method's permissions (e.g. assigning `Final` fields from a helper
+                    // defined inside `__init__`, which mypy also allows).
+                }
+                ScopeKind::Method(_) => {
+                    crossed_method = true;
+                }
+                ScopeKind::Module => {
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// Record a receiver-attribute assignment inside its owning method scope.
+    /// Returns whether the target was a receiver attribute.
     ///
-    /// Returns `true` if the attribute was a self attribute.
-    /// Record a self attribute assignment (e.g., `self.x = value`) inside the current method scope.
-    /// We accumulate all assignments to the same attribute within the method so they can later be unioned.
+    /// Repeated assignments accumulate values and retain the first annotation.
+    /// Every method participates; field merging prioritizes recognized initializer
+    /// methods and downstream checks diagnose unsupported implicit definitions.
     pub fn record_self_attr_assign(
         &mut self,
         x: &ExprAttribute,
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
+        has_value: bool,
     ) -> bool {
         self.record_self_attr_assign_named(
             SelfAttrAssignTarget {
@@ -2380,6 +2576,7 @@ impl Scopes {
             },
             value,
             annotation,
+            has_value,
         )
     }
 
@@ -2391,41 +2588,60 @@ impl Scopes {
         target: SelfAttrAssignTarget<'_>,
         value: ExprOrBinding,
         annotation: Option<Idx<KeyAnnotation>>,
+        has_value: bool,
     ) -> bool {
         let SelfAttrAssignTarget {
             receiver,
             name,
             instance_only,
         } = target;
-        for scope in self.iter_rev_mut() {
-            if let ScopeKind::Method(method_scope) = &mut scope.kind
-                && (!instance_only || method_scope.receiver_kind == MethodSelfKind::Instance)
-                && let Some(self_name) = &method_scope.self_name
-                && matches!(receiver, Expr::Name(name) if name.id == self_name.id)
-            {
-                if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
-                    // Accumulate subsequent assignments in the method.
-                    attr.0.push(value);
-                    // Keep the first type annotation encountered in the method.
-                    if attr.1.is_none() {
-                        attr.1 = annotation;
-                    }
-                } else {
-                    // First time seeing this attribute in this method: record it.
-                    method_scope.instance_attributes.insert(
-                        name.id.clone(),
-                        InstanceAttribute(
-                            vec![value],
-                            annotation,
-                            name.range,
-                            method_scope.receiver_kind,
-                        ),
-                    );
-                }
-                return true;
-            }
+        let Expr::Name(receiver_name) = receiver else {
+            return false;
+        };
+        let Some((method_idx, _)) = self.find_receiver_method_index(&receiver_name.id) else {
+            return false;
+        };
+        let in_nested_function = self.scopes.iter().skip(method_idx + 1).any(|node| {
+            matches!(
+                node.scope.kind,
+                ScopeKind::Function(_) | ScopeKind::Method(_)
+            )
+        });
+        let scope = &mut self.scopes[method_idx].scope;
+        let ScopeKind::Method(method_scope) = &mut scope.kind else {
+            unreachable!("`find_receiver_method_index` returns the index of a method scope");
+        };
+        if instance_only && method_scope.receiver_kind != MethodSelfKind::Instance {
+            return false;
         }
-        false
+        if has_value && !in_nested_function {
+            scope
+                .flow
+                .instance_attribute_initialization
+                .insert(name.id.clone(), InitializationStatus::Initialized);
+        }
+        if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
+            // Accumulate subsequent assignments in the method.
+            attr.0.push(value);
+            attr.4 |= has_value;
+            // Keep the first type annotation encountered in the method.
+            if attr.1.is_none() {
+                attr.1 = annotation;
+            }
+        } else {
+            // First time seeing this attribute in this method: record it.
+            method_scope.instance_attributes.insert(
+                name.id.clone(),
+                InstanceAttribute(
+                    vec![value],
+                    annotation,
+                    name.range,
+                    method_scope.receiver_kind,
+                    has_value,
+                ),
+            );
+        }
+        true
     }
 
     /// Record a local bound to the result of a `__new__` call inside `__new__`, such as
@@ -2468,6 +2684,27 @@ impl Scopes {
         }
     }
 
+    /// A deletion in the method body removes its initialization guarantee.
+    pub fn record_self_attr_delete(&mut self, x: &ExprAttribute) {
+        for scope in self.iter_rev_mut() {
+            match &scope.kind {
+                ScopeKind::Function(_) => return,
+                ScopeKind::Method(method) => {
+                    if method.self_name.as_ref().is_some_and(|self_name| {
+                        matches!(&*x.value, Expr::Name(name) if name.id == self_name.id)
+                    }) {
+                        scope.flow.instance_attribute_initialization.insert(
+                            x.attr.id.clone(),
+                            InitializationStatus::Uninitialized,
+                        );
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Record the value of `self.register_buffer(...)` or `self.register_parameter(...)`.
     /// The enclosing class is checked for `torch.nn.Module` ancestry during solving.
     pub fn record_nn_module_registration(
@@ -2498,33 +2735,27 @@ impl Scopes {
     }
 
     pub fn method_that_sets_attr(&self, x: &ExprAttribute) -> Option<MethodThatSetsAttr> {
-        let mut method_name: Option<Name> = None;
-        let mut receiver_kind = MethodSelfKind::Instance;
-        for scope in self.iter_rev() {
-            match &scope.kind {
-                ScopeKind::Method(method_scope) if method_name.is_none() => {
-                    if let Some(self_name) = &method_scope.self_name
-                        && matches!(&*x.value, Expr::Name(name) if name.id == self_name.id)
-                    {
-                        method_name = Some(method_scope.name.id.clone());
-                        receiver_kind = method_scope.receiver_kind;
-                    } else {
-                        return None;
-                    }
-                }
-                ScopeKind::Class(class_scope) => {
-                    if let Some(method_name) = &method_name {
-                        return Some(MethodThatSetsAttr {
-                            method_name: method_name.clone(),
-                            recognized_attribute_defining_method: is_attribute_defining_method(
-                                method_name,
-                                &class_scope.name.id,
-                            ),
-                            instance_or_class: receiver_kind,
-                        });
-                    }
-                }
-                _ => {}
+        let Expr::Name(receiver) = &*x.value else {
+            return None;
+        };
+        let (method_idx, crossed_method) = self.find_receiver_method_index(&receiver.id)?;
+        if crossed_method {
+            // Permissions to write Final fields must not cross a nested-method boundary.
+            return None;
+        }
+        let ScopeKind::Method(method_scope) = &self.scopes[method_idx].scope.kind else {
+            unreachable!("`find_receiver_method_index` returns the index of a method scope");
+        };
+        for node in self.scopes[..method_idx].iter().rev() {
+            if let ScopeKind::Class(class_scope) = &node.scope.kind {
+                return Some(MethodThatSetsAttr {
+                    method_name: method_scope.name.id.clone(),
+                    recognized_attribute_defining_method: is_attribute_defining_method(
+                        &method_scope.name.id,
+                        &class_scope.name.id,
+                    ),
+                    instance_or_class: method_scope.receiver_kind,
+                });
             }
         }
         None
@@ -3350,7 +3581,89 @@ impl Scopes {
         None
     }
 
-    /// Record a return in the enclosing function body there is one.
+    /// The attributes of the current method's receiver that a `finally` body assigns directly,
+    /// outside any nested block, with their status over the method's `return`s so far. `None` if
+    /// it assigns none.
+    pub fn finally_return_statuses(
+        &self,
+        finally: &[Stmt],
+    ) -> Option<SmallMap<Name, InitializationStatus>> {
+        let ScopeKind::Method(ScopeMethod {
+            self_name: Some(self_name),
+            return_attribute_initialization: returns,
+            ..
+        }) = &self.current().kind
+        else {
+            return None;
+        };
+        let mut targets: Vec<&Expr> = finally
+            .iter()
+            .flat_map(|stmt| match stmt {
+                Stmt::Assign(x) => x.targets.as_slice(),
+                Stmt::AnnAssign(x) if x.value.is_some() => slice::from_ref(&*x.target),
+                _ => &[],
+            })
+            .collect();
+        let mut statuses = SmallMap::new();
+        while let Some(target) = targets.pop() {
+            match target {
+                Expr::Tuple(x) => targets.extend(&x.elts),
+                Expr::List(x) => targets.extend(&x.elts),
+                Expr::Starred(x) => targets.push(&x.value),
+                Expr::Attribute(x) => {
+                    if matches!(&*x.value, Expr::Name(name) if name.id == self_name.id) {
+                        statuses.insert(x.attr.id.clone(), returns.get(&x.attr.id).clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        (!statuses.is_empty()).then_some(statuses)
+    }
+
+    /// Take the combined `return` state of the current method, so that the `return`s of a
+    /// `finally` body that assigns attributes directly can be collected separately.
+    pub fn take_method_returns(&mut self) -> ReturnAttributeInitialization {
+        let ScopeKind::Method(method) = &mut self.current_mut().kind else {
+            unreachable!("only a method's `finally` body assigns attributes directly");
+        };
+        mem::take(&mut method.return_attribute_initialization)
+    }
+
+    /// Finish a `try` statement whose `finally` body assigns attributes directly.
+    /// `before_try` holds their status over the `return`s before the statement, and `returns`
+    /// combines those with the `return`s before the `finally` body, which runs after them. An
+    /// attribute that is still initialized after the `finally` body is initialized on the
+    /// `return` paths inside the statement, so its status is the one from before the statement.
+    pub fn finish_try_returns(
+        &mut self,
+        before_try: SmallMap<Name, InitializationStatus>,
+        mut returns: ReturnAttributeInitialization,
+    ) {
+        let unset_nodes = &mut self.unset_nodes;
+        let scope = &mut self.scopes.last_mut().scope;
+        let ScopeKind::Method(method) = &mut scope.kind else {
+            unreachable!("only a method's `finally` body assigns attributes directly");
+        };
+        for (name, status) in before_try {
+            if scope.flow.instance_attribute_initialization.get(&name)
+                != Some(&InitializationStatus::Initialized)
+            {
+                continue;
+            }
+            if status == returns.unlisted {
+                returns.attributes.shift_remove(&name);
+            } else {
+                returns.attributes.insert(name, status);
+            }
+        }
+        let finally_returns = mem::take(&mut method.return_attribute_initialization);
+        returns.combine(finally_returns, unset_nodes);
+        method.return_attribute_initialization = returns;
+    }
+
+    /// Record a return in the enclosing function body there is one. `previous_stmt_expr` is the
+    /// termination key of the statement before the `return`.
     ///
     /// Return `None` if this succeeded and Some(rejected_return) if we are at the top-level
     pub fn record_or_reject_return(
@@ -3358,16 +3671,65 @@ impl Scopes {
         ret: CurrentIdx,
         x: StmtReturn,
         is_unreachable: bool,
+        previous_stmt_expr: Option<Idx<Key>>,
     ) -> Result<(), (CurrentIdx, StmtReturn)> {
-        match self.current_yields_and_returns_mut() {
-            Some(yields_and_returns) => {
-                yields_and_returns
-                    .returns
-                    .push((ret.into_idx(), x, is_unreachable));
-                Ok(())
+        let unset_nodes = &mut self.unset_nodes;
+        for scope in self.scopes.iter_mut().map(|node| &mut node.scope).rev() {
+            match &mut scope.kind {
+                ScopeKind::Function(function) => {
+                    function
+                        .yields_and_returns
+                        .returns
+                        .push((ret.into_idx(), x, is_unreachable));
+                    return Ok(());
+                }
+                ScopeKind::Method(method) => {
+                    if !is_unreachable {
+                        let current = &scope.flow.instance_attribute_initialization;
+                        let returns = &mut method.return_attribute_initialization;
+                        // The status at this `return` of an attribute the flow has not assigned.
+                        let missing =
+                            InitializationStatus::merge(unset_nodes, [(None, previous_stmt_expr)]);
+                        let unlisted = InitializationStatus::merge(
+                            unset_nodes,
+                            [(Some(&returns.unlisted), None), (Some(&missing), None)],
+                        );
+                        // List the attributes this flow assigns, unless being unlisted already
+                        // makes them uninitialized.
+                        if returns.unlisted != InitializationStatus::Uninitialized {
+                            for name in current.keys() {
+                                if !returns.attributes.contains_key(name) {
+                                    returns
+                                        .attributes
+                                        .insert(name.clone(), returns.unlisted.clone());
+                                }
+                            }
+                        }
+                        returns.attributes.retain(|name, status| {
+                            let here = match current.get(name) {
+                                None | Some(InitializationStatus::Uninitialized) => {
+                                    (Some(&missing), None)
+                                }
+                                here => (here, previous_stmt_expr),
+                            };
+                            *status = InitializationStatus::merge(
+                                unset_nodes,
+                                [(Some(&*status), None), here],
+                            );
+                            *status != unlisted
+                        });
+                        returns.unlisted = unlisted;
+                    }
+                    method
+                        .yields_and_returns
+                        .returns
+                        .push((ret.into_idx(), x, is_unreachable));
+                    return Ok(());
+                }
+                _ => {}
             }
-            None => Err((ret, x)),
         }
+        Err((ret, x))
     }
 
     /// Record a yield in the enclosing function body there is one.
@@ -3426,18 +3788,14 @@ impl Scopes {
     ///   coming from self-assignment in methods. If both occur, only the class body
     ///   definition is tracked.
     /// - Panics if the current scope is not a class body.
-    ///
-    /// The final map contains possibly uninitialized class-body fields. Its optional
-    /// `UnsetNode`s can prove that every path without an assignment terminates.
     pub fn finish_class_and_get_field_definitions(
         &mut self,
     ) -> (
-        SmallMap<Name, (ClassFieldDefinition, TextRange)>,
+        SmallMap<Name, (ClassFieldDefinition, TextRange, InitializedInClass)>,
         NNModuleRegistrations,
-        SmallMap<Name, Option<Vec<UnsetNodeId>>>,
+        Vec<(Name, Idx<KeyAnnotation>, Idx<KeyAnnotation>)>,
     ) {
         let mut field_definitions = SmallMap::new();
-        let mut uninitialized_fields = SmallMap::new();
         let class_body = self.pop();
         let mut class_scope = {
             if let ScopeKind::Class(class_scope) = class_body.kind {
@@ -3534,6 +3892,8 @@ impl Scopes {
                                 annotation,
                                 initialized_in_recognized_method: recognized_instance_attrs
                                     .contains(name.key().as_str()),
+                                // Set below for each method that assigns the field.
+                                initialized_in_method: false,
                                 initialized_on_new_instance: attributes_set_on_new_instance
                                     .contains(name.key().as_str()),
                             },
@@ -3547,24 +3907,54 @@ impl Scopes {
                             definition: value.idx,
                         },
                     };
-                    match &value.style {
-                        _ if static_info.function_def_only => {}
-                        FlowStyle::PossiblyUninitialized => {
-                            uninitialized_fields.insert_hashed(name.owned(), None);
-                        }
+                    let initialized = match &value.style {
+                        _ if static_info.definition_only => InitializedInFlow::Yes,
+                        FlowStyle::PossiblyUninitialized => InitializedInFlow::Conditionally,
                         FlowStyle::MaybeInitialized(nodes) => {
-                            uninitialized_fields.insert_hashed(name.owned(), Some(nodes.clone()));
+                            InitializedInFlow::DeferredCheck(nodes.clone())
                         }
-                        _ => {}
-                    }
-                    field_definitions.insert_hashed(name.owned(), (definition, static_info.range));
+                        _ => InitializedInFlow::Yes,
+                    };
+                    // A bare annotation is initialized by the methods that assign it, which
+                    // are merged below. If no recognized method assigns it,
+                    // `uninitialized-instance-variable` reports it instead. Any assignment
+                    // to the instance created in `__new__` counts as initializing it.
+                    let initialized = if matches!(
+                        definition,
+                        ClassFieldDefinition::DeclaredByAnnotation {
+                            initialized_in_recognized_method: true,
+                            initialized_on_new_instance: false,
+                            ..
+                        }
+                    ) {
+                        InitializationStatus::Uninitialized
+                    } else {
+                        InitializationStatus::from(initialized)
+                    };
+                    field_definitions.insert_hashed(
+                        name.owned(),
+                        (
+                            definition,
+                            static_info.range,
+                            InitializedInClass::from(initialized),
+                        ),
+                    );
                 }
             });
         // Merge assignments from different methods.
         // `method_attrs` yields attributes from recognized constructor methods first (e.g. __init__),
         // followed by other helper methods.
+        let mut redefinitions = Vec::new();
         method_attrs.into_iter().for_each(
-            |(name, method, InstanceAttribute(values, annotation, range, receiver_kind))| {
+            |(
+                name,
+                method,
+                MethodAttribute {
+                    attribute:
+                        InstanceAttribute(values, annotation, range, receiver_kind, has_value),
+                    initialized,
+                },
+            )| {
                 if let Some((
                     ClassFieldDefinition::DefinedInMethod {
                         values: existing_values,
@@ -3574,16 +3964,20 @@ impl Scopes {
                         has_instance_write: existing_instance_write,
                     },
                     _,
+                    existing_initialized,
                 )) = field_definitions.get_mut(name.key())
                 {
                     if matches!(receiver_kind, MethodSelfKind::Instance) {
                         *existing_instance_write = true;
                     }
+                    if let (Some(new_ann), Some(existing_ann)) = (annotation, *existing_annot) {
+                        redefinitions.push((name.key().clone(), new_ann, existing_ann));
+                    }
                     if existing_method.recognized_attribute_defining_method
                         && !method.recognized_attribute_defining_method
                     {
-                        // Prioritization: Existing is from a recognized constructor, new is from an
-                        // unrecognized helper method. The constructor wins, so ignore the new assignment.
+                        // The constructor determines the attribute type, so the helper's values,
+                        // annotation, and receiver kind do not affect the definition.
                     } else {
                         // Merge: Either both are constructors (e.g. __new__ and __init__), or both are
                         // helper methods. We combine all their assignments.
@@ -3597,6 +3991,21 @@ impl Scopes {
                             *existing_receiver = MethodSelfKind::Class;
                         }
                     }
+                    // Initialization is merged independently of definition priority.
+                    // Any method can establish initialization, so combine their requirements with OR.
+                    existing_initialized.or(initialized);
+                } else if let Some((
+                    ClassFieldDefinition::DeclaredByAnnotation {
+                        initialized_in_method,
+                        ..
+                    },
+                    _,
+                    existing_initialized,
+                )) = field_definitions.get_mut(name.key())
+                {
+                    // Methods initialize a bare class-body annotation without changing its definition.
+                    *initialized_in_method |= has_value;
+                    existing_initialized.or(initialized);
                 } else if !field_definitions.contains_key_hashed(name.as_ref()) {
                     field_definitions.insert_hashed(
                         name,
@@ -3612,16 +4021,13 @@ impl Scopes {
                                 ),
                             },
                             range,
+                            initialized.into(),
                         ),
                     );
                 }
             },
         );
-        (
-            field_definitions,
-            nn_module_registrations,
-            uninitialized_fields,
-        )
+        (field_definitions, nn_module_registrations, redefinitions)
     }
 
     /// Return a pair Some((method_name, class_key)) if we are currently in a method
@@ -3974,7 +4380,7 @@ impl Scopes {
                                 last_range: TextRange::default(),
                                 char_len,
                                 char_mask,
-                                function_def_only: false,
+                                definition_only: false,
                             }))
                         })
                     },
@@ -4745,6 +5151,43 @@ impl<'a> BindingsBuilder<'a> {
                 })
         };
 
+        // Each reachable path must initialize an attribute. A missing assignment can
+        // instead be justified by a Never-returning call on that path. Ordinary loops
+        // include the pre-loop path because their bodies may execute zero times. A loop
+        // that definitely runs keeps the pre-loop state only if no loop path survives, as
+        // the local flow does.
+        let include_base = match merge_style {
+            MergeStyle::Loop => true,
+            MergeStyle::LoopDefinitelyRuns => flows.is_empty(),
+            MergeStyle::Exclusive | MergeStyle::Inclusive | MergeStyle::BoolOp => false,
+        };
+        // A flow can be definitely unreachable without having terminated, such as after a loop
+        // that always runs and always exits through `return`.
+        let attribute_flows = flows
+            .iter()
+            .filter(|flow| !flow.is_definitely_unreachable)
+            .map(|flow| (flow, flow.last_stmt_expr))
+            .chain(include_base.then_some((&base, None)));
+        let mut attribute_names = SmallSet::new();
+        for (flow, _) in attribute_flows.clone() {
+            for name in flow.instance_attribute_initialization.keys() {
+                attribute_names.insert(name.clone());
+            }
+        }
+        let mut instance_attribute_initialization = SmallMap::with_capacity(attribute_names.len());
+        for name in attribute_names {
+            let initialized = InitializationStatus::merge(
+                &mut self.scopes.unset_nodes,
+                attribute_flows.clone().map(|(flow, termination_key)| {
+                    (
+                        flow.instance_attribute_initialization.get(&name),
+                        termination_key,
+                    )
+                }),
+            );
+            instance_attribute_initialization.insert(name, initialized);
+        }
+
         // Collect all unique names from base + all flows. We need this before we construct merge items
         // so that we can accurately represent a flow in which some name doesn't appear.
         let mut all_names: SmallSet<Name> = SmallSet::new();
@@ -4801,6 +5244,7 @@ impl<'a> BindingsBuilder<'a> {
         let flow = Flow {
             info: merged_flow_infos,
             excluded_none_pairs,
+            instance_attribute_initialization,
             has_terminated,
             terminated_by_raise: has_terminated && any_terminated_by_raise,
             is_definitely_unreachable: all_are_unreachable,
@@ -4822,6 +5266,28 @@ impl<'a> BindingsBuilder<'a> {
         let mut phis = SmallSet::new();
         for (name, info) in flow.info.iter_mut() {
             if exclude_names.contains(name) {
+                continue;
+            }
+            // Import identities with no local writes across the loop need no speculative value
+            // join. Keep their available bindings; narrowing joins still happen at teardown.
+            let stable_import = info.value.as_ref().is_some_and(|value| {
+                matches!(
+                    value.style,
+                    FlowStyle::Import(..) | FlowStyle::ImportAs(_) | FlowStyle::MergeableImport(_)
+                ) && self.scopes.current().stat.0.get(name).is_none_or(|decl| {
+                    let eligible = match decl.style {
+                        StaticStyle::SingleDef(_) | StaticStyle::ImplicitBuiltinImport(_) => true,
+                        // Wildcard symbols also have this static style, but their declaration
+                        // ranges can collapse multiple imports. Only real module values qualify.
+                        StaticStyle::MergeableImport => {
+                            matches!(value.style, FlowStyle::MergeableImport(_))
+                        }
+                        _ => false,
+                    };
+                    eligible && decl.last_range.end() <= range.start()
+                })
+            });
+            if stable_import {
                 continue;
             }
             // We are promising to insert a binding for this key when we merge the flow

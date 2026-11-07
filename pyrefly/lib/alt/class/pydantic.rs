@@ -20,6 +20,7 @@ use pyrefly_types::function::FuncMetadata;
 use pyrefly_types::function::Function;
 use pyrefly_types::function::FunctionKind;
 use pyrefly_types::keywords::DataclassFieldKeywords;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::lit_int::LitInt;
 use pyrefly_types::literal::Lit;
 use pyrefly_util::gas::Gas;
@@ -105,7 +106,8 @@ impl PydanticRangeConstraints {
 #[derive(Clone)]
 struct PydanticParamConstraint {
     field_name: Name,
-    constraints: PydanticRangeConstraints,
+    range: Option<PydanticRangeConstraints>,
+    lax_type: Option<Type>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -130,7 +132,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         let mro = self.get_mro_for_class(class);
         for base_type in mro.ancestors_no_object() {
-            if base_type.has_qname(ModuleName::pydantic_root_model().as_str(), "RootModel") {
+            if base_type.is(KnownClass::PydanticRootModel) {
                 let targs = base_type.targs().as_slice();
                 if let Some(root_type) = targs.last().cloned() {
                     return Some((root_type, has_strict));
@@ -181,10 +183,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if member.defining_class == *cls {
             return None;
         }
-        if !member
-            .defining_class
-            .has_toplevel_qname(ModuleName::pydantic().as_str(), "BaseModel")
-        {
+        if !member.defining_class.is(KnownClass::PydanticBaseModel) {
             // An earlier synthesized base must not mask a real override later in the MRO.
             let visible = self.get_class_member_ignoring_own_synthesized(cls, &MODEL_CONSTRUCT)?;
             return (visible.value.as_ref() != member.value.as_ref()).then(|| {
@@ -238,9 +237,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         cls: &Class,
         attr_name: &Name,
     ) -> Option<Type> {
-        if !cls.has_toplevel_qname(ModuleName::pydantic_root_model().as_str(), "RootModel")
-            || *attr_name != dunder::INIT
-        {
+        if !cls.is(KnownClass::PydanticRootModel) || *attr_name != dunder::INIT {
             return None;
         }
         let tparams = self.get_class_tparams(cls)?;
@@ -257,7 +254,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub fn is_pydantic_strict_metadata(&self, ty: &Type) -> bool {
         match ty {
-            Type::ClassType(cls) => cls.has_qname(ModuleName::pydantic_types().as_str(), "Strict"),
+            Type::ClassType(cls) => cls.is(KnownClass::PydanticStrict),
             _ => false,
         }
     }
@@ -360,7 +357,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             Type::ClassType(cls) => {
-                if cls.has_qname(ModuleName::pydantic_root_model().as_str(), "RootModel") {
+                if cls.is(KnownClass::PydanticRootModel) {
                     let targs = cls.targs().as_slice();
                     let root_type = targs
                         .last()
@@ -416,15 +413,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     if is_pydantic_dataclass_metadata(&call.func_metadata))
         });
 
-        let has_pydantic_base_model_base_class =
-            bases_with_metadata.iter().any(|(base_class_object, _)| {
-                base_class_object.has_toplevel_qname(ModuleName::pydantic().as_str(), "BaseModel")
-            });
+        let has_pydantic_base_model_base_class = bases_with_metadata
+            .iter()
+            .any(|(base_class_object, _)| base_class_object.is(KnownClass::PydanticBaseModel));
 
         let has_pydantic_base_settings_base_class =
             bases_with_metadata.iter().any(|(base_class_object, _)| {
-                base_class_object
-                    .has_toplevel_qname(ModuleName::pydantic_settings().as_str(), "BaseSettings")
+                base_class_object.is(KnownClass::PydanticSettingsBaseSettings)
             });
 
         // A pydantic *dataclass* is not a pydantic *model*, so an inherited `DataClass`
@@ -470,11 +465,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return None;
         }
 
-        let has_pydantic_root_model_base_class =
-            bases_with_metadata.iter().any(|(base_class_object, _)| {
-                base_class_object
-                    .has_toplevel_qname(ModuleName::pydantic_root_model().as_str(), "RootModel")
-            });
+        let has_pydantic_root_model_base_class = bases_with_metadata
+            .iter()
+            .any(|(base_class_object, _)| base_class_object.is(KnownClass::PydanticRootModel));
 
         let has_base_settings_kind = bases_with_metadata.iter().any(|(_, metadata)| {
             matches!(
@@ -882,7 +875,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if !metadata.is_pydantic_model() {
             return None;
         }
-        if let BindingAnnotation::AnnotateExpr(_, annotation_expr, _) = self.bindings().get(annot) {
+        if let BindingAnnotation::AnnotateExpr(_, annotation_expr, _, _) =
+            self.bindings().get(annot)
+        {
             let mut keywords = None;
             let ignore_errors = self.error_swallower();
             let metadata_items = self.get_annotated_metadata(
@@ -975,7 +970,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         None
     }
 
-    pub fn check_pydantic_argument_range_constraints(
+    pub fn check_pydantic_argument_constraints(
         &self,
         cls: &Class,
         dataclass: &DataclassMetadata,
@@ -1033,9 +1028,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return;
         };
         if meta.kind.function_name().as_str() != "model_validate"
-            || !meta.kind.class().is_some_and(|cls| {
-                cls.has_toplevel_qname(ModuleName::pydantic().as_str(), "BaseModel")
-            })
+            || !meta
+                .kind
+                .class()
+                .is_some_and(|cls| cls.is(KnownClass::PydanticBaseModel))
         {
             return;
         }
@@ -1123,9 +1119,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     || !self
                         .get_non_synthesized_class_member_and_defining_class(cls, &dunder::INIT)
                         .is_some_and(|member| {
-                            member
-                                .defining_class
-                                .has_toplevel_qname(ModuleName::pydantic().as_str(), "BaseModel")
+                            member.defining_class.is(KnownClass::PydanticBaseModel)
                         })
                 {
                     return;
@@ -1196,7 +1190,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 &value_ty,
                                 &PydanticParamConstraint {
                                     field_name: name,
-                                    constraints,
+                                    range: Some(constraints),
+                                    lax_type: None,
                                 },
                                 value.range(),
                                 errors,
@@ -1225,18 +1220,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut constraints = SmallMap::new();
         let mut position = 0;
         let kw_only_by_class = self.compute_kw_only_fields_by_class(cls);
-        for (field_name, _field, keywords) in
+        for (field_name, field, keywords) in
             self.iter_fields(cls, dataclass, true, &kw_only_by_class)
         {
             if !keywords.init {
                 continue;
             }
-            let Some(constraint) = PydanticRangeConstraints::from_keywords(&keywords) else {
+            let range = PydanticRangeConstraints::from_keywords(&keywords);
+            let lax_type = dataclass
+                .is_pydantic_lax_field(&field_name, &keywords)
+                .then(|| field.ty());
+            if range.is_none() && lax_type.is_none() {
                 continue;
-            };
+            }
             let info = PydanticParamConstraint {
                 field_name: field_name.clone(),
-                constraints: constraint,
+                range,
+                lax_type,
             };
             if keywords.init_by_name {
                 constraints.insert(PydanticParamKey::Name(field_name), info.clone());
@@ -1269,14 +1269,35 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             return;
         }
+        // The signature checks input types. This check enforces value restrictions on literals.
+        if let Some(field_ty) = &info.lax_type
+            && matches!(value_ty, Type::Literal(_))
+            && self.is_subset_eq(value_ty, &self.expand_type_for_lax_mode(field_ty))
+            && !self.pydantic_lax_accepts_literal(field_ty, value_ty)
+        {
+            self.error(
+                errors,
+                range,
+                ErrorKind::BadArgumentType,
+                format!(
+                    "Argument value `{}` is not valid for Pydantic field `{}` with type `{}`",
+                    self.for_display(value_ty.clone()),
+                    info.field_name,
+                    self.for_display(field_ty.clone()),
+                ),
+            );
+        }
+        let Some(constraints) = &info.range else {
+            return;
+        };
         let Some(value_lit) = int_literal_from_type(value_ty) else {
             return;
         };
         let checks = [
-            ("gt", info.constraints.gt.as_ref()),
-            ("ge", info.constraints.ge.as_ref()),
-            ("lt", info.constraints.lt.as_ref()),
-            ("le", info.constraints.le.as_ref()),
+            ("gt", constraints.gt.as_ref()),
+            ("ge", constraints.ge.as_ref()),
+            ("lt", constraints.lt.as_ref()),
+            ("le", constraints.le.as_ref()),
         ];
         for (label, constraint_ty) in checks {
             let Some(constraint_ty) = constraint_ty else {
