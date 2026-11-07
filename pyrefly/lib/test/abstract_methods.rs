@@ -887,11 +887,11 @@ from abc import ABC, abstractmethod
 
 class A1(ABC):
     @abstractmethod
-    def a(): ...
+    def a(): ...  # E: Instance method `a` must accept the instance as its first positional parameter
 
 class B1(ABC):
     @abstractmethod
-    def b(): ...
+    def b(): ...  # E: Instance method `b` must accept the instance as its first positional parameter
 
 class C(A1, B1): ...
 
