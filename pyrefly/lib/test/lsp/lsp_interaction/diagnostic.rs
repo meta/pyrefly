@@ -561,6 +561,7 @@ fn test_stream_diagnostics_after_save() {
 }
 
 // TODO - flaky on GitHub CI
+#[cfg(not(fbcode_build))]
 #[test]
 #[ignore]
 fn test_stream_diagnostics_no_flicker_after_undo_edit() {
@@ -637,6 +638,7 @@ fn test_stream_diagnostics_no_flicker_after_undo_edit() {
 /// Start with only b open, then open file d while a recheck for b is happening.
 // TODO: Flaky on GitHub CI — disabled until stabilized.
 // https://github.com/facebook/pyrefly/actions/runs/26119243466/job/76816531108
+#[cfg(not(fbcode_build))]
 #[test]
 #[ignore]
 fn test_open_file_during_recheck() {
