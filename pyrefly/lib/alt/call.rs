@@ -25,6 +25,7 @@ use pyrefly_types::types::CalleeKind;
 use pyrefly_types::types::NNModuleType;
 use pyrefly_types::types::TArgs;
 use pyrefly_types::types::TParams;
+use pyrefly_util::owner::Owner;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::prelude::VecExt;
 use pyrefly_util::visit::Visit;
@@ -56,6 +57,7 @@ use crate::alt::class::dataclass::ReplaceKind;
 use crate::alt::expr::ExprCallee;
 use crate::alt::expr::TypeOrExpr;
 use crate::alt::nn_module_specials::is_nn_sequential;
+use crate::alt::overload::ArgsExpander;
 use crate::alt::unwrap::HintRef;
 use crate::alt::unwrap::MAX_HINT_WIDTH;
 use crate::binding::binding::Key;
@@ -287,6 +289,15 @@ struct ConstructedInstance {
 }
 
 impl ConstructedInstance {
+    /// A hint match requires successful specialization and argument checks.
+    fn is_match(&self) -> bool {
+        self.matched_hint
+            && self.specialization_errors.is_none()
+            && !self.errors.has_hard()
+            && !self.arg_errors.has_hard()
+            && !self.return_errors.has_hard()
+    }
+
     fn take<Ans: LookupAnswer>(
         self,
         arguments_range: TextRange,
@@ -1241,40 +1252,84 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Selects a constructor outcome without publishing its diagnostics.
     /// Prefers the first hint match without hard call errors or specialization failures.
     /// Otherwise keeps the first outcome without hard call errors, or constructs without a hint.
+    /// A union hint may accept different argument expansions through different members.
     /// Hints wider than `MAX_HINT_WIDTH` are ignored.
     fn construct_with_hint(
         &self,
+        args: &[CallArg],
+        keywords: &[CallKeyword],
         hint: Option<HintRef>,
-        construct: impl Fn(Option<&Type>) -> ConstructedInstance,
+        construct: impl Fn(&[CallArg], &[CallKeyword], Option<&Type>) -> ConstructedInstance,
     ) -> ConstructedInstance {
-        if let Some(hint) = hint
-            && let hints = hint.types()
-            && hints.len() <= MAX_HINT_WIDTH
-        {
-            let mut ret_no_match_hint = None;
-            for member_hint in hints.iter() {
-                let ret = construct(Some(member_hint));
-                if ret.errors.has_hard() {
-                    continue;
+        let select = |args: &[CallArg], keywords: &[CallKeyword]| {
+            if let Some(hint) = hint
+                && let hints = hint.types()
+                && hints.len() <= MAX_HINT_WIDTH
+            {
+                let mut ret_no_match_hint = None;
+                for member_hint in hints.iter() {
+                    let ret = construct(args, keywords, Some(member_hint));
+                    if ret.errors.has_hard() {
+                        continue;
+                    }
+                    if ret.matched_hint && ret.specialization_errors.is_none() {
+                        // Prefer contextual results assignable to their hint, such as list[Base]
+                        // rather than list[Child] when the argument is [Child()].
+                        return ret;
+                    }
+                    if ret_no_match_hint.is_none() {
+                        ret_no_match_hint = Some(ret);
+                    }
                 }
-                if ret.matched_hint && ret.specialization_errors.is_none() {
-                    // Take the first successful match. We require the result to be assignable to the
-                    // hint so that, in a case like `x: list[X] | None = [XChild()]`, we choose the
-                    // `list[X]` branch with contextually typed results.
+                if let Some(ret) = ret_no_match_hint {
+                    // Keep the first contextual result if only specialization failed.
                     return ret;
                 }
-                if ret_no_match_hint.is_none() {
-                    ret_no_match_hint = Some(ret);
-                }
             }
-            if let Some(ret) = ret_no_match_hint {
-                // Even if none of the results were assignable to their hints, we still keep the
-                // first contextually typed result if it only produced specialization errors.
-                return ret;
-            }
+            // If the hint is too wide or always produces non-specialization errors, don't use it.
+            construct(args, keywords, None)
+        };
+        let unexpanded = select(args, keywords);
+        if !hint.is_some_and(|hint| (2..=MAX_HINT_WIDTH).contains(&hint.types().len()))
+            || (unexpanded.matched_hint && unexpanded.specialization_errors.is_none())
+        {
+            return unexpanded;
         }
-        // If the hint is too wide or always produces non-specialization errors, don't use it.
-        construct(None)
+
+        let mut expander = ArgsExpander::new(args.to_vec(), keywords.to_vec(), self);
+        let owner = Owner::new();
+        let expansion_errors = self.error_collector();
+        while let Some(arg_lists) = expander.expand(&expansion_errors, &owner) {
+            if expansion_errors.has_hard() {
+                break;
+            }
+            // Every expansion must match some hint. A rejected batch publishes nothing.
+            let Some(outcomes) = arg_lists
+                .into_iter()
+                .map(|(args, keywords)| {
+                    let outcome = select(&args, &keywords);
+                    outcome.is_match().then_some(outcome)
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            let mut outcomes = outcomes.into_iter();
+            let mut result = outcomes
+                .next()
+                .expect("Argument expansion produces at least one call");
+            let mut types = vec![result.ty.clone()];
+            for outcome in outcomes {
+                types.push(outcome.ty);
+                result.errors.extend(outcome.errors);
+                result.arg_errors.extend(outcome.arg_errors);
+                result.return_errors.extend(outcome.return_errors);
+            }
+            result.ty = self.unions(types);
+            result.arg_errors.extend(expansion_errors);
+            return result;
+        }
+        unexpanded
     }
 
     fn construct_class(
@@ -1342,12 +1397,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let prepared = ConstructorArguments::new(hint);
         let (args, keywords) = prepared.prepare(args, keywords);
 
-        self.construct_with_hint(hint, |hint| {
+        self.construct_with_hint(&args, &keywords, hint, |args, keywords, hint| {
             self.construct_class_inner(
                 cls.clone(),
                 constructor_kind.clone(),
-                &args,
-                &keywords,
+                args,
+                keywords,
                 arguments_range,
                 callee_range,
                 context,
@@ -1740,11 +1795,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let hint = HintRef::filter_for_constructor(hint, typed_dict.targs());
         let prepared = ConstructorArguments::new(hint);
         let (args, keywords) = prepared.prepare(args, keywords);
-        self.construct_with_hint(hint, |hint| {
+        self.construct_with_hint(&args, &keywords, hint, |args, keywords, hint| {
             self.construct_typed_dict_inner(
                 typed_dict.clone(),
-                &args,
-                &keywords,
+                args,
+                keywords,
                 arguments_range,
                 context,
                 hint,
