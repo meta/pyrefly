@@ -2832,13 +2832,42 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.bind_bound_method_type(&m.func, &m.obj, skip_instantiation, is_subset)
     }
 
+    /// Drop overloads whose first parameter cannot accept `receiver`. Type parameters on both
+    /// sides are replaced with `Any`, so an overload is dropped only if no specialization of it
+    /// could accept the receiver. If every overload would be dropped, `func` is returned
+    /// unchanged so that the callable stays usable.
+    fn filter_overloads_by_receiver(&self, func: Type, receiver: &Type) -> Type {
+        let Type::Overload(overload) = &func else {
+            return func;
+        };
+        let any = self.heap.mk_any_implicit();
+        let erase_tparams = |ty: &Type| {
+            let mut ty = ty.clone();
+            ty.subst_mut_fn(&mut |_| Some(any.clone()));
+            ty
+        };
+        let receiver = erase_tparams(receiver);
+        let signatures = overload.signatures.iter().filter(|sig| {
+            let (OverloadType::Function(f) | OverloadType::Forall(Forall { body: f, .. })) = sig;
+            f.signature
+                .get_first_param()
+                .is_none_or(|param| self.is_subset_eq(&receiver, &erase_tparams(param)))
+        });
+        match Vec1::try_from_vec(signatures.cloned().collect()) {
+            Ok(signatures) => self.heap.mk_overload(Overload {
+                signatures,
+                metadata: overload.metadata.clone(),
+            }),
+            Err(_) => func,
+        }
+    }
+
+    /// Bind `__new__` to `cls`, dropping overloads whose `cls` parameter cannot accept the
+    /// class object.
     pub fn bind_dunder_new(&self, t: &Type, cls: ClassType) -> Option<Type> {
-        self.bind_function(
-            t,
-            &self.heap.mk_type_of(self.heap.mk_class_type(cls)),
-            false,
-            &mut |a, b| self.is_subset_eq(a, b),
-        )
+        let cls_type = self.heap.mk_type_of(self.heap.mk_class_type(cls));
+        let t = self.filter_overloads_by_receiver(t.clone(), &cls_type);
+        self.bind_function(&t, &cls_type, false, &mut |a, b| self.is_subset_eq(a, b))
     }
 
     /// Bind a `__init__` method for constructor callable conversion.
@@ -2846,7 +2875,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Does not instantiate type variables (they should be inferred at the call site).
     pub fn bind_dunder_init(&self, mut t: Type, cls: &ClassType) -> Type {
         let bound = if let Type::BoundMethod(m) = &t {
-            let mut func_type = m.func.clone().as_type();
+            let mut func_type = self.filter_overloads_by_receiver(m.func.clone().as_type(), &m.obj);
             // For each callable, set its return type to its first param's type (i.e. `self`).
             func_type.transform_toplevel_callable_signatures(|c: &mut Callable, _| {
                 if let Some(self_type) = c.get_first_param() {
