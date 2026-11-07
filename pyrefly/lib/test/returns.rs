@@ -519,32 +519,14 @@ def version_gated_branch() -> int:
     else:
         raise RuntimeError
 
-def raises_in_loop() -> int:
+def raises_in_loop() -> int:  # E: Function declared to return `int` but can never return
     while True:
         raise RuntimeError
-
-def asserts_in_loop() -> int:
-    while True:
-        assert False
-
-def raises_in_nested_loop() -> int:
-    while True:
-        while True:
-            raise RuntimeError
 
 def nested_break() -> int:  # E: Function declared to return `int` but can never return
     while True:
         while True:
             break
-
-def nested_function() -> int:  # E: Function declared to return `int` but can never return
-    while True:
-        def placeholder() -> int:
-            raise RuntimeError
-
-def version_gated_assert() -> int:
-    while True:
-        assert sys.version_info >= (3, 0)
 
 def inferred_never():
     raise RuntimeError

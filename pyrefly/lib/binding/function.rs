@@ -1248,7 +1248,8 @@ fn and_dnf<'a>(
 /// * Return Some with an empty clause to say that we can never reach the end (e.g. always return, raise)
 /// * Return Some(clauses) as DNF over endings that may be the last expression.
 ///
-/// When `exits_fall_through` is true, return, raise, and a failing assert count as fall-through.
+/// When `exits_fall_through` is true, a suite ending in return, raise, or a failing assert counts as
+/// falling off the end.
 pub(crate) fn function_last_expressions<'a>(
     x: &'a [Stmt],
     sys_info: SysInfo,
@@ -1261,39 +1262,14 @@ pub(crate) fn function_last_expressions<'a>(
         environment: &mut bool,
         exits_fall_through: bool,
     ) -> Option<Vec<Vec<LastPathExpr<'a>>>> {
-        fn loop_body_has_exit(
-            statement: &Stmt,
-            has_exit: &mut bool,
-            nested_loop: bool,
-            exits_fall_through: bool,
-            sys_info: SysInfo,
-            environment: &mut bool,
-        ) {
+        fn loop_body_has_break_statement(statement: &Stmt, has_break: &mut bool) {
             match statement {
-                Stmt::Break(_) if !nested_loop => {
-                    *has_exit = true;
+                Stmt::Break(_) => {
+                    *has_break = true;
                 }
-                Stmt::Return(_) | Stmt::Raise(_) if exits_fall_through => *has_exit = true,
-                Stmt::Assert(x) if exits_fall_through => {
-                    *environment |= SysInfo::depends_on_sys_info(&x.test);
-                    *has_exit |= sys_info.evaluate_bool(&x.test) == Some(false);
-                }
-                Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
-                Stmt::While(_) | Stmt::For(_) if !exits_fall_through => {}
-                _ => {
-                    let nested_loop =
-                        nested_loop || matches!(statement, Stmt::While(_) | Stmt::For(_));
-                    statement.recurse(&mut |statement| {
-                        loop_body_has_exit(
-                            statement,
-                            has_exit,
-                            nested_loop,
-                            exits_fall_through,
-                            sys_info,
-                            environment,
-                        )
-                    });
-                }
+                Stmt::While(_) | Stmt::For(_) => {}
+                _ => statement
+                    .recurse(&mut |statement| loop_body_has_break_statement(statement, has_break)),
             }
         }
 
@@ -1303,20 +1279,11 @@ pub(crate) fn function_last_expressions<'a>(
                 expr: &x.value,
                 guards: guards.as_slice().into(),
             }]]),
-            Stmt::Return(_) | Stmt::Raise(_) => {
-                if exits_fall_through {
-                    None
-                } else {
-                    Some(vec![vec![]])
-                }
-            }
+            Stmt::Return(_) | Stmt::Raise(_) | Stmt::Assert(_) if exits_fall_through => None,
+            Stmt::Return(_) | Stmt::Raise(_) => Some(vec![vec![]]),
             Stmt::Assert(x) if sys_info.evaluate_bool(&x.test) == Some(false) => {
                 *environment |= SysInfo::depends_on_sys_info(&x.test);
-                if exits_fall_through {
-                    None
-                } else {
-                    Some(vec![vec![]])
-                }
+                Some(vec![vec![]])
             }
             Stmt::With(x) => {
                 let kind = IsAsync::new(x.is_async);
@@ -1334,40 +1301,24 @@ pub(crate) fn function_last_expressions<'a>(
             Stmt::While(x) => {
                 let test_value = sys_info.evaluate_bool(&x.test);
                 *environment |= SysInfo::depends_on_sys_info(&x.test);
-                let mut has_exit = false;
+                let mut has_break = false;
                 if test_value != Some(false) {
-                    x.body.visit(&mut |stmt| {
-                        loop_body_has_exit(
-                            stmt,
-                            &mut has_exit,
-                            false,
-                            exits_fall_through,
-                            sys_info,
-                            environment,
-                        )
-                    });
+                    x.body
+                        .visit(&mut |stmt| loop_body_has_break_statement(stmt, &mut has_break));
                 }
-                if test_value == Some(true) && !has_exit {
+                if test_value == Some(true) && !has_break {
                     Some(vec![vec![]])
-                } else if has_exit || x.orelse.is_empty() {
+                } else if has_break || x.orelse.is_empty() {
                     None
                 } else {
                     f(sys_info, &x.orelse, guards, environment, exits_fall_through)
                 }
             }
             Stmt::For(x) => {
-                let mut has_exit = false;
-                x.body.visit(&mut |stmt| {
-                    loop_body_has_exit(
-                        stmt,
-                        &mut has_exit,
-                        false,
-                        exits_fall_through,
-                        sys_info,
-                        environment,
-                    )
-                });
-                if has_exit || x.orelse.is_empty() {
+                let mut has_break = false;
+                x.body
+                    .visit(&mut |stmt| loop_body_has_break_statement(stmt, &mut has_break));
+                if has_break || x.orelse.is_empty() {
                     None
                 } else {
                     f(sys_info, &x.orelse, guards, environment, exits_fall_through)

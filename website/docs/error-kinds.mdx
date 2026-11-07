@@ -2311,22 +2311,20 @@ two_args(a=1, b=2, c=3)
 
 Default severity: `warn`
 
-Pyrefly emits this warning when a function's body cannot reach its end even if
-`return`, `raise`, and failing `assert` statements count as reaching it. The
-function must have no explicit return, and its return annotation must be
-different from `Never`, `NoReturn`, and `None`.
+Pyrefly emits this warning when a function can never return, contrary to its
+annotation. This is a syntactic check on the last statement in the function, so
+calls to other functions that never return don't count, and things like
+infinite loops earlier in the body trigger an `unreachable` hint instead.
+Functions that end in `raise` or a failing `assert` are excluded from this
+check, as well as generators, functions annotated as returning `None`,
+`NoReturn`, or `Never`, and functions that fail to return only in some
+configurations.
 
 ```python
 def f() -> int:  # Function declared to return `int` but can never return [unexpected-never]
     while True:
         pass
 ```
-
-This check uses syntax, not inferred `Never` types. Calls to functions that
-never return, exception-only bodies, and failing assertions do not trigger
-the warning. Pyrefly also excludes generators and bodies whose divergence
-depends on the configured Python version or platform. The declared return
-type remains the type visible to callers.
 
 ## unexpected-positional-argument
 
