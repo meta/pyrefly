@@ -1412,7 +1412,7 @@ testcase!(
     test_missing_self_parameter,
     r#"
 class C:
-    def f():  # E: Instance method `f` must accept a positional argument
+    def f():  # E: Instance method `f` must accept the instance as its first positional parameter
         pass
 C().f()  # E: Expected 0 positional arguments, got 1 (including implicit `self`)
     "#,
@@ -1423,11 +1423,11 @@ testcase!(
     test_instance_method_missing_receiver,
     r#"
 class Foo:
-    def fn() -> None: ...  # E: Instance method `fn` must accept a positional argument
+    def fn() -> None: ...  # E: Instance method `fn` must accept the instance as its first positional parameter
 
-    def kwargs_only(**kwargs: object) -> None: ...  # E: Instance method `kwargs_only` must accept a positional argument
+    def kwargs_only(**kwargs: object) -> None: ...  # E: Instance method `kwargs_only` must accept the instance as its first positional parameter
 
-    def keyword_only(*, x: object = None) -> None: ...  # E: Instance method `keyword_only` must accept a positional argument
+    def keyword_only(*, x: object = None) -> None: ...  # E: Instance method `keyword_only` must accept the instance as its first positional parameter
 
     def conventional(self) -> None: ...
 
@@ -1481,10 +1481,10 @@ unknown: Any = lambda f: f
 
 class C(ABC):
     @final
-    def plain() -> None: ...  # E: Instance method `plain` must accept a positional argument
+    def plain() -> None: ...  # E: Instance method `plain` must accept the instance as its first positional parameter
 
     @abstractmethod
-    def abstract() -> None: ...  # E: Instance method `abstract` must accept a positional argument
+    def abstract() -> None: ...  # E: Instance method `abstract` must accept the instance as its first positional parameter
 
     @add_receiver
     def wrapped() -> None: ...
@@ -1493,7 +1493,7 @@ class C(ABC):
     def uncertain() -> None: ...
 
     @property
-    def prop() -> int: ...  # E: Instance method `prop` must accept a positional argument
+    def prop() -> int: ...  # E: Instance method `prop` must accept the instance as its first positional parameter
     "#,
 );
 

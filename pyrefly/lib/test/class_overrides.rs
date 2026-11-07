@@ -2434,11 +2434,11 @@ testcase!(
     test_override_method_without_self,
     r#"
 class A:
-    def foo() -> int:  # E: Instance method `foo` must accept a positional argument
+    def foo() -> int:  # E: Instance method `foo` must accept the instance as its first positional parameter
         return 42
 
 class B(A):
-    def foo() -> int:  # E: Instance method `foo` must accept a positional argument
+    def foo() -> int:  # E: Instance method `foo` must accept the instance as its first positional parameter
         return 100
     "#,
 );

@@ -673,7 +673,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 )
             } else {
                 format!(
-                    "Instance method `{}` must accept a positional argument",
+                    "Instance method `{}` must accept the instance as its first positional parameter",
                     def.name
                 )
             };
