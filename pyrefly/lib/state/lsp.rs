@@ -4211,6 +4211,22 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    pub fn insert_inferred_annotation_code_actions(
+        &self,
+        handle: &Handle,
+        selection: TextRange,
+        import_format: ImportFormat,
+        inlay_hint_config: InlayHintConfig,
+    ) -> Option<Vec<(String, Vec<(Module, TextRange, String)>)>> {
+        quick_fixes::insert_inferred_annotation::insert_inferred_annotation_code_actions(
+            self,
+            handle,
+            selection,
+            import_format,
+            inlay_hint_config,
+        )
+    }
+
     pub fn pytest_fixture_type_annotation_code_actions(
         &self,
         handle: &Handle,

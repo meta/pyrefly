@@ -144,3 +144,51 @@ fn test_notebook_code_action_implicit_import_cross_cell() {
         .unwrap();
     interaction.shutdown().unwrap();
 }
+
+#[test]
+fn test_notebook_code_action_insert_inferred_type() {
+    let root = get_test_files_root();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .unwrap();
+
+    interaction.open_notebook(
+        "notebook.ipynb",
+        vec!["x = 1", "def f() -> int:\n    return x\nyyy = f()\n"],
+    );
+
+    let cell2_uri = interaction.cell_uri("notebook.ipynb", "cell2");
+    interaction
+        .code_action_cell("notebook.ipynb", "cell2", 2, 0, 2, 3)
+        .expect_response_with(|response| {
+            let Some(actions) = response else {
+                return false;
+            };
+            actions.iter().any(|action| {
+                let CodeActionResponse::CodeAction(code_action) = action else {
+                    return false;
+                };
+                if code_action.title != "Insert inferred type `: int`" {
+                    return false;
+                }
+                let Some(text_edits) = code_action
+                    .edit
+                    .as_ref()
+                    .and_then(|edit| edit.changes.as_ref())
+                    .and_then(|changes| changes.get(&cell2_uri))
+                else {
+                    return false;
+                };
+                text_edits
+                    .iter()
+                    .any(|text_edit| text_edit.new_text == ": int")
+            })
+        })
+        .unwrap();
+    interaction.shutdown().unwrap();
+}

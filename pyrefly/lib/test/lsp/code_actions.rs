@@ -23,7 +23,9 @@ use crate::module::module_info::ModuleInfo;
 use crate::state::ide::import_regular_import_edit;
 use crate::state::ide::insert_from_import_edit;
 use crate::state::ide::insert_import_edit;
+use crate::state::lsp::AllOffPartial;
 use crate::state::lsp::ImportFormat;
+use crate::state::lsp::InlayHintConfig;
 use crate::state::lsp::LocalRefactorCodeAction;
 use crate::state::require::Require;
 use crate::state::state::State;
@@ -8254,4 +8256,301 @@ class Derived(Base):
         return 2
 ";
     assert_eq!(expected, after);
+}
+
+fn inferred_annotation_actions(
+    files: &[(&'static str, &str)],
+    range: TextRange,
+    config: InlayHintConfig,
+) -> Vec<(String, String)> {
+    let (handles, state) = mk_multi_file_state_assert_no_errors(files, Require::Exports);
+    let handle = handles.get("main").unwrap();
+    let transaction = state.transaction();
+    transaction
+        .insert_inferred_annotation_code_actions(handle, range, ImportFormat::Absolute, config)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(title, edits)| {
+            let info = edits[0].0.clone();
+            let after = apply_refactor_edits_for_module(&info, &edits);
+            (title, after)
+        })
+        .collect()
+}
+
+fn range_of(source: &str, needle: &str) -> TextRange {
+    let start = source.find(needle).expect("needle");
+    TextRange::new(
+        TextSize::try_from(start).unwrap(),
+        TextSize::try_from(start + needle.len()).unwrap(),
+    )
+}
+
+const ANNOTATED_RETURN: &str = "\
+def grow(x: int):
+    return x
+
+yyy = grow(1)
+";
+
+#[test]
+fn insert_inferred_type_on_variable() {
+    let actions = inferred_annotation_actions(
+        &[("main", ANNOTATED_RETURN)],
+        range_of(ANNOTATED_RETURN, "yyy"),
+        Default::default(),
+    );
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].0, "Insert inferred type `: int`");
+    assert_eq!(
+        actions[0].1,
+        "\
+def grow(x: int):
+    return x
+
+yyy: int = grow(1)
+"
+    );
+}
+
+#[test]
+fn insert_inferred_type_on_return() {
+    let actions = inferred_annotation_actions(
+        &[("main", ANNOTATED_RETURN)],
+        range_of(ANNOTATED_RETURN, "grow"),
+        Default::default(),
+    );
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].0, "Insert inferred type `-> int`");
+    assert_eq!(
+        actions[0].1,
+        "\
+def grow(x: int) -> int:
+    return x
+
+yyy = grow(1)
+"
+    );
+}
+
+#[test]
+fn insert_inferred_type_at_insertion_point() {
+    let start = ANNOTATED_RETURN.find("yyy").unwrap() + "yyy".len();
+    let cursor = TextRange::empty(TextSize::try_from(start).unwrap());
+    let actions =
+        inferred_annotation_actions(&[("main", ANNOTATED_RETURN)], cursor, Default::default());
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].0, "Insert inferred type `: int`");
+}
+
+#[test]
+fn insert_inferred_type_on_class_attribute() {
+    let code = "\
+def value() -> int:
+    return 1
+
+class Box:
+    def __init__(self) -> None:
+        self.item = value()
+";
+    let actions = inferred_annotation_actions(
+        &[("main", code)],
+        range_of(code, "item"),
+        Default::default(),
+    );
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].0, "Insert inferred type `: int`");
+    assert!(actions[0].1.contains("self.item: int = value()"));
+}
+
+#[test]
+fn insert_inferred_type_adds_import() {
+    let lib = "\
+class Value:
+    pass
+
+def make() -> Value:
+    return Value()
+";
+    let main = "\
+from lib import make
+
+value = make()
+";
+    let actions = inferred_annotation_actions(
+        &[("lib", lib), ("main", main)],
+        range_of(main, "value"),
+        Default::default(),
+    );
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].0, "Insert inferred type `: Value`");
+    assert_eq!(
+        actions[0].1,
+        "\
+from lib import Value
+from lib import make
+
+value: Value = make()
+"
+    );
+}
+
+#[test]
+fn insert_inferred_type_preserves_crlf_imports() {
+    let lib = "class Value:\r\n    pass\r\n\r\ndef make() -> Value:\r\n    return Value()\r\n";
+    let main = "from lib import make\r\n\r\nvalue = make()\r\n";
+    let actions = inferred_annotation_actions(
+        &[("lib", lib), ("main", main)],
+        range_of(main, "value"),
+        Default::default(),
+    );
+    assert_eq!(actions.len(), 1);
+    assert_eq!(
+        actions[0].1,
+        "from lib import Value\r\nfrom lib import make\r\n\r\nvalue: Value = make()\r\n"
+    );
+}
+
+#[test]
+fn insert_inferred_type_skips_non_insertable_and_unrelated_cursors() {
+    let unpacked = "\
+def take(pair: tuple[int, int]) -> None:
+    first, second = pair
+";
+    assert!(
+        inferred_annotation_actions(
+            &[("main", unpacked)],
+            range_of(unpacked, "first"),
+            Default::default(),
+        )
+        .is_empty()
+    );
+
+    let capture = "\
+def take(xs: list[int]) -> None:
+    match xs:
+        case [head]:
+            print(head)
+";
+    assert!(
+        inferred_annotation_actions(
+            &[("main", capture)],
+            range_of(capture, "head"),
+            Default::default(),
+        )
+        .is_empty()
+    );
+
+    let annotated = "yyy: int = 1\n";
+    assert!(
+        inferred_annotation_actions(
+            &[("main", annotated)],
+            range_of(annotated, "yyy"),
+            Default::default(),
+        )
+        .is_empty()
+    );
+
+    // A cursor in the body is outside the function header the return hint annotates.
+    assert!(
+        inferred_annotation_actions(
+            &[("main", ANNOTATED_RETURN)],
+            range_of(ANNOTATED_RETURN, "return"),
+            Default::default(),
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn insert_inferred_type_respects_inlay_hint_config() {
+    let hidden = InlayHintConfig {
+        call_argument_names: AllOffPartial::All,
+        function_return_types: false,
+        pytest_parameters: false,
+        variable_types: false,
+    };
+    assert!(
+        inferred_annotation_actions(
+            &[("main", ANNOTATED_RETURN)],
+            range_of(ANNOTATED_RETURN, "yyy"),
+            hidden
+        )
+        .is_empty()
+    );
+    assert!(
+        inferred_annotation_actions(
+            &[("main", ANNOTATED_RETURN)],
+            range_of(ANNOTATED_RETURN, "grow"),
+            hidden
+        )
+        .is_empty()
+    );
+
+    let mut returns_only = hidden;
+    returns_only.function_return_types = true;
+    assert!(
+        inferred_annotation_actions(
+            &[("main", ANNOTATED_RETURN)],
+            range_of(ANNOTATED_RETURN, "yyy"),
+            returns_only,
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        inferred_annotation_actions(
+            &[("main", ANNOTATED_RETURN)],
+            range_of(ANNOTATED_RETURN, "grow"),
+            returns_only,
+        )
+        .len(),
+        1
+    );
+
+    // Argument-name hints stay out of this quick fix even when that inlay hint is enabled.
+    let calls = "\
+def f(value: int) -> None:
+    return None
+
+f(1)
+";
+    let names_on = InlayHintConfig {
+        call_argument_names: AllOffPartial::All,
+        ..InlayHintConfig::default()
+    };
+    assert!(
+        inferred_annotation_actions(&[("main", calls)], range_of(calls, "1"), names_on).is_empty()
+    );
+}
+
+#[test]
+fn insert_inferred_type_for_each_selected_hint() {
+    let code = "\
+def grow(x: int):
+    return x
+
+yyy = grow(1)
+zzz = grow(2)
+";
+    let start = code.find("yyy").unwrap();
+    let end = code.find("zzz").unwrap() + "zzz".len();
+    let selection = TextRange::new(
+        TextSize::try_from(start).unwrap(),
+        TextSize::try_from(end).unwrap(),
+    );
+    let actions = inferred_annotation_actions(&[("main", code)], selection, Default::default());
+    assert_eq!(
+        actions
+            .iter()
+            .map(|(title, _)| title.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Insert inferred type `: int`",
+            "Insert inferred type `: int`"
+        ]
+    );
+    assert!(actions[0].1.contains("yyy: int = grow(1)"));
+    assert!(actions[1].1.contains("zzz: int = grow(2)"));
+    assert!(!actions[0].1.contains("zzz: int"));
+    assert!(!actions[1].1.contains("yyy: int"));
 }

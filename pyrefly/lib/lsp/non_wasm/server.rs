@@ -5332,71 +5332,82 @@ impl Server {
             // index so that import quick-fixes can be redirected to the current cell
             // instead of always targeting cell 1 (position 0 of the combined AST).
             let triggered_cell_index = self.maybe_get_code_cell_index(uri);
-            if let Some(quickfixes) = transaction.local_quickfix_code_actions_sorted(
+            let mut quickfixes = transaction
+                .local_quickfix_code_actions_sorted(
+                    &handle,
+                    range,
+                    import_format,
+                    Some(&self.lsp_thread_pool),
+                )
+                .unwrap_or_default();
+            let annotation_start = Instant::now();
+            let inlay_hint_config = lsp_config.and_then(|c| c.inlay_hints).unwrap_or_default();
+            if let Some(annotation_fixes) = transaction.insert_inferred_annotation_code_actions(
                 &handle,
                 range,
                 import_format,
-                Some(&self.lsp_thread_pool),
+                inlay_hint_config,
             ) {
-                actions.extend(quickfixes.into_iter().filter_map(|(title, edits)| {
-                    // Fixes for missing `@override` and context-manager annotations
-                    // can include several edits. Group every edit by its target document
-                    // into a single workspace edit
-                    // so the whole fix applies in one action.
-                    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-                    for (info, range, insert_text) in edits {
-                        let lsp_location = self.to_lsp_location(&TextRangeWithModule {
-                            module: info.clone(),
-                            range,
-                        })?;
-                        let mut edit_uri = lsp_location.uri;
-                        let mut edit_range = lsp_location.range;
-                        // Import insertions in notebooks go into the active cell.
-                        // Replacements must retain their target cell and range.
-                        if range.is_empty()
-                            && let Some(current_cell_idx) = triggered_cell_index
-                        {
-                            let edit_cell_idx = info.to_cell_for_lsp(range.start());
-                            if edit_cell_idx != Some(current_cell_idx) {
-                                // Redirect to the current cell, inserting at line 0.
-                                let open_files = self.open_files.read();
-                                let notebook_path =
-                                    self.open_notebook_cells.read().get(uri).cloned();
-                                let cell_url = notebook_path.and_then(|path| {
-                                    if let Some(LspFile::Notebook(notebook)) =
-                                        open_files.get(&path).map(|f| &**f)
-                                    {
-                                        notebook.get_code_cell_url(current_cell_idx).cloned()
-                                    } else {
-                                        None
-                                    }
-                                });
-                                if let Some(cell_url) = cell_url {
-                                    let top_of_cell = lsp_types::Range {
-                                        start: lsp_types::Position::new(0, 0),
-                                        end: lsp_types::Position::new(0, 0),
-                                    };
-                                    edit_uri = cell_url;
-                                    edit_range = top_of_cell;
-                                }
-                            }
-                        };
-                        changes.entry(edit_uri).or_default().push(TextEdit {
-                            range: edit_range,
-                            new_text: insert_text,
-                        });
-                    }
-                    Some(CodeActionResponse::CodeAction(CodeAction {
-                        title,
-                        kind: Some(CodeActionKind::QuickFix),
-                        edit: Some(WorkspaceEdit {
-                            changes: Some(changes),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }))
-                }));
+                quickfixes.extend(annotation_fixes);
             }
+            record_code_action_telemetry("insert_inferred_annotation", annotation_start);
+            actions.extend(quickfixes.into_iter().filter_map(|(title, edits)| {
+                // Fixes for missing `@override` and context-manager annotations
+                // can include several edits. Group every edit by its target document
+                // into a single workspace edit
+                // so the whole fix applies in one action.
+                let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+                for (info, range, insert_text) in edits {
+                    let lsp_location = self.to_lsp_location(&TextRangeWithModule {
+                        module: info.clone(),
+                        range,
+                    })?;
+                    let mut edit_uri = lsp_location.uri;
+                    let mut edit_range = lsp_location.range;
+                    // Import insertions in notebooks go into the active cell.
+                    // Replacements must retain their target cell and range.
+                    if range.is_empty()
+                        && let Some(current_cell_idx) = triggered_cell_index
+                    {
+                        let edit_cell_idx = info.to_cell_for_lsp(range.start());
+                        if edit_cell_idx != Some(current_cell_idx) {
+                            // Redirect to the current cell, inserting at line 0.
+                            let open_files = self.open_files.read();
+                            let notebook_path = self.open_notebook_cells.read().get(uri).cloned();
+                            let cell_url = notebook_path.and_then(|path| {
+                                if let Some(LspFile::Notebook(notebook)) =
+                                    open_files.get(&path).map(|f| &**f)
+                                {
+                                    notebook.get_code_cell_url(current_cell_idx).cloned()
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(cell_url) = cell_url {
+                                let top_of_cell = lsp_types::Range {
+                                    start: lsp_types::Position::new(0, 0),
+                                    end: lsp_types::Position::new(0, 0),
+                                };
+                                edit_uri = cell_url;
+                                edit_range = top_of_cell;
+                            }
+                        }
+                    };
+                    changes.entry(edit_uri).or_default().push(TextEdit {
+                        range: edit_range,
+                        new_text: insert_text,
+                    });
+                }
+                Some(CodeActionResponse::CodeAction(CodeAction {
+                    title,
+                    kind: Some(CodeActionKind::QuickFix),
+                    edit: Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }))
+            }));
             record_code_action_telemetry("quickfix", start);
         }
         if allow_fix_all {
