@@ -688,10 +688,23 @@ def unary(x: int): ...
 def variadic(*args: int): ...
 
 def test(xs: list[int]):
-    f(*xs)  # E:
+    f(*xs)
     unary(*xs)
     f(*())
     variadic(*xs)
+"#,
+);
+
+testcase!(
+    test_splat_unknown_length_zero_positional_params_5542,
+    r#"
+def no_args() -> int:
+    return 0
+
+def forward(xs: list[int]) -> None:
+    no_args(*xs)
+
+forward([])
 "#,
 );
 
