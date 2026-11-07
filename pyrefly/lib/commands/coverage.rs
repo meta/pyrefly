@@ -23,9 +23,9 @@ use crate::commands::util::CommandExitStatus;
 #[derive(Debug, Clone, Subcommand)]
 pub enum CoverageCommand {
     /// Generate a machine-readable type-coverage report from pyrefly type checking results.
-    Report(ReportArgs),
+    Report(Box<ReportArgs>),
     /// Check that type coverage from pyrefly type checking results meets a minimum threshold.
-    Check(CheckArgs),
+    Check(Box<CheckArgs>),
 }
 
 impl CoverageCommand {
