@@ -4,9 +4,8 @@ name: "Publish: Create GitHub release"
 # version is published to PyPI and a tag is pushed.
 #
 # It is called by publish_to_pypi.yml after the tag push succeeds.
-# Creating the release will in turn trigger publish_upload_binaries.yml
-# (which fires on release published events) to build and upload
-# platform binaries.
+# publish_to_pypi.yml then calls publish_upload_binaries.yml to attach the
+# platform binaries from the wheels it published.
 
 on:
   workflow_call:

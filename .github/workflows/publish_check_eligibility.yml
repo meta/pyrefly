@@ -1,7 +1,7 @@
 name: "Publish: Check eligibility"
 
-# Gate shared by publish_to_pypi.yml and publish_extension.yml. For `push`
-# events: publish from `main` only for dev versions (M.m.p-dev.N). Stable
+# Gate for publish_to_pypi.yml, which also publishes the VS Code extension.
+# For `push` events: publish from `main` only for dev versions (M.m.p-dev.N). Stable
 # version bumps land on main to keep trunk's version current and to keep
 # release notes in trunk history, but the artifact that actually publishes
 # is built from the cherry-picked commit on the release branch -- so we

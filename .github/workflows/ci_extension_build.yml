@@ -1,7 +1,18 @@
 name: "CI: Extension build"
+
+# Packages the VS Code extension for every platform. Releases package the
+# executables from the release wheels (`wheels: true`), so the extension ships
+# the same optimized binaries as PyPI. Otherwise each platform builds its own
+# executable, which is cheaper for testing the extension.
+
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      wheels:
+        description: 'Package the executables from the `dist` artifact of the calling run'
+        type: boolean
+        default: false
     outputs:
       pyrefly_version:
         description: 'The semver version from version.bzl (e.g. 1.2.0 or 1.2.0-dev.4)'
@@ -12,6 +23,12 @@ on:
       prerelease_flag:
         description: '"--pre-release" if dev version, empty string otherwise'
         value: ${{ jobs.get_version.outputs.prerelease_flag }}
+
+env:
+  # Retry downloads of crates and Rust toolchains, inside cross's containers
+  # too, more often than the default of 3 attempts.
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
 
 jobs:
   get_version:
@@ -41,9 +58,57 @@ jobs:
           echo "PYREFLY_VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "MARKETPLACE_VERSION=$MARKETPLACE_VERSION" >> $GITHUB_OUTPUT
           echo "PRERELEASE_FLAG=$PRERELEASE_FLAG" >> $GITHUB_OUTPUT
+  package_extension:
+    needs: get_version
+    if: ${{ inputs.wheels }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: win32-x64
+            binary: pyrefly-windows-x86_64
+          - target: win32-arm64
+            binary: pyrefly-windows-arm64
+          - target: linux-x64
+            binary: pyrefly-linux-x86_64
+          - target: linux-arm64
+            binary: pyrefly-linux-arm64
+          - target: linux-armhf
+            binary: pyrefly-linux-armv7
+          - target: alpine-x64
+            binary: pyrefly-linux-x86_64-musl
+          - target: alpine-arm64
+            binary: pyrefly-linux-arm64-musl
+          - target: darwin-x64
+            binary: pyrefly-macos-x86_64
+          - target: darwin-arm64
+            binary: pyrefly-macos-arm64
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download wheels
+        uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist
+      - name: Copy the executable to lsp/bin
+        run: python3 scripts/wheel_binaries.py extract dist ${{ matrix.binary }} lsp/bin
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+        working-directory: lsp/
+      - run: npx vsce package --target ${{ matrix.target }} ${{ needs.get_version.outputs.prerelease_flag }} ${{ needs.get_version.outputs.marketplace_version }}
+        working-directory: lsp/
+      - uses: actions/upload-artifact@v6
+        with:
+          name: pyrefly-${{ matrix.target }}
+          path: "lsp/*.vsix"
+
   build_extension:
     needs: get_version
-    if: ${{ success() }}
+    if: ${{ success() && !inputs.wheels }}
     strategy:
       fail-fast: false
       matrix:
@@ -52,7 +117,7 @@ jobs:
             platform: win32
             arch: x64
             github_env: $env:GITHUB_ENV
-          - os: windows-latest
+          - os: windows-11-arm
             platform: win32
             arch: arm64
             github_env: $env:GITHUB_ENV
@@ -67,22 +132,20 @@ jobs:
             # necessary for glibc 2.31
             container: ubuntu:20.04
             github_env: $GITHUB_ENV
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-latest
             platform: linux
             arch: armhf
-            # necessary for glibc 2.31
-            container: ubuntu:20.04
+            rust_target: armv7-unknown-linux-gnueabihf
             github_env: $GITHUB_ENV
           - os: ubuntu-latest
             platform: alpine
             arch: x64
             rust_target: x86_64-unknown-linux-musl
             github_env: $GITHUB_ENV
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-latest
             platform: alpine
             arch: arm64
-            # necessary for glibc 2.31
-            container: ubuntu:20.04
+            rust_target: aarch64-unknown-linux-musl
             github_env: $GITHUB_ENV
           # x86 EOL on github-actions is august 2027 according to https://github.com/actions/runner-images/issues/13046
           # we are currently cross-compiling but still running on macos-15-intel for the e2e tests. at EOL, we
@@ -109,7 +172,7 @@ jobs:
       - name: set windows cargo home
         # we need to set CARGO_HOME to a high-up directory on Windows machines, since some dependencies cloned
         # by Cargo have long paths and will cause builds/tests to fail
-        if: ${{ matrix.os == 'windows-latest' }}
+        if: ${{ matrix.platform == 'win32' }}
         run: echo "CARGO_HOME=C:\\cargo" >> ${{ matrix.github_env }}
       - name: set up rust cache
         uses: Swatinem/rust-cache@v2
@@ -117,7 +180,10 @@ jobs:
           prefix-key: pyrefly-extension
       - name: set jemalloc page size for ARM64 Linux
         if: ${{ matrix.arch == 'arm64' && matrix.platform == 'linux' || matrix.arch == 'arm64' && matrix.platform == 'alpine' }}
-        run: echo "JEMALLOC_SYS_WITH_LG_PAGE=16" >> ${{ matrix.github_env }}
+        run: |
+          echo "JEMALLOC_SYS_WITH_LG_PAGE=16" >> ${{ matrix.github_env }}
+          # cross only passes the variable into its container when asked to.
+          echo "CROSS_BUILD_ENV_PASSTHROUGH=JEMALLOC_SYS_WITH_LG_PAGE" >> ${{ matrix.github_env }}
       - name: set jemalloc page size for ARM64 macOS
         if: ${{ matrix.arch == 'arm64' && matrix.platform == 'darwin' }}
         run: echo "JEMALLOC_SYS_WITH_LG_PAGE=14" >> ${{ matrix.github_env }}
@@ -127,11 +193,11 @@ jobs:
         with:
           command: build
           target: ${{ matrix.rust_target }}
-          args: "--release --all-features --manifest-path pyrefly/Cargo.toml"
+          args: "--release --manifest-path pyrefly/Cargo.toml"
           toolchain: stable
       - name: build pyrefly binary
         if: ${{ matrix.rust_target == '' }}
-        run: cargo build --release --all-features --manifest-path pyrefly/Cargo.toml
+        run: cargo build --release --manifest-path pyrefly/Cargo.toml
       - name: copy binary to lsp/bin
         shell: bash
         run: |
