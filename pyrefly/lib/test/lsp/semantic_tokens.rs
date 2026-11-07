@@ -1205,7 +1205,8 @@ token-type: enumMember
 #[test]
 fn enum_member_definition_test() {
     let mut env = TestEnv::new();
-    // Multiple members keep unions of A or title as literal unions, not enum instances.
+    // A single-member enum normalizes Literal[E.A] to E. The literal-union fixtures
+    // therefore have a second member.
     env.add(
         "fixtures",
         r#"
@@ -1252,7 +1253,6 @@ mixed_class: type[E] | type[Holder]
 x: X
 str_enum_class: type[X] | type[Y]
 mixed_str_enum_class: type[X] | type[Holder]
-# Complete singleton unions normalize to instance types, outside the literal gate.
 normalized_union_class: type[SingletonE] | type[SingletonF]
 "#,
     );
@@ -1272,6 +1272,8 @@ normalized_union_class: type[SingletonE] | type[SingletonF]
         ("str_enum_class.title", "class", "enumMember"),
         ("mixed_str_enum_class.title", "class", "property"),
         ("Holder.title", "class", "property"),
+        // BUG: A should be enumMember, but normalization loses the enum literal types.
+        // https://github.com/meta/pyrefly/issues/4751
         ("normalized_union_class.A", "class", "property"),
     ] {
         let (receiver, attribute) = expression.split_once('.').unwrap();
@@ -2410,8 +2412,8 @@ fn attribute_range_skips_classification_but_visits_receiver() {
         );
         builder.process_ast(
             &ast,
-            &|_, _, name| {
-                classified.borrow_mut().push(name.to_string());
+            &|attr| {
+                classified.borrow_mut().push(attr.attr.id.to_string());
                 Some(SemanticTokenTypes::Property)
             },
             &|_| Some((ModuleName::from_str("main"), SymbolKind::Variable)),

@@ -24,6 +24,7 @@ use regex::Regex;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::ExceptHandler;
 use ruff_python_ast::Expr;
+use ruff_python_ast::ExprAttribute;
 use ruff_python_ast::ExprContext;
 use ruff_python_ast::InterpolatedElement;
 use ruff_python_ast::InterpolatedStringElement;
@@ -639,7 +640,7 @@ impl SemanticTokenBuilder {
     fn process_expr(
         &mut self,
         x: &Expr,
-        get_attribute_kind: &dyn Fn(TextRange, TextRange, &Name) -> Option<SemanticTokenTypes>,
+        get_attribute_kind: &dyn Fn(&ExprAttribute) -> Option<SemanticTokenTypes>,
         get_symbol_kind: &dyn Fn(&Key) -> Option<(ModuleName, SymbolKind)>,
     ) {
         match x {
@@ -671,8 +672,7 @@ impl SemanticTokenBuilder {
             }
             Expr::Attribute(attr) => {
                 if range_overlaps(self.limit_range, attr.attr.range()) {
-                    let kind = get_attribute_kind(attr.range(), attr.value.range(), &attr.attr.id)
-                        .unwrap_or(SemanticTokenTypes::Property);
+                    let kind = get_attribute_kind(attr).unwrap_or(SemanticTokenTypes::Property);
                     self.push_if_in_range(attr.attr.range(), kind, Vec::new());
                 }
                 attr.value
@@ -904,7 +904,7 @@ impl SemanticTokenBuilder {
     pub fn process_ast(
         &mut self,
         ast: &ModModule,
-        get_attribute_kind: &dyn Fn(TextRange, TextRange, &Name) -> Option<SemanticTokenTypes>,
+        get_attribute_kind: &dyn Fn(&ExprAttribute) -> Option<SemanticTokenTypes>,
         get_symbol_kind: &dyn Fn(&Key) -> Option<(ModuleName, SymbolKind)>,
     ) {
         for s in &ast.body {

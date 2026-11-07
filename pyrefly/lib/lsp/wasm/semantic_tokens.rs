@@ -5,13 +5,13 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::slice;
-
 use lsp_types::SemanticToken;
 use lsp_types::SemanticTokenTypes;
 use pyrefly_build::handle::Handle;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::types::Type;
+use ruff_python_ast::ExprAttribute;
+use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 
 use crate::binding::binding::Key;
@@ -24,6 +24,46 @@ use crate::state::semantic_tokens::disabled_ranges_for_module;
 use crate::state::state::Transaction;
 
 impl Transaction<'_> {
+    /// Classify an attribute using its value type and effective definition.
+    fn attribute_semantic_token_type(
+        &self,
+        handle: &Handle,
+        attr: &ExprAttribute,
+    ) -> Option<SemanticTokenTypes> {
+        let ty = self.get_type_trace(handle, attr.range())?;
+        let kind = attribute_symbol_kind_from_type(&ty)
+            .to_lsp_semantic_token_type_with_modifiers()
+            .0;
+        let name = &attr.attr.id;
+        // Enum-valued fields can have the same type as enum members. Check
+        // the winning declaration on each receiver branch, not shadowed bases.
+        if ty
+            .as_unions()
+            .iter()
+            .all(|ty| matches!(ty, Type::Literal(lit) if matches!(lit.value, Lit::Enum(_))))
+            && let Some(base) = self.get_type_trace(handle, attr.value.range())
+            && self.ad_hoc_solve(handle, "semantic_token_enum_member", |solver| {
+                solver
+                    .attribute_lookup_classes(&base)
+                    .is_some_and(|classes| {
+                        !classes.is_empty()
+                            && classes.iter().all(|cls| {
+                                solver
+                                    .get_class_member_with_defining_class(cls, name)
+                                    .is_some_and(|member| {
+                                        solver
+                                            .get_enum_member(&member.defining_class, name)
+                                            .is_some()
+                                    })
+                            })
+                    })
+            }) == Some(true)
+        {
+            return Some(SemanticTokenTypes::EnumMember);
+        }
+        Some(kind)
+    }
+
     pub fn semantic_tokens(
         &self,
         handle: &Handle,
@@ -44,42 +84,7 @@ impl Transaction<'_> {
 
         builder.process_ast(
             &ast,
-            &|range, base_range, name| {
-                let ty = self.get_type_trace(handle, range)?;
-                let kind = attribute_symbol_kind_from_type(&ty)
-                    .to_lsp_semantic_token_type_with_modifiers()
-                    .0;
-                let members = match &ty {
-                    Type::Union(union) => union.members.as_slice(),
-                    _ => slice::from_ref(&ty),
-                };
-                // Enum-valued fields can have the same type as enum members. Check
-                // the winning declaration on each receiver branch, not shadowed bases.
-                if members
-                    .iter()
-                    .all(|ty| matches!(ty, Type::Literal(lit) if matches!(lit.value, Lit::Enum(_))))
-                    && let Some(base) = self.get_type_trace(handle, base_range)
-                    && self.ad_hoc_solve(handle, "semantic_token_enum_member", |solver| {
-                        solver
-                            .attribute_lookup_classes(&base)
-                            .is_some_and(|classes| {
-                                !classes.is_empty()
-                                    && classes.iter().all(|cls| {
-                                        solver
-                                            .get_class_member_with_defining_class(cls, name)
-                                            .is_some_and(|member| {
-                                                solver
-                                                    .get_enum_member(&member.defining_class, name)
-                                                    .is_some()
-                                            })
-                                    })
-                            })
-                    }) == Some(true)
-                {
-                    return Some(SemanticTokenTypes::EnumMember);
-                }
-                Some(kind)
-            },
+            &|attr| self.attribute_semantic_token_type(handle, attr),
             &|key: &Key| {
                 let find_preference = FindPreference {
                     import_behavior: ImportBehavior::StopAtRenamedImports,

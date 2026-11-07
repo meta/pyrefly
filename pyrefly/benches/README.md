@@ -2,7 +2,7 @@
 
 Real-world benchmarks over a large, pinned PyTorch checkout (15k+ Python files)
 across all cores. They cover interactive LSP latency (`cold_start`,
-`error_propagation`, `semantic_tokens`, `workspace_symbol`), cold whole-project
+`error_propagation`, `workspace_symbol`), cold whole-project
 batch throughput (`full_check`), and cold whole-project indexing (`indexed_memory`).
 A separate `pytorch_memory` target reports the memory that index holds, for the
 reason in its section below.
@@ -55,17 +55,6 @@ per bench:
 - `pytorch/workspace_symbol.rs` — the workspace-symbol benchmark. Fully indexes
   the checkout once, then measures warm `workspace/symbol("init")` requests.
   Criterion id `pytorch/workspace_symbol_init`.
-- `pytorch/semantic_tokens.rs` — the semantic-token benchmark. Opens
-  `torch/nn/modules/module.py` and measures warm `textDocument/semanticTokens/full`
-  requests. Server setup, type checking, and the first request are not measured.
-  Background indexing is disabled. The client supplies syntax highlighting, so
-  the response contains only semantic tokens. This exercises attribute
-  classification across a large file. Criterion id `pytorch/semantic_tokens_module`.
-  The existing CodSpeed walltime job includes this benchmark.
-  `NoTelemetry` excludes the telemetry backend's per-solve work. Internal timing
-  and telemetry event construction still execute.
-  For a base/head comparison, copy this benchmark and its registration to the
-  base revision, then use the same pinned source, compiler, and arguments.
 - `pytorch/full_check.rs` — the full-check benchmark. Fresh `State` per iteration;
   runs exactly what `pyrefly check` (project mode, no file args) does from inside
   the checkout — discovers the project and checks every project file across all
@@ -123,7 +112,6 @@ cargo bench --bench pytorch -- error_propagation
 cargo bench --bench pytorch -- full_check
 cargo bench --bench pytorch -- indexed_memory
 PYREFLY_LOG=off cargo bench --bench pytorch -- workspace_symbol_init
-PYREFLY_LOG=off cargo bench --bench pytorch -- semantic_tokens_module --noplot
 
 # The memory report — its own target, so that it gets a clean process
 buck2 run @fbcode//mode/opt fbcode//pyrefly/pyrefly:pytorch_memory_bench
