@@ -5687,10 +5687,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Option<ClassAttribute> {
         self.get_class_member(class.class_object(), name)
             .map(|field| {
+                let lookup_class = if field.is_classmethod() {
+                    quantified
+                        .attribute_lookup_class_type(class.class_object())
+                        .unwrap_or_else(|| class.clone())
+                } else {
+                    class.clone()
+                };
                 self.as_class_attribute(
                     name,
                     field.as_ref(),
-                    &ClassBase::Quantified(quantified, class.clone()),
+                    &ClassBase::Quantified(quantified, lookup_class),
                 )
             })
     }

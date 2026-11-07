@@ -205,7 +205,8 @@ impl TParams {
             .0
             .into_iter()
             .map(|q| {
-                let new_restriction = match q.restriction() {
+                let original_restriction = q.restriction().clone();
+                let new_restriction = match &original_restriction {
                     Restriction::Bound(ty) => {
                         Restriction::Bound(Self::strip_recursive_class_targs(ty.clone()))
                     }
@@ -219,7 +220,12 @@ impl TParams {
                     }
                     Restriction::Unrestricted => Restriction::Unrestricted,
                 };
-                q.with_restriction(new_restriction)
+                if new_restriction == original_restriction {
+                    q
+                } else {
+                    q.with_untruncated_restriction(original_restriction)
+                        .with_restriction(new_restriction)
+                }
             })
             .collect();
         Self(quantifieds)
