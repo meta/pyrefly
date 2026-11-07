@@ -2912,7 +2912,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             && !(base
                 .type_at_facet(&FacetKind::Attribute(x.attr.id.clone()))
                 .is_some_and(Type::is_error)
-                && self.attr_missing_from_base(base.ty(), &x.attr.id));
+                && self.attr_error_from_missing(base.ty(), &x.attr.id));
         errors.extend(attr_errors);
         match result.ty() {
             // Like pyright, every access whose type is an implicit `Any` is reported, including

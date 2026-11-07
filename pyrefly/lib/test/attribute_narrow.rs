@@ -303,6 +303,24 @@ def f(x: A | B):
 );
 
 testcase!(
+    test_missing_attribute_narrow_rebase_preserves_declared_errors,
+    r#"
+from typing import final, reveal_type
+
+@final
+class A:
+    foo: int
+class B:
+    foo: NotDefined  # E: Could not find name `NotDefined`
+
+def f(x: A | B):
+    if isinstance(x.foo, int):
+        if isinstance(x, B):
+            reveal_type(x.foo)  # E: revealed type: Unknown
+"#,
+);
+
+testcase!(
     test_missing_class_attribute_narrow_preserves_access_errors,
     r#"
 from typing import reveal_type
@@ -332,6 +350,49 @@ def f(x: int):
         x.foo.bar
         x.foo.method()
         x.foo[0]
+"#,
+);
+
+testcase!(
+    test_missing_attribute_narrow_union_error_provenance,
+    TestEnv::new().enable_unknown_from_error_error(),
+    r#"
+from typing import Any
+
+class Missing:
+    pass
+class Explicit:
+    foo: Any
+class Dynamic:
+    def __getattr__(self, name: str) -> Any: ...
+class Invalid:
+    foo: NotDefined  # E: Could not find name `NotDefined`
+class PartiallyInvalid:
+    foo: int | NotDefined  # E: Could not find name `NotDefined`
+
+def any_base(x: Any | None):
+    if x.foo:  # E: Object of class `NoneType` has no attribute `foo`
+        x.foo
+    x.foo
+
+def explicit(x: Explicit | Missing):
+    if x.foo:  # E: Object of class `Missing` has no attribute `foo`
+        x.foo
+    x.foo
+
+def dynamic(x: Dynamic | Missing):
+    if x.foo:  # E: Object of class `Missing` has no attribute `foo`
+        x.foo
+    x.foo
+
+def declared_error(x: Invalid | Missing):
+    if x.foo:  # E: Object of class `Missing` has no attribute `foo`
+        x.foo  # E: The type of attribute `foo` is unknown because it comes from an error
+    x.foo  # E: The type of attribute `foo` is unknown because it comes from an error
+
+def declared_union_error(x: PartiallyInvalid | Missing):
+    if not isinstance(x.foo, int):  # E: Object of class `Missing` has no attribute `foo`
+        x.foo  # E: The type of attribute `foo` is unknown because it comes from an error
 "#,
 );
 

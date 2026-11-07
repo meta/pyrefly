@@ -3130,15 +3130,27 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.unions(results)
     }
 
-    /// Whether `attr_name` is genuinely absent from the looked-up members of `base`, as opposed
-    /// to being present but resolving to an error type. This distinguishes a narrowed
-    /// missing-attribute facet, whose access error was already reported where it arose, from a
-    /// declared attribute whose own type is an error, which must keep reporting.
-    pub(crate) fn attr_missing_from_base(&self, base: &Type, attr_name: &Name) -> bool {
+    /// Whether a missing member is the only source of error `Any` in this attribute lookup.
+    /// Other members may supply valid types, including `Any`, but declared error types must
+    /// keep reporting even when the attribute has been narrowed.
+    pub(crate) fn attr_error_from_missing(&self, base: &Type, attr_name: &Name) -> bool {
         self.as_attribute_base(base.clone())
             .is_some_and(|attr_base| {
-                let (found, not_found, _) = self.lookup_attr(attr_base, attr_name).decompose();
-                found.is_empty() && !not_found.is_empty()
+                let (found, not_found, internal_errors) =
+                    self.lookup_attr(attr_base, attr_name).decompose();
+                let ignore_errors = self.error_swallower();
+                !not_found.is_empty()
+                    && internal_errors.is_empty()
+                    && found.into_iter().all(|(attr, _)| {
+                        self.resolve_get_access(
+                            attr_name,
+                            attr,
+                            TextRange::default(),
+                            &ignore_errors,
+                            None,
+                        )
+                        .is_ok_and(|ty| ty.into_unions().iter().all(|member| !member.is_error()))
+                    })
             })
     }
 
