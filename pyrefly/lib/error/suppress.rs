@@ -9,6 +9,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -194,9 +195,16 @@ impl SerializedError {
         self.is_unused_pyrefly_or_pyre_ignore() || self.is_unused_type_ignore()
     }
 
+    /// Returns true if this error kind cannot be suppressed by an ignore comment
+    /// (see [`ErrorKind::is_unsuppressable`]). Such errors must be excluded when
+    /// writing suppression comments, since the comment would never take effect.
+    pub fn is_unsuppressable(&self) -> bool {
+        <ErrorKind as FromStr>::from_str(&self.name).is_ok_and(|kind| kind.is_unsuppressable())
+    }
+
     /// Returns whether a suppression comment may be written for this error.
     pub fn is_suppressable(&self) -> bool {
-        !self.is_directive() && !self.is_unused_ignore()
+        !self.is_directive() && !self.is_unsuppressable()
     }
 }
 

@@ -485,21 +485,25 @@ impl ErrorCollector {
         error_config: &ErrorConfig,
     ) -> SuppressionEffect {
         // Check whole-file ignore-all directives first.
-        // Unused-ignore errors cannot be suppressed to prevent infinite loops.
-        if !err.error_kind().is_unused_ignore()
-            && err.error_kind().suppression_names().any(|kind| {
-                ignore_all.iter().any(|supp| {
-                    error_config.enabled_ignores.contains(&supp.tool())
-                        && match supp.tool() {
-                            Tool::Pyrefly => {
-                                supp.error_codes().is_empty()
-                                    || supp.error_codes().iter().any(|x| x == kind)
-                            }
-                            _ => true,
+        // Diagnostics about ignore comments themselves can never be silenced by a
+        // comment (see ErrorKind::is_unsuppressable); only their configured
+        // severity applies. Enforce that once here so every path below — ignore-all,
+        // per-line, and f-string — is covered uniformly.
+        if err.error_kind().is_unsuppressable() {
+            return SuppressionEffect::None;
+        }
+        if err.error_kind().suppression_names().any(|kind| {
+            ignore_all.iter().any(|supp| {
+                error_config.enabled_ignores.contains(&supp.tool())
+                    && match supp.tool() {
+                        Tool::Pyrefly => {
+                            supp.error_codes().is_empty()
+                                || supp.error_codes().iter().any(|x| x == kind)
                         }
-                })
+                        _ => true,
+                    }
             })
-        {
+        }) {
             return SuppressionEffect::Suppress;
         }
         let mut effect = err.suppression_effect(
@@ -625,9 +629,11 @@ impl ErrorCollector {
                 }
                 continue;
             }
-            // A `misplaced-ignore` error is about a suppression comment, so the fix is to
-            // move or remove the comment rather than to suppress the error.
-            let effect = if error.error_kind() == ErrorKind::MisplacedIgnore {
+            // Ignore-comment diagnostics are about suppression comments themselves,
+            // so the fix is to move or remove the comment rather than to suppress
+            // the error. `suppression_effect` already returns `None` for them, but
+            // keep the explicit short-circuit so their intent stays local.
+            let effect = if error.error_kind().is_unsuppressable() {
                 SuppressionEffect::None
             } else {
                 Self::suppression_effect(error, fstring_ranges, ignore_all, error_config)
