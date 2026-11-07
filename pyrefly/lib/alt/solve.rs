@@ -6856,7 +6856,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // results could preserve sharing by being represented as aliases.
         self.get_idx(fwd)
             .clone()
-            .map_ty(|ty| ty.promote_shallow_implicit_literals(self.stdlib))
+            .map_ty(|ty| ty.promote_shallow(self.stdlib))
     }
 
     pub(crate) fn binding_to_type_info(

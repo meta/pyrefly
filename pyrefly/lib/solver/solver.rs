@@ -3780,9 +3780,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 answer
             }
         } else {
-            let t1_p = t1
-                .clone()
-                .promote_implicit_literals(self.type_order.stdlib());
+            let t1_p = t1.clone().promote(self.type_order.stdlib());
             if let Some(upper_bound) = upper_bound {
                 // Don't promote literals if doing so would violate a literal upper bound.
                 if self.is_subset_eq(&t1_p, upper_bound).is_ok() {
@@ -4350,9 +4348,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                         Ok(())
                     }
                     Variable::PartialContained(_) => {
-                        let t1_p = t1
-                            .clone()
-                            .promote_implicit_literals(self.type_order.stdlib());
+                        let t1_p = t1.clone().promote(self.type_order.stdlib());
                         drop(v2_ref);
                         // Widen None to None | Any (see comment at the other
                         // PartialContained pinning site above).

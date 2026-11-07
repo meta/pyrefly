@@ -675,7 +675,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         members
                             .iter()
                             .cloned()
-                            .map(|ty| ty.promote_implicit_literals(self.stdlib))
+                            .map(|ty| ty.promote(self.stdlib))
                             .collect(),
                     );
                     (

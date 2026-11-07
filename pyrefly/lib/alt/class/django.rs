@@ -990,11 +990,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && let Type::Tuple(Tuple::Concrete(elements)) = &lit_enum.ty
                     && elements.len() >= 2
                 {
-                    Some(
-                        elements[elements.len() - 1]
-                            .clone()
-                            .promote_implicit_literals(self.stdlib),
-                    )
+                    Some(elements[elements.len() - 1].clone().promote(self.stdlib))
                 } else {
                     None
                 }

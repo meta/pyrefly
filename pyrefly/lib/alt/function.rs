@@ -1143,7 +1143,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Inner decorators see the original return type. The completed getter describes
             // the writable cached value, so inferred literals must be widened.
             ty.transform_toplevel_callable_signatures(|callable, _| {
-                callable.ret = callable.ret.clone().promote_implicit_literals(self.stdlib);
+                callable.ret = callable.ret.clone().promote(self.stdlib);
             });
         }
         self.validate_singledispatch_dispatcher_signature(
@@ -1562,7 +1562,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             .ty
                             .clone()
                             .with_literal_style(LitStyle::Implicit)
-                            .promote_implicit_literals(self.stdlib),
+                            .promote(self.stdlib),
                     )
                 } else {
                     self.heap.mk_any_implicit()
@@ -2648,7 +2648,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let impl_ret = impl_func.signature.ret.clone();
             self.check_type(
                 &overload_func.signature.ret,
-                &impl_ret.promote_implicit_literals(self.stdlib),
+                &impl_ret.promote(self.stdlib),
                 *range,
                 errors,
                 &|| {

@@ -351,7 +351,7 @@ fn get_classes_of_type(type_: &Type, context: &ModuleContext) -> ClassNamesFromT
 pub fn preprocess_type(type_: &Type, context: &ModuleAnswersContext) -> Type {
     let type_ = type_.clone();
     // Promote `Literal[..]` into `str` or `int`.
-    let type_ = type_.promote_implicit_literals(&context.stdlib);
+    let type_ = type_.promote(&context.stdlib);
     strip_self_type(context.answers.heap(), type_)
 }
 

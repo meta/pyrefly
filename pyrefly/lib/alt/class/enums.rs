@@ -272,7 +272,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let value_ty = self.enum_literal_to_value_type(lit_enum.clone(), enum_metadata.is_django);
         // Only preserve the literal type if its base class type matches the mixin exactly.
         if let Some(ref mixed_in) = mixed_in {
-            let promoted = value_ty.clone().promote_implicit_literals(self.stdlib);
+            let promoted = value_ty.clone().promote(self.stdlib);
             if &promoted == mixed_in {
                 value_ty
             } else {
@@ -310,7 +310,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 };
                 let value_ty = self.enum_literal_to_value_type(*lit_enum, enum_metadata.is_django);
                 Some(if let Some(ref mixed_in) = mixed_in {
-                    let promoted = value_ty.clone().promote_implicit_literals(self.stdlib);
+                    let promoted = value_ty.clone().promote(self.stdlib);
                     if &promoted == mixed_in {
                         value_ty
                     } else {

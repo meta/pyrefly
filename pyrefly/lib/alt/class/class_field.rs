@@ -2153,7 +2153,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         // Shape and column inference need NNModule and DataFrame literals kept.
                         value_ty
                     } else {
-                        value_ty.promote_implicit_literals(self.stdlib)
+                        value_ty.promote(self.stdlib)
                     };
                     union_types.push(value_ty);
                     if overall_annotation.is_none() {
@@ -2346,7 +2346,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 && has_implicit_literal
             {
                 let pre = value_ty.clone();
-                (value_ty.promote_implicit_literals(self.stdlib), Some(pre))
+                (value_ty.promote(self.stdlib), Some(pre))
             } else {
                 (value_ty, None)
             }

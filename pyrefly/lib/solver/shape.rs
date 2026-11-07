@@ -173,8 +173,7 @@ pub(crate) fn normalize_shape_int_bound_solution(
         return None;
     }
     let normalize_member = |member: &Type| {
-        shape_int_bound_solution(member)
-            .unwrap_or_else(|| member.clone().promote_implicit_literals(stdlib))
+        shape_int_bound_solution(member).unwrap_or_else(|| member.clone().promote(stdlib))
     };
     if optional_int_bound {
         let normalize_optional_member = |member: &Type| match member {

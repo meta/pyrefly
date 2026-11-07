@@ -2221,43 +2221,56 @@ impl Type {
         }
     }
 
-    fn promote_one_implicit_literal(ty: &mut Type, stdlib: &Stdlib) {
+    fn promote_one(ty: &mut Type, stdlib: &Stdlib) {
+        Self::promote_implicit_literal(ty, stdlib);
+        Self::remove_truthiness_markers(ty);
+    }
+
+    fn promote_implicit_literal(ty: &mut Type, stdlib: &Stdlib) {
         match &*ty {
             Type::Literal(lit) if lit.style == LitStyle::Implicit => {
                 *ty = lit.value.general_class_type(stdlib).clone().to_type()
             }
             Type::LiteralString(LitStyle::Implicit) => *ty = stdlib.str().clone().to_type(),
-            Type::Intersect(x) if x.0.iter().any(Type::is_truthiness_marker) => {
-                *ty = ty.clone().without_truthiness_markers()
-            }
             _ => {}
         }
     }
 
-    /// Like `promote_implicit_literals` but only recurses into unions.
-    pub fn promote_shallow_implicit_literals(mut self, stdlib: &Stdlib) -> Type {
+    /// Remove the truthiness markers from `ty` if it is an intersection. This does not recurse.
+    fn remove_truthiness_markers(ty: &mut Type) {
+        if let Type::Intersect(x) = ty
+            && x.0.iter().any(Type::is_truthiness_marker)
+        {
+            x.0.retain(|m| !m.is_truthiness_marker());
+            if let [member] = x.0.as_slice() {
+                *ty = member.clone();
+            }
+        }
+    }
+
+    /// Like `promote` but only recurses into unions.
+    pub fn promote_shallow(mut self, stdlib: &Stdlib) -> Type {
         match &mut self {
             Type::Union(union) => {
                 for member in &mut union.members {
-                    Self::promote_one_implicit_literal(member, stdlib);
+                    Self::promote_one(member, stdlib);
                 }
             }
-            _ => Self::promote_one_implicit_literal(&mut self, stdlib),
+            _ => Self::promote_one(&mut self, stdlib),
         }
         self
     }
 
     /// Widen an inferred type for a slot that later assignments can write, such as an attribute,
-    /// a container element or a solved type variable: implicit literals become their class, and
-    /// truthiness markers are removed, because they describe only the value of one expression.
-    pub fn promote_implicit_literals(mut self, stdlib: &Stdlib) -> Type {
+    /// a container element or a solved type variable. This removes precision that describes only
+    /// the value of one expression: implicit literals become their class, and truthiness markers
+    /// are removed.
+    pub fn promote(mut self, stdlib: &Stdlib) -> Type {
         fn g(ty: &mut Type, f: &mut dyn FnMut(&mut Type)) {
             ty.recurse_mut(&mut |ty| g(ty, f));
             f(ty);
         }
-        g(&mut self, &mut |ty| {
-            Self::promote_one_implicit_literal(ty, stdlib)
-        });
+        g(&mut self, &mut |ty| Self::promote_one(ty, stdlib));
         self
     }
 
@@ -2384,18 +2397,7 @@ impl Type {
 
     /// Remove truthiness markers from every intersection.
     pub fn without_truthiness_markers(self) -> Type {
-        self.transform(&mut |t| {
-            if let Type::Intersect(x) = t
-                && x.0.iter().any(Type::is_truthiness_marker)
-            {
-                let mut members = x.0.clone();
-                members.retain(|m| !m.is_truthiness_marker());
-                *t = match members.as_slice() {
-                    [member] => member.clone(),
-                    _ => Type::Intersect(Box::new((members, x.1.clone()))),
-                };
-            }
-        })
+        self.transform(&mut Self::remove_truthiness_markers)
     }
 
     /// Replace every DataFrame and Series schema with its plain underlying class. The schema forms

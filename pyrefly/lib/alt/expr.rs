@@ -996,7 +996,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .clone();
                     // Complements PromoteForward for seeded captures.
                     if self.bindings().should_promote_at_range(x.range) {
-                        result.map_ty(|ty| ty.promote_shallow_implicit_literals(self.stdlib))
+                        result.map_ty(|ty| ty.promote_shallow(self.stdlib))
                     } else {
                         result
                     }
@@ -1204,7 +1204,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                         self.solver().expand_with_bounds(&mut resolved);
                                         let promoted = resolved
                                             .with_literal_style(LitStyle::Implicit)
-                                            .promote_implicit_literals(self.stdlib);
+                                            .promote(self.stdlib);
                                         // A `None` default almost always denotes an optional value,
                                         // so infer `Any | None` to keep the parameter permissive
                                         // rather than strictly `None`.
@@ -1716,7 +1716,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
         }
-        ty.promote_implicit_literals(self.stdlib)
+        ty.promote(self.stdlib)
     }
 
     fn dict_key_infer_with_hint(
@@ -2649,8 +2649,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let result = if let Some(default) = args.args.get(1) {
             self.union(
                 field.ty,
-                self.expr_infer(default, errors)
-                    .promote_implicit_literals(self.stdlib),
+                self.expr_infer(default, errors).promote(self.stdlib),
             )
         } else {
             self.heap.mk_optional(field.ty)
@@ -2686,8 +2685,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let result = if let Some(default) = args.args.get(1) {
             self.union(
                 field.ty,
-                self.expr_infer(default, errors)
-                    .promote_implicit_literals(self.stdlib),
+                self.expr_infer(default, errors).promote(self.stdlib),
             )
         } else {
             field.ty
