@@ -150,6 +150,21 @@ class SetOnOtherObject:
 "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/5554
+testcase!(
+    test_uninitialized_instance_variable_argparse_namespace,
+    TestEnv::new().enable_uninitialized_instance_variable_error(),
+    r#"
+from argparse import Namespace
+
+class Args(Namespace):
+    name: str
+
+class SubArgs(Args):
+    verbose: bool
+"#,
+);
+
 // https://github.com/facebook/pyrefly/issues/5278
 // Metaclass annotations describe attributes supplied by classes that use the
 // metaclass (via type.__new__), not fields that must be set in metaclass __init__.
