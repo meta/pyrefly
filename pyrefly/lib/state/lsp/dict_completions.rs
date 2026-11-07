@@ -844,20 +844,23 @@ impl<'a> Transaction<'a> {
         })
     }
 
+    /// Returns whether `position` is in a string-literal value of a dict literal whose expected
+    /// type is a `TypedDict` with that key, in which case the completions for the value come
+    /// from here.
     pub(crate) fn add_dict_value_literal_completions(
         &self,
         handle: &Handle,
         module: &ModModule,
         position: TextSize,
         completions: &mut Vec<RankedCompletion>,
-    ) {
+    ) -> bool {
         let Some((dict, key_lit, value_lit)) =
             Self::dict_literal_value_string_literal_at(module, position)
         else {
-            return;
+            return false;
         };
         if position < value_lit.range().start() || position > value_lit.range().end() {
-            return;
+            return false;
         }
         let Some(members) = self.narrowed_typed_dict_members_for_dict_literal(
             handle,
@@ -866,14 +869,15 @@ impl<'a> Transaction<'a> {
             Some(key_lit.range()),
             Some(value_lit.range()),
         ) else {
-            return;
+            return false;
         };
         let Some(field_ty) =
             self.typed_dict_field_type_from_members(handle, members, key_lit.value.to_str())
         else {
-            return;
+            return false;
         };
         Self::add_literal_completions_from_type(&field_ty, completions, true);
+        true
     }
 
     /// Collects column names that are present in every member of a DataFrame union.

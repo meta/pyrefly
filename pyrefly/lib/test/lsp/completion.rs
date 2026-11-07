@@ -809,6 +809,41 @@ item: FooBar = {
     );
 }
 
+// The checker tries the members of a union in order and records the expected type of the value
+// at the cursor from the last member it tried. Here the matching member sorts first, so that
+// record comes from `Bbb`, which the other key's value rules out.
+#[test]
+fn dict_value_completion_narrows_discriminated_typed_dict_union_independent_of_member_order() {
+    let code = r#"
+from typing import Literal, TypedDict
+
+class Aaa(TypedDict):
+    kind: Literal["aaa"]
+    mode: Literal["aaa-mode"]
+
+class Bbb(TypedDict):
+    kind: Literal["bbb"]
+    mode: Literal["bbb-mode"]
+
+item: Aaa | Bbb = {
+    "kind": "aaa",
+    "mode": "|",
+#            ^
+}
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    let report = strip_ansi(&report);
+    assert!(
+        report.contains("- (Value) 'aaa-mode': Literal['aaa-mode']"),
+        "{report}"
+    );
+    assert!(
+        !report.contains("- (Value) 'bbb-mode': Literal['bbb-mode']"),
+        "{report}"
+    );
+}
+
 #[test]
 fn dict_key_completion_from_discriminated_typed_dict_union_literal() {
     let code = r#"
