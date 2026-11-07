@@ -59,6 +59,7 @@ use vec1::Vec1;
 
 use crate::alt::answers_solver::AnswersSolver;
 use crate::binding::binding::Key;
+use crate::binding::bindings::BindingsBuilder;
 use crate::error::error::Error;
 use crate::export::exports::ExportLocation;
 use crate::lsp::module_helpers::collect_symbol_def_paths;
@@ -107,6 +108,9 @@ pub struct HoverResult {
 pub struct HoverOptions {
     pub show_go_to_links: bool,
     pub verbosity_level: usize,
+    /// Whether hovering the definition of a class field shows the docstring that follows it.
+    /// Hovering a use of the field always does.
+    pub field_docstring_at_definition: bool,
 }
 
 /// Hover qualifies the module of a value's type, but not of a signature, where a
@@ -1479,6 +1483,24 @@ fn resolve_hover_parameter_doc(
     None
 }
 
+/// The docstring after a class field's definition, if `position` is on the field's name there.
+fn field_docstring_at_definition(
+    ast: &ModModule,
+    module: Module,
+    position: TextSize,
+) -> Option<Docstring> {
+    let nodes = Ast::locate_node(ast, position);
+    let AnyNodeRef::ExprName(name) = nodes.first()? else {
+        return None;
+    };
+    let class = nodes.iter().find_map(|node| match node {
+        AnyNodeRef::StmtClassDef(class) => Some(*class),
+        _ => None,
+    })?;
+    let range = *BindingsBuilder::extract_field_docstrings(&class.body).get(&name.range)?;
+    Some(Docstring(range, module))
+}
+
 fn is_constructor_dunder(name: Option<&str>) -> bool {
     name.is_some_and(|name| name == dunder::INIT.as_str() || name == dunder::NEW.as_str())
 }
@@ -1547,6 +1569,7 @@ pub fn get_hover(
         HoverOptions {
             show_go_to_links,
             verbosity_level: 0,
+            field_docstring_at_definition: false,
         },
     )
     .map(|result| result.hover)
@@ -1697,7 +1720,13 @@ pub fn get_hover_with_verbosity(
         docstring.or_else(|| class_docstring_for_constructor(transaction, handle, position))
     } else {
         docstring
-    };
+    }
+    .or_else(|| {
+        options
+            .field_docstring_at_definition
+            .then(|| field_docstring_at_definition(ast.as_deref()?, module_info?, position))
+            .flatten()
+    });
 
     let name = name.or_else(|| identifier_text_at(transaction, handle, position));
 

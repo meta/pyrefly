@@ -5934,6 +5934,7 @@ impl Server {
             HoverOptions {
                 show_go_to_links,
                 verbosity_level,
+                field_docstring_at_definition: false,
             },
         ))
     }
