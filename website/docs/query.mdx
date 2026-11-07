@@ -1,0 +1,93 @@
+---
+title: Semantic Queries
+description: Query Python types, references, and calls from the command line.
+---
+
+{/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */}
+
+# Semantic Queries
+
+:::warning Experimental
+
+The `query` command is experimental. Its arguments and JSON format can change.
+
+:::
+
+Use semantic queries to inspect Python code without an editor or an LSP client.
+Each successful command writes one JSON value to stdout. Logs and errors go to stderr.
+
+```shell
+pyrefly query hover src/payments/core.py 128 5
+pyrefly query find-references src/payments/core.py 128 5 --include-declaration
+pyrefly query call-hierarchy src/payments/core.py 128 5
+```
+
+`hover` returns LSP hover content, including a type or signature and available documentation.
+It returns `null` if the valid source position has no hover information.
+`find-references` returns an array of LSP locations, sorted by URI, line, and column.
+The `--include-declaration` flag adds the symbol's declaration.
+`call-hierarchy` returns an object with `item`, `incoming`, and `outgoing` fields.
+These fields contain LSP call hierarchy items and call edges in a deterministic order.
+
+## Source positions
+
+Input line and column numbers start at **1**. Columns count **UTF-16 code units**.
+For example, most characters occupy one column. A character such as `🐍` occupies two columns.
+Positions cannot point between the two UTF-16 code units of this character.
+
+JSON output follows LSP conventions. Output line and `character` numbers start at **0**.
+Range ends are exclusive. Locations use `file:` URIs, including percent encoding for characters such as spaces.
+
+To query an output location:
+
+1. Decode the file URI into a filesystem path with a URI library.
+2. Add 1 to `range.start.line`.
+3. Add 1 to `range.start.character`.
+
+For a call hierarchy item, use `selectionRange.start` instead of `range.start`.
+Incoming `fromRanges` belong to the caller's file. Outgoing `fromRanges` belong to the queried function's file.
+Bundled stub locations point to materialized `.pyi` files in Pyrefly's cache.
+
+## Project selection
+
+Pyrefly discovers configuration from the target file, independent of the current directory.
+References and call hierarchy queries index candidate files from that configuration's
+`project-includes` and `project-excludes`. Each candidate retains its own configuration.
+Hover loads the target and its imports without indexing the whole project.
+
+Use `--config` to select a configuration explicitly:
+
+```shell
+pyrefly query find-references src/payments/core.py 128 5 --config pyrefly.toml
+```
+
+An explicit configuration applies to all candidate files. Queries also accept the standard
+configuration overrides before the query name, such as `pyrefly query --python-version 3.13 hover ...`.
+Build-system configurations use their source database for import resolution.
+Configure project includes to cover potential callers. A source database alone does not enumerate all reverse dependencies.
+
+## Errors and coverage limits
+
+A missing or unreadable target, an invalid position, or an invalid configuration causes a nonzero exit status.
+The command writes an error to stderr and does not write a JSON result.
+An unresolved symbol causes a reference or call hierarchy query to fail.
+Ordinary type errors do not prevent useful semantic queries.
+
+Queries read files from disk. They do not include unsaved editor changes.
+Use Python source files or stub files as targets. Notebook cell positions are not supported.
+Results depend on configured imports, the Python environment, and the indexed candidate files.
+Files outside that candidate set can be absent from references and incoming calls.
+Dynamic calls that static analysis cannot resolve can also be absent.
+The command does not query an external reference provider.
+
+Call hierarchy uses the same resolution as the LSP. It can return multiple edges for repeated calls.
+For symbols with multiple possible definitions, the current adapter uses the first definition.
+A successful empty result does not prove that no caller exists outside the configured scope.
+
+Each invocation creates a new analysis state. Repeated invocations do not share a persistent index.
+References and call hierarchy index the selected project. Large projects can require substantial time and memory.

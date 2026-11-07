@@ -7052,8 +7052,7 @@ impl Server {
             Some(CallHierarchyOutgoingCallsRequest::METHOD.as_str()),
         )?;
 
-        // Clone uri for use in the transform closure
-        let uri_for_transform = uri.clone();
+        let path_remapper = self.path_remapper.clone();
 
         // The CallHierarchyItem we receive is already at the definition position
         // (thanks to prepare_call_hierarchy doing the go-to-definition step).
@@ -7076,7 +7075,7 @@ impl Server {
                 Ok((callees, definition.module))
             },
             move |(callees, source_module)| {
-                transform_outgoing_calls(callees, &source_module, &uri_for_transform)
+                transform_outgoing_calls(callees, &source_module, path_remapper.as_ref())
             },
         )
     }
