@@ -99,7 +99,7 @@ impl Load {
         let res = match path.details() {
             ModulePathDetails::FileSystem(path) => Self::load_from_filesystem(path, timing),
             ModulePathDetails::Namespace(_) => Ok(FileContents::from_source("".to_owned())),
-            ModulePathDetails::Memory(path) => memory_lookup
+            ModulePathDetails::Memory(_) => memory_lookup
                 .get(path)
                 .duped()
                 .as_deref()

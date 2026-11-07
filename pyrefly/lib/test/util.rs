@@ -861,11 +861,11 @@ impl TestEnv {
         SysInfo::new(self.version, self.platform.clone())
     }
 
-    pub fn get_memory(&self) -> Vec<(PathBuf, Option<Arc<FileContents>>)> {
+    pub fn get_memory(&self) -> Vec<(ModulePath, Option<Arc<FileContents>>)> {
         self.modules
             .iter()
             .filter_map(|(_, path, contents)| match path.details() {
-                ModulePathDetails::Memory(path) => Some(((**path).clone(), contents.dupe())),
+                ModulePathDetails::Memory(_) => Some((path.dupe(), contents.dupe())),
                 _ => None,
             })
             .collect()
@@ -1362,7 +1362,7 @@ pub fn testcase_for_macro(
                 env.sys_info(),
             );
             t.set_memory(vec![(
-                PathBuf::from(file),
+                ModulePath::memory(PathBuf::from(file)),
                 Some(Arc::new(FileContents::from_source(contents.clone()))),
             )]);
             t.run(&[h.dupe()], Require::Everything, None);

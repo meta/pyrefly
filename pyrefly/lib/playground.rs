@@ -353,10 +353,10 @@ impl Playground {
 
             source_db.insert(module_name, memory_path.dupe());
 
-            let handle = Handle::new(module_name, memory_path, self.sys_info.dupe());
+            let handle = Handle::new(module_name, memory_path.dupe(), self.sys_info.dupe());
             self.handles.insert(filename.clone(), handle);
             file_contents.push((
-                module_path,
+                memory_path,
                 Some(Arc::new(FileContents::from_source(content.clone()))),
             ));
         }
@@ -398,7 +398,7 @@ impl Playground {
 
     pub fn update_single_file(&mut self, filename: String, content: String) {
         if let Some(_handle) = self.handles.get(&filename) {
-            let module_path = PathBuf::from(&filename);
+            let module_path = ModulePath::memory(PathBuf::from(&filename));
             let file_content = vec![(
                 module_path,
                 Some(Arc::new(FileContents::from_source(content))),

@@ -60,7 +60,7 @@ pub struct Checker {
     config: ArcId<ConfigFile>,
     stdlib: Vec<(ModuleName, ModulePath)>,
     /// Loaded into memory by the first [`Checker::check`].
-    pending_stdlib: Vec<(PathBuf, Option<Arc<FileContents>>)>,
+    pending_stdlib: Vec<(ModulePath, Option<Arc<FileContents>>)>,
 }
 
 impl Checker {
@@ -114,7 +114,7 @@ impl Checker {
                 .iter()
                 .map(|(_, path, source)| {
                     (
-                        path.as_path().to_path_buf(),
+                        path.dupe(),
                         Some(Arc::new(FileContents::from_source(source.clone()))),
                     )
                 })
@@ -146,7 +146,7 @@ impl Checker {
             .into_iter()
             .chain(files.iter().map(|(name, source)| {
                 (
-                    memory_path(name).as_path().to_path_buf(),
+                    memory_path(name),
                     Some(Arc::new(FileContents::from_source((*source).to_owned()))),
                 )
             }))

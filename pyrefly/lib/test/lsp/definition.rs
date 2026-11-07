@@ -533,7 +533,7 @@ fn state_with_conftest(files: &[(&str, &str)], code: &str) -> (TempDir, State, H
     );
     let mut transaction = state.new_committable_transaction(Require::Exports, None);
     transaction.as_mut().set_memory(vec![(
-        path,
+        ModulePath::memory(path),
         Some(Arc::new(FileContents::from_source(code.to_owned()))),
     )]);
     transaction
@@ -1388,7 +1388,7 @@ fn parent_declarations_keep_the_declaring_snapshot() {
     );
     let mut transaction = state.new_committable_transaction(Require::Everything, None);
     transaction.as_mut().set_memory(vec![(
-        path,
+        ModulePath::memory(path),
         Some(Arc::new(FileContents::from_source(memory))),
     )]);
     transaction

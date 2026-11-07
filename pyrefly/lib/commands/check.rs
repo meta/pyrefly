@@ -1877,7 +1877,7 @@ impl CheckArgs {
 
         // Add the snippet source to the transaction's memory
         transaction.as_mut().set_memory(vec![(
-            PathBuf::from(module_path.as_path()),
+            ModulePath::memory(module_path.as_path().to_path_buf()),
             Some(Arc::new(FileContents::from_source(code))),
         )]);
 
