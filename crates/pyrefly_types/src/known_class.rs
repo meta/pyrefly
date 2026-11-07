@@ -171,6 +171,7 @@ known_classes! {
     FastApi => ("fastapi", "FastAPI"),
     FastApiApplications => ("fastapi.applications", "FastAPI"),
     FastApiTestClient => ("fastapi.testclient", "TestClient"),
+    LoggingLogger => ("logging", "Logger"),
     MarshmallowSchema => ("marshmallow.schema", "Schema"),
     NarwhalsDataFrame => ("narwhals.dataframe", "DataFrame"),
     NarwhalsLazyFrame => ("narwhals.dataframe", "LazyFrame"),

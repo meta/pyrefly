@@ -466,6 +466,9 @@ const IMPLICIT_BUILTIN_CONSTRUCTORS: &[KnownClass] = &[
     KnownClass::Tuple,
 ];
 
+/// Stdlib classes whose instances are conventionally left unannotated, as `(module, class)`.
+const IMPLICIT_STDLIB_CLASSES: &[KnownClass] = &[KnownClass::LoggingLogger, KnownClass::RePattern];
+
 fn parse_variables(
     module: &Module,
     answers: &Answers,
@@ -478,7 +481,7 @@ fn parse_variables(
 
     /// Only a call hides its type at the assignment site, unless the callee names the class it
     /// yields: a builtin constructor like `list()`, or an explicitly specialized class like
-    /// `Spam[int]()`.
+    /// `Spam[int]()`. Instances of `IMPLICIT_STDLIB_CLASSES` are exempt whatever the call.
     fn untyped_if_call(answers: &Answers, idx: Idx<Key>, expr: &Expr) -> SlotCounts {
         let Expr::Call(call) = expr else {
             return SlotCounts::default();
@@ -498,10 +501,11 @@ fn parse_variables(
             _ => false,
         };
 
-        if answers
-            .get_idx(idx)
-            .is_some_and(|t| matches!(t.ty(), Type::ClassType(cls) if callee_names(cls)))
-        {
+        let is_implicit_stdlib =
+            |cls: &ClassType| IMPLICIT_STDLIB_CLASSES.iter().any(|class| cls.is(*class));
+        if answers.get_idx(idx).is_some_and(|t| {
+            matches!(t.ty(), Type::ClassType(cls) if callee_names(cls) || is_implicit_stdlib(cls))
+        }) {
             SlotCounts::default()
         } else {
             SlotCounts::untyped()
@@ -2324,6 +2328,14 @@ mod tests {
     fn test_report_variables() {
         let report = build_module_report_for_test("variables.py");
         compare_snapshot("variables.expected.json", &report);
+    }
+
+    /// Calls returning a `logging.Logger` or `re.Pattern` have 0 slots, whatever the callee is.
+    /// Other calls count, even when the callee has the name of a stdlib factory.
+    #[test]
+    fn test_report_implicit_stdlib_classes() {
+        let report = build_module_report_for_test("implicit_stdlib_classes.py");
+        compare_snapshot("implicit_stdlib_classes.expected.json", &report);
     }
 
     /// gh-3773: optional imports must not be reported as untyped variables.

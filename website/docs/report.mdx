@@ -35,6 +35,16 @@ Only public symbols count: names without a leading underscore, plus anything in 
 stub is also analyzed (`--prefer-stubs=false` disables this). With `--public-only`, only symbols
 reachable from public modules via re-export chains count: the library's public API.
 
+A simple unannotated assignment to a module-level variable only counts as a typable if the value is
+a call, since a call hides the type at the assignment site. Three kinds of call are exempt:
+
+- Some builtin constructors, like `list()`.
+- Explicitly specialized classes, like `Spam[int]()`.
+- Anything that returns a `logging.Logger` or `re.Pattern`, since those are conventionally left
+  unannotated.
+
+A variable assigned in both branches of an `if`/`else` counts whatever the values.
+
 ### Cython
 
 In [Cython pure Python mode](https://cython.readthedocs.io/en/latest/src/tutorial/pure.html),
