@@ -401,6 +401,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 base_class_object.is(KnownClass::Type) || metadata.is_metaclass()
             });
 
+        let is_argparse_namespace =
+            bases_with_metadata
+                .iter()
+                .any(|(base_class_object, metadata)| {
+                    base_class_object.is(KnownClass::ArgparseNamespace)
+                        || metadata.is_argparse_namespace()
+                });
+
         // Compute various pieces of special metadata.
         let has_base_any = contains_base_class_any
             || bases_with_metadata
@@ -636,6 +644,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             django_rest_framework_serializer_kind,
             is_marshmallow_schema,
             is_factory_boy_factory,
+            is_argparse_namespace,
             is_metaclass,
             explicit_slots,
             capture_init.map(|names| names.to_vec()),

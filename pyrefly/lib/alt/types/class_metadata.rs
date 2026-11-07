@@ -146,6 +146,8 @@ pub struct ClassMetadata {
     django_rest_framework_serializer_kind: Option<DjangoRestFrameworkSerializerKind>,
     is_marshmallow_schema: bool,
     is_factory_boy_factory: bool,
+    /// Whether this class is a subclass of `argparse.Namespace`.
+    is_argparse_namespace: bool,
     /// Whether this class is a metaclass (i.e., a subclass of `type`).
     is_metaclass: bool,
     explicit_slots: ExplicitSlots,
@@ -241,6 +243,7 @@ static RECURSIVE_CLASS_METADATA: ClassMetadata = ClassMetadata {
     django_model_metadata: None,
     is_marshmallow_schema: false,
     is_factory_boy_factory: false,
+    is_argparse_namespace: false,
     django_rest_framework_serializer_kind: None,
     is_metaclass: false,
     explicit_slots: ExplicitSlots::Absent,
@@ -274,6 +277,7 @@ impl ClassMetadata {
         django_rest_framework_serializer_kind: Option<DjangoRestFrameworkSerializerKind>,
         is_marshmallow_schema: bool,
         is_factory_boy_factory: bool,
+        is_argparse_namespace: bool,
         is_metaclass: bool,
         explicit_slots: ExplicitSlots,
         capture_init: Option<Vec<Name>>,
@@ -304,6 +308,7 @@ impl ClassMetadata {
             django_rest_framework_serializer_kind,
             is_marshmallow_schema,
             is_factory_boy_factory,
+            is_argparse_namespace,
             is_metaclass,
             explicit_slots,
             capture_init,
@@ -358,6 +363,11 @@ impl ClassMetadata {
     pub fn is_django_rest_framework_model_serializer(&self) -> bool {
         self.django_rest_framework_serializer_kind
             == Some(DjangoRestFrameworkSerializerKind::ModelSerializer)
+    }
+
+    /// Whether this class is a subclass of `argparse.Namespace`.
+    pub fn is_argparse_namespace(&self) -> bool {
+        self.is_argparse_namespace
     }
 
     /// Whether this class is a metaclass (i.e., a subclass of `type`).

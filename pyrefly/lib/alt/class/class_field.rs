@@ -1832,9 +1832,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // uninitialized instance vars in the ordinary sense (see #5278).
                 // Enum sets `_value_` and `_name_` on every member it creates, so annotating
                 // them in the enum body only declares their types.
+                // argparse sets the attributes of a `Namespace` with `setattr` when it parses
+                // arguments, so annotations on a subclass only declare their types.
                 let excluded_from_uninit_check = metadata.is_metaclass()
                     || (metadata.is_enum() && matches!(name.as_str(), "_value_" | "_name_"))
-                    || metadata.initializes_annotated_fields();
+                    || metadata.initializes_annotated_fields()
+                    || metadata.is_argparse_namespace();
                 if is_uninit_instance_var && !excluded_from_uninit_check {
                     self.error(
                         errors,
