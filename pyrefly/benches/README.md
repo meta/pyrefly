@@ -1,3 +1,17 @@
+# Reference CodeLens benchmark
+
+`code_lens` measures warm LSP requests against a generated 10,000-line Python
+file with 2,500 function definitions and ten importing modules. It measures
+listing unresolved lenses separately from resolving twenty visible lenses.
+Fixture creation, initial analysis, and server shutdown are not timed.
+The fixture does not use an external reference provider.
+
+```bash
+PYREFLY_LOG=off cargo bench -p pyrefly --bench code_lens -- --noplot
+```
+
+These synthetic results do not establish performance for every workspace.
+
 # PyTorch benchmarks
 
 Real-world benchmarks over a large, pinned PyTorch checkout (15k+ Python files)

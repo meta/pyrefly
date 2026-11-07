@@ -196,6 +196,21 @@ If true, Pyrefly will sync notebook documents with the language server. Set to `
 
 Enable Pyrefly's Run/Test CodeLens actions for Python files.
 
+#### `python.pyrefly.referencesCodeLens`
+
+**Type:** boolean &nbsp; **Default:** `false`
+
+Show reference counts above Python classes, functions, and methods. Select a count to show its references.
+This setting requires indexing. It is separate from `runnableCodeLens` and does not affect Run/Test actions.
+Pyrefly searches for references when the editor resolves a visible lens. Notebook cells are excluded from these counts.
+Reference lenses use a separate worker from Find References and rename.
+
+Clients must register the `pyrefly.showReferences` command and set
+`initializationOptions.pyrefly.supportsReferencesCodeLens` to `true` before Pyrefly emits reference lenses.
+The VS Code extension registers this command and sends this option automatically.
+The command receives a URI string, an LSP position, and an array of LSP locations.
+Other clients must provide their own handler for these arguments.
+
 #### `python.analysis.showHoverGoToLinks`
 
 **Type:** boolean &nbsp; **Default:** `true`
@@ -290,6 +305,7 @@ Below is an example showing every supported key at its default value:
     "streamDiagnostics": true,
     "syncNotebooks": true,
     "runnableCodeLens": false,
+    "referencesCodeLens": false,
     "disabledLanguageServices": {
       "hover": false,
       "documentSymbol": false,

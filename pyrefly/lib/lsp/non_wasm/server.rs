@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+mod code_lens;
 mod event_loop;
 
 use std::cmp::min;
@@ -50,10 +51,9 @@ use lsp_types::CodeActionProvider;
 use lsp_types::CodeActionRequest;
 use lsp_types::CodeActionResponse;
 use lsp_types::CodeActionTriggerKind;
-use lsp_types::CodeLens;
 use lsp_types::CodeLensOptions;
-use lsp_types::CodeLensParams;
 use lsp_types::CodeLensRequest;
+use lsp_types::CodeLensResolveRequest;
 use lsp_types::CompletionItem;
 use lsp_types::CompletionList;
 use lsp_types::CompletionOptions;
@@ -302,7 +302,6 @@ use crate::lsp::non_wasm::code_lens::OverrideCodeLensRefreshNotification;
 use crate::lsp::non_wasm::code_lens::OverrideCodeLensRequest;
 use crate::lsp::non_wasm::code_lens::OverrideCodeLensTarget;
 use crate::lsp::non_wasm::code_lens::OverrideCodeLensTargets;
-use crate::lsp::non_wasm::code_lens::runnable_lsp_code_lens;
 use crate::lsp::non_wasm::convert_module_package::convert_module_package_code_actions;
 use crate::lsp::non_wasm::document_symbols::flatten_to_symbol_information;
 use crate::lsp::non_wasm::external_provider::ExternalProvider;
@@ -397,6 +396,7 @@ use crate::types::class::ClassType;
 
 enum RequestError {
     Cancelled,
+    ContentModified,
     Internal(String),
 }
 
@@ -415,6 +415,14 @@ struct FindReferencesRequest {
     find_preference: FindPreference,
     options: ReferenceOptions,
     activity_key: Option<ActivityKey>,
+    kind: ReferenceTaskKind,
+}
+
+/// Reference lenses run independently of interactive reference searches.
+#[derive(Clone, Copy)]
+enum ReferenceTaskKind {
+    Interactive,
+    CodeLens { version: Option<i32> },
 }
 
 pub struct InitializeInfo {
@@ -1157,6 +1165,8 @@ pub struct Server {
     lsp_queue: LspQueue,
     recheck_queue: HeavyTaskQueue,
     find_reference_queue: HeavyTaskQueue,
+    /// A slow lens search must not block interactive reference searches or renames.
+    code_lens_queue: HeavyTaskQueue,
     sourcedb_queue: HeavyTaskQueue,
     /// Any configs whose find cache should be invalidated.
     invalidated_source_dbs: Mutex<SmallSet<ArcId<Box<dyn SourceDatabase + 'static>>>>,
@@ -1204,6 +1214,8 @@ pub struct Server {
     /// we rely on file watchers to catch up.
     indexed_workspaces: Mutex<HashSet<PathBuf>>,
     cancellation_handles: Mutex<HashMap<RequestId, CancellationHandle>>,
+    /// These handles remain registered while reference tasks wait in the queue.
+    reference_cancellation_handles: Mutex<HashMap<RequestId, CancellationHandle>>,
     /// A thread pool for transactions run in the lsp_loop to avoid possibly waiting on thread pool
     /// operations in another thread.
     lsp_thread_pool: ThreadPool,
@@ -1674,7 +1686,7 @@ pub fn capabilities(
             ..Default::default()
         })),
         code_lens_provider: Some(CodeLensOptions {
-            resolve_provider: Some(false),
+            resolve_provider: Some(true),
             work_done_progress_options: Default::default(),
         }),
         completion_provider: Some(CompletionOptions {
@@ -1859,6 +1871,11 @@ pub fn lsp_loop(
                 .find_reference_queue
                 .run_until_stopped(&server, telemetry);
         });
+        if server.supports_references_code_lens() {
+            scope.spawn(|| {
+                server.code_lens_queue.run_until_stopped(&server, telemetry);
+            });
+        }
         scope.spawn(|| {
             server.sourcedb_queue.run_until_stopped(&server, telemetry);
         });
@@ -2157,6 +2174,9 @@ impl Server {
                 info!("We should cancel request {id:?}");
                 if let Some(cancellation_handle) = self.cancellation_handles.lock().remove(&id) {
                     cancellation_handle.cancel();
+                }
+                if let Some(handle) = self.reference_cancellation_handles.lock().remove(&id) {
+                    handle.cancel();
                 }
                 canceled_requests.insert(id);
             }
@@ -2728,10 +2748,31 @@ impl Server {
                         )
                     {
                         self.set_file_stats(params.text_document.uri.clone(), telemetry_event);
-                        self.send_response(new_response(
-                            x.id,
-                            Ok(self.code_lens(&transaction, params).unwrap_or_default()),
-                        ));
+                        let response = match self.code_lens(&transaction, params) {
+                            Ok(response) => response,
+                            Err(reason) => {
+                                telemetry_event.set_empty_response_reason(reason);
+                                None
+                            }
+                        };
+                        self.send_response(new_response(x.id, Ok(response)));
+                    }
+                } else if let Some(params) = as_request::<CodeLensResolveRequest>(&x) {
+                    if let Some(params) = self
+                        .extract_request_params_or_send_err_response::<CodeLensResolveRequest>(
+                            params, &x.id,
+                        )
+                        && let Err(error) = self.resolve_code_lens(
+                            x.id.clone(),
+                            &transaction,
+                            &params,
+                            telemetry_event.activity_key.clone(),
+                        )
+                    {
+                        if let code_lens::CodeLensError::Unavailable(reason) = &error {
+                            telemetry_event.set_empty_response_reason(reason.clone());
+                        }
+                        self.send_response(error.into_response(x.id, params));
                     }
                 } else if let Some(params) = as_request::<SemanticTokensRequest>(&x) {
                     if let Some(params) = self
@@ -3093,6 +3134,7 @@ impl Server {
             lsp_queue,
             recheck_queue: HeavyTaskQueue::new(QueueName::RecheckQueue),
             find_reference_queue: HeavyTaskQueue::new(QueueName::FindReferenceQueue),
+            code_lens_queue: HeavyTaskQueue::new(QueueName::CodeLensQueue),
             sourcedb_queue: HeavyTaskQueue::new(QueueName::SourceDbQueue),
             invalidated_source_dbs: Mutex::new(SmallSet::new()),
             build_system_status: Mutex::new(None),
@@ -3110,6 +3152,7 @@ impl Server {
             indexed_configs: Mutex::new(HashSet::new()),
             indexed_workspaces: Mutex::new(HashSet::new()),
             cancellation_handles: Mutex::new(HashMap::new()),
+            reference_cancellation_handles: Mutex::new(HashMap::new()),
             lsp_thread_pool: ThreadPool::new(ThreadCount::NumThreads(
                 NonZeroUsize::new(8).unwrap(),
             )),
@@ -3211,24 +3254,6 @@ impl Server {
         };
 
         telemetry.set_file_stats(TelemetryFileStats { uri, config_root });
-    }
-
-    fn runnable_code_lens_cwd(&self, path: &std::path::Path) -> Option<String> {
-        let config = self.state.config_finder().python_file(
-            ModuleNameWithKind::guaranteed(ModuleName::unknown()),
-            &ModulePath::filesystem(path.to_path_buf()),
-        );
-        let cwd = config
-            .source
-            .root_from_file()
-            .map(std::path::Path::to_path_buf)
-            .or_else(|| {
-                self.workspaces
-                    .get_with(path.to_path_buf(), |(workspace_root, _)| {
-                        workspace_root.cloned()
-                    })
-            })?;
-        Some(cwd.to_string_lossy().into_owned())
     }
 
     fn send_response(&self, x: Response) {
@@ -3579,6 +3604,7 @@ impl Server {
             }
         }
         self.publish_diagnostics(diags, notebook_cell_urls, versions, source);
+        self.refresh_reference_code_lenses();
         if self
             .initialize_params
             .capabilities
@@ -3828,6 +3854,9 @@ impl Server {
         // to unblock committing transactions.
         for (_, cancellation_handle) in server.cancellation_handles.lock().drain() {
             cancellation_handle.cancel();
+        }
+        for (_, handle) in server.reference_cancellation_handles.lock().drain() {
+            handle.cancel();
         }
 
         // we have to run, not just commit to process updates
@@ -4857,6 +4886,7 @@ impl Server {
                 self.server_mode,
             );
         }
+        self.refresh_reference_code_lenses();
 
         if modified {
             self.setup_file_watcher_if_necessary(None);
@@ -4889,6 +4919,7 @@ impl Server {
                 );
             }
         }
+        self.refresh_reference_code_lenses();
 
         if modified {
             self.setup_file_watcher_if_necessary(Some(telemetry_event));
@@ -5137,6 +5168,7 @@ impl Server {
                 ..Default::default()
             },
             activity_key,
+            ReferenceTaskKind::Interactive,
             move |transaction, handle, definition, _telemetry, _telemetry_event| {
                 let FindDefinitionItemWithDocstring {
                     metadata: _,
@@ -5599,6 +5631,7 @@ impl Server {
         position: Position,
         find_preference: FindPreference,
         activity_key: Option<ActivityKey>,
+        task_kind: ReferenceTaskKind,
         find_fn: impl FnOnce(
             &mut CancellableTransaction,
             &Handle,
@@ -5624,37 +5657,108 @@ impl Server {
                 return Err(reason);
             }
         };
+        let pending = CancellationHandle::default();
+        let source_version = match task_kind {
+            ReferenceTaskKind::Interactive => None,
+            ReferenceTaskKind::CodeLens { version } => Some((uri.clone(), version)),
+        };
+        self.reference_cancellation_handles
+            .lock()
+            .insert(request_id.clone(), pending.dupe());
         let uri_for_telemetry = uri.clone();
-        self.find_reference_queue.queue_task(
-            TelemetryEventKind::FindFromDefinition,
+        let is_code_lens = matches!(task_kind, ReferenceTaskKind::CodeLens { .. });
+        let queue = if is_code_lens {
+            &self.code_lens_queue
+        } else {
+            &self.find_reference_queue
+        };
+        let kind = if is_code_lens {
+            TelemetryEventKind::LspEvent(CodeLensResolveRequest::METHOD.to_string())
+        } else {
+            TelemetryEventKind::FindFromDefinition
+        };
+        queue.queue_task(
+            kind,
             Box::new(move |server, telemetry, telemetry_event| {
                 server.set_file_stats(uri_for_telemetry, telemetry_event);
                 telemetry_event.set_activity_key(activity_key);
+                if pending.is_cancelled() {
+                    telemetry_event.canceled = true;
+                    server.send_response(Response::new_err(
+                        request_id,
+                        ErrorCode::RequestCanceled as i32,
+                        "Request canceled before execution".to_owned(),
+                    ));
+                    return;
+                }
                 let mut transaction = server.state.cancellable_transaction();
-                server
-                    .cancellation_handles
-                    .lock()
-                    .insert(request_id.clone(), transaction.get_cancellation_handle());
+                {
+                    let mut handles = server.reference_cancellation_handles.lock();
+                    if pending.is_cancelled() {
+                        transaction.get_cancellation_handle().cancel();
+                    } else {
+                        handles.insert(request_id.clone(), transaction.get_cancellation_handle());
+                    }
+                }
+                if transaction.get_cancellation_handle().is_cancelled() {
+                    telemetry_event.canceled = true;
+                    server.send_response(Response::new_err(
+                        request_id,
+                        ErrorCode::RequestCanceled as i32,
+                        "Request canceled before execution".to_owned(),
+                    ));
+                    return;
+                }
+                if source_version
+                    .as_ref()
+                    .is_some_and(|(uri, version)| server.text_document_version(uri) != *version)
+                {
+                    server
+                        .reference_cancellation_handles
+                        .lock()
+                        .remove(&request_id);
+                    server.send_response(Response::new_err(
+                        request_id,
+                        ErrorCode::ContentModified as i32,
+                        "The document changed before CodeLens resolution".to_owned(),
+                    ));
+                    return;
+                }
                 server.validate_in_memory_for_transaction(
                     transaction.as_mut(),
                     telemetry_event,
                     None,
                 );
-                match find_fn(
+                let result = find_fn(
                     &mut transaction,
                     &handle,
                     definition,
                     telemetry,
                     telemetry_event,
-                ) {
+                );
+                server
+                    .reference_cancellation_handles
+                    .lock()
+                    .remove(&request_id);
+                let result = if transaction.get_cancellation_handle().is_cancelled() {
+                    Err(RequestError::Cancelled)
+                } else if source_version
+                    .as_ref()
+                    .is_some_and(|(uri, version)| server.text_document_version(uri) != *version)
+                {
+                    Err(RequestError::ContentModified)
+                } else {
+                    result
+                };
+                match result {
                     Ok(results) => {
-                        server.cancellation_handles.lock().remove(&request_id);
                         server.connection.send(Message::Response(new_response(
                             request_id,
                             Ok(Some(transform_result(results))),
                         )));
                     }
                     Err(RequestError::Cancelled) => {
+                        telemetry_event.canceled = true;
                         let message = format!("Request {request_id} is canceled");
                         info!("{message}");
                         server.connection.send(Message::Response(Response::new_err(
@@ -5671,6 +5775,13 @@ impl Server {
                             ErrorCode::InternalError as i32,
                             message,
                         )));
+                    }
+                    Err(RequestError::ContentModified) => {
+                        server.send_response(Response::new_err(
+                            request_id,
+                            ErrorCode::ContentModified as i32,
+                            "The document changed during CodeLens resolution".to_owned(),
+                        ));
                     }
                 }
             }),
@@ -5695,6 +5806,7 @@ impl Server {
             find_preference,
             options,
             activity_key,
+            kind,
         } = request;
         let path_remapper = self.path_remapper.clone();
         let external_references = self.external_references.clone();
@@ -5709,6 +5821,7 @@ impl Server {
             position,
             find_preference,
             activity_key,
+            kind,
             move |transaction, handle, definition, telemetry, telemetry_event| {
                 let qualified_name =
                     compute_qualified_name(transaction.as_ref(), handle, &definition);
@@ -5816,6 +5929,7 @@ impl Server {
                     ..ReferenceOptions::all(params.context.include_declaration)
                 },
                 activity_key,
+                kind: ReferenceTaskKind::Interactive,
             },
             move |results| {
                 let mut locations = Vec::new();
@@ -5856,6 +5970,7 @@ impl Server {
                 },
                 options: ReferenceOptions::textual_only(true),
                 activity_key,
+                kind: ReferenceTaskKind::Interactive,
             },
             move |results| {
                 let mut changes = HashMap::new();
@@ -6232,37 +6347,6 @@ impl Server {
         );
         Ok(())
     }
-
-    fn code_lens(
-        &self,
-        transaction: &Transaction<'_>,
-        params: CodeLensParams,
-    ) -> Option<Vec<CodeLens>> {
-        let uri = &params.text_document.uri;
-        let path = self.path_for_uri(uri)?;
-        let runnable_code_lens = self
-            .workspaces
-            .get_with(path.clone(), |(_, workspace)| workspace.runnable_code_lens);
-        let maybe_cell_idx = self.maybe_get_code_cell_index(uri);
-        let handle = self
-            .make_handle_if_enabled(uri, Some(CodeLensRequest::METHOD.as_str()))
-            .ok()?;
-        let info = transaction.get_module_info(&handle)?;
-        let entries = transaction.runnable_code_lens_entries(&handle, uri, runnable_code_lens)?;
-        let cwd = self.runnable_code_lens_cwd(&path);
-
-        let mut lenses = Vec::new();
-        for entry in entries {
-            if info.to_cell_for_lsp(entry.range.start()) != maybe_cell_idx {
-                continue;
-            }
-            let range = info.to_lsp_range(entry.range);
-            lenses.push(runnable_lsp_code_lens(uri, range, entry, cwd.as_deref()));
-        }
-
-        Some(lenses)
-    }
-
     fn semantic_tokens_full(
         &self,
         transaction: &Transaction<'_>,
@@ -6973,6 +7057,7 @@ impl Server {
             params.item.selection_range.start,
             FindPreference::default(),
             activity_key,
+            ReferenceTaskKind::Interactive,
             move |transaction, handle, definition, telemetry, telemetry_event| {
                 let qualified_name =
                     compute_qualified_name(transaction.as_ref(), handle, &definition);
@@ -7065,6 +7150,7 @@ impl Server {
             params.item.selection_range.start,
             FindPreference::default(),
             activity_key,
+            ReferenceTaskKind::Interactive,
             move |transaction, handle, definition, _telemetry, _telemetry_event| {
                 // find_global_outgoing_calls_from_function_definition expects a position
                 let position = definition.definition_range.start();
@@ -7323,6 +7409,7 @@ impl Server {
             params.item.selection_range.start,
             FindPreference::default(),
             activity_key,
+            ReferenceTaskKind::Interactive,
             move |transaction, handle, definition, _telemetry, _telemetry_event| {
                 transaction.run(&[handle.dupe()], Require::Everything, None)?;
                 let Some(target) =
@@ -7376,6 +7463,7 @@ impl Server {
             params.item.selection_range.start,
             FindPreference::default(),
             activity_key,
+            ReferenceTaskKind::Interactive,
             move |transaction, handle, definition, _telemetry, _telemetry_event| {
                 transaction.run(&[handle.dupe()], Require::Everything, None)?;
                 let Some(target) =

@@ -5,20 +5,40 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::cell::RefCell;
 use std::fs;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
+use crossbeam_channel::Receiver;
+use crossbeam_channel::Sender;
+use lsp_server::ErrorCode;
 use lsp_types::CodeLens;
+use lsp_types::CodeLensOptions;
+use lsp_types::CodeLensRefreshRequest;
 use lsp_types::CodeLensRequest;
+use lsp_types::CodeLensResolveRequest;
+use lsp_types::Location;
 use lsp_types::Position;
+use lsp_types::Range;
+use lsp_types::RenameRequest;
+use lsp_types::SymbolInformation;
 use lsp_types::Uri;
 use pyrefly_lsp_test::IndexingMode;
 use pyrefly_lsp_test::LspArgs;
 use pyrefly_lsp_test::Message;
 use pyrefly_lsp_test::object_model::CellKind;
+use pyrefly_lsp_test::object_model::ExternalProvider;
 use pyrefly_lsp_test::object_model::InitializeSettings;
 use pyrefly_lsp_test::object_model::LspInteraction;
 use pyrefly_lsp_test::object_model::LspInteractionArgs;
 use pyrefly_lsp_test::object_model::TestTelemetry;
+use pyrefly_util::telemetry::SubTaskTelemetry;
+use pyrefly_util::telemetry::TelemetryEventKind;
 use serde_json::Value;
 use serde_json::json;
 use tempfile::TempDir;
@@ -34,6 +54,81 @@ fn runnable_code_lens_config() -> serde_json::Value {
             "runnableCodeLens": true
         }
     }])
+}
+
+fn indexed_interaction(root_path: &Path) -> LspInteraction {
+    let scope_uri = Uri::from_file_path(root_path).unwrap();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
+    interaction.set_root(root_path.to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![("test".to_owned(), scope_uri)]),
+            initialization_options: Some(json!({"pyrefly": {
+                "supportsReferencesCodeLens": true,
+                "referencesCodeLens": true
+            }})),
+            ..Default::default()
+        })
+        .unwrap();
+    interaction
+}
+
+fn request_code_lenses(interaction: &LspInteraction, uri: Uri) -> Vec<CodeLens> {
+    let lenses = RefCell::new(Vec::new());
+    interaction
+        .client
+        .send_request::<CodeLensRequest>(json!({
+            "textDocument": {
+                "uri": uri
+            }
+        }))
+        .expect_response_with(|response| {
+            lenses.replace(response.unwrap_or_default());
+            true
+        })
+        .unwrap();
+    lenses.into_inner()
+}
+
+fn resolve_code_lens(interaction: &LspInteraction, lens: CodeLens) -> CodeLens {
+    let resolved = RefCell::new(None);
+    interaction
+        .client
+        .send_request::<CodeLensResolveRequest>(serde_json::to_value(lens).unwrap())
+        .expect_response_with(|lens| {
+            resolved.replace(Some(lens));
+            true
+        })
+        .unwrap();
+    resolved.into_inner().unwrap()
+}
+
+#[test]
+fn test_code_lens_advertises_resolve_provider() {
+    let interaction = LspInteraction::new();
+    interaction
+        .client
+        .send_initialize(
+            interaction
+                .client
+                .get_initialize_params(&InitializeSettings::default()),
+        )
+        .expect_response_with(|response| {
+            response.capabilities.code_lens_provider
+                == Some(CodeLensOptions {
+                    resolve_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })
+        })
+        .unwrap();
+    interaction.client.send_initialized();
+    interaction.shutdown().unwrap();
 }
 
 #[test]
@@ -591,4 +686,496 @@ fn test_override_code_lens_parent_after_defining_file_shifts() {
         })
         .unwrap();
     interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_code_lens_shows_reference_counts() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("code_lens_references");
+    let symbols_uri = Uri::from_file_path(root_path.join("symbols.py")).unwrap();
+    let interaction = indexed_interaction(&root_path);
+
+    interaction.client.did_open("symbols.py");
+    interaction.client.did_open("usage.py");
+
+    let lenses = request_code_lenses(&interaction, symbols_uri);
+    assert_eq!(lenses.len(), 3);
+    assert!(
+        lenses
+            .iter()
+            .all(|lens| lens.command.is_none() && lens.data.is_some())
+    );
+    for (line, title, count) in [
+        (0, "3 references", 3),
+        (1, "2 references", 2),
+        (4, "2 references", 2),
+    ] {
+        let lens = lenses
+            .iter()
+            .find(|lens| lens.range.start.line == line)
+            .unwrap()
+            .clone();
+        let lens = resolve_code_lens(&interaction, lens);
+        assert!(has_reference_lens(&lens, line, title, count));
+    }
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_reference_code_lens_request_from_notebook_is_empty() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("code_lens_references");
+    let interaction = indexed_interaction(&root_path);
+    interaction.open_notebook("notebook.ipynb", vec!["class NotebookSymbol:\n    pass"]);
+
+    let lenses = request_code_lenses(
+        &interaction,
+        interaction.cell_uri("notebook.ipynb", "cell1"),
+    );
+    assert!(lenses.is_empty());
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_reference_code_lens_excludes_notebook_references() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("code_lens_references");
+    let symbols_uri = Uri::from_file_path(root_path.join("symbols.py")).unwrap();
+    let interaction = indexed_interaction(&root_path);
+    interaction.client.did_open("symbols.py");
+    interaction.client.did_open("usage.py");
+    interaction.open_notebook(
+        "notebook.ipynb",
+        vec!["from symbols import Greeter", "Greeter()"],
+    );
+    let notebook_uris = [
+        interaction.cell_uri("notebook.ipynb", "cell1"),
+        interaction.cell_uri("notebook.ipynb", "cell2"),
+    ];
+
+    interaction
+        .client
+        .references("symbols.py", 0, 7, false)
+        .expect_response_with(|locations| {
+            let locations = locations.expect("References should be available");
+            notebook_uris
+                .iter()
+                .all(|uri| locations.iter().any(|location| &location.uri == uri))
+        })
+        .unwrap();
+
+    let lenses = request_code_lenses(&interaction, symbols_uri);
+    let greeter_lens = lenses
+        .into_iter()
+        .find(|lens| lens.range.start.line == 0)
+        .unwrap();
+    let resolved = resolve_code_lens(&interaction, greeter_lens);
+    let locations = reference_locations(&resolved);
+    assert_eq!(locations.len(), 3);
+    assert!(
+        locations
+            .iter()
+            .all(|location| !notebook_uris.contains(&location.uri))
+    );
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_reference_code_lens_requires_client_setting_and_indexing() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("code_lens_references");
+    for (indexing_mode, supports, enabled) in [
+        (IndexingMode::LazyBlocking, true, None),
+        (IndexingMode::LazyBlocking, true, Some(false)),
+        (IndexingMode::LazyBlocking, false, Some(true)),
+        (IndexingMode::None, true, Some(true)),
+    ] {
+        let mut options = json!({"pyrefly": {"supportsReferencesCodeLens": supports}});
+        if let Some(enabled) = enabled {
+            options["pyrefly"]["referencesCodeLens"] = json!(enabled);
+        }
+        let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+            args: LspArgs {
+                indexing_mode,
+                ..LspInteractionArgs::default().args
+            },
+            ..Default::default()
+        });
+        interaction.set_root(root_path.clone());
+        interaction
+            .initialize(InitializeSettings {
+                initialization_options: Some(options),
+                ..Default::default()
+            })
+            .unwrap();
+        interaction.client.did_open("symbols.py");
+        let uri = Uri::from_file_path(root_path.join("symbols.py")).unwrap();
+        assert!(request_code_lenses(&interaction, uri).is_empty());
+        interaction.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn test_reference_code_lens_rejects_invalid_data() {
+    let root = get_test_files_root();
+    let interaction = indexed_interaction(&root.path().join("code_lens_references"));
+    for data in [
+        Value::Null,
+        json!({}),
+        json!({"uri": false}),
+        json!({"uri": "file:///test.py", "version": "invalid"}),
+    ] {
+        interaction
+            .client
+            .send_request::<CodeLensResolveRequest>(json!({
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+                "data": data
+            }))
+            .expect_response_error_code(ErrorCode::InvalidParams as i32)
+            .unwrap();
+    }
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_reference_code_lens_refreshes_after_another_file_changes() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("code_lens_references");
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
+    interaction.set_root(root_path.clone());
+    interaction.initialize(InitializeSettings {
+        workspace_folders: Some(vec![("test".to_owned(), Uri::from_file_path(&root_path).unwrap())]),
+        capabilities: Some(json!({"workspace": {"codeLens": {"refreshSupport": true}}})),
+        initialization_options: Some(json!({"pyrefly": {"supportsReferencesCodeLens": true, "referencesCodeLens": true}})),
+        ..Default::default()
+    }).unwrap();
+    interaction.client.did_open("symbols.py");
+    interaction.client.did_open("usage.py");
+    let uri = Uri::from_file_path(root_path.join("symbols.py")).unwrap();
+    let lens = request_code_lenses(&interaction, uri.clone()).remove(0);
+    assert!(has_reference_lens(
+        &resolve_code_lens(&interaction, lens),
+        0,
+        "3 references",
+        3
+    ));
+    interaction
+        .client
+        .did_change("usage.py", "# No references remain in this file.\n");
+    interaction
+        .client
+        .expect_request::<CodeLensRefreshRequest>(Value::Null)
+        .unwrap()
+        .send_response(Value::Null);
+    let lens = request_code_lenses(&interaction, uri).remove(0);
+    assert!(has_reference_lens(
+        &resolve_code_lens(&interaction, lens),
+        0,
+        "1 reference",
+        1
+    ));
+    interaction
+        .client
+        .references("symbols.py", 0, 7, false)
+        .expect_response_with(|locations| locations.is_some_and(|locations| locations.len() == 1))
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_disabling_reference_code_lens_preserves_runnable_lenses() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("code_lens");
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
+    interaction.set_root(root_path.clone());
+    interaction.initialize(InitializeSettings {
+        initialization_options: Some(json!({"pyrefly": {
+            "supportsReferencesCodeLens": true, "referencesCodeLens": false, "runnableCodeLens": true
+        }})),
+        ..Default::default()
+    }).unwrap();
+    interaction.client.did_open("main_and_tests.py");
+    let lenses = request_code_lenses(
+        &interaction,
+        Uri::from_file_path(root_path.join("main_and_tests.py")).unwrap(),
+    );
+    assert!(!lenses.is_empty());
+    assert!(
+        lenses
+            .iter()
+            .all(|lens| lens.command.as_ref().is_some_and(|command| {
+                matches!(
+                    command.command.as_str(),
+                    "pyrefly.runMain" | "pyrefly.runTest"
+                )
+            }))
+    );
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_reference_code_lens_displays_missing_definition() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("code_lens_references");
+    let interaction = indexed_interaction(&root_path);
+    let uri = Uri::from_file_path(root_path.join("missing_definition.py")).unwrap();
+    interaction
+        .client
+        .did_open_uri(&uri, "python", "def defined():\n    pass\nunknown\n");
+    let lens = request_code_lenses(&interaction, uri).remove(0);
+    for line in [0, 2] {
+        let mut unresolved = lens.clone();
+        unresolved.range.start.line = line;
+        unresolved.range.start.character = 0;
+        unresolved.range.end = unresolved.range.start;
+        let resolved = resolve_code_lens(&interaction, unresolved);
+        let command = resolved
+            .command
+            .expect("An unavailable lens must have a visible label");
+        assert_eq!(command.title, "References unavailable");
+        assert!(command.command.is_empty());
+        assert!(resolved.data.is_none());
+    }
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_reference_code_lens_rejects_old_document_version() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("code_lens_references");
+    let interaction = indexed_interaction(&root_path);
+    interaction.client.did_open("symbols.py");
+    let uri = Uri::from_file_path(root_path.join("symbols.py")).unwrap();
+    let lens = request_code_lenses(&interaction, uri).remove(0);
+    interaction
+        .client
+        .did_change("symbols.py", "\nclass Different:\n    pass\n");
+    interaction
+        .client
+        .send_request::<CodeLensResolveRequest>(json!(lens))
+        .expect_response_error_code(ErrorCode::ContentModified as i32)
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_reference_code_lens_zero_and_one_reference() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("code_lens_references");
+    let interaction = indexed_interaction(&root_path);
+    let uri = Uri::from_file_path(root_path.join("counts.py")).unwrap();
+    interaction.client.did_open_uri(
+        &uri,
+        "python",
+        "def unused():\n    pass\ndef used():\n    pass\nused()\n",
+    );
+    let lenses = request_code_lenses(&interaction, uri);
+    assert_eq!(lenses.len(), 2);
+    for (lens, (line, title, count)) in lenses
+        .into_iter()
+        .zip([(0, "0 references", 0), (2, "1 reference", 1)])
+    {
+        let lens = resolve_code_lens(&interaction, lens);
+        assert!(has_reference_lens(&lens, line, title, count));
+    }
+    interaction.shutdown().unwrap();
+}
+
+/// Block the first external search so the test can fill and cancel queued requests.
+struct BlockingReferences {
+    calls: Sender<String>,
+    release: Receiver<()>,
+    first: AtomicBool,
+    uri: Uri,
+}
+
+impl ExternalProvider for BlockingReferences {
+    fn find_references(
+        &self,
+        qualified_name: &str,
+        _source_uri: &Uri,
+        timeout: Duration,
+        _telemetry: Option<SubTaskTelemetry>,
+    ) -> anyhow::Result<Vec<(Uri, Vec<Range>)>> {
+        self.calls.send(qualified_name.to_owned()).unwrap();
+        if self.first.swap(false, Ordering::Relaxed) {
+            self.release
+                .recv_timeout(timeout)
+                .expect("The test must release the first search");
+        }
+        Ok(vec![(self.uri.clone(), vec![Range::default()])])
+    }
+
+    fn workspace_symbols(
+        &self,
+        _query: &str,
+        _workspace_uri: &Uri,
+        _timeout: Duration,
+        _telemetry: Option<SubTaskTelemetry>,
+    ) -> anyhow::Result<Vec<SymbolInformation>> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn test_reference_code_lens_does_not_block_interactive_references() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("code_lens_references");
+    let (calls_tx, calls) = crossbeam_channel::unbounded();
+    let (release, release_rx) = crossbeam_channel::bounded(1);
+    let telemetry = TestTelemetry::new();
+    let events = telemetry.subscribe();
+    let external_uri = Uri::from_file_path(root_path.join("external.py")).unwrap();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        telemetry: Box::new(telemetry),
+        external_references: Arc::new(BlockingReferences {
+            calls: calls_tx,
+            release: release_rx,
+            first: AtomicBool::new(true),
+            uri: external_uri.clone(),
+        }),
+        ..Default::default()
+    });
+    interaction.set_root(root_path.clone());
+    interaction.initialize(InitializeSettings {
+        workspace_folders: Some(vec![("test".to_owned(), Uri::from_file_path(&root_path).unwrap())]),
+        initialization_options: Some(json!({"pyrefly": {"supportsReferencesCodeLens": true, "referencesCodeLens": true}})),
+        ..Default::default()
+    }).unwrap();
+    interaction.client.did_open("symbols.py");
+    interaction.client.did_open("usage.py");
+    let lenses = request_code_lenses(
+        &interaction,
+        Uri::from_file_path(root_path.join("symbols.py")).unwrap(),
+    );
+    let timeout = Duration::from_secs(10);
+    let first = interaction
+        .client
+        .send_request::<CodeLensResolveRequest>(json!(lenses[0]));
+    assert_eq!(calls.recv_timeout(timeout).unwrap(), "symbols.Greeter");
+
+    // Telemetry marks the end of dispatch, so the search is queued before cancellation.
+    let wait_for_dispatch = |id: String| {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let event = events.recv_deadline(deadline).unwrap();
+            if event.event.request_id.as_ref() == Some(&id)
+                && matches!(&event.event.kind, TelemetryEventKind::LspEvent(name) if name.starts_with("LspRequest("))
+            {
+                break;
+            }
+        }
+    };
+    let canceled = interaction
+        .client
+        .send_request::<CodeLensResolveRequest>(json!(lenses[1]));
+    wait_for_dispatch(canceled.id().to_string());
+    let live = interaction
+        .client
+        .send_request::<CodeLensResolveRequest>(json!(lenses[2]));
+    wait_for_dispatch(live.id().to_string());
+    let interactive = interaction.client.references("symbols.py", 4, 5, false);
+    wait_for_dispatch(interactive.id().to_string());
+    interaction.client.cancel_request(canceled.id());
+    interaction.client.cancel_request(first.id());
+    let deadline = Instant::now() + timeout;
+    let mut cancellations = 0;
+    while cancellations < 2 {
+        let event = events.recv_deadline(deadline).unwrap();
+        if matches!(&event.event.kind, TelemetryEventKind::LspEvent(name) if name == "CancelRequest")
+        {
+            cancellations += 1;
+        }
+    }
+    // Interactive references must finish while the first lens is still blocked.
+    assert_eq!(calls.recv_timeout(timeout).unwrap(), "symbols.run");
+    interactive
+        .expect_response_with(|locations| {
+            locations
+                .unwrap()
+                .iter()
+                .any(|location| location.uri == external_uri)
+        })
+        .unwrap();
+    interaction
+        .client
+        .send_request::<RenameRequest>(json!({
+            "textDocument": {
+                "uri": Uri::from_file_path(root_path.join("symbols.py")).unwrap()
+            },
+            "position": {"line": 4, "character": 5},
+            "newName": "renamed_run"
+        }))
+        .expect_response_with(|edit| {
+            assert!(edit.is_some());
+            true
+        })
+        .unwrap();
+    assert_eq!(calls.recv_timeout(timeout).unwrap(), "symbols.run");
+    release.send(()).unwrap();
+    first
+        .expect_response_error_code(ErrorCode::RequestCanceled as i32)
+        .unwrap();
+    canceled
+        .expect_response_error_code(ErrorCode::RequestCanceled as i32)
+        .unwrap();
+    assert_eq!(calls.recv_timeout(timeout).unwrap(), "symbols.run");
+    live.expect_response_with(|lens| {
+        has_reference_lens(&lens, 4, "3 references", 3)
+            && reference_locations(&lens)
+                .iter()
+                .any(|location| location.uri == external_uri)
+    })
+    .unwrap();
+    assert!(calls.is_empty());
+    interaction.shutdown().unwrap();
+}
+
+fn has_reference_lens(
+    lens: &CodeLens,
+    line: u32,
+    expected_title: &str,
+    expected_locations: usize,
+) -> bool {
+    let Some(command) = &lens.command else {
+        return false;
+    };
+    lens.range.start.line == line
+        && command.title == expected_title
+        && command.command == "pyrefly.showReferences"
+        && reference_locations(lens).len() == expected_locations
+}
+
+fn reference_locations(lens: &CodeLens) -> Vec<Location> {
+    let arguments = lens
+        .command
+        .as_ref()
+        .and_then(|command| command.arguments.as_ref())
+        .expect("Resolved reference lens should have command arguments");
+    serde_json::from_value(
+        arguments
+            .get(2)
+            .expect("Reference locations should be the third argument")
+            .clone(),
+    )
+    .expect("Reference locations should deserialize")
 }
