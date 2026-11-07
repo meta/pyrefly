@@ -2294,6 +2294,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if self.is_equivalent(&old, &new) {
                 continue;
             }
+            // A missing-attribute fallback carries no refinement information. Keep the stored
+            // refinement rather than letting `intersect` replace it with an error `Any`.
+            if new.is_error() && self.attr_error_from_missing(result.ty(), name) {
+                continue;
+            }
             let rebased = self.intersect(stored, &new);
             if rebased.is_never() {
                 return TypeInfo::of_ty(self.heap.mk_never());
