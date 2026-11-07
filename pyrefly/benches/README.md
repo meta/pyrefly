@@ -2,10 +2,10 @@
 
 Real-world benchmarks over a large, pinned PyTorch checkout (15k+ Python files)
 across all cores. They cover interactive LSP latency (`cold_start`,
-`error_propagation`, `workspace_symbol`), cold whole-project batch throughput
-(`full_check`), and cold whole-project indexing (`indexed_memory`). A separate
-`pytorch_memory` target reports the memory that index holds, for the reason in
-its section below.
+`error_propagation`, `workspace_symbol`), cold whole-project
+batch throughput (`full_check`), and cold whole-project indexing (`indexed_memory`).
+A separate `pytorch_memory` target reports the memory that index holds, for the
+reason in its section below.
 
 For the full command reference (all flags, micro benchmarks, cargo/buck forms),
 see `.agents/skills/benchmark-pyrefly/SKILL.md`.

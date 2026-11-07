@@ -7,9 +7,9 @@
 
 //! PyTorch walltime benchmarks. Each benchmark lives in its own module
 //! (`cold_start`, `error_propagation`, `full_check`, `indexed_memory`,
-//! `workspace_symbol`) sharing the checkout harness in [`common`]; this crate root
-//! just aggregates their criterion groups into one binary, so a single
-//! `pytorch_bench` target builds and runs all of them.
+//! `workspace_symbol`) sharing the checkout harness in
+//! [`common`]. This crate root aggregates their Criterion groups into one binary.
+//! A single `pytorch_bench` target builds and runs all of them.
 //! Individual benchmarks are still selectable by name at runtime, e.g.
 //! `cargo bench -p pyrefly --bench pytorch -- cold_start`.
 

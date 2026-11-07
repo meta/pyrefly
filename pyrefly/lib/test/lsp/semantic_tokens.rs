@@ -5,14 +5,21 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
+use lsp_types::SemanticTokenTypes;
 use pretty_assertions::assert_eq;
+use pyrefly_python::ast::Ast;
+use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_python::sys_info::PythonVersion;
+use ruff_python_ast::PySourceType;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
 use crate::state::require::Require;
+use crate::state::semantic_tokens::SemanticTokenBuilder;
 use crate::state::semantic_tokens::SemanticTokensLegends;
 use crate::test::util::TestEnv;
 use crate::test::util::mk_multi_file_state_with_env;
@@ -1195,12 +1202,11 @@ token-type: enumMember
     );
 }
 
-// BUG: Enum highlighting follows the inferred value type, not the attribute definition.
-// union_class.A should be enumMember. Holder.kind, Holder.A,
-// holder.kind, and e.kind should be property (issue #4751).
 #[test]
 fn enum_member_definition_test() {
     let mut env = TestEnv::new();
+    // A single-member enum normalizes Literal[E.A] to E. The literal-union fixtures
+    // therefore have a second member.
     env.add(
         "fixtures",
         r#"
@@ -1209,6 +1215,7 @@ from typing import ClassVar, Literal
 
 class E(Enum):
     A = 1
+    B = 2
     ALIAS = A
 
     @property
@@ -1217,16 +1224,36 @@ class E(Enum):
 
 class F(Enum):
     A = 1
+    B = 2
+
+class X(str, Enum):
+    title = "title"
+    other = "other"
+
+class Y(str, Enum):
+    title = "other"
+    other = "title"
+
+class SingletonE(Enum):
+    A = 1
+
+class SingletonF(Enum):
+    A = 1
 
 class Holder:
     kind: ClassVar[Literal[E.A]] = E.A
     A: ClassVar[Literal[E.A]] = E.A
+    title: ClassVar[Literal[X.title]] = X.title
 
 holder: Holder
 e: E
 enum_class: type[E]
 union_class: type[E] | type[F]
 mixed_class: type[E] | type[Holder]
+x: X
+str_enum_class: type[X] | type[Y]
+mixed_str_enum_class: type[X] | type[Holder]
+normalized_union_class: type[SingletonE] | type[SingletonF]
 "#,
     );
     for (expression, receiver_kind, attribute_kind) in [
@@ -1234,12 +1261,20 @@ mixed_class: type[E] | type[Holder]
         ("E.ALIAS", "class", "enumMember"),
         ("e.A", "variable", "enumMember"),
         ("enum_class.A", "class", "enumMember"),
-        ("union_class.A", "class", "property"),
+        ("union_class.A", "class", "enumMember"),
         ("mixed_class.A", "class", "property"),
-        ("Holder.kind", "class", "enumMember"),
-        ("Holder.A", "class", "enumMember"),
-        ("holder.kind", "variable", "enumMember"),
-        ("e.kind", "variable", "enumMember"),
+        ("Holder.kind", "class", "property"),
+        ("Holder.A", "class", "property"),
+        ("holder.kind", "variable", "property"),
+        ("e.kind", "variable", "property"),
+        ("X.title", "class", "enumMember"),
+        ("x.title", "variable", "enumMember"),
+        ("str_enum_class.title", "class", "enumMember"),
+        ("mixed_str_enum_class.title", "class", "property"),
+        ("Holder.title", "class", "property"),
+        // BUG: A should be enumMember, but normalization loses the enum literal types.
+        // https://github.com/meta/pyrefly/issues/4751
+        ("normalized_union_class.A", "class", "property"),
     ] {
         let (receiver, attribute) = expression.split_once('.').unwrap();
         let code = format!("from fixtures import *\n{expression}\n");
@@ -1269,8 +1304,6 @@ token-type: {attribute_kind}",
     }
 }
 
-// BUG: Narrowing changes the highlighting of holder.kind to enumMember.
-// Both occurrences should remain property; E.A and E.B should be enumMember (issue #4751).
 #[test]
 fn narrowed_enum_instance_attribute_test() {
     let code = r#"
@@ -1345,7 +1378,7 @@ line: 13, column: 9, length: 6, text: holder
 token-type: parameter
 
 line: 13, column: 16, length: 4, text: kind
-token-type: enumMember
+token-type: property
 
 line: 13, column: 24, length: 1, text: E
 token-type: class
@@ -2357,5 +2390,40 @@ fn type_alias_keyword_range_test() {
             )
             .is_empty()
         );
+    }
+}
+
+#[test]
+fn attribute_range_skips_classification_but_visits_receiver() {
+    let code = "a.b.c";
+    let (ast, errors, _) = Ast::parse(code, PySourceType::Python);
+    assert!(errors.is_empty());
+    for (start, end, expected_attributes, expected_tokens) in [
+        (0, 1, vec![], vec!["a"]),
+        (2, 3, vec!["b"], vec!["b"]),
+        (4, 5, vec!["c"], vec!["c"]),
+        (1, 2, vec![], vec![]),
+        (2, 2, vec![], vec![]),
+    ] {
+        let classified = RefCell::new(Vec::new());
+        let mut builder = SemanticTokenBuilder::new(
+            Some(TextRange::new(TextSize::new(start), TextSize::new(end))),
+            Vec::new(),
+        );
+        builder.process_ast(
+            &ast,
+            &|attr| {
+                classified.borrow_mut().push(attr.attr.id.to_string());
+                Some(SemanticTokenTypes::Property)
+            },
+            &|_| Some((ModuleName::from_str("main"), SymbolKind::Variable)),
+        );
+        assert_eq!(*classified.borrow(), expected_attributes);
+        let tokens: Vec<_> = builder
+            .all_tokens_sorted()
+            .iter()
+            .map(|token| &code[token.range.start().to_usize()..token.range.end().to_usize()])
+            .collect();
+        assert_eq!(tokens, expected_tokens);
     }
 }
