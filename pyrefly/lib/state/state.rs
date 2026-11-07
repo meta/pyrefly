@@ -96,6 +96,7 @@ use crate::binding::binding::KeyClassMetadata;
 use crate::binding::binding::KeyClassMro;
 use crate::binding::binding::KeyClassSubscriptSymmetry;
 use crate::binding::binding::KeyClassSynthesizedFields;
+use crate::binding::binding::KeyDjangoRelations;
 use crate::binding::binding::KeyExport;
 use crate::binding::binding::KeyTParams;
 use crate::binding::binding::KeyVariance;
@@ -3344,6 +3345,29 @@ impl<'a> LookupExport for TransactionHandle<'a> {
 }
 
 impl<'a> LookupAnswer for TransactionHandle<'a> {
+    fn django_model_modules(&self) -> Vec<(ModuleName, ModulePath)> {
+        let config = self.module_data.config.read().dupe();
+        if config.django_model_modules.is_empty() {
+            return Vec::new();
+        }
+        self.transaction
+            .get_cached_loader(&config)
+            .check_django_model_modules(
+                self.transaction.config_finder(),
+                self.module_data.handle.path(),
+            );
+        config
+            .django_model_modules
+            .iter()
+            .copied()
+            .filter_map(|module| {
+                self.get_module(module, None, ModuleDep::Key(KeyDjangoRelations.to_anykey()))
+                    .finding()
+                    .map(|module_data| (module, module_data.handle.path().dupe()))
+            })
+            .collect()
+    }
+
     fn get<'answer, K: Solve<Self> + Exported>(
         &self,
         module: ModuleName,

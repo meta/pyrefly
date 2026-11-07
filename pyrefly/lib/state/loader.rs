@@ -8,7 +8,9 @@
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Once;
 
+use anyhow::anyhow;
 use dupe::Dupe;
 use pyrefly_config::error_kind::ErrorKind;
 use pyrefly_python::module_name::ModuleName;
@@ -23,6 +25,8 @@ use crate::config::config::ConfigFile;
 use crate::config::config::ConfigSource;
 use crate::config::config::FallbackSearchPath;
 use crate::config::config::ImportLookupPathPart;
+use crate::config::finder::ConfigError;
+use crate::config::finder::ConfigFinder;
 use crate::error::context::ErrorContext;
 use crate::module::finder::DirEntryCache;
 use crate::module::finder::FindImportOptions;
@@ -228,6 +232,8 @@ impl<T> FindingOrError<T> {
 #[derive(Debug)]
 pub struct LoaderFindCache {
     config: ArcId<ConfigFile>,
+    /// Report unresolved Django model modules once per import-resolution configuration.
+    django_model_modules_checked: Once,
     /// When true, all import resolution steps are origin-independent: no
     /// source_db, no sub_configs, and fallback_search_path is not
     /// DirectoryRelative. This lets us cache every module by ModuleName
@@ -268,12 +274,39 @@ impl LoaderFindCache {
             );
         Self {
             config,
+            django_model_modules_checked: Once::new(),
             is_origin_independent,
             cache: Default::default(),
             executable_cache: Default::default(),
             replaced_source_cache: Default::default(),
             dir_cache: DirEntryCache::new(),
         }
+    }
+
+    pub fn check_django_model_modules(&self, config_finder: &ConfigFinder, origin: &ModulePath) {
+        self.django_model_modules_checked.call_once(|| {
+            let errors = self
+                .config
+                .django_model_modules
+                .iter()
+                .filter(|module| {
+                    self.find_import(**module, Some(origin), None)
+                        .finding()
+                        .is_none()
+                })
+                .map(|module| {
+                    let context = self
+                        .config
+                        .source
+                        .root_from_file()
+                        .map(|root| format!(" (config root `{}`)", root.display()))
+                        .unwrap_or_default();
+                    ConfigError::warn(anyhow!(
+                        "Cannot resolve module `{module}` listed in `django-model-modules`{context}"
+                    ))
+                });
+            config_finder.add_errors(errors.collect());
+        });
     }
 
     /// Find source for a configured replacement without changing other import lookups.

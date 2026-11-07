@@ -5,15 +5,30 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use dupe::Dupe;
+use pyrefly_build::handle::Handle;
+use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::module_path::ModulePath;
+use pyrefly_util::arc_id::ArcId;
+use pyrefly_util::thread_pool::ThreadCount;
+
 use crate::binding::binding::KeyClassSynthesizedFields;
+use crate::config::error_kind::ErrorKind;
+use crate::config::error_kind::Severity;
+use crate::config::finder::ConfigFinder;
 use crate::django_testcase;
+use crate::state::load::FileContents;
+use crate::state::require::Require;
+use crate::state::state::State;
 use crate::test::django::util::django_env;
 use crate::test::util::TestEnv;
 use crate::test::util::get_class;
 use crate::testcase;
 
-// Cross-module reverse relations: when the FK target is in a different module,
-// reverse relations cannot be synthesized yet because our current analysis only scans the current module.
+// Cross-module reverse relations are only discovered from explicitly configured model modules.
 fn django_env_with_separate_models() -> TestEnv {
     let mut env = django_env();
     env.add(
@@ -26,6 +41,25 @@ class Author(models.Model):
 "#,
     );
     env
+}
+
+fn django_env_with_configured_models() -> TestEnv {
+    django_env_with_separate_models().with_django_model_modules(&["main"])
+}
+
+fn django_env_with_multiple_model_modules() -> TestEnv {
+    let mut env = django_env_with_separate_models();
+    env.add(
+        "magazine",
+        r#"
+from django.db import models
+from .author import Author
+
+class Magazine(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+"#,
+    );
+    env.with_django_model_modules(&["main", "magazine"])
 }
 
 fn django_env_with_module(name: &str, code: &str) -> TestEnv {
@@ -46,6 +80,173 @@ from django.db.models.base import Model
     );
     env.add("django.db.models.base", "class Model: pass");
     env
+}
+
+#[test]
+fn test_reverse_relations_incremental() {
+    let mut env = django_env().with_django_model_modules(&["relations"]);
+    env.add(
+        "author",
+        "from django.db.models import Model\nclass Author(Model): pass",
+    );
+    env.add(
+        "publisher",
+        "from django.db.models import Model\nclass Publisher(Model): pass",
+    );
+    env.add("relations", "");
+    env.add(
+        "main",
+        r#"
+from typing import assert_type
+from django.db.models.fields.related_descriptors import RelatedManager
+from author import Author
+from publisher import Publisher
+from relations import Book
+
+assert_type(Author().books, RelatedManager[Book])
+assert_type(Publisher().books, RelatedManager[Book])
+"#,
+    );
+    let main = Handle::new(
+        ModuleName::from_str("main"),
+        ModulePath::memory(PathBuf::from("main.py")),
+        env.sys_info(),
+    );
+    let state = State::new(env.config_finder(), ThreadCount::Inline);
+    for (iteration, related_name) in ["books", "works", "+", "books"].into_iter().enumerate() {
+        let mut transaction = state.new_committable_transaction(Require::Exports, None);
+        if iteration == 0 {
+            transaction.as_mut().set_memory(env.get_memory());
+        }
+        transaction.as_mut().set_memory(vec![(
+            PathBuf::from("relations.py"),
+            Some(Arc::new(FileContents::from_source(format!(
+                r#"
+from django.db import models
+from author import Author
+from publisher import Publisher
+
+class Book(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE, related_name="{related_name}")
+    publisher = models.ForeignKey(Publisher, on_delete=models.CASCADE, related_name="{related_name}")
+"#
+            )))),
+        )]);
+        // Only the consumer is checked eagerly. Both target models are solved on demand.
+        transaction
+            .as_mut()
+            .run(&[main.dupe()], Require::Everything, None);
+        let errors = transaction
+            .as_ref()
+            .get_errors([&main])
+            .collect_display_errors();
+        assert_eq!(
+            errors.len(),
+            if related_name == "books" { 0 } else { 4 },
+            "{errors:?}"
+        );
+        for error in &errors {
+            match error.error_kind() {
+                ErrorKind::MissingAttribute => {
+                    assert!(
+                        error.msg().contains("has no attribute `books`"),
+                        "{error:?}"
+                    );
+                }
+                ErrorKind::AssertType => {
+                    assert!(error.msg().contains("assert_type(Unknown,"), "{error:?}");
+                }
+                _ => panic!("unexpected diagnostic: {error:?}"),
+            }
+        }
+        state.commit_transaction(transaction, None);
+    }
+}
+
+#[test]
+fn test_reverse_relations_per_module_config() {
+    let mut env = django_env_with_separate_models().with_django_model_modules(&["books"]);
+    env.add(
+        "other",
+        "from django.db.models import Model\nclass Other(Model): pass",
+    );
+    env.add(
+        "books",
+        r#"
+from django.db import models
+from author import Author
+
+class Book(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+"#,
+    );
+    env.add(
+        "magazines",
+        r#"
+from django.db import models
+from other import Other
+
+class Magazine(models.Model):
+    other = models.ForeignKey(Other, on_delete=models.CASCADE)
+"#,
+    );
+    env.add(
+        "main",
+        r#"
+from typing import assert_type
+from django.db.models.fields.related_descriptors import RelatedManager
+from author import Author
+from other import Other
+from books import Book
+from magazines import Magazine
+
+assert_type(Author().book_set, RelatedManager[Book])
+assert_type(Other().magazine_set, RelatedManager[Magazine])
+"#,
+    );
+    let config = env.config();
+    let mut other_config = (*config).clone();
+    other_config.django_model_modules = vec![ModuleName::from_str("magazines")];
+    let other_config = ArcId::new(other_config);
+    let fallback = config.dupe();
+    let finder = ConfigFinder::new_custom(
+        Box::new(move |module, _| {
+            Ok(Some(if module.as_str() == "other" {
+                other_config.dupe()
+            } else {
+                config.dupe()
+            }))
+        }),
+        Box::new(|_| unreachable!("all modules have an explicit test config")),
+        Box::new(move |_, _| fallback.dupe()),
+        Box::new(|| {}),
+    );
+    let main = Handle::new(
+        ModuleName::from_str("main"),
+        ModulePath::memory(PathBuf::from("main.py")),
+        env.sys_info(),
+    );
+    let state = State::new(finder, ThreadCount::Inline);
+    let mut transaction = state.new_transaction(Require::Exports, None);
+    transaction.set_memory(env.get_memory());
+    transaction.run(&[main.dupe()], Require::Everything, None);
+    transaction
+        .get_errors([&main])
+        .check_against_expectations()
+        .unwrap();
+}
+
+#[test]
+fn test_reverse_relations_missing_configured_module() {
+    let mut env = django_env_with_separate_models()
+        .with_django_model_modules(&["author", "misspelled_models"]);
+    env.add("main", "from author import Author\nAuthor()\n");
+    let (state, _) = env.to_state();
+    let errors = state.transaction().get_config_errors();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].severity(), Severity::Warn);
+    assert!(errors[0].get_message().contains("misspelled_models"));
+    assert!(errors[0].get_message().contains("django-model-modules"));
 }
 
 testcase!(
@@ -258,8 +459,7 @@ assert_type(reporter.überbook_set, RelatedManager[ÜberBook])
 );
 
 testcase!(
-    bug = "Cross-module reverse relations not supported",
-    test_foreign_key_reverse_cross_module,
+    test_foreign_key_reverse_cross_module_without_config,
     django_env_with_separate_models(),
     r#"
 from django.db import models
@@ -268,9 +468,45 @@ from .author import Author
 class Book(models.Model):
     author = models.ForeignKey(Author, on_delete=models.CASCADE)
 
-# Author is defined in a different module, so reverse relation won't be synthesized
+# No model modules are configured, so the reverse relation is not discovered.
 author = Author()
 author.book_set  # E: `Author` has no attribute `book_set`
+"#,
+);
+
+testcase!(
+    test_foreign_key_reverse_cross_module_configured,
+    django_env_with_configured_models(),
+    r#"
+from django.db import models
+from django.db.models.fields.related_descriptors import RelatedManager
+from typing import assert_type
+from .author import Author
+
+class Book(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+author = Author()
+assert_type(author.book_set, RelatedManager[Book])
+"#,
+);
+
+testcase!(
+    test_foreign_key_reverse_multiple_configured_modules,
+    django_env_with_multiple_model_modules(),
+    r#"
+from django.db import models
+from django.db.models.fields.related_descriptors import RelatedManager
+from typing import assert_type
+from .author import Author
+from .magazine import Magazine
+
+class Book(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+
+author = Author()
+assert_type(author.book_set, RelatedManager[Book])
+assert_type(author.magazine_set, RelatedManager[Magazine])
 "#,
 );
 
