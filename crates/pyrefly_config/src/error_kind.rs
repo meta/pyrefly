@@ -467,6 +467,8 @@ pub enum ErrorKind {
     UnboundName,
     /// An error caused by a keyword argument used in the wrong place.
     UnexpectedKeyword,
+    /// A function diverges without an explicit exit, contrary to its return annotation.
+    UnexpectedNever,
     /// An error caused by passing a positional argument for a keyword-only parameter.
     UnexpectedPositionalArgument,
     /// Attempting to use a type checker directive without importing it from `typing`.
@@ -699,6 +701,7 @@ impl ErrorKind {
             ErrorKind::UnannotatedAttribute => Severity::Ignore,
             ErrorKind::UnannotatedParameter => Severity::Ignore,
             ErrorKind::UnannotatedReturn => Severity::Ignore,
+            ErrorKind::UnexpectedNever => Severity::Warn,
             ErrorKind::UninitializedInstanceVariable => Severity::Ignore,
             ErrorKind::UnknownArgumentType => Severity::Ignore,
             ErrorKind::ImplicitAnyLambda => Severity::Ignore,

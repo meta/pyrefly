@@ -690,7 +690,7 @@ class Base:
 @define
 class Sub(Base):
     z: bool
-    x: float  # E: not consistent with `int`
+    x: float  # E: `Sub.x` has type `float`, which is not assignable to `int`, the type of `Base.x`
 
 reveal_type(Sub.__init__)  # E: revealed type: (self: Sub, y: str, z: bool, x: float) -> None
 "#,
@@ -976,6 +976,28 @@ attr.fields_dict(NotAttrs)  # E: `fields_dict()` is not an attrs class
 );
 
 // Inherited fields appear, and a generic class substitutes its type argument.
+attrs_testcase!(
+    test_attrs_fields_specialized_class_def,
+    r#"
+from typing import assert_type
+import attr
+
+@attr.define
+class A[T]:
+    value: T
+
+assert_type(attr.fields_dict(A[int])["value"], attr.Attribute[int])
+Alias = A[str]
+assert_type(attr.fields_dict(Alias)["value"], attr.Attribute[str])
+
+class NotAttrs[T]:
+    value: T
+
+attr.fields(NotAttrs[int])  # E: `fields()` is not an attrs class
+attr.fields_dict(NotAttrs[int])  # E: `fields_dict()` is not an attrs class
+"#,
+);
+
 attrs_testcase!(
     test_attrs_fields_dict_inheritance_generic,
     r#"

@@ -8,6 +8,7 @@
 use std::cmp::max;
 use std::fmt::Debug;
 use std::mem;
+use std::slice;
 
 use itertools::Either;
 use itertools::Itertools;
@@ -1235,6 +1236,8 @@ pub struct InstanceAttribute(
     pub Option<Idx<KeyAnnotation>>,
     pub TextRange,
     pub MethodSelfKind,
+    /// Whether some write assigns a value, rather than only annotating the attribute.
+    pub bool,
 );
 
 /// An attribute assigned in a method, with its initialization at the end of the method.
@@ -1242,6 +1245,67 @@ pub struct InstanceAttribute(
 pub struct MethodAttribute {
     pub attribute: InstanceAttribute,
     pub initialized: InitializationStatus,
+}
+
+/// Attribute initialization combined over the reachable `return`s of a method.
+#[derive(Clone, Debug)]
+pub struct ReturnAttributeInitialization {
+    attributes: SmallMap<Name, InitializationStatus>,
+    /// The status of every attribute absent from `attributes`.
+    unlisted: InitializationStatus,
+}
+
+impl ReturnAttributeInitialization {
+    fn get(&self, name: &Name) -> &InitializationStatus {
+        self.attributes.get(name).unwrap_or(&self.unlisted)
+    }
+
+    /// Whether every attribute is initialized at every `return` so far, as when there is none.
+    fn initializes_everything(&self) -> bool {
+        self.attributes.is_empty() && self.unlisted == InitializationStatus::Initialized
+    }
+
+    /// Combine the `return`s of another part of the method into these.
+    fn combine(&mut self, other: Self, unset_nodes: &mut UnsetNodes) {
+        if other.initializes_everything() {
+            return;
+        }
+        if self.initializes_everything() {
+            *self = other;
+            return;
+        }
+        let unlisted = InitializationStatus::merge(
+            unset_nodes,
+            [(Some(&self.unlisted), None), (Some(&other.unlisted), None)],
+        );
+        // List the attributes that only `other` lists, unless being unlisted here already makes
+        // them uninitialized.
+        if self.unlisted != InitializationStatus::Uninitialized {
+            for name in other.attributes.keys() {
+                if !self.attributes.contains_key(name) {
+                    self.attributes.insert(name.clone(), self.unlisted.clone());
+                }
+            }
+        }
+        self.attributes.retain(|name, status| {
+            *status = InitializationStatus::merge(
+                unset_nodes,
+                [(Some(&*status), None), (Some(other.get(name)), None)],
+            );
+            *status != unlisted
+        });
+        self.unlisted = unlisted;
+    }
+}
+
+impl Default for ReturnAttributeInitialization {
+    /// With no `return` yet, no `return` misses an attribute.
+    fn default() -> Self {
+        Self {
+            attributes: SmallMap::new(),
+            unlisted: InitializationStatus::Initialized,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1253,9 +1317,8 @@ struct ScopeMethod {
     new_instance_names: SmallSet<Name>,
     instance_attributes: SmallMap<Name, InstanceAttribute>,
     nn_module_registrations: NNModuleRegistrations,
-    /// Attribute initialization combined over the reachable `return`s so far, or `None` before
-    /// the first one. An absent name is uninitialized at some `return`.
-    return_attribute_initialization: Option<SmallMap<Name, InitializationStatus>>,
+    /// Attribute initialization combined over the reachable `return`s so far.
+    return_attribute_initialization: ReturnAttributeInitialization,
     parameters: SmallMap<Name, ParameterUsage>,
     yields_and_returns: YieldsAndReturns,
     is_async: bool,
@@ -1329,7 +1392,7 @@ impl ScopeMethod {
             new_instance_names: SmallSet::new(),
             instance_attributes: SmallMap::new(),
             nn_module_registrations: SmallMap::new(),
-            return_attribute_initialization: None,
+            return_attribute_initialization: Default::default(),
             parameters: SmallMap::new(),
             yields_and_returns: Default::default(),
             is_async,
@@ -2388,12 +2451,10 @@ impl Scopes {
                                         flow.last_stmt_expr,
                                     )
                                 })
-                                .chain(
-                                    method_scope
-                                        .return_attribute_initialization
-                                        .iter()
-                                        .map(|flow| (flow.get(&name), None)),
-                                ),
+                                .chain([(
+                                    Some(method_scope.return_attribute_initialization.get(&name)),
+                                    None,
+                                )]),
                         );
                         (
                             name,
@@ -2562,6 +2623,7 @@ impl Scopes {
         if let Some(attr) = method_scope.instance_attributes.get_mut(&name.id) {
             // Accumulate subsequent assignments in the method.
             attr.0.push(value);
+            attr.4 |= has_value;
             // Keep the first type annotation encountered in the method.
             if attr.1.is_none() {
                 attr.1 = annotation;
@@ -2575,6 +2637,7 @@ impl Scopes {
                     annotation,
                     name.range,
                     method_scope.receiver_kind,
+                    has_value,
                 ),
             );
         }
@@ -3518,7 +3581,89 @@ impl Scopes {
         None
     }
 
-    /// Record a return in the enclosing function body there is one.
+    /// The attributes of the current method's receiver that a `finally` body assigns directly,
+    /// outside any nested block, with their status over the method's `return`s so far. `None` if
+    /// it assigns none.
+    pub fn finally_return_statuses(
+        &self,
+        finally: &[Stmt],
+    ) -> Option<SmallMap<Name, InitializationStatus>> {
+        let ScopeKind::Method(ScopeMethod {
+            self_name: Some(self_name),
+            return_attribute_initialization: returns,
+            ..
+        }) = &self.current().kind
+        else {
+            return None;
+        };
+        let mut targets: Vec<&Expr> = finally
+            .iter()
+            .flat_map(|stmt| match stmt {
+                Stmt::Assign(x) => x.targets.as_slice(),
+                Stmt::AnnAssign(x) if x.value.is_some() => slice::from_ref(&*x.target),
+                _ => &[],
+            })
+            .collect();
+        let mut statuses = SmallMap::new();
+        while let Some(target) = targets.pop() {
+            match target {
+                Expr::Tuple(x) => targets.extend(&x.elts),
+                Expr::List(x) => targets.extend(&x.elts),
+                Expr::Starred(x) => targets.push(&x.value),
+                Expr::Attribute(x) => {
+                    if matches!(&*x.value, Expr::Name(name) if name.id == self_name.id) {
+                        statuses.insert(x.attr.id.clone(), returns.get(&x.attr.id).clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        (!statuses.is_empty()).then_some(statuses)
+    }
+
+    /// Take the combined `return` state of the current method, so that the `return`s of a
+    /// `finally` body that assigns attributes directly can be collected separately.
+    pub fn take_method_returns(&mut self) -> ReturnAttributeInitialization {
+        let ScopeKind::Method(method) = &mut self.current_mut().kind else {
+            unreachable!("only a method's `finally` body assigns attributes directly");
+        };
+        mem::take(&mut method.return_attribute_initialization)
+    }
+
+    /// Finish a `try` statement whose `finally` body assigns attributes directly.
+    /// `before_try` holds their status over the `return`s before the statement, and `returns`
+    /// combines those with the `return`s before the `finally` body, which runs after them. An
+    /// attribute that is still initialized after the `finally` body is initialized on the
+    /// `return` paths inside the statement, so its status is the one from before the statement.
+    pub fn finish_try_returns(
+        &mut self,
+        before_try: SmallMap<Name, InitializationStatus>,
+        mut returns: ReturnAttributeInitialization,
+    ) {
+        let unset_nodes = &mut self.unset_nodes;
+        let scope = &mut self.scopes.last_mut().scope;
+        let ScopeKind::Method(method) = &mut scope.kind else {
+            unreachable!("only a method's `finally` body assigns attributes directly");
+        };
+        for (name, status) in before_try {
+            if scope.flow.instance_attribute_initialization.get(&name)
+                != Some(&InitializationStatus::Initialized)
+            {
+                continue;
+            }
+            if status == returns.unlisted {
+                returns.attributes.shift_remove(&name);
+            } else {
+                returns.attributes.insert(name, status);
+            }
+        }
+        let finally_returns = mem::take(&mut method.return_attribute_initialization);
+        returns.combine(finally_returns, unset_nodes);
+        method.return_attribute_initialization = returns;
+    }
+
+    /// Record a return in the enclosing function body there is one. `previous_stmt_expr` is the
+    /// termination key of the statement before the `return`.
     ///
     /// Return `None` if this succeeded and Some(rejected_return) if we are at the top-level
     pub fn record_or_reject_return(
@@ -3526,6 +3671,7 @@ impl Scopes {
         ret: CurrentIdx,
         x: StmtReturn,
         is_unreachable: bool,
+        previous_stmt_expr: Option<Idx<Key>>,
     ) -> Result<(), (CurrentIdx, StmtReturn)> {
         let unset_nodes = &mut self.unset_nodes;
         for scope in self.scopes.iter_mut().map(|node| &mut node.scope).rev() {
@@ -3540,28 +3686,39 @@ impl Scopes {
                 ScopeKind::Method(method) => {
                     if !is_unreachable {
                         let current = &scope.flow.instance_attribute_initialization;
-                        // A name that is uninitialized at a `return` stays uninitialized, so
-                        // it is dropped instead of being merged again at later ones.
-                        match &mut method.return_attribute_initialization {
-                            None => {
-                                method.return_attribute_initialization = Some(
-                                    current
-                                        .iter()
-                                        .filter(|(_, status)| {
-                                            !matches!(status, InitializationStatus::Uninitialized)
-                                        })
-                                        .map(|(name, status)| (name.clone(), status.clone()))
-                                        .collect(),
-                                );
+                        let returns = &mut method.return_attribute_initialization;
+                        // The status at this `return` of an attribute the flow has not assigned.
+                        let missing =
+                            InitializationStatus::merge(unset_nodes, [(None, previous_stmt_expr)]);
+                        let unlisted = InitializationStatus::merge(
+                            unset_nodes,
+                            [(Some(&returns.unlisted), None), (Some(&missing), None)],
+                        );
+                        // List the attributes this flow assigns, unless being unlisted already
+                        // makes them uninitialized.
+                        if returns.unlisted != InitializationStatus::Uninitialized {
+                            for name in current.keys() {
+                                if !returns.attributes.contains_key(name) {
+                                    returns
+                                        .attributes
+                                        .insert(name.clone(), returns.unlisted.clone());
+                                }
                             }
-                            Some(previous) => previous.retain(|name, status| {
-                                *status = InitializationStatus::merge(
-                                    unset_nodes,
-                                    [(Some(&*status), None), (current.get(name), None)],
-                                );
-                                !matches!(status, InitializationStatus::Uninitialized)
-                            }),
                         }
+                        returns.attributes.retain(|name, status| {
+                            let here = match current.get(name) {
+                                None | Some(InitializationStatus::Uninitialized) => {
+                                    (Some(&missing), None)
+                                }
+                                here => (here, previous_stmt_expr),
+                            };
+                            *status = InitializationStatus::merge(
+                                unset_nodes,
+                                [(Some(&*status), None), here],
+                            );
+                            *status != unlisted
+                        });
+                        returns.unlisted = unlisted;
                     }
                     method
                         .yields_and_returns
@@ -3735,6 +3892,8 @@ impl Scopes {
                                 annotation,
                                 initialized_in_recognized_method: recognized_instance_attrs
                                     .contains(name.key().as_str()),
+                                // Set below for each method that assigns the field.
+                                initialized_in_method: false,
                                 initialized_on_new_instance: attributes_set_on_new_instance
                                     .contains(name.key().as_str()),
                             },
@@ -3791,7 +3950,8 @@ impl Scopes {
                 name,
                 method,
                 MethodAttribute {
-                    attribute: InstanceAttribute(values, annotation, range, receiver_kind),
+                    attribute:
+                        InstanceAttribute(values, annotation, range, receiver_kind, has_value),
                     initialized,
                 },
             )| {
@@ -3835,12 +3995,16 @@ impl Scopes {
                     // Any method can establish initialization, so combine their requirements with OR.
                     existing_initialized.or(initialized);
                 } else if let Some((
-                    ClassFieldDefinition::DeclaredByAnnotation { .. },
+                    ClassFieldDefinition::DeclaredByAnnotation {
+                        initialized_in_method,
+                        ..
+                    },
                     _,
                     existing_initialized,
                 )) = field_definitions.get_mut(name.key())
                 {
                     // Methods initialize a bare class-body annotation without changing its definition.
+                    *initialized_in_method |= has_value;
                     existing_initialized.or(initialized);
                 } else if !field_definitions.contains_key_hashed(name.as_ref()) {
                     field_definitions.insert_hashed(

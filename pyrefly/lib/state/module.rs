@@ -43,6 +43,7 @@ use ruff_python_ast::ModModule;
 use crate::alt::answers::Answers;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers::Solutions;
+use crate::error::collector::ModuleDiagnostics;
 use crate::export::exports::Exports;
 use crate::export::exports::LookupExport;
 use crate::state::dirty::AtomicComputedDirty;
@@ -452,6 +453,30 @@ pub trait ModuleStateReader {
     fn get_parsed_module(&self) -> Option<Arc<ParsedModule>>;
     fn get_answers(&self) -> Option<Arc<Answers>>;
     fn get_solutions(&self) -> Option<Arc<Solutions>>;
+    fn parse_errors(&self) -> Option<ModuleDiagnostics> {
+        self.get_parsed_module()
+            .map(|parsed| parsed.errors().dupe())
+            .or_else(|| {
+                self.get_answers()
+                    .map(|answers| answers.bindings().parse_errors().dupe())
+            })
+            .or_else(|| {
+                self.get_solutions()
+                    .map(|solutions| solutions.parse_errors().dupe())
+            })
+    }
+    fn binding_errors(&self) -> Option<ModuleDiagnostics> {
+        self.get_answers()
+            .map(|answers| answers.bindings().binding_errors().dupe())
+            .or_else(|| {
+                self.get_solutions()
+                    .map(|solutions| solutions.binding_errors().dupe())
+            })
+    }
+    fn solve_errors(&self) -> Option<ModuleDiagnostics> {
+        self.get_solutions()
+            .map(|solutions| solutions.solve_errors().dupe())
+    }
     fn module_ranges(&self) -> Option<Arc<ModuleRanges>>;
 }
 

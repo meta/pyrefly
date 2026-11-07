@@ -21,6 +21,7 @@ use pyrefly_types::dimension::contains_var_in_type;
 use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::dimension::is_gradual_size;
 use pyrefly_types::dimension::type_is_gradual_fast;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::read_only::ReadOnlyReason;
 use pyrefly_types::shaped_array::IntTuple;
@@ -142,14 +143,14 @@ fn canonical_vararg_unpack_inner<'a>(ty: &'a Type, other: &Type) -> &'a Type {
 fn accepts_all_class_objects(ty: &Type) -> bool {
     match ty {
         Type::Any(_) => true,
-        Type::ClassType(cls) if cls.is_builtin("object") => true,
+        Type::ClassType(cls) if cls.is(KnownClass::Object) => true,
         Type::Union(union) => union.members.iter().any(accepts_all_class_objects),
         _ => false,
     }
 }
 
 fn is_int_class_type(cls: &ClassType) -> bool {
-    cls.has_qname("shape_extensions", "Int")
+    cls.is(KnownClass::ShapeExtensionsInt)
 }
 
 fn params_have_any_args_and_kwargs(params: &Params) -> bool {
@@ -766,9 +767,9 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
         // TODO: Remove this once pandas 2.x is no longer supported.
         // This is fixed in pandas 3.0 stubs. Until then, we hard-code that list/tuple satisfy
         // SequenceNotStr. See https://github.com/pandas-dev/pandas/issues/56995
-        if protocol.has_qname("pandas._typing", "SequenceNotStr")
+        if protocol.is(KnownClass::PandasSequenceNotStr)
             && let Type::ClassType(got_cls) = &got
-            && (got_cls.is_builtin("list") || got_cls.is_builtin("tuple"))
+            && (got_cls.is(KnownClass::List) || got_cls.is(KnownClass::Tuple))
         {
             // Check that the element type of the list/tuple is a subtype of
             // `SequenceNotStr`'s element type. If either type does not have exactly
@@ -1952,8 +1953,14 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 })
             }
             (Type::Never(_), _) => Ok(()),
-            (_, Type::ClassType(want)) if want.is_builtin("object") => {
+            (_, Type::ClassType(want)) if want.is(KnownClass::Object) => {
                 Ok(()) // everything is an instance of `object`
+            }
+            (Type::SpecializedClassDef(got), want) => {
+                self.is_subset_eq(&Type::type_of(Type::ClassType(got.clone())), want)
+            }
+            (got, Type::SpecializedClassDef(want)) => {
+                self.is_subset_eq(got, &Type::type_of(Type::ClassType(want.clone())))
             }
             (got_ty, want_ty)
                 if let Some(got_alias) = as_type_alias(got_ty)
@@ -2188,11 +2195,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 self.is_subset_type_to_int_tuple(got, want)
             }
             (_, Type::Quantified(_)) => Err(SubsetError::Other),
-            // A truthiness marker only records when a boolean operand is returned, for narrowing.
-            // It does not restrict which values are assignable.
-            (l, Type::Intersect(u)) => all(u.0.iter().filter(|u| !u.is_truthiness_marker()), |u| {
-                self.is_subset_eq(l, u)
-            }),
+            (l, Type::Intersect(u)) => all(u.0.iter(), |u| self.is_subset_eq(l, u)),
             (l, Type::Union(u_union)) => {
                 let ordered_us = self.solver.partial_sort_by_vars(&u_union.members);
                 let mut error = None;
@@ -2246,11 +2249,11 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                     .mk_class_type(self.type_order.stdlib().object().clone()),
                 u,
             ),
-            (Type::Module(_), Type::ClassType(cls)) if cls.has_qname("types", "ModuleType") => {
+            (Type::Module(_), Type::ClassType(cls)) if cls.is(KnownClass::TypesModuleType) => {
                 Ok(())
             }
             (_, Type::ClassType(cls))
-                if cls.has_qname("types", "FunctionType")
+                if cls.is(KnownClass::TypesFunctionType)
                     && (matches!(
                         got,
                         Type::Callable(_) | Type::Function(_) | Type::Overload(_)
@@ -2261,15 +2264,13 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             {
                 Ok(())
             }
-            (Type::BoundMethod(_), Type::ClassType(cls))
-                if cls.has_qname("types", "MethodType") =>
-            {
+            (Type::BoundMethod(_), Type::ClassType(cls)) if cls.is(KnownClass::TypesMethodType) => {
                 Ok(())
             }
             // Only a `Callable` with `Params::Partial` params is an instance of
             // `functools.partial[ret]`; a plain callable is not.
             (Type::Callable(_) | Type::Function(_), Type::ClassType(cls))
-                if cls.has_qname("functools", "partial") =>
+                if cls.is(KnownClass::FunctoolsPartial) =>
             {
                 let l_sig = match got {
                     Type::Callable(c) => &**c,
@@ -2451,17 +2452,17 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             // Any Int expression represents an integer dimension value, whether it is a
             // concrete literal (`Int[3]`) or symbolic (`Int[N]`, `Int[N + 1]`).
             (Type::Int(_), Type::ClassType(cls))
-                if cls.is_builtin("int") || cls.is_builtin("float") =>
+                if cls.is(KnownClass::Int) || cls.is(KnownClass::Float) =>
             {
                 Ok(())
             }
             (Type::ClassType(cls), want @ Type::Int(_))
-                if cls.is_builtin("int") && is_gradual_size(want) =>
+                if cls.is(KnownClass::Int) && is_gradual_size(want) =>
             {
                 Ok(())
             }
             (Type::ClassType(cls), Type::Int(Int::Symbolic(inner)))
-                if cls.is_builtin("int")
+                if cls.is(KnownClass::Int)
                     && matches!(inner.as_ref(), Type::Var(_) | Type::Quantified(_)) =>
             {
                 if let Type::Var(v) = inner.as_ref()
@@ -2480,7 +2481,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 // still-fresh partial var is pinned gradual; anything else is a
                 // genuine mismatch.
                 match &inner_expanded {
-                    Type::ClassType(inner_cls) if inner_cls.is_builtin("int") => Ok(()),
+                    Type::ClassType(inner_cls) if inner_cls.is(KnownClass::Int) => Ok(()),
                     expanded if is_gradual_size(expanded) => Ok(()),
                     Type::Var(_) | Type::Quantified(_) | Type::Any(_) => {
                         self.is_subset_eq(&gradual_size(), inner)
@@ -2522,7 +2523,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 Ok(())
             }
             (Type::ClassType(got), Type::ClassType(want))
-                if want.is_builtin("float")
+                if want.is(KnownClass::Float)
                     && self.type_order.has_superclass(
                         got.class_object(),
                         self.type_order.stdlib().int().class_object(),
@@ -2531,7 +2532,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 Ok(())
             }
             (Type::ClassType(got), Type::ClassType(want))
-                if want.is_builtin("complex")
+                if want.is(KnownClass::Complex)
                     && (self.type_order.has_superclass(
                         got.class_object(),
                         self.type_order.stdlib().int().class_object(),
@@ -2560,8 +2561,8 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 }
             }
             (_, Type::ClassType(want))
-                if (want.has_qname("typing", "Container")
-                    || want.has_qname("typing", "Collection"))
+                if (want.is(KnownClass::TypingContainer)
+                    || want.is(KnownClass::TypingCollection))
                     && (matches!(got, Type::LiteralString(_))
                         || matches!(got, Type::Literal(lit) if matches!(lit.value, Lit::Str(_)))) =>
             {
@@ -2608,14 +2609,14 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             (Type::Annotated(_, _), Type::Type(_)) => Err(SubsetError::Other),
             // type[X | Y] <: types.UnionType — union expressions create UnionType at runtime.
             (Type::Type(inner), Type::ClassType(want))
-                if want.has_qname("types", "UnionType") && matches!(**inner, Type::Union(_)) =>
+                if want.is(KnownClass::TypesUnionType) && matches!(**inner, Type::Union(_)) =>
             {
                 Ok(())
             }
             // type[C[T, ...]] <: types.GenericAlias — subscripted generics create GenericAlias at runtime.
             (Type::Type(inner), Type::ClassType(want))
                 if let Type::ClassType(got) = &**inner
-                    && want.has_qname("types", "GenericAlias")
+                    && want.is(KnownClass::TypesGenericAlias)
                     && !got.targs().is_empty() =>
             {
                 Ok(())
@@ -2635,9 +2636,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             }
             (Type::Type(l), Type::TypeForm(u)) => self.is_subset_eq(l, u),
             // The class representation of Any is compatible with any TypeForm.
-            (Type::ClassDef(got), Type::TypeForm(_)) if got.has_toplevel_qname("typing", "Any") => {
-                Ok(())
-            }
+            (Type::ClassDef(got), Type::TypeForm(_)) if got.is(KnownClass::TypingAny) => Ok(()),
             // ClassDef <: TypeForm[T] — bare class names are valid type forms.
             (Type::ClassDef(got), Type::TypeForm(want)) => {
                 self.is_subset_eq(&self.type_order.promote_silently(got), want)
@@ -2664,7 +2663,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 Err(SubsetError::Other)
             }
             (Type::ClassDef(got), Type::ClassType(want))
-                if self.type_order.is_new_type(got) && want.is_builtin("type") =>
+                if self.type_order.is_new_type(got) && want.is(KnownClass::Type) =>
             {
                 Err(SubsetError::Other)
             }
@@ -2848,7 +2847,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             // Most special forms are not allowed as an argument to type.
             // https://typing.python.org/en/latest/spec/special-types.html#type
             (Type::Type(inner), Type::ClassType(cls))
-                if cls.is_builtin("type") && matches!(**inner, Type::SpecialForm(_)) =>
+                if cls.is(KnownClass::Type) && matches!(**inner, Type::SpecialForm(_)) =>
             {
                 let Type::SpecialForm(special_form) = &**inner else {
                     unreachable!("guarded by matches! above")
@@ -2856,7 +2855,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 Err(SubsetError::TypeCannotAcceptSpecialForms(*special_form))
             }
             (Type::Type(inner), Type::ClassType(cls))
-                if cls.is_builtin("type") && matches!(**inner, Type::Callable(_)) =>
+                if cls.is(KnownClass::Type) && matches!(**inner, Type::Callable(_)) =>
             {
                 Err(SubsetError::TypeCannotAcceptSpecialForms(
                     SpecialForm::Callable,

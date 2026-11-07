@@ -34,6 +34,7 @@ use std::slice;
 
 use pyrefly_python::ast::Ast;
 use pyrefly_types::dimension::Int;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
 use pyrefly_types::shaped_array::tuple_carrier_to_shape;
@@ -171,12 +172,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) -> Type {
         let base_errors = self.error_collector();
-        let ty = self.expr_untype_without_shape_comment(
-            base,
-            TypeFormContext::type_argument(),
-            &base_errors,
-        );
-        self.shaped_type(
+        let written_context = if matches!(context, TypeFormContext::BaseClassList) {
+            context
+        } else {
+            TypeFormContext::type_argument()
+        };
+        let ty = self.expr_untype_without_shape_comment(base, written_context, &base_errors);
+        if matches!(context, TypeFormContext::BaseClassList) && matches!(ty, Type::Tuple(_)) {
+            errors.extend(base_errors);
+            self.error(
+                errors,
+                comment.range,
+                ErrorKind::InvalidAnnotation,
+                "A shape comment on a tuple base must refine its type arguments instead of replacing the tuple carrier".to_owned(),
+            );
+            return ty;
+        }
+        let ty = self.shaped_type(
             ShapedAnnotation {
                 base_expr: base,
                 payload: &comment.payload,
@@ -187,7 +199,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             comment.range,
             context,
             errors,
-        )
+        );
+        match ty {
+            Type::ShapedArray(array) if matches!(context, TypeFormContext::BaseClassList) => {
+                self.heap.mk_class_type(array.base_class)
+            }
+            ty => ty,
+        }
     }
 
     fn shaped_type(
@@ -215,7 +233,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return self.expr_untype(shape_expr, type_form_context, errors);
         }
         match &base {
-            Type::ClassType(cls) if cls.is_builtin("int") => {
+            Type::ClassType(cls) if cls.is(KnownClass::Int) => {
                 errors.extend(base_errors);
                 // `Shaped[int, "N"]` is `Int[N]`.
                 return match self.parse_int_type(

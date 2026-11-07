@@ -76,6 +76,26 @@ def test_conv2d_string_padding() -> None:
     assert_shape(output.shape, (1, 16, 30, 30), runtime=(1, 16, 32, 32))
 
 
+def test_conv_transpose3d_controls() -> None:
+    volume = torch.randn((2, 4, 3, 8, 8))
+    defaults = nn.ConvTranspose3d(4, 8, 3)(volume)
+    scalar = nn.ConvTranspose3d(4, 8, kernel_size=3, stride=2)(volume)
+    assert_shape(defaults.shape, (2, 8, 5, 10, 10))
+    assert_shape(scalar.shape, (2, 8, 7, 17, 17))
+
+    per_axis = nn.ConvTranspose3d(
+        4,
+        8,
+        kernel_size=(1, 3, 3),
+        stride=(1, 2, 2),
+        padding=(0, 1, 1),
+        output_padding=(0, 1, 1),
+    )(volume)
+    assert_shape(per_axis.shape, (2, 8, int, int, int), runtime=(2, 8, 3, 16, 16))
+    stride = nn.ConvTranspose3d(4, 8, 3, stride=(1, 2, 2))(volume)
+    assert_shape(stride.shape, (2, 8, int, int, int), runtime=(2, 8, 5, 17, 17))
+
+
 def test_functional_convolution_rejects_invalid_arguments() -> None:
     tensor = torch.randn((2, 3, 10, 20))
     weight = torch.randn((4, 3, 3, 5))

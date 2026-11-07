@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, assert_type, cast, Literal
 
 import numpy as np
-from shape_extensions import assert_shape, IntTuple
+from shape_extensions import assert_raises, assert_shape, IntTuple
 
 
 def make_array(shape: Any, value: Any = 1.0) -> Any:
@@ -247,3 +247,209 @@ def test_rounding_preserves_shape() -> None:
     assert_shape(np.round(a=a, decimals=-1).shape, (5,))
     assert_shape(np.trunc(a).shape, (5,))
     assert_shape(np.clip(a, -1.0, 2.0).shape, (5,))
+
+
+def test_round_scalars_and_sequences() -> None:
+    rounded_float = np.round(0.234, decimals=2)
+    rounded_int = np.round(3)
+    rounded_float32 = np.round(np.float32(1.25), 1)
+    rounded_list = np.round([1.24, 2.56], decimals=1)
+    assert_type(rounded_float, Any)
+    assert_type(rounded_int, Any)
+    assert_type(rounded_float32, np.float32)
+    assert_type(rounded_list, np.ndarray)
+    assert isinstance(rounded_float, np.float64)
+    assert rounded_float == 0.23
+    assert isinstance(rounded_int, np.int64)
+    assert isinstance(rounded_float32, np.float32)
+    assert rounded_list.tolist() == [1.2, 2.6]
+    with assert_raises(TypeError):
+        np.round(None)  # E: No matching overload
+
+
+def test_round_array_dtypes() -> None:
+    floats = np.ones((2, 3))
+    integers = np.full((2, 3), 7, dtype=np.int8)
+    complexes = np.full((2, 3), 1.25 + 2.5j, dtype=np.complex64)
+    booleans = np.ones((2, 3), dtype=np.bool_)
+    gradual_dtype = cast(
+        "np.ndarray[tuple[Literal[2], Literal[3]]]", make_array((2, 3), 1.25)
+    )
+    unknown_rank = cast(np.ndarray, floats)
+
+    assert_type(np.round(floats, 1), np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_type(np.round(integers, -1), np.ndarray[[2, 3], np.dtype[np.int8]])
+    assert_type(
+        np.round(complexes, decimals=1), np.ndarray[[2, 3], np.dtype[np.complex64]]
+    )
+    assert_type(np.round(booleans), np.ndarray[[2, 3], np.dtype[np.float16]])
+    assert_type(np.round(gradual_dtype, 1), np.ndarray[[2, 3], Any])
+    assert_shape(np.round(unknown_rank).shape, IntTuple, runtime=(2, 3))
+    assert np.round(floats, 1).dtype == np.dtype(np.float64)
+    assert np.round(integers, -1).tolist() == [[10, 10, 10], [10, 10, 10]]
+    assert np.round(integers, -1).dtype == np.dtype(np.int8)
+    assert np.round(complexes, decimals=1).dtype == np.dtype(np.complex64)
+    assert np.round(booleans).dtype == np.dtype(np.float16)
+
+
+def test_round_rank_zero_and_sequence_inputs() -> None:
+    scalar_array = np.ones(())
+    unknown_scalar = cast(np.ndarray, np.ones(()))
+
+    rounded = np.round(scalar_array, 1)
+    assert_type(rounded, Any)
+    assert_type(np.round(unknown_scalar), Any)
+    assert_shape(scalar_array.shape, ())
+    assert isinstance(rounded, np.float64)
+    assert isinstance(np.round(unknown_scalar), np.float64)
+
+    rounded_tuple = np.round((1.24, 2.56), 1)
+    nested = np.round([[1.25], [2.5]])
+    assert_type(rounded_tuple, np.ndarray)
+    assert_type(nested, np.ndarray)
+    assert rounded_tuple.tolist() == [1.2, 2.6]
+    assert nested.tolist() == [[1.0], [2.0]]
+    with assert_raises(TypeError):
+        np.round("1.5")  # E: No matching overload
+    with assert_raises(TypeError):
+        np.round(["1.5"])  # E: No matching overload
+
+
+class ArrayUfuncDispatch:
+    def __array__(self, dtype: Any = None, copy: Any = None) -> np.ndarray[[2], Any]:
+        return np.ones(2)
+
+    def __array_ufunc__(
+        self, ufunc: Any, method: str, *inputs: Any, **kwargs: Any
+    ) -> str:
+        return "custom result"
+
+
+class ExternalObject:
+    pass
+
+
+def test_unary_ufunc_external_dispatch() -> None:
+    values = ArrayUfuncDispatch()
+    signed = np.sign(values)
+    logged = np.log1p(values)
+    assert_type(signed, Any)
+    assert_type(logged, Any)
+    assert signed == logged == "custom result"
+    assert_shape(values.__array__().shape, (2,))
+
+
+def test_nan_to_num_external_objects() -> None:
+    external = ExternalObject()
+    union = cast("list[ExternalObject] | np.ndarray | ExternalObject", np.ones((2, 3)))
+    result = np.nan_to_num(union)
+    untouched = np.nan_to_num(external)
+    assert_type(result, Any)
+    assert_type(untouched, Any)
+    assert untouched is external
+    assert_shape(result.shape, IntTuple, runtime=(2, 3))
+
+
+def test_clip_scalar_or_none_bounds() -> None:
+    x = np.ones((2, 3))
+
+    scalar = np.ones(())
+    assert_type(np.clip(scalar, 0.0, None), Any)
+    assert_type(np.clip(scalar, 0.0, 1.0), Any)
+    assert isinstance(np.clip(scalar, 0.0, None), np.float64)
+    assert isinstance(np.clip(scalar, 0.0, 1.0), np.float64)
+    unknown_rank = cast(np.ndarray, scalar)
+    assert_type(np.clip(unknown_rank, 0.0, None), Any)
+
+    lower = np.clip(x, 0.0, None)
+    upper = np.clip(x, None, 1.0)
+    unbounded = np.clip(x, None, None)
+    assert_type(lower, np.ndarray[[2, 3], Any])
+    assert_type(upper, np.ndarray[[2, 3], Any])
+    assert_type(unbounded, np.ndarray[[2, 3], Any])
+    assert_shape(lower.shape, (2, 3))
+    assert_shape(upper.shape, (2, 3))
+    assert_shape(unbounded.shape, (2, 3))
+    assert_shape(x.clip(0, None).shape, (2, 3))
+    assert_type(np.clip(x, 0, 1), np.ndarray[[2, 3], Any])
+
+
+def test_clip_keyword_bounds() -> None:
+    x = np.ones((2, 3))
+
+    lower = np.clip(a=x, a_min=0.0, a_max=None)
+    upper = np.clip(x, a_max=1.0, a_min=None)
+    assert_type(lower, np.ndarray[[2, 3], Any])
+    assert_type(upper, np.ndarray[[2, 3], Any])
+    assert_shape(lower.shape, (2, 3))
+    assert_shape(upper.shape, (2, 3))
+
+
+def test_clip_numpy_scalar_and_optional_bounds() -> None:
+    x = np.ones((2, 3))
+    bound = cast("float | None", 0.0)
+
+    numpy_scalar = np.clip(x, np.float32(0.0), np.int64(1))
+    optional = np.clip(x, bound, None)
+    complex_scalar = np.clip(x, 0j, None)
+    assert_type(numpy_scalar, np.ndarray[[2, 3], Any])
+    assert_type(optional, np.ndarray[[2, 3], Any])
+    assert_type(complex_scalar, np.ndarray[[2, 3], Any])
+    assert_shape(numpy_scalar.shape, (2, 3))
+    assert_shape(optional.shape, (2, 3))
+    assert_shape(complex_scalar.shape, (2, 3))
+
+
+def test_clip_array_bounds_remain_gradual() -> None:
+    x = np.ones((2, 1))
+    row = np.zeros((1, 3))
+
+    lower = np.clip(x, row, None)
+    upper = np.clip(a=x, a_min=None, a_max=row)
+    sequence = np.clip(x, [0.0, 1.0, 2.0], None)
+    assert_type(lower, Any)
+    assert_type(upper, Any)
+    assert_type(sequence, Any)
+    assert_type(np.clip(cast(Any, x), 0.0, None), Any)
+    assert_shape(lower.shape, IntTuple, runtime=(2, 3))
+    assert_shape(upper.shape, IntTuple, runtime=(2, 3))
+    assert_shape(sequence.shape, IntTuple, runtime=(2, 3))
+
+
+def test_clip_float_bounds_can_promote_integer_dtype() -> None:
+    x = np.ones((2, 3), dtype=np.int64)
+
+    clipped = np.clip(x, 0.5, None)
+    bounded = np.clip(x, 0.5, 1.5)
+    assert_type(clipped, np.ndarray[[2, 3], Any])
+    assert_type(bounded, np.ndarray[[2, 3], Any])
+    assert_shape(clipped.shape, (2, 3))
+    assert_shape(bounded.shape, (2, 3))
+    assert clipped.dtype == np.dtype(np.float64)
+    assert bounded.dtype == np.dtype(np.float64)
+
+
+def test_nan_to_num_preserves_array_shape() -> None:
+    vector = np.full(3, np.nan)
+    matrix = np.ones((2, 3))
+
+    assert_shape(np.nan_to_num(vector).shape, (3,))
+    assert_shape(
+        np.nan_to_num(matrix, copy=False, nan=0.0, posinf=1.0, neginf=-1.0).shape,
+        (2, 3),
+    )
+    assert_type(np.nan_to_num(matrix).dtype, np.dtype[np.float64])
+    assert_shape(np.nan_to_num([1.0, np.nan]).shape, IntTuple, runtime=(2,))
+    assert np.nan_to_num(vector).tolist() == [0.0, 0.0, 0.0]
+
+
+def test_nan_to_num_rank_zero_array_returns_scalar() -> None:
+    scalar = np.ones(())
+
+    string_scalar = np.str_("hello")
+    assert_type(np.nan_to_num(string_scalar), Any)
+    assert isinstance(np.nan_to_num(string_scalar), np.str_)
+
+    assert_shape(scalar.shape, ())
+    assert_type(np.nan_to_num(scalar), Any)
+    assert isinstance(np.nan_to_num(scalar), np.float64)

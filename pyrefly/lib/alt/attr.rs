@@ -13,6 +13,7 @@ use pyrefly_python::keywords::is_valid_identifier;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitEnum;
 use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::shaped_array::shape_to_tuple_carrier;
@@ -121,6 +122,8 @@ pub enum AttrSubsetError {
         got: Type,
         want: Type,
         subset_error: SubsetError,
+        // Allows override diagnostics to distinguish read and write failures.
+        read_compatible: bool,
     },
     // `want` is not a subtype of `got`
     // applies to property setters
@@ -207,6 +210,7 @@ impl AttrSubsetError {
                 got,
                 want,
                 subset_error: _,
+                read_compatible: _,
             } => {
                 format!(
                     "`{child_class}.{attr_name}` has type `{}`, which is not consistent with `{}` in `{parent_class}.{attr_name}` (the type of read-write attributes cannot be changed)",
@@ -1398,7 +1402,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ];
         !relevant_dunders.iter().any(|dunder: &&Name| {
             let field = self.get_class_member_with_defining_class(cls, dunder);
-            field.is_some_and(|field| !field.defining_class.is_builtin("object"))
+            field.is_some_and(|field| !field.defining_class.is(KnownClass::Object))
         })
     }
 
@@ -1569,7 +1573,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             // `as_attribute_base` promotes literals, so we should promote here too
             // In the future, we should refactor `get_protocol_attribute` to reuse the `AttributeBase`, to ensure the logic is identical
-            let got = got.clone().promote_implicit_literals(self.stdlib);
+            let got = got.clone().promote(self.stdlib);
             if (!got_attrs.is_empty())
                 && let Some(want) = self.get_protocol_attribute(protocol, got.clone(), attr_name)
             {
@@ -1792,6 +1796,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         for base_results in candidates {
             let [(attribute, _)] = base_results.as_slice() else {
                 return None;
+            };
+            let projected;
+            let attribute = if let Attribute::ClassAttribute(ClassAttribute::Descriptor(
+                desc,
+                DescriptorBase::Instance(_) | DescriptorBase::SelfInstance(_),
+            )) = attribute
+            {
+                projected = Attribute::class_attribute(self.descriptor_as_attribute(desc)?);
+                &projected
+            } else {
+                attribute
             };
             let (ty, set_type) = match attribute {
                 Attribute::Simple(ty) => (ty, None),
@@ -2069,7 +2084,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         match metaclass_attr {
                             Some(meta_attr)
                                 if self.class_attribute_is_data_descriptor(&meta_attr)
-                                    || metaclass.class_object().is_builtin("type") =>
+                                    || metaclass.class_object().is(KnownClass::Type) =>
                             {
                                 acc.found_class_attribute(meta_attr, base)
                             }
@@ -2086,7 +2101,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         {
                             let metadata = self.get_metadata_for_class(class.class_object());
                             let metaclass = metadata.metaclass(self.stdlib);
-                            if !metaclass.class_object().is_builtin("type") {
+                            if !metaclass.class_object().is(KnownClass::Type) {
                                 let metaclass_attr =
                                     self.get_metaclass_attribute(class, metaclass, attr_name);
                                 match metaclass_attr {
@@ -2233,7 +2248,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let inherited_from_object = self.field_is_inherited_from(
                     self.stdlib.generic_alias().class_object(),
                     attr_name,
-                    ("builtins", "object"),
+                    KnownClass::Object,
                 );
                 for (b, exclude) in [(&generic_alias, inherited_from_object), (&origin, false)] {
                     if exclude {
@@ -2330,7 +2345,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         metaclass.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     )
                 {
                     acc.not_found(NotFoundOn::ClassInstance(
@@ -2355,7 +2370,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let inherited_from_object = self.field_is_inherited_from(
                     self.stdlib.generic_alias().class_object(),
                     dunder_name,
-                    ("builtins", "object"),
+                    KnownClass::Object,
                 );
                 for (b, exclude) in [(&generic_alias, inherited_from_object), (&origin, false)] {
                     if exclude {
@@ -2386,7 +2401,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         cls.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(cls.class_object().clone(), base))
@@ -2401,7 +2416,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         self.stdlib.method_type().class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(
@@ -2416,7 +2431,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         tensor.base_class.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(
@@ -2726,6 +2741,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::ClassDef(cls) => acc.push(AttributeBase1::ClassObject(ClassBase::ClassDef(
                 self.as_class_type_unchecked(&cls),
             ))),
+            Type::SpecializedClassDef(class) => {
+                acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(class)));
+            }
             Type::SelfType(class_type) => acc.push(AttributeBase1::SelfType(class_type)),
             Type::Type(ty) => self.as_attribute_base1_of_type(*ty, acc),
             Type::TypedDict(TypedDict::TypedDict(td))
@@ -3014,6 +3032,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// `as_attribute_base1` helper for `Type::Type(ty)`.
     fn as_attribute_base1_of_type(&self, ty: Type, acc: &mut Vec<AttributeBase1>) {
         match ty {
+            Type::SpecializedClassDef(_) => acc.push(AttributeBase1::ClassObject(
+                ClassBase::ClassDef(self.stdlib.generic_alias().clone()),
+            )),
             Type::SelfType(class_type) => {
                 acc.push(AttributeBase1::ClassObject(ClassBase::SelfType(class_type)))
             }
@@ -3028,31 +3049,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::Literal(lit) => acc.push(AttributeBase1::ClassObject(ClassBase::ClassType(
                 lit.value.general_class_type(self.stdlib).clone(),
             ))),
-            Type::Tuple(tuple) => self.as_attribute_base1(
-                self.heap
-                    .mk_type_of(self.heap.mk_class_type(self.erase_tuple_type(tuple))),
-                acc,
-            ),
+            Type::Tuple(tuple) => acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(
+                self.erase_tuple_type(tuple),
+            ))),
             Type::ClassType(class) => {
-                let class_base = AttributeBase1::ClassObject(ClassBase::ClassType(class.clone()));
-                if !class.targs().is_empty() {
-                    // If the class type has type arguments, at runtime it's also a GenericAlias
-
-                    // FIXME:
-                    // If `C` is a generic class, then the type of the expression `C` is `type[C]`.
-                    // We're relying on this behaviour to give `C[int]` the
-                    // runtime generic alias type, but this is technically
-                    // incorrect as `type[C[int]]` should be instances of `type`
-                    // and not `GenericAlias`.
-                    // Therefore, if we ever have a value of `type[C[int]]`
-                    // (e.g. via inheritance), we should not treat it as a
-                    // `GenericAlias`. However, such cases are rare in practice.
-                    acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(
-                        class.clone(),
-                    )));
-                } else {
-                    acc.push(class_base)
-                }
+                acc.push(AttributeBase1::ClassObject(ClassBase::ClassType(class)))
             }
             Type::ClassDef(class) => {
                 // type[ClassDef(C)] is C.__class__: C's metaclass, viewed as a class object.
@@ -3379,7 +3380,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
 
         match ty {
-            Type::ClassDef(_) | Type::Type(_) => true,
+            Type::ClassDef(_) | Type::SpecializedClassDef(_) | Type::Type(_) => true,
             Type::TypeAlias(_)
             | Type::UntypedAlias(_)
             | Type::KwCall(_)

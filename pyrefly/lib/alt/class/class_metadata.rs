@@ -13,10 +13,10 @@ use itertools::Itertools;
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
-use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::annotation::Annotation;
 use pyrefly_types::callable::Params;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::type_var::Restriction;
@@ -333,7 +333,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         // TODO Zeina: This pattern is repeated a lot in this file. See if we can refactor it (BE).
         for (base_class_object, metadata) in &bases_with_metadata {
-            if base_class_object.has_toplevel_qname(ModuleName::django_models().as_str(), "Model") {
+            if base_class_object.is(KnownClass::DjangoModel) {
                 directly_inherits_model = true;
             }
 
@@ -364,19 +364,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         let mut django_rest_framework_serializer_kind = None;
         for (base_class_object, metadata) in &bases_with_metadata {
-            if base_class_object.has_toplevel_qname(
-                ModuleName::rest_framework_serializers().as_str(),
-                "ModelSerializer",
-            ) || metadata.is_django_rest_framework_model_serializer()
+            if base_class_object.is(KnownClass::RestFrameworkModelSerializer)
+                || metadata.is_django_rest_framework_model_serializer()
             {
                 django_rest_framework_serializer_kind =
                     Some(DjangoRestFrameworkSerializerKind::ModelSerializer);
                 break;
             }
-            if base_class_object.has_toplevel_qname(
-                ModuleName::rest_framework_serializers().as_str(),
-                "Serializer",
-            ) || metadata.is_django_rest_framework_serializer()
+            if base_class_object.is(KnownClass::RestFrameworkSerializer)
+                || metadata.is_django_rest_framework_serializer()
             {
                 django_rest_framework_serializer_kind =
                     Some(DjangoRestFrameworkSerializerKind::Serializer);
@@ -388,8 +384,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             bases_with_metadata
                 .iter()
                 .any(|(base_class_object, metadata)| {
-                    base_class_object
-                        .has_toplevel_qname(ModuleName::marshmallow_schema().as_str(), "Schema")
+                    base_class_object.is(KnownClass::MarshmallowSchema)
                         || metadata.is_marshmallow_schema()
                 });
 
@@ -397,15 +392,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             bases_with_metadata
                 .iter()
                 .any(|(base_class_object, metadata)| {
-                    base_class_object
-                        .has_toplevel_qname(ModuleName::factory_base().as_str(), "Factory")
-                        || metadata.is_factory_boy_factory()
+                    base_class_object.is(KnownClass::Factory) || metadata.is_factory_boy_factory()
                 });
 
         let is_metaclass = bases_with_metadata
             .iter()
             .any(|(base_class_object, metadata)| {
-                base_class_object.is_builtin("type") || metadata.is_metaclass()
+                base_class_object.is(KnownClass::Type) || metadata.is_metaclass()
             });
 
         // Compute various pieces of special metadata.
@@ -704,8 +697,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) {
         let is_pydantic_model = bases_with_metadata.iter().any(|(base, metadata)| {
-            base.has_toplevel_qname(ModuleName::pydantic().as_str(), "BaseModel")
-                || metadata.is_pydantic_model()
+            base.is(KnownClass::PydanticBaseModel) || metadata.is_pydantic_model()
         });
         let keywords = keywords
             .iter()
@@ -904,10 +896,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         bases_with_metadata
             .iter()
             .find_map(|(base_class_object, metadata)| {
-                if base_class_object.has_toplevel_qname(
-                    ModuleName::type_checker_internals().as_str(),
-                    "NamedTupleFallback",
-                ) {
+                if base_class_object.is(KnownClass::TypeshedNamedTupleFallback) {
                     Some(NamedTupleMetadata {
                         elements: self.get_named_tuple_elements(cls, errors),
                         has_dynamic_fields,
@@ -1337,7 +1326,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let annotation = &self.get_idx(annotation_key).annotation;
             if annotation.is_class_var()
                 || annotation.is_init_var()
-                || matches!(annotation.get_type(), Type::ClassType(c) if c.has_qname("dataclasses", "KW_ONLY"))
+                || matches!(annotation.get_type(), Type::ClassType(c) if c.is(KnownClass::DataclassesKwOnly))
             {
                 pseudo_overrides.insert(name.clone());
                 continue;
@@ -1604,7 +1593,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     // To avoid circular computation on targs, we have a special version of `expr_infer` that does not look into any subscript of any expr
-    fn base_class_expr_infer_for_metadata(
+    pub(crate) fn base_class_expr_infer_for_metadata(
         &self,
         expr: &BaseClassExpr,
         errors: &ErrorCollector,
@@ -1670,7 +1659,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             && matches!(quantified.restriction(), Restriction::Unrestricted)
                             && let Some(tparam) = forall.tparams.as_vec().first()
                             && *quantified == *tparam
-                            && let Some(subscript_base_expr) = BaseClassExpr::from_expr(slice) =>
+                            && let [argument] = Ast::unpack_slice(slice)
+                            && let Some(subscript_base_expr) =
+                                BaseClassExpr::from_expr(argument) =>
                     {
                         self.base_class_expr_infer_for_metadata(&subscript_base_expr, errors)
                     }
@@ -1819,6 +1810,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 match self.untype_opt(ty.clone(), x.range(), &errors) {
                     None => BaseClassParseResult::InvalidType(ty, x.range()),
+                    Some(Type::ShapedArray(array))
+                        if self
+                            .bindings()
+                            .shape_declarations
+                            .commented_bases
+                            .contains_key(&x.range()) =>
+                    {
+                        parse_base_class_type(self.heap.mk_class_type(array.base_class))
+                    }
                     Some(ty) => parse_base_class_type(ty),
                 }
             }
@@ -2083,9 +2083,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Type::ClassType(metaclass) => Metaclass::new(
                     metaclass,
                     direct_metaclass.is_some_and(|direct_metaclass| {
-                        direct_metaclass
-                            .class_object()
-                            .has_toplevel_qname("abc", "ABCMeta")
+                        direct_metaclass.class_object().is(KnownClass::AbcMeta)
                     }),
                 ),
                 _ => unreachable!("Metaclass must be a ClassType"),
@@ -2217,7 +2215,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self.has_nonempty_generated_slots_from_complete_mro(metadata, mro);
 
         // Skip `object` so narrowing's fallback to `object` stays meaningful.
-        let local = !cls.is_builtin("object")
+        let local = !cls.is(KnownClass::Object)
             && (metadata.is_local_disjoint_base() || has_nonempty_generated_slots);
         let local_representative = if local { Some(cls.dupe()) } else { None };
         let inherited_representative = survivors.into_iter().next();
@@ -2296,10 +2294,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub fn calculate_abstract_members(&self, cls: &Class) -> AbstractClassMembers {
-        if cls.has_toplevel_qname(
-            ModuleName::type_checker_internals().as_str(),
-            "TypedDictFallback",
-        ) {
+        if cls.is(KnownClass::TypeshedTypedDictFallback) {
             // TypedDictFallback is a fake base for TypedDict classes. Typeshed models it as
             // inheriting from Mapping for convenience, but it should not get Mapping's
             // unimplemented abstract methods.
@@ -2354,10 +2349,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub fn calculate_subscript_symmetry(&self, cls: &Class) -> bool {
         // Built-in mutable containers are hardcoded as symmetric: their
         // typeshed slice overloads would otherwise classify them as asymmetric.
-        if cls.is_builtin("list")
-            || cls.is_builtin("dict")
-            || cls.is_builtin("bytearray")
-            || cls.is_builtin("memoryview")
+        if cls.is(KnownClass::List)
+            || cls.is(KnownClass::Dict)
+            || cls.is(KnownClass::ByteArray)
+            || cls.is(KnownClass::MemoryView)
         {
             return true;
         }
@@ -2424,7 +2419,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         metaclass: Option<&ClassType>,
     ) -> bool {
         for (base, base_metadata) in bases_with_metadata {
-            if base.has_toplevel_qname("abc", "ABC") {
+            if base.is(KnownClass::Abc) {
                 return true;
             }
             if let Some(metaclass) = base_metadata.custom_metaclass()
@@ -2453,7 +2448,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if !seen.insert(cls.dupe()) {
                 continue;
             }
-            if cls.has_toplevel_qname("abc", "ABCMeta") {
+            if cls.is(KnownClass::AbcMeta) {
                 return true;
             }
             pending.extend(

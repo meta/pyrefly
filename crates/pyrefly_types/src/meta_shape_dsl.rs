@@ -174,6 +174,7 @@ impl Val {
 /// to runtime values. Each returns `None` if the type doesn't match.
 mod extract {
     use crate::dimension::Int;
+    use crate::known_class::KnownClass;
     use crate::literal::Lit;
     use crate::shaped_array::IntTuple;
     use crate::tuple::Tuple;
@@ -296,7 +297,7 @@ mod extract {
 
         match ty {
             // list[Array[...]] - can't determine element count, return None
-            Type::ClassType(class_type) if class_type.has_qname("builtins", "list") => {
+            Type::ClassType(class_type) if class_type.is(KnownClass::List) => {
                 // Lists don't preserve element count in the type system
                 // Fall back to fixture for now
                 None
@@ -1528,7 +1529,7 @@ fn convert_fndef(func: &ruff_python_ast::StmtFunctionDef) -> Result<DslFnDef, Ds
 // - x == None / x != None → narrows x to/from None in then/else
 
 /// Type environment mapping variable names to their inferred types.
-type TypeEnv = HashMap<String, DslType>;
+type DslTypeEnv = HashMap<String, DslType>;
 
 /// Function return types, keyed by function name.
 ///
@@ -1740,7 +1741,7 @@ fn narrow_away_none(ty: &DslType, errors: &mut Vec<String>) -> DslType {
 
 /// Analyze a condition expression for type narrowing.
 /// Returns (then_env, else_env) — the environments for the true and false branches.
-fn narrow(cond: &DslExpr, env: &TypeEnv, errors: &mut Vec<String>) -> (TypeEnv, TypeEnv) {
+fn narrow(cond: &DslExpr, env: &DslTypeEnv, errors: &mut Vec<String>) -> (DslTypeEnv, DslTypeEnv) {
     match cond {
         // isinstance(x, con)
         DslExpr::IsInstance { expr, ty } => {
@@ -1858,7 +1859,7 @@ fn arithmetic_result(a: &DslType, b: &DslType) -> DslType {
 /// Infer the element type of a list literal from its elements.
 fn infer_list_elem_type(
     elts: &[DslExpr],
-    env: &TypeEnv,
+    env: &DslTypeEnv,
     sigs: &FnRetTypes,
     errors: &mut Vec<String>,
 ) -> DslType {
@@ -1878,10 +1879,10 @@ fn infer_list_elem_type(
 fn bind_comp_vars(
     vars: &[String],
     iter: &DslExpr,
-    env: &TypeEnv,
+    env: &DslTypeEnv,
     sigs: &FnRetTypes,
     errors: &mut Vec<String>,
-) -> TypeEnv {
+) -> DslTypeEnv {
     let mut new_env = env.clone();
     match iter {
         DslExpr::Call {
@@ -1938,7 +1939,7 @@ fn bind_comp_vars(
 fn infer_call(
     func: &DslCallTarget,
     args: &[DslExpr],
-    env: &TypeEnv,
+    env: &DslTypeEnv,
     sigs: &FnRetTypes,
     errors: &mut Vec<String>,
 ) -> DslType {
@@ -2048,7 +2049,7 @@ fn infer_call(
 /// Infer the type of a DSL expression.
 fn infer_expr(
     expr: &DslExpr,
-    env: &TypeEnv,
+    env: &DslTypeEnv,
     sigs: &FnRetTypes,
     errors: &mut Vec<String>,
 ) -> DslType {
@@ -2186,7 +2187,7 @@ fn infer_expr(
 /// function has no return annotation (an error already reported elsewhere).
 fn check_body(
     body: &DslBody,
-    env: &TypeEnv,
+    env: &DslTypeEnv,
     sigs: &FnRetTypes,
     ret_ty: Option<&DslType>,
     errors: &mut Vec<String>,
@@ -2242,7 +2243,7 @@ fn type_check_program(fndefs: &[DslFnDef]) -> Result<(), Vec<DslCompileError>> {
     let sigs = build_fn_ret_types(fndefs, &mut errors);
     for fndef in fndefs {
         let mut fn_errors: Vec<String> = Vec::new();
-        let mut env = TypeEnv::new();
+        let mut env = DslTypeEnv::new();
         for param in &fndef.params {
             env.insert(param.name.clone(), param.ty.clone());
         }
@@ -2370,12 +2371,20 @@ fn bind_dsl_params(
 }
 
 /// Evaluate a DSL expression against a runtime environment.
+/// What every expression of one DSL function evaluation shares.
+struct DslEvalContext<'a> {
+    /// The DSL functions that calls resolve to, by name.
+    fns: &'a HashMap<String, Arc<DslFnDef>>,
+    /// The name of the function being evaluated, for error messages.
+    op_name: &'a str,
+}
+
 fn eval_dsl_expr(
     expr: &DslExpr,
     env: &HashMap<String, Val>,
-    fns: &HashMap<String, Arc<DslFnDef>>,
-    op_name: &str,
+    ctx: &DslEvalContext,
 ) -> Result<Val, ShapeError> {
+    let op_name = ctx.op_name;
     match expr {
         DslExpr::Const(c) => Ok(const_to_val(c)),
 
@@ -2390,7 +2399,7 @@ fn eval_dsl_expr(
             let vals: Vec<Val> = elems
                 .iter()
                 .filter(|e| !matches!(e, DslExpr::Ellipsis))
-                .map(|e| eval_dsl_expr(e, env, fns, op_name))
+                .map(|e| eval_dsl_expr(e, env, ctx))
                 .collect::<Result<_, _>>()?;
             Ok(Val::List(vals))
         }
@@ -2401,7 +2410,7 @@ fn eval_dsl_expr(
             iter,
             cond,
         } => {
-            let iter_val = eval_dsl_expr(iter, env, fns, op_name)?;
+            let iter_val = eval_dsl_expr(iter, env, ctx)?;
             // Iterating over a variadic shape is not supported — soft error.
             if matches!(iter_val, Val::Unpacked { .. }) {
                 return Err(ShapeError::Unsupported {
@@ -2429,24 +2438,24 @@ fn eval_dsl_expr(
                     }
                 }
                 if let Some(cond_expr) = cond
-                    && !eval_dsl_expr(cond_expr, &inner_env, fns, op_name)?.as_bool()
+                    && !eval_dsl_expr(cond_expr, &inner_env, ctx)?.as_bool()
                 {
                     continue;
                 }
-                result.push(eval_dsl_expr(elt, &inner_env, fns, op_name)?);
+                result.push(eval_dsl_expr(elt, &inner_env, ctx)?);
             }
             Ok(Val::List(result))
         }
 
         DslExpr::Index { base, index } => {
-            let base_val = eval_dsl_expr(base, env, fns, op_name)?;
+            let base_val = eval_dsl_expr(base, env, ctx)?;
             if matches!(base_val, Val::Unpacked { .. }) {
                 return Err(ShapeError::Unsupported {
                     message: format!("{op_name}: cannot index variadic shape"),
                 });
             }
             let items = base_val.as_list();
-            let mut idx = eval_dsl_expr(index, env, fns, op_name)?.as_int();
+            let mut idx = eval_dsl_expr(index, env, ctx)?.as_int();
             let len = items.len() as i64;
             if idx < 0 {
                 idx += len;
@@ -2462,7 +2471,7 @@ fn eval_dsl_expr(
         }
 
         DslExpr::Slice { base, lower, upper } => {
-            let base_val = eval_dsl_expr(base, env, fns, op_name)?;
+            let base_val = eval_dsl_expr(base, env, ctx)?;
             match base_val {
                 Val::Unpacked {
                     ref prefix,
@@ -2472,11 +2481,11 @@ fn eval_dsl_expr(
                     // Evaluate bounds — at most one of lower/upper is present for
                     // the slice patterns used in the DSL (e.g., dims[:-1], dims[1:]).
                     let lo_val = match lower {
-                        Some(e) => Some(eval_dsl_expr(e, env, fns, op_name)?.as_int()),
+                        Some(e) => Some(eval_dsl_expr(e, env, ctx)?.as_int()),
                         None => None,
                     };
                     let hi_val = match upper {
-                        Some(e) => Some(eval_dsl_expr(e, env, fns, op_name)?.as_int()),
+                        Some(e) => Some(eval_dsl_expr(e, env, ctx)?.as_int()),
                         None => None,
                     };
                     eval_unpacked_slice(prefix, middle, suffix, lo_val, hi_val, op_name)
@@ -2486,14 +2495,14 @@ fn eval_dsl_expr(
                     let len = items.len() as i64;
                     let lo = match lower {
                         Some(e) => {
-                            let v = eval_dsl_expr(e, env, fns, op_name)?.as_int();
+                            let v = eval_dsl_expr(e, env, ctx)?.as_int();
                             if v < 0 { (v + len).max(0) } else { v.min(len) }
                         }
                         None => 0,
                     };
                     let hi = match upper {
                         Some(e) => {
-                            let v = eval_dsl_expr(e, env, fns, op_name)?.as_int();
+                            let v = eval_dsl_expr(e, env, ctx)?.as_int();
                             if v < 0 { (v + len).max(0) } else { v.min(len) }
                         }
                         None => len,
@@ -2513,31 +2522,31 @@ fn eval_dsl_expr(
         }
 
         DslExpr::BinOp { left, op, right } => {
-            let lval = eval_dsl_expr(left, env, fns, op_name)?;
+            let lval = eval_dsl_expr(left, env, ctx)?;
             // Short-circuit and/or (Python semantics).
             match op {
                 DslOp::And => {
                     if !val_as_bool(&lval, op_name)? {
                         return Ok(Val::Bool(false));
                     }
-                    let rval = eval_dsl_expr(right, env, fns, op_name)?;
+                    let rval = eval_dsl_expr(right, env, ctx)?;
                     return Ok(Val::Bool(val_as_bool(&rval, op_name)?));
                 }
                 DslOp::Or => {
                     if val_as_bool(&lval, op_name)? {
                         return Ok(Val::Bool(true));
                     }
-                    let rval = eval_dsl_expr(right, env, fns, op_name)?;
+                    let rval = eval_dsl_expr(right, env, ctx)?;
                     return Ok(Val::Bool(val_as_bool(&rval, op_name)?));
                 }
                 _ => {}
             }
-            let rval = eval_dsl_expr(right, env, fns, op_name)?;
+            let rval = eval_dsl_expr(right, env, ctx)?;
             eval_binop(&lval, *op, &rval, op_name)
         }
 
         DslExpr::UnaryOp { op, operand } => {
-            let val = eval_dsl_expr(operand, env, fns, op_name)?;
+            let val = eval_dsl_expr(operand, env, ctx)?;
             match op {
                 DslUnaryOp::Not => Ok(Val::Bool(!val_as_bool(&val, op_name)?)),
                 DslUnaryOp::Neg => {
@@ -2562,13 +2571,13 @@ fn eval_dsl_expr(
         DslExpr::Call { func, args } => {
             let arg_vals: Vec<Val> = args
                 .iter()
-                .map(|a| eval_dsl_expr(a, env, fns, op_name))
+                .map(|a| eval_dsl_expr(a, env, ctx))
                 .collect::<Result<_, _>>()?;
-            eval_call(func, &arg_vals, fns, op_name)
+            eval_call(func, &arg_vals, ctx)
         }
 
         DslExpr::IsInstance { expr, ty } => {
-            let val = eval_dsl_expr(expr, env, fns, op_name)?;
+            let val = eval_dsl_expr(expr, env, ctx)?;
             let matches = match (ty, &val) {
                 (DslTypeCon::Int, Val::Int(_)) => true,
                 (DslTypeCon::Str, Val::Str(_)) => true,
@@ -2583,8 +2592,8 @@ fn eval_dsl_expr(
         }
 
         DslExpr::In { left, right } => {
-            let needle = eval_dsl_expr(left, env, fns, op_name)?;
-            let haystack = eval_dsl_expr(right, env, fns, op_name)?;
+            let needle = eval_dsl_expr(left, env, ctx)?;
+            let haystack = eval_dsl_expr(right, env, ctx)?;
             if matches!(haystack, Val::Unpacked { .. }) {
                 return Err(ShapeError::Unsupported {
                     message: format!("{op_name}: 'in' not supported on variadic shape"),
@@ -2596,7 +2605,7 @@ fn eval_dsl_expr(
         }
 
         DslExpr::Shape(inner) => {
-            let val = eval_dsl_expr(inner, env, fns, op_name)?;
+            let val = eval_dsl_expr(inner, env, ctx)?;
             let shape = val.as_shape();
             match shape.view() {
                 IntTupleView::Concrete(dims) => {
@@ -2631,7 +2640,7 @@ fn eval_dsl_expr(
         }
 
         DslExpr::ShapedArrayNew(shape_expr) => {
-            let val = eval_dsl_expr(shape_expr, env, fns, op_name)?;
+            let val = eval_dsl_expr(shape_expr, env, ctx)?;
             match val {
                 Val::Unpacked {
                     prefix,
@@ -2654,10 +2663,10 @@ fn eval_dsl_expr(
         }
 
         DslExpr::IfExpr { body, test, orelse } => {
-            if val_as_bool(&eval_dsl_expr(test, env, fns, op_name)?, op_name)? {
-                eval_dsl_expr(body, env, fns, op_name)
+            if val_as_bool(&eval_dsl_expr(test, env, ctx)?, op_name)? {
+                eval_dsl_expr(body, env, ctx)
             } else {
-                eval_dsl_expr(orelse, env, fns, op_name)
+                eval_dsl_expr(orelse, env, ctx)
             }
         }
 
@@ -2942,13 +2951,9 @@ fn val_eq(a: &Val, b: &Val) -> bool {
     }
 }
 
-/// Evaluate a function call — builtins handled inline, user-defined looked up in `fns`.
-fn eval_call(
-    func: &DslCallTarget,
-    args: &[Val],
-    fns: &HashMap<String, Arc<DslFnDef>>,
-    op_name: &str,
-) -> Result<Val, ShapeError> {
+/// Evaluate a function call — builtins handled inline, user-defined looked up in `ctx.fns`.
+fn eval_call(func: &DslCallTarget, args: &[Val], ctx: &DslEvalContext) -> Result<Val, ShapeError> {
+    let op_name = ctx.op_name;
     match func {
         DslCallTarget::Builtin(builtin) => match builtin {
             DslBuiltin::Prod => {
@@ -3136,7 +3141,8 @@ fn eval_call(
             }
         },
         DslCallTarget::UserDefined(name) => {
-            let fn_def = fns
+            let fn_def = ctx
+                .fns
                 .get(name)
                 .unwrap_or_else(|| panic!("DSL bug: {op_name}: undefined function `{name}`"));
             let mut call_env = HashMap::new();
@@ -3155,7 +3161,7 @@ fn eval_call(
                 });
                 call_env.insert(param.name.clone(), const_to_val(default));
             }
-            eval_dsl_body(&fn_def.body, &mut call_env, fns, op_name).map(|(val, _is_unbounded)| val)
+            eval_dsl_body(&fn_def.body, &mut call_env, ctx).map(|(val, _is_unbounded)| val)
         }
     }
 }
@@ -3171,12 +3177,12 @@ fn eval_call(
 fn eval_dsl_body(
     body: &DslBody,
     env: &mut HashMap<String, Val>,
-    fns: &HashMap<String, Arc<DslFnDef>>,
-    op_name: &str,
+    ctx: &DslEvalContext,
 ) -> Result<(Val, bool), ShapeError> {
+    let op_name = ctx.op_name;
     match body {
         DslBody::Assign { vars, expr, rest } => {
-            let val = eval_dsl_expr(expr, env, fns, op_name)?;
+            let val = eval_dsl_expr(expr, env, ctx)?;
             if vars.len() == 1 {
                 env.insert(vars[0].clone(), val);
             } else {
@@ -3195,27 +3201,27 @@ fn eval_dsl_body(
                     env.insert(var.clone(), item.clone());
                 }
             }
-            eval_dsl_body(rest, env, fns, op_name)
+            eval_dsl_body(rest, env, ctx)
         }
         DslBody::If {
             cond,
             then_body,
             rest,
         } => {
-            if val_as_bool(&eval_dsl_expr(cond, env, fns, op_name)?, op_name)? {
+            if val_as_bool(&eval_dsl_expr(cond, env, ctx)?, op_name)? {
                 let mut then_env = env.clone();
-                eval_dsl_body(then_body, &mut then_env, fns, op_name)
+                eval_dsl_body(then_body, &mut then_env, ctx)
             } else {
-                eval_dsl_body(rest, env, fns, op_name)
+                eval_dsl_body(rest, env, ctx)
             }
         }
         DslBody::Return(expr) => {
             let has_ellipsis = matches!(expr, DslExpr::List(elems)
                 if elems.len() >= 2 && matches!(elems.last(), Some(DslExpr::Ellipsis)));
-            Ok((eval_dsl_expr(expr, env, fns, op_name)?, has_ellipsis))
+            Ok((eval_dsl_expr(expr, env, ctx)?, has_ellipsis))
         }
         DslBody::Raise(expr) => {
-            let msg = eval_dsl_expr(expr, env, fns, op_name)?;
+            let msg = eval_dsl_expr(expr, env, ctx)?;
             let text = match msg {
                 Val::Str(s) => s,
                 other => {
@@ -3476,12 +3482,11 @@ impl MetaShapeFunction for DslMetaShapeFunction {
     ) -> Option<Result<Type, ShapeError>> {
         let mut env = bind_dsl_params(&self.fn_def.params, bound_args)?;
 
-        let result = eval_dsl_body(
-            &self.fn_def.body,
-            &mut env,
-            &self.fn_lookup,
-            &self.fn_def.name,
-        );
+        let ctx = DslEvalContext {
+            fns: &self.fn_lookup,
+            op_name: &self.fn_def.name,
+        };
+        let result = eval_dsl_body(&self.fn_def.body, &mut env, &ctx);
 
         match result {
             Ok((val, is_unbounded)) => {

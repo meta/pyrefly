@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, assert_type, cast
 
 import numpy as np
-from shape_extensions import assert_shape, IntTuple
+from shape_extensions import assert_raises, assert_shape, IntTuple
 
 
 def test_matrix_arithmetic() -> None:
@@ -187,3 +187,39 @@ def check_unary_ufunc_sequence_input() -> None:
     x, y, z = radians
     assert finite.all()
     assert (x, y, z) != (0.0, 0.0, 0.0)
+
+
+def test_integer_array_shifts() -> None:
+    values = np.full((2, 1), 8, dtype=np.uint64)
+    counts = np.ones((1, 3), dtype=np.uint64)
+
+    right = values >> np.uint64(1)
+    left = values << np.uint64(1)
+    reflected_right = np.uint64(16) >> values
+    reflected_left = np.uint64(1) << values
+    broadcasted = values >> counts
+    assert_type(right, np.ndarray[[2, 1], Any])
+    assert_type(left, np.ndarray[[2, 1], Any])
+    assert_shape(right.shape, (2, 1))
+    assert_shape(left.shape, (2, 1))
+    assert_shape(reflected_right.shape, (2, 1))
+    assert_shape(reflected_left.shape, (2, 1))
+    assert_shape(broadcasted.shape, (2, 3))
+    assert right.tolist() == [[4], [4]]
+    assert left.tolist() == [[16], [16]]
+    with assert_raises(ValueError):
+        values >> np.ones((3, 2), dtype=np.uint64)  # E: Cannot broadcast
+    with assert_raises(TypeError):
+        values >> 0.5  # E: not supported
+
+
+def test_shift_dtype_promotion_and_scalar_result() -> None:
+    values = np.ones((2, 3), dtype=np.int8)
+    promoted = values << np.int64(1)
+    scalar = np.array(8, dtype=np.uint64) >> np.uint64(1)
+    assert_type(promoted, np.ndarray[[2, 3], Any])
+    assert_type(scalar, Any)
+    assert_shape(promoted.shape, (2, 3))
+    assert_shape(scalar.shape, IntTuple, runtime=())
+    assert promoted.dtype == np.dtype(np.int64)
+    assert isinstance(scalar, np.uint64)

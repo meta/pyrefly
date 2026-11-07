@@ -118,12 +118,6 @@ pub enum Usage {
     /// alias bindings should produce Binding::TypeAliasRef instead of
     /// Binding::Forward.
     TypeAliasRhs,
-    /// Metadata of an `Annotated[...]` type form. Like `StaticTypeInformation`, but names may
-    /// refer to fields declared later in the enclosing class body when the annotation is not
-    /// evaluated where it appears.
-    AnnotatedMetadata {
-        allow_class_body_forward_reference: bool,
-    },
 }
 
 impl Usage {
@@ -132,9 +126,7 @@ impl Usage {
         match other {
             Self::CurrentIdx(idx) => Self::NonPinningValue(Some(*idx)),
             Self::NonPinningValue(idx) => Self::NonPinningValue(*idx),
-            Self::StaticTypeInformation { .. }
-            | Self::TypeAliasRhs
-            | Self::AnnotatedMetadata { .. } => Self::NonPinningValue(None),
+            Self::StaticTypeInformation { .. } | Self::TypeAliasRhs => Self::NonPinningValue(None),
         }
     }
 
@@ -143,9 +135,7 @@ impl Usage {
         match self {
             Usage::CurrentIdx(idx) => Some(*idx),
             Usage::NonPinningValue(idx) => *idx,
-            Usage::StaticTypeInformation { .. }
-            | Usage::TypeAliasRhs
-            | Usage::AnnotatedMetadata { .. } => None,
+            Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs => None,
         }
     }
 
@@ -158,9 +148,7 @@ impl Usage {
     pub fn is_static(&self) -> bool {
         matches!(
             self,
-            Usage::StaticTypeInformation { .. }
-                | Usage::TypeAliasRhs
-                | Usage::AnnotatedMetadata { .. }
+            Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs
         )
     }
 }
@@ -308,12 +296,10 @@ impl<'a> BindingsBuilder<'a> {
         usage: &mut Usage,
         tparams_builder: Option<&mut LegacyTParamCollector>,
     ) -> Idx<Key> {
-        let allow_class_body_forward_reference = matches!(
-            usage,
-            Usage::AnnotatedMetadata {
-                allow_class_body_forward_reference: true
-            }
-        );
+        // A static context, such as `Annotated` metadata, is not evaluated where it appears when
+        // annotations are postponed, so it may refer to fields declared later in a class body.
+        let allow_class_body_forward_reference =
+            usage.is_static() && self.annotations_are_postponed();
         self.ensure_name_in_type(
             name,
             usage,
@@ -755,28 +741,21 @@ impl<'a> BindingsBuilder<'a> {
     /// Bind the metadata items of an `Annotated[...]` type form. Names in them still resolve, but
     /// the metadata is not type-checked, so their ranges are recorded and bindings created inside
     /// them only report name resolution errors.
-    fn bind_annotated_metadata(
-        &mut self,
-        metadata: &mut [Expr],
-        allow_class_body_forward_reference: bool,
-    ) {
+    fn bind_annotated_metadata(&mut self, metadata: &mut [Expr]) {
         for e in metadata {
             self.ensure_expr(
                 e,
-                &mut Usage::AnnotatedMetadata {
-                    allow_class_body_forward_reference,
+                &mut Usage::StaticTypeInformation {
+                    is_annotation: false,
                 },
             );
             self.annotated_metadata_ranges.push(e.range());
         }
     }
 
-    /// Whether names in a type may refer to fields declared later in the enclosing class body,
-    /// which is the case when the type is not evaluated where it appears.
-    fn allow_class_body_forward_reference_in_type(&self, in_string_literal: bool) -> bool {
-        in_string_literal
-            || self.scopes.has_future_annotations()
-            || self.sys_info.version().at_least(3, 14)
+    /// Whether annotations in this module are evaluated lazily rather than where they appear.
+    fn annotations_are_postponed(&self) -> bool {
+        self.scopes.has_future_annotations() || self.sys_info.version().at_least(3, 14)
     }
 
     /// Execute through the expr, ensuring every name has a binding.
@@ -842,7 +821,7 @@ impl<'a> BindingsBuilder<'a> {
                             &mut type_usage,
                             false,
                         );
-                        self.bind_annotated_metadata(&mut tup.elts[1..], false);
+                        self.bind_annotated_metadata(&mut tup.elts[1..]);
                     } else {
                         self.ensure_type_impl(
                             &mut *slice,
@@ -1383,7 +1362,7 @@ impl<'a> BindingsBuilder<'a> {
                     usage,
                     tparams_builder,
                     check_runtime_name && !in_string_literal,
-                    self.allow_class_body_forward_reference_in_type(in_string_literal),
+                    in_string_literal || self.annotations_are_postponed(),
                 );
             }
             Expr::Subscript(ExprSubscript { value, .. })
@@ -1448,12 +1427,7 @@ impl<'a> BindingsBuilder<'a> {
                 let bound_as_shape = special == SpecialExport::Shaped
                     && self.bind_shape_string(*range, tup, tparams_builder, usage);
                 if !bound_as_shape {
-                    let allow_class_body_forward_reference =
-                        self.allow_class_body_forward_reference_in_type(in_string_literal);
-                    self.bind_annotated_metadata(
-                        &mut tup.elts[1..],
-                        allow_class_body_forward_reference,
-                    );
+                    self.bind_annotated_metadata(&mut tup.elts[1..]);
                 }
             }
             Expr::Subscript(ExprSubscript { value, slice, .. })

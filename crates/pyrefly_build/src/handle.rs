@@ -50,6 +50,11 @@ impl Handle {
         }
     }
 
+    /// A handle for another module in the same Python environment as this one.
+    pub fn for_module(&self, module: ModuleName, path: ModulePath) -> Self {
+        Self::new(module, path, self.sys_info.dupe())
+    }
+
     /// Create a new handle from a ModuleNameWithKind.
     pub fn from_with_module_name_kind(
         module: ModuleNameWithKind,

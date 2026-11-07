@@ -40,9 +40,11 @@ from numpy.linalg._linalg import (
 )
 from shape_extensions import Flag, Int, IntTuple, IntVar
 
-from .. import floating, ndarray
+from .. import complex64, complex128, dtype, float32, float64, floating, ndarray
 
 class LinAlgError(ValueError): ...
+
+type _UPLO = Literal["L", "U", "l", "u"]
 
 # MVP shape surface only; NumPy dtype promotion is intentionally not modeled.
 @overload
@@ -92,9 +94,29 @@ def norm(
     axis: None = None,
     keepdims: Literal[False] = False,
 ) -> floating: ...
-def eigh[N: IntVar, DType](
-    a: ndarray[[N, N], DType],
-) -> tuple[ndarray[[N], DType], ndarray[[N, N], DType]]: ...
+
+# Hermitian eigenvalues are real, so complex inputs produce floating eigenvalues of
+# the same precision. Integer inputs promote, so their dtypes stay gradual. Leading
+# batch dimensions are preserved.
+@overload
+def eigh[N: IntVar, ScalarT: float32 | complex64, Batch: IntTuple = []](
+    a: ndarray[[*Batch, N, N], dtype[ScalarT]],
+    UPLO: _UPLO = "L",
+) -> tuple[
+    ndarray[[*Batch, N], dtype[float32]], ndarray[[*Batch, N, N], dtype[ScalarT]]
+]: ...
+@overload
+def eigh[N: IntVar, ScalarT: float64 | complex128, Batch: IntTuple = []](
+    a: ndarray[[*Batch, N, N], dtype[ScalarT]],
+    UPLO: _UPLO = "L",
+) -> tuple[
+    ndarray[[*Batch, N], dtype[float64]], ndarray[[*Batch, N, N], dtype[ScalarT]]
+]: ...
+@overload
+def eigh[N: IntVar, Batch: IntTuple = []](
+    a: ndarray[[*Batch, N, N]],
+    UPLO: _UPLO = "L",
+) -> tuple[ndarray[[*Batch, N]], ndarray[[*Batch, N, N]]]: ...
 def svd[M: IntVar, N: IntVar, DType](
     a: ndarray[[M, N], DType],
     # NumPy defaults to full SVD; this MVP accepts only the reduced form needed

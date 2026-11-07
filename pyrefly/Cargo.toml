@@ -62,7 +62,7 @@ itertools = "0.15.0"
 lsp-server = "0.10.0"
 lsp_types = { package = "gen-lsp-types", version = "0.11.0", features = ["url"] }
 num-traits = { version = "0.2.19", default-features = false }
-parking_lot = { version = "0.12.1", features = ["arc_lock", "send_guard", "serde"] }
+parking_lot = { version = "0.13.0", features = ["arc_lock", "send_guard", "serde"] }
 parse-display = "0.8.2"
 paste = "1.0.14"
 percent-encoding = "2.1"
@@ -96,7 +96,7 @@ tokio = { version = "1.54.1", features = ["macros", "rt"] }
 toml = { version = "1.1.8", features = ["preserve_order"] }
 tracing = { version = "0.1.41", features = ["attributes", "valuable"] }
 tsp_types = { path = "../crates/tsp_types" }
-uuid = { version = "1.28.0", features = ["js", "rng-getrandom", "v4"] }
+uuid = { version = "1.28.0", features = ["rng-getrandom", "v4"] }
 vec1 = { version = "1.12.1", features = ["serde"] }
 web-time = "1.1.0"
 xxhash-rust = { version = "0.8.19", features = ["xxh64"] }

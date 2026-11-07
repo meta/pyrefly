@@ -20,6 +20,7 @@ use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::facet::FacetKind;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::identity::IdentityIgnored;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::type_alias::TypeAliasData;
@@ -56,6 +57,7 @@ use starlark_map::small_set::SmallSet;
 use vec1::Vec1;
 
 use crate::alt::answers::AttributeReferenceKind;
+use crate::alt::answers::IndexedAttribute;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::answers_solver::TypeCheckOptions;
@@ -80,6 +82,7 @@ use crate::alt::types::legacy_lookup::LegacyTypeParameterLookup;
 use crate::alt::types::yields::YieldFromResult;
 use crate::alt::types::yields::YieldResult;
 use crate::alt::unwrap::HintRef;
+use crate::binding::base_class::BaseClassExpr;
 use crate::binding::binding::AnnAssignHasValue;
 use crate::binding::binding::AnnotationStyle;
 use crate::binding::binding::AnnotationTarget;
@@ -201,7 +204,8 @@ use crate::types::types::Type;
 
 /// Collects each legacy type parameter once, retaining its declaration range for ordering.
 /// The alias anchor keeps quantifications of the same variable in different aliases distinct.
-/// Declaration-range starts provide deterministic ordinals within each alias.
+/// Within an alias, a parameter's index is the order in which the collector first meets it. The
+/// declaration's offset would not do: variables declared in different modules can share it.
 struct LegacyTypeParamCollector {
     module: ModuleName,
     alias_anchor: TextRange,
@@ -230,7 +234,7 @@ impl LegacyTypeParamCollector {
                 let range = tv.qname().range();
                 let identity = QuantifiedIdentity::new(
                     self.module,
-                    AnchorIndex::new(self.alias_anchor, u32::from(range.start())),
+                    AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
                     QuantifiedOrigin::ScopedLegacy,
                 );
                 let q = Quantified::from_type_var(tv, identity);
@@ -248,7 +252,7 @@ impl LegacyTypeParamCollector {
                 let range = tvt.qname().range();
                 let identity = QuantifiedIdentity::new(
                     self.module,
-                    AnchorIndex::new(self.alias_anchor, u32::from(range.start())),
+                    AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
                     QuantifiedOrigin::ScopedLegacy,
                 );
                 let q = Quantified::type_var_tuple(
@@ -270,7 +274,7 @@ impl LegacyTypeParamCollector {
                 let range = ps.qname().range();
                 let identity = QuantifiedIdentity::new(
                     self.module,
-                    AnchorIndex::new(self.alias_anchor, u32::from(range.start())),
+                    AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
                     QuantifiedOrigin::ScopedLegacy,
                 );
                 let q = Quantified::param_spec(
@@ -679,9 +683,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) -> AnnotationWithTarget {
         match binding {
-            BindingAnnotation::AnnotateExpr(target, x, class_key) => {
+            BindingAnnotation::AnnotateExpr(target, x, class_key, override_func) => {
                 let type_form_context = target.type_form_context();
-                let mut ann = self.expr_annotation(x, type_form_context, errors);
+                // Filter repeated inherited `Any` only when both this operation and
+                // its module collect diagnostics. Binding solves use active local
+                // collectors even for silent dependencies, whose module collector
+                // is `Never`. Configured severity does not control collection.
+                let may_exempt = override_func.is_some()
+                    && errors.is_active()
+                    && self.base_errors().is_active()
+                    && matches!(
+                        type_form_context,
+                        TypeFormContext::ParameterAnnotation
+                            | TypeFormContext::ParameterArgsAnnotation
+                            | TypeFormContext::ParameterKwargsAnnotation
+                            | TypeFormContext::ReturnAnnotation
+                    );
+                let ann_errors = may_exempt.then(|| self.error_collector());
+                let mut ann = self.expr_annotation(
+                    x,
+                    type_form_context,
+                    ann_errors.as_ref().unwrap_or(errors),
+                );
                 if let Some(class_key) = class_key
                     && let Some(ty) = &mut ann.ty
                 {
@@ -713,6 +736,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 .to_owned(),
                         );
                     }
+                }
+                if let Some(ann_errors) = ann_errors {
+                    // Policy choice, not a type-system requirement (a base `x: Any`
+                    // permits e.g. an override `x: object`): we avoid blaming the
+                    // override for repeating an `Any` the base signature dictates,
+                    // so the `explicit-any` reported where it is written is dropped.
+                    // The inherited lookup runs only when such an error is actually
+                    // present in the local collector.
+                    let dictated = matches!(&ann.ty, Some(Type::Any(AnyStyle::Explicit)))
+                        && ann_errors.has_error_kind(ErrorKind::ExplicitAny)
+                        && override_func
+                            .as_ref()
+                            .is_some_and(|func| self.override_base_dictates_any(*func, target));
+                    errors.extend_filtered(ann_errors, |error| {
+                        !(dictated && error.error_kind() == ErrorKind::ExplicitAny)
+                    });
                 }
                 AnnotationWithTarget {
                     target: target.clone(),
@@ -752,7 +791,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn is_proxy_method_type_in_annotation(ty: &Type) -> bool {
         if let Type::ClassType(cls) = ty {
             cls.class_object()
-                .has_toplevel_qname("shape_extensions", "ProxyMethod")
+                .is(KnownClass::ShapeExtensionsProxyMethod)
         } else {
             false
         }
@@ -892,7 +931,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         } else if let Some(ty) = ty
             && let Type::ClassDef(cls) = &ty
-            && cls.has_toplevel_qname("dataclasses", "InitVar")
+            && cls.is(KnownClass::DataclassesInitVar)
         {
             Some(Qualifier::InitVar)
         } else {
@@ -926,14 +965,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let swallower = self.error_swallower();
         let is_type = matches!(
             self.expr_infer(&call.func, &swallower),
-            Type::ClassDef(cls) if cls.is_builtin("type")
+            Type::ClassDef(cls) if cls.is(KnownClass::Type)
         );
         let suggestion =
             if is_type && call.arguments.args.len() == 1 && call.arguments.keywords.is_empty() {
                 match self.expr_infer(&call.arguments.args[0], &swallower) {
                     Type::ClassType(cls)
-                        if cls.is_builtin("_NotImplementedType")
-                            || cls.has_qname("types", "NotImplementedType") =>
+                        if cls.is(KnownClass::NotImplementedType)
+                            || cls.is(KnownClass::TypesNotImplementedType) =>
                     {
                         Some("`types.NotImplementedType`".to_owned())
                     }
@@ -1162,12 +1201,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         else {
             return false;
         };
-        !iter_method
-            .defining_class
-            .has_toplevel_qname("builtins", "tuple")
-            && !iter_method
-                .defining_class
-                .has_toplevel_qname("type_checker_internals", "NamedTupleFallback")
+        !matches!(
+            iter_method.defining_class.known(),
+            Some(KnownClass::Tuple | KnownClass::TypeshedNamedTupleFallback)
+        )
     }
 
     /// Given an `iterable` type, determine the iteration type; this is the type
@@ -1605,7 +1642,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.tvars_to_tparams_for_type_alias(t, collector);
                 }
             }
-            Type::ClassType(cls) => {
+            Type::ClassType(cls) | Type::SpecializedClassDef(cls) => {
                 for t in cls.targs_mut().as_mut() {
                     self.tvars_to_tparams_for_type_alias(t, collector);
                 }
@@ -1646,6 +1683,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if !self.has_valid_annotation_syntax(expr, errors) {
             return TypeAlias::error(name.clone(), style);
         }
+        // Preserve exact class expressions through chains of legacy aliases.
+        let ty = if let Type::TypeAlias(alias) = &ty
+            && let value @ Type::SpecializedClassDef(_) =
+                self.get_type_alias(alias).as_value(self.stdlib)
+        {
+            value
+        } else {
+            ty
+        };
         let annotated_metadata = match &ty {
             Type::Annotated(_, metadata) => Some(metadata.clone()),
             _ => self
@@ -1654,6 +1700,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .shaped_annotation_metadata(range)
                 .map(|shape| vec![Lit::Str(shape.into()).to_implicit_type()].into_boxed_slice()),
         };
+        let is_specialized_class = matches!(&ty, Type::SpecializedClassDef(_));
         let untyped = self.untype_opt(ty.clone(), range, errors);
         let ty = if let Some(untyped) = untyped {
             let validated =
@@ -1675,6 +1722,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // been interpreted as a shape in this declaration.
         let stored_ty = if let Some(metadata) = annotated_metadata {
             Type::Annotated(Box::new(ty), metadata)
+        } else if is_specialized_class && let Type::ClassType(cls) = ty {
+            Type::SpecializedClassDef(cls)
         } else {
             self.heap.mk_type_of(ty)
         };
@@ -2251,7 +2300,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if let Some(default_expr) = &tp.default {
             let is_size_bound = |ty: &Type| {
                 matches!(ty, Type::Int(_))
-                    || matches!(ty, Type::ClassType(cls) if cls.has_qname("shape_extensions", "Int"))
+                    || matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsInt))
             };
             let default = if matches!(
                 &restriction,
@@ -3018,7 +3067,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.expr_infer(x, errors);
             }
             BindingExpect::TypeCheckBaseClassExpr(x) => {
-                self.expr_untype(x, TypeFormContext::BaseClassList, errors);
+                let ty = self.expr_untype(x, TypeFormContext::BaseClassList, errors);
+                if self
+                    .bindings()
+                    .shape_declarations
+                    .commented_bases
+                    .contains_key(&x.range())
+                    && let Some(base) = BaseClassExpr::from_expr(x)
+                {
+                    self.preserve_comment_base_identity(&base, ty, errors);
+                }
             }
             BindingExpect::Bool(x) => {
                 self.check_bool_expr(x, errors);
@@ -3153,6 +3211,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 is_async,
                 is_generator,
                 has_explicit_return,
+                diverges_without_exit,
             } => {
                 let annotation = self.get_idx(*annotation).annotation.get_type().clone();
                 let implicit_return = self.get_idx(*implicit_return);
@@ -3165,6 +3224,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     range,
                     errors,
                 );
+                if *diverges_without_exit
+                    && !has_explicit_return
+                    && !is_generator
+                    && !annotation.is_never()
+                    && !annotation.is_none()
+                {
+                    self.error(
+                        errors,
+                        range,
+                        ErrorKind::UnexpectedNever,
+                        format!(
+                            "Function declared to return `{}` but can never return",
+                            self.for_display(annotation.clone())
+                        ),
+                    );
+                }
             }
             BindingExpect::MatchExhaustiveness {
                 subject_idx,
@@ -3313,16 +3388,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         }) || (*is_instance
                             && self.get_class_member(cls, &dunder::GETATTR).is_some())
                             // Check each ancestor's own fields, including `object`, so the
-                            // result does not depend on whether the class has other bases.
+                            // result does not depend on whether the class has other bases. An
+                            // ancestor that only declares the attribute does not initialize it.
                             || self
                                 .get_mro_for_class(cls)
                                 .ancestors(self.stdlib)
                                 .any(|base| {
-                                    self.get_field_from_current_class_only(
-                                        base.class_object(),
-                                        name,
-                                    )
-                                    .is_some()
+                                    let base = base.class_object();
+                                    let Some(field) =
+                                        self.get_field_from_current_class_only(base, name)
+                                    else {
+                                        return false;
+                                    };
+                                    if !field.is_declared_only() {
+                                        return true;
+                                    }
+                                    // A declaration still counts in an ancestor that initializes
+                                    // annotated fields itself, other than a protocol, or in a
+                                    // metaclass, whose subclass bodies usually fill it.
+                                    let base_metadata = self.get_metadata_for_class(base);
+                                    (base_metadata.initializes_annotated_fields()
+                                        && !base_metadata.is_protocol())
+                                        || base_metadata.is_metaclass()
                                 })
                     });
                 if !initialized && !inherited_or_dynamic {
@@ -3400,7 +3487,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ) || matches!(&result_ty, Type::Type(f) if matches!(&**f, Type::ClassType(_))))
                         || {
                             let callable_ty = self.expr_infer(&call.func, &swallower);
-                            matches!(&callable_ty, Type::ClassDef(_))
+                            matches!(
+                                &callable_ty,
+                                Type::ClassDef(_) | Type::SpecializedClassDef(_)
+                            )
                         }
                 } else {
                     false
@@ -3506,9 +3596,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         owners: &[Class],
     ) -> bool {
         value_type.clone().into_unions().into_iter().any(|ty| {
+            let ty = match ty {
+                Type::TypeAlias(alias) => self.get_type_alias(&alias).as_value(self.stdlib),
+                ty => ty,
+            };
             let accessed_class = match ty {
                 Type::ClassDef(cls) => Some(cls),
-                Type::ClassType(cls) | Type::SelfType(cls) => Some(cls.into_class_object()),
+                Type::ClassType(cls) | Type::SelfType(cls) | Type::SpecializedClassDef(cls) => {
+                    Some(cls.into_class_object())
+                }
                 Type::Type(inner) => match *inner {
                     Type::ClassType(cls) | Type::SelfType(cls) => Some(cls.into_class_object()),
                     _ => None,
@@ -3644,16 +3740,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
             if let Some(child_range) = cls_fields.field_decl_range(field_name) {
                 for ancestor in mro.ancestors(self.stdlib) {
-                    let ancestor_fields = self.get_class_fields(ancestor.class_object());
-                    if let Some(ancestor_range) =
-                        ancestor_fields.and_then(|f| f.field_decl_range(field_name))
+                    let ancestor_class = ancestor.class_object();
+                    if self
+                        .get_class_fields(ancestor_class)
+                        .is_some_and(|f| f.contains(field_name))
                     {
-                        let ancestor_module_path = ancestor.class_object().module().path();
+                        let ancestor_module_path = ancestor_class.module_path();
                         if ancestor_module_path.is_first_party_for_indexing() {
                             self.current().add_parent_method_mapping(
                                 child_range,
                                 ancestor_module_path.dupe(),
-                                ancestor_range,
+                                IndexedAttribute {
+                                    cls: ancestor_class.index(),
+                                    name: field_name.clone(),
+                                },
                             );
                         }
                     }
@@ -4502,7 +4602,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Returns `None` for special forms which don't have a source expression.
     pub(crate) fn annotation_range(&self, key: Idx<KeyAnnotation>) -> Option<TextRange> {
         match self.bindings().get(key) {
-            BindingAnnotation::AnnotateExpr(_, expr, _)
+            BindingAnnotation::AnnotateExpr(_, expr, _, _)
             | BindingAnnotation::DocstringParam(_, expr) => Some(expr.range()),
             BindingAnnotation::SpecialForm(..) => None,
         }
@@ -6756,7 +6856,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // results could preserve sharing by being represented as aliases.
         self.get_idx(fwd)
             .clone()
-            .map_ty(|ty| ty.promote_shallow_implicit_literals(self.stdlib))
+            .map_ty(|ty| ty.promote_shallow(self.stdlib))
     }
 
     pub(crate) fn binding_to_type_info(
@@ -7151,7 +7251,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // when there is no annotation, so that `mylist = list` is treated
         // like a value assignment rather than a type alias?
         match ty {
-            Type::Type(_)
+            Type::SpecializedClassDef(_)
+            | Type::Type(_)
             | Type::TypeVar(_)
             | Type::ParamSpec(_)
             | Type::TypeVarTuple(_)
@@ -7853,11 +7954,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub(crate) fn is_int_tuple_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "IntTuple")
+        cls.is(KnownClass::ShapeExtensionsIntTuple)
     }
 
     pub(crate) fn is_int_tuples_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "IntTuples")
+        cls.is(KnownClass::ShapeExtensionsIntTuples)
     }
 
     pub(crate) fn bare_int_tuple_carrier(&self) -> Type {
@@ -7967,14 +8068,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             Some(self.heap.mk_int_tuple(IntTuple::shapeless()))
                         } else if self.is_int_tuples_class(cls.class_object()) {
                             Some(self.bare_int_tuples())
-                        } else if cls.has_qname("shape_extensions", "Int") {
+                        } else if cls.is(KnownClass::ShapeExtensionsInt) {
                             Some(gradual_size())
                         } else if self.shaped_array_shape_for_class_type(cls).is_some() {
                             // Canonicalize bare shaped-array types to Type::ShapedArray(shapeless)
                             // for consistency. Subscripted arrays are already converted to
                             // Type::ShapedArray during annotation parsing, so only the bare case reaches here.
                             Some(ShapedArrayType::shapeless(cls.clone()).to_type())
-                        } else if cls.has_qname("types", "NoneType") {
+                        } else if cls.is(KnownClass::TypesNoneType) {
                             // Normalize type[NoneType] as None
                             Some(self.heap.mk_none())
                         } else {

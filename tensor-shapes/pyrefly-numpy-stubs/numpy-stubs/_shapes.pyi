@@ -92,6 +92,10 @@ def repeat_sequence_shape(
     )
 
 @type_shape_dsl_function
+def flatten_shape(shape: IntTuple) -> IntTuple:
+    return dsl.IntTuple((dsl.prod(shape),))
+
+@type_shape_dsl_function
 def take_shape(shape: IntTuple, indices: IntTuple, axis: int | None) -> IntTuple:
     if axis is None:
         return indices
@@ -440,3 +444,23 @@ def reshape_varargs_shape(shape: IntTuple, target: IntTuple) -> IntTuple:
     if len(target) == 0:
         return dsl.Invalid("reshape expects at least one dimension")
     return reshape_shape(shape, target)
+
+@type_shape_dsl_function
+def multivariate_normal_shape(
+    mean: IntTuple, cov: IntTuple, size: IntTuple
+) -> IntTuple:
+    if len(mean) != 1 or len(cov) != 2:
+        return dsl.Invalid("mean must be 1-D and cov must be 2-D")
+    n = mean[0]
+    if dsl.is_concrete_int(n) and any(
+        dsl.is_concrete_int(dimension) and dimension != n for dimension in cov
+    ):
+        return dsl.Invalid("mean and cov must have the same length")
+    return dsl.concat(size, mean)
+
+@type_shape_dsl_function
+def multivariate_normal_scalar_size_shape(
+    mean: IntTuple, cov: IntTuple, size: Int | None
+) -> IntTuple:
+    batch = dsl.IntTuple(()) if size is None else dsl.IntTuple((size,))
+    return multivariate_normal_shape(mean, cov, batch)

@@ -162,6 +162,25 @@ impl<'a> CallValue<'a> {
         }
     }
 
+    /// Infers with contextual typing while retaining any invocation-local argument cache.
+    pub fn infer_with_hint<Ans: LookupAnswer>(
+        self,
+        solver: &AnswersSolver<Ans>,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+    ) -> Type {
+        match self.as_type_or_expr() {
+            TypeOrExpr::Type(ty, _) => ty.clone(),
+            TypeOrExpr::Expr(expr) => solver
+                .expr_with_argument_cache(
+                    expr,
+                    ExprOptions::infer(errors, hint),
+                    self.argument_cache(),
+                )
+                .into_ty(),
+        }
+    }
+
     fn transform<Ans: LookupAnswer>(
         &self,
         solver: &AnswersSolver<Ans>,

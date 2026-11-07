@@ -130,22 +130,24 @@ impl SuppressArgs {
                     .resolve(self.config_override.clone(), wrapper)?;
 
                 let check_args = CheckArgs::parse_from(["check", "--output-format", "omit-errors"]);
-                let (_, errors, _check_result) = check_args.run_once(
+                // Convert to SerializedErrors for all user-visible errors,
+                // excluding directives (e.g. reveal_type) and both
+                // unused-ignore kinds
+                let (_, _, serialized_errors) = check_args.run_once_with(
                     version,
                     files_to_check,
                     config_finder,
                     upsell,
                     thread_count,
+                    |errors, _| {
+                        errors
+                            .iter()
+                            .filter(|e| e.error().error_kind().is_suppressable())
+                            .filter_map(|e| SerializedError::from_error(e.error()))
+                            .collect()
+                    },
                 )?;
-
-                // Convert to SerializedErrors for all user-visible errors,
-                // excluding directives (e.g. reveal_type) and both
-                // unused-ignore kinds
-                errors
-                    .into_iter()
-                    .filter(|e| e.error_kind().is_suppressable())
-                    .filter_map(|e| SerializedError::from_error(&e))
-                    .collect()
+                serialized_errors
             };
 
             // Apply suppressions

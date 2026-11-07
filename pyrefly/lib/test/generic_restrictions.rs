@@ -923,6 +923,85 @@ def merge[T: (A, B)](x: T, y: T) -> None:
     "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/5452
+// `f1` uses final classes, so its constraints are provably disjoint, and checks that a generic
+// method called with an argument of type `T` returns `T`. `h` shows the parameter types printed
+// when an argument is rejected.
+testcase!(
+    test_constrained_typevar_argument_shares_receiver_constraint,
+    r#"
+from typing import AnyStr, assert_type, final
+
+def f(a: AnyStr, b: AnyStr) -> bool:
+    a += b
+    return a.startswith(b)
+
+def g(a: AnyStr, b: AnyStr) -> None:
+    if isinstance(a, bytes):
+        a.startswith(b)
+
+@final
+class A:
+    def pick[S](self, x: S) -> S: ...
+
+@final
+class B:
+    def pick[S](self, x: S) -> S: ...
+
+def f1[T: (A, B)](a: T, b: T) -> None:
+    assert_type(a.pick(b), T)
+
+def h(a: AnyStr) -> None:
+    a.startswith(1)  # E: Argument `Literal[1]` is not assignable to parameter `prefix` with type `Buffer | tuple[Buffer, ...] | AnyStr` # E: Argument `Literal[1]` is not assignable to parameter `prefix` with type `str | tuple[str, ...] | AnyStr`
+    "#,
+);
+
+// `a` and `b` are values of the same constraint, but narrowing `a` to a subclass doesn't narrow
+// `b`: `subclass(MyStr(), "")` is legal, so `b` can be a plain `str`. The parameters have type
+// `Tag` because a parameter of the receiver's own class hits the bug in
+// `test_constrained_typevar_argument_of_receiver_class`.
+testcase!(
+    test_constrained_typevar_argument_rejected_when_receiver_does_not_determine_constraint,
+    r#"
+from typing import AnyStr
+
+class Tag:
+    def tag(self, other: Tag) -> None: ...
+
+class MyStr(str, Tag): ...
+
+class MyBytes(bytes, Tag): ...
+
+def subclass(a: AnyStr, b: AnyStr) -> None:
+    if isinstance(a, (MyStr, MyBytes)):
+        a.tag(b)  # E: Argument `AnyStr` is not assignable to parameter `other` with type `Tag`
+
+class P: ...
+
+class Q(P, Tag): ...
+
+def overlapping[T: (P, Q)](a: T, b: T) -> None:
+    if isinstance(a, Q):
+        a.tag(b)  # E: Argument `T` is not assignable to parameter `other` with type `Tag`
+    "#,
+);
+
+// `f(MyStr(), "")` is legal, so `b` can be a plain `str` where `m` expects a `MyStr`.
+testcase!(
+    bug = "`a.m(b)` should error because `b` can be a plain `str`",
+    test_constrained_typevar_argument_of_receiver_class,
+    r#"
+from typing import AnyStr
+
+class MyStr(str):
+    def m(self, other: MyStr) -> None: ...
+
+def f(a: AnyStr, b: AnyStr) -> None:
+    if isinstance(a, MyStr):
+        a.m(b)
+    "#,
+);
+
 testcase!(
     test_typevar_single_constraint_is_error,
     r#"

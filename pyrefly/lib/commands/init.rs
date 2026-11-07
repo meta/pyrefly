@@ -29,7 +29,6 @@ use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::files::FilesArgs;
 use crate::commands::util::CommandExitStatus;
 use crate::config::config::ConfigFile;
-use crate::error::error::Error as CheckError;
 
 const MAX_ERRORS_TO_PROMPT_SUPPRESSION: usize = 100;
 
@@ -156,8 +155,7 @@ impl InitArgs {
             self.run_check(config_path.clone(), version, wrapper.clone(), thread_count);
 
         // Check if there are errors and if there are fewer than 100
-        if let Ok((_, errors)) = check_result {
-            let error_count = errors.len();
+        if let Ok((_, error_count)) = check_result {
             if error_count == 0 {
                 return Ok(CommandExitStatus::Success);
             }
@@ -184,7 +182,7 @@ impl InitArgs {
         wrapper: Option<ConfigConfigurerWrapper>,
         thread_count: ThreadCount,
         extra_args: &[&str],
-    ) -> anyhow::Result<(CommandExitStatus, Vec<CheckError>)> {
+    ) -> anyhow::Result<(CommandExitStatus, usize)> {
         let mut args = vec!["check", "--output-format", "omit-errors"];
         args.extend_from_slice(extra_args);
         let check_args = check::CheckArgs::parse_from(args);
@@ -195,8 +193,15 @@ impl InitArgs {
             wrapper,
         )?;
         check_args
-            .run_once(version, globs, config_finder, upsell, thread_count)
-            .map(|(status, errors, _check_result)| (status, errors))
+            .run_once_with(
+                version,
+                globs,
+                config_finder,
+                upsell,
+                thread_count,
+                |errors, _| errors.len(),
+            )
+            .map(|(status, _, error_count)| (status, error_count))
     }
 
     fn run_check(
@@ -205,7 +210,7 @@ impl InitArgs {
         version: &str,
         wrapper: Option<ConfigConfigurerWrapper>,
         thread_count: ThreadCount,
-    ) -> anyhow::Result<(CommandExitStatus, Vec<CheckError>)> {
+    ) -> anyhow::Result<(CommandExitStatus, usize)> {
         info!("Running pyrefly check...");
         let res = self.run_configured_check(config_path, version, wrapper, thread_count, &[]);
         if let Err(e) = &res {

@@ -545,6 +545,44 @@ def f() -> None:
 }
 
 #[test]
+fn test_callees_specialized_class_def_metaclass() {
+    let directory = TempDir::new().unwrap();
+    let file = directory.path().join("main.py");
+    fs_anyhow::write(
+        &file,
+        r#"
+class C[T]:
+    def __init__(self) -> None: ...
+def ty[T](x: T) -> type[T]: ...
+
+C[int]()
+factory = ty(C[int])
+factory(C, (str,))
+"#,
+    )
+    .unwrap();
+    let query = create_query();
+    let module = ModuleName::from_str("main");
+    let path = ModulePath::filesystem(file);
+    let errors = query.add_files(vec![(module, path.clone())]);
+    assert!(errors.is_empty(), "{errors:?}");
+    let callees = query.get_callees_with_location(module, path, None).unwrap();
+    assert_eq!(
+        callees
+            .iter()
+            .filter(|(_, callee)| callee.target == "main.C.__init__")
+            .count(),
+        1
+    );
+    assert!(
+        callees
+            .iter()
+            .any(|(_, callee)| callee.target == "types.GenericAlias.__new__"),
+        "{callees:?}"
+    );
+}
+
+#[test]
 fn test_callees_flag_type_constructor() {
     let tdir = TempDir::new().unwrap();
     let path = tdir.path().join("shape_extensions.py");

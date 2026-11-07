@@ -26,6 +26,7 @@ use tempfile::Builder;
 
 use crate::config::config::BaselineMatchingMode;
 use crate::error::error::Error;
+use crate::error::error::ReportedError;
 use crate::error::legacy::BaselineError;
 use crate::error::legacy::BaselineErrors;
 
@@ -202,8 +203,9 @@ impl BaselineKey {
 /// The file is compared by its path rather than by how its handle displays it, which
 /// for an in-memory handle adds a prefix. Copies of one diagnostic from different kinds
 /// of handle therefore still sort next to each other, which `is_copy` relies on.
-fn sort_by_source_position(errors: &mut [Error]) {
+fn sort_by_source_position(errors: &mut [impl ReportedError]) {
     errors.sort_by_cached_key(|error| {
+        let error = error.error();
         (
             error.path().as_path().to_string_lossy().into_owned(),
             error.range().start(),
@@ -227,10 +229,13 @@ fn is_copy(a: &Error, b: &Error) -> bool {
 /// Put the diagnostics `--update-baseline` is about to record into row order. Under
 /// `column-ordered`, copies of one diagnostic are recorded once, because matching reads
 /// them back as one.
-pub(crate) fn prepare_baseline_rows(errors: &mut Vec<Error>, matching_mode: BaselineMatchingMode) {
+pub(crate) fn prepare_baseline_rows(
+    errors: &mut Vec<impl ReportedError>,
+    matching_mode: BaselineMatchingMode,
+) {
     sort_by_source_position(errors);
     if matching_mode.is_ordered() {
-        errors.dedup_by(|a, b| is_copy(a, b));
+        errors.dedup_by(|a, b| is_copy(a.error(), b.error()));
     }
 }
 
@@ -348,7 +353,11 @@ impl BaselineIndex {
 
     /// Move every diagnostic the baseline covers from `shown_errors` to
     /// `baseline_errors`, and return whether each row covered at least one diagnostic.
-    fn apply(&self, shown_errors: &mut Vec<Error>, baseline_errors: &mut Vec<Error>) -> Vec<bool> {
+    fn apply<E: ReportedError>(
+        &self,
+        shown_errors: &mut Vec<E>,
+        baseline_errors: &mut Vec<E>,
+    ) -> Vec<bool> {
         let unrecorded = match &self.lookup {
             Lookup::Sequences {
                 min_severity: Some(min_severity),
@@ -364,8 +373,8 @@ impl BaselineIndex {
         };
         let (covered, rows_matched) = match &self.lookup {
             Lookup::Membership(lookup) => {
-                let observed =
-                    shown_errors.map(|error| BaselineKey::from_error(error, self.matching_mode));
+                let observed = shown_errors
+                    .map(|error| BaselineKey::from_error(error.error(), self.matching_mode));
                 let covered = observed.map(|key| lookup.contains(key));
                 let matched_keys: HashSet<&BaselineKey> = observed
                     .iter()
@@ -382,8 +391,8 @@ impl BaselineIndex {
                 let mut observed = Vec::with_capacity(shown_errors.len());
                 let mut observation_of = Vec::with_capacity(shown_errors.len());
                 for (index, error) in shown_errors.iter().enumerate() {
-                    if index == 0 || !is_copy(&shown_errors[index - 1], error) {
-                        observed.push(BaselineKey::from_error(error, self.matching_mode));
+                    if index == 0 || !is_copy(shown_errors[index - 1].error(), error.error()) {
+                        observed.push(BaselineKey::from_error(error.error(), self.matching_mode));
                     }
                     observation_of.push(observed.len() - 1);
                 }
@@ -458,7 +467,11 @@ impl BaselineProcessor {
     ///
     /// Under `column-ordered`, each call must include every diagnostic for the files it
     /// covers, because each file's rows are aligned against that file's diagnostics.
-    pub fn process_errors(&self, shown_errors: &mut Vec<Error>, baseline_errors: &mut Vec<Error>) {
+    pub fn process_errors<E: ReportedError>(
+        &self,
+        shown_errors: &mut Vec<E>,
+        baseline_errors: &mut Vec<E>,
+    ) {
         self.index.apply(shown_errors, baseline_errors);
     }
 }
@@ -542,10 +555,10 @@ impl TrackedBaselineProcessor {
     /// for it. The set-based modes instead treat a single match as covering every row
     /// sharing that key, because there one row already suppresses any number of
     /// diagnostics.
-    pub fn process_errors(
+    pub fn process_errors<E: ReportedError>(
         self,
-        shown_errors: &mut Vec<Error>,
-        baseline_errors: &mut Vec<Error>,
+        shown_errors: &mut Vec<E>,
+        baseline_errors: &mut Vec<E>,
         checked_paths: &HashSet<String>,
         scope: StaleRowScope,
     ) -> BaselinePruningResult {
@@ -1356,7 +1369,7 @@ mod tests {
             BaselineMatchingMode::ColumnOrdered,
         )
         .unwrap();
-        let result = processor.process_errors(
+        let result = processor.process_errors::<Error>(
             &mut Vec::new(),
             &mut Vec::new(),
             &HashSet::from([checked]),

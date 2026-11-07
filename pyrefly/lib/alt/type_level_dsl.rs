@@ -15,6 +15,7 @@ use pyrefly_types::dimension::is_optional_int;
 use pyrefly_types::dimension::is_optional_int_bound_type_var;
 use pyrefly_types::function::FuncDefId;
 use pyrefly_types::function::FunctionKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::shaped_array::is_int_tuples_type;
 use pyrefly_types::type_level_dsl::ParsedTypeShapeDslFunction;
@@ -960,35 +961,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// reexports work while unrelated same-spelling functions do not.
     fn resolve_type_shape_dsl_intrinsic(&self, expr: &Expr) -> Option<TypeShapeDslIntrinsic> {
         let callee = self.expr_infer(expr, &self.error_swallower());
-        if let Type::ClassDef(class) = &callee
-            && class.qname().module_name().as_str() == "shape_extensions.dsl"
-            && class.qname().id().as_str() == "IntTuple"
-        {
-            return Some(TypeShapeDslIntrinsic::IntTuple);
-        }
-        if let Type::ClassDef(class) = &callee
-            && class.qname().module_name().as_str() == "shape_extensions.dsl"
-            && class.qname().id().as_str() == "IntTuples"
-        {
-            return Some(TypeShapeDslIntrinsic::IntTuples);
-        }
-        if let Type::ClassDef(class) = &callee
-            && class.qname().module_name().as_str() == "builtins"
-            && class.qname().id().as_str() == "range"
-        {
-            return Some(TypeShapeDslIntrinsic::Range);
-        }
-        if let Type::ClassDef(class) = &callee
-            && class.qname().module_name().as_str() == "builtins"
-            && class.qname().id().as_str() == "tuple"
-        {
-            return Some(TypeShapeDslIntrinsic::Tuple);
-        }
-        if let Type::ClassDef(class) = &callee
-            && class.qname().module_name().as_str() == "builtins"
-            && class.qname().id().as_str() == "zip"
-        {
-            return Some(TypeShapeDslIntrinsic::Zip);
+        if let Type::ClassDef(class) = &callee {
+            match class.known() {
+                Some(KnownClass::ShapeExtensionsDslIntTuple) => {
+                    return Some(TypeShapeDslIntrinsic::IntTuple);
+                }
+                Some(KnownClass::ShapeExtensionsDslIntTuples) => {
+                    return Some(TypeShapeDslIntrinsic::IntTuples);
+                }
+                Some(KnownClass::Range) => return Some(TypeShapeDslIntrinsic::Range),
+                Some(KnownClass::Tuple) => return Some(TypeShapeDslIntrinsic::Tuple),
+                Some(KnownClass::Zip) => return Some(TypeShapeDslIntrinsic::Zip),
+                _ => {}
+            }
         }
         let Some(CalleeKind::Function(function_kind)) = callee.callee_kind() else {
             return None;
@@ -1056,11 +1041,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if id.qname.id().as_str() != "gradual" {
             return None;
         }
-        if class.has_toplevel_qname("shape_extensions.dsl", "Int") {
+        if class.is(KnownClass::ShapeExtensionsDslInt) {
             Some(TypeShapeDslIntrinsic::Gradual(TypeShapeDslDomain::Int))
-        } else if class.has_toplevel_qname("shape_extensions.dsl", "IntTuple") {
+        } else if class.is(KnownClass::ShapeExtensionsDslIntTuple) {
             Some(TypeShapeDslIntrinsic::Gradual(TypeShapeDslDomain::IntTuple))
-        } else if class.has_toplevel_qname("shape_extensions.dsl", "IntTuples") {
+        } else if class.is(KnownClass::ShapeExtensionsDslIntTuples) {
             Some(TypeShapeDslIntrinsic::Gradual(
                 TypeShapeDslDomain::IntTuples,
             ))
@@ -1429,7 +1414,7 @@ fn type_shape_dsl_input_domain(ty: &Type) -> Option<TypeShapeDslInputDomain> {
     }
     if matches!(
         ty,
-        Type::ClassType(cls) if cls.has_qname("shape_extensions", "NamedInts")
+        Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsNamedInts)
     ) || matches!(
         ty,
         Type::Quantified(q) if q.restriction.is_named_ints()

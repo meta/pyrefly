@@ -29,11 +29,13 @@ use pyrefly_python::module_path::ModulePath;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::lined_buffer::LineNumber;
 use pyrefly_util::visit::Visit;
+use rayon::prelude::*;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::visitor::walk_expr;
 use ruff_text_size::Ranged;
+use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 
@@ -43,9 +45,14 @@ use crate::error::baseline::BaselineProcessor;
 use crate::error::baseline::StaleRowScope;
 use crate::error::baseline::TrackedBaselineProcessor;
 use crate::error::baseline::normalize_baseline_path;
+use crate::error::collector::BorrowedCollectedErrors;
+use crate::error::collector::CollectedDiagnostic;
 use crate::error::collector::CollectedErrors;
+use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
 use crate::error::error::BaselineStatus;
 use crate::error::error::Error;
+use crate::error::error::ReportedError;
 use crate::error::expectation::Expectation;
 use crate::error::legacy::BaselineErrors;
 use crate::error::style::ErrorStyle;
@@ -274,11 +281,25 @@ impl ModuleRanges {
     }
 }
 
+/// A module's load, its parse, binding and solve diagnostics, its ranges, and its config.
+type LoadErrors = (
+    Arc<Load>,
+    Option<ModuleDiagnostics>,
+    Option<ModuleDiagnostics>,
+    Option<ModuleDiagnostics>,
+    Option<Arc<ModuleRanges>>,
+    ArcId<ConfigFile>,
+);
+
+/// Below this many modules, `Errors` collates on the calling thread, where the work is
+/// too small to pay for moving it to a thread pool.
+const PARALLEL_COLLATION_MIN_MODULES: usize = 64;
+
 /// The errors from a collection of modules.
 #[derive(Debug)]
 pub struct Errors {
-    // Sorted by module name and path (so deterministic display order)
-    loads: Vec<(Arc<Load>, Option<Arc<ModuleRanges>>, ArcId<ConfigFile>)>,
+    // Sorted by module path so concatenating per-module diagnostics is deterministic.
+    loads: Vec<LoadErrors>,
 }
 
 /// Outcome of applying a baseline file.
@@ -339,17 +360,18 @@ impl BaselineApplyResult {
 }
 
 impl Errors {
-    pub fn new(mut loads: Vec<(Arc<Load>, Option<Arc<ModuleRanges>>, ArcId<ConfigFile>)>) -> Self {
-        loads.sort_by_key(|x| (x.0.module_info.name(), x.0.module_info.path().dupe()));
+    pub fn new(mut loads: Vec<LoadErrors>) -> Self {
+        loads.sort_by_key(|x| x.0.module_info.path().dupe());
         Self { loads }
     }
 
-    pub(crate) fn merge_display_errors(
-        mut ordinary: Vec<Error>,
-        directives: Vec<Error>,
-    ) -> Vec<Error> {
+    pub(crate) fn merge_display_errors<E: ReportedError>(
+        mut ordinary: Vec<E>,
+        directives: Vec<E>,
+    ) -> Vec<E> {
         ordinary.extend(directives);
         ordinary.sort_by_cached_key(|e| {
+            let e = e.error();
             (
                 e.module().name(),
                 e.path().dupe(),
@@ -360,34 +382,103 @@ impl Errors {
         ordinary
     }
 
-    pub fn collect_errors(&self) -> CollectedErrors {
-        let mut errors = CollectedErrors::default();
-        for (load, module_ranges, config) in &self.loads {
-            if load.errors.style() == ErrorStyle::Never {
-                continue;
-            }
-            let error_config = config.get_error_config(load.module_info.path());
-            let ranges = module_ranges
-                .as_ref()
-                .expect("module_ranges must be present when error style is not Never");
-            load.errors.collect_into(
-                &error_config,
-                &ranges.multi_line,
-                &ranges.ignore_all,
-                &ranges.misplaced_ignore_all,
-                &mut errors,
-            );
+    /// Apply `f` to each module, in `loads` order. Every diagnostic is stored on the
+    /// module that contains its primary location, so each module's diagnostics are
+    /// collated on their own, and the results never need deduplicating across modules.
+    /// That lets large collections run in parallel, on the ambient rayon thread pool
+    /// rather than on the state's pool, which a concurrent recheck may be occupying.
+    fn map_modules<'a, R: Send>(&'a self, f: impl Fn(&'a LoadErrors) -> R + Sync + Send) -> Vec<R> {
+        if self.loads.len() < PARALLEL_COLLATION_MIN_MODULES {
+            self.loads.iter().map(f).collect()
+        } else {
+            self.loads.par_iter().map(f).collect()
         }
-        errors
+    }
+
+    pub fn collect_errors(&self) -> CollectedErrors {
+        // Copy each module's diagnostics on the thread that collated them.
+        let modules = self.map_modules(|module| {
+            let mut owned = CollectedErrors::default();
+            Self::collect_module_error_refs(module)?.into_owned(&mut owned);
+            Some(owned)
+        });
+        CollectedErrors::concat(modules.into_iter().flatten().collect())
+    }
+
+    /// Collate every module's diagnostics, borrowing them, along with the unused-suppression
+    /// diagnostics, which each module works out from its own diagnostics as it collates them.
+    pub(crate) fn collect_error_refs_with_unused_ignores(
+        &self,
+    ) -> (BorrowedCollectedErrors<'_>, Vec<Error>) {
+        let (errors, unused): (Vec<_>, Vec<_>) = self
+            .map_modules(|module| {
+                let (load, _, _, _, module_ranges, config) = module;
+                let module_errors = Self::collect_module_error_refs(module).unwrap_or_default();
+                let path = load.module_info.path();
+                let module_unused = Self::collect_unused_ignore_errors_for_module(
+                    &load.module_info,
+                    module_ranges.as_deref(),
+                    config.enabled_ignores(path).as_ref(),
+                    config.type_ignore_unknown_tag_behavior(path),
+                    module_errors
+                        .suppressed
+                        .iter()
+                        .chain(&module_errors.ordinary)
+                        .chain(&module_errors.hints)
+                        .map(CollectedDiagnostic::error),
+                );
+                (module_errors, module_unused)
+            })
+            .into_iter()
+            .unzip();
+        (
+            BorrowedCollectedErrors::concat(errors),
+            unused.into_iter().flatten().collect(),
+        )
+    }
+
+    /// Collate one module's diagnostics, or `None` if the module does not report any.
+    /// Each category of the result is sorted by range.
+    fn collect_module_error_refs(
+        (load, parse_errors, binding_errors, solve_errors, module_ranges, config): &LoadErrors,
+    ) -> Option<BorrowedCollectedErrors<'_>> {
+        if load.error_style == ErrorStyle::Never {
+            return None;
+        }
+        let error_config = config.get_error_config(load.module_info.path());
+        let ranges = module_ranges
+            .as_ref()
+            .expect("module_ranges must be present when error style is not Never");
+        let parse_errors = parse_errors
+            .as_ref()
+            .expect("a module with module_ranges must have parse diagnostics");
+        // Collect in the order the phases run, so diagnostics at an equal range
+        // stay in phase order.
+        let snapshots: Vec<&ModuleDiagnostics> = [&load.load_errors, parse_errors]
+            .into_iter()
+            .chain(binding_errors)
+            .chain(solve_errors)
+            .collect();
+        let mut errors = BorrowedCollectedErrors::default();
+        ErrorCollector::collect_snapshots_into(
+            &load.module_info,
+            &snapshots,
+            &error_config,
+            &ranges.multi_line,
+            &ranges.ignore_all,
+            &mut errors,
+        );
+        Some(errors)
     }
 
     /// Apply baseline filtering to already-collected errors in place.
     /// `relative_to` resolves relative paths stored in the baseline file.
     /// A missing file is mapped to `NotFound` (benign), not `FailedToRead`,
     /// so there is no TOCTOU race between `exists()` and reading the file.
-    pub fn apply_baseline(
+    pub fn apply_baseline<E: ReportedError>(
         &self,
-        errors: &mut CollectedErrors,
+        ordinary: &mut Vec<E>,
+        baseline: &mut Vec<E>,
         baseline_path: Option<&Path>,
         relative_to: &Path,
         matching_mode: BaselineMatchingMode,
@@ -425,17 +516,12 @@ impl Errors {
             let checked_paths: HashSet<_> = self
                 .loads
                 .iter()
-                .filter(|(load, _, _)| load.errors.style() != ErrorStyle::Never)
-                .map(|(load, _, _)| {
+                .filter(|(load, _, _, _, _, _)| load.error_style != ErrorStyle::Never)
+                .map(|(load, _, _, _, _, _)| {
                     normalize_baseline_path(load.module_info.path().as_path(), relative_to)
                 })
                 .collect();
-            let result = processor.process_errors(
-                &mut errors.ordinary,
-                &mut errors.baseline,
-                &checked_paths,
-                scope,
-            );
+            let result = processor.process_errors(ordinary, baseline, &checked_paths, scope);
             BaselineApplyResult::Applied {
                 unused_entry_count: result.unused_entry_count,
                 retained: result.retained,
@@ -448,7 +534,7 @@ impl Errors {
                 Ok(p) => p,
                 Err(e) => return BaselineApplyResult::FailedToRead(e),
             };
-            processor.process_errors(&mut errors.ordinary, &mut errors.baseline);
+            processor.process_errors(ordinary, baseline);
             BaselineApplyResult::Applied {
                 unused_entry_count: 0,
                 retained: BaselineErrors::default(),
@@ -463,31 +549,49 @@ impl Errors {
     /// Paths recorded in a baseline resolve relative to its config's source root, falling
     /// back to the baseline file's own directory.
     pub fn collect_lsp_errors_with_baselines(&self) -> (Vec<Error>, Vec<Error>) {
-        let mut collected = self.collect_errors();
-        let unused = self.collect_unused_ignore_errors_for_display(&collected);
-        collected.ordinary.extend(unused.ordinary);
-        collected.ordinary.extend(unused.hints);
-        collected.ordinary.append(&mut collected.hints);
-        let config_by_path: SmallMap<&ModulePath, &ArcId<ConfigFile>> = self
-            .loads
-            .iter()
-            .map(|(load, _, config)| (load.module_info.path(), config))
-            .collect();
-        let mut errors = collected;
-        let mut ordinary = Vec::new();
+        let mut unused = Vec::new();
+        let (normal, baselined) = self.collect_lsp_error_refs_with_baselines(&mut unused);
+        let owned = |errors: Vec<CollectedDiagnostic<'_>>| {
+            errors
+                .into_iter()
+                .map(CollectedDiagnostic::into_error)
+                .collect()
+        };
+        (owned(normal), owned(baselined))
+    }
+
+    /// Like `collect_lsp_errors_with_baselines`, but borrowing every diagnostic. The
+    /// unused-suppression diagnostics, which collection creates rather than finds, are
+    /// stored in `unused`.
+    pub(crate) fn collect_lsp_error_refs_with_baselines<'a>(
+        &'a self,
+        unused: &'a mut Vec<Error>,
+    ) -> (Vec<CollectedDiagnostic<'a>>, Vec<CollectedDiagnostic<'a>>) {
+        let (collected, unused_ignores) = self.collect_error_refs_with_unused_ignores();
+        *unused = unused_ignores;
+        let unused: &'a [Error] = unused;
+        let config_by_path = self.config_by_path();
+        let mut normal = collected.directives;
+        let mut baselined = Vec::new();
 
         // Group by config before matching, so that each baseline is parsed once and sees
         // every diagnostic it governs in a single call.
-        let mut by_config: SmallMap<ArcId<ConfigFile>, (&Path, Vec<Error>)> = SmallMap::new();
-        for error in errors.ordinary.drain(..) {
-            match config_by_path.get(&error.path()) {
+        let mut by_config: SmallMap<ArcId<ConfigFile>, (&Path, Vec<CollectedDiagnostic>)> =
+            SmallMap::new();
+        for error in collected
+            .ordinary
+            .into_iter()
+            .chain(collected.hints)
+            .chain(self.shown_unused_ignore_errors(unused))
+        {
+            match config_by_path.get(&error.error().path()) {
                 Some(config) if let Some(baseline) = &config.baseline => by_config
                     .entry((*config).dupe())
                     .or_insert_with(|| (baseline, Vec::new()))
                     .1
                     .push(error),
                 // The module has no config, or its config has no baseline.
-                _ => ordinary.push(error),
+                _ => normal.push(error),
             }
         }
 
@@ -504,15 +608,79 @@ impl Errors {
             // An unreadable or invalid baseline suppresses nothing; the language server
             // surfaces every diagnostic rather than failing the request.
             if let Some(processor) = processor {
-                processor.process_errors(&mut group, &mut errors.baseline);
+                processor.process_errors(&mut group, &mut baselined);
             }
-            ordinary.extend(group);
+            normal.extend(group);
         }
 
         (
-            Self::merge_display_errors(ordinary, errors.directives),
-            Self::merge_display_errors(errors.baseline, Vec::new()),
+            Self::merge_display_errors(normal, Vec::new()),
+            Self::merge_display_errors(baselined, Vec::new()),
         )
+    }
+
+    fn config_by_path(&self) -> SmallMap<&ModulePath, &ArcId<ConfigFile>> {
+        self.loads
+            .iter()
+            .map(|(load, _, _, _, _, config)| (load.module_info.path(), config))
+            .collect()
+    }
+
+    /// The diagnostics in `unused` that their module's config shows, at the severity it
+    /// gives them.
+    pub(crate) fn shown_unused_ignore_errors<'a>(
+        &self,
+        unused: &'a [Error],
+    ) -> Vec<CollectedDiagnostic<'a>> {
+        if unused.is_empty() {
+            return Vec::new();
+        }
+        let config_by_path = self.config_by_path();
+        let self_suppressed = self.self_suppressed_unused_ignore_ranges();
+        unused
+            .iter()
+            .filter_map(|error| {
+                if error.error_kind() == ErrorKind::UnusedIgnore
+                    && self_suppressed.contains(&(error.path(), error.range()))
+                {
+                    return None;
+                }
+                let config = config_by_path.get(&error.path())?;
+                let severity = config
+                    .get_error_config(error.path())
+                    .display_config
+                    .severity(error.error_kind());
+                (severity != Severity::Ignore).then(|| CollectedDiagnostic::new(error, severity))
+            })
+            .collect()
+    }
+
+    /// The exact comment ranges that suppress their own unused-ignore diagnostics.
+    fn self_suppressed_unused_ignore_ranges(&self) -> SmallSet<(&ModulePath, TextRange)> {
+        // Match exact comment ranges so one directive cannot hide another directive's diagnostic.
+        self.loads
+            .iter()
+            .flat_map(|(load, ..)| {
+                let module = &load.module_info;
+                module
+                    .ignore()
+                    .iter()
+                    .flat_map(|(_, suppressions)| suppressions)
+                    .filter(|supp| {
+                        supp.tool() == Tool::Pyrefly
+                            && supp
+                                .error_codes()
+                                .iter()
+                                .any(|code| code == ErrorKind::UnusedIgnore.to_name())
+                    })
+                    .map(|supp| {
+                        (
+                            module.path(),
+                            supp.removal_edit(module.lined_buffer(), None).range,
+                        )
+                    })
+            })
+            .collect()
     }
 
     pub fn collect_display_errors(&self) -> Vec<Error> {
@@ -530,7 +698,7 @@ impl Errors {
 
     pub fn collect_ignores(&self) -> SmallMap<&ModulePath, &Ignore> {
         let mut ignore_collection: SmallMap<&ModulePath, &Ignore> = SmallMap::new();
-        for (load, _, _) in &self.loads {
+        for (load, _, _, _, _, _) in &self.loads {
             let module_path = load.module_info.path();
             let ignores = load.module_info.ignore();
             ignore_collection.insert(module_path, ignores);
@@ -543,79 +711,69 @@ impl Errors {
     /// suppression comment that doesn't suppress any actual error.
     /// Accepts pre-collected errors to avoid redundant error collection.
     pub fn collect_unused_ignore_errors(&self, collected: &CollectedErrors) -> Vec<Error> {
-        let mut unused_errors = Vec::new();
+        self.collect_unused_ignore_errors_from(
+            collected
+                .suppressed
+                .iter()
+                .chain(&collected.ordinary)
+                .chain(&collected.hints),
+        )
+    }
 
-        // Build a map of which error codes were suppressed on each line, keyed by module path.
-        // Key: module_path, Value: map from line number to set of suppressed error codes
-        let mut suppressed_codes_by_module: SmallMap<
-            &ModulePath,
-            SmallMap<LineNumber, SmallSet<String>>,
-        > = SmallMap::new();
+    fn collect_unused_ignore_errors_from<'a>(
+        &self,
+        affected: impl Iterator<Item = &'a Error>,
+    ) -> Vec<Error> {
+        let mut affected_by_suppression_by_module: SmallMap<&ModulePath, Vec<&Error>> =
+            SmallMap::new();
+        for error in affected {
+            affected_by_suppression_by_module
+                .entry(error.path())
+                .or_default()
+                .push(error);
+        }
+        self.map_modules(|(load, _, _, _, module_ranges, config)| {
+            let path = load.module_info.path();
+            let affected = affected_by_suppression_by_module
+                .get(path)
+                .into_iter()
+                .flat_map(|errors| errors.iter().copied());
+            Self::collect_unused_ignore_errors_for_module(
+                &load.module_info,
+                module_ranges.as_deref(),
+                config.enabled_ignores(path).as_ref(),
+                config.type_ignore_unknown_tag_behavior(path),
+                affected,
+            )
+        })
+        .into_iter()
+        .flatten()
+        .collect()
+    }
 
-        // Build per-module lookup maps for f-string ranges and enabled ignores.
-        // Skip modules that never computed errors — they have no suppressed
-        // errors and no module_ranges.
-        let fstring_ranges_by_module: SmallMap<&ModulePath, &[(LineNumber, LineNumber)]> = self
-            .loads
-            .iter()
-            .filter(|(load, _, _)| load.errors.style() != ErrorStyle::Never)
-            .map(|(load, module_ranges, _)| {
-                (
-                    load.module_info.path(),
-                    module_ranges
-                        .as_ref()
-                        .expect("module_ranges must be present when error style is not Never")
-                        .multi_line
-                        .as_slice(),
-                )
-            })
-            .collect();
-
-        let enabled_ignores_by_module: SmallMap<&ModulePath, SmallSet<Tool>> = self
-            .loads
-            .iter()
-            .map(|(load, _, config)| {
-                let path = load.module_info.path();
-                (path, config.enabled_ignores(path).into_owned())
-            })
-            .collect();
-
-        let type_ignore_unknown_tag_behavior_by_module: SmallMap<
-            &ModulePath,
-            TypeIgnoreUnknownTagBehavior,
-        > = self
-            .loads
-            .iter()
-            .map(|(load, _, config)| {
-                let path = load.module_info.path();
-                (path, config.type_ignore_unknown_tag_behavior(path))
-            })
-            .collect();
-
-        for error in collected
-            .suppressed
-            .iter()
-            .chain(&collected.ordinary)
-            .chain(&collected.hints)
-        {
-            let module_path = error.path();
-            let enabled_ignores = enabled_ignores_by_module
-                .get(&module_path)
-                .cloned()
-                .unwrap_or_else(Tool::default_enabled);
-            let type_ignore_unknown_tag_behavior = type_ignore_unknown_tag_behavior_by_module
-                .get(&module_path)
-                .copied()
-                .unwrap_or_default();
+    /// Collects errors for the unused ignore comments of one module, given the module's
+    /// diagnostics that a suppression affects.
+    pub(crate) fn collect_unused_ignore_errors_for_module<'a>(
+        module: &Module,
+        ranges: Option<&ModuleRanges>,
+        enabled_ignores: &SmallSet<Tool>,
+        type_ignore_unknown_tag_behavior: TypeIgnoreUnknownTagBehavior,
+        affected: impl Iterator<Item = &'a Error>,
+    ) -> Vec<Error> {
+        let multi_line = ranges.map_or(&[][..], |ranges| ranges.multi_line.as_slice());
+        // Map from line number to the set of error codes suppressed on it.
+        let mut suppressed_codes: SmallMap<LineNumber, SmallSet<String>> = SmallMap::new();
+        for error in affected {
+            assert_eq!(
+                error.path(),
+                module.path(),
+                "a module can only classify its own suppressed diagnostics"
+            );
             let start_line = error.display_range().start.line_within_file();
             let end_line = error.display_range().end.line_within_file();
-
-            let containing_range = fstring_ranges_by_module
-                .get(&module_path)
-                .and_then(|ranges| find_containing_range(ranges, start_line));
-
+            let containing_range = find_containing_range(multi_line, start_line);
             let is_affected = error
-                .suppression_effect(&enabled_ignores, type_ignore_unknown_tag_behavior)
+                .suppression_effect(enabled_ignores, type_ignore_unknown_tag_behavior)
                 != SuppressionEffect::None
                 || containing_range.is_some_and(|(fs_start, fs_end)| {
                     let ignore = error.module().ignore();
@@ -624,22 +782,19 @@ impl Errors {
                             && ignore.suppression_effect(
                                 fs_start,
                                 kind,
-                                &enabled_ignores,
+                                enabled_ignores,
                                 type_ignore_unknown_tag_behavior,
                             ) != SuppressionEffect::None)
                             || (fs_end != start_line
                                 && ignore.suppression_effect(
                                     fs_end,
                                     kind,
-                                    &enabled_ignores,
+                                    enabled_ignores,
                                     type_ignore_unknown_tag_behavior,
                                 ) != SuppressionEffect::None)
                     })
                 });
-
             if is_affected {
-                let module_codes = suppressed_codes_by_module.entry(module_path).or_default();
-
                 // Track both this kind's name and any parent kind's name, so that
                 // e.g. `# pyrefly: ignore[bad-override]` is not reported as unused
                 // when it suppresses a `bad-override-mutable-attribute` error.
@@ -651,7 +806,7 @@ impl Errors {
 
                 // Track the error codes for all lines the error spans.
                 for line_idx in start_line.to_zero_indexed()..=end_line.to_zero_indexed() {
-                    let line_codes = module_codes
+                    let line_codes = suppressed_codes
                         .entry(LineNumber::from_zero_indexed(line_idx))
                         .or_default();
                     for code in &error_codes {
@@ -664,148 +819,137 @@ impl Errors {
                 // suppression comment placed there is recognized as "used".
                 if let Some((fs_start, fs_end)) = containing_range {
                     for code in &error_codes {
-                        module_codes
+                        suppressed_codes
                             .entry(fs_start)
                             .or_default()
                             .insert(code.clone());
-                        module_codes.entry(fs_end).or_default().insert(code.clone());
+                        suppressed_codes
+                            .entry(fs_end)
+                            .or_default()
+                            .insert(code.clone());
                     }
                 }
             }
         }
 
-        // Iterate over each module and check for unused ignores
-        for (load, ranges, config) in &self.loads {
-            let module = &load.module_info;
-            let module_path = module.path();
-            let ignore = module.ignore();
-            let enabled_ignores = config.enabled_ignores(module_path);
+        let mut unused_errors = Vec::new();
+        for (applies_to_line, suppressions) in module.ignore().iter() {
+            for supp in suppressions {
+                if ranges.is_some_and(|ranges| ranges.ignore_all.contains(supp)) {
+                    continue;
+                }
+                let tool = supp.tool();
+                // Only check tools that are enabled and that we support
+                // reporting unused ignores for (Pyrefly and Pyre).
+                if !enabled_ignores.contains(&tool) {
+                    continue;
+                }
+                match tool {
+                    Tool::Pyrefly | Tool::Pyre | Tool::Type => {}
+                    _ => continue,
+                }
 
-            // Get the suppressed codes for this module (if any)
-            let module_suppressed_codes = suppressed_codes_by_module.get(&module_path);
-
-            for (applies_to_line, suppressions) in ignore.iter() {
-                for supp in suppressions {
-                    if ranges
-                        .as_ref()
-                        .is_some_and(|ranges| ranges.ignore_all.contains(supp))
-                    {
-                        continue;
+                // Get the error codes actually suppressed on this line
+                let used_codes: SmallSet<String> = suppressed_codes
+                    .get(applies_to_line)
+                    .cloned()
+                    .unwrap_or_default();
+                // For Tool::Pyre, error code filtering is not enforced
+                // (any Pyre suppression suppresses all errors on the line),
+                // so we only report it as unused when no errors at all were
+                // suppressed on its line.
+                if tool == Tool::Pyre {
+                    if !used_codes.is_empty() {
+                        continue; // Pyre suppression is used
                     }
-                    let tool = supp.tool();
-                    // Only check tools that are enabled and that we support
-                    // reporting unused ignores for (Pyrefly and Pyre).
-                    if !enabled_ignores.contains(&tool) {
-                        continue;
-                    }
-                    match tool {
-                        Tool::Pyrefly | Tool::Pyre | Tool::Type => {}
-                        _ => continue,
-                    }
-
-                    // Get the error codes actually suppressed on this line
-                    let used_codes: SmallSet<String> = module_suppressed_codes
-                        .and_then(|m| m.get(applies_to_line))
-                        .cloned()
-                        .unwrap_or_default();
-                    // For Tool::Pyre, error code filtering is not enforced
-                    // (any Pyre suppression suppresses all errors on the line),
-                    // so we only report it as unused when no errors at all were
-                    // suppressed on its line.
-                    if tool == Tool::Pyre {
-                        if !used_codes.is_empty() {
-                            continue; // Pyre suppression is used
-                        }
-                        let edit = supp.removal_edit(module.lined_buffer(), None);
-                        unused_errors.push(
-                            Error::new(
-                                module.dupe(),
-                                edit.range,
-                                "Unused pyre-fixme comment".to_owned(),
-                                Vec::new(),
-                                ErrorKind::UnusedIgnore,
-                            )
-                            .with_quick_fix(edit.into()),
-                        );
-                        continue;
-                    }
-
-                    // For `# type: ignore`, line-wide bookkeeping considers it unused
-                    // only if no suppression effect applies to any diagnostic on this line.
-                    if tool == Tool::Type {
-                        if !used_codes.is_empty() {
-                            continue; // type: ignore is used
-                        }
-                        let edit = supp.removal_edit(module.lined_buffer(), None);
-                        unused_errors.push(
-                            Error::new(
-                                module.dupe(),
-                                edit.range,
-                                "Unused `# type: ignore` comment".to_owned(),
-                                Vec::new(),
-                                ErrorKind::UnusedTypeIgnore,
-                            )
-                            .with_quick_fix(edit.into()),
-                        );
-                        continue;
-                    }
-
-                    // Tool::Pyrefly: check individual error codes
-                    let declared_codes: SmallSet<String> =
-                        supp.error_codes().iter().cloned().collect();
-
-                    // Determine if the suppression is unused
-                    let unused_codes: SmallSet<String> = if declared_codes.is_empty() {
-                        // Blanket ignore - unused if no errors were suppressed
-                        if used_codes.is_empty() {
-                            SmallSet::new() // Mark as unused (empty set signals blanket unused)
-                        } else {
-                            continue; // Used, skip
-                        }
-                    } else {
-                        // Specific codes - find which are unused
-                        let unused: SmallSet<String> = declared_codes
-                            .iter()
-                            .filter(|code| !used_codes.contains(*code))
-                            .cloned()
-                            .collect();
-                        if unused.is_empty() {
-                            continue; // All codes used, skip
-                        }
-                        unused
-                    };
-
-                    let msg = if declared_codes.is_empty() {
-                        "Unused `# pyrefly: ignore` comment".to_owned()
-                    } else if unused_codes.len() == declared_codes.len() {
-                        format!(
-                            "Unused `# pyrefly: ignore` comment for code(s): {}",
-                            unused_codes.iter().cloned().collect::<Vec<_>>().join(", ")
-                        )
-                    } else {
-                        format!(
-                            "Unused error code(s) in `# pyrefly: ignore`: {}",
-                            unused_codes.iter().cloned().collect::<Vec<_>>().join(", ")
-                        )
-                    };
-
-                    let partially_unused =
-                        !declared_codes.is_empty() && unused_codes.len() != declared_codes.len();
-                    let edit = supp.removal_edit(
-                        module.lined_buffer(),
-                        partially_unused.then_some(&unused_codes),
-                    );
+                    let edit = supp.removal_edit(module.lined_buffer(), None);
                     unused_errors.push(
                         Error::new(
                             module.dupe(),
                             edit.range,
-                            msg,
+                            "Unused pyre-fixme comment".to_owned(),
                             Vec::new(),
                             ErrorKind::UnusedIgnore,
                         )
                         .with_quick_fix(edit.into()),
                     );
+                    continue;
                 }
+
+                // For `# type: ignore`, line-wide bookkeeping considers it unused
+                // only if no suppression effect applies to any diagnostic on this line.
+                if tool == Tool::Type {
+                    if !used_codes.is_empty() {
+                        continue; // type: ignore is used
+                    }
+                    let edit = supp.removal_edit(module.lined_buffer(), None);
+                    unused_errors.push(
+                        Error::new(
+                            module.dupe(),
+                            edit.range,
+                            "Unused `# type: ignore` comment".to_owned(),
+                            Vec::new(),
+                            ErrorKind::UnusedTypeIgnore,
+                        )
+                        .with_quick_fix(edit.into()),
+                    );
+                    continue;
+                }
+
+                // Tool::Pyrefly: check individual error codes
+                let declared_codes: SmallSet<String> = supp.error_codes().iter().cloned().collect();
+
+                // Determine if the suppression is unused
+                let unused_codes: SmallSet<String> = if declared_codes.is_empty() {
+                    // Blanket ignore - unused if no errors were suppressed
+                    if used_codes.is_empty() {
+                        SmallSet::new() // Mark as unused (empty set signals blanket unused)
+                    } else {
+                        continue; // Used, skip
+                    }
+                } else {
+                    // Specific codes - find which are unused
+                    let unused: SmallSet<String> = declared_codes
+                        .iter()
+                        .filter(|code| !used_codes.contains(*code))
+                        .cloned()
+                        .collect();
+                    if unused.is_empty() {
+                        continue; // All codes used, skip
+                    }
+                    unused
+                };
+
+                let msg = if declared_codes.is_empty() {
+                    "Unused `# pyrefly: ignore` comment".to_owned()
+                } else if unused_codes.len() == declared_codes.len() {
+                    format!(
+                        "Unused `# pyrefly: ignore` comment for code(s): {}",
+                        unused_codes.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                } else {
+                    format!(
+                        "Unused error code(s) in `# pyrefly: ignore`: {}",
+                        unused_codes.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                };
+
+                let partially_unused =
+                    !declared_codes.is_empty() && unused_codes.len() != declared_codes.len();
+                let edit = supp.removal_edit(
+                    module.lined_buffer(),
+                    partially_unused.then_some(&unused_codes),
+                );
+                unused_errors.push(
+                    Error::new(
+                        module.dupe(),
+                        edit.range,
+                        msg,
+                        Vec::new(),
+                        ErrorKind::UnusedIgnore,
+                    )
+                    .with_quick_fix(edit.into()),
+                );
             }
         }
 
@@ -821,16 +965,19 @@ impl Errors {
         collected: &CollectedErrors,
     ) -> CollectedErrors {
         let unused_errors = self.collect_unused_ignore_errors(collected);
+        if unused_errors.is_empty() {
+            return CollectedErrors::default();
+        }
         let mut result = CollectedErrors::default();
-
-        // Build a path-to-config map for O(1) lookup instead of O(loads) per error.
-        let config_by_path: SmallMap<&ModulePath, &ArcId<ConfigFile>> = self
-            .loads
-            .iter()
-            .map(|(load, _, config)| (load.module_info.path(), config))
-            .collect();
+        let config_by_path = self.config_by_path();
+        let self_suppressed = self.self_suppressed_unused_ignore_ranges();
 
         for error in unused_errors {
+            if error.error_kind() == ErrorKind::UnusedIgnore
+                && self_suppressed.contains(&(error.path(), error.range()))
+            {
+                continue;
+            }
             if let Some(config) = config_by_path.get(&error.path()) {
                 let error_config = config.get_error_config(error.path());
                 let severity = error_config.display_config.severity(error.error_kind());
@@ -849,25 +996,15 @@ impl Errors {
     }
 
     pub fn check_against_expectations(&self) -> anyhow::Result<()> {
-        for (load, module_ranges, config) in &self.loads {
-            if load.errors.style() == ErrorStyle::Never {
+        for module in &self.loads {
+            let Some(errors) = Self::collect_module_error_refs(module) else {
                 continue;
-            }
-            let error_config = config.get_error_config(load.module_info.path());
-            let ranges = module_ranges
-                .as_ref()
-                .expect("module_ranges must be present when error style is not Never");
+            };
             let mut result = CollectedErrors::default();
-            load.errors.collect_into(
-                &error_config,
-                &ranges.multi_line,
-                &ranges.ignore_all,
-                &ranges.misplaced_ignore_all,
-                &mut result,
-            );
+            errors.into_owned(&mut result);
+            let module_info = &module.0.module_info;
             let output_errors = Self::merge_display_errors(result.ordinary, result.directives);
-            Expectation::parse(load.module_info.dupe(), load.module_info.contents())
-                .check(&output_errors)?;
+            Expectation::parse(module_info.dupe(), module_info.contents()).check(&output_errors)?;
         }
         Ok(())
     }
@@ -900,27 +1037,38 @@ mod tests {
     use crate::config::config::ConfigFile;
     use crate::config::finder::ConfigFinder;
     use crate::error::error::ErrorRenderer;
+    use crate::error::suppress::SerializedError;
+    use crate::error::suppress::UnusedIgnoreKind;
+    use crate::error::suppress::remove_unused_ignores_from_serialized;
     use crate::state::errors::Errors;
+    use crate::state::errors::PARALLEL_COLLATION_MIN_MODULES;
     use crate::state::load::FileContents;
     use crate::state::require::Require;
     use crate::state::state::State;
+    use crate::test::util::TestEnv;
 
     impl Errors {
         pub fn check_var_leak(&self) -> anyhow::Result<()> {
-            let regex = Regex::new(r"@\d+").unwrap();
-            for (load, _, config) in &self.loads {
-                let error_config = config.get_error_config(load.module_info.path());
-                let errors = load.errors.collect(&error_config).ordinary;
-                for error in errors {
-                    let msg = error.msg();
-                    if regex.is_match(&msg) {
-                        return Err(anyhow::anyhow!(
-                            "{}:{}: variable ids leaked into error message: {}",
-                            error.path(),
-                            error.display_range(),
-                            msg,
-                        ));
-                    }
+            // Match variable ids such as `@12`, but not source locations such as
+            // `@128:7-21` that qualified names in messages can carry.
+            let regex = Regex::new(r"@\d+(?:$|[^0-9:])").unwrap();
+            let errors = self.collect_errors();
+            for error in errors
+                .ordinary
+                .iter()
+                .chain(&errors.hints)
+                .chain(&errors.directives)
+                .chain(&errors.suppressed)
+                .chain(&errors.disabled)
+            {
+                let msg = error.msg();
+                if regex.is_match(&msg) {
+                    return Err(anyhow::anyhow!(
+                        "{}:{}: variable ids leaked into error message: {}",
+                        error.path(),
+                        error.display_range(),
+                        msg,
+                    ));
                 }
             }
             Ok(())
@@ -932,10 +1080,18 @@ mod tests {
     }
 
     fn get_errors(contents: &str) -> (Errors, TempDir) {
+        get_errors_with_config(contents, |_| {})
+    }
+
+    fn get_errors_with_config(
+        contents: &str,
+        configure: impl FnOnce(&mut ConfigFile),
+    ) -> (Errors, TempDir) {
         let tdir = tempfile::tempdir().unwrap();
 
         let mut config = ConfigFile::default();
         config.python_environment.set_empty_to_default();
+        configure(&mut config);
         let name = "test";
         fs_anyhow::write(&get_path(&tdir), contents).unwrap();
         config.configure();
@@ -1009,6 +1165,70 @@ def f() -> int:
     }
 
     #[test]
+    fn test_collect_errors_from_many_modules_in_path_order() {
+        let count = PARALLEL_COLLATION_MIN_MODULES + 6;
+        let names = (0..count).map(|i| format!("m{i:03}")).collect::<Vec<_>>();
+        let mut env = TestEnv::new();
+        for name in &names {
+            env.add(name, "x: int = ''\ny: int = 1  # pyrefly: ignore\n");
+        }
+        let (state, handle) = env.to_state();
+        let handles = names.iter().map(|name| handle(name)).collect::<Vec<_>>();
+        let transaction = state.transaction();
+        let errors = transaction.get_errors(&handles);
+        let collected = errors.collect_errors();
+        let modules = collected
+            .ordinary
+            .iter()
+            .map(|error| error.module().name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(modules, names, "each module's error, in path order");
+        assert!(
+            collected
+                .ordinary
+                .iter()
+                .all(|error| error.error_kind() == ErrorKind::BadAssignment)
+        );
+        let unused = errors.collect_unused_ignore_errors(&collected);
+        let modules = unused
+            .iter()
+            .map(|error| error.module().name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(modules, names, "each module's unused ignore, in path order");
+    }
+
+    #[test]
+    fn test_unused_ignores_are_isolated_by_module() {
+        let mut env = TestEnv::new();
+        env.add(
+            "used",
+            r#"
+def f() -> int:
+    # pyrefly: ignore [bad-return]
+    return "x"
+"#,
+        );
+        env.add(
+            "unused",
+            r#"
+def f() -> int:
+    # pyrefly: ignore [bad-return]
+    return 1
+"#,
+        );
+        let (state, handle) = env.to_state();
+        let handles = [handle("used"), handle("unused")];
+        let transaction = state.transaction();
+        let errors = transaction.get_errors(&handles);
+        let collected = errors.collect_errors();
+        let unused = errors.collect_unused_ignore_errors(&collected);
+
+        assert_eq!(unused.len(), 1);
+        assert_eq!(unused[0].module().name(), ModuleName::from_str("unused"));
+        assert!(unused[0].msg().contains("bad-return"));
+    }
+
+    #[test]
     fn test_unused_specific_code_ignore() {
         // An ignore comment with a specific code that doesn't match any error
         let contents = r#"
@@ -1021,6 +1241,97 @@ def f() -> int:
         let unused = errors.collect_unused_ignore_errors(&collected);
         assert_eq!(unused.len(), 1);
         assert!(unused[0].msg().contains("bad-override"));
+    }
+
+    #[test]
+    fn test_unused_ignore_self_suppression_for_display() {
+        for (contents, raw_count, visible_count, type_error_count) in [
+            ("# pyrefly: ignore[unused-ignore]\nx = 1\n", 1, 0, 0),
+            ("x = 1  # pyrefly: ignore[unused-ignore]\n", 1, 0, 0),
+            (
+                "# pyrefly: ignore[bad-assignment, unused-ignore]\nx = 1\n",
+                1,
+                0,
+                0,
+            ),
+            (
+                "# pyrefly: ignore[bad-assignment, unused-ignore]\nx: int = \"\"\n",
+                1,
+                0,
+                0,
+            ),
+            ("x: int = \"\"  # pyrefly: ignore[unused-ignore]\n", 1, 0, 1),
+            ("# pyrefly: ignore[bad-assignment]\nx = 1\n", 1, 1, 0),
+            ("# pyrefly: ignore\nx = 1\n", 1, 1, 0),
+            (
+                "# pyrefly: ignore[unused-ignore]\n# pyrefly: ignore[bad-assignment]\nx = 1\n",
+                2,
+                1,
+                0,
+            ),
+            (
+                "x = 1  # pyrefly: ignore[unused-ignore]  # pyrefly: ignore[bad-assignment]\n",
+                2,
+                1,
+                0,
+            ),
+        ] {
+            let (errors, _tdir) = get_errors_with_config(contents, |config| {
+                config
+                    .root
+                    .errors
+                    .get_or_insert_with(Default::default)
+                    .set_error_severity(ErrorKind::UnusedIgnore, Severity::Error);
+            });
+            let collected = errors.collect_errors();
+            assert_eq!(collected.ordinary.len(), type_error_count, "{contents}");
+            assert_eq!(
+                errors.collect_unused_ignore_errors(&collected).len(),
+                raw_count,
+                "{contents}",
+            );
+            let display = errors.collect_unused_ignore_errors_for_display(&collected);
+            assert_eq!(display.ordinary.len(), visible_count, "{contents}");
+            assert!(display.disabled.is_empty(), "{contents}");
+            assert!(display.hints.is_empty(), "{contents}");
+            assert_eq!(
+                errors.collect_lsp_errors_with_baselines().0.len(),
+                visible_count + type_error_count,
+                "{contents}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_unused_ignore_self_suppression_preserves_cleanup() {
+        for (contents, expected) in [
+            (
+                "x = 1  # pyrefly: ignore[bad-assignment, unused-ignore]\n",
+                "x = 1\n",
+            ),
+            (
+                "x: int = \"\"  # pyrefly: ignore[bad-assignment, unused-ignore]\n",
+                "x: int = \"\"  # pyrefly: ignore[bad-assignment]\n",
+            ),
+        ] {
+            let (errors, tdir) = get_errors(contents);
+            let collected = errors.collect_errors();
+            let unused = errors.collect_unused_ignore_errors(&collected);
+            assert_eq!(unused.len(), 1);
+            let serialized = unused
+                .iter()
+                .filter_map(SerializedError::from_error)
+                .collect();
+            assert_eq!(
+                remove_unused_ignores_from_serialized(serialized, UnusedIgnoreKind::Pyrefly)
+                    .unwrap(),
+                1,
+            );
+            assert_eq!(
+                fs_anyhow::read_to_string(&get_path(&tdir)).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -1185,6 +1496,35 @@ def f() -> int:
 
         let mut renderer = ErrorRenderer::plain(Vec::new());
         renderer.write(&unused[0], Path::new(""), true).unwrap();
+    }
+
+    #[test]
+    fn test_collect_errors_keeps_parse_errors_in_source_order() {
+        let contents = r#"
+1 +
+x: int = ""
+"#;
+        let (errors, _tdir) = get_errors(contents);
+        let kinds = errors
+            .collect_errors()
+            .ordinary
+            .iter()
+            .map(|error| error.error_kind())
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, vec![ErrorKind::ParseError, ErrorKind::BadAssignment]);
+    }
+
+    #[test]
+    fn test_collect_errors_puts_parse_errors_first_at_the_same_range() {
+        let (errors, _tdir) = get_errors("*e: int = (42,)\n");
+        let errors = errors.collect_errors().ordinary;
+        assert_eq!(errors.len(), 2);
+        assert_eq!(
+            errors[0].range(),
+            errors[1].range(),
+            "both diagnostics should report the starred target"
+        );
+        assert_eq!(errors[0].error_kind(), ErrorKind::ParseError);
     }
 
     #[test]

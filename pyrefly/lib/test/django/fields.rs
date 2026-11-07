@@ -6,6 +6,165 @@
  */
 
 use crate::django_testcase;
+use crate::test::django::util::django_env;
+use crate::testcase;
+
+django_testcase!(
+    test_union_field_instance_contract,
+    r#"
+from typing import Protocol, assert_type
+from django.db import models
+
+def flag() -> bool: ...
+
+class HasName(Protocol):
+    name: str
+
+class Record(models.Model):
+    name = models.CharField[str, str](max_length=20) if flag() else models.TextField[str, str]()
+    different = models.CharField[str, str](max_length=20) if flag() else models.IntegerField[int, int]()
+
+class ActiveBase(models.Model):
+    is_active: bool | models.BooleanField[bool, bool]
+
+class ActiveChild(ActiveBase):
+    is_active = models.BooleanField()
+
+def update(record: Record) -> None:
+    assert_type(record.name, str)
+    record.name = "hello"
+    record.name = object()  # E: not assignable to attribute `name`
+    assert_type(record.different, str | int)
+    record.different = "hello"  # E: not assignable to attribute `different`
+    record.different = 1  # E: not assignable to attribute `different`
+
+value: HasName = Record()
+"#,
+);
+
+django_testcase!(
+    bug = "Override checks use the getter instead of the inferred setter",
+    test_field_inferred_setter_override_contract,
+    r#"
+from django.db import models
+
+class WideSetter(models.Model):
+    name: models.CharField[str | int, str] = models.CharField(max_length=200)
+
+class Child(WideSetter):
+    name = models.CharField(max_length=100)  # E: inconsistent
+"#,
+);
+
+testcase!(
+    test_field_instance_contract_compatibility,
+    django_env().enable_missing_override_decorator_error(),
+    r#"
+from typing import Protocol
+from django.db import models
+
+class HasName(Protocol):
+    name: str
+
+class ReadOnlyName(Protocol):
+    @property
+    def name(self) -> str: ...
+
+class AnyName(Protocol):
+    name: object
+
+class Base(models.Model):
+    name = models.TextField()
+    class Meta:
+        abstract = True
+
+class Contact(Base):
+    name = models.CharField(max_length=200)
+
+def accept_name(value: HasName) -> None: ...
+def accept_read_only_name(value: ReadOnlyName) -> None: ...
+
+accept_name(Contact())
+accept_read_only_name(Contact())
+accept_name(Base())
+accept_any_name: AnyName = Contact()  # E: not assignable
+
+class WrongOverride(Base):
+    name = models.IntegerField()  # E: inconsistent
+
+class WrongName(models.Model):
+    name = models.IntegerField()
+
+accept_name(WrongName())  # E: not assignable
+
+class PlainBase(models.Model):
+    name: str
+
+class FieldChild(PlainBase):
+    name = models.CharField(max_length=200)
+
+class FieldBase(models.Model):
+    name: models.CharField[str, str] = models.CharField(max_length=200)
+
+class PlainChild(FieldBase):
+    name: str = "Alice"
+
+class WideSetter(models.Model):
+    name: models.CharField[str | int, str] = models.CharField(max_length=200)
+
+class NarrowSetter(WideSetter):
+    name: models.CharField[str, str] = models.CharField(max_length=200)  # E: inconsistent
+"#,
+);
+
+django_testcase!(
+    test_field_explicit_type_arguments,
+    r#"
+from typing import Any, Literal, assert_type
+from django.db import models
+from django.db.models.fields import _FieldDescriptor
+
+class Contact(models.Model):
+    name: models.CharField[str, str] = models.CharField(max_length=200)
+    code = models.CharField[str, str](max_length=20)
+    permissive: models.CharField[Any, str] = models.CharField(max_length=200)
+    literal = models.CharField[str, Literal["fixed"]](max_length=20)
+
+def update(contact: Contact) -> None:
+    contact.name = "Alice"
+    contact.name = 123  # E: not assignable
+    contact.code = 123  # E: not assignable
+    contact.permissive = 123
+
+assert_type(Contact().name, str)
+assert_type(Contact.name, _FieldDescriptor[models.CharField[str, str]])
+assert_type(Contact.code, _FieldDescriptor[models.CharField[str, str]])
+assert_type(Contact.permissive, _FieldDescriptor[models.CharField[Any, str]])
+assert_type(Contact().literal, Literal["fixed"])
+"#,
+);
+
+django_testcase!(
+    test_field_access_on_class_and_instance,
+    r#"
+from typing import assert_type
+
+from django.db import models
+from django.db.models.expressions import Combinable
+from django.db.models.fields import _FieldDescriptor
+
+class Contact(models.Model):
+    address = models.CharField(max_length=200)
+
+contact = Contact(address="123 Fake St")
+assert_type(contact.address, str)
+assert_type(
+    Contact.address,
+    _FieldDescriptor[models.CharField[str | int | Combinable, str]],
+)
+assert_type(Contact.address.field.max_length, int | None)
+"#,
+);
 
 // https://github.com/facebook/pyrefly/issues/5322
 django_testcase!(

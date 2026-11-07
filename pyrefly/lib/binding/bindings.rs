@@ -129,6 +129,8 @@ use crate::binding::table::TableKeyed;
 use crate::config::base::InferReturnTypes;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
+use crate::error::style::ErrorStyle;
 use crate::export::definitions::Definitions;
 use crate::export::definitions::MutableCaptureKind;
 use crate::export::exports::Exports;
@@ -304,7 +306,7 @@ impl InitializedInFlow {
 }
 
 /// Initialization on every path through a control-flow merge.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitializationStatus {
     /// Every path initializes the attribute.
     Initialized,
@@ -432,6 +434,8 @@ table! {
 #[derive(Debug)]
 pub struct Bindings {
     module_info: ModuleInfo,
+    parse_errors: ModuleDiagnostics,
+    binding_errors: ModuleDiagnostics,
     sys_info: SysInfo,
     table: BindingTable,
     metadata: Arc<BindingsMetadata>,
@@ -544,7 +548,7 @@ pub struct BindingsBuilder<'a> {
     pub func_count: u32,
     type_alias_count: u32,
     await_context: AwaitContext,
-    errors: &'a ErrorCollector,
+    errors: ErrorCollector,
     solver: &'a Solver,
     pub has_docstring: bool,
     pub scopes: Scopes,
@@ -694,6 +698,8 @@ impl Bindings {
             bind_functools_wrapper_mutation(&mut table, TextRange::default(), false);
         Self {
             module_info,
+            parse_errors: ModuleDiagnostics::default(),
+            binding_errors: ModuleDiagnostics::default(),
             sys_info: SysInfo::default(),
             table,
             metadata: Arc::new(BindingsMetadata::new()),
@@ -743,6 +749,14 @@ impl Bindings {
     /// Stored factory applications, arbitrary attribute writes, and cross-module effects are not tracked.
     pub fn functools_wrapper_mutation(&self) -> Idx<Key> {
         self.functools_wrapper_mutation
+    }
+
+    pub fn parse_errors(&self) -> &ModuleDiagnostics {
+        &self.parse_errors
+    }
+
+    pub fn binding_errors(&self) -> &ModuleDiagnostics {
+        &self.binding_errors
     }
 
     pub fn sys_info(&self) -> &SysInfo {
@@ -1096,11 +1110,13 @@ impl Bindings {
     pub fn new(
         x: ModModule,
         module_info: ModuleInfo,
+        parse_errors: ModuleDiagnostics,
+        module_ranges: Arc<ModuleRanges>,
         exports: &Exports,
         solver: &Solver,
         lookup: &dyn LookupExport,
         sys_info: SysInfo,
-        errors: &ErrorCollector,
+        error_style: ErrorStyle,
         enable_trace: bool,
         check_unannotated_defs: bool,
         analyze_unannotated_for_ide: bool,
@@ -1110,10 +1126,8 @@ impl Bindings {
     ) -> Self {
         let module_range = x.range;
         let pytest_info = PytestBindingInfo::from_module(&x);
-        // Compute module ranges from the AST before consuming it. These are
-        // needed later for error collection, which runs after the AST may
-        // have been evicted.
-        let module_ranges = Arc::new(ModuleRanges::compute(&x, &module_info));
+        let errors = ErrorCollector::new(module_info.dupe(), error_style);
+        let shape_comments = ShapeComments::new(&x, &module_info, &errors);
         let mut builder = BindingsBuilder {
             module_info: module_info.dupe(),
             annotated_metadata_ranges: Vec::new(),
@@ -1153,7 +1167,7 @@ impl Bindings {
             call_base_classes: Vec::new(),
             class_field_definitions: SmallMap::new(),
             shape_declarations: ShapeDeclarations::default(),
-            shape_comments: ShapeComments::new(&x, &module_info, errors),
+            shape_comments,
             shape_string_annotation: None,
             subsequently_initialized: SmallSet::new(),
             adjacent_namedtuple_defaults: None,
@@ -1286,6 +1300,8 @@ impl Bindings {
         );
         Self {
             module_info,
+            parse_errors,
+            binding_errors: builder.errors.finish(),
             sys_info: builder.sys_info,
             table: builder.table,
             metadata: Arc::new(builder.metadata),
@@ -1975,7 +1991,7 @@ impl<'a> BindingsBuilder<'a> {
             // same region and walks it again for each statement nested inside, so a suite whose
             // last statement is a deep nest of compound statements is rescanned once per level.
             let paths = (!is_expr_stmt && iter.peek().is_some())
-                .then(|| function_last_expressions(slice::from_ref(&x), self.sys_info))
+                .then(|| function_last_expressions(slice::from_ref(&x), self.sys_info, false))
                 .flatten()
                 // An answer the environment decided holds for this configuration only, and a
                 // suite dead under one configuration is live under another. An exhaustive `match`
@@ -3201,6 +3217,7 @@ impl<'a> BindingsBuilder<'a> {
         undecorated_idx: Idx<KeyUndecoratedFunction>,
         class_key: Option<Idx<KeyClass>>,
         is_variadic: bool,
+        override_func: Option<Idx<KeyUndecoratedFunction>>,
         ignore_annotation: bool,
     ) {
         let name = x.name();
@@ -3213,7 +3230,12 @@ impl<'a> BindingsBuilder<'a> {
             x.annotation().map(|x| {
                 self.insert_binding(
                     KeyAnnotation::Annotation(ShortIdentifier::new(name)),
-                    BindingAnnotation::AnnotateExpr(target.clone(), x.clone(), class_key),
+                    BindingAnnotation::AnnotateExpr(
+                        target.clone(),
+                        x.clone(),
+                        class_key,
+                        override_func,
+                    ),
                 )
             })
         };

@@ -9,6 +9,66 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_descriptor_instance_contract_compatibility,
+    TestEnv::new().enable_missing_override_decorator_error(),
+    r#"
+from typing import Protocol, Self, assert_type, overload
+
+class Field[S, G]:
+    @overload
+    def __get__(self, instance: None, owner: type) -> Self: ...
+    @overload
+    def __get__(self, instance: object, owner: type) -> G: ...
+    def __get__(self, instance: object | None, owner: type) -> Self | G:
+        raise NotImplementedError
+    def __set__(self, instance: object, value: S) -> None: ...
+
+class TextField(Field[str, str]): ...
+class CharField(Field[str, str]): ...
+
+class HasName(Protocol):
+    name: str
+
+class Base:
+    name = TextField()
+
+class Child(Base):
+    name = CharField()
+
+class PlainBase:
+    name: str
+
+class FieldChild(PlainBase):
+    name = CharField()
+
+class PlainChild(Base):
+    name: str = "Alice"
+
+def accept_name(value: HasName) -> None: ...
+
+accept_name(Child())
+accept_name(FieldChild())
+accept_name(PlainChild())
+assert_type(Child.name, CharField)
+assert_type(Child().name, str)
+
+class WrongGetter(Base):
+    name = Field[str, int]()  # E: inconsistent
+
+class WideSetter:
+    name = Field[str | int, str]()
+
+class NarrowSetter(WideSetter):
+    name = Field[str, str]()  # E: inconsistent
+
+class WrongName:
+    name = Field[int, int]()
+
+accept_name(WrongName())  # E: not assignable
+"#,
+);
+
+testcase!(
     test_staticmethod_with_explicit_parameter_type,
     r#"
 from typing import assert_type, reveal_type, Callable

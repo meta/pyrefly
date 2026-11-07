@@ -216,9 +216,9 @@ are scoped to the declaration; other names resolve through ordinary annotation
 scopes. Imports used only in comments may need an unused-import suppression for
 external linters.
 
-The supported positions are parameter annotations, return annotations, and
-annotated assignments. A multiline annotation can carry separate comments on
-its type components. The comment applies to the outermost complete component
+The supported positions are parameter annotations, return annotations,
+annotated assignments, and class bases. A multiline annotation can carry separate
+comments on its type components. The comment applies to the outermost complete component
 ending on its line; a following comma is a separator, not part of the type.
 For example:
 
@@ -247,6 +247,35 @@ components, but do not expand type aliases or select into union operators,
 literal values, annotation metadata, existing `Shaped` wrappers, or list-valued,
 starred, and ellipsis type arguments. Prefix comments for local annotations and IDE
 navigation inside comment payloads are not supported.
+
+Class bases use the same payloads and component selectors:
+
+```python
+# shapes: M, N
+class Base: ...
+
+# shapes: K
+class Derived(
+    Base,  # shaped: K, K + 1
+): ...
+
+class Fixed(
+    Base,  # shaped: 4, 8
+): ...
+```
+
+`Derived[3]` inherits `Base[3, 4]`; `Fixed` inherits `Base[4, 8]` without
+becoming shape-generic. A comma-separated payload supplies separate type
+arguments, whereas `[M, N]` supplies one shape-tuple argument. Written ordinary
+arguments are preserved: `Base[T]  # shaped: M, N` appends the two dimensions.
+A subclass's declaration does not implicitly specialize its bases by matching
+names. Put each base on its own comment-bearing line. Comments may refine a
+base's type arguments, but cannot replace the whole base or annotate class
+keywords such as `metaclass=`. Dynamic bases and the special `Generic`,
+`Protocol`, `TypedDict`, and `NamedTuple` base forms are not supported comment
+targets. Tuple bases use component comments or selectors rather than the
+whole-carrier shape shorthand. Refining an alias's arguments must preserve the
+nominal base class. Comments have no effect on runtime inheritance or validation.
 
 Without the header, shape comments have no effect and produce no diagnostics.
 With it, malformed or unattached directives are reported as invalid annotations,

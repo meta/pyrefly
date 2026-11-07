@@ -851,6 +851,37 @@ BytesIO
     );
 }
 
+// https://github.com/facebook/pyrefly/issues/5223
+#[test]
+fn insert_import_skips_module_name_with_non_identifier() {
+    let (handles, state) = mk_multi_file_state(
+        &[
+            ("main", "Migration\n"),
+            ("pkg.migrations.0001_initial", "class Migration: ...\n"),
+            ("pkg.models", "class Migration: ...\n"),
+        ],
+        Require::Exports,
+        false,
+    );
+    let import_titles: Vec<String> = state
+        .transaction()
+        .local_quickfix_code_actions_sorted(
+            &handles["main"],
+            TextRange::empty(TextSize::new(0)),
+            ImportFormat::Absolute,
+            None,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(title, _)| title)
+        .filter(|title| title.starts_with("Insert import:"))
+        .collect();
+    assert_eq!(
+        import_titles,
+        ["Insert import: `from pkg.models import Migration`"]
+    );
+}
+
 #[test]
 fn import_edits_with_non_future_imports() {
     let (handles, _) = mk_multi_file_state(

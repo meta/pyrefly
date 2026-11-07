@@ -801,7 +801,7 @@ pub fn suppress_errors(errors: Vec<SerializedError>, comment_location: CommentLo
 /// Takes UnusedIgnore errors from `collect_unused_ignore_errors` and applies their
 /// structured suppression edits.
 pub fn remove_unused_ignores(
-    unused_ignore_errors: Vec<Error>,
+    unused_ignore_errors: &[Error],
     kind: UnusedIgnoreKind,
 ) -> anyhow::Result<usize> {
     let serialized: Vec<SerializedError> = unused_ignore_errors
@@ -921,7 +921,7 @@ mod tests {
         let collected = errors.collect_errors();
         let unused_errors = errors.collect_unused_ignore_errors(&collected);
         let removals =
-            suppress::remove_unused_ignores(unused_errors, UnusedIgnoreKind::Pyrefly).unwrap();
+            suppress::remove_unused_ignores(&unused_errors, UnusedIgnoreKind::Pyrefly).unwrap();
         let got_file = fs_anyhow::read_to_string(&get_path(&tdir)).unwrap();
         assert_eq!(after, got_file);
         assert_eq!(removals, expected_removals);
@@ -939,7 +939,7 @@ mod tests {
         let collected = errors.collect_errors();
         let unused_errors = errors.collect_unused_ignore_errors(&collected);
         let removals =
-            suppress::remove_unused_ignores(unused_errors, UnusedIgnoreKind::Pyrefly).unwrap();
+            suppress::remove_unused_ignores(&unused_errors, UnusedIgnoreKind::Pyrefly).unwrap();
         let got_file = fs_anyhow::read_to_string(&get_path(&tdir)).unwrap();
         assert_eq!(after, got_file);
         assert_eq!(removals, expected_removals);
@@ -992,7 +992,7 @@ mod tests {
         let collected = errors.collect_errors();
         let unused_errors = errors.collect_unused_ignore_errors(&collected);
         let removals =
-            suppress::remove_unused_ignores(unused_errors, UnusedIgnoreKind::Type).unwrap();
+            suppress::remove_unused_ignores(&unused_errors, UnusedIgnoreKind::Type).unwrap();
         let got_file = fs_anyhow::read_to_string(&get_path(&tdir)).unwrap();
         assert_eq!(after, got_file);
         assert_eq!(removals, expected_removals);
@@ -1019,7 +1019,7 @@ mod tests {
         let collected = errors.collect_errors();
         let unused_errors = errors.collect_unused_ignore_errors(&collected);
         let removals =
-            suppress::remove_unused_ignores(unused_errors, UnusedIgnoreKind::All).unwrap();
+            suppress::remove_unused_ignores(&unused_errors, UnusedIgnoreKind::All).unwrap();
 
         assert_eq!(
             fs_anyhow::read_to_string(&get_path(&tdir)).unwrap(),
@@ -1457,7 +1457,7 @@ def f() -> int:
         let unused_errors = errors.collect_unused_ignore_errors(&collected);
 
         let removals =
-            suppress::remove_unused_ignores(unused_errors, UnusedIgnoreKind::All).unwrap();
+            suppress::remove_unused_ignores(&unused_errors, UnusedIgnoreKind::All).unwrap();
 
         let got_file = fs_anyhow::read_to_string(&get_path(&tdir)).unwrap();
         assert_eq!(want, got_file);

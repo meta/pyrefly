@@ -9,6 +9,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::keywords::ConverterMap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::tuple::Tuple;
@@ -191,9 +192,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if class_obj == self.stdlib.list_object()
             || class_obj == self.stdlib.set_object()
             || class_obj == self.stdlib.frozenset_object()
-            || class_obj.has_toplevel_qname(ModuleName::collections().as_str(), "deque")
-            || class_obj.has_toplevel_qname(ModuleName::typing().as_str(), "Sequence")
-            || class_obj.has_toplevel_qname(ModuleName::typing().as_str(), "Iterable")
+            || class_obj.is(KnownClass::CollectionsDeque)
+            || class_obj.is(KnownClass::TypingSequence)
+            || class_obj.is(KnownClass::TypingIterable)
         {
             return Some(self.heap.mk_class_type(self.stdlib.iterable(first_ty)));
         }
@@ -206,9 +207,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ty: &Type,
         targs: &[Type],
     ) -> Option<Type> {
-        if class_obj.has_toplevel_qname(ModuleName::from_str("re").as_str(), "Pattern")
-            || class_obj.has_toplevel_qname(ModuleName::typing().as_str(), "Pattern")
-        {
+        if class_obj.is(KnownClass::RePattern) || class_obj.is(KnownClass::TypingPattern) {
             let pattern_input = targs
                 .first()
                 .cloned()
@@ -252,11 +251,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         class_obj,
                         &GET_PYDANTIC_CORE_SCHEMA,
                     )
-                    .is_some_and(|member| {
-                        !member
-                            .defining_class
-                            .has_toplevel_qname(ModuleName::pydantic().as_str(), "BaseModel")
-                    })
+                    .is_some_and(|member| !member.defining_class.is(KnownClass::PydanticBaseModel))
                 {
                     return self.heap.mk_any_explicit();
                 }

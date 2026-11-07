@@ -16,6 +16,7 @@ use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::dimension::is_gradual_size;
 use pyrefly_types::dimension::is_optional_int;
 use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::shaped_array::IntTuple;
@@ -35,7 +36,7 @@ use pyrefly_types::types::Type;
 pub(crate) fn type_as_intvar_solution(ty: &Type) -> Option<Type> {
     match ty {
         _ if ty.is_any() => Some(gradual_size()),
-        Type::ClassType(cls) if cls.is_builtin("int") => Some(gradual_size()),
+        Type::ClassType(cls) if cls.is(KnownClass::Int) => Some(gradual_size()),
         Type::Quantified(q) if q.kind() == QuantifiedKind::IntVar => Some(ty.clone()),
         Type::TypeVar(tv) if tv.kind() == QuantifiedKind::IntVar => Some(ty.clone()),
         // An unsolved solver variable has no dimension structure for `Int::from_type` to retain.
@@ -49,7 +50,7 @@ fn shape_int_bound_solution(ty: &Type) -> Option<Type> {
     match ty {
         Type::Var(_) => None,
         Type::Any(_) => Some(gradual_size()),
-        Type::ClassType(cls) if cls.is_builtin("int") => Some(gradual_size()),
+        Type::ClassType(cls) if cls.is(KnownClass::Int) => Some(gradual_size()),
         _ => Int::from_type(ty).map(|dimension| canonicalize(Type::Int(dimension))),
     }
 }
@@ -172,8 +173,7 @@ pub(crate) fn normalize_shape_int_bound_solution(
         return None;
     }
     let normalize_member = |member: &Type| {
-        shape_int_bound_solution(member)
-            .unwrap_or_else(|| member.clone().promote_implicit_literals(stdlib))
+        shape_int_bound_solution(member).unwrap_or_else(|| member.clone().promote(stdlib))
     };
     if optional_int_bound {
         let normalize_optional_member = |member: &Type| match member {

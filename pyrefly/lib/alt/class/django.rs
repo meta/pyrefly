@@ -7,13 +7,17 @@
 
 use std::iter;
 
+use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_name::is_python_identifier;
 use pyrefly_types::callable::Callable;
+use pyrefly_types::callable::Param;
 use pyrefly_types::callable::ParamList;
+use pyrefly_types::callable::Required;
 use pyrefly_types::class::Class;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::class::DjangoClassMetadata;
+use pyrefly_types::function::DescriptorSetterMetadata;
 use pyrefly_types::function::FuncMetadata;
 use pyrefly_types::function::Function;
 use pyrefly_types::function::PropertyMetadata;
@@ -21,8 +25,12 @@ use pyrefly_types::function::PropertyRole;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::keywords::KwCall;
 use pyrefly_types::keywords::TypeMap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::tuple::Tuple;
+use pyrefly_types::types::AnyStyle;
+use pyrefly_types::types::Overload;
+use pyrefly_types::types::OverloadType;
 use pyrefly_types::types::Type;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::Expr;
@@ -31,6 +39,7 @@ use ruff_python_ast::ExprStringLiteral;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
+use vec1::vec1;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
@@ -54,7 +63,7 @@ const COMBINABLE: Name = Name::new_static("Combinable");
 
 pub fn is_django_choices_subclass(bases_with_metadata: &[(Class, &ClassMetadata)]) -> bool {
     bases_with_metadata.iter().any(|(base, base_meta)| {
-        base.has_toplevel_qname(ModuleName::django_models_enums().as_str(), "Choices")
+        base.is(KnownClass::DjangoChoices)
             || base_meta
                 .enum_metadata()
                 .as_ref()
@@ -81,12 +90,8 @@ const VALUES: Name = Name::new_static("values");
 const ID: Name = Name::new_static("id");
 const PK: Name = Name::new_static("pk");
 const AUTO_FIELD: Name = Name::new_static("AutoField");
-const FOREIGN_KEY: Name = Name::new_static("ForeignKey");
-const ONE_TO_ONE_FIELD: Name = Name::new_static("OneToOneField");
 const NULL: Name = Name::new_static("null");
 const BLANK: Name = Name::new_static("blank");
-const CHAR_FIELD: Name = Name::new_static("CharField");
-const MANY_TO_MANY_FIELD: Name = Name::new_static("ManyToManyField");
 const MODEL: Name = Name::new_static("Model");
 const ANNOTATE: Name = Name::new_static("annotate");
 const MANYRELATEDMANAGER: Name = Name::new_static("ManyRelatedManager");
@@ -134,8 +139,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return false;
         };
         symbol.name == ANNOTATE
-            && (cls.has_toplevel_qname("django.db.models.query", "QuerySet")
-                || cls.has_toplevel_qname("django.db.models.manager", "Manager"))
+            && (cls.is(KnownClass::DjangoQuerySet) || cls.is(KnownClass::DjangoManager))
     }
 
     pub(crate) fn infer_django_annotate_call(
@@ -200,7 +204,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // The intersection preserves call-site metadata while generic QuerySet operations use the
         // original row as their fallback type.
         base.targs_mut().as_mut()[1] = self.heap.mk_intersect(vec![annotation], row);
-        if queryset.has_qname("django.db.models.query", "QuerySet") {
+        if queryset.is(KnownClass::DjangoQuerySet) {
             queryset = base;
         } else {
             queryset = queryset.with_django_metadata(DjangoClassMetadata::SpecializedBase { base });
@@ -245,10 +249,170 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     fn is_one_to_one_field(&self, field: &Class) -> bool {
-        field.has_toplevel_qname(
-            ModuleName::django_models_fields_related().as_str(),
-            ONE_TO_ONE_FIELD.as_str(),
-        )
+        field.is(KnownClass::DjangoOneToOneField)
+    }
+
+    /// Fill inferred descriptor arguments while retaining declared arguments.
+    fn specialize_django_field_descriptor(
+        &self,
+        field: &ClassType,
+        get_type: Type,
+        set_type: Type,
+        infer_arguments: bool,
+    ) -> ClassType {
+        let mut field = field.clone();
+        for (param, arg) in field.targs_mut().iter_paired_mut() {
+            match param.name().as_str() {
+                "_ST" if infer_arguments || matches!(arg, Type::Any(AnyStyle::Implicit)) => {
+                    *arg = set_type.clone();
+                }
+                "_GT" if infer_arguments || matches!(arg, Type::Any(AnyStyle::Implicit)) => {
+                    *arg = get_type.clone();
+                }
+                "_To" | "_Through" if matches!(arg, Type::Any(AnyStyle::Implicit)) => {
+                    if let Type::ClassType(manager) = &get_type
+                        && let [target, through] = manager.targs().as_slice()
+                    {
+                        *arg = if param.name().as_str() == "_To" {
+                            target.clone()
+                        } else {
+                            through.clone()
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+        field
+    }
+
+    /// Specialize model fields while retaining their normal descriptor overloads.
+    pub fn get_django_class_field_type(
+        &self,
+        ty: &Type,
+        class: &Class,
+        name: &Name,
+        definition: &ClassFieldDefinition,
+    ) -> Option<Type> {
+        let initial_value = match definition {
+            ClassFieldDefinition::AssignedInBody { value, .. } => match value.as_ref() {
+                ExprOrBinding::Expr(expr) => Some(expr),
+                ExprOrBinding::Binding(_) => None,
+            },
+            _ => None,
+        };
+        if !self.get_metadata_for_class(class).is_django_model() {
+            return self
+                .get_django_field_types(ty, class, Some(name), initial_value)
+                .map(|(get_type, _)| get_type);
+        }
+        let has_annotation_type = match definition {
+            ClassFieldDefinition::AssignedInBody {
+                annotation: Some(annotation),
+                ..
+            }
+            | ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => {
+                self.get_idx(*annotation).annotation.ty.is_some()
+            }
+            _ => false,
+        };
+        // Constructor type parameters describe inference holes before arguments such as
+        // `db_default` solve them. A specialized constructor has no such parameters.
+        let infer_arguments = !has_annotation_type
+            && initial_value
+                .and_then(|expr| expr.as_call_expr())
+                .and_then(|call| {
+                    self.unwrap_class_object_silently(
+                        &self.expr_infer(&call.func, &self.error_swallower()),
+                    )
+                })
+                .is_some_and(|(parameters, _)| !parameters.is_empty());
+        let specialized = self.distribute_over_union(ty, |member| {
+            let types = if infer_arguments && let Type::ClassType(field) = member {
+                self.get_django_field_types_from_class(
+                    field.class_object(),
+                    class,
+                    Some(name),
+                    initial_value,
+                )
+            } else {
+                self.get_django_field_types(member, class, Some(name), initial_value)
+            };
+            let Some((get_type, set_type)) = types else {
+                return member.clone();
+            };
+            if let Type::ClassType(field) = member
+                && self.inherits_from_django_field(field.class_object())
+            {
+                let Type::ClassType(field) = self.solver().force(member.clone()) else {
+                    unreachable!("forcing a field instance preserves its class type")
+                };
+                let override_type = if !infer_arguments
+                    && field.targs().iter_paired().any(|(param, arg)| {
+                        param.name().as_str() == "_ST"
+                            && !matches!(arg, Type::Any(AnyStyle::Implicit))
+                    }) {
+                    set_type.clone()
+                } else {
+                    get_type.clone()
+                };
+                let field = self.specialize_django_field_descriptor(
+                    &field,
+                    get_type.clone(),
+                    set_type.clone(),
+                    infer_arguments,
+                );
+                self.heap
+                    .mk_class_type(field.with_django_metadata(DjangoClassMetadata::Field {
+                        get_type,
+                        set_type,
+                        override_type,
+                    }))
+            } else {
+                get_type
+            }
+        });
+        (specialized != *ty).then_some(specialized)
+    }
+
+    /// Resolve constructed fields to their instance read and assignment contracts.
+    pub(crate) fn django_field_instance_types(&self, ty: &Type) -> Option<(Type, Type)> {
+        match ty {
+            Type::ClassType(cls) => match cls.django_metadata()? {
+                DjangoClassMetadata::Field {
+                    get_type, set_type, ..
+                } => Some((get_type.clone(), set_type.clone())),
+                _ => None,
+            },
+            Type::Union(union) => {
+                let (index, (get_type, set_type)) =
+                    union
+                        .members
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, member)| {
+                            self.django_field_instance_types(member)
+                                .map(|types| (index, types))
+                        })?;
+                let mut get_types = union.members[..index].to_vec();
+                let mut set_types = get_types.clone();
+                get_types.push(get_type);
+                set_types.push(set_type);
+                for member in &union.members[index + 1..] {
+                    let (get_type, set_type) = self
+                        .django_field_instance_types(member)
+                        .unwrap_or_else(|| (member.clone(), member.clone()));
+                    get_types.push(get_type);
+                    set_types.push(set_type);
+                }
+                // Reading may produce any branch, but a write must satisfy every branch.
+                Some((
+                    self.unions(get_types),
+                    self.intersect_guarantees(&set_types),
+                ))
+            }
+            _ => None,
+        }
     }
 
     /// Return the read and assignment types of a Django field.
@@ -260,20 +424,31 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         initial_value_expr: Option<&Expr>,
     ) -> Option<(Type, Type)> {
         match ty {
-            Type::ClassType(cls)
-                if cls.has_qname(ModuleName::django_utils_functional().as_str(), "_Getter") =>
-            {
-                cls.targs()
-                    .as_slice()
-                    .first()
-                    .map(|ty| (ty.clone(), ty.clone()))
+            Type::ClassType(cls) if cls.is(KnownClass::DjangoGetter) => cls
+                .targs()
+                .as_slice()
+                .first()
+                .map(|ty| (ty.clone(), ty.clone())),
+            Type::ClassType(cls) => {
+                let (mut get_type, mut set_type) = self.get_django_field_types_from_class(
+                    cls.class_object(),
+                    class,
+                    field_name,
+                    initial_value_expr,
+                )?;
+                // Explicit descriptor arguments take precedence over inferred defaults.
+                for (param, arg) in cls.targs().iter_paired() {
+                    let arg = self.solver().force(arg.clone());
+                    if !matches!(arg, Type::Any(AnyStyle::Implicit)) {
+                        match param.name().as_str() {
+                            "_GT" => get_type = arg,
+                            "_ST" => set_type = arg,
+                            _ => {}
+                        }
+                    }
+                }
+                Some((get_type, set_type))
             }
-            Type::ClassType(cls) => self.get_django_field_types_from_class(
-                cls.class_object(),
-                class,
-                field_name,
-                initial_value_expr,
-            ),
             Type::ClassDef(cls) => {
                 self.get_django_field_types_from_class(cls, class, field_name, initial_value_expr)
             }
@@ -397,9 +572,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn inherits_from_django_field(&self, cls: &Class) -> bool {
         self.get_mro_for_class(cls)
             .ancestors(self.stdlib)
-            .any(|ancestor| {
-                ancestor.has_qname(ModuleName::django_models_fields().as_str(), "Field")
-            })
+            .any(|ancestor| ancestor.is(KnownClass::DjangoField))
     }
 
     /// Bind a generated manager and its initial queryset for a class-body assignment.
@@ -461,7 +634,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             base.targs_mut().as_mut()[1] = model.clone();
         }
-        let queryset = if queryset.has_qname("django.db.models.query", "QuerySet") {
+        let queryset = if queryset.is(KnownClass::DjangoQuerySet) {
             base
         } else {
             queryset.with_django_metadata(DjangoClassMetadata::SpecializedBase { base })
@@ -510,8 +683,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .ancestors(self.stdlib),
             )
             .find(|base| {
-                base.has_qname("django.db.models.manager", "Manager")
-                    || base.has_qname("django.db.models.manager", "BaseManager")
+                base.is(KnownClass::DjangoManager) || base.is(KnownClass::DjangoBaseManager)
             })?
             .clone();
         let [original_model] = base.targs().as_slice() else {
@@ -552,12 +724,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn django_queryset_base(&self, cls: &ClassType) -> Option<ClassType> {
         if let Some(DjangoClassMetadata::SpecializedBase { base }) = cls.django_metadata() {
             Some(base.clone())
-        } else if cls.has_qname("django.db.models.query", "QuerySet") {
+        } else if cls.is(KnownClass::DjangoQuerySet) {
             Some(cls.clone())
         } else {
             self.get_mro_for_class(cls.class_object())
                 .ancestors(self.stdlib)
-                .find(|base| base.has_qname("django.db.models.query", "QuerySet"))
+                .find(|base| base.is(KnownClass::DjangoQuerySet))
                 .map(|base| base.substitute_with(&cls.substitution()))
         }
     }
@@ -569,16 +741,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 && symbol
                     .cls
                     .as_ref()
-                    .is_some_and(|cls| cls.has_toplevel_qname("django.db.models.query", "QuerySet"))
+                    .is_some_and(|cls| cls.is(KnownClass::DjangoQuerySet))
         })
     }
 
     /// Check manager replacements by nominal type, independently of their attribute names.
     pub(crate) fn is_django_manager_type(&self, ty: &Type) -> bool {
         matches!(ty, Type::ClassType(cls) if
-            cls.has_qname("django.db.models.manager", "BaseManager")
+            cls.is(KnownClass::DjangoBaseManager)
             || self.get_mro_for_class(cls.class_object()).ancestors(self.stdlib)
-                .any(|base| base.has_qname("django.db.models.manager", "BaseManager")))
+                .any(|base| base.is(KnownClass::DjangoBaseManager)))
     }
 
     /// Resolve generated members through the same path as ordinary instance members.
@@ -588,13 +760,89 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         name: &Name,
     ) -> Option<ClassAttribute> {
         match cls.django_metadata()? {
+            DjangoClassMetadata::Field {
+                get_type,
+                set_type,
+                override_type,
+            } => {
+                if name == &dunder::GET {
+                    if let Some(field) = self.get_class_member(cls.class_object(), name) {
+                        let mut attr =
+                            self.as_instance_attribute(name, &field, &Instance::of_class(cls));
+                        if let ClassAttribute::ReadWrite { read_type, .. } = &mut attr {
+                            read_type.transform_toplevel_callable_signatures(|signature, _| {
+                            if matches!(signature.get_positional_param(1), Some(Type::ClassType(instance))
+                                if instance.is(KnownClass::DjangoModel)) {
+                                signature.ret = get_type.clone();
+                            }
+                        });
+                        }
+                        return Some(attr);
+                    }
+                    let metadata = FuncMetadata::method(cls.class_object(), dunder::GET);
+                    let signatures = vec1![
+                        (self.heap.mk_none(), self.heap.mk_class_type(cls.clone())),
+                        (
+                            self.heap.mk_class_type(self.stdlib.object().clone()),
+                            get_type.clone(),
+                        ),
+                    ]
+                    .mapped(|(instance_type, ret)| {
+                        OverloadType::Function(Function {
+                            signature: Callable::list(
+                                ParamList::new(vec![
+                                    self.class_self_param(cls.class_object(), false),
+                                    Param::PosOnly(None, instance_type, Required::Required),
+                                    Param::PosOnly(
+                                        None,
+                                        self.heap.mk_any_explicit(),
+                                        Required::Required,
+                                    ),
+                                ]),
+                                ret,
+                            ),
+                            metadata: metadata.clone(),
+                        })
+                    });
+                    return Some(self.as_instance_attribute(
+                        name,
+                        &ClassField::new_synthesized(self.heap.mk_overload(Overload {
+                            signatures,
+                            metadata: Box::new(metadata),
+                        })),
+                        &Instance::of_class(cls),
+                    ));
+                }
+                if name != &dunder::SET {
+                    return None;
+                }
+                let mut metadata = FuncMetadata::method(cls.class_object(), dunder::SET);
+                metadata.flags.descriptor_setter = Some(Box::new(DescriptorSetterMetadata {
+                    read_type: get_type.clone(),
+                    override_type: override_type.clone(),
+                }));
+                let method = self.heap.mk_function(Function {
+                    signature: Callable::list(
+                        ParamList::new(vec![
+                            self.class_self_param(cls.class_object(), false),
+                            Param::PosOnly(None, self.heap.mk_any_explicit(), Required::Required),
+                            Param::PosOnly(None, set_type.clone(), Required::Required),
+                        ]),
+                        self.heap.mk_none(),
+                    ),
+                    metadata,
+                });
+                Some(self.as_instance_attribute(
+                    name,
+                    &ClassField::new_synthesized(method),
+                    &Instance::of_class(cls),
+                ))
+            }
             DjangoClassMetadata::Manager { queryset } => {
                 let manager_member =
                     self.get_class_member_with_defining_class(cls.class_object(), name);
                 if let Some(member) = &manager_member
-                    && member
-                        .defining_class
-                        .has_toplevel_qname("django.db.models.manager", "BaseManager")
+                    && member.defining_class.is(KnownClass::DjangoBaseManager)
                 {
                     if !matches!(name.as_str(), "all" | "get_queryset") {
                         return None;
@@ -624,9 +872,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     let policy = self
                         .get_class_fields(&member.defining_class)
                         .and_then(|fields| fields.django_queryset_only(name));
-                    let queryset_only = member
-                        .defining_class
-                        .has_toplevel_qname("django.db.models.query", "QuerySet")
+                    let queryset_only = member.defining_class.is(KnownClass::DjangoQuerySet)
                         && matches!(name.as_str(), "delete" | "adelete" | "as_manager");
                     if policy == Some(true)
                         || (policy.is_none() && (name.as_str().starts_with('_') || queryset_only))
@@ -718,16 +964,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub fn is_foreign_key_like_field(&self, field: &Class) -> bool {
-        let module = ModuleName::django_models_fields_related();
-        field.has_toplevel_qname(module.as_str(), FOREIGN_KEY.as_str())
-            || field.has_toplevel_qname(module.as_str(), ONE_TO_ONE_FIELD.as_str())
+        field.is(KnownClass::DjangoForeignKey) || field.is(KnownClass::DjangoOneToOneField)
     }
 
     pub fn is_many_to_many_field(&self, field: &Class) -> bool {
-        field.has_toplevel_qname(
-            ModuleName::django_models_fields_related().as_str(),
-            MANY_TO_MANY_FIELD.as_str(),
-        )
+        field.is(KnownClass::DjangoManyToManyField)
     }
 
     pub fn get_django_enum_synthesized_fields(
@@ -749,11 +990,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && let Type::Tuple(Tuple::Concrete(elements)) = &lit_enum.ty
                     && elements.len() >= 2
                 {
-                    Some(
-                        elements[elements.len() - 1]
-                            .clone()
-                            .promote_implicit_literals(self.stdlib),
-                    )
+                    Some(elements[elements.len() - 1].clone().promote(self.stdlib))
                 } else {
                     None
                 }
@@ -868,8 +1105,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Attribute lookup handles cycles between models' primary keys.
             let pk_type = if self
                 .get_non_synthesized_class_member(model, pk_field_name)
-                .is_some_and(|field| field.is_foreign_key())
-            {
+                .is_some_and(|field| {
+                    matches!(field.ty(), Type::ClassType(field)
+                        if self.is_foreign_key_like_field(field.class_object()))
+                }) {
                 self.attr_infer_for_type(
                     &pk_type,
                     &PK,
@@ -894,11 +1133,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         has_keyword_true(call_expr, &NULL)
     }
 
-    /// Check if a Django field has a `choices` argument.
-    pub fn has_django_field_choices(&self, call_expr: &ExprCall) -> bool {
-        find_keyword(call_expr, &CHOICES).is_some()
-    }
-
     /// Check if a Django field has `blank=True`.
     fn is_django_field_blank(&self, call_expr: &ExprCall) -> bool {
         has_keyword_true(call_expr, &BLANK)
@@ -906,10 +1140,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Check if a Django field is a CharField.
     fn is_char_field(&self, field: &Class) -> bool {
-        field.has_toplevel_qname(
-            ModuleName::django_models_fields().as_str(),
-            CHAR_FIELD.as_str(),
-        )
+        field.is(KnownClass::DjangoCharField)
     }
 
     /// Extract a Literal type from CharField choices.
@@ -950,14 +1181,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Returns the primary key type of the related model.
-    fn get_foreign_key_id_type(&self, class_field: &ClassField) -> Option<Type> {
-        // Check if this is a ForeignKey field using the cached metadata
-        if !class_field.is_foreign_key() {
+    fn get_foreign_key_id_type(&self, class: &Class, class_field: &ClassField) -> Option<Type> {
+        let field_type = class_field.ty();
+        if !matches!(&field_type, Type::ClassType(field)
+            if self.is_foreign_key_like_field(field.class_object()))
+        {
             return None;
         }
 
         // Get the related model type from the field
-        let ty = class_field.ty();
+        let (ty, _) = self.get_django_field_types(&field_type, class, None, None)?;
         let (related_cls, is_foreign_key_nullable) = match ty {
             Type::Union(f) => {
                 // Nullable foreign key: extract the class type from the union
@@ -1002,7 +1235,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // to avoid triggering type resolution during synthesis, which can cause cycles.
         for field_name in &django_metadata.foreign_key_like_fields {
             if let Some(class_field) = self.get_field_from_current_class_only(cls, field_name)
-                && let Some(fk_id_type) = self.get_foreign_key_id_type(class_field)
+                && let Some(fk_id_type) = self.get_foreign_key_id_type(cls, class_field)
             {
                 let id_field_name = Name::new(format!("{}_id", field_name));
                 fields.insert(id_field_name, ClassSynthesizedField::new(fk_id_type));
