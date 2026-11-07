@@ -1001,6 +1001,7 @@ testcase!(
     test_unpack_string_exact,
     r#"
 a, b, c = "abc"
+x, y = "12"
 "#,
 );
 
@@ -1009,6 +1010,10 @@ testcase!(
     r#"
 a, *b = "abc"
 x, y, *z = "w"  # E: Cannot unpack Literal['w'] (of size 1) into 2+ values
+x, *y = "123"
+x, *y = "12"
+x, *y = "1"
+x, *y = ""  # E: Cannot unpack Literal[''] (of size 0) into 1+ values
 "#,
 );
 
@@ -1031,6 +1036,69 @@ testcase!(
     r#"
 items = [1, 2, 3, 4]
 bad = items[::0]  # E: Slice step cannot be zero
+"#,
+);
+
+testcase!(
+    test_for_loop_unpack_string,
+    r#"
+for k, v in {"x": 1}:  # E: Cannot unpack
+    pass
+
+xs: list[str] = []
+for a, b in xs:  # E: Cannot unpack
+    pass
+"#,
+);
+
+testcase!(
+    test_for_loop_unpack_tuple_annotation,
+    r#"
+from __future__ import annotations
+
+x: list[tuple[str, str]] = []
+for a, b in x:
+    pass
+"#,
+);
+
+testcase!(
+    test_unpack_string_star_only,
+    r#"
+from typing import LiteralString, assert_type
+
+def f(s: str, literal: LiteralString) -> None:
+    *chars, = s
+    assert_type(chars, list[str])
+    *literal_chars, = literal
+    assert_type(literal_chars, list[LiteralString])
+
+*empty, = ""
+*nonempty, = "123"
+"#,
+);
+
+testcase!(
+    test_unpack_string_union,
+    r#"
+from typing import Literal, LiteralString
+
+def f(xs: list[str | tuple[int, int]], literals: list[LiteralString | tuple[int, int]]) -> None:
+    for a, b in xs:  # E: Cannot unpack
+        pass
+    for a, *rest in xs:  # E: Cannot unpack
+        pass
+    for *chars, in xs:
+        pass
+    for a, b in literals:  # E: Cannot unpack
+        pass
+    for *literal_chars, in literals:
+        pass
+
+def g(s: Literal["12", "34"], short: Literal["", "1"], b: Literal[b"12", b"34"]) -> None:
+    a, c = s
+    a, *rest = short  # E: Cannot unpack
+    x, y = b
 "#,
 );
 

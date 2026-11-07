@@ -3088,18 +3088,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 if iterable_ty.ty().is_never() {
                     return EmptyAnswer;
                 }
-                // String and bytes literals have known length, so generate a fixed-length iterable
-                let iterables = match iterable_ty.ty() {
+                let mut iterables = Vec::new();
+                self.map_over_union(iterable_ty.ty(), |ty| match ty {
+                    // String and bytes literals have known length.
                     Type::Literal(lit) if let Lit::Str(s) = &lit.value => {
                         let char_ty = self.heap.mk_literal_string(LitStyle::Implicit);
-                        vec![Iterable::FixedLen(vec![char_ty; s.chars().count()])]
+                        iterables.push(Iterable::FixedLen(vec![char_ty; s.chars().count()]));
                     }
                     Type::Literal(lit) if let Lit::Bytes(b) = &lit.value => {
                         let elem_ty = self.heap.mk_class_type(self.stdlib.int().clone());
-                        vec![Iterable::FixedLen(vec![elem_ty; b.len()])]
+                        iterables.push(Iterable::FixedLen(vec![elem_ty; b.len()]));
                     }
-                    _ => self.iterate(iterable_ty.ty(), *range, errors, None),
-                };
+                    _ if !matches!(expect, SizeExpectation::Ge(0))
+                        && (matches!(ty, Type::ClassType(cls) if cls == self.stdlib.str())
+                            || matches!(ty, Type::LiteralString(_))) =>
+                    {
+                        self.error(
+                            errors,
+                            *range,
+                            ErrorKind::BadUnpacking,
+                            format!("Cannot unpack {} into {}", ty, expect.message()),
+                        );
+                    }
+                    _ => iterables.extend(self.iterate(ty, *range, errors, None)),
+                });
                 for iterable in iterables {
                     match iterable {
                         Iterable::OfType(_) => {}
