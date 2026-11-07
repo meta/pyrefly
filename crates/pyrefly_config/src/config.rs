@@ -4282,6 +4282,7 @@ output-format = "omit-errors"
                 "Basic preset should keep {kind:?} as Hint"
             );
         }
+        assert_eq!(errors.severity(ErrorKind::RevealType), Severity::Info);
         // A representative sample of kinds that should be silenced. Exhaustive
         // enumeration is covered by `test_preset_fields_propagate`.
         for kind in [

@@ -127,7 +127,7 @@
     "redundant-cast": ["legacy", "default", "strict", "all"],
     "redundant-condition": ["legacy", "default", "strict", "all"],
     "regex": ["legacy", "default", "strict", "all"],
-    "reveal-type": ["legacy", "default", "strict", "all"],
+    "reveal-type": ["basic", "legacy", "default", "strict", "all"],
     "string-as-iterable": ["all"],
     "unannotated-attribute": ["all"],
     "unannotated-parameter": ["all"],

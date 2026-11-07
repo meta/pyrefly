@@ -154,6 +154,7 @@ impl Preset {
                     (ErrorKind::MissingImport, Severity::Error),
                     (ErrorKind::NotAsync, Severity::Error),
                     (ErrorKind::ParseError, Severity::Error),
+                    (ErrorKind::RevealType, Severity::Info),
                     (ErrorKind::UnexpectedKeyword, Severity::Error),
                     (ErrorKind::UnexpectedPositionalArgument, Severity::Error),
                     (ErrorKind::UnknownName, Severity::Error),
