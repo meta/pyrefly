@@ -7,6 +7,7 @@
 
 use pyrefly_python::sys_info::PythonVersion;
 
+use crate::config::base::ClassDecoratorBehavior;
 use crate::test::util::TestEnv;
 use crate::testcase;
 
@@ -1117,6 +1118,556 @@ def f():
 def g(a: A):
     pass
 g(f)
+    "#,
+);
+
+testcase!(
+    test_class_decorator_behavior_ignore,
+    TestEnv::new().with_class_decorator_behavior(ClassDecoratorBehavior::Ignore),
+    r#"
+from dataclasses import dataclass
+from typing import Any, assert_type
+
+def typed(cls: type) -> int: ...
+def untyped(cls): return cls
+def erased(cls: type) -> type[Any]: ...
+
+@typed
+class Typed: ...
+
+@untyped
+class Untyped: ...
+
+@erased
+class Erased: ...
+
+assert_type(Typed, type[Typed])
+assert_type(Untyped, type[Untyped])
+assert_type(Erased, type[Any])
+assert_type(Typed(), Typed)
+
+# Special decorators still provide their synthesized class behavior.
+@dataclass
+class Data:
+    value: int
+
+assert_type(Data(1).value, int)
+"#,
+);
+
+testcase!(
+    test_class_decorator_behavior_typed_only,
+    TestEnv::new().with_class_decorator_behavior(ClassDecoratorBehavior::TypedOnly),
+    r#"
+from typing import Any, Callable, assert_type
+
+def typed(cls: type) -> int: ...
+def untyped(cls): return cls
+def explicit_any(cls: type) -> Any: ...
+def inferred_type_any(cls: type[Any]): return cls
+def factory() -> Callable: return untyped
+
+class UntypedDecorator:
+    def __call__(self, cls): return cls
+
+@typed
+class Typed: ...
+
+@untyped
+class Untyped: ...
+
+@explicit_any
+class ExplicitAny: ...
+
+@inferred_type_any
+class InferredTypeAny: ...
+
+@factory()
+class Factory: ...
+
+@UntypedDecorator()
+class Instance: ...
+
+assert_type(Typed, int)
+assert_type(Untyped, type[Untyped])
+assert_type(ExplicitAny, type[ExplicitAny])
+assert_type(InferredTypeAny, type[InferredTypeAny])
+assert_type(Factory, type[Factory])
+assert_type(Instance, type[Instance])
+"#,
+);
+
+testcase!(
+    test_class_decorator_behavior_typed_only_union,
+    r#"
+from typing import Any, Callable, assert_type
+
+def inferred_factory(value):
+    if value:
+        return lambda cls: cls
+    return value
+
+@inferred_factory(True)
+class Inferred:
+    def method(self) -> int:
+        return 1
+
+assert_type(Inferred, type[Inferred])
+assert_type(Inferred().method(), int)
+value: str = Inferred().method()  # E: `int` is not assignable to `str`
+
+def to_int(cls: type) -> int: ...
+def to_str(cls: type) -> str: ...
+
+def typed_factory(flag: bool) -> Callable[[type], int] | Callable[[type], str]:
+    return to_int if flag else to_str
+
+@typed_factory(True)
+class Typed: ...
+
+assert_type(Typed, int | str)
+
+def any_factory(value: Any) -> Callable[[type], int] | Any:
+    return value
+
+@any_factory(to_int)
+class ExplicitAny: ...
+
+assert_type(ExplicitAny, type[ExplicitAny])
+
+class UntypedDecorator:
+    def __call__(self, cls):
+        return cls
+
+def instance_factory(flag: bool) -> Callable[[type], int] | UntypedDecorator:
+    return to_int if flag else UntypedDecorator()
+
+@instance_factory(False)
+class Instance: ...
+
+assert_type(Instance, type[Instance])
+"#,
+);
+
+testcase!(
+    test_class_decorator_behavior_all_union,
+    TestEnv::new().with_class_decorator_behavior(ClassDecoratorBehavior::All),
+    r#"
+from typing import Any, assert_type
+
+def factory(value):
+    if value:
+        return lambda cls: cls
+    return value
+
+@factory(True)
+class C: ...
+
+assert_type(C, Any)
+"#,
+);
+
+testcase!(
+    test_class_decorator_type_return_annotations,
+    TestEnv::new().enable_untyped_class_decorator_error(),
+    r#"
+from typing import Any, assert_type
+
+def bare(cls: type) -> type:
+    return cls
+
+def bare_union(cls: type) -> type | None:
+    return cls
+
+def explicit(cls: type) -> type[Any]:
+    return cls
+
+def explicit_union(cls: type) -> type[Any] | None:
+    return cls
+
+@bare  # E: Untyped class decorator
+class Bare:
+    x: int = 1
+
+@bare_union  # E: Untyped class decorator
+class BareUnion:
+    x: int = 1
+
+@explicit
+class Explicit:
+    x: int = 1
+
+@explicit_union
+class ExplicitUnion: ...
+
+assert_type(Bare, type[Bare])
+assert_type(Bare().x, int)
+assert_type(BareUnion, type[BareUnion])
+assert_type(BareUnion().x, int)
+assert_type(Explicit, type[Any])
+assert_type(ExplicitUnion, type[Any] | None)
+"#,
+);
+
+testcase!(
+    test_class_decorator_overloads_and_union_classification,
+    TestEnv::new().enable_untyped_class_decorator_error(),
+    r#"
+from typing import Any, assert_type, overload
+
+@overload
+def deco(cls: type[int]) -> Any: ...
+@overload
+def deco(cls: type) -> int: ...
+def deco(cls: Any) -> Any: ...
+
+@deco
+class Typed: ...
+
+assert_type(Typed, int)
+
+def factory(value):
+    if value:
+        return lambda cls: cls
+    return value
+
+@factory(True)  # E: Untyped class decorator
+class Untyped:
+    x: int = 1
+
+assert_type(Untyped, type[Untyped])
+assert_type(Untyped().x, int)
+"#,
+);
+
+testcase!(
+    test_class_decorator_self_references_in_annotations,
+    r#"
+from typing import Callable, assert_type, cast
+
+def to_wrapper(cls: type) -> Callable[[], int]: ...
+
+@to_wrapper
+class C:
+    other: "C"  # E: Expected a type form
+    def clone(self) -> "C": ...  # E: Expected a type form
+
+@cast("Callable[[type[D]], int]", lambda cls: 1)
+class D: ...
+
+assert_type(C, Callable[[], int])
+assert_type(D, int)
+"#,
+);
+
+testcase!(
+    test_class_decorator_behavior_default,
+    r#"
+from typing import assert_type
+
+def typed(cls: type) -> int: ...
+def untyped(cls): return cls
+
+@typed
+class Typed: ...
+
+@untyped
+class Untyped: ...
+
+assert_type(Typed, int)
+assert_type(Untyped, type[Untyped])
+"#,
+);
+
+testcase!(
+    test_class_decorator_behavior_all,
+    TestEnv::new().with_class_decorator_behavior(ClassDecoratorBehavior::All),
+    r#"
+from dataclasses import dataclass
+from typing import Any, Callable, assert_type
+
+def typed(cls: type) -> int: ...
+def untyped(cls): return cls
+def explicit_any(cls: type) -> Any: ...
+def inferred_type_any(cls: type[Any]): return cls
+def factory() -> Callable: return untyped
+def to_str(value: int) -> str: ...
+
+class UntypedDecorator:
+    def __call__(self, cls): return cls
+
+@typed
+class Typed: ...
+
+@untyped
+class Untyped: ...
+
+@explicit_any
+class ExplicitAny: ...
+
+@inferred_type_any
+class InferredTypeAny: ...
+
+@factory()
+class Factory: ...
+
+@UntypedDecorator()
+class Instance: ...
+
+@to_str
+@typed
+class Stacked: ...
+
+assert_type(Typed, int)
+assert_type(Untyped, Any)
+assert_type(ExplicitAny, Any)
+assert_type(InferredTypeAny, type[Any])
+assert_type(Factory, Any)
+assert_type(Instance, Any)
+assert_type(Stacked, str)
+
+@dataclass(kw_only=True)
+class Data:
+    value: int
+
+assert_type(Data(value=1).value, int)
+
+@missing_decorator  # E: Could not find name `missing_decorator`
+class Invalid: ...
+
+assert_type(Invalid(), Invalid)
+
+def generic_identity[T](cls: type[T]) -> type[T]:
+    return cls
+
+@generic_identity
+class GenericClass[T]:
+    def method(self, value: T) -> T:
+        return value
+
+assert_type(GenericClass[int]().method(1), int)
+"#,
+);
+
+testcase!(
+    test_class_decorator_return_type_applied,
+    r#"
+from typing import reveal_type
+
+def to_int(cls: type) -> int:
+    return 42
+
+@to_int
+class C:
+    ...
+
+reveal_type(C)  # E: revealed type: int
+    "#,
+);
+
+testcase!(
+    test_class_decorator_error_preserves_inheritance,
+    r#"
+from typing import assert_type
+
+@missing_decorator  # E: Could not find name `missing_decorator`
+class Base:
+    def inherited(self) -> int:
+        return 1
+
+class Child(Base): ...
+
+assert_type(Base(), Base)
+assert_type(Child().inherited(), int)
+    "#,
+);
+
+testcase!(
+    test_class_decorator_preserves_generic_class,
+    r#"
+from typing import Callable, Generic, TypeVar, assert_type, overload
+
+T = TypeVar("T")
+
+# This is the overloaded class-preserving signature used by rich.repr.auto.
+@overload
+def auto(cls: type[T]) -> type[T]: ...
+@overload
+def auto(*, angular: bool = False) -> Callable[[type[T]], type[T]]: ...
+def auto(cls=None, *, angular=False):
+    return cls if cls is not None else auto
+
+@auto
+class Bare[T]:
+    def method(self, value: T) -> T:
+        return value
+
+@auto(angular=True)
+class Factory(Generic[T]):
+    def method(self, value: T) -> T:
+        return value
+
+class BareChild(Bare[int]): ...
+class FactoryChild(Factory[str]): ...
+
+assert_type(Bare[int]().method(1), int)
+assert_type(Factory[str]().method("value"), str)
+assert_type(BareChild().method(1), int)
+assert_type(FactoryChild().method("value"), str)
+    "#,
+);
+
+testcase!(
+    test_class_decorator_preserves_returned_type_arguments,
+    r#"
+from typing import Any, Callable, assert_type, cast
+
+def identity[T](cls: type[T]) -> type[T]:
+    return cls
+
+@cast("Callable[[type[Box]], type[Box[int]]]", identity)
+class Box[T]:
+    def __init__(self, value: T) -> None:
+        self.value = value
+
+assert_type(Box(1).value, int)
+Box("bad")  # E: is not assignable to parameter `value` with type `int`
+
+@cast("Callable[[type[Erased]], type[Erased[Any]]]", identity)
+class Erased[T]:
+    def __init__(self, value: T) -> None:
+        self.value = value
+
+assert_type(Erased(1).value, Any)
+    "#,
+);
+
+testcase!(
+    test_class_decorator_generic_noncallable_result,
+    r#"
+from typing import Any, assert_type
+
+def instances[T](cls: type[T]) -> list[T]: ...
+
+@instances
+class Box[T]:
+    value: T
+
+# Class type parameters cannot escape into a non-generic value.
+assert_type(Box[0].value, Any)
+    "#,
+);
+
+testcase!(
+    test_class_decorator_dataclass_preserves_class,
+    r#"
+from dataclasses import dataclass
+from typing import assert_type
+
+@dataclass
+class Bare:
+    value: int
+
+@dataclass(kw_only=True)
+class Called:
+    value: int
+
+assert_type(Bare, type[Bare])
+assert_type(Bare(1), Bare)
+assert_type(Bare(1).value, int)
+assert_type(Called, type[Called])
+assert_type(Called(value=1), Called)
+assert_type(Called(value=1).value, int)
+Called(1)  # E: Expected argument `value` to be passed by name
+    "#,
+);
+
+testcase!(
+    test_class_decorator_dataclass_transform_preserves_class,
+    r#"
+from typing import assert_type, dataclass_transform
+
+@dataclass_transform(kw_only_default=True)
+class Base: ...
+
+class Child(Base):
+    value: int
+
+assert_type(Base, type[Base])
+assert_type(Base(), Base)
+assert_type(Child(value=1), Child)
+assert_type(Child(value=1).value, int)
+Child(1)  # E: Expected argument `value` to be passed by name
+    "#,
+);
+
+testcase!(
+    test_class_decorator_dataclass_transform_metadata_preserves_class,
+    r#"
+from typing import Callable, assert_type, dataclass_transform
+
+# Transform metadata preserves the class even when the signature erases its type.
+@dataclass_transform()
+def model(cls: type[object]) -> type[object]: ...
+
+@dataclass_transform()
+def model_factory(*, kw_only: bool = False) -> Callable[[type[object]], type[object]]: ...
+
+@model
+class Bare:
+    value: int
+
+@model_factory(kw_only=True)
+class Called:
+    value: int
+
+assert_type(Bare, type[Bare])
+assert_type(Bare(1), Bare)
+assert_type(Bare(1).value, int)
+assert_type(Called, type[Called])
+assert_type(Called(value=1), Called)
+assert_type(Called(value=1).value, int)
+Called(1)  # E: Expected argument `value` to be passed by name
+    "#,
+);
+
+testcase!(
+    test_class_decorator_special_function_kinds_preserve_class,
+    r#"
+from functools import total_ordering
+from typing import Protocol, assert_type, final, runtime_checkable
+from typing_extensions import disjoint_base
+
+@final
+class FinalClass:
+    value: int = 1
+
+@disjoint_base
+class DisjointClass:
+    value: int = 1
+
+@runtime_checkable
+class RuntimeProtocol(Protocol):
+    value: int
+
+@total_ordering
+class OrderedClass:
+    def __lt__(self, other: OrderedClass) -> bool: ...
+
+assert_type(FinalClass, type[FinalClass])
+assert_type(FinalClass(), FinalClass)
+assert_type(FinalClass().value, int)
+assert_type(DisjointClass, type[DisjointClass])
+assert_type(DisjointClass(), DisjointClass)
+assert_type(DisjointClass().value, int)
+assert_type(OrderedClass, type[OrderedClass])
+assert_type(OrderedClass(), OrderedClass)
+assert_type(OrderedClass() >= OrderedClass(), bool)
+
+def narrow(value: object) -> None:
+    if isinstance(value, RuntimeProtocol):
+        assert_type(value, RuntimeProtocol)
+        assert_type(value.value, int)
     "#,
 );
 

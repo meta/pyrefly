@@ -2687,6 +2687,16 @@ impl<'a> BindingsBuilder<'a> {
 
         let binding = if forward_to_first_use {
             Binding::ForwardToFirstUse(target_idx)
+        } else if deferred.usage.is_static()
+            && let Some(Binding::ClassDef(class_idx, decorators)) = self.idx_to_binding(target_idx)
+            && decorators.iter().any(|decorator| {
+                self.idx_to_key(*decorator)
+                    .range()
+                    .contains_range(self.idx_to_key(deferred.bound_name_idx).range())
+            })
+        {
+            // Self-references in decorator expressions use the undecorated class to avoid cycles.
+            Binding::ClassDef(*class_idx, Box::new([]))
         } else if let Some(b) = self.idx_to_binding(target_idx)
             && matches!(
                 b,

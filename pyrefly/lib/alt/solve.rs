@@ -76,6 +76,7 @@ use crate::alt::types::class_metadata::ClassMetadata;
 use crate::alt::types::class_metadata::ClassMro;
 use crate::alt::types::class_metadata::ClassSynthesizedFields;
 use crate::alt::types::class_metadata::DataclassKind;
+use crate::alt::types::decorated_function::ClassDecoratorKind;
 use crate::alt::types::decorated_function::Decorator;
 use crate::alt::types::decorated_function::UndecoratedFunction;
 use crate::alt::types::legacy_lookup::LegacyTypeParameterLookup;
@@ -150,6 +151,7 @@ use crate::binding::narrow::NarrowOp;
 use crate::binding::narrow::identifier_and_chain_for_expr;
 use crate::binding::narrow::identifier_and_chain_prefix_for_expr;
 use crate::binding::shape_type::BoundShapeComment;
+use crate::config::base::ClassDecoratorBehavior;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorContext;
@@ -7535,73 +7537,52 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Binding::ClassDef(x, decorators) => match &self.get_idx(*x).0 {
                 None => self.heap.mk_any_implicit(),
                 Some(cls) => {
-                    // A class decorator obscures the class if its own type is `Any`, or if it
-                    // returns an unknown type. Class decorators are not applied below, so the
-                    // result is read from the decorator's signatures rather than by calling it.
-                    // Like for functions, only the first decorator (in application order) that
-                    // makes the result unknown is blamed for it.
-                    let returns_unknown = |callable: &Type| {
-                        let mut signatures = callable.toplevel_callable_signatures().peekable();
-                        signatures.peek().is_some()
-                            && signatures.all(|(sig, _)| sig.ret.has_top_level_implicit_any())
-                    };
+                    let mut ty = self.heap.mk_class_def(cls.dupe());
+                    let behavior = self.solver().config.class_decorator_behavior;
                     let mut obscured = false;
-                    for idx in decorators.iter().rev() {
-                        let decorator_ty = &self.get_idx(*idx).ty;
-                        let decorator_is_any = matches!(
-                            decorator_ty,
-                            Type::Any(AnyStyle::Implicit | AnyStyle::Explicit)
-                        );
-                        if decorator_is_any
-                            || (!obscured
-                                && match decorator_ty {
-                                    Type::ClassType(instance) => self
-                                        .instance_as_dunder_call(instance)
-                                        .is_some_and(|call| returns_unknown(&call)),
-                                    _ => returns_unknown(decorator_ty),
-                                })
+                    for decorator_key in decorators.iter().rev() {
+                        let decorator = self.get_idx(*decorator_key);
+                        if self.bindings().get(*decorator_key).is_class_metadata
+                            || decorator.ty.is_error()
                         {
+                            continue;
+                        }
+                        let range = self.bindings().idx_to_key(*decorator_key).range();
+                        let kind = self.class_decorator_kind(&decorator.ty);
+                        if let ClassDecoratorKind::Untyped { warn } = kind {
+                            if warn && !obscured {
+                                self.error(
+                                    errors,
+                                    range,
+                                    ErrorKind::UntypedClassDecorator,
+                                    format!(
+                                        "Untyped class decorator may modify `{}` in unexpected ways",
+                                        cls.name()
+                                    ),
+                                );
+                            }
                             obscured = true;
-                            self.error(
-                                errors,
-                                self.bindings().idx_to_key(*idx).range(),
-                                ErrorKind::UntypedClassDecorator,
-                                format!(
-                                    "Untyped class decorator may modify `{}` in unexpected ways",
-                                    cls.name()
-                                ),
-                            );
+                        }
+                        match (behavior, kind) {
+                            (ClassDecoratorBehavior::Ignore, ClassDecoratorKind::ErasesClass) => {
+                                ty = self.heap.mk_type_of(self.heap.mk_any_explicit());
+                            }
+                            (ClassDecoratorBehavior::Ignore, _)
+                            | (
+                                ClassDecoratorBehavior::TypedOnly,
+                                ClassDecoratorKind::Untyped { .. },
+                            ) => {}
+                            _ => {
+                                ty = self.apply_class_decorator(
+                                    decorator.ty.clone(),
+                                    ty,
+                                    range,
+                                    errors,
+                                );
+                            }
                         }
                     }
-                    // TODO: analyze the class decorators beyond the unknown-type check above. We don't
-                    // support general type-level analysis of class decorators (the ones we do
-                    // support, like dataclass-related ones, are handled via custom bindings).
-                    //
-                    // Note that all decorators have their own binding so they are still type checked for errors
-                    // *inside* the decorator. The only application-level effect we honor is an
-                    // explicit `type[Any]` return, which intentionally erases the class interface.
-                    //
-                    // We use `.any()` across the chain because if *any* decorator is annotated
-                    // with `-> type[Any]`, all *later* decorators receive whatever class that
-                    // dynamic decorator produces (an `Any`-ish class), so the final output must
-                    // also be treated as dynamic. This is by intent: the escape hatch lets library
-                    // authors signal that the class flows through a decorator a type checker cannot
-                    // model accurately, so the end result is not modelable either.
-                    let erases_class = decorators.iter().any(|idx| {
-                        let decorator_ty = &self.get_idx(*idx).ty;
-                        // Only an explicit `-> type[Any]` return annotation counts; a return
-                        // type inferred from the body (e.g. `return cls` where `cls: type[Any]`)
-                        // does not, since the user did not opt in to erasing the class.
-                        !decorator_ty.toplevel_func_metadata().is_some_and(|meta| meta.flags.is_return_inferred)
-                            && decorator_ty
-                                .toplevel_callable_signatures()
-                                .any(|(c, _)| matches!(&c.ret, Type::Type(inner) if matches!(&**inner, Type::Any(AnyStyle::Explicit))))
-                    });
-                    if erases_class {
-                        self.heap.mk_type_of(self.heap.mk_any_explicit())
-                    } else {
-                        self.heap.mk_class_def(cls.dupe())
-                    }
+                    ty
                 }
             },
             Binding::AnnotatedType(ann, val) => {
