@@ -4042,6 +4042,34 @@ output-format = "omit-errors"
         assert!(toml::from_str::<ConfigFile>("class-decorator-behavior = 'invalid'").is_err());
     }
 
+    #[test]
+    fn test_class_decorator_behavior_presets() {
+        for (preset, expected) in [
+            (Preset::Basic, ClassDecoratorBehavior::Ignore),
+            (Preset::Legacy, ClassDecoratorBehavior::Ignore),
+            (Preset::Default, ClassDecoratorBehavior::TypedOnly),
+            (Preset::Strict, ClassDecoratorBehavior::TypedOnly),
+            (Preset::All, ClassDecoratorBehavior::TypedOnly),
+        ] {
+            for override_behavior in [
+                None,
+                Some(ClassDecoratorBehavior::Ignore),
+                Some(ClassDecoratorBehavior::TypedOnly),
+                Some(ClassDecoratorBehavior::All),
+            ] {
+                let mut config = ConfigFile::default();
+                config.interpreters.skip_interpreter_query = true;
+                config.root.preset = Some(preset);
+                config.root.class_decorator_behavior = override_behavior;
+                assert!(config.configure().is_empty());
+                assert_eq!(
+                    config.class_decorator_behavior(&test_path("src/main.py")),
+                    override_behavior.unwrap_or(expected),
+                );
+            }
+        }
+    }
+
     /// `type-ignore-unknown-tag-behavior` resolves through the same chain as every
     /// other per-file setting, so a build system can supply it. `default_config`
     /// reaches it by the same path once the target config declines to answer.

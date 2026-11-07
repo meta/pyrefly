@@ -1143,7 +1143,7 @@ class Erased: ...
 
 assert_type(Typed, type[Typed])
 assert_type(Untyped, type[Untyped])
-assert_type(Erased, type[Erased])
+assert_type(Erased, type[Any])
 assert_type(Typed(), Typed)
 
 # Special decorators still provide their synthesized class behavior.
@@ -1264,6 +1264,99 @@ def factory(value):
 class C: ...
 
 assert_type(C, Any)
+"#,
+);
+
+testcase!(
+    test_class_decorator_type_return_annotations,
+    TestEnv::new().enable_untyped_class_decorator_error(),
+    r#"
+from typing import Any, assert_type
+
+def bare(cls: type) -> type:
+    return cls
+
+def bare_union(cls: type) -> type | None:
+    return cls
+
+def explicit(cls: type) -> type[Any]:
+    return cls
+
+def explicit_union(cls: type) -> type[Any] | None:
+    return cls
+
+@bare  # E: Untyped class decorator
+class Bare:
+    x: int = 1
+
+@bare_union  # E: Untyped class decorator
+class BareUnion:
+    x: int = 1
+
+@explicit
+class Explicit:
+    x: int = 1
+
+@explicit_union
+class ExplicitUnion: ...
+
+assert_type(Bare, type[Bare])
+assert_type(Bare().x, int)
+assert_type(BareUnion, type[BareUnion])
+assert_type(BareUnion().x, int)
+assert_type(Explicit, type[Any])
+assert_type(ExplicitUnion, type[Any] | None)
+"#,
+);
+
+testcase!(
+    test_class_decorator_overloads_and_union_classification,
+    TestEnv::new().enable_untyped_class_decorator_error(),
+    r#"
+from typing import Any, assert_type, overload
+
+@overload
+def deco(cls: type[int]) -> Any: ...
+@overload
+def deco(cls: type) -> int: ...
+def deco(cls: Any) -> Any: ...
+
+@deco
+class Typed: ...
+
+assert_type(Typed, int)
+
+def factory(value):
+    if value:
+        return lambda cls: cls
+    return value
+
+@factory(True)  # E: Untyped class decorator
+class Untyped:
+    x: int = 1
+
+assert_type(Untyped, type[Untyped])
+assert_type(Untyped().x, int)
+"#,
+);
+
+testcase!(
+    test_class_decorator_self_references_in_annotations,
+    r#"
+from typing import Callable, assert_type, cast
+
+def to_wrapper(cls: type) -> Callable[[], int]: ...
+
+@to_wrapper
+class C:
+    other: "C"  # E: Expected a type form
+    def clone(self) -> "C": ...  # E: Expected a type form
+
+@cast("Callable[[type[D]], int]", lambda cls: 1)
+class D: ...
+
+assert_type(C, Callable[[], int])
+assert_type(D, int)
 "#,
 );
 

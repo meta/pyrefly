@@ -58,6 +58,7 @@ use crate::alt::call::CallStyle;
 use crate::alt::call::CallTarget;
 use crate::alt::callable::CallArg;
 use crate::alt::singledispatch::DispatcherDef;
+use crate::alt::types::decorated_function::ClassDecoratorKind;
 use crate::alt::types::decorated_function::Decorator;
 use crate::alt::types::decorated_function::SpecialDecorator;
 use crate::alt::types::decorated_function::UndecoratedFunction;
@@ -74,7 +75,6 @@ use crate::binding::binding::KeyDecorator;
 use crate::binding::binding::KeyLegacyTypeParam;
 use crate::binding::binding::KeyUndecoratedFunction;
 use crate::binding::classmethod::MethodReceiverKind;
-use crate::config::base::ClassDecoratorBehavior;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::TypeCheckContext;
@@ -2293,6 +2293,65 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.singledispatch_dispatcher_as_callback(widened, &application.original_decoratee)
     }
 
+    /// Classify once for both the untyped warning and decorator application.
+    pub(crate) fn class_decorator_kind(&self, decorator: &Type) -> ClassDecoratorKind {
+        let mut untyped = false;
+        let mut warn = false;
+        for member in decorator.clone().into_unions() {
+            let instance_call = match &member {
+                Type::ClassType(instance) => self.instance_as_dunder_call(instance),
+                _ => None,
+            };
+            let callable = instance_call.as_ref().unwrap_or(&member);
+            if let Type::Any(style) = callable {
+                untyped = true;
+                warn |= *style != AnyStyle::Error;
+                continue;
+            }
+            let inferred = callable
+                .toplevel_func_metadata()
+                .is_some_and(|meta| meta.flags.is_return_inferred);
+            let mut signatures = callable.toplevel_callable_signatures().peekable();
+            // A union is untyped if any member is untyped. An overload is untyped
+            // only if every signature has an untyped return.
+            let mut member_untyped = signatures.peek().is_some();
+            let mut member_warn = false;
+            for (signature, _) in signatures {
+                let mut return_untyped = false;
+                for ret in signature.ret.clone().into_unions() {
+                    match ret {
+                        Type::Any(style) => {
+                            return_untyped = true;
+                            member_warn |= style == AnyStyle::Implicit;
+                        }
+                        Type::Type(inner) => match &*inner {
+                            Type::Any(AnyStyle::Explicit) if !inferred => {
+                                // An explicit erasure takes precedence over untyped alternatives.
+                                return ClassDecoratorKind::ErasesClass;
+                            }
+                            Type::Any(style) => {
+                                return_untyped = true;
+                                member_warn |= *style != AnyStyle::Error;
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+                member_untyped &= return_untyped;
+            }
+            if member_untyped {
+                untyped = true;
+                warn |= member_warn;
+            }
+        }
+        if untyped {
+            ClassDecoratorKind::Untyped { warn }
+        } else {
+            ClassDecoratorKind::Typed
+        }
+    }
+
     pub(crate) fn apply_class_decorator(
         &self,
         decorator: Type,
@@ -2301,65 +2360,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) -> Type {
         if self.stdlib.is_bootstrapping() {
+            // Decorator inference depends on the builtins that bootstrapping is still constructing.
             return decoratee;
         }
-        if self.solver().config.class_decorator_behavior == ClassDecoratorBehavior::TypedOnly {
-            // Any untyped union member must preserve the class type.
-            let preserves_class = decorator.clone().into_unions().into_iter().any(|member| {
-                let instance_call = match &member {
-                    Type::ClassType(instance) => self.instance_as_dunder_call(instance),
-                    _ => None,
-                };
-                let callable = instance_call.as_ref().unwrap_or(&member);
-                matches!(callable, Type::Any(_))
-                    || callable
-                        .toplevel_callable_signatures()
-                        .any(|(signature, _)| {
-                            matches!(&signature.ret, Type::Any(_))
-                                || signature.ret.has_top_level_implicit_any()
-                                || callable.toplevel_func_metadata().is_some_and(|meta| {
-                                    meta.flags.is_return_inferred
-                                        && matches!(
-                                            &signature.ret,
-                                            Type::Type(inner) if matches!(
-                                                &**inner,
-                                                Type::Any(AnyStyle::Explicit)
-                                            )
-                                        )
-                                })
-                        })
-            });
-            if preserves_class {
-                return decoratee;
-            }
-        }
-        let preserves_class = match &decorator {
-            Type::KwCall(call) => {
-                call.func_metadata
-                    .flags
-                    .dataclass_transform_metadata
-                    .is_some()
-                    || call.has_function_kind(FunctionKind::Dataclass)
-                    || call.has_function_kind(FunctionKind::DataclassTransform)
-                    || call.has_function_kind(FunctionKind::DisjointBase)
-                    || call.has_function_kind(FunctionKind::Final)
-                    || call.has_function_kind(FunctionKind::RuntimeCheckable)
-                    || call.has_function_kind(FunctionKind::TotalOrdering)
-            }
-            _ => decorator.toplevel_func_metadata().is_some_and(|meta| {
-                meta.flags.dataclass_transform_metadata.is_some()
-                    || matches!(
-                        meta.kind,
-                        FunctionKind::Dataclass
-                            | FunctionKind::DataclassTransform
-                            | FunctionKind::DisjointBase
-                            | FunctionKind::Final
-                            | FunctionKind::RuntimeCheckable
-                            | FunctionKind::TotalOrdering
-                    )
-            }),
+        let metadata = match &decorator {
+            Type::KwCall(call) => Some(&call.func_metadata),
+            _ => decorator.toplevel_func_metadata(),
         };
-        if preserves_class {
+        if metadata.is_some_and(|meta| {
+            meta.flags.dataclass_transform_metadata.is_some()
+                || matches!(
+                    meta.kind,
+                    FunctionKind::Dataclass
+                        | FunctionKind::DataclassTransform
+                        | FunctionKind::DisjointBase
+                        | FunctionKind::Final
+                        | FunctionKind::RuntimeCheckable
+                        | FunctionKind::TotalOrdering
+                )
+        }) {
             return decoratee;
         }
         let call_target =

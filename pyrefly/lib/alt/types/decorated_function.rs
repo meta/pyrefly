@@ -56,6 +56,17 @@ pub struct Decorator {
     pub deprecation: Option<Deprecation>,
 }
 
+/// Whether a class decorator can be tracked or explicitly erases the class type.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ClassDecoratorKind {
+    Typed,
+    /// Explicit `Any` returns disable tracking without an implicit-unknown warning.
+    Untyped {
+        warn: bool,
+    },
+    ErasesClass,
+}
+
 impl Display for Decorator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Decorator[{}]", self.ty)

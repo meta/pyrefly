@@ -65,7 +65,7 @@ pub enum InferReturnTypes {
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum ClassDecoratorBehavior {
-    /// Preserve the class regardless of decorator return types.
+    /// Ignore inferred decorator results, but honor explicit `type[Any]` return annotations.
     Ignore,
     /// Apply typed decorators and preserve the class for untyped decorators.
     #[default]
@@ -198,6 +198,7 @@ impl Preset {
                     check_unannotated_defs: Some(false),
                     infer_return_types: Some(InferReturnTypes::Never),
                     infer_with_first_use: Some(false),
+                    class_decorator_behavior: Some(ClassDecoratorBehavior::Ignore),
                     enabled_ignores: Some(Tool::all()),
                     ..Default::default()
                 }
@@ -217,6 +218,7 @@ impl Preset {
                     check_unannotated_defs: Some(false),
                     infer_return_types: Some(InferReturnTypes::Never),
                     legacy_overload_expansion: Some(true),
+                    class_decorator_behavior: Some(ClassDecoratorBehavior::Ignore),
                     type_ignore_unknown_tag_behavior: Some(TypeIgnoreUnknownTagBehavior::Suppress),
                     ..Default::default()
                 }
