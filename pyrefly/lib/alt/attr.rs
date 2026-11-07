@@ -323,6 +323,22 @@ pub enum AttrNarrowing {
     IfAssignable(Type),
 }
 
+/// Result of checking an assignment to an attribute.
+#[derive(Debug, Clone)]
+pub struct AttrAssignResult {
+    /// The type narrowed for flow sensitivity (None for properties/descriptors/setattr).
+    pub narrowed: Option<Type>,
+    /// The type to record for hover and getComputedType on the assignment target.
+    pub target_type: Option<Type>,
+}
+
+/// Accessor types for an asymmetric property or descriptor during assignment hover.
+#[derive(Debug, Clone)]
+pub struct PropertyAccessorTypes {
+    pub getter_type: Type,
+    pub setter_type: Type,
+}
+
 #[derive(Debug)]
 enum InternalError {
     /// An internal error caused by `as_attribute_base` being partial.
@@ -975,7 +991,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         allow_assign_to_final: bool,
         range: TextRange,
         errors: &ErrorCollector,
-    ) -> Option<Type> {
+    ) -> AttrAssignResult {
         let ty;
         let got = match got {
             ExprOrBinding::Expr(value) => TypeOrExpr::Expr(value),
@@ -994,6 +1010,74 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             None,
             "attr::check_assign_to_attribute_and_infer_narrow",
         )
+    }
+
+    /// If `attr_name` on `base_type` resolves to an asymmetric property or descriptor,
+    /// returns the getter and setter types for hover display.
+    pub fn property_accessor_types_for_assignment(
+        &self,
+        base_type: Type,
+        attr_name: &Name,
+    ) -> Option<PropertyAccessorTypes> {
+        let attr_base = self.as_attribute_base(base_type)?;
+        let (found, _, _) = self.lookup_attr(attr_base, attr_name).decompose();
+        for (attr, _) in found {
+            match attr {
+                Attribute::ClassAttribute(ClassAttribute::Property(getter, Some(setter), _)) => {
+                    let getter_types = getter
+                        .toplevel_callable_signatures()
+                        .map(|(c, _)| c.ret.clone())
+                        .collect::<Vec<_>>();
+                    let getter_type = if getter_types.is_empty() {
+                        self.heap.mk_any_implicit()
+                    } else {
+                        self.unions(getter_types)
+                    };
+                    let Some(setter_type) = self.get_property_setter_value(&setter) else {
+                        continue;
+                    };
+                    if !self.is_subset_eq(&getter_type, &setter_type)
+                        || !self.is_subset_eq(&setter_type, &getter_type)
+                    {
+                        return Some(PropertyAccessorTypes {
+                            getter_type,
+                            setter_type,
+                        });
+                    }
+                }
+                Attribute::ClassAttribute(ClassAttribute::Descriptor(desc, _)) if desc.setter => {
+                    let errors = self.error_collector();
+                    let Some(setter) = self.resolve_descriptor_setter(attr_name, &desc, &errors)
+                    else {
+                        continue;
+                    };
+                    let setter_type = self.get_descriptor_setter_value(&setter);
+                    let getter_types = if let Some(getter) =
+                        self.resolve_descriptor_getter(attr_name, &desc, &errors)
+                    {
+                        getter
+                            .toplevel_callable_signatures()
+                            .map(|(c, _)| c.ret.clone())
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![]
+                    };
+                    if !getter_types.is_empty() {
+                        let getter_type = self.unions(getter_types);
+                        if !self.is_subset_eq(&getter_type, &setter_type)
+                            || !self.is_subset_eq(&setter_type, &getter_type)
+                        {
+                            return Some(PropertyAccessorTypes {
+                                getter_type,
+                                setter_type,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Resolves an assignment to an attribute that was not found, which falls back to
@@ -1103,7 +1187,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
         todo_ctx: &str,
-    ) -> Option<Type> {
+    ) -> AttrAssignResult {
         let setters = self.resolve_attr_setters(
             base,
             attr_name,
@@ -1125,7 +1209,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         };
         // Map over every setter before deciding whether to narrow, so that `got` is checked
         // against all of them.
-        let narrowed_types = setters.into_map(|setter| match setter? {
+        let results = setters.into_map(|setter| match setter? {
             AttrSetter::Declared { ty, narrow } => {
                 // A value matching any branch of an `Overloaded` attribute can be assigned to it.
                 let ty = if let Type::Overloaded(branches) = &ty
@@ -1154,13 +1238,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         got.clone()
                     }
                 };
-                match narrow {
-                    AttrNarrowing::Always => Some(got_ty),
+                let narrow_ty = match narrow {
+                    AttrNarrowing::Always => Some(got_ty.clone()),
                     AttrNarrowing::Never => None,
-                    AttrNarrowing::IfAssignable(read_type) => {
-                        self.is_subset_eq(&got_ty, &read_type).then_some(got_ty)
-                    }
-                }
+                    AttrNarrowing::IfAssignable(read_type) => self
+                        .is_subset_eq(&got_ty, &read_type)
+                        .then_some(got_ty.clone()),
+                };
+                Some((narrow_ty, Some(got_ty)))
             }
             AttrSetter::SetAttr(setattr_ty) => {
                 self.call_setattr(
@@ -1171,13 +1256,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     errors,
                     context,
                 );
-                None
+                Some((None, None))
             }
             AttrSetter::PropertySetter(setter) => {
+                let target_type = self.get_property_setter_value(&setter);
                 self.call_property_setter(setter, CallArg::arg(got), range, errors, context);
-                None
+                Some((None, target_type))
             }
             AttrSetter::DescriptorSetter(setter, base) => {
+                let target_type = Some(self.get_descriptor_setter_value(&setter));
                 self.call_descriptor_setter(
                     setter,
                     base,
@@ -1186,14 +1273,31 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     errors,
                     context,
                 );
-                None
+                Some((None, target_type))
             }
         });
+
+        let Some(unzipped) = results.into_iter().collect::<Option<Vec<_>>>() else {
+            return AttrAssignResult {
+                narrowed: None,
+                target_type: None,
+            };
+        };
+        let (narrowed_list, target_list): (Vec<_>, Vec<_>) = unzipped.into_iter().unzip();
         // We narrow only if every member of the base has a narrowable declared attribute.
-        narrowed_types
+        let narrowed = narrowed_list
             .into_iter()
             .collect::<Option<Vec<_>>>()
-            .map(|tys| self.unions(tys))
+            .map(|tys| self.unions(tys));
+        let target_type = target_list
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .map(|tys| self.unions(tys));
+
+        AttrAssignResult {
+            narrowed,
+            target_type,
+        }
     }
 
     /// Resolves how to check an assignment to `attr_name` on each member of `base`. A `None`

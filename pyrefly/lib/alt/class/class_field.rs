@@ -293,9 +293,9 @@ pub struct Descriptor {
     /// Does `__get__` exist on the descriptor?  It is typically a `BoundMethod` although
     /// it is possible for a user to erroneously define a `__get__` with any type, including a
     /// non-callable one.
-    getter: bool,
+    pub(crate) getter: bool,
     /// Does `__set__` exist on the descriptor? Similar considerations to `getter` apply.
-    setter: bool,
+    pub(crate) setter: bool,
     /// Does `__delete__` exist on the descriptor?
     deleter: bool,
     /// Whether a decorated method defines this descriptor.
@@ -6782,7 +6782,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         (read_ty, setter_val)
     }
 
-    fn resolve_descriptor_getter(
+    pub(crate) fn resolve_descriptor_getter(
         &self,
         attr_name: &Name,
         x: &Descriptor,
@@ -6828,7 +6828,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    fn resolve_descriptor_setter(
+    pub(crate) fn resolve_descriptor_setter(
         &self,
         attr_name: &Name,
         x: &Descriptor,
@@ -6855,15 +6855,39 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Given a `__set__(self, instance, value)` function, gets the type of `value`.
-    fn get_descriptor_setter_value(&self, setter: &Type) -> Type {
+    pub(crate) fn get_descriptor_setter_value(&self, setter: &Type) -> Type {
         let values = setter
             .toplevel_callable_signatures()
-            .filter_map(|(callable, _)| callable.get_positional_param(2).cloned())
+            .filter_map(|(callable, _)| {
+                callable
+                    .get_positional_param(2)
+                    .or_else(|| callable.get_positional_param(1))
+                    .cloned()
+            })
             .collect::<Vec<_>>();
         if values.is_empty() {
             self.heap.mk_any_implicit()
         } else {
             self.unions(values)
+        }
+    }
+
+    /// Given a property setter, gets the type of the value being assigned.
+    pub(crate) fn get_property_setter_value(&self, setter: &Type) -> Option<Type> {
+        let values = setter
+            .toplevel_callable_signatures()
+            .filter_map(|(callable, _)| {
+                if callable.get_positional_param(1).is_some() {
+                    callable.get_positional_param(1).cloned()
+                } else {
+                    callable.get_positional_param(0).cloned()
+                }
+            })
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            None
+        } else {
+            Some(self.unions(values))
         }
     }
 
