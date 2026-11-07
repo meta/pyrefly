@@ -76,6 +76,7 @@ use crate::alt::types::class_metadata::ClassMetadata;
 use crate::alt::types::class_metadata::ClassMro;
 use crate::alt::types::class_metadata::ClassSynthesizedFields;
 use crate::alt::types::class_metadata::DataclassKind;
+use crate::alt::types::decorated_function::ClassDecoratorKind;
 use crate::alt::types::decorated_function::Decorator;
 use crate::alt::types::decorated_function::UndecoratedFunction;
 use crate::alt::types::legacy_lookup::LegacyTypeParameterLookup;
@@ -7536,59 +7537,50 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Binding::ClassDef(x, decorators) => match &self.get_idx(*x).0 {
                 None => self.heap.mk_any_implicit(),
                 Some(cls) => {
-                    // A class decorator obscures the class if its own type is `Any`, or if it
-                    // returns an unknown type. Read the return signatures before applying the
-                    // decorators so this diagnostic does not depend on application results.
-                    // Like for functions, only the first decorator (in application order) that
-                    // makes the result unknown is blamed for it.
-                    let returns_unknown = |callable: &Type| {
-                        let mut signatures = callable.toplevel_callable_signatures().peekable();
-                        signatures.peek().is_some()
-                            && signatures.all(|(sig, _)| sig.ret.has_top_level_implicit_any())
-                    };
-                    let mut obscured = false;
-                    for idx in decorators.iter().rev() {
-                        let decorator_ty = &self.get_idx(*idx).ty;
-                        let decorator_is_any = matches!(
-                            decorator_ty,
-                            Type::Any(AnyStyle::Implicit | AnyStyle::Explicit)
-                        );
-                        if decorator_is_any
-                            || (!obscured
-                                && match decorator_ty {
-                                    Type::ClassType(instance) => self
-                                        .instance_as_dunder_call(instance)
-                                        .is_some_and(|call| returns_unknown(&call)),
-                                    _ => returns_unknown(decorator_ty),
-                                })
-                        {
-                            obscured = true;
-                            self.error(
-                                errors,
-                                self.bindings().idx_to_key(*idx).range(),
-                                ErrorKind::UntypedClassDecorator,
-                                format!(
-                                    "Untyped class decorator may modify `{}` in unexpected ways",
-                                    cls.name()
-                                ),
-                            );
-                        }
-                    }
                     let mut ty = self.heap.mk_class_def(cls.dupe());
                     let behavior = self.solver().config.class_decorator_behavior;
+                    let mut obscured = false;
                     for decorator_key in decorators.iter().rev() {
-                        if behavior == ClassDecoratorBehavior::Ignore
-                            || self.bindings().get(*decorator_key).is_class_metadata
-                        {
-                            continue;
-                        }
                         let decorator = self.get_idx(*decorator_key);
-                        // An invalid decorator must not erase the class during error recovery.
-                        if matches!(&decorator.ty, Type::Any(AnyStyle::Error)) {
+                        if self.bindings().get(*decorator_key).is_class_metadata
+                            || decorator.ty.is_error()
+                        {
                             continue;
                         }
                         let range = self.bindings().idx_to_key(*decorator_key).range();
-                        ty = self.apply_class_decorator(decorator.ty.clone(), ty, range, errors);
+                        let kind = self.class_decorator_kind(&decorator.ty);
+                        if let ClassDecoratorKind::Untyped { warn } = kind {
+                            if warn && !obscured {
+                                self.error(
+                                    errors,
+                                    range,
+                                    ErrorKind::UntypedClassDecorator,
+                                    format!(
+                                        "Untyped class decorator may modify `{}` in unexpected ways",
+                                        cls.name()
+                                    ),
+                                );
+                            }
+                            obscured = true;
+                        }
+                        match (behavior, kind) {
+                            (ClassDecoratorBehavior::Ignore, ClassDecoratorKind::ErasesClass) => {
+                                ty = self.heap.mk_type_of(self.heap.mk_any_explicit());
+                            }
+                            (ClassDecoratorBehavior::Ignore, _)
+                            | (
+                                ClassDecoratorBehavior::TypedOnly,
+                                ClassDecoratorKind::Untyped { .. },
+                            ) => {}
+                            _ => {
+                                ty = self.apply_class_decorator(
+                                    decorator.ty.clone(),
+                                    ty,
+                                    range,
+                                    errors,
+                                );
+                            }
+                        }
                     }
                     ty
                 }

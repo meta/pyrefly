@@ -73,7 +73,7 @@
           "default": true
         },
         "class-decorator-behavior": {
-          "description": "How class decorators affect class types. Ignore all decorator return types, ignore untyped decorators, or apply all decorator return types.",
+          "description": "How class decorators affect class types. Ignore decorator results except explicit type[Any] erasure, apply only typed decorators, or apply all decorators. Defaults to ignore in basic and legacy presets, and typed-only otherwise.",
           "type": "string",
           "enum": ["ignore", "typed-only", "all"],
           "default": "typed-only"
