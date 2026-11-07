@@ -131,7 +131,10 @@ jobs:
           path: pyrefly/dist
 
   linux:
-    runs-on: ubuntu-latest
+    # The ubuntu-latest (26.04) image ships Docker 29.4.2, whose seccomp profile
+    # blocks 32-bit socket calls, so the i686 container has no network:
+    # https://github.com/actions/runner-images/issues/14790
+    runs-on: ${{ matrix.target == 'i686-unknown-linux-gnu' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       matrix:
         target:
