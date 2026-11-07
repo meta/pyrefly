@@ -2307,6 +2307,27 @@ def two_args(a: int, b: int) -> int:
 two_args(a=1, b=2, c=3)
 ```
 
+## unexpected-never
+
+Default severity: `warn`
+
+Pyrefly emits this warning when a function's body cannot reach its end even if
+`return`, `raise`, and failing `assert` statements count as reaching it. The
+function must have no explicit return, and its return annotation must be
+different from `Never`, `NoReturn`, and `None`.
+
+```python
+def f() -> int:  # Function declared to return `int` but can never return [unexpected-never]
+    while True:
+        pass
+```
+
+This check uses syntax, not inferred `Never` types. Calls to functions that
+never return, exception-only bodies, and failing assertions do not trigger
+the warning. Pyrefly also excludes generators and bodies whose divergence
+depends on the configured Python version or platform. The declared return
+type remains the type visible to callers.
+
 ## unexpected-positional-argument
 
 A positional argument was passed for a keyword-only parameter.

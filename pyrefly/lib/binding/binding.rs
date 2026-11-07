@@ -1301,14 +1301,15 @@ pub enum BindingExpect {
         existing: Idx<KeyAnnotation>,
         name: Name,
     },
-    /// Validate a function implementation's implicit return without making the
-    /// published return type depend on the function body.
+    /// Validate a function's return annotation without making the published
+    /// return type depend on the function body.
     ValidateImplicitReturn {
         annotation: Idx<KeyAnnotation>,
         implicit_return: Idx<Key>,
         is_async: bool,
         is_generator: bool,
         has_explicit_return: bool,
+        diverges_without_exit: bool,
     },
     /// Expression used in a boolean context (`bool()`, `if`, or `while`)
     Bool(Expr),
