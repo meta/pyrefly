@@ -326,3 +326,19 @@ MISSING = Sentinel("MISSING", z := 1)  # E: Sentinel only takes one positional a
 assert_type(z, Literal[1])
 "#,
 );
+
+testcase!(
+    test_sentinel_with_type_qualifier,
+    r#"
+from typing import ClassVar, Final
+from typing_extensions import Sentinel
+
+class Bar:
+    MARKER: ClassVar = Sentinel("MARKER")
+    _value: int | MARKER
+
+class Baz:
+    MARKER: Final = Sentinel("MARKER")
+    _value: int | MARKER
+    "#,
+);

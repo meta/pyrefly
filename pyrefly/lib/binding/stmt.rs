@@ -589,6 +589,16 @@ impl<'a> BindingsBuilder<'a> {
         })
     }
 
+    /// Whether the annotation is a bare `Final` or `ClassVar`, which carries no type of its own.
+    fn is_bare_final_or_class_var(&self, annotation: &Expr) -> bool {
+        self.as_special_export(annotation) == Some(SpecialExport::Final)
+            || match annotation {
+                Expr::Name(n) => n.id == "ClassVar",
+                Expr::Attribute(a) => a.attr.id == "ClassVar",
+                _ => false,
+            }
+    }
+
     fn assign_sentinel(&mut self, name: &ExprName, call: &mut ExprCall) {
         // Sentinels are static types only; skip them for first-usage type inference.
         let static_type_usage = &mut Usage::StaticTypeInformation {
@@ -1212,6 +1222,20 @@ impl<'a> BindingsBuilder<'a> {
                                         _ => unreachable!("filtered by outer match"),
                                     }
                                 }
+                                return;
+                            }
+                            // Only bare qualifiers (`Final`, `ClassVar`) leave the type to the
+                            // sentinel itself, so that it can be used in type expressions.
+                            SpecialExport::Sentinel | SpecialExport::BuiltinsSentinel
+                                if self.is_bare_final_or_class_var(&x.annotation) =>
+                            {
+                                let ident = Ast::expr_name_identifier(name.clone());
+                                self.bind_annotation(
+                                    &ident,
+                                    &mut x.annotation,
+                                    AnnAssignHasValue::Yes,
+                                );
+                                self.assign_sentinel(&name, call);
                                 return;
                             }
                             _ => {}
