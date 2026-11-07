@@ -803,3 +803,30 @@ References:
         report.trim(),
     );
 }
+
+#[test]
+fn references_to_normalized_identifier() {
+    // Python applies NFKC normalization to identifiers, so `𝒞` and `C` are the same name.
+    let code = r#"
+CCC = 1
+# ^
+print(𝒞𝒞𝒞)
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+        get_test_report(state, handle, position, true)
+    });
+    assert_eq!(
+        r#"
+# main.py
+2 | CCC = 1
+      ^
+References:
+2 | CCC = 1
+    ^^^
+4 | print(𝒞𝒞𝒞)
+          ^^^
+"#
+        .trim(),
+        report.trim(),
+    );
+}

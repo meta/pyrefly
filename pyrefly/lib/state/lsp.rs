@@ -381,6 +381,18 @@ fn definition_matcher(
     }
 }
 
+/// Parses a forward-reference string such as `"list[Foo]"` into the expression the binder
+/// built from it. Only strings whose source text is exactly their value are parsed: escapes
+/// or implicit concatenation shift the ranges of the names parsed from a string.
+fn exact_forward_ref(literal: &ExprStringLiteral, source: &str) -> Option<Expr> {
+    let part = literal.as_single_part_string()?;
+    if &source[part.content_range()] == part.as_str() {
+        Ast::parse_type_literal(literal, source).ok()
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum DefinitionMetadata {
     Attribute,
@@ -1077,14 +1089,14 @@ impl<'a> Transaction<'a> {
     }
 
     /// The string literal in `covering_nodes` parsed as a forward reference, such as `list[Foo]`
-    /// from `x: "list[Foo]"`. It is parsed with `Ast::parse_type_literal`, as in the binder, so
-    /// its nodes carry the ranges under which keys and types were recorded.
+    /// from `x: "list[Foo]"`. It is parsed as in the binder, so its nodes carry the ranges under
+    /// which keys and types were recorded.
     fn forward_ref_at(&self, handle: &Handle, covering_nodes: &[AnyNodeRef]) -> Option<Expr> {
         let literal = covering_nodes.iter().find_map(|node| match node {
             AnyNodeRef::ExprStringLiteral(literal) => Some(*literal),
             _ => None,
         })?;
-        Ast::parse_type_literal(literal, self.get_module_info(handle)?.contents()).ok()
+        exact_forward_ref(literal, self.get_module_info(handle)?.contents())
     }
 
     /// Like `forward_ref_at`, but only for strings the binder treated as types. The binder only
@@ -5100,15 +5112,8 @@ impl<'a> Transaction<'a> {
     ) -> Option<Vec<TextRange>> {
         let mut references = Vec::new();
         if let Some(mod_module) = self.get_ast(handle) {
-            let module_info = self.get_module_info(handle);
             let is_valid_use = |x: &ExprName| {
-                // Escapes or implicit concatenation shift the ranges of names parsed from a
-                // forward-reference string, so a name counts only where its range covers its
-                // own text in the source.
                 if x.id() == expected_name
-                    && module_info
-                        .as_ref()
-                        .is_some_and(|info| info.code_at(x.range()) == expected_name.as_str())
                     && let Some((def_handle, Export { location, .. })) = self
                         .find_export_for_key(
                             handle,
@@ -5128,11 +5133,12 @@ impl<'a> Transaction<'a> {
                     false
                 }
             };
+            let module_info = self.get_module_info(handle);
             // Only strings that mention the name can hold a forward reference to it.
             let forward_ref = |x: &ExprStringLiteral| {
                 let source = module_info.as_ref()?.contents();
                 if x.value.to_str().contains(expected_name.as_str()) {
-                    Ast::parse_type_literal(x, source).ok()
+                    exact_forward_ref(x, source)
                 } else {
                     None
                 }

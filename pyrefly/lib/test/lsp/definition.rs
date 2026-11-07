@@ -5269,3 +5269,30 @@ Definition Result: None
         report.trim(),
     );
 }
+
+#[test]
+fn goto_def_ignores_quoted_annotations_with_escapes() {
+    // Escapes shift the ranges of the names parsed from a string, so it stays plain text.
+    let code = r#"
+class Model: ...
+class Other: ...
+
+a: "\x4dodel | Other"
+#            ^ ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+5 | a: "\x4dodel | Other"
+                 ^
+Definition Result: None
+
+5 | a: "\x4dodel | Other"
+                   ^
+Definition Result: None
+"#
+        .trim(),
+        report.trim(),
+    );
+}
