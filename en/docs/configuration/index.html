@@ -38,9 +38,9 @@
 <script src="https://buttons.github.io/buttons.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/2.0.0/clipboard.min.js"></script>
 <script src="/js/code-block-buttons.js"></script>
-<script src="/js/gtag-fragment-tracking.js"></script><link rel="stylesheet" href="/assets/css/styles.8e9df58b.css">
-<script src="/assets/js/runtime~main.7e89e805.js" defer="defer"></script>
-<script src="/assets/js/main.db3977d6.js" defer="defer"></script>
+<script src="/js/gtag-fragment-tracking.js"></script><link rel="stylesheet" href="/assets/css/styles.519bb944.css">
+<script src="/assets/js/runtime~main.95e42945.js" defer="defer"></script>
+<script src="/assets/js/main.2becc4c1.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
 <script>!function(){function t(t){document.documentElement.setAttribute("data-theme",t)}var e=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();t(null!==e?e:"dark")}(),function(){try{const n=new URLSearchParams(window.location.search).entries();for(var[t,e]of n)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script>
@@ -202,7 +202,8 @@ or remove <code>project-excludes</code>.</p>
 <li>Default: <code>[&quot;**/node_modules&quot;, &quot;**/__pycache__&quot;, &quot;**/venv/**&quot;, &quot;**/.[!/.]*/**&quot;]</code> +
 anything in your <code>site-packages-path</code> (even from the interpreter) unless it would
 exclude items in your <a href="#search-path"><code>search-path</code></a>.</li>
-<li>Flag equivalent: <code>--project-excludes</code></li>
+<li>Flag equivalent: <code>--project-excludes</code>, which replaces <code>project-excludes</code>.
+<code>--extend-project-excludes</code> adds patterns to <code>project-excludes</code> instead.</li>
 <li>Equivalent configs: <code>exclude</code> in Pyright and mypy</li>
 <li>Notes:<!-- -->
 <ul>
@@ -262,7 +263,8 @@ project setting when unset.</p>
 <li>Type: table with <code>includes</code> and <code>excludes</code> keys, each a list of
 <a href="#filesystem-globbing">filesystem glob patterns</a></li>
 <li>Default: <code>project-includes</code> / <code>project-excludes</code></li>
-<li>Flag equivalent: none, though <code>--project-excludes</code> takes precedence over <code>coverage.excludes</code></li>
+<li>Flag equivalent: none, though <code>--project-excludes</code> takes precedence over <code>coverage.excludes</code>,
+and <code>--extend-project-excludes</code> adds to <code>coverage.excludes</code></li>
 <li>Notes:<!-- -->
 <ul>
 <li>Like the project globs, these are not consulted when passing in <code>FILES...</code>.</li>

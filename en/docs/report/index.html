@@ -38,9 +38,9 @@
 <script src="https://buttons.github.io/buttons.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/2.0.0/clipboard.min.js"></script>
 <script src="/js/code-block-buttons.js"></script>
-<script src="/js/gtag-fragment-tracking.js"></script><link rel="stylesheet" href="/assets/css/styles.8e9df58b.css">
-<script src="/assets/js/runtime~main.7e89e805.js" defer="defer"></script>
-<script src="/assets/js/main.db3977d6.js" defer="defer"></script>
+<script src="/js/gtag-fragment-tracking.js"></script><link rel="stylesheet" href="/assets/css/styles.519bb944.css">
+<script src="/assets/js/runtime~main.95e42945.js" defer="defer"></script>
+<script src="/assets/js/main.2becc4c1.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
 <script>!function(){function t(t){document.documentElement.setAttribute("data-theme",t)}var e=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();t(null!==e?e:"dark")}(),function(){try{const n=new URLSearchParams(window.location.search).entries();for(var[t,e]of n)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script>
@@ -66,6 +66,15 @@ annotation).</p>
 <code>self</code>/<code>cls</code> are not typable, overloads are merged, and <code>.py</code> files are skipped when their <code>.pyi</code>
 stub is also analyzed (<code>--prefer-stubs=false</code> disables this). With <code>--public-only</code>, only symbols
 reachable from public modules via re-export chains count: the library&#x27;s public API.</p>
+<p>A simple unannotated assignment to a module-level variable only counts as a typable if the value is
+a call, since a call hides the type at the assignment site. Three kinds of call are exempt:</p>
+<ul>
+<li>Some builtin constructors, like <code>list()</code>.</li>
+<li>Explicitly specialized classes, like <code>Spam[int]()</code>.</li>
+<li>Anything that returns a <code>logging.Logger</code> or <code>re.Pattern</code>, since those are conventionally left
+unannotated.</li>
+</ul>
+<p>A variable assigned in both branches of an <code>if</code>/<code>else</code> counts whatever the values.</p>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="cython">Cython<a href="#cython" class="hash-link" aria-label="Direct link to Cython" title="Direct link to Cython">​</a></h3>
 <p>In <a href="https://cython.readthedocs.io/en/latest/src/tutorial/pure.html" target="_blank" rel="noopener noreferrer">Cython pure Python mode</a>,
 C-level declarations don&#x27;t exist at runtime, so they aren&#x27;t counted as typables:</p>
@@ -84,7 +93,7 @@ one), except dynamic attributes of a type that declares or inherits <code>__dict
 <li><code>.pxd</code> files aren&#x27;t read, so <code>public</code> and <code>readonly</code> fields aren&#x27;t counted.</li>
 <li>Keyword declarations such as <code>cython.declare(x=cython.int)</code> aren&#x27;t recognized.</li>
 </ul></div></div>
-<h2 class="anchor anchorWithStickyNavbar_LWe7" id="checking-coverage-against-a-threshold">Checking coverage against a threshold<a href="#checking-coverage-against-a-threshold" class="hash-link" aria-label="Direct link to Checking coverage against a threshold" title="Direct link to Checking coverage against a threshold">  ​</a></h2>
+<h2 class="anchor anchorWithStickyNavbar_LWe7" id="checking-coverage-against-a-threshold">Checking coverage against a threshold<a href="#checking-coverage-against-a-threshold" class="hash-link" aria-label="Direct link to Checking coverage against a threshold" title="Direct link to Checking coverage against a threshold">​</a></h2>
 <div class="language-sh codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-sh codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">pyrefly coverage check robot/ --fail-under 60</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
 <p>It reports every offending symbol in the same style as <code>pyrefly check</code>, as <code>coverage-missing</code>
 (no annotations at all) or <code>coverage-partial</code> (only some), followed by a one-line summary:</p>

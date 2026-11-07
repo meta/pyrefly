@@ -38,9 +38,9 @@
 <script src="https://buttons.github.io/buttons.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/2.0.0/clipboard.min.js"></script>
 <script src="/js/code-block-buttons.js"></script>
-<script src="/js/gtag-fragment-tracking.js"></script><link rel="stylesheet" href="/assets/css/styles.8e9df58b.css">
-<script src="/assets/js/runtime~main.7e89e805.js" defer="defer"></script>
-<script src="/assets/js/main.db3977d6.js" defer="defer"></script>
+<script src="/js/gtag-fragment-tracking.js"></script><link rel="stylesheet" href="/assets/css/styles.519bb944.css">
+<script src="/assets/js/runtime~main.95e42945.js" defer="defer"></script>
+<script src="/assets/js/main.2becc4c1.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
 <script>!function(){function t(t){document.documentElement.setAttribute("data-theme",t)}var e=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();t(null!==e?e:"dark")}(),function(){try{const n=new URLSearchParams(window.location.search).entries();for(var[t,e]of n)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script>
@@ -62,10 +62,9 @@ The website wires it into the sandbox under <code>website/src/sandbox/</code>.</
 <ul>
 <li>Linux or macOS (website WASM workflows are not supported on native Windows;
 use WSL).</li>
-<li><a href="https://rustup.rs/" target="_blank" rel="noopener noreferrer">Rust</a> with <code>wasm32-unknown-unknown</code>.</li>
-<li><a href="https://rustwasm.github.io/wasm-pack/installer/" target="_blank" rel="noopener noreferrer"><code>wasm-pack</code></a> and
-<a href="https://github.com/WebAssembly/binaryen" target="_blank" rel="noopener noreferrer"><code>wasm-opt</code></a> (<code>wasm-opt</code> must be on
-<code>PATH</code>; <code>wasm-pack</code>’s bundled optimizer is disabled because it is outdated).</li>
+<li><a href="https://rustup.rs/" target="_blank" rel="noopener noreferrer">Rust</a> with <code>wasm32-wasip1</code>. With <code>rustup</code>, <code>build.sh</code>
+adds the target.</li>
+<li><a href="https://github.com/WebAssembly/binaryen" target="_blank" rel="noopener noreferrer"><code>wasm-opt</code></a> on <code>PATH</code>.</li>
 <li>Clang / LLVM. On macOS: <code>brew install llvm</code>. On Fedora/CentOS:
 <code>sudo dnf install clang</code>. If zstd fails to compile on a Mac, put Homebrew
 LLVM first on <code>PATH</code> (<code>llvm-config --version</code> should resolve).</li>
@@ -74,10 +73,11 @@ LLVM first on <code>PATH</code> (<code>llvm-config --version</code> should resol
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="build-the-crate">Build the crate<a href="#build-the-crate" class="hash-link" aria-label="Direct link to Build the crate" title="Direct link to Build the crate">​</a></h3>
 <p>From the repository root:</p>
 <div class="language-bash codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-bash codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token plain">cd pyrefly_wasm</span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">./build.sh</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
-<p>That runs <code>wasm-pack</code> for the <code>web</code> target and then <code>wasm-opt -Os</code>. Pass
-<code>--BUILD_FOR_TEST</code> to target <code>nodejs</code> (used by website Jest tests).</p>
-<p>Output lands in <code>pyrefly_wasm/target/</code> (<code>pyrefly_wasm.js</code> and
-<code>pyrefly_wasm_bg.wasm</code>). Copy those into the sandbox (or test) paths the
+<p>That runs <code>cargo build --release --target wasm32-wasip1</code> and then
+<code>wasm-opt -Os</code>. The same module works in the browser and in Node.js, which the
+website Jest tests use.</p>
+<p>Output lands in <code>pyrefly_wasm/target/</code> (<code>pyrefly_wasm.js</code>, the JavaScript
+bindings, and <code>pyrefly_wasm_bg.wasm.opt</code>, the module). Copy those into the sandbox (or test) paths the
 website README describes when you need a local rebuild.</p>
 <h3 class="anchor anchorWithStickyNavbar_LWe7" id="test-changes-in-the-sandbox">Test changes in the sandbox<a href="#test-changes-in-the-sandbox" class="hash-link" aria-label="Direct link to Test changes in the sandbox" title="Direct link to Test changes in the sandbox">​</a></h3>
 <p>See <a href="https://github.com/facebook/pyrefly/blob/main/website/README.md" target="_blank" rel="noopener noreferrer"><code>website/README.md</code></a>.
@@ -87,14 +87,16 @@ In short:</p>
 WASM. The sandbox is the primary consumer of <code>pyrefly_wasm</code>, so exercise the
 affected sandbox behavior after changing its implementation or API.</p>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="current-api">Current API<a href="#current-api" class="hash-link" aria-label="Direct link to Current API" title="Direct link to Current API">​</a></h2>
-<p><code>pyrefly_wasm</code> exports a <code>State</code> class (<code>new State(version)</code>) wrapping the
-in-tree playground. The exports in
+<p><code>pyrefly_wasm.js</code> exports <code>init(source)</code>, which loads the module, and a <code>State</code>
+class (<code>new State(version)</code>) wrapping the in-tree playground. <code>source</code> is a URL,
+a <code>Response</code>, the module bytes, or a compiled <code>WebAssembly.Module</code>; the default
+is <code>pyrefly_wasm_bg.wasm</code> next to <code>pyrefly_wasm.js</code>. The exports in
 <a href="https://github.com/facebook/pyrefly/blob/main/pyrefly_wasm/lib.rs" target="_blank" rel="noopener noreferrer"><code>pyrefly_wasm/lib.rs</code></a>
 are the authoritative API reference. The current JavaScript names are:</p>
-<table><thead><tr><th>Method</th><th>Role</th></tr></thead><tbody><tr><td><code>updateSandboxFiles(files, forceUpdate)</code></td><td>Replace the virtual project (<code>Record&lt;string, string&gt;</code> of path → source). Returns an optional error string.</td></tr><tr><td><code>updateSingleFile(filename, content)</code></td><td>Update one file.</td></tr><tr><td><code>setActiveFile(filename)</code></td><td>Choose which file later queries apply to.</td></tr><tr><td><code>getErrors()</code></td><td>Type errors for the project.</td></tr><tr><td><code>hover(line, column)</code></td><td>Hover payload at a 0-based position, or <code>null</code>.</td></tr><tr><td><code>gotoDefinition(line, column)</code></td><td>Definition ranges, or <code>null</code>.</td></tr><tr><td><code>autoComplete(line, column)</code></td><td>Completions.</td></tr><tr><td><code>inlayHint(callArgumentNames)</code></td><td>Inlay hints.</td></tr><tr><td><code>semanticTokens(range)</code></td><td>Semantic tokens for an optional range.</td></tr><tr><td><code>semanticTokensLegend()</code></td><td>Token types/modifiers legend.</td></tr></tbody></table>
-<p>Positions match the playground (<code>line</code> / <code>column</code> as <code>i32</code>). Payloads are
-serde-serialized into JS; there is no TypeScript <code>.d.ts</code> from <code>wasm-pack</code>
-(<code>--no-typescript</code>). The sandbox keeps a local
+<table><thead><tr><th>Method</th><th>Role</th></tr></thead><tbody><tr><td><code>updateSandboxFiles(files, forceUpdate)</code></td><td>Replace the virtual project (<code>Record&lt;string, string&gt;</code> of path → source). Returns an optional error string.</td></tr><tr><td><code>updateSingleFile(filename, content)</code></td><td>Update one file.</td></tr><tr><td><code>setActiveFile(filename)</code></td><td>Choose which file later queries apply to.</td></tr><tr><td><code>getErrors()</code></td><td>Type errors for the project.</td></tr><tr><td><code>hover(line, column)</code></td><td>Hover payload at a 0-based position, or <code>null</code>.</td></tr><tr><td><code>gotoDefinition(line, column, withContents)</code></td><td>Definitions, each with a <code>filename</code> and a <code>range</code>, or <code>null</code>. With <code>withContents</code>, a definition in a bundled stub also has the stub&#x27;s text.</td></tr><tr><td><code>autoComplete(line, column)</code></td><td>Completions.</td></tr><tr><td><code>inlayHint(callArgumentNames)</code></td><td>Inlay hints.</td></tr><tr><td><code>semanticTokens(range)</code></td><td>Semantic tokens for an optional range.</td></tr><tr><td><code>semanticTokensLegend()</code></td><td>Token types/modifiers legend.</td></tr><tr><td><code>free()</code></td><td>Drop the playground now, instead of when the <code>State</code> is garbage-collected.</td></tr></tbody></table>
+<p>Positions match the playground (<code>line</code> / <code>column</code> as <code>i32</code>). Each call passes a
+JSON request to the module and returns its JSON response; there is no
+TypeScript <code>.d.ts</code>. The sandbox keeps a local
 <a href="https://github.com/facebook/pyrefly/blob/main/website/src/sandbox/Sandbox.tsx" target="_blank" rel="noopener noreferrer"><code>PyreflyState</code></a>
 interface.</p>
 <p>Some native features are compiled out with

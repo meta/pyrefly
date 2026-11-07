@@ -2282,7 +2282,8 @@ or remove `project-excludes`.
 - Default: `["**/node_modules", "**/__pycache__", "**/venv/**", "**/.[!/.]*/**"]` +
   anything in your `site-packages-path` (even from the interpreter) unless it would
   exclude items in your [`search-path`](#search-path).
-- Flag equivalent: `--project-excludes`
+- Flag equivalent: `--project-excludes`, which replaces `project-excludes`.
+  `--extend-project-excludes` adds patterns to `project-excludes` instead.
 - Equivalent configs: `exclude` in Pyright and mypy
 - Notes:
     - While not explicitly part of `project-excludes`, there are several patterns that are
@@ -2339,7 +2340,8 @@ project setting when unset.
 - Type: table with `includes` and `excludes` keys, each a list of
   [filesystem glob patterns](#filesystem-globbing)
 - Default: `project-includes` / `project-excludes`
-- Flag equivalent: none, though `--project-excludes` takes precedence over `coverage.excludes`
+- Flag equivalent: none, though `--project-excludes` takes precedence over `coverage.excludes`,
+  and `--extend-project-excludes` adds to `coverage.excludes`
 - Notes:
     - Like the project globs, these are not consulted when passing in `FILES...`.
     - `coverage.excludes` gets the same default excludes appended as `project-excludes` does,
@@ -7373,6 +7375,25 @@ def two_args(a: int, b: int) -> int:
 two_args(a=1, b=2, c=3)
 ```
 
+## unexpected-never
+
+Default severity: `warn`
+
+Pyrefly emits this warning when a function can never return, contrary to its
+annotation. This is a syntactic check on the last statement in the function, so
+calls to other functions that never return don't count, and things like
+infinite loops earlier in the body trigger an `unreachable` hint instead.
+Functions that end in `raise` or a failing `assert` are excluded from this
+check, as well as generators, functions annotated as returning `None`,
+`NoReturn`, or `Never`, and functions that fail to return only in some
+configurations.
+
+```python
+def f() -> int:  # Function declared to return `int` but can never return [unexpected-never]
+    while True:
+        pass
+```
+
 ## unexpected-positional-argument
 
 A positional argument was passed for a keyword-only parameter.
@@ -12399,6 +12420,16 @@ Only public symbols count: names without a leading underscore, plus anything in 
 stub is also analyzed (`--prefer-stubs=false` disables this). With `--public-only`, only symbols
 reachable from public modules via re-export chains count: the library's public API.
 
+A simple unannotated assignment to a module-level variable only counts as a typable if the value is
+a call, since a call hides the type at the assignment site. Three kinds of call are exempt:
+
+- Some builtin constructors, like `list()`.
+- Explicitly specialized classes, like `Spam[int]()`.
+- Anything that returns a `logging.Logger` or `re.Pattern`, since those are conventionally left
+  unannotated.
+
+A variable assigned in both branches of an `if`/`else` counts whatever the values.
+
 ### Cython
 
 In [Cython pure Python mode](https://cython.readthedocs.io/en/latest/src/tutorial/pure.html),
@@ -14712,9 +14743,9 @@ are scoped to the declaration; other names resolve through ordinary annotation
 scopes. Imports used only in comments may need an unused-import suppression for
 external linters.
 
-The supported positions are parameter annotations, return annotations, and
-annotated assignments. A multiline annotation can carry separate comments on
-its type components. The comment applies to the outermost complete component
+The supported positions are parameter annotations, return annotations,
+annotated assignments, and class bases. A multiline annotation can carry separate
+comments on its type components. The comment applies to the outermost complete component
 ending on its line; a following comma is a separator, not part of the type.
 For example:
 
@@ -14743,6 +14774,35 @@ components, but do not expand type aliases or select into union operators,
 literal values, annotation metadata, existing `Shaped` wrappers, or list-valued,
 starred, and ellipsis type arguments. Prefix comments for local annotations and IDE
 navigation inside comment payloads are not supported.
+
+Class bases use the same payloads and component selectors:
+
+```python
+# shapes: M, N
+class Base: ...
+
+# shapes: K
+class Derived(
+    Base,  # shaped: K, K + 1
+): ...
+
+class Fixed(
+    Base,  # shaped: 4, 8
+): ...
+```
+
+`Derived[3]` inherits `Base[3, 4]`; `Fixed` inherits `Base[4, 8]` without
+becoming shape-generic. A comma-separated payload supplies separate type
+arguments, whereas `[M, N]` supplies one shape-tuple argument. Written ordinary
+arguments are preserved: `Base[T]  # shaped: M, N` appends the two dimensions.
+A subclass's declaration does not implicitly specialize its bases by matching
+names. Put each base on its own comment-bearing line. Comments may refine a
+base's type arguments, but cannot replace the whole base or annotate class
+keywords such as `metaclass=`. Dynamic bases and the special `Generic`,
+`Protocol`, `TypedDict`, and `NamedTuple` base forms are not supported comment
+targets. Tuple bases use component comments or selectors rather than the
+whole-carrier shape shorthand. Refining an alias's arguments must preserve the
+nominal base class. Comments have no effect on runtime inheritance or validation.
 
 Without the header, shape comments have no effect and produce no diagnostics.
 With it, malformed or unattached directives are reported as invalid annotations,
@@ -15193,10 +15253,9 @@ The website wires it into the sandbox under `website/src/sandbox/`.
 
 - Linux or macOS (website WASM workflows are not supported on native Windows;
   use WSL).
-- [Rust](https://rustup.rs/) with `wasm32-unknown-unknown`.
-- [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/) and
-  [`wasm-opt`](https://github.com/WebAssembly/binaryen) (`wasm-opt` must be on
-  `PATH`; `wasm-pack`’s bundled optimizer is disabled because it is outdated).
+- [Rust](https://rustup.rs/) with `wasm32-wasip1`. With `rustup`, `build.sh`
+  adds the target.
+- [`wasm-opt`](https://github.com/WebAssembly/binaryen) on `PATH`.
 - Clang / LLVM. On macOS: `brew install llvm`. On Fedora/CentOS:
   `sudo dnf install clang`. If zstd fails to compile on a Mac, put Homebrew
   LLVM first on `PATH` (`llvm-config --version` should resolve).
@@ -15211,11 +15270,12 @@ cd pyrefly_wasm
 ./build.sh
 ```
 
-That runs `wasm-pack` for the `web` target and then `wasm-opt -Os`. Pass
-`--BUILD_FOR_TEST` to target `nodejs` (used by website Jest tests).
+That runs `cargo build --release --target wasm32-wasip1` and then
+`wasm-opt -Os`. The same module works in the browser and in Node.js, which the
+website Jest tests use.
 
-Output lands in `pyrefly_wasm/target/` (`pyrefly_wasm.js` and
-`pyrefly_wasm_bg.wasm`). Copy those into the sandbox (or test) paths the
+Output lands in `pyrefly_wasm/target/` (`pyrefly_wasm.js`, the JavaScript
+bindings, and `pyrefly_wasm_bg.wasm.opt`, the module). Copy those into the sandbox (or test) paths the
 website README describes when you need a local rebuild.
 
 ### Test changes in the sandbox
@@ -15235,8 +15295,10 @@ affected sandbox behavior after changing its implementation or API.
 
 ## Current API
 
-`pyrefly_wasm` exports a `State` class (`new State(version)`) wrapping the
-in-tree playground. The exports in
+`pyrefly_wasm.js` exports `init(source)`, which loads the module, and a `State`
+class (`new State(version)`) wrapping the in-tree playground. `source` is a URL,
+a `Response`, the module bytes, or a compiled `WebAssembly.Module`; the default
+is `pyrefly_wasm_bg.wasm` next to `pyrefly_wasm.js`. The exports in
 [`pyrefly_wasm/lib.rs`](https://github.com/facebook/pyrefly/blob/main/pyrefly_wasm/lib.rs)
 are the authoritative API reference. The current JavaScript names are:
 
@@ -15247,15 +15309,16 @@ are the authoritative API reference. The current JavaScript names are:
 | `setActiveFile(filename)` | Choose which file later queries apply to. |
 | `getErrors()` | Type errors for the project. |
 | `hover(line, column)` | Hover payload at a 0-based position, or `null`. |
-| `gotoDefinition(line, column)` | Definition ranges, or `null`. |
+| `gotoDefinition(line, column, withContents)` | Definitions, each with a `filename` and a `range`, or `null`. With `withContents`, a definition in a bundled stub also has the stub's text. |
 | `autoComplete(line, column)` | Completions. |
 | `inlayHint(callArgumentNames)` | Inlay hints. |
 | `semanticTokens(range)` | Semantic tokens for an optional range. |
 | `semanticTokensLegend()` | Token types/modifiers legend. |
+| `free()` | Drop the playground now, instead of when the `State` is garbage-collected. |
 
-Positions match the playground (`line` / `column` as `i32`). Payloads are
-serde-serialized into JS; there is no TypeScript `.d.ts` from `wasm-pack`
-(`--no-typescript`). The sandbox keeps a local
+Positions match the playground (`line` / `column` as `i32`). Each call passes a
+JSON request to the module and returns its JSON response; there is no
+TypeScript `.d.ts`. The sandbox keeps a local
 [`PyreflyState`](https://github.com/facebook/pyrefly/blob/main/website/src/sandbox/Sandbox.tsx)
 interface.
 
