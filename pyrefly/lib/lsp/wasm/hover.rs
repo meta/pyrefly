@@ -537,11 +537,8 @@ fn docstring_for_class_object_type(
         },
         _ => return None,
     };
-    let definition_handle = Handle::new(
-        qname.module_name(),
-        qname.module_path().dupe(),
-        handle.sys_info().dupe(),
-    );
+    let definition_handle =
+        transaction.imported_handle(handle, qname.module_name(), qname.module_path().dupe());
     let module = transaction.get_module_info(&definition_handle)?;
     // Exported classes retain their docstring range after their AST is evicted.
     let range = if let Some(ExportLocation::ThisModule(export)) =

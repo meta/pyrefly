@@ -123,6 +123,14 @@ resolve imports.
    See [Environment Autoconfiguration](configuration.mdx#environment-autoconfiguration)
    for more information on finding interpreters.
 
+A module found through the site package path is part of the importer's environment. When
+files use different configurations, as in the language server or `pyrefly check` with file
+arguments, the module's own configuration may have a different site package path. So may
+the default configuration, which a module outside any configuration uses. Pyrefly then
+resolves the module's imports through the importer's site package path, as Python does at
+runtime. See
+[IDE configuration selection](./IDE.mdx#configuration-selection) for an example.
+
 ## Stub Files vs Source Files
 
 A
@@ -200,6 +208,10 @@ environment. However, since resolving module locations through an import hook
 operate without code execution. Consequently, when an editable install is configured to use import hooks, Pyrefly
 will be unable to automatically locate and analyze the corresponding source files, resulting in incomplete type checking and
 code analysis.
+
+A project installed in editable mode resolves its imports in the environment it is installed
+into, even if it has its own configuration and virtual environment. See
+[Site Packages Path](#site-packages-path).
 
 Setuptools build system uses import hooks by default for editable installations. To ensure compatibility between
 setuptools-based editable installs and Pyrefly, setuptools must be configured to use path-based `.pth` files instead.

@@ -2015,7 +2015,11 @@ impl<'a> Transaction<'a> {
     /// ranges read from current class metadata: a `Class` keeps the `Module` from when its type
     /// was solved, and a module is not rechecked when a dependency only moves code around.
     fn class_module(&self, handle: &Handle, cls: &Class) -> Option<Module> {
-        self.get_module_info(&handle.for_module(cls.module_name(), cls.module_path().dupe()))
+        self.get_module_info(&self.imported_handle(
+            handle,
+            cls.module_name(),
+            cls.module_path().dupe(),
+        ))
     }
 
     /// The references in `references_by_module` that point at the definition at `definition_range`
@@ -3637,7 +3641,8 @@ impl<'a> Transaction<'a> {
         };
 
         if let Some(func_id) = metadata.kind.as_func_def_id() {
-            let def_handle = handle.for_module(
+            let def_handle = self.imported_handle(
+                handle,
                 func_id.qname.module_name(),
                 func_id.qname.module_path().dupe(),
             );
