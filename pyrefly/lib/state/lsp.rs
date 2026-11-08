@@ -3014,6 +3014,30 @@ impl<'a> Transaction<'a> {
         None
     }
 
+    /// Return the instance attribute type named by a literal `__slots__` entry.
+    pub(crate) fn dunder_slots_entry_type(
+        &self,
+        handle: &Handle,
+        ast: &ModModule,
+        position: TextSize,
+    ) -> Option<Type> {
+        let (class, name) = dunder_slots_entry(&Ast::locate_node(ast, position))?;
+        let answers = self.get_answers(handle)?;
+        let idx = answers
+            .bindings()
+            .key_to_idx_hashed_opt(Hashed::new(&Key::Definition(class)))?;
+        let Type::ClassDef(class) = answers.get_type_at(idx)? else {
+            return None;
+        };
+        self.ad_hoc_solve(handle, "dunder_slots_entry_type", |solver| {
+            solver
+                .completions(solver.instantiate(&class), Some(&name), true, false)
+                .into_iter()
+                .find(|attribute| attribute.name == name)
+                .and_then(|attribute| attribute.ty)
+        })?
+    }
+
     fn find_definition_for_keyword_argument(
         &self,
         handle: &Handle,

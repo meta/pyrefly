@@ -1402,8 +1402,9 @@ fn resolve_hovered_type(
     ast: Option<&ModModule>,
     position: TextSize,
 ) -> Option<Type> {
-    let mut type_ = transaction
-        .subscript_operator_type_at(handle, position)
+    let mut type_ = ast
+        .and_then(|ast| transaction.dunder_slots_entry_type(handle, ast, position))
+        .or_else(|| transaction.subscript_operator_type_at(handle, position))
         .or_else(|| transaction.get_type_at(handle, position))
         .or_else(|| transaction.operator_type_at(handle, position))?;
 
