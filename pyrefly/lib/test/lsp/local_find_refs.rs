@@ -5,13 +5,22 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
+use std::slice;
+
 use itertools::Itertools;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
+use pyrefly_python::module::TextRangeWithModule;
+use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
+use tempfile::TempDir;
 
+use crate::state::lsp::FindPreference;
 use crate::state::lsp::ReferenceOptions;
+use crate::state::require::Require;
 use crate::state::state::State;
+use crate::test::util::TestEnv;
 use crate::test::util::code_frame_of_source_at_range;
 use crate::test::util::get_batched_lsp_operations_report;
 
@@ -233,8 +242,6 @@ text = "foo"
     );
 }
 
-// BUG: References omit __slots__ entries.
-// Both cursors should find the slots entry, assignment, and read of self.foo (issue #4344).
 #[test]
 fn dunder_slots_entries_are_attribute_references() {
     let code = r#"
@@ -258,6 +265,8 @@ class C:
 3 |     __slots__ = ("foo",)
                        ^
 References:
+3 |     __slots__ = ("foo",)
+                      ^^^
 7 |         self.foo = 1
                  ^^^
 11 |         return self.foo
@@ -266,6 +275,8 @@ References:
 7 |         self.foo = 1
                  ^
 References:
+3 |     __slots__ = ("foo",)
+                      ^^^
 7 |         self.foo = 1
                  ^^^
 11 |         return self.foo
@@ -274,6 +285,161 @@ References:
         .trim(),
         report.trim(),
     );
+}
+
+#[test]
+fn dunder_slots_references_use_string_contents() {
+    for name in ["foo", "café", "变量"] {
+        for assignment in [
+            "__slots__ = \"foo\"",
+            "__slots__ = (\"foo\",)",
+            "__slots__ = [r'foo']",
+            "__slots__ = {\"foo\": \"Field documentation.\"}",
+            "__slots__: tuple[str, ...] = (\"\"\"foo\"\"\",)",
+            "names = __slots__ = (\"foo\",)",
+        ] {
+            let assignment = assignment.replace("foo", name);
+            let code = format!(
+                "class C:\n    {assignment}\n    {name}: int\n    def read(self) -> int:\n        return self.{name}\n    text = \"{name}\"\n"
+            );
+            let (state, handle) = TestEnv::one("main", &code).to_state();
+            let handle = handle("main");
+            let transaction = state.transaction();
+            let module = transaction.get_module_info(&handle).unwrap();
+            for position in [
+                code.find(name).unwrap(),
+                code.find(&format!("self.{name}")).unwrap() + "self.".len(),
+            ] {
+                for include_declaration in [false, true] {
+                    let references = transaction.find_local_references(
+                        &handle,
+                        TextSize::try_from(position).unwrap(),
+                        ReferenceOptions::all(include_declaration),
+                    );
+                    let expected_lines = if include_declaration {
+                        vec![1, 2, 4]
+                    } else {
+                        vec![1, 4]
+                    };
+                    assert_eq!(
+                        references
+                            .iter()
+                            .map(|range| module.to_lsp_range(*range).start.line)
+                            .collect::<Vec<_>>(),
+                        expected_lines,
+                        "code: {code}",
+                    );
+                    for range in references {
+                        assert_eq!(module.code_at(range), name);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dunder_slots_references_respect_class_identity() {
+    let code = r#"
+class C:
+    __slots__ = {"foo": "foo"}
+    text = "foo"
+    def __init__(self) -> None:
+        __slots__ = ("foo",)
+        self.foo = 1
+    def read(self) -> int:
+        return self.foo
+
+    class Inner:
+        __slots__ = ("foo",)
+        foo: str
+
+class Other:
+    __slots__ = ("foo",)
+    foo: str
+"#;
+    let (state, handle) = TestEnv::one("main", code).to_state();
+    let handle = handle("main");
+    let expected = [
+        code.find("\"foo\"").unwrap() + 1,
+        code.find("self.foo").unwrap() + "self.".len(),
+        code.rfind("self.foo").unwrap() + "self.".len(),
+    ]
+    .into_iter()
+    .map(|start| TextRange::at(TextSize::try_from(start).unwrap(), TextSize::of("foo")))
+    .collect::<Vec<_>>();
+    for range in &expected {
+        assert_eq!(
+            state.transaction().find_local_references(
+                &handle,
+                range.start(),
+                ReferenceOptions::all(true),
+            ),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn dunder_slots_global_references_in_indexed_files() {
+    let root = TempDir::new().unwrap();
+    let mut env = TestEnv::new()
+        .with_default_require_level(Require::Indexing)
+        .with_run_require(Require::Indexing);
+    let base = "class Base:\n    foo: int\n";
+    for (name, code) in [
+        ("base", base),
+        (
+            "child",
+            "from base import Base\nclass Child(Base):\n    __slots__ = (\"foo\",)\n",
+        ),
+        (
+            "unrelated",
+            "from base import Base\nclass Other:\n    __slots__ = (\"foo\",)\n    foo: str\n",
+        ),
+        ("plain", "from base import Base\nclass Plain(Base): pass\n"),
+    ] {
+        let path = root.path().join(format!("{name}.py"));
+        fs::write(&path, code).unwrap();
+        env.add_real_path(name, path);
+    }
+    let (state, handle) = env.to_state();
+    let base_handle = handle("base");
+    let child_handle = handle("child");
+    let mut transaction = state.transaction();
+    assert!(transaction.get_ast(&child_handle).is_none());
+    assert!(transaction.get_answers(&child_handle).is_none());
+    transaction.run(slice::from_ref(&base_handle), Require::Everything, None);
+    let definitions = transaction
+        .find_definition(
+            &base_handle,
+            TextSize::try_from(base.find("foo").unwrap()).unwrap(),
+            FindPreference::default(),
+        )
+        .unwrap();
+    let definition = definitions.first();
+    let mut references = transaction
+        .find_global_references_from_definition(
+            *base_handle.sys_info(),
+            definition.metadata.clone(),
+            TextRangeWithModule::new(definition.module.clone(), definition.definition_range),
+            ReferenceOptions::all(true),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|(module, ranges)| {
+            for range in &ranges {
+                assert_eq!(module.code_at(*range), "foo");
+            }
+            (module.name().to_string(), ranges.len())
+        })
+        .collect::<Vec<_>>();
+    references.sort();
+    assert_eq!(
+        references,
+        vec![("base".to_owned(), 1), ("child".to_owned(), 1)]
+    );
+    assert!(transaction.get_answers(&handle("plain")).is_none());
 }
 
 #[test]
