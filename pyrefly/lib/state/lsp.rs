@@ -383,6 +383,56 @@ fn definition_matcher(
     }
 }
 
+/// Identify a literal slot name and the class definition that owns it.
+fn dunder_slots_entry(covering_nodes: &[AnyNodeRef]) -> Option<(ShortIdentifier, Name)> {
+    let literal = covering_nodes.iter().find_map(|node| match node {
+        AnyNodeRef::ExprStringLiteral(literal) => Some(literal),
+        _ => None,
+    })?;
+    let value = covering_nodes.iter().find_map(|node| match node {
+        AnyNodeRef::StmtAssign(assign)
+            if assign
+                .targets
+                .iter()
+                .any(|target| matches!(target, Expr::Name(name) if name.id == *dunder::SLOTS)) =>
+        {
+            Some(assign.value.as_ref())
+        }
+        AnyNodeRef::StmtAnnAssign(assign)
+            if matches!(assign.target.as_ref(), Expr::Name(name) if name.id == *dunder::SLOTS) =>
+        {
+            assign.value.as_deref()
+        }
+        _ => None,
+    })?;
+    let is_entry = match value {
+        Expr::StringLiteral(value) => value.range() == literal.range(),
+        Expr::Tuple(tuple) => tuple.elts.iter().any(|elt| elt.range() == literal.range()),
+        Expr::List(list) => list.elts.iter().any(|elt| elt.range() == literal.range()),
+        Expr::Dict(dict) => dict.items.iter().any(|item| {
+            item.key
+                .as_ref()
+                .is_some_and(|key| key.range() == literal.range())
+        }),
+        _ => false,
+    };
+    if !is_entry {
+        return None;
+    }
+    let Some(AnyNodeRef::StmtClassDef(class)) = covering_nodes.iter().find(|node| {
+        matches!(
+            node,
+            AnyNodeRef::StmtClassDef(_) | AnyNodeRef::StmtFunctionDef(_)
+        )
+    }) else {
+        return None;
+    };
+    Some((
+        ShortIdentifier::new(&class.name),
+        Name::new(literal.value.to_str()),
+    ))
+}
+
 /// Parses a forward-reference string such as `"list[Foo]"` into the expression the binder
 /// built from it. Only strings whose source text is exactly their value are parsed: escapes
 /// or implicit concatenation shift the ranges of the names parsed from a string.
@@ -3119,6 +3169,17 @@ impl<'a> Transaction<'a> {
                 self.find_definition_for_dunder_all_entry(handle, position, preference)
             {
                 return Ok(vec1![definition]);
+            }
+            if let Some((class, name)) = dunder_slots_entry(&covering_nodes)
+                && let Some(answers) = self.get_answers(handle)
+                && let Some(idx) = answers
+                    .bindings()
+                    .key_to_idx_hashed_opt(Hashed::new(&Key::Definition(class)))
+                && let Some(class_type) = answers.get_type_at(idx)
+            {
+                return self.find_attribute_definition_for_base_type(
+                    handle, preference, class_type, &name,
+                );
             }
         }
 
