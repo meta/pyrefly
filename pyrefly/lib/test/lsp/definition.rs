@@ -3155,6 +3155,29 @@ Definition Result:
     );
 }
 
+#[test]
+fn dunder_all_remove_entry_definition_test() {
+    let code = r#"
+foo = 1
+__all__ = ["foo"]
+__all__.remove("foo")
+#                ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+4 | __all__.remove("foo")
+                     ^
+Definition Result:
+2 | foo = 1
+    ^^^
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
 // BUG: A __slots__ entry has no definition target. It should resolve to self.foo (issue #4344).
 #[test]
 fn dunder_slots_entry_definition_test() {
