@@ -198,6 +198,32 @@ impl PatternNarrowOps {
 }
 
 impl<'a> BindingsBuilder<'a> {
+    /// Project the narrowed tuple before pattern captures can rebind its original names.
+    fn narrow_tuple_match_subject(
+        &mut self,
+        match_subject: &MatchSubject,
+        subject_idx: Idx<Key>,
+        range: TextRange,
+    ) {
+        if let MatchSubject::Tuple(subjects) = match_subject {
+            let mut ops = NarrowOps::new();
+            for (index, subject) in subjects.iter().enumerate() {
+                if let Some(subject) = subject {
+                    let op = NarrowOp::Atomic(
+                        None,
+                        AtomicNarrowOp::MatchSubjectElement(subject_idx, index),
+                    );
+                    ops.and_for_subject(subject, op.for_subject(subject), range);
+                }
+            }
+            self.bind_narrow_ops(
+                &ops,
+                NarrowUseLocation::Span(range),
+                &Usage::NonPinningValue(None),
+            );
+        }
+    }
+
     /// The atomic narrow op a leaf sub-pattern imposes on its element, if any.
     ///
     /// Used to build a subject narrowed by every sibling element constraint, so non-narrowing
@@ -304,6 +330,7 @@ impl<'a> BindingsBuilder<'a> {
                     .subject_narrow_op(NarrowOp::Atomic(None, AtomicNarrowOp::Is(value)), p.range())
             }
             Pattern::MatchAs(p) => {
+                self.narrow_tuple_match_subject(&match_subject, subject_idx, p.range());
                 // If there's no name for this pattern, refine the variable being matched
                 // If there is a new name, refine that instead
                 let original_subject = match_subject.clone();
@@ -431,6 +458,7 @@ impl<'a> BindingsBuilder<'a> {
                         NarrowUseLocation::Span(x.range()),
                     ),
                 );
+                self.narrow_tuple_match_subject(&match_subject, subject_idx, x.range());
                 if let Some(subject) = match_subject.as_single() {
                     // Add the combined narrow op to the returned narrow_ops for
                     // scope-level narrowing propagation across cases.
