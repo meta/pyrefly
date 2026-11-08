@@ -2890,7 +2890,9 @@ pub(crate) struct TransactionHandle<'a> {
     /// Keyed by ModulePath (cheap to hash — discriminant + interned u64) rather
     /// than Handle, since ModulePath uniquely identifies the target module within
     /// a TransactionHandle (module name is derivable, sys_info is invariant).
-    deferred_deps: RefCell<FxHashMap<ModulePath, (Handle, ModuleDeps)>>,
+    /// Each entry also remembers the target module, so that repeated lookups of
+    /// the same module skip the transaction's shared module map.
+    deferred_deps: RefCell<FxHashMap<ModulePath, DeferredDeps<'a>>>,
     /// Cache of cross-module `BindingsMetadata` for class field lookups.
     /// Keyed by `ArcId::id()` (pointer-as-usize) to avoid atomic refcount
     /// operations and to get a cheap 8-byte hash key.
@@ -2900,6 +2902,14 @@ pub(crate) struct TransactionHandle<'a> {
     ///   2. The cache is append-only — entries are never removed or replaced,
     ///      so references into existing entries remain valid.
     metadata_cache: UnsafeCell<FxHashMap<usize, Arc<BindingsMetadata>>>,
+}
+
+/// Dependencies of a `TransactionHandle`'s module on one target module, not yet
+/// flushed to `module_data.deps`.
+struct DeferredDeps<'a> {
+    handle: Handle,
+    module_data: &'a ArcId<ModuleDataMut>,
+    deps: ModuleDeps,
 }
 
 /// Result of looking up a target module's `Answers` for a cross-module
@@ -2931,19 +2941,22 @@ impl<'a> TransactionHandle<'a> {
         dep: ModuleDep,
     ) -> FindingOrError<&'a ArcId<ModuleDataMut>> {
         let resolve = move |path: &ModulePath| {
-            let handle = Handle::new(
-                module,
-                path.dupe(),
-                self.module_data.handle.sys_info().dupe(),
-            );
-            let res = self.transaction.get_imported_module(&handle);
-            self.deferred_deps
-                .borrow_mut()
-                .entry(handle.path().dupe())
-                .or_insert_with(|| (handle, ModuleDeps::default()))
-                .1
-                .add_dep(dep);
-            res
+            let mut deferred_deps = self.deferred_deps.borrow_mut();
+            let deferred = deferred_deps.entry(path.dupe()).or_insert_with(|| {
+                let handle = Handle::new(
+                    module,
+                    path.dupe(),
+                    self.module_data.handle.sys_info().dupe(),
+                );
+                let module_data = self.transaction.get_imported_module(&handle);
+                DeferredDeps {
+                    handle,
+                    module_data,
+                    deps: ModuleDeps::default(),
+                }
+            });
+            deferred.deps.add_dep(dep);
+            deferred.module_data
         };
         match path {
             // Explicit path — already resolved. Bypass imports entirely. Most lookups take this
@@ -3080,14 +3093,21 @@ impl Drop for TransactionHandle<'_> {
         let mut deps_lock = self.module_data.deps.write();
         // Detach from the frozen snapshot on first write, if still shared.
         let deps = Arc::make_mut(&mut deps_lock);
-        for (_path, (target_handle, new_deps)) in deferred {
-            match deps.entry(target_handle.dupe()) {
+        for (
+            _path,
+            DeferredDeps {
+                handle: target_handle,
+                module_data: target,
+                deps: new_deps,
+            },
+        ) in deferred
+        {
+            match deps.entry(target_handle) {
                 Entry::Occupied(mut e) => {
                     e.get_mut().merge(new_deps);
                 }
                 Entry::Vacant(e) => {
                     e.insert(new_deps);
-                    let target = self.transaction.get_module(&target_handle);
                     let mut rdeps = target.rdeps.lock();
                     let inserted = Arc::make_mut(&mut rdeps).insert(self.module_data.handle.dupe());
                     assert!(inserted);
