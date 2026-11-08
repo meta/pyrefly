@@ -382,6 +382,18 @@ fn definition_matcher(
     }
 }
 
+/// Return the content range of a single string literal with the given expression range.
+fn string_literal_content_range(ast: &ModModule, range: TextRange) -> Option<TextRange> {
+    Ast::locate_node(ast, range.start())
+        .into_iter()
+        .find_map(|node| match node {
+            AnyNodeRef::ExprStringLiteral(literal) if literal.range() == range => {
+                Some(literal.as_single_part_string()?.content_range())
+            }
+            _ => None,
+        })
+}
+
 /// Parses a forward-reference string such as `"list[Foo]"` into the expression the binder
 /// built from it. Only strings whose source text is exactly their value are parsed: escapes
 /// or implicit concatenation shift the ranges of the names parsed from a string.
@@ -4642,18 +4654,39 @@ impl<'a> Transaction<'a> {
 
     pub fn prepare_rename(&self, handle: &Handle, position: TextSize) -> Option<TextRange> {
         let identifier_context = self.identifier_at(handle, position);
+        let dunder_all_entry = self.get_exports_data(handle).dunder_all_name_at(position);
 
         let definitions = self
             .find_definition(
                 handle,
                 position,
                 FindPreference {
+                    import_behavior: if dunder_all_entry.is_some() {
+                        ImportBehavior::StopAtRenamedImports
+                    } else {
+                        ImportBehavior::JumpThroughEverything
+                    },
                     resolve_call_dunders: false,
                     ..Default::default()
                 },
             )
             .map(Vec1::into_vec)
             .unwrap_or_default();
+
+        if dunder_all_entry.is_some()
+            && (definitions.is_empty()
+                || definitions.iter().any(|definition| {
+                    let handle = handle
+                        .for_module(definition.module.name(), definition.module.path().dupe());
+                    definition.module.path().is_bundled()
+                        || self
+                            .get_exports_data(&handle)
+                            .dunder_all_name_at(definition.definition_range.start())
+                            .is_some()
+                }))
+        {
+            return None;
+        }
 
         for FindDefinitionItemWithDocstring {
             module,
@@ -4686,6 +4719,11 @@ impl<'a> Transaction<'a> {
             .or_else(|| {
                 self.setattr_name_literal_at(handle, position)
                     .map(|(name, _)| name.range)
+            })
+            .or_else(|| {
+                let (range, _) = dunder_all_entry?;
+                let ast = self.get_ast(handle)?;
+                string_literal_content_range(&ast, range)
             })
     }
 

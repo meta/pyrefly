@@ -19,6 +19,7 @@ use ruff_text_size::TextSize;
 use tempfile::TempDir;
 
 use crate::state::lsp::FindPreference;
+use crate::state::lsp::ImportBehavior;
 use crate::state::lsp::ReferenceOptions;
 use crate::state::require::Require;
 use crate::state::state::State;
@@ -91,6 +92,7 @@ fn replace_paired_references(
             &source_handle,
             TextSize::try_from(position).unwrap(),
             FindPreference {
+                import_behavior: ImportBehavior::StopAtRenamedImports,
                 resolve_call_dunders: false,
                 ..Default::default()
             },
