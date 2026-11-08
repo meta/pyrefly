@@ -233,7 +233,7 @@ text = "foo"
     );
 }
 
-// BUG: A __slots__ entry is disconnected from references to its attribute.
+// BUG: References omit __slots__ entries.
 // Both cursors should find the slots entry, assignment, and read of self.foo (issue #4344).
 #[test]
 fn dunder_slots_entries_are_attribute_references() {
@@ -258,7 +258,10 @@ class C:
 3 |     __slots__ = ("foo",)
                        ^
 References:
-
+7 |         self.foo = 1
+                 ^^^
+11 |         return self.foo
+                         ^^^
 
 7 |         self.foo = 1
                  ^

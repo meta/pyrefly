@@ -3178,7 +3178,6 @@ Definition Result:
     );
 }
 
-// BUG: A __slots__ entry has no definition target. It should resolve to self.foo (issue #4344).
 #[test]
 fn dunder_slots_entry_definition_test() {
     let code = r#"
@@ -3195,11 +3194,110 @@ class C:
 # main.py
 3 |     __slots__ = ("foo",)
                        ^
-Definition Result: None
+Definition Result:
+7 |         self.foo = 1
+                 ^^^
 "#
         .trim(),
         report.trim(),
     );
+}
+
+#[test]
+fn dunder_slots_definition_assignment_forms() {
+    for assignment in [
+        "__slots__ = \"foo\"",
+        "__slots__ = (\"foo\",)",
+        "__slots__ = [\"foo\"]",
+        "__slots__ = {\"foo\": \"Field documentation.\"}",
+        "__slots__: tuple[str, ...] = (\"foo\",)",
+        "names = __slots__ = (\"foo\",)",
+    ] {
+        let code = format!(
+            "class C:\n    {assignment}\n    def __init__(self) -> None:\n        self.foo: int = 1\n"
+        );
+        let (state, handle) = TestEnv::one("main", &code).to_state();
+        let handle = handle("main");
+        let position = TextSize::try_from(code.find("\"foo\"").unwrap() + 1).unwrap();
+        let definitions = state
+            .transaction()
+            .goto_definition(&handle, position)
+            .unwrap();
+        assert_eq!(definitions.len(), 1, "assignment: {assignment}");
+        assert_eq!(definitions[0].module.path(), handle.path());
+        assert_eq!(
+            definitions[0].range,
+            TextRange::at(
+                TextSize::try_from(code.rfind("foo").unwrap()).unwrap(),
+                TextSize::of("foo"),
+            ),
+        );
+    }
+}
+
+#[test]
+fn dunder_slots_definition_uses_nearest_class() {
+    let code = r#"
+class Outer:
+    __slots__ = ("foo",)
+    def __init__(self) -> None:
+        self.foo = 1
+
+    class Inner:
+        __slots__ = ("foo",)
+        def __init__(self) -> None:
+            self.foo = 2
+
+def factory():
+    class Local:
+        __slots__ = ("foo",)
+        def __init__(self) -> None:
+            self.foo = 3
+    return Local
+"#;
+    let (state, handle) = TestEnv::one("main", code).to_state();
+    let handle = handle("main");
+    let transaction = state.transaction();
+    for ((start, _), (definition, _)) in code
+        .match_indices("\"foo\"")
+        .zip(code.match_indices("self.foo"))
+    {
+        let definitions = transaction
+            .goto_definition(&handle, TextSize::try_from(start + 1).unwrap())
+            .unwrap();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].module.path(), handle.path());
+        assert_eq!(
+            definitions[0].range,
+            TextRange::at(
+                TextSize::try_from(definition + "self.".len()).unwrap(),
+                TextSize::of("foo"),
+            ),
+        );
+    }
+}
+
+#[test]
+fn dunder_slots_definition_rejects_unrelated_strings() {
+    for code in [
+        "__slots__ = (\"foo\",)\nfoo = 1\n",
+        "class C:\n    def __init__(self):\n        __slots__ = (\"foo\",)\n        self.foo = 1\n",
+        "class C:\n    __slots__ = {\"foo\": \"foo\"}\n    def __init__(self):\n        self.foo = 1\n",
+        "class C:\n    names = (\"foo\",)\n    def __init__(self):\n        self.foo = 1\n",
+        "class C:\n    __slots__ = tuple([\"foo\"])\n    def __init__(self):\n        self.foo = 1\n",
+        "class C:\n    __slots__ = (\"foo\",)\n",
+    ] {
+        let (state, handle) = TestEnv::one("main", code).to_state();
+        let handle = handle("main");
+        let position = TextSize::try_from(code.rfind("\"foo\"").unwrap() + 1).unwrap();
+        assert!(
+            state
+                .transaction()
+                .goto_definition(&handle, position)
+                .is_err(),
+            "code: {code}",
+        );
+    }
 }
 
 #[test]

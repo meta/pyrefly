@@ -78,7 +78,7 @@ class C:
 7 |     __slots__ = ("bar",)
                        ^
 ```python
-Literal['bar']
+(attribute) bar: Literal['bar']
 ```
 "#
         .trim(),
