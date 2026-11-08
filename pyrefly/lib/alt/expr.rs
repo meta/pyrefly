@@ -1156,7 +1156,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     hint,
                     errors,
                     errors,
-                    |cur_hint, callable_errors, _| {
+                    (),
+                    |(), cur_hint, callable_errors, _| {
                         let _lambda_context = self.enter_lambda_binding_context(
                             param_ids
                                 .iter()

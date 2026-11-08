@@ -2433,20 +2433,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// parameter type the hint fixed. Both are scoped per hint member and committed only for the
     /// accepted member, so a rejected member cannot leak errors. Callers with a single collector
     /// pass the same reference for both.
-    pub fn callable_infer_with_hint<R>(
+    ///
+    /// Each attempt consumes its own copy of `input`. When there is only one attempt, `input`
+    /// is moved into it rather than cloned.
+    pub fn callable_infer_with_hint<T: Clone, R>(
         &self,
         hint: Option<HintRef>,
         errors: &ErrorCollector,
         arg_errors: &ErrorCollector,
-        mut inner: impl FnMut(Option<&Type>, &ErrorCollector, &ErrorCollector) -> R,
+        input: T,
+        mut inner: impl FnMut(T, Option<&Type>, &ErrorCollector, &ErrorCollector) -> R,
         result_type: impl Fn(&R) -> &Type,
     ) -> R {
         let owner = Owner::new();
         let hint = match hint {
             // Optimization: no-hint and single-hint cases can return immediately.
-            None => return inner(None, errors, arg_errors),
+            None => return inner(input, None, errors, arg_errors),
             Some(hint) if hint.types().len() == 1 => {
-                return inner(hint.types().first(), errors, arg_errors);
+                return inner(input, hint.types().first(), errors, arg_errors);
             }
             Some(hint) => hint,
         };
@@ -2467,7 +2471,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             let cur_errors = self.error_collector();
             let cur_arg_errors = self.error_collector();
-            let ret = inner(cur_hint, &cur_errors, &cur_arg_errors);
+            let ret = inner(input.clone(), cur_hint, &cur_errors, &cur_arg_errors);
             if !cur_errors.has_hard()
                 && cur_hint.is_none_or(|hint| {
                     let snapshot = self
@@ -2536,13 +2540,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             hint,
             call_errors,
             arg_errors,
-            |cur_hint, cur_call_errors, cur_arg_errors| {
+            (callable, self_obj),
+            |(callable, self_obj), cur_hint, cur_call_errors, cur_arg_errors| {
                 self.callable_infer_inner(
-                    callable.clone(),
+                    callable,
                     callable_name,
                     shape_transform,
                     tparams,
-                    self_obj.clone(),
+                    self_obj,
                     args,
                     keywords,
                     arguments_range,
