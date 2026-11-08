@@ -4844,10 +4844,10 @@ impl<'a> BindingsBuilder<'a> {
         let mut branch_idxs = SmallSet::with_capacity(merge_branches.len());
         let mut branch_infos = Vec::with_capacity(merge_branches.len());
         let mut styles = Vec::with_capacity(merge_branches.len());
-        // For each value, the position of its style, and the termination keys of the branches
-        // that carry it, or `None` once one of them has no key.
-        let mut styled_values: SmallMap<Idx<Key>, (usize, Option<Vec<Idx<Key>>>)> =
-            SmallMap::with_capacity(merge_branches.len());
+        // For each distinct value and style, the value, the position of its style, and the
+        // termination keys of the branches that carry it, or `None` once one of them has no key.
+        let mut styled_values: Vec<(Idx<Key>, usize, Option<Vec<Idx<Key>>>)> =
+            Vec::with_capacity(merge_branches.len());
         let n_merge_branches = merge_branches.len();
         let mut n_values = 0;
         let mut n_possibly_set_branches = 0;
@@ -4912,10 +4912,14 @@ impl<'a> BindingsBuilder<'a> {
                     continue;
                 }
                 value_idxs.insert(v.idx);
-                // An invariant in Pyrefly is that we only set style when we
-                // set a value, so duplicate value_idxs always have the same style.
+                // Branches can share a value with different styles, such as a `break` that
+                // assigned it and the fall-through of a loop that may not have run, so a
+                // value is deduplicated only together with its style.
                 if !unset_unless_terminated {
-                    if let Some((_, keys)) = styled_values.get_mut(&v.idx) {
+                    if let Some((_, _, keys)) = styled_values
+                        .iter_mut()
+                        .find(|(idx, position, _)| *idx == v.idx && styles[*position] == v.style)
+                    {
                         *keys =
                             keys.take()
                                 .zip(merge_branch.termination_key)
@@ -4924,13 +4928,11 @@ impl<'a> BindingsBuilder<'a> {
                                     keys
                                 });
                     } else {
-                        styled_values.insert(
+                        styled_values.push((
                             v.idx,
-                            (
-                                styles.len(),
-                                merge_branch.termination_key.map(|key| vec![key]),
-                            ),
-                        );
+                            styles.len(),
+                            merge_branch.termination_key.map(|key| vec![key]),
+                        ));
                         styles.push(v.style);
                     }
                 }
@@ -4942,7 +4944,7 @@ impl<'a> BindingsBuilder<'a> {
         // carry its value, so it continues only if one of their termination keys is not `Never`.
         // Those branches share one node for the merge. When every branch carries the value,
         // reaching the merge is enough, so the paths need no new node.
-        for (position, keys) in styled_values.into_values() {
+        for (_, position, keys) in styled_values {
             if let FlowStyle::MaybeInitialized(nodes) = &mut styles[position]
                 && let Some(keys) = keys
                 && keys.len() < n_merge_branches
