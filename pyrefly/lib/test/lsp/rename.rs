@@ -363,7 +363,6 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
     )
 }
 
-// BUG: prepare_rename returns None for the __slots__ entry (issue #4344).
 #[test]
 fn prepare_rename_symbol_literals() {
     let code = r#"
@@ -402,7 +401,9 @@ Rename range:
 
 7 |     __slots__ = ("bar",)
                        ^
-Rename range: None
+Rename range:
+7 |     __slots__ = ("bar",)
+                      ^^^
 "#
         .trim(),
         report.trim(),
@@ -468,6 +469,91 @@ fn test_rename_dunder_all_updates_source_stub_and_consumers() {
     let source = "foo = 1\n__all__ = ['foo']\n";
     let stub = "foo: int\n__all__ = ['foo']\n";
     let consumer = "from lib import foo\n__all__ = ['foo']\nfoo\n";
+    let position = source.find("'foo'").unwrap() + 1;
+    assert_eq!(
+        rename_paired_symbol(source, stub, consumer, None, position),
+        vec![
+            ("consumer.py".to_owned(), consumer.replace("foo", "renamed")),
+            ("lib.py".to_owned(), source.replace("foo", "renamed")),
+            ("lib.pyi".to_owned(), stub.replace("foo", "renamed")),
+        ],
+    );
+}
+
+#[test]
+fn test_prepare_rename_dunder_slots_entries() {
+    for name in ["foo", "café", "变量"] {
+        for assignment in [
+            format!("__slots__ = \"{name}\""),
+            format!("__slots__ = ('{name}',)"),
+            format!("__slots__ = [r'{name}']"),
+            format!("__slots__ = {{'{name}': 'Documentation.'}}"),
+            format!("__slots__: tuple[str, ...] = (\"\"\"{name}\"\"\",)"),
+            format!("names = __slots__ = ('{name}',)"),
+        ] {
+            let source = format!(
+                "class C:\n    {assignment}\n    {name}: int\n    def __init__(self) -> None:\n        self.{name} = 1\n\nC().{name}\n"
+            );
+            let (state, handle) = TestEnv::one("main", &source).to_state();
+            let handle = handle("main");
+            let start = source.find(name).unwrap();
+            let range = TextRange::at(TextSize::try_from(start).unwrap(), TextSize::of(name));
+            for position in [range.start(), range.end()] {
+                assert_eq!(
+                    state.transaction().prepare_rename(&handle, position),
+                    Some(range)
+                );
+            }
+            assert_eq!(
+                rename_local_symbol(&source, start),
+                source.replace(name, "renamed"),
+            );
+        }
+    }
+}
+
+#[test]
+fn test_prepare_rename_dunder_slots_rejects_invalid_targets() {
+    for (source, literal) in [
+        ("class C:\n    __slots__ = ('missing',)\n", "'missing'"),
+        ("class C:\n    foo: int\n    text = 'foo'\n", "'foo'"),
+        (
+            "class C:\n    foo: int\n    __slots__ = {'foo': 'foo'}\n",
+            "'foo'",
+        ),
+        (
+            "class C:\n    foo: int\n    def method(self):\n        __slots__ = ('foo',)\n",
+            "'foo'",
+        ),
+        (
+            "class C:\n    foo: int\n    __slots__ = ('f' 'oo',)\n",
+            "'f'",
+        ),
+        ("class C:\n    __slots__ = ('__str__',)\n", "'__str__'"),
+    ] {
+        let (state, handle) = TestEnv::one("main", source).to_state();
+        let handle = handle("main");
+        let position = TextSize::try_from(source.rfind(literal).unwrap() + 1).unwrap();
+        assert_eq!(state.transaction().prepare_rename(&handle, position), None);
+    }
+}
+
+#[test]
+fn test_rename_dunder_slots_respects_class_identity() {
+    let source = "class C:\n    __slots__ = {'foo': 'foo'}\n    foo: int\n    class Nested:\n        __slots__ = ('foo',)\n        foo: str\n\nclass Other:\n    __slots__ = ('foo',)\n    foo: str\n\nC().foo\nC.Nested().foo\nOther().foo\n";
+    let position = source.find("'foo'").unwrap() + 1;
+    let expected = source
+        .replacen("'foo'", "'renamed'", 1)
+        .replace("foo: int", "renamed: int")
+        .replace("C().foo", "C().renamed");
+    assert_eq!(rename_local_symbol(source, position), expected);
+}
+
+#[test]
+fn test_rename_dunder_slots_updates_source_stub_and_consumers() {
+    let source = "class C:\n    __slots__ = ('foo',)\n    foo: int\n    def __init__(self) -> None:\n        self.foo = 1\n";
+    let stub = "class C:\n    __slots__ = ('foo',)\n    foo: int\n";
+    let consumer = "from lib import C\nC().foo\n";
     let position = source.find("'foo'").unwrap() + 1;
     assert_eq!(
         rename_paired_symbol(source, stub, consumer, None, position),
