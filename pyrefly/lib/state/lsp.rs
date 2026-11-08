@@ -4701,6 +4701,11 @@ impl<'a> Transaction<'a> {
                 return None;
             }
         }
+        let symbol_literal_range = dunder_all_entry.map(|entry| entry.range).or_else(|| {
+            bindings
+                .dunder_slots_entry_at(position)
+                .map(|entry| entry.name.range)
+        });
 
         let definitions = self
             .find_definition(
@@ -4715,7 +4720,7 @@ impl<'a> Transaction<'a> {
             .map(Vec1::into_vec)
             .unwrap_or_default();
 
-        if dunder_all_entry.is_some()
+        if symbol_literal_range.is_some()
             && (definitions.is_empty()
                 || definitions
                     .iter()
@@ -4756,7 +4761,7 @@ impl<'a> Transaction<'a> {
                 self.setattr_name_literal_at(handle, position)
                     .map(|(name, _)| name.range)
             })
-            .or_else(|| dunder_all_entry.map(|entry| entry.range))
+            .or(symbol_literal_range)
     }
 
     pub fn find_local_references(
