@@ -28,6 +28,7 @@ use crate::binding::binding::ExhaustiveBinding;
 use crate::binding::binding::ExhaustivenessKind;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyExpect;
+use crate::binding::binding::MatchCaseNegations;
 use crate::binding::binding::NarrowUseLocation;
 use crate::binding::binding::SizeExpectation;
 use crate::binding::binding::UnpackedPosition;
@@ -958,7 +959,11 @@ impl<'a> BindingsBuilder<'a> {
                             NarrowUseLocation::Start(negations.1),
                         ),
                     ),
-                    Some(Box::new(negations)),
+                    Some(Box::new(MatchCaseNegations {
+                        op: negations.0,
+                        range: negations.1,
+                        declared_subject_idx: subject_idx,
+                    })),
                 ),
                 None if match_subject.as_single().is_some() && !negated_prev_ops.0.is_empty() => (
                     self.insert_binding(

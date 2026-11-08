@@ -52,6 +52,7 @@ use crate::alt::polars_specials::polars_degrade_for_mutation;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::types::instance::Instance;
 use crate::binding::binding::Key;
+use crate::binding::binding::MatchCaseNegations;
 use crate::binding::narrow::AtomicNarrowOp;
 use crate::binding::narrow::FacetOrigin;
 use crate::binding::narrow::FacetSubject;
@@ -2716,7 +2717,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         subject_idx: &Idx<Key>,
         narrowing_subject: Option<&NarrowingSubject>,
         narrow_ops_for_case: &(NarrowOp, TextRange),
-        prev_case_negations: Option<&(NarrowOp, TextRange)>,
+        prev_case_negations: Option<&MatchCaseNegations>,
         case_range: &TextRange,
         errors: &ErrorCollector,
     ) {
@@ -2758,8 +2759,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Narrow by the current pattern first, then apply the earlier cases'
         // negations. On an `Any` subject this lets `bool` become `bool` before
         // subtracting an earlier `int`, which yields `Never`.
-        if let Some((prev_op, prev_range)) = prev_case_negations {
-            narrowed_info = self.narrow(&narrowed_info, prev_op, *prev_range, &ignore_errors);
+        if let Some(negations) = prev_case_negations {
+            narrowed_info = self.narrow(
+                &narrowed_info,
+                &negations.op,
+                negations.range,
+                &ignore_errors,
+            );
         }
         let mut narrowed_ty = match resolved_facet_chain {
             Some(resolved_chain) => {
@@ -2771,7 +2777,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if !narrowed_ty.is_never() && !has_never_trigger_facet {
             return;
         }
-        let subject_display = self.for_display(subject_ty);
+        // `subject_idx` is already `Never` when earlier cases settle reachability,
+        // so name the subject those negations started from.
+        let reported_ty = match (subject_ty.is_never(), prev_case_negations) {
+            (true, Some(negations)) => self
+                .with_type_for_exhaustiveness_check(self.get_idx(negations.declared_subject_idx))
+                .ty()
+                .clone(),
+            _ => subject_ty,
+        };
+        let subject_display = self.for_display(reported_ty);
         self.error(
             errors,
             *case_range,
@@ -2789,37 +2804,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Structural ops like `IsSequence`/`LenEq` are checkable but aren't
     /// triggers on their own.
     fn is_match_case_reachability_op(op: &NarrowOp) -> bool {
-        // Classifies as (can_check, has_trigger). The two dimensions can't be
-        // collapsed into a single bool because And/Or need to distinguish
-        // "structural but checkable" from "unknown and uncheckable" in sub-ops.
-        fn classify(op: &NarrowOp) -> (bool, bool) {
-            match op {
-                NarrowOp::Atomic(_, AtomicNarrowOp::Eq(_) | AtomicNarrowOp::Is(_)) => (true, true),
-                NarrowOp::Atomic(_, AtomicNarrowOp::IsInstance(_, NarrowSource::Pattern)) => {
-                    (true, true)
-                }
-                NarrowOp::Atomic(
-                    _,
-                    AtomicNarrowOp::IsSequence
-                    | AtomicNarrowOp::IsMapping
-                    | AtomicNarrowOp::LenEq(_)
-                    | AtomicNarrowOp::LenGte(_),
-                ) => (true, false),
-                NarrowOp::And(ops) | NarrowOp::Or(ops) => {
-                    let mut has_trigger = false;
-                    for op in ops {
-                        let (can_check, op_has_trigger) = classify(op);
-                        if !can_check {
-                            return (false, false);
-                        }
-                        has_trigger |= op_has_trigger;
-                    }
-                    (true, has_trigger)
-                }
-                _ => (false, false),
-            }
-        }
-        let (can_check, has_trigger) = classify(op);
+        let (can_check, has_trigger) = classify_match_case_op(op);
         can_check && has_trigger
     }
 
@@ -2937,5 +2922,77 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             (Type::Literal(left), Type::Literal(right)) => left.value == right.value,
             _ => false,
         }
+    }
+}
+
+/// Classifies a match case's narrow op as (can_check, has_trigger).
+///
+/// The two dimensions can't be collapsed into a single bool because And/Or need to
+/// distinguish "structural but checkable" from "unknown and uncheckable" in sub-ops.
+fn classify_match_case_op(op: &NarrowOp) -> (bool, bool) {
+    match op {
+        NarrowOp::Atomic(_, AtomicNarrowOp::Eq(_) | AtomicNarrowOp::Is(_)) => (true, true),
+        NarrowOp::Atomic(_, AtomicNarrowOp::IsInstance(_, NarrowSource::Pattern)) => (true, true),
+        NarrowOp::Atomic(
+            _,
+            AtomicNarrowOp::IsSequence
+            | AtomicNarrowOp::IsMapping
+            | AtomicNarrowOp::LenEq(_)
+            | AtomicNarrowOp::LenGte(_)
+            // The gate never narrows positively, so an enclosing
+            // `IsInstance` has to supply the trigger.
+            | AtomicNarrowOp::ClassCoverageGate(_),
+        ) => (true, false),
+        NarrowOp::And(ops) | NarrowOp::Or(ops) => {
+            let mut has_trigger = false;
+            for op in ops {
+                let (can_check, op_has_trigger) = classify_match_case_op(op);
+                if !can_check {
+                    return (false, false);
+                }
+                has_trigger |= op_has_trigger;
+            }
+            (true, has_trigger)
+        }
+        _ => (false, false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_match_case_op;
+    use crate::binding::narrow::AtomicNarrowOp;
+    use crate::binding::narrow::NarrowOp;
+    use crate::binding::narrow::NarrowSource;
+
+    fn placeholder() -> NarrowOp {
+        NarrowOp::Atomic(None, AtomicNarrowOp::Placeholder)
+    }
+
+    fn gate() -> NarrowOp {
+        NarrowOp::Atomic(None, AtomicNarrowOp::ClassCoverageGate(Box::new([])))
+    }
+
+    #[test]
+    fn coverage_gate_is_checkable_but_not_a_trigger() {
+        assert_eq!(classify_match_case_op(&gate()), (true, false));
+    }
+
+    #[test]
+    fn coverage_gate_does_not_qualify_alone() {
+        assert_eq!(
+            classify_match_case_op(&NarrowOp::And(vec![gate()])),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn unknown_sub_op_blocks_the_whole_op() {
+        // `Placeholder` is unclassifiable, so an `And` containing one is never
+        // checkable, even alongside otherwise-classifiable sub-ops.
+        assert_eq!(
+            classify_match_case_op(&NarrowOp::And(vec![gate(), placeholder()])),
+            (false, false)
+        );
     }
 }

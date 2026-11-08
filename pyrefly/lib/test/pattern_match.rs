@@ -2269,3 +2269,64 @@ def g() -> int:
     return value
 "#,
 );
+
+// A full class pattern subsumes a later partial pattern of the same class;
+// mypy's `--warn-unreachable` and pyright's strict mode both report the second case.
+testcase!(
+    test_match_case_unreachable_full_class_before_partial,
+    r#"
+class A:
+    x: int
+
+def full_before_partial(a: A) -> None:
+    match a:
+        case A():
+            pass
+        case A(x=1):  # E: Case pattern can never match subject of type `A`
+            pass
+"#,
+);
+
+// A partial class pattern alone stays reachable, and so does a subclass pattern
+// after it: an `A` instance with a different `x` still matches only the second case.
+testcase!(
+    test_match_case_reachable_partial_class_patterns,
+    r#"
+class A:
+    x: int
+
+class B(A):
+    pass
+
+def partial_alone(a: A) -> None:
+    match a:
+        case A(x=1):
+            pass
+
+def partial_before_subclass(b: B) -> None:
+    match b:
+        case A(x=1):
+            pass
+        case B():
+            pass
+"#,
+);
+
+// A repeated partial class pattern is still not reported: its negation cannot
+// subtract the class, because `ClassCoverageGate` only subtracts when every
+// sub-pattern exhausts its slot. Tracked in https://github.com/facebook/pyrefly/issues/5516.
+testcase!(
+    bug = "duplicate partial class pattern is not reported",
+    test_match_case_reachable_duplicate_partial_class_pattern,
+    r#"
+class A:
+    x: int
+
+def duplicate_partial(a: A) -> None:
+    match a:
+        case A(x=1):
+            pass
+        case A(x=1):
+            pass
+"#,
+);
