@@ -101,7 +101,7 @@ References:
     );
 }
 
-// BUG: References omit __all__ entries, and remove("foo") cannot resolve foo.
+// BUG: References omit __all__ entries.
 // Every cursor should find the definition and both string entries (issue #4344).
 #[test]
 fn dunder_all_entries_are_symbol_references() {
@@ -134,6 +134,8 @@ References:
 6 | __all__.remove("foo")
                      ^
 References:
+2 | foo = 1
+    ^^^
 "#
         .trim(),
         report.trim(),
