@@ -375,21 +375,44 @@ impl Exports {
 
     /// If `position` is inside a user-specified `__all__` string entry, return its range and name.
     pub fn dunder_all_name_at(&self, position: TextSize) -> Option<(TextRange, Name)> {
+        self.dunder_all_names()?.find_map(|(range, name)| {
+            range
+                .contains_inclusive(position)
+                .then(|| (range, name.clone()))
+        })
+    }
+
+    /// Return the ranges and names of string entries in a user-specified `__all__`.
+    pub fn dunder_all_names(&self) -> Option<impl Iterator<Item = (TextRange, &Name)>> {
         if self.definitions.dunder_all.kind != DunderAllKind::Specified {
             return None;
         }
-        self.definitions
-            .dunder_all
-            .entries
-            .iter()
-            .find_map(|entry| match entry {
-                DunderAllEntry::Name(range, name) | DunderAllEntry::Remove(range, name)
-                    if range.contains_inclusive(position) =>
-                {
-                    Some((*range, name.clone()))
-                }
-                _ => None,
-            })
+        Some(
+            self.definitions
+                .dunder_all
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    DunderAllEntry::Name(range, name) | DunderAllEntry::Remove(range, name) => {
+                        Some((*range, name))
+                    }
+                    DunderAllEntry::Module(_, _) => None,
+                }),
+        )
+    }
+
+    /// Return an import's local definition range and whether it has an explicit alias.
+    pub fn import_definition(&self, name: &Name) -> Option<(TextRange, bool)> {
+        let definition = self.definitions.definitions.get(name)?;
+        match definition.style {
+            DefinitionStyle::ImportAs(_, _) | DefinitionStyle::ImportAsEq(_) => {
+                Some((definition.range, true))
+            }
+            DefinitionStyle::Import(_) | DefinitionStyle::ImportModule(_) => {
+                Some((definition.range, false))
+            }
+            _ => None,
+        }
     }
 
     /// Whether `name` is defined in this module as a `Final` whose type is declared rather than
