@@ -1606,7 +1606,8 @@ pub fn get_hover_with_verbosity(
         position,
     );
 
-    let Some(type_) = resolve_hovered_type(transaction, handle, ast.as_deref(), position) else {
+    let Some(mut type_) = resolve_hovered_type(transaction, handle, ast.as_deref(), position)
+    else {
         return keyword_hover;
     };
 
@@ -1631,7 +1632,6 @@ pub fn get_hover_with_verbosity(
                 })
         });
 
-    let fallback_name_from_type = fallback_hover_name_from_type(&type_);
     let keyword_argument_identifier = keyword_argument_identifier(transaction, handle, position);
     let definition = transaction
         .find_definition(
@@ -1655,6 +1655,20 @@ pub fn get_hover_with_verbosity(
                     item.module.code_at(item.definition_range) == identifier.id.as_str()
                 })
         });
+    // An `__all__` entry refers to a symbol, so hover uses that symbol's type.
+    if let Some(definition) = &definition
+        && transaction
+            .get_exports_data(handle)
+            .dunder_all_name_at(position)
+            .is_some()
+        && let Some(definition_type) = transaction.get_type_at(
+            &handle.for_module(definition.module.name(), definition.module.path().dupe()),
+            definition.definition_range.start(),
+        )
+    {
+        type_ = definition_type;
+    }
+    let fallback_name_from_type = fallback_hover_name_from_type(&type_);
     let interface_definition = definition.as_ref().and_then(|executable| {
         if keyword_argument_identifier.is_some() {
             return None;

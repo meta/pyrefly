@@ -57,7 +57,15 @@ class C:
     def __init__(self) -> None:
         self.bar: str = ""
 "#;
-    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+        match get_hover(&state.transaction(), handle, position, false) {
+            Some(Hover {
+                contents: Contents::MarkupContent(markup),
+                ..
+            }) => markup.value,
+            _ => "None".to_owned(),
+        }
+    });
     assert_eq!(
         r#"
 # main.py
@@ -99,6 +107,17 @@ __all__.remove("foo")
             report
         },
     );
+}
+
+#[test]
+fn hover_dunder_all_class_entry() {
+    let code = r#"
+class C: ...
+__all__ = ["C"]
+#          ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(report.contains("(class) C: type[C]"), "got: {report}");
 }
 
 #[test]
@@ -2643,6 +2662,7 @@ def exported() -> int:
     let position = extract_cursors_for_test(lib_code)[0];
 
     let report = get_test_report(&state, &lib_handle, position);
+    assert!(report.contains("-> int"), "got: {report}");
     assert!(
         report.contains("Public stub documentation."),
         "got: {report}"
