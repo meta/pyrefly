@@ -161,7 +161,6 @@ CORPUS = (
             "astral",
             "attrs",
             "awesomeversion",
-            "cryptography",
             "httpx",
             "jinja2",
             "orjson",
@@ -283,6 +282,11 @@ def build_with_pgo(
     # Cargo profile would change the hash in every symbol name, and LLVM matches
     # profile records to functions by symbol name.
     instrumented_dir = target_dir / "instrumented"
+    instrument = f"-Cprofile-generate={profile_dir}"
+    if target == "aarch64-pc-windows-msvc":
+        # MSVC's linker leaves the function names out of the profiles that an
+        # instrumented ARM64 executable writes, so LLVM cannot read them.
+        instrument += " -Clinker=rust-lld"
     run(
         [
             *cargo_build(target, debug, "rustc"),
@@ -291,9 +295,7 @@ def build_with_pgo(
         environment=environment
         | {
             "CARGO_TARGET_DIR": str(instrumented_dir),
-            "RUSTFLAGS": append_flags(
-                environment.get("RUSTFLAGS"), f"-Cprofile-generate={profile_dir}"
-            ),
+            "RUSTFLAGS": append_flags(environment.get("RUSTFLAGS"), instrument),
         },
     )
     binary = built_binary(instrumented_dir, target, debug)
