@@ -42,7 +42,6 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
     }
 }
 
-// BUG: Hover shows a string literal type for the __slots__ entry (issue #4344).
 #[test]
 fn hover_symbol_literals() {
     let code = r#"
@@ -78,12 +77,87 @@ class C:
 7 |     __slots__ = ("bar",)
                        ^
 ```python
-(attribute) bar: Literal['bar']
+(attribute) bar: str
 ```
 "#
         .trim(),
         report.trim(),
     );
+}
+
+#[test]
+fn hover_dunder_slots_assignment_forms() {
+    for assignment in [
+        "__slots__ = \"foo\"",
+        "__slots__ = (\"foo\",)",
+        "__slots__ = [\"foo\"]",
+        "__slots__ = {\"foo\": \"Field documentation.\"}",
+        "__slots__: tuple[str, ...] = (\"foo\",)",
+        "names = __slots__ = (\"foo\",)",
+    ] {
+        let code = format!(
+            "class C:\n    {assignment}\n    def __init__(self) -> None:\n        self.foo: int = 1\n"
+        );
+        let (state, handle) = TestEnv::one("main", &code).to_state();
+        let handle = handle("main");
+        let position = TextSize::try_from(code.find("\"foo\"").unwrap() + 1).unwrap();
+        let report = get_test_report(&state, &handle, position);
+        assert!(report.contains("(attribute) foo: int"), "got: {report}");
+    }
+}
+
+#[test]
+fn hover_dunder_slots_preserves_type_parameters() {
+    let code = r#"
+class C[T]:
+    __slots__ = ("foo",)
+#                 ^
+    def __init__(self, value: T) -> None:
+        self.foo: T = value
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(report.contains("(attribute) foo: T"), "got: {report}");
+}
+
+#[test]
+fn hover_dunder_slots_uses_nearest_class() {
+    let code = r#"
+class Outer:
+    __slots__ = ("foo",)
+    def __init__(self) -> None:
+        self.foo: int = 1
+
+    class Inner:
+        __slots__ = ("foo",)
+        def __init__(self) -> None:
+            self.foo: str = ""
+"#;
+    let (state, handle) = TestEnv::one("main", code).to_state();
+    let handle = handle("main");
+    for ((start, _), expected_type) in code.match_indices("\"foo\"").zip(["int", "str"]) {
+        let position = TextSize::try_from(start + 1).unwrap();
+        let report = get_test_report(&state, &handle, position);
+        assert!(
+            report.contains(&format!("(attribute) foo: {expected_type}")),
+            "got: {report}",
+        );
+    }
+}
+
+#[test]
+fn hover_dunder_slots_keeps_unresolved_and_unrelated_literal_types() {
+    for code in [
+        "class C:\n    __slots__ = (\"foo\",)\n",
+        "class C:\n    __slots__ = {\"foo\": \"foo\"}\n    def __init__(self):\n        self.foo: int = 1\n",
+        "class C:\n    def __init__(self):\n        __slots__ = (\"foo\",)\n        self.foo: int = 1\n",
+        "class C:\n    names = (\"foo\",)\n    def __init__(self):\n        self.foo: int = 1\n",
+    ] {
+        let (state, handle) = TestEnv::one("main", code).to_state();
+        let handle = handle("main");
+        let position = TextSize::try_from(code.rfind("\"foo\"").unwrap() + 1).unwrap();
+        let report = get_test_report(&state, &handle, position);
+        assert!(report.contains("Literal['foo']"), "got: {report}");
+    }
 }
 
 #[test]
