@@ -146,7 +146,9 @@ we find the config for each file matched by the pattern provided.
 
 The language server finds a configuration separately for each source file because one
 session can serve multiple projects. The language server also runs the search for each
-imported file. The per-file search can produce different IDE and project-mode CLI results.
+imported file, but a file found through the importer's site package path resolves its imports
+in the importer's Python environment. The per-file search can produce different IDE and
+project-mode CLI results.
 See [IDE configuration selection](./IDE.mdx#configuration-selection) for details and ways
 to configure external source trees.
 

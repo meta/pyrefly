@@ -5,38 +5,49 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::hash::Hash;
-use std::hash::Hasher;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use dupe::Dupe;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_name::ModuleNameWithKind;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::sys_info::SysInfo;
+use static_interner::Intern;
+use static_interner::Interner;
+
+static SITE_PACKAGE_PATH_INTERNER: Interner<Vec<PathBuf>> = Interner::new();
+
+/// The site-package path of a Python environment. Interned so that copying, comparing and
+/// hashing it is cheap. There is about one value per Python environment, so the memory that
+/// interning never frees is negligible.
+#[derive(Clone, Dupe, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SitePackagePath(Intern<Vec<PathBuf>>);
+
+impl SitePackagePath {
+    pub fn new(paths: Vec<PathBuf>) -> Self {
+        Self(SITE_PACKAGE_PATH_INTERNER.intern(paths))
+    }
+
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.0
+    }
+
+    /// Every site-package path interned so far.
+    pub fn all() -> impl Iterator<Item = Self> {
+        SITE_PACKAGE_PATH_INTERNER.iter().map(Self)
+    }
+}
 
 /// A handle to a Python module, containing its name, path, and system information.
-#[derive(Debug, Clone, Dupe, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Dupe, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Handle {
     module: ModuleNameWithKind,
     path: ModulePath,
     sys_info: SysInfo,
-    /// The site-package path of the importer's Python environment, when this module is checked in
-    /// that environment rather than in its own config's. The same file checked in two environments
-    /// therefore has two handles.
-    importer_site_package_path: Option<Arc<[PathBuf]>>,
-}
-
-impl Hash for Handle {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.module.hash(state);
-        self.path.hash(state);
-        self.sys_info.hash(state);
-        // The importer's site-package path is left out, which keeps a handle's hash independent of
-        // the Python environment it is checked in. Equal handles still hash equally, and equality
-        // still compares the path.
-    }
+    /// The site-package path of the Python environment this module is checked in, when that is an
+    /// importer's environment rather than its own config's. One file can therefore have several
+    /// handles.
+    importer_site_package_path: Option<SitePackagePath>,
 }
 
 impl Handle {
@@ -50,7 +61,8 @@ impl Handle {
         }
     }
 
-    /// A handle for another module in the same Python environment as this one.
+    /// A handle for another module with the same `SysInfo`, checked in the Python environment of
+    /// its own config.
     pub fn for_module(&self, module: ModuleName, path: ModulePath) -> Self {
         Self::new(module, path, self.sys_info.dupe())
     }
@@ -69,10 +81,11 @@ impl Handle {
         }
     }
 
-    /// The same handle, checked in the Python environment with the given site-package path.
-    pub fn with_importer_site_package_path(self, path: Arc<[PathBuf]>) -> Self {
+    /// This module, checked in the Python environment with site-package path `path`, or in the
+    /// Python environment of its own config if `path` is `None`.
+    pub fn with_importer_site_package_path(self, path: Option<SitePackagePath>) -> Self {
         Self {
-            importer_site_package_path: Some(path),
+            importer_site_package_path: path,
             ..self
         }
     }
@@ -95,16 +108,8 @@ impl Handle {
         &self.sys_info
     }
 
-    /// The same module, checked in the Python environment of its own config.
-    pub fn without_importer_site_package_path(&self) -> Self {
-        Self {
-            importer_site_package_path: None,
-            ..self.dupe()
-        }
-    }
-
-    pub fn importer_site_package_path(&self) -> Option<&Arc<[PathBuf]>> {
-        self.importer_site_package_path.as_ref()
+    pub fn importer_site_package_path(&self) -> Option<SitePackagePath> {
+        self.importer_site_package_path
     }
 
     /// Returns true if this handle's module name was created using fallback heuristics.

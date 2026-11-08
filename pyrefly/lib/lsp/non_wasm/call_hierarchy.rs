@@ -357,7 +357,7 @@ impl CancellableTransaction<'_> {
         // Pass 1: work out which files reference the target at all. This is answered from
         // the index, which every rdep carries at `Require::Indexing`, so a file that never
         // mentions the target costs nothing beyond the lookup.
-        let handles_with_refs = self.process_rdeps_with_definition(
+        let files_with_refs = self.process_rdeps_with_definition(
             sys_info,
             target_definition,
             |transaction, handle, patched_definition| {
@@ -379,20 +379,6 @@ impl CancellableTransaction<'_> {
                 }
             },
         )?;
-
-        // Copies of one file checked in different Python environments can each have references,
-        // so merge them into one entry per file.
-        let mut files_with_refs: Vec<(Handle, Vec<TextRange>)> = Vec::new();
-        for (handle, references) in handles_with_refs {
-            if let Some((_, existing)) = files_with_refs
-                .iter_mut()
-                .find(|(h, _)| h.path() == handle.path())
-            {
-                existing.extend(references);
-            } else {
-                files_with_refs.push((handle, references));
-            }
-        }
 
         // Attributing a call site to its enclosing function needs the AST, and the AST is
         // only retained at `Require::Everything`. A file the client never opened is held at
@@ -490,10 +476,10 @@ impl CancellableTransaction<'_> {
         };
 
         // Get handle for module where target function is defined (may differ from original handle)
-        let target_handle = self.as_ref().imported_handle(
-            handle,
+        let target_handle = Handle::new(
             target_def.module.name(),
             target_def.module.path().dupe(),
+            handle.sys_info().dupe(),
         );
 
         let Some(target_ast) = self.as_ref().get_ast(&target_handle) else {

@@ -1474,7 +1474,7 @@ impl<'a> Transaction<'a> {
                 return None;
             }
             let definition_handle =
-                self.imported_handle(handle, item.module.name(), item.module.path().dupe());
+                handle.for_module(item.module.name(), item.module.path().dupe());
             let id = Identifier::new(Name::new(code_at_range), item.definition_range);
             Some(ResolutionKind::KeyInModule(
                 definition_handle,
@@ -2015,7 +2015,11 @@ impl<'a> Transaction<'a> {
     /// ranges read from current class metadata: a `Class` keeps the `Module` from when its type
     /// was solved, and a module is not rechecked when a dependency only moves code around.
     fn class_module(&self, handle: &Handle, cls: &Class) -> Option<Module> {
-        self.get_module_info(&handle.for_module(cls.module_name(), cls.module_path().dupe()))
+        self.get_module_info(&self.imported_handle(
+            handle,
+            cls.module_name(),
+            cls.module_path().dupe(),
+        ))
     }
 
     /// The references in `references_by_module` that point at the definition at `definition_range`
@@ -3009,7 +3013,7 @@ impl<'a> Transaction<'a> {
         handle: &Handle,
         module: &ModuleInfo,
     ) -> Arc<ModModule> {
-        let module_handle = self.imported_handle(handle, module.name(), module.path().dupe());
+        let module_handle = handle.for_module(module.name(), module.path().dupe());
         self.get_ast(&module_handle)
             .unwrap_or_else(|| Ast::parse(module.contents(), module.source_type()).0.into())
     }
@@ -5803,9 +5807,7 @@ fn compute_transitive_rdeps_for_definition_impl<T: RdepTransaction>(
             rdeps
         }
     };
-    // Drop the filesystem counterparts of in-memory handles, including their copies checked in an
-    // importer's Python environment.
-    let fs_counterparts_of_in_memory_handles: HashSet<Handle> = transitive_rdeps
+    for fs_counterpart_of_in_memory_handles in transitive_rdeps
         .iter()
         .filter_map(|handle| match handle.path().details() {
             ModulePathDetails::Memory(path_buf) => Some(handle.for_module(
@@ -5814,10 +5816,10 @@ fn compute_transitive_rdeps_for_definition_impl<T: RdepTransaction>(
             )),
             _ => None,
         })
-        .collect();
-    transitive_rdeps.retain(|handle| {
-        !fs_counterparts_of_in_memory_handles.contains(&handle.without_importer_site_package_path())
-    });
+        .collect::<Vec<_>>()
+    {
+        transitive_rdeps.remove(&fs_counterpart_of_in_memory_handles);
+    }
     let candidate_handles: Vec<Handle> = transitive_rdeps
         .into_iter()
         .sorted_by_key(|h| h.path().dupe())

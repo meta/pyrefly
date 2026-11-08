@@ -15,6 +15,7 @@ use std::fmt::Display;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
+use std::iter;
 use std::mem;
 use std::path::Path;
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ use enum_iterator::Sequence;
 use fxhash::FxHashMap;
 use itertools::Itertools;
 use pyrefly_build::handle::Handle;
+use pyrefly_build::handle::SitePackagePath;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
@@ -1018,70 +1020,20 @@ impl<'a> Transaction<'a> {
         )
     }
 
+    /// The errors of every loaded module, reporting each file once. A file checked in several
+    /// Python environments has a handle for each, and its errors come from its own environment if
+    /// it was checked there: sorting puts the handle without an importer's site-package path first.
     pub fn get_all_errors(&self) -> Errors {
-        if self.data.updated_modules.is_empty() {
-            // Optimized path
-            return Errors::new(
-                self.readable
-                    .modules
-                    .values()
-                    .filter_map(|x| {
-                        let load = x.state.get_load()?;
-                        let parse_errors = x.state.parse_errors();
-                        let binding_errors = x.state.binding_errors();
-                        let solve_diagnostics = x.state.solve_errors();
-                        let module_ranges = x.state.module_ranges();
-                        Some((
-                            load,
-                            parse_errors,
-                            binding_errors,
-                            solve_diagnostics,
-                            module_ranges,
-                            x.config.dupe(),
-                        ))
-                    })
-                    .collect(),
-            );
-        }
-        let mut res = self
-            .data
-            .updated_modules
-            .iter_unordered()
-            .filter_map(|x| {
-                let load = x.1.state.get_load()?;
-                let parse_errors = x.1.state.parse_errors();
-                let binding_errors = x.1.state.binding_errors();
-                let solve_diagnostics = x.1.state.solve_errors();
-                let module_ranges = x.1.state.module_ranges();
-                Some((
-                    load,
-                    parse_errors,
-                    binding_errors,
-                    solve_diagnostics,
-                    module_ranges,
-                    x.1.config.read().dupe(),
-                ))
+        let handles = self
+            .handles()
+            .into_iter()
+            .filter(|handle| self.get_load(handle).is_some())
+            .sorted()
+            .dedup_by(|a, b| {
+                a.module() == b.module() && a.path() == b.path() && a.sys_info() == b.sys_info()
             })
             .collect::<Vec<_>>();
-        for (k, v) in self.readable.modules.iter() {
-            if self.data.updated_modules.get(k).is_none()
-                && let Some(load) = v.state.get_load()
-            {
-                let parse_errors = v.state.parse_errors();
-                let binding_errors = v.state.binding_errors();
-                let solve_diagnostics = v.state.solve_errors();
-                let module_ranges = v.state.module_ranges();
-                res.push((
-                    load,
-                    parse_errors,
-                    binding_errors,
-                    solve_diagnostics,
-                    module_ranges,
-                    v.config.dupe(),
-                ));
-            }
-        }
-        Errors::new(res)
+        self.get_errors(&handles)
     }
 
     pub fn config_finder(&self) -> &ConfigFinder {
@@ -1169,7 +1121,8 @@ impl<'a> Transaction<'a> {
         self.get_load(handle).map(|x| x.module_info.dupe())
     }
 
-    /// Return the modules that directly depend on this one.
+    /// Return the modules that directly depend on this one, or on any copy of it checked in
+    /// another Python environment.
     ///
     /// A dependency edge means the depending module's result was computed from
     /// this file's contents, which is exactly the question safe deletion asks,
@@ -1186,46 +1139,48 @@ impl<'a> Transaction<'a> {
     /// has open look unused.
     pub fn get_rdeps(&self, handle: &Handle) -> HashSet<Handle> {
         let path = handle.path().as_path();
-        self.copies(handle)
-            .iter()
-            .flat_map(|copy| {
-                self.get_module(copy)
+        let mut rdeps = HashSet::new();
+        for copy in self.copies(handle) {
+            rdeps.extend(
+                self.get_module(&copy)
                     .rdeps
                     .lock()
                     .iter()
                     .filter(|rdep| rdep.path().as_path() != path)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
+                    .cloned(),
+            );
+        }
+        rdeps
+    }
+
+    /// `handle` and the handles this transaction holds for the same module checked in other
+    /// Python environments. This is one lookup per interned site-package path, rather than a scan
+    /// of every module. The interner is global, so it can hold paths that no module here uses.
+    fn copies(&self, handle: &Handle) -> Vec<Handle> {
+        iter::once(None)
+            .chain(SitePackagePath::all().map(Some))
+            .map(|path| handle.dupe().with_importer_site_package_path(path))
+            .filter(|copy| copy == handle || self.get_require(copy).is_some())
             .collect()
     }
 
-    /// `handle` and the loaded handles for the same module checked in other Python environments.
-    fn copies(&self, handle: &Handle) -> Vec<Handle> {
-        let plain = handle.without_importer_site_package_path();
-        let mut copies: Vec<Handle> = self
-            .handles()
-            .into_iter()
-            .filter(|h| h != handle && h.without_importer_site_package_path() == plain)
-            .collect();
-        copies.push(handle.dupe());
-        copies
-    }
-
-    /// The handle that `importer` gets for the module `module` at `path`: the handle it would get
-    /// by importing that module. Every module checked in one Python environment gets the same
-    /// handle, so this also gives the handle of a module that `importer` reaches indirectly, such
-    /// as the module defining a type that `importer` uses.
+    /// The handle that `importer` gets for the module `module` at `path`: the handle it would
+    /// get by importing that module. Modules checked in one Python environment get the same
+    /// handle for a module, so this is also the handle of a module that `importer` reaches
+    /// through other modules checked in its environment, such as the module defining a type
+    /// that `importer` uses.
     pub fn imported_handle(
         &self,
         importer: &Handle,
         module: ModuleName,
         path: ModulePath,
     ) -> Handle {
-        let config = self.data.state.get_config(importer);
+        let config = self
+            .get_config(importer)
+            .unwrap_or_else(|| self.data.state.get_config(importer));
         self.data
             .state
-            .imported_handle(importer, &config, module, path)
+            .imported_handle_with_config(importer, &config, module, path)
     }
 
     /// Compute transitive dependency closure for the given handle.
@@ -1359,7 +1314,7 @@ impl<'a> Transaction<'a> {
         path.map(|path| {
             self.data
                 .state
-                .imported_handle(handle, &config, module, path)
+                .imported_handle_with_config(handle, &config, module, path)
         })
     }
 
@@ -1385,7 +1340,7 @@ impl<'a> Transaction<'a> {
             .map(|path| {
                 self.data
                     .state
-                    .imported_handle(handle, &config, module, path)
+                    .imported_handle_with_config(handle, &config, module, path)
             })
     }
 
@@ -1412,7 +1367,7 @@ impl<'a> Transaction<'a> {
         path.map(|path| {
             self.data
                 .state
-                .imported_handle(handle, &config, module, path)
+                .imported_handle_with_config(handle, &config, module, path)
         })
     }
 
@@ -1519,8 +1474,8 @@ impl<'a> Transaction<'a> {
             let mut is_dirty = false;
 
             // Only check imports (not all deps), since only import-statement deps
-            // need `find_import` re-validation. The cached value is the handle built
-            // from the result of `find_import`, so we build it again and compare.
+            // need `find_import` re-validation. The cache holds the handle built from
+            // the result of `find_import`, so we rebuild it and compare.
             for (module_name, cached) in module_data.imports.read().iter() {
                 let fresh = loader
                     .find_import(
@@ -1529,7 +1484,7 @@ impl<'a> Transaction<'a> {
                         Some(&self.timing),
                     )
                     .map(|path| {
-                        self.data.state.imported_handle(
+                        self.data.state.imported_handle_with_config(
                             &module_data.handle,
                             &config,
                             *module_name,
@@ -2038,10 +1993,12 @@ impl<'a> Transaction<'a> {
                     .get_cached_loader(&config)
                     .find_import(*other_module, Some(handle.path()), Some(&self.timing))
                     .finding()?;
-                let other_handle =
-                    self.data
-                        .state
-                        .imported_handle(handle, &config, *other_module, other_path);
+                let other_handle = self.data.state.imported_handle_with_config(
+                    handle,
+                    &config,
+                    *other_module,
+                    other_path,
+                );
                 self.lookup_export_location(&other_handle, actual_name)
             }
         }
@@ -2930,7 +2887,8 @@ impl<'a> Transaction<'a> {
 /// env is not `Sync`.
 pub struct TransactionTypeEnv<'a> {
     transaction: &'a Transaction<'a>,
-    /// The module this env was created for. Other modules are looked up with its `SysInfo`.
+    /// The module this env was created for. Other modules are looked up with the handles it gets
+    /// for them.
     handle: Handle,
     stdlib: Arc<Stdlib>,
     thread_state: ThreadState,
@@ -2948,10 +2906,10 @@ impl TypeEnv for TransactionTypeEnv<'_> {
             PrecomputedTParams::Precomputed(tparams) => return tparams,
             PrecomputedTParams::FromBinding => KeyTParams(cls.index()),
         };
-        let handle = Handle::new(
+        let handle = self.transaction.imported_handle(
+            &self.handle,
             cls.module_name(),
             cls.module_path().dupe(),
-            self.handle.sys_info().dupe(),
         );
         // There is no answer only if the class's module was rebuilt without this class, in which
         // case the solver also treats the class as having no type parameters.
@@ -2972,9 +2930,8 @@ pub(crate) struct TransactionHandle<'a> {
     /// Locally accumulated deps, flushed to `module_data.deps` on drop.
     /// This batches N lock acquisitions per handle lifetime into 1.
     /// Keyed by ModulePath (cheap to hash — discriminant + interned u64) rather
-    /// than Handle, since ModulePath uniquely identifies the target module within
-    /// a TransactionHandle (module name is derivable, and sys_info and the configs that decide the
-    /// handle's importer site-package path are invariant).
+    /// than Handle. Each entry keeps the handle that the first lookup of its path
+    /// resolved, so that later lookups of the same module can reuse it.
     deferred_deps: RefCell<FxHashMap<ModulePath, (Handle, ModuleDeps)>>,
     /// Cache of cross-module `BindingsMetadata` for class field lookups.
     /// Keyed by `ArcId::id()` (pointer-as-usize) to avoid atomic refcount
@@ -3015,18 +2972,8 @@ impl<'a> TransactionHandle<'a> {
         path: Option<&ModulePath>,
         dep: ModuleDep,
     ) -> FindingOrError<&'a ArcId<ModuleDataMut>> {
-        let resolve = move |handle: Handle| {
-            let res = self.transaction.get_imported_module(&handle);
-            self.deferred_deps
-                .borrow_mut()
-                .entry(handle.path().dupe())
-                .or_insert_with(|| (handle, ModuleDeps::default()))
-                .1
-                .add_dep(dep);
-            res
-        };
         let imported_handle = |config: &ConfigFile, path: ModulePath| {
-            self.transaction.data.state.imported_handle(
+            self.transaction.data.state.imported_handle_with_config(
                 &self.module_data.handle,
                 config,
                 module,
@@ -3034,18 +2981,27 @@ impl<'a> TransactionHandle<'a> {
             )
         };
         match path {
+            // Explicit path — already resolved. Bypass imports entirely. Most lookups take this
+            // path, so it resolves directly rather than through a `FindingOrError`, and reuses the
+            // handle kept in `deferred_deps` rather than deciding it again.
             Some(path) => {
-                // Explicit path — already resolved. Bypass imports entirely, and reuse the
-                // handle if this module was already looked up, which saves deciding its handle.
-                let seen = self
-                    .deferred_deps
-                    .borrow()
-                    .get(path)
-                    .map(|(handle, _)| handle.dupe())
-                    .filter(|handle| handle.module() == module);
-                FindingOrError::new_finding(resolve(seen.unwrap_or_else(|| {
+                let mut deferred_deps = self.deferred_deps.borrow_mut();
+                let (handle, deps) = deferred_deps.entry(path.dupe()).or_insert_with(|| {
+                    (
+                        imported_handle(&self.module_data.config.read(), path.dupe()),
+                        ModuleDeps::default(),
+                    )
+                });
+                deps.add_dep(dep);
+                // One file found through two search roots is two modules, so reuse the handle only
+                // for the same module name.
+                let handle = if handle.module() == module {
+                    handle.dupe()
+                } else {
                     imported_handle(&self.module_data.config.read(), path.dupe())
-                })))
+                };
+                drop(deferred_deps);
+                FindingOrError::new_finding(self.transaction.get_imported_module(&handle))
             }
             None => {
                 // No path — needs find_import. Check imports cache first.
@@ -3078,6 +3034,16 @@ impl<'a> TransactionHandle<'a> {
                         Arc::make_mut(&mut imports).insert(module, finding.dupe());
                         finding
                     }
+                };
+                let resolve = move |handle: Handle| {
+                    let res = self.transaction.get_imported_module(&handle);
+                    self.deferred_deps
+                        .borrow_mut()
+                        .entry(handle.path().dupe())
+                        .or_insert_with(|| (handle, ModuleDeps::default()))
+                        .1
+                        .add_dep(dep);
+                    res
                 };
                 handle.map(resolve)
             }
@@ -3691,11 +3657,10 @@ pub struct State {
     threads: ThreadPool,
     uniques: UniqueFactory,
     config_finder: ConfigFinder,
-    /// The configs of modules checked in an importer's Python environment, keyed by the config of
-    /// the module's location and the importer's site-package path. Reusing one config per key
-    /// keeps `get_cached_loader`, which is keyed by config identity, from making a new loader on
-    /// each lookup.
-    importer_configs: Mutex<SmallMap<(ArcId<ConfigFile>, Arc<[PathBuf]>), ArcId<ConfigFile>>>,
+    /// The configs of modules checked in an importer's Python environment, keyed by the module's
+    /// own config and the importer's site-package path. One config per key keeps
+    /// `get_cached_loader`, which is keyed by config identity, from making a loader per lookup.
+    importer_configs: Mutex<SmallMap<(ArcId<ConfigFile>, SitePackagePath), ArcId<ConfigFile>>>,
     endpoint_module_cache: EndpointModuleCache,
     state: RwLock<StateData>,
     run_count: AtomicUsize,
@@ -3781,14 +3746,13 @@ impl State {
                 Some(site_package_path) => self
                     .importer_configs
                     .lock()
-                    .entry((config.dupe(), site_package_path.dupe()))
+                    .entry((config.dupe(), site_package_path))
                     .or_insert_with(|| {
-                        // Replace the whole site-package path, including the paths queried from
-                        // the interpreter, so that `site_package_path()` of this config is exactly
-                        // the handle's importer site-package path.
+                        // Clear the paths queried from the interpreter as well, so that
+                        // `site_package_path()` is exactly the importer's site-package path.
                         let mut config = ConfigFile::clone(&config);
                         config.python_environment.site_package_path =
-                            Some(site_package_path.to_vec());
+                            Some(site_package_path.paths().to_vec());
                         config
                             .python_environment
                             .interpreter_site_package_path
@@ -3801,7 +3765,8 @@ impl State {
         }
     }
 
-    /// The handle for `module` at `path`, imported by `importer`, whose config is `importer_config`.
+    /// The handle for `module` at `path`, imported by `importer` whose config is
+    /// `importer_config`.
     ///
     /// A module under the importer's site-package path whose own config has a different
     /// site-package path is checked in the importer's Python environment, with the importer's
@@ -3809,7 +3774,7 @@ impl State {
     /// environment elsewhere, has the default config, so it is checked this way too. Every other
     /// module keeps a plain handle, so a module whose own config already uses the importer's
     /// site-package path is checked only once.
-    fn imported_handle(
+    fn imported_handle_with_config(
         &self,
         importer: &Handle,
         importer_config: &ConfigFile,
@@ -3827,12 +3792,11 @@ impl State {
                 .eq(importer_config.site_package_path())
         {
             // If the importer is itself checked in this environment, its config's site-package
-            // path is the one on its handle, so reuse that `Arc` rather than allocate a new one.
-            let site_package_path = importer
-                .importer_site_package_path()
-                .cloned()
-                .unwrap_or_else(|| importer_config.site_package_path().cloned().collect());
-            handle.with_importer_site_package_path(site_package_path)
+            // path is the one on its handle, so reuse that rather than intern it again.
+            let site_package_path = importer.importer_site_package_path().unwrap_or_else(|| {
+                SitePackagePath::new(importer_config.site_package_path().cloned().collect())
+            });
+            handle.with_importer_site_package_path(Some(site_package_path))
         } else {
             handle
         }

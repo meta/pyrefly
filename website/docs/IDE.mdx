@@ -51,6 +51,15 @@ treats the dependency files as [unconfigured](../configuration#unconfigured-proj
 an unconfigured dependency, Pyrefly may perform a more conservative analysis and provide
 less precise type information.
 
+The Python environment is the exception. A file found through the importing file's
+[site package path](../import-resolution#site-packages-path) is part of the importer's
+environment, so its own imports also resolve through the importer's site package path, as
+they do at runtime. For example, `library/` might have its own configuration and virtual
+environment and be installed in editable mode into `app/.venv`. Files in `app/` and the
+library files they import then share one copy of each dependency in `app/.venv`. A library
+imported from two environments is checked once in each, and a library file you open is
+checked in its own environment.
+
 Per-file configuration selection can make IDE results differ from `pyrefly check` with no
 file arguments. A check with no file arguments runs in project mode and uses one selected
 configuration for the project and all imported files. The language server and

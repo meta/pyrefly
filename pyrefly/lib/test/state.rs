@@ -37,6 +37,7 @@ use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
 use pyrefly_util::thread_pool::ThreadCount;
 use pyrefly_util::thread_pool::ThreadPool;
 use ruff_python_ast::name::Name;
+use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 use starlark_map::small_set::SmallSet;
 use tempfile::TempDir;
@@ -55,6 +56,7 @@ use crate::error::error::Error;
 use crate::error::error::print_errors;
 use crate::lsp::non_wasm::module_helpers::handle_from_module_path;
 use crate::lsp::non_wasm::server::resolve_export_location;
+use crate::lsp::wasm::hover::get_hover;
 use crate::module::bundled::BundledStub;
 use crate::module::bundled::set_readonly;
 use crate::module::finder::DirEntryCache;
@@ -1894,29 +1896,30 @@ fn test_stdlib_cached_on_recheck() {
 
 /// Writes apps `app` and `app2` and a library `lib`, each with its own config and Python
 /// environment, and each environment with a module `dep`. The apps find the library through their
-/// site-package paths, and the library's config uses `lib_site_package_path`.
+/// site-package paths. The library's config uses `lib_site_package_path`, relative to `lib`.
 fn write_apps_and_library(root: &Path, lib_site_package_path: &[&str]) {
-    let site_package_path = |dirs: &[&str]| {
-        dirs.iter()
-            .map(|dir| format!("'{}'", root.join(dir).display()))
-            .collect::<Vec<_>>()
-            .join(", ")
+    let config = |site_package_path: &[&str]| {
+        format!(
+            "site-packages-path = [{}]\nskip-interpreter-query = true\n",
+            site_package_path
+                .iter()
+                .map(|path| format!("'{path}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     for (app, env) in [("app", "app_env"), ("app2", "app2_env")] {
         fs::create_dir_all(root.join(app)).unwrap();
         fs::create_dir_all(root.join(env)).unwrap();
         fs::write(
             root.join(app).join(ConfigFile::PYREFLY_FILE_NAME),
-            format!(
-                "site-package-path = [{}]\nskip-interpreter-query = true\n",
-                site_package_path(&[env, "lib"])
-            ),
+            config(&[&format!("../{env}"), "../lib"]),
         )
         .unwrap();
         fs::write(root.join(env).join("dep.py"), "class C: ...\n").unwrap();
         fs::write(
             root.join(app).join("main.py"),
-            "import dep\nimport mylib\nmylib.f(x=dep.C())\n",
+            "import dep\nimport mylib\nmylib.f(x=dep.C())\nmylib.K().m()\nk = mylib.K\n",
         )
         .unwrap();
     }
@@ -1924,77 +1927,133 @@ fn write_apps_and_library(root: &Path, lib_site_package_path: &[&str]) {
     fs::create_dir_all(root.join("lib_env")).unwrap();
     fs::write(
         root.join("lib").join(ConfigFile::PYREFLY_FILE_NAME),
-        format!(
-            "site-package-path = [{}]\nskip-interpreter-query = true\n",
-            site_package_path(lib_site_package_path)
-        ),
+        config(lib_site_package_path),
     )
     .unwrap();
-    fs::write(root.join("lib_env/dep.py"), "class C: ...\n").unwrap();
+    fs::write(root.join("lib_env").join("dep.py"), "class C: ...\n").unwrap();
     fs::write(
-        root.join("lib/mylib.py"),
-        "import dep\ndef f(x: dep.C) -> None: ...\n",
+        root.join("lib").join("mylib.py"),
+        r#"import dep
+def f(x: dep.C) -> None: ...
+class K:
+    """The K class."""
+    def m(self) -> None: ...
+"#,
     )
     .unwrap();
 }
 
+/// Checks the apps written by `write_apps_and_library` and returns the state and the handles of
+/// `app/main.py`, `app2/main.py` and `lib/mylib.py`.
+fn check_apps(root: &Path, require: Require) -> (State, [Handle; 3]) {
+    let state = State::new(default_config_finder(None), TEST_THREAD_COUNT);
+    let handles = ["app/main.py", "app2/main.py", "lib/mylib.py"]
+        .map(|path| handle_from_module_path(&state, ModulePath::filesystem(root.join(path))));
+    let mut transaction = state.new_committable_transaction(require, None);
+    transaction
+        .as_mut()
+        .run(&handles[..2], Require::Everything, None);
+    state.commit_transaction(transaction, None);
+    (state, handles)
+}
+
+fn import_handle(transaction: &Transaction, handle: &Handle, module: &str) -> Handle {
+    transaction
+        .import_handle(handle, ModuleName::from_str(module), None)
+        .finding()
+        .unwrap()
+}
+
 /// A library with its own config and environment, found through an app's site-package path, is
-/// checked in the app's environment: the app's copy of the library resolves `dep` to the same
-/// handle as the app does, so passing the app's `dep.C` to it is not an error. Two apps get one
-/// copy each, and IDE features that look up the library from an app use the app's copy. Checked on
-/// its own, the library resolves `dep` through its own site-package path. Find references reports
-/// each file once. See https://github.com/facebook/pyrefly/issues/3556.
+/// checked in the app's environment. The app's copy of the library resolves `dep` to the same
+/// module as the app, so passing the app's `dep.C` to it is not an error. Each app gets its own
+/// copy, and the library checked on its own still resolves `dep` in its own environment. See
+/// https://github.com/facebook/pyrefly/issues/3556.
 #[test]
 fn test_library_imported_from_another_environment() {
     let temp_dir = TempDir::new().unwrap();
     let root = temp_dir.path();
-    write_apps_and_library(root, &["lib_env"]);
-    let state = State::new(default_config_finder(None), TEST_THREAD_COUNT);
-    let handle =
-        |path: &str| handle_from_module_path(&state, ModulePath::filesystem(root.join(path)));
-    let (main, main2, mylib) = (
-        handle("app/main.py"),
-        handle("app2/main.py"),
-        handle("lib/mylib.py"),
-    );
-    let mut transaction = state.new_transaction(Require::Exports, None);
-    transaction.run(&[main.dupe(), main2.dupe()], Require::Everything, None);
+    write_apps_and_library(root, &["../lib_env"]);
+    let (state, [main, main2, mylib]) = check_apps(root, Require::Exports);
+    let mut transaction = state.transaction();
     let errors = transaction
         .get_errors([&main, &main2])
         .collect_display_errors();
     assert!(errors.is_empty(), "expected no errors, got {errors:?}");
-
-    let import = |transaction: &Transaction, handle: &Handle, module: &str| {
-        transaction
-            .import_handle(handle, ModuleName::from_str(module), None)
-            .finding()
-            .unwrap()
-    };
+    assert_ne!(
+        import_handle(&transaction, &main, "mylib"),
+        import_handle(&transaction, &main2, "mylib")
+    );
     for main in [&main, &main2] {
+        let app_mylib = import_handle(&transaction, main, "mylib");
         assert_eq!(
-            import(&transaction, &import(&transaction, main, "mylib"), "dep"),
-            import(&transaction, main, "dep")
+            import_handle(&transaction, &app_mylib, "dep"),
+            import_handle(&transaction, main, "dep")
         );
     }
-    assert_eq!(
-        import(&transaction, &import(&transaction, &main2, "mylib"), "dep")
-            .path()
-            .as_path(),
-        root.join("app2_env/dep.py")
-    );
 
-    let code = fs::read_to_string(root.join("app/main.py")).unwrap();
+    transaction.run(&[mylib.dupe()], Require::Everything, None);
+    let errors = transaction.get_errors([&mylib]).collect_display_errors();
+    assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+    assert_eq!(
+        import_handle(&transaction, &mylib, "dep").path().as_path(),
+        root.join("lib_env").join("dep.py")
+    );
+}
+
+/// From an app, go to definition, go to type definition and the docstring in a hover read the
+/// app's copy of the library, which is the only one loaded.
+#[test]
+fn test_library_definitions_from_app() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    write_apps_and_library(root, &["../lib_env"]);
+    let (state, [main, _, _]) = check_apps(root, Require::Exports);
+    let transaction = state.transaction();
+    let code = fs::read_to_string(root.join("app").join("main.py")).unwrap();
     let position = |text: &str| TextSize::try_from(code.find(text).unwrap()).unwrap();
-    let type_definition = transaction
-        .goto_type_definition(&main, position("f("))
+    let paths = |definitions: &[TextRangeWithModule]| {
+        definitions
+            .iter()
+            .map(|definition| definition.module.path().as_path().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let mylib = vec![root.join("lib").join("mylib.py")];
+    assert_eq!(
+        paths(
+            &transaction
+                .goto_type_definition(&main, position("f("))
+                .unwrap()
+        ),
+        mylib
+    );
+    let method = transaction
+        .find_definition(&main, position("m()"), FindPreference::default())
         .unwrap();
     assert_eq!(
-        type_definition
+        method
             .iter()
-            .map(|definition| definition.module.path().as_path())
+            .map(|definition| definition.module.path().as_path().to_owned())
             .collect::<Vec<_>>(),
-        vec![root.join("lib/mylib.py")]
+        mylib
     );
+    let hover = get_hover(&transaction, &main, position("k ="), false).unwrap();
+    assert!(
+        format!("{:?}", hover.contents).contains("The K class."),
+        "{hover:?}"
+    );
+}
+
+/// The library is imported from two environments and also checked on its own. Its reverse
+/// dependencies, and find references on one of its functions, include both apps, and list each
+/// file once.
+#[test]
+fn test_library_references_from_each_environment() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    write_apps_and_library(root, &["../lib_env"]);
+    let (state, [main, main2, mylib]) = check_apps(root, Require::Exports);
+    let mut transaction = state.transaction();
     let mut rdeps = transaction
         .get_rdeps(&mylib)
         .into_iter()
@@ -2003,19 +2062,17 @@ fn test_library_imported_from_another_environment() {
     rdeps.sort();
     assert_eq!(
         rdeps,
-        vec![root.join("app/main.py"), root.join("app2/main.py")]
+        vec![
+            main.path().as_path().to_owned(),
+            main2.path().as_path().to_owned()
+        ]
     );
 
     transaction.run(&[mylib.dupe()], Require::Everything, None);
-    let errors = transaction.get_errors([&mylib]).collect_display_errors();
-    assert!(errors.is_empty(), "expected no errors, got {errors:?}");
-    assert_eq!(
-        import(&transaction, &mylib, "dep").path().as_path(),
-        root.join("lib_env/dep.py")
-    );
-
+    let code = fs::read_to_string(root.join("app").join("main.py")).unwrap();
+    let position = TextSize::try_from(code.find("f(").unwrap()).unwrap();
     let definitions = transaction
-        .find_definition(&main, position("f("), FindPreference::default())
+        .find_definition(&main, position, FindPreference::default())
         .unwrap();
     let definition = definitions.first();
     let mut references = transaction
@@ -2033,22 +2090,27 @@ fn test_library_imported_from_another_environment() {
     assert_eq!(
         references,
         vec![
-            (root.join("app/main.py"), 1),
-            (root.join("app2/main.py"), 1),
-            (root.join("lib/mylib.py"), 1)
+            (main.path().as_path().to_owned(), 1),
+            (main2.path().as_path().to_owned(), 1),
+            (mylib.path().as_path().to_owned(), 1)
         ]
     );
 }
 
-/// When the library's config changes from the app's environment to its own, the app's import of
-/// the library switches to the library's copy in the app's environment.
+/// The library's config first uses the app's environment, so the app imports the library's own
+/// module. When the config switches to the library's own environment, the app must recheck its
+/// import and get a copy in its environment. Without the recheck, the library resolves `dep` in
+/// `lib_env` and the app's call is an error.
 #[test]
 fn test_library_environment_change_rechecks_importer() {
     let temp_dir = TempDir::new().unwrap();
     let root = temp_dir.path();
-    write_apps_and_library(root, &["app_env", "lib"]);
+    write_apps_and_library(root, &["../app_env", "."]);
     let state = State::new(default_config_finder(None), TEST_THREAD_COUNT);
-    let main = handle_from_module_path(&state, ModulePath::filesystem(root.join("app/main.py")));
+    let main = handle_from_module_path(
+        &state,
+        ModulePath::filesystem(root.join("app").join("main.py")),
+    );
     let error_count_after = |events: CategorizedEvents| {
         let mut transaction = state.new_committable_transaction(Require::Everything, None);
         transaction.as_mut().invalidate_events(&events);
@@ -2068,10 +2130,7 @@ fn test_library_environment_change_rechecks_importer() {
     let lib_config = root.join("lib").join(ConfigFile::PYREFLY_FILE_NAME);
     fs::write(
         &lib_config,
-        format!(
-            "site-package-path = ['{}']\nskip-interpreter-query = true\n",
-            root.join("lib_env").display()
-        ),
+        "site-packages-path = ['../lib_env']\nskip-interpreter-query = true\n",
     )
     .unwrap();
     assert_eq!(
@@ -2081,4 +2140,164 @@ fn test_library_environment_change_rechecks_importer() {
         }),
         0
     );
+}
+
+/// The app reads a field of a library class whose module it never imports, because the library
+/// imports that module inside a function. Looking up the class's fields uses the class's module
+/// path rather than an import, and still finds the copy checked in the app's environment, so the
+/// field has the app's `dep.C`.
+#[test]
+fn test_library_class_fields_without_import() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    write_apps_and_library(root, &["../lib_env"]);
+    fs::write(
+        root.join("lib").join("fields.py"),
+        "import dep\nclass B:\n    c: dep.C\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("lib").join("factory.py"),
+        "def make():\n    from fields import B\n    return B()\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("app").join("main.py"),
+        "import dep\nimport factory\nc: dep.C = factory.make().c\n",
+    )
+    .unwrap();
+    let (state, [main, _, _]) = check_apps(root, Require::Exports);
+    let errors = state
+        .transaction()
+        .get_errors([&main])
+        .collect_display_errors();
+    assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+}
+
+/// A Python environment outside any config: its modules have the default config, so a module the
+/// app imports from it is checked in the app's environment and resolves its own imports there.
+/// Checking that module on its own, as opening it in an editor does, makes a second copy.
+#[test]
+fn test_environment_outside_any_config() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    fs::create_dir_all(root.join("app")).unwrap();
+    fs::create_dir_all(root.join("env")).unwrap();
+    fs::write(
+        root.join("app").join(ConfigFile::PYREFLY_FILE_NAME),
+        "site-packages-path = ['../env']\nskip-interpreter-query = true\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("env").join("dep.py"),
+        "import dep2\nclass C:\n    d: dep2.D\n",
+    )
+    .unwrap();
+    fs::write(root.join("env").join("dep2.py"), "class D: ...\n").unwrap();
+    fs::write(
+        root.join("app").join("main.py"),
+        "import dep\nimport dep2\nd: dep2.D = dep.C().d\n",
+    )
+    .unwrap();
+    let state = State::new(default_config_finder(None), TEST_THREAD_COUNT);
+    let handle =
+        |path: &str| handle_from_module_path(&state, ModulePath::filesystem(root.join(path)));
+    let (main, dep) = (handle("app/main.py"), handle("env/dep.py"));
+    let mut transaction = state.new_transaction(Require::Exports, None);
+    transaction.run(&[main.dupe(), dep.dupe()], Require::Everything, None);
+    let errors = transaction
+        .get_errors([&main, &dep])
+        .collect_display_errors();
+    assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+
+    let app_dep = import_handle(&transaction, &main, "dep");
+    assert!(app_dep.importer_site_package_path().is_some());
+    assert_eq!(
+        import_handle(&transaction, &app_dep, "dep2"),
+        import_handle(&transaction, &main, "dep2")
+    );
+    assert_eq!(dep.importer_site_package_path(), None);
+    assert_eq!(app_dep.path(), dep.path());
+}
+
+/// With the library file open and edited, find references reads the library file from the editor
+/// only: neither its file on disk nor the app's copy of that file adds references.
+#[test]
+fn test_library_open_in_editor_references() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    write_apps_and_library(root, &["../lib_env"]);
+    let state = State::new(default_config_finder(None), TEST_THREAD_COUNT);
+    let lib_path = root.join("lib").join("mylib.py");
+    // Shift the text in the editor, so that its ranges differ from the file on disk.
+    let code = format!("\n\n{}", fs::read_to_string(&lib_path).unwrap());
+    let main = handle_from_module_path(
+        &state,
+        ModulePath::filesystem(root.join("app").join("main.py")),
+    );
+    let mylib = handle_from_module_path(&state, ModulePath::memory(lib_path.clone()));
+    let mut transaction = state.new_committable_transaction(Require::Exports, None);
+    transaction.as_mut().set_memory(vec![(
+        lib_path.clone(),
+        Some(Arc::new(FileContents::from_source(code.clone()))),
+    )]);
+    transaction
+        .as_mut()
+        .run(&[main.dupe(), mylib.dupe()], Require::Everything, None);
+    state.commit_transaction(transaction, None);
+
+    let mut transaction = state.transaction();
+    let position = TextSize::try_from(code.find("f(").unwrap()).unwrap();
+    let definitions = transaction
+        .find_definition(&mylib, position, FindPreference::default())
+        .unwrap();
+    let definition = definitions.first();
+    let mut references = transaction
+        .find_global_references_from_definition(
+            *mylib.sys_info(),
+            definition.metadata.clone(),
+            TextRangeWithModule::new(definition.module.clone(), definition.definition_range),
+            ReferenceOptions::textual_only(true),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|(module, ranges)| (module.path().dupe(), ranges))
+        .collect::<Vec<_>>();
+    references.sort_by_key(|(path, _)| path.dupe());
+    let main_code = fs::read_to_string(root.join("app").join("main.py")).unwrap();
+    let range = |code: &str| {
+        TextRange::at(
+            TextSize::try_from(code.find("f(").unwrap()).unwrap(),
+            TextSize::new(1),
+        )
+    };
+    let mut expected = vec![
+        (main.path().dupe(), vec![range(&main_code)]),
+        (mylib.path().dupe(), vec![range(&code)]),
+    ];
+    expected.sort_by_key(|(path, _)| path.dupe());
+    assert_eq!(references, expected);
+}
+
+/// The library has an error and is checked both on its own and in the apps' environments. All
+/// errors, as `pyrefly check --check-all` reports them, include the library's error once.
+#[test]
+fn test_library_all_errors_reported_once() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    write_apps_and_library(root, &["../lib_env"]);
+    let lib_path = root.join("lib").join("mylib.py");
+    let code = fs::read_to_string(&lib_path).unwrap();
+    fs::write(&lib_path, format!("{code}x: int = ''\n")).unwrap();
+    // `--check-all` keeps the errors of every module.
+    let (state, [_, _, mylib]) = check_apps(root, Require::Errors);
+    let mut transaction = state.transaction();
+    transaction.run(&[mylib], Require::Errors, None);
+    let errors = transaction
+        .get_all_errors()
+        .collect_display_errors()
+        .into_iter()
+        .filter(|error| error.path().as_path() == lib_path)
+        .collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1, "{errors:?}");
 }
