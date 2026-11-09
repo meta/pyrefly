@@ -465,13 +465,12 @@ def check(broad: int, values: list[int]) -> None:
 
 testcase!(
     test_class_flag_substitutes_into_type_shape_dsl_return,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
 import shape_extensions.dsl as dsl
-from shape_extensions import Flag, IntTuple, shaped_array, type_shape_dsl_function
+from shape_extensions import Flag, IntTuple, type_shape_dsl_function
 from typing import assert_type
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple]: ...
 
 @type_shape_dsl_function
@@ -651,12 +650,11 @@ def diag_extent(n: Int, k: int) -> Int:
 
 testcase!(
     test_type_shape_dsl_function_docstring,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
-from shape_extensions import IntTuple, shaped_array, type_shape_dsl_function
+from shape_extensions import IntTuple, type_shape_dsl_function
 from typing import assert_type
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple]: ...
 
 @type_shape_dsl_function
@@ -1817,7 +1815,7 @@ def f(x: Array[[2, 3], int]) -> None:
 
 testcase!(
     test_type_level_dsl_broadcast_return_boundary,
-    legacy_shaped_array_env_with_torch(),
+    shape_extensions_env_with_torch(),
     r#"
 import shape_extensions
 import shape_extensions as shapes
@@ -1880,7 +1878,7 @@ def test(x: Tensor[[2, 3]], y: Tensor[[1, 3]], z: Tensor[[2, 1]], bad: Tensor[[4
     reveal_type(add_imported(x, y))  # E: revealed type: Tensor[[2, 3]]
     reveal_type(add_alias(x, y))  # E: revealed type: Tensor[[2, 3]]
     reveal_type(add_nested(x, z, y))  # E: revealed type: Tensor[[2, 3]]
-    reveal_type(add_imported(x, unknown))  # E: revealed type: Tensor[tuple[Unknown, ...]]
+    reveal_type(add_imported(x, unknown))  # E: revealed type: Tensor[IntTuple]
     add_imported(x, bad)  # E: Cannot evaluate type-level shape DSL call: Cannot broadcast dimension Int[2] with dimension Int[4] at position 0
     add_nested(x, bad, y)  # E: Cannot evaluate type-level shape DSL call: Cannot broadcast dimension Int[2] with dimension Int[4] at position 0
     add_repeated(x, bad)  # E: Cannot evaluate type-level shape DSL call: Cannot broadcast dimension Int[2] with dimension Int[4] at position 0
@@ -5166,7 +5164,7 @@ def bad_plain_call() -> Tensor[[*Elements[plain()], 4]]: ...  # E: Expected a ty
 
 testcase!(
     test_type_level_dsl_broadcast_rejected_at_direct_type_roots,
-    legacy_shaped_array_env_with_torch(),
+    shape_extensions_env_with_torch(),
     r#"
 from shape_extensions import IntTuple, broadcast
 from torch import Tensor
@@ -5183,10 +5181,10 @@ def pep_default[T = Tensor[broadcast(IntTuple[2], IntTuple[2])]]() -> None: ... 
 
 class BadBase(list[Tensor[broadcast(IntTuple[2], IntTuple[2])]]): ...  # E: Function call cannot be used in annotations
 class BadGeneric(Generic[broadcast(IntTuple[2], IntTuple[2])]): ...  # E: Function call cannot be used in annotations
-class BadMetaclass(metaclass=Tensor[broadcast(IntTuple[2], IntTuple[2])]): ...  # E: Function call cannot be used in annotations
+class BadMetaclass(metaclass=Tensor[broadcast(IntTuple[2], IntTuple[2])]): ...  # E: Function call cannot be used in annotations  # E: which is not a subclass of `type`
 class BadExtraItems(TypedDict, extra_items=Tensor[broadcast(IntTuple[2], IntTuple[2])]): ...  # E: Function call cannot be used in annotations
 
-assert_type(None, Tensor[broadcast(IntTuple[2], IntTuple[2])])  # E: Function call cannot be used in annotations
+assert_type(None, Tensor[broadcast(IntTuple[2], IntTuple[2])])  # E: Function call cannot be used in annotations  # E: assert_type(None, Tensor[Unknown]) failed
 cast(Tensor[broadcast(IntTuple[2], IntTuple[2])], None)  # E: Function call cannot be used in annotations
 TypeForm(Tensor[broadcast(IntTuple[2], IntTuple[2])])  # E: Function call cannot be used in annotations
 "#,

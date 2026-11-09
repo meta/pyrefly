@@ -5,9 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use crate::test::shape_dsl::legacy_shaped_array_env;
 use crate::test::shaped::shaped_env;
 use crate::test::util::TestEnv;
+use crate::test::util::shape_extensions_env;
 use crate::test::util::testcase_for_macro;
 use crate::testcase;
 
@@ -697,14 +697,13 @@ def f() -> None: ...  # E: cannot combine
 );
 
 testcase!(
-    test_shaped_comments_registered_array,
-    legacy_shaped_array_env(),
+    test_shaped_comments_inttuple_generic_array,
+    shape_extensions_env(),
     r#"
 # enable-shape-type-comments
 from typing import assert_type
-from shape_extensions import IntTuple, shaped_array
+from shape_extensions import IntTuple
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType = object]:
     shape: Shape
 
@@ -1069,20 +1068,19 @@ class Commented(
 );
 
 testcase!(
-    test_shaped_comments_base_registered_array,
-    legacy_shaped_array_env(),
+    test_shaped_comments_base_inttuple_generic_array,
+    shape_extensions_env(),
     r#"
 # enable-shape-type-comments
-from typing import Literal, assert_type
-from shape_extensions import IntTuple, shaped_array
-@shaped_array(shape="Shape")
+from typing import assert_type
+from shape_extensions import IntTuple
 class Array[Shape: IntTuple = IntTuple]:
     shape: Shape
 class Image(
     Array,  # shaped: [3, 4]
 ): ...
 def check(i: Image) -> None:
-    assert_type(i.shape, tuple[Literal[3], Literal[4]])
+    assert_type(i.shape, IntTuple[3, 4])
 "#,
 );
 
@@ -1117,14 +1115,13 @@ def check(fields: Fields) -> None:
 );
 
 testcase!(
-    test_shaped_comments_registered_array_dsl_and_bare_carrier,
-    legacy_shaped_array_env(),
+    test_shaped_comments_inttuple_generic_array_dsl_and_bare_carrier,
+    shape_extensions_env(),
     r#"
 # enable-shape-type-comments
 from typing import assert_type
-from shape_extensions import IntTuple, shaped_array, broadcast
+from shape_extensions import IntTuple, broadcast
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType = object]: ...
 
 # shapes: *Left, *Right
