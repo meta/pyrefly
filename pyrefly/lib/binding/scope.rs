@@ -3323,6 +3323,8 @@ impl Scopes {
         }
     }
 
+    /// Does the module have `from __future__ import annotations`?
+    /// Most callers should use `BindingsBuilder::annotations_are_postponed`.
     pub fn has_future_annotations(&self) -> bool {
         // Look up through scopes to find the module scope's flag
         for scope in self.iter_rev() {
@@ -5554,6 +5556,11 @@ impl<'a> BindingsBuilder<'a> {
     pub fn next_branch(&mut self) {
         self.finish_branch();
         self.start_branch();
+    }
+
+    /// Whether annotations in this module are evaluated lazily rather than where they appear.
+    pub fn annotations_are_postponed(&self) -> bool {
+        self.scopes.has_future_annotations() || self.sys_info.version().at_least(3, 14)
     }
 }
 

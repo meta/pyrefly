@@ -443,8 +443,7 @@ impl<'a> BindingsBuilder<'a> {
                         }
                     )
                     && self.module_info.path().style() == ModuleStyle::Executable
-                    && !self.sys_info.version().at_least(3, 14)
-                    && !self.scopes.has_future_annotations()
+                    && !self.annotations_are_postponed()
                     && let Some(error_message) = is_initialized.as_error_message(&name.id)
                 {
                     self.error(name.range, ErrorKind::UnboundName, error_message);
@@ -753,11 +752,6 @@ impl<'a> BindingsBuilder<'a> {
         }
     }
 
-    /// Whether annotations in this module are evaluated lazily rather than where they appear.
-    fn annotations_are_postponed(&self) -> bool {
-        self.scopes.has_future_annotations() || self.sys_info.version().at_least(3, 14)
-    }
-
     /// Execute through the expr, ensuring every name has a binding.
     pub fn ensure_expr(&mut self, x: &mut Expr, usage: &mut Usage) {
         self.with_semantic_checker(|semantic, context| semantic.visit_expr(x, context));
@@ -832,7 +826,7 @@ impl<'a> BindingsBuilder<'a> {
                             false,
                         );
                     }
-                } else if self.scopes.has_future_annotations()
+                } else if self.annotations_are_postponed()
                     && let Expr::Name(name) = &**value
                     && let Some((class_object_idx, FlowStyle::ClassDef { .. })) =
                         self.scopes.binding_idx_for_name(&name.id)
@@ -1628,8 +1622,7 @@ impl<'a> BindingsBuilder<'a> {
                 // (which make annotations lazy and avoid the runtime error)
                 if self.module_info.path().style() == ModuleStyle::Executable
                     && (left_is_forward_ref || right_is_forward_ref)
-                    && !self.sys_info.version().at_least(3, 14)
-                    && !self.scopes.has_future_annotations()
+                    && !self.annotations_are_postponed()
                 {
                     self.insert_binding(
                         KeyExpect::ForwardRefUnion(*range),
