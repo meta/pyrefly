@@ -5241,12 +5241,11 @@ def f(
 
 testcase!(
     test_symbolic_size_subset_delegates_to_symbolic_leaf,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
 from typing import Any, reveal_type
-from shape_extensions import Elements, IntTuple, IntVar, shaped_array
+from shape_extensions import Elements, IntTuple, IntVar
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple = tuple[Any, ...], DType = Any]: ...
 
 def append_dim[S: IntTuple, OUT: IntVar](
@@ -5506,12 +5505,11 @@ def ordinary(x: tuple[str, *tuple[Int, ...]]) -> None:
 
 testcase!(
     test_ordinary_typevar_shape_dimension_is_rejected,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
 from typing import Any, Generic, TypeVar
-from shape_extensions import Int, Elements, Int, IntTuple, IntVar, shaped_array
+from shape_extensions import Elements, Int, IntTuple, IntVar
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple = tuple[Any, ...], DType = Any]: ...
 
 class SymBox[N: IntVar]: ...
@@ -5787,12 +5785,11 @@ def test(exponent: Int[63], concrete: Int[7]) -> None:
 
 testcase!(
     test_tensor_shapes_internal_dim_carrier_flows_to_size,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
-from shape_extensions import Int, IntTuple, IntVar, shaped_array
+from shape_extensions import Int, IntTuple, IntVar
 from typing import Any, reveal_type
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple = tuple[Any, ...], DType = Any]:
     shape: Shape
 
@@ -5807,14 +5804,13 @@ def shape_carrier_uses_canonical_size[N: IntVar](symbolic: Array[[N], int]) -> N
 );
 
 testcase!(
-    test_shaped_array_overload_impl_accepts_symbolic_size_return,
-    legacy_shaped_array_env(),
+    test_inttuple_array_overload_impl_accepts_symbolic_size_return,
+    shape_extensions_env(),
     r#"
-from shape_extensions import Int, IntVar, shaped_array
+from shape_extensions import Int, IntTuple, IntVar
 from typing import overload
 
-@shaped_array(shape="Shape")
-class Tensor[Shape]: ...
+class Tensor[Shape: IntTuple]: ...
 
 class Layer: ...
 
@@ -5841,14 +5837,13 @@ def dense_chain[I: IntVar, B: IntVar, C: IntVar, H: IntVar, W: IntVar](
 );
 
 testcase!(
-    test_shaped_array_overload_impl_accepts_symbolic_size_return_with_generic_block,
-    legacy_shaped_array_env(),
+    test_inttuple_array_overload_impl_accepts_symbolic_size_return_with_generic_block,
+    shape_extensions_env(),
     r#"
-from shape_extensions import Int, IntVar, shaped_array
+from shape_extensions import Int, IntTuple, IntVar
 from typing import Any, overload
 
-@shaped_array(shape="Shape")
-class Tensor[Shape]: ...
+class Tensor[Shape: IntTuple]: ...
 
 class Block[C: IntVar, GR: IntVar, BnC: IntVar]: ...
 
@@ -7013,9 +7008,9 @@ def f(x: Tensor[2, 3], y: Tensor) -> None:  # E: Expected a type form, got insta
 
 testcase!(
     test_tensor_shapes_keeps_integer_type_arguments_ordinary,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
-from shape_extensions import Int, IntTuple, IntVar, shaped_array
+from shape_extensions import Int, IntTuple, IntVar
 from typing import TypeVar, reveal_type
 
 T = TypeVar("T")
@@ -7024,10 +7019,8 @@ DefaultT = TypeVar("DefaultT", default=3)  # E: Expected a type form, got instan
 class Box[T]: ...
 class DefaultBox[T = 3]: ...  # E: Expected a type form, got instance of `Literal[3]`
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType, Device]: ...
 
-@shaped_array(shape="Shape")
 class DTypeFirstArray[DType, Shape: IntTuple]: ...
 
 class Cpu: ...
@@ -7147,12 +7140,11 @@ def preserve_shape(array: Array[[2, 3]], nd: ndarray[[4]]) -> None:
 
 testcase!(
     test_tensor_shapes_gradual_size,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
-from shape_extensions import Int, IntTuple, shaped_array
+from shape_extensions import Int, IntTuple
 from typing import Any, assert_type, overload, reveal_type
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple]: ...
 
 def take_int(x: int) -> None: ...
@@ -7334,14 +7326,13 @@ def f(i: int, s3: Int[3]) -> None:
 testcase!(
     test_tensor_shapes_numpy_shaped_api_accepts_int_lengths,
     {
-        let mut env = legacy_shaped_array_env();
+        let mut env = shape_extensions_env();
         env.add_with_path(
             "numpy",
             "numpy.pyi",
             r#"
-from shape_extensions import Int, IntTuple, IntVar, shaped_array
+from shape_extensions import Int, IntTuple, IntVar
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType = int]: ...
 
 def arange[N: IntVar](stop: Int[N]) -> Array[[N], int]: ...
@@ -7364,14 +7355,13 @@ def f(targets: list[int], n_points: int) -> None:
 testcase!(
     test_tensor_shapes_len_carries_first_dimension,
     {
-        let mut env = legacy_shaped_array_env();
+        let mut env = shape_extensions_env();
         env.add_with_path(
             "numpy",
             "numpy.pyi",
             r#"
-from shape_extensions import Int, IntTuple, IntVar, shaped_array
+from shape_extensions import Int, IntTuple, IntVar
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType = int]:
     def __len__[N: IntVar](self: Array[[N], DType]) -> Int[N]: ...
 
@@ -7638,7 +7628,7 @@ def use[N: IntVar, M: IntVar](x: Int[N], y: Int[M]) -> None:
 
 testcase!(
     test_legacy_intvar_treated_as_intvar,
-    legacy_shaped_array_env_with_torch(),
+    shape_extensions_env_with_torch(),
     r#"
 from shape_extensions import Int, IntVar
 from torch import Tensor
@@ -7660,7 +7650,7 @@ def f(n: Int[N], shifted: Int[N + 1], x: Tensor[[N, M]], shifted_x: Tensor[[N + 
 
 testcase!(
     test_intvar_type_parameter_bound,
-    legacy_shaped_array_env_with_torch(),
+    shape_extensions_env_with_torch(),
     r#"
 from shape_extensions import Int, Elements, IntTuple, IntVar
 from shape_extensions import IntVar as SV
@@ -8060,8 +8050,8 @@ def f(x: Tensor[[2, 3]], y: Tensor) -> None:
 );
 
 testcase!(
-    test_shaped_array_intvar_wrapper,
-    legacy_shaped_array_env_with_torch(),
+    test_inttuple_array_intvar_wrapper,
+    shape_extensions_env_with_torch(),
     r#"
 from shape_extensions import IntVar
 from shape_extensions import IntVar as iv
@@ -8086,7 +8076,7 @@ def bad_arity() -> Tensor[[IntVar[1, 2]]]: ...  # E: Expected 1 argument for `In
 
 testcase!(
     test_shape_arithmetic_intvar_wrapper,
-    legacy_shaped_array_env_with_torch(),
+    shape_extensions_env_with_torch(),
     r#"
 from shape_extensions import IntVar
 from typing import assert_type, reveal_type
@@ -8302,12 +8292,11 @@ assert_type(assert_shape((2, 3), (2, 3)), IntTuple[2, 3])
 
 testcase!(
     test_tuple_carrier_shape_context_preserves_starred_inttuple,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
-from shape_extensions import Elements, IntTuple, shaped_array
+from shape_extensions import Elements, IntTuple
 from typing import reveal_type
 
-@shaped_array(shape="Shape")
 class Tensor[Shape: IntTuple]: ...
 
 class Foo[Shape: IntTuple]:
@@ -8340,7 +8329,7 @@ def f(
 testcase!(
     test_jaxtyping_without_a_declaration_uses_ordinary_types,
     {
-        let mut env = legacy_shaped_array_env_with_torch();
+        let mut env = shape_extensions_env_with_torch();
         add_jaxtyping_stubs(&mut env);
         env
     },
@@ -9309,13 +9298,13 @@ def outside(value: Any) -> None:
 
 testcase!(
     test_non_jaxtyping_annotated_alias_keeps_vanilla_metadata,
-    legacy_shaped_array_env_with_torch(),
+    shape_extensions_env_with_torch(),
     r#"
 from torch import Tensor
 from typing import Annotated as Float, reveal_type
 
 def f(x: Float[Tensor, 123]) -> None:
-    reveal_type(x)  # E: revealed type: Tensor
+    reveal_type(x)  # E: revealed type: Tensor[Unknown]
 "#,
 );
 
