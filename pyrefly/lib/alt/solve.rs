@@ -7752,7 +7752,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             &x.parent,
             x.shape_dsl_def.clone(),
             x.type_shape_dsl_def.clone(),
-            x.uses_shape_dsl_ir_name,
             errors,
         )
     }

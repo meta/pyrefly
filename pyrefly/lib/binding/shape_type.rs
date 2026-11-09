@@ -10,7 +10,6 @@ use std::sync::Arc;
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::keywords::is_valid_identifier;
-use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
 use pyrefly_types::meta_shape_dsl::convert_shape_dsl_function;
@@ -252,7 +251,6 @@ impl ShapeDeclarations {
 pub(super) struct ShapeFunctionMetadata {
     pub shape_dsl_def: Option<Arc<ShapeDslFunction>>,
     pub type_shape_dsl_def: Option<Arc<ParsedTypeShapeDslFunction>>,
-    pub uses_shape_dsl_ir_name: Option<ShortIdentifier>,
 }
 
 impl BindingsBuilder<'_> {
@@ -620,15 +618,6 @@ impl BindingsBuilder<'_> {
             None
         };
 
-        let uses_shape_dsl_ir_name = function.decorator_list.iter().find_map(|decorator| {
-            let call = decorator.expression.as_call_expr()?;
-            if self.as_special_export(&call.func) != Some(SpecialExport::UsesShapeDsl) {
-                return None;
-            }
-            let name = call.arguments.args.first()?.as_name_expr()?;
-            Some(ShortIdentifier::expr_name(name))
-        });
-
         let shape_dsl_def = if is_shape_dsl && !is_type_shape_dsl {
             if let Some(vararg) = &function.parameters.vararg {
                 self.error(
@@ -689,7 +678,6 @@ impl BindingsBuilder<'_> {
         ShapeFunctionMetadata {
             shape_dsl_def,
             type_shape_dsl_def,
-            uses_shape_dsl_ir_name,
         }
     }
 

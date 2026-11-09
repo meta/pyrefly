@@ -1153,7 +1153,6 @@ impl<'a> BindingsBuilder<'a> {
                 // The solver validates a type-level DSL function by inferring expressions in
                 // its body, which only have bindings if the body was bound.
                 type_shape_dsl_def: shape_metadata.type_shape_dsl_def.filter(|_| is_body_bound),
-                uses_shape_dsl_ir_name: shape_metadata.uses_shape_dsl_ir_name,
             },
         );
 

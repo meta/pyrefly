@@ -28,7 +28,6 @@ use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
-use pyrefly_types::meta_shape_dsl::ShapeTransform;
 use pyrefly_types::meta_shape_dsl::validate_shape_dsl_functions;
 use pyrefly_types::quantified::AnchorIndex;
 use pyrefly_types::quantified::Quantified;
@@ -540,7 +539,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         parent: &NestingContext,
         shape_dsl_def: Option<Arc<ShapeDslFunction>>,
         type_shape_dsl_def: Option<Arc<ParsedTypeShapeDslFunction>>,
-        uses_shape_dsl_ir_name: Option<ShortIdentifier>,
         errors: &ErrorCollector,
     ) -> UndecoratedFunction {
         let defining_cls = class_key.and_then(|k| self.get_idx(*k).0.dupe());
@@ -835,28 +833,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             FunctionKind::from_definition(func_id)
         };
-
-        // Resolve the IR function reference from @uses_shape_dsl(ir_fn) and
-        // populate `flags.shape_transform` with the DSL function it points to.
-        if let Some(ir_identifier) = uses_shape_dsl_ir_name {
-            let ir_type = self.get(&Key::BoundName(ir_identifier)).ty().clone();
-            if let Type::Function(func) = &ir_type
-                && let FunctionKind::ShapeDsl(_, dsl_fn, fn_closure) = &func.metadata.kind
-            {
-                flags.shape_transform = Some(Arc::new(ShapeTransform {
-                    dsl_fn: dsl_fn.clone(),
-                    fn_closure: fn_closure.clone(),
-                }));
-            } else {
-                self.error(
-                    errors,
-                    ir_identifier.range(),
-                    ErrorKind::InvalidArgument,
-                    "`@uses_shape_dsl` argument does not resolve to a `@shape_dsl_function`"
-                        .to_owned(),
-                );
-            }
-        }
 
         flags.has_gradual_variadic_params = params_are_gradual_variadic(&params);
         let metadata = FuncMetadata { kind, flags };
@@ -1414,13 +1390,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 flags.has_no_type_check = true;
                 true
             }
-            SpecialDecorator::UsesShapeDsl => {
-                // The actual shape_transform flag is populated after the decorator
-                // loop in undecorated_function, where uses_shape_dsl_ir_name is
-                // available. Returning true here just filters the decorator out of
-                // the list so it doesn't go through the generic decorator pipeline.
-                true
-            }
+            SpecialDecorator::UsesShapeDsl => true,
             SpecialDecorator::DefinesAssertShape => {
                 flags.is_assert_shape = true;
                 true
