@@ -36,7 +36,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
 
+use dupe::Dupe;
 use lsp_types::Uri;
+use pyrefly_build::handle::Handle;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_types::callable::Callable;
@@ -80,6 +82,7 @@ use tsp_types::TypeKind;
 use tsp_types::UnionType;
 
 use crate::lsp::module_helpers::to_real_path;
+use crate::state::state::Transaction;
 
 /// Monotonic counter used to assign unique ids to converted types.
 static NEXT_TYPE_ID: AtomicI32 = AtomicI32::new(1);
@@ -144,6 +147,65 @@ pub fn convert_type_with_resolvers<'a>(
         stdlib,
     }
     .convert(ty)
+}
+
+/// Convert a type against the warm transaction that produced it, retaining
+/// the source handle's import context and Python environment for every resolver.
+pub fn convert_type_in_transaction(
+    transaction: &Transaction,
+    source_handle: &Handle,
+    ty: &PyreflyType,
+) -> TspType {
+    let resolve_func_range = |func_id: &FuncDefId| {
+        let handle = Handle::new(
+            func_id.qname.module_name(),
+            func_id.qname.module_path().dupe(),
+            source_handle.sys_info().dupe(),
+        );
+        transaction
+            .get_answers(&handle)?
+            .bindings()
+            .function_def_range(func_id.def_index)
+    };
+    let resolve_module_path = |module: &pyrefly_types::module::ModuleType| {
+        let module_name = ModuleName::from_str(&module.to_string());
+        let finding = transaction
+            .import_handle(source_handle, module_name, None)
+            .finding()?;
+        let path = to_real_path(finding.path())?;
+        Some(path.canonicalize().unwrap_or(path))
+    };
+    let resolve_export = |module_name: ModuleName, name: &Name| {
+        resolve_export_location(transaction, source_handle, module_name, name)
+    };
+    let stdlib = transaction.get_stdlib(source_handle);
+    convert_type_with_resolvers(
+        ty,
+        Some(&resolve_func_range),
+        Some(&resolve_module_path),
+        Some(&resolve_export),
+        StdlibClasses {
+            none_type: stdlib.none_type(),
+            bool_type: stdlib.bool(),
+            int_type: stdlib.int(),
+            tuple_class: stdlib.tuple_object(),
+        },
+    )
+}
+
+/// Resolve an export through the source handle's import context, keeping the
+/// same `SysInfo` that the transaction used to compute its stdlib.
+pub(crate) fn resolve_export_location(
+    transaction: &Transaction,
+    source_handle: &Handle,
+    module_name: ModuleName,
+    name: &Name,
+) -> Option<(ModulePath, lsp_types::Range)> {
+    let target_handle = transaction
+        .import_handle(source_handle, module_name, None)
+        .finding()?;
+    let (module, range) = transaction.lookup_export_location(&target_handle, name)?;
+    Some((module.path().dupe(), module.to_lsp_range(range)))
 }
 
 /// Convert a pyrefly `Type` to a TSP protocol `Type`.
