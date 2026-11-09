@@ -673,7 +673,6 @@ Data(x=NotConvertibleToInt())  # E: `NotConvertibleToInt` is not assignable to p
 
 // `converter=None` means no converter, as in attrs: https://github.com/facebook/pyrefly/issues/5283
 testcase!(
-    bug = "`converter=None` makes the `__init__` param `Unknown`",
     test_converter_none_init_param,
     r#"
 from typing import dataclass_transform, Any, reveal_type
@@ -686,7 +685,7 @@ class C:
     x: str = my_field(converter=None)
     y: str = my_field()
     z: str = my_field(converter=to_str)
-reveal_type(C.__init__)  # E: revealed type: (self: C, x: Unknown, y: str, z: int) -> None
+reveal_type(C.__init__)  # E: revealed type: (self: C, x: str, y: str, z: int) -> None
     "#,
 );
 

@@ -902,8 +902,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let converter_param = self
             .attrs_converters_combinator_param(args, annotated_field_ty, errors)
             .or_else(|| {
+                // attrs treats `converter=None` as no converter.
                 map.0
                     .get(&DataclassFieldKeywords::CONVERTER)
+                    .filter(|converter| !converter.is_none())
                     .map(|converter| self.get_converter_param(converter, annotated_field_ty))
             });
         // Note that we intentionally don't try to fill in `default`, since we can't distinguish

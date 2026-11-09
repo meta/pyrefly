@@ -4664,7 +4664,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     let got = self.expr_infer(expr, errors);
                     if let Some(annot_ty) = &annot_ty
-                        && call.arguments.find_keyword("converter").is_none()
+                        // attrs treats `converter=None` as no converter.
+                        && call.arguments.find_keyword("converter").is_none_or(|converter| {
+                            self.expr_infer(&converter.value, &self.error_swallower())
+                                .is_none()
+                        })
                         && self
                             .bindings()
                             .get_class_fields(spec.class_def_index)
