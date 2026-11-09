@@ -32,7 +32,6 @@ use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::read_only::IsFinalVariableInitialized;
-use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::simplify::unions;
 use pyrefly_types::type_var::PreInferenceVariance;
 use pyrefly_types::type_var::Restriction;
@@ -5342,22 +5341,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             &Instance::of_self_type(cls),
                         )
                     })
-            })
-    }
-
-    /// Look up an attribute on a shaped-array instance, substituting Self with the full type.
-    pub fn get_shaped_array_attribute(
-        &self,
-        shaped_array: &ShapedArrayType,
-        name: &Name,
-    ) -> Option<ClassAttribute> {
-        self.get_class_member(shaped_array.base_class.class_object(), name)
-            .map(|field| {
-                self.as_instance_attribute(
-                    name,
-                    field.as_ref(),
-                    &Instance::of_shaped_array(shaped_array),
-                )
             })
     }
 
