@@ -1084,6 +1084,15 @@ impl<'a> Transaction<'a> {
         &self.data.state.config_finder
     }
 
+    /// Run `op` on the state's thread pool. See `State::install`.
+    pub fn install<OP, R>(&self, op: OP) -> R
+    where
+        OP: FnOnce() -> R + Send,
+        R: Send,
+    {
+        self.data.state.install(op)
+    }
+
     /// Search through the export table of every module we know about.
     /// Searches will be performed in parallel on chunks of modules, to speed things up.
     /// The order of the resulting `Vec` is unspecified.

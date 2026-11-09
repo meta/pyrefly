@@ -32,6 +32,7 @@ use pyrefly_util::display::number_thousands;
 use pyrefly_util::lined_buffer::DisplayRange;
 use pyrefly_util::lined_buffer::LineNumber;
 use pyrefly_util::lined_buffer::LinedBuffer;
+use pyrefly_util::thread_pool::in_thread_pool;
 use rayon::prelude::*;
 use ruff_annotate_snippets::Annotation;
 use ruff_annotate_snippets::AnnotationKind;
@@ -321,9 +322,9 @@ impl<W: Write> ErrorRenderer<W> {
         Ok(())
     }
 
-    /// Write every error in `errors`, in order. Many errors are rendered in parallel, each
-    /// chunk into its own buffer, and the buffers are written in order. The work is done in
-    /// waves, so only a wave's buffers are held at once.
+    /// Write every error in `errors`, in order. On a thread pool, many errors are rendered in
+    /// parallel, each chunk into its own buffer, and the buffers are written in order. The work
+    /// is done in waves, so only a wave's buffers are held at once.
     pub fn write_all(
         &mut self,
         errors: &[impl ReportedError],
@@ -331,7 +332,7 @@ impl<W: Write> ErrorRenderer<W> {
         verbose: bool,
     ) -> io::Result<()> {
         const CHUNK: usize = 256;
-        if errors.len() <= CHUNK {
+        if errors.len() <= CHUNK || !in_thread_pool() {
             for error in errors {
                 self.write(error, project_root, verbose)?;
             }
@@ -1012,6 +1013,8 @@ mod tests {
 
     use dupe::Dupe;
     use pyrefly_python::module_name::ModuleName;
+    use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
+    use pyrefly_util::thread_pool::ThreadPool;
     use ruff_text_size::TextSize;
 
     use super::*;
@@ -1076,10 +1079,13 @@ mod tests {
             for error in &errors {
                 renderer.write(error, Path::new("/root"), verbose).unwrap();
             }
+            // Errors are rendered in parallel only on a thread pool.
             let mut all = Vec::new();
-            ErrorRenderer::plain(&mut all)
-                .write_all(&errors, Path::new("/root"), verbose)
-                .unwrap();
+            ThreadPool::new(TEST_THREAD_COUNT).install(|| {
+                ErrorRenderer::plain(&mut all)
+                    .write_all(&errors, Path::new("/root"), verbose)
+                    .unwrap()
+            });
             assert!(
                 all == each,
                 "rendering in parallel should not change the output (verbose: {verbose})"
