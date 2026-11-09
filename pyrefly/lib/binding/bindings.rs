@@ -439,9 +439,10 @@ pub struct Bindings {
     sys_info: SysInfo,
     table: BindingTable,
     metadata: Arc<BindingsMetadata>,
-    /// Multi-line ranges and ignore-all directives, computed from the AST
-    /// here, before the AST is evicted from memory. Used for error suppression.
-    module_ranges: Arc<ModuleRanges>,
+    /// Multi-line ranges and ignore-all directives, computed with the AST, before it is
+    /// evicted from memory. Used for error suppression. Present exactly when the module's
+    /// diagnostics are computed.
+    module_ranges: Option<Arc<ModuleRanges>>,
     /// Ranges of `Annotated` metadata, sorted and non-overlapping.
     annotated_metadata_ranges: Vec<TextRange>,
     /// Ranges of the types that were read from docstrings, sorted and non-overlapping.
@@ -703,11 +704,7 @@ impl Bindings {
             sys_info: SysInfo::default(),
             table,
             metadata: Arc::new(BindingsMetadata::new()),
-            module_ranges: Arc::new(ModuleRanges {
-                multi_line: Vec::new(),
-                ignore_all: Vec::new(),
-                misplaced_ignore_all: Vec::new(),
-            }),
+            module_ranges: None,
             annotated_metadata_ranges: Vec::new(),
             docstring_type_ranges: Vec::new(),
             scope_trace: None,
@@ -767,8 +764,8 @@ impl Bindings {
         &self.metadata
     }
 
-    pub fn module_ranges(&self) -> &Arc<ModuleRanges> {
-        &self.module_ranges
+    pub fn module_ranges(&self) -> Option<&Arc<ModuleRanges>> {
+        self.module_ranges.as_ref()
     }
 
     /// Whether `range` lies inside `Annotated` metadata. Pyrefly does not type-check metadata, so
@@ -1111,7 +1108,7 @@ impl Bindings {
         x: ModModule,
         module_info: ModuleInfo,
         parse_errors: ModuleDiagnostics,
-        module_ranges: Arc<ModuleRanges>,
+        module_ranges: Option<Arc<ModuleRanges>>,
         exports: &Exports,
         solver: &Solver,
         lookup: &dyn LookupExport,
