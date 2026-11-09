@@ -1388,16 +1388,15 @@ def f[N: IntVar](
 // Symbolic dimensions stay exclusive to `IntVar`: an unresolved `N: Int` is a
 // gradual dimension, never a symbolic one.
 testcase!(
-    test_shape_dimension_syntax_across_tuple_forms,
-    legacy_shaped_array_env(),
+    test_inttuple_array_dimension_syntax_across_tuple_forms,
+    shape_extensions_env(),
     r#"
 from typing import Any, assert_type
-from shape_extensions import Int, IntTuple, IntVar, shaped_array
+from shape_extensions import Int, IntTuple, IntVar
 
 type _Shape = IntTuple
 type _AnyShape = tuple[Any, ...]
 
-@shaped_array(shape="Shape")
 class Array[Shape: _Shape = _AnyShape, DType = Any]: ...
 
 def ordinary_tuple_form[N: Int, M: IntVar](
@@ -1406,10 +1405,10 @@ def ordinary_tuple_form[N: Int, M: IntVar](
     tuple_int_var: Array[tuple[M], int],  # E: `M` is an `IntVar` and cannot be used as an ordinary type
     tuple_symbolic: Array[tuple[Int[M]], int],
     tuple_arithmetic: Array[tuple[Int[M + 1]], int],
-    nested_type_object: Array[tuple[type[Int[5]]], int],  # E: Invalid shaped-array shape carrier `tuple[type[Int[5]]]`
+    nested_type_object: Array[tuple[type[Int[5]]], int],  # E: is not assignable
 ) -> None:
-    # An unresolved `N: Int` is gradual, so it is not a symbolic dimension.
-    assert_type(unresolved, Array[[int], int])
+    # An ordinary tuple retains its element type parameter.
+    assert_type(unresolved, Array[tuple[N], int])
     assert_type(tuple_literal, Array[[5], int])
     assert_type(tuple_int_var, Array[[int], int])
     assert_type(tuple_symbolic, Array[[M], int])
@@ -1430,10 +1429,7 @@ def direct_int_tuple_form[N: Int, M: IntVar](
     assert_type(direct_literal, Array[[5], int])
     assert_type(direct_int_var, Array[[M], int])
     assert_type(direct_arithmetic, Array[[M + 1], int])
-    # Invalid explicit `Int[...]` syntax rejects the whole annotation, while a
-    # rejected type variable preserves the rank with a gradual dimension.
-    assert_type(direct_explicit_int, Any)
-    assert_type(direct_ordinary, Array[[int], int])
+    # Invalid dimension expressions are diagnosed at the shape argument.
 
 def bare_list_form[N: Int, M: IntVar](
     raw: Array[[5, M], int],
@@ -1443,14 +1439,13 @@ def bare_list_form[N: Int, M: IntVar](
 ) -> None:
     assert_type(raw, Array[[5, M], int])
     assert_type(arithmetic, Array[[M + 1], int])
-    assert_type(bare_explicit_int, Any)
-    assert_type(bare_ordinary, Array[[int], int])
 
-def inexact_bounds[C: (Int[2], Int[3]), L: Int[5], B: int, O: Int | None](
-    tuple_constrained: Array[tuple[C], int],  # E: Invalid shaped-array shape carrier `tuple[C]`
-    tuple_literal_bound: Array[tuple[L], int],  # E: Invalid shaped-array shape carrier `tuple[L]`
-    tuple_builtin_int: Array[tuple[B], int],  # E: Invalid shaped-array shape carrier `tuple[B]`
-    tuple_optional: Array[tuple[O], int],  # E: Invalid shaped-array shape carrier `tuple[O]`
+# Ordinary tuple elements follow their integer bounds; optional elements are not integers.
+def tuple_and_dimension_bounds[C: (Int[2], Int[3]), L: Int[5], B: int, O: Int | None](
+    tuple_constrained: Array[tuple[C], int],
+    tuple_literal_bound: Array[tuple[L], int],
+    tuple_builtin_int: Array[tuple[B], int],
+    tuple_optional: Array[tuple[O], int],  # E: is not assignable
     direct_constrained: Array[IntTuple[C], int],  # E: `C` must be an `IntVar` to be used as a shape dimension
     direct_literal_bound: Array[IntTuple[L], int],  # E: `L` must be an `IntVar` to be used as a shape dimension
     direct_builtin_int: Array[IntTuple[B], int],  # E: `B` must be an `IntVar` to be used as a shape dimension
@@ -1461,48 +1456,47 @@ def inexact_bounds[C: (Int[2], Int[3]), L: Int[5], B: int, O: Int | None](
 
 testcase!(
     test_assert_shape_runtime_argument,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
 from typing import Any
-from shape_extensions import IntTuple, assert_shape, shaped_array
+from shape_extensions import IntTuple, assert_shape
 
 type _Shape = IntTuple
 type _AnyShape = tuple[Any, ...]
 
-@shaped_array(shape="Shape")
 class Array[Shape: _Shape = _AnyShape, DType = Any]:
     shape: Shape
 
 def exact(x: Array[[2, 3], int]) -> None:
     # The positional shape is the static expectation, with or without `runtime`.
-    assert_shape(x, (2, 3))
-    assert_shape(x, (6,))  # E: assert_shape((2, 3), (6,)) failed
-    assert_shape(x, (2, 3), runtime=(6,))
-    assert_shape(x, (3, 2), runtime=(6,))  # E: assert_shape((2, 3), (3, 2)) failed
-    assert_shape(x, (2, 3), runtime=missing)  # E: Could not find name `missing`
+    assert_shape(x.shape, (2, 3))
+    assert_shape(x.shape, (6,))  # E: assert_shape((2, 3), (6,)) failed
+    assert_shape(x.shape, (2, 3), runtime=(6,))
+    assert_shape(x.shape, (3, 2), runtime=(6,))  # E: assert_shape((2, 3), (3, 2)) failed
+    assert_shape(x.shape, (2, 3), runtime=missing)  # E: Could not find name `missing`
 
 def gradual(x: Array) -> None:
     # A bare `IntTuple` says nothing was inferred, and holds only when that is so.
-    assert_shape(x, IntTuple, runtime=(2, 3))
+    assert_shape(x.shape, IntTuple, runtime=(2, 3))
 
 def gradual_claim_must_be_true(x: Array[[2, 3], int]) -> None:
-    assert_shape(x, IntTuple, runtime=(2, 3))  # E: assert_shape((2, 3), (*IntTuple)) failed
+    assert_shape(x.shape, IntTuple, runtime=(2, 3))  # E: assert_shape((2, 3), (*IntTuple)) failed
 
 def degenerate(x: Array[[3], int]) -> None:
     # The expected shape records what Pyrefly infers, so unlike an annotation it
     # accepts a negative dimension. The comparison still runs.
-    assert_shape(x, (-3,), runtime=(0,))  # E: assert_shape((3,), (-3,)) failed
+    assert_shape(x.shape, (-3,), runtime=(0,))  # E: assert_shape((3,), (-3,)) failed
 
 def empty_extent(x: Array) -> None:
     # Zero extents are valid in both runtime shapes and annotations.
-    assert_shape(x, IntTuple, runtime=(0,))
+    assert_shape(x.shape, IntTuple, runtime=(0,))
 
 def rejects_a_non_shape(x: Array[[2, 3], int]) -> None:
-    assert_shape(x, 0, runtime=(2, 3))  # E: Second argument to `assert_shape` must be a tuple of tensor dimensions, or `IntTuple`
+    assert_shape(x.shape, 0, runtime=(2, 3))  # E: Second argument to `assert_shape` must be a tuple of tensor dimensions, or `IntTuple`
 
 def rejects_other_keywords(x: Array[[3], int]) -> None:
-    assert_shape(x, (3,), bogus=(3,))  # E: unexpected keyword argument `bogus`
-    assert_shape(x, (3,), bogus=missing)  # E: Could not find name `missing`  # E: unexpected keyword argument `bogus`
+    assert_shape(x.shape, (3,), bogus=(3,))  # E: unexpected keyword argument `bogus`
+    assert_shape(x.shape, (3,), bogus=missing)  # E: Could not find name `missing`  # E: unexpected keyword argument `bogus`
 "#,
 );
 
@@ -1793,15 +1787,15 @@ def shapeful_unbounded_middle(
 );
 
 testcase!(
-    test_shaped_array_inttuple_shape_arg_return_reprojection,
-    legacy_shaped_array_env(),
+    test_inttuple_array_inttuple_shape_arg_generic_return,
+    shape_extensions_env(),
     r#"
-from shape_extensions import IntTuple, shaped_array
+from shape_extensions import Index, IntTuple, index_shape
 from typing import reveal_type
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType]:
     def clone(self) -> Array[Shape, DType]: ...
+    def __getitem__[I: Index](self, index: I) -> Array[index_shape(Shape, I), DType]: ...
 
 def f(x: Array[[2, 3], int]) -> None:
     y = x.clone()
@@ -6018,13 +6012,12 @@ def g[S](x: Array[S, int]) -> None: ...
 );
 
 testcase!(
-    test_shaped_array_compact_list_arity_error,
-    legacy_shaped_array_env(),
+    test_inttuple_array_compact_list_arity_error,
+    shape_extensions_env(),
     r#"
-from shape_extensions import shaped_array
+from shape_extensions import IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 # Extra args are an ordinary arity error, not compact tuple syntax.
 def f(bad: Array[2, 3, int]) -> None: ...  # E: Expected a type form, got instance of `Literal[2]`  # E: Expected a type form, got instance of `Literal[3]`  # E: Expected 2 type arguments for `Array`, got 3
@@ -6032,26 +6025,24 @@ def f(bad: Array[2, 3, int]) -> None: ...  # E: Expected a type form, got instan
 );
 
 testcase!(
-    test_shaped_array_compact_tuple_rejected,
-    legacy_shaped_array_env(),
+    test_inttuple_array_compact_tuple_rejected,
+    shape_extensions_env(),
     r#"
-from shape_extensions import shaped_array
+from shape_extensions import IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def f(bad: Array[(2, 3), int]) -> None: ...  # E: Expected a type form, got instance of `tuple[Literal[2], Literal[3]]`
 "#,
 );
 
 testcase!(
-    test_shaped_array_compact_list_invalid_dim,
-    legacy_shaped_array_env(),
+    test_inttuple_array_compact_list_invalid_dim,
+    shape_extensions_env(),
     r#"
-from shape_extensions import shaped_array
+from shape_extensions import IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 # Invalid compact dims report the unresolved name without cascading to a
 # non-integer dimension error.
@@ -6060,18 +6051,17 @@ def f(bad: Array[["rows", 3], int]) -> None: ...  # E: Could not find name `rows
 );
 
 testcase!(
-    test_shaped_array_rejects_invalid_tuple_carrier_for_inttuple_bound,
-    legacy_shaped_array_env(),
+    test_inttuple_array_rejects_invalid_tuple_carrier_for_inttuple_bound,
+    shape_extensions_env(),
     r#"
 from typing import Literal
-from shape_extensions import IntTuple, shaped_array
+from shape_extensions import IntTuple
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType]: ...
 
-def f(bad: Array[tuple[str], int]) -> None: ...  # E: Invalid shaped-array shape carrier `tuple[str]`
-def g(bad: Array[tuple[Literal[2], str, Literal[4]], int]) -> None: ...  # E: Invalid shaped-array shape carrier `tuple[Literal[2], str, Literal[4]]`
-def h(bad: Array[tuple[Literal[1], *tuple[str], Literal[2]], int]) -> None: ...  # E: Invalid shaped-array shape carrier `tuple[Literal[1], str, Literal[2]]`
+def f(bad: Array[tuple[str], int]) -> None: ...  # E: is not assignable
+def g(bad: Array[tuple[Literal[2], str, Literal[4]], int]) -> None: ...  # E: is not assignable
+def h(bad: Array[tuple[Literal[1], *tuple[str], Literal[2]], int]) -> None: ...  # E: is not assignable
 "#,
 );
 
@@ -8138,7 +8128,7 @@ def f[N, M](
 
 testcase!(
     test_assert_shape_builtin,
-    legacy_shaped_array_env_with_torch(),
+    shape_extensions_env_with_torch(),
     r#"
 from shape_extensions import IntTuple, IntVar, assert_shape
 from typing import assert_type
@@ -8146,15 +8136,13 @@ from torch import Tensor
 
 def f[N: IntVar, M: IntVar](x: Tensor[[N, M]]) -> None:
     assert_type(assert_shape(x.shape, (IntVar[N], IntVar[M])), IntTuple[N, M])
-    assert_type(assert_shape(x, (IntVar[N], IntVar[M])), Tensor[[N, M]])
-    assert_shape(x, (IntVar[M], IntVar[N]))  # E: assert_shape((N, M), (M, N)) failed
     assert_shape(x.shape, (IntVar[M], IntVar[N]))  # E: assert_shape((N, M), (M, N)) failed
     assert_shape(x.shape, (IntVar[N],))  # E: assert_shape((N, M), (N,)) failed
     assert_shape(x.shape, [IntVar[N], IntVar[M]])  # E: Second argument to `assert_shape` must be a tuple of tensor dimensions
 
 def make[T]() -> T: ...
 
-inferred_from_assignment: Tensor[[2, 3]] = assert_shape(make(), (2, 3))
+inferred_from_assignment: IntTuple[2, 3] = assert_shape(make(), (2, 3))
 "#,
 );
 
@@ -10639,13 +10627,12 @@ def f(
 
 testcase!(
     test_assert_type_gradual_shape_not_equivalent_to_concrete,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
 from typing import Any, assert_type
-from shape_extensions import Int, shaped_array
+from shape_extensions import Int, IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def bare_dims(gradual: Int[int], concrete: Int[3]) -> None:
     # A gradual dimension is the shape analog of `Any`: not equivalent to a concrete size.
@@ -10665,13 +10652,12 @@ def shapes(gradual: Array[[Any], int], concrete: Array[[3], int]) -> None:
 
 testcase!(
     test_assert_type_shapeless_shape_not_equivalent_to_concrete,
-    legacy_shaped_array_env(),
+    shape_extensions_env(),
     r#"
 from typing import assert_type
-from shape_extensions import IntTuple, shaped_array
+from shape_extensions import IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def f(shapeless: Array[IntTuple, int], concrete: Array[[3], int]) -> None:
     # A wholly shapeless array is the maximal gradual shape (unknown rank) — the
