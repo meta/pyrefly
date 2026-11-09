@@ -449,6 +449,72 @@ def test_svd_reduced_dtype_preserved() -> None:
     assert_type(vt.dtype, np.dtype[np.float32])
 
 
+def test_svd_defaults_to_full_matrices() -> None:
+    tall = np.ones((5, 3))
+
+    # E: Missing argument `full_matrices`
+    u, s, vh = np.linalg.svd(tall)
+    # E: `Literal[True]` is not assignable to parameter `full_matrices`
+    explicit_u, _, explicit_vh = np.linalg.svd(tall, full_matrices=True)
+    assert_type(u, np.ndarray[[5, 3], np.dtype[np.float64]])
+    assert_type(vh, np.ndarray[[3, 3], np.dtype[np.float64]])
+    assert_shape(s.shape, (3,))
+    assert u.shape == (5, 5)
+    assert vh.shape == (3, 3)
+    assert explicit_u.shape == (5, 5)
+    assert explicit_vh.shape == (3, 3)
+
+
+def test_svd_values_only() -> None:
+    tall = np.ones((5, 3), dtype=np.float32)
+
+    # E: Missing argument `full_matrices` # E: parameter `compute_uv`
+    values = np.linalg.svd(tall, compute_uv=False)
+    # E: parameter `compute_uv`
+    reduced_values = np.linalg.svd(tall, full_matrices=False, compute_uv=False)
+    assert_shape(tall.shape, (5, 3))
+    assert isinstance(values, np.ndarray)
+    assert cast(Any, values).shape == (3,)
+    assert cast(Any, values).dtype == np.dtype(np.float32)
+    assert cast(Any, reduced_values).shape == (3,)
+
+
+def test_svd_singular_values_are_real() -> None:
+    complex_tall = np.ones((5, 3), dtype=np.complex128)
+    integers = np.ones((5, 3), dtype=np.int64)
+
+    u, s, vh = np.linalg.svd(complex_tall, full_matrices=False)
+    int_u, int_s, int_vh = np.linalg.svd(integers, full_matrices=False)
+    assert_type(u, np.ndarray[[5, 3], np.dtype[np.complex128]])
+    assert_type(s, np.ndarray[[3], np.dtype[np.complex128]])
+    assert_type(vh, np.ndarray[[3, 3], np.dtype[np.complex128]])
+    assert_type(int_u, np.ndarray[[5, 3], np.dtype[np.int64]])
+    assert_type(int_s, np.ndarray[[3], np.dtype[np.int64]])
+    assert_type(int_vh, np.ndarray[[3, 3], np.dtype[np.int64]])
+    assert_shape(s.shape, (3,))
+    assert u.dtype == np.dtype(np.complex128)
+    assert s.dtype == np.dtype(np.float64)
+    assert vh.dtype == np.dtype(np.complex128)
+    assert int_u.dtype == np.dtype(np.float64)
+    assert int_s.dtype == np.dtype(np.float64)
+    assert int_vh.dtype == np.dtype(np.float64)
+
+
+def test_svd_batched_and_invalid_ranks() -> None:
+    batch = np.ones((4, 2, 3))
+
+    # E: parameter `a`
+    u, s, vh = np.linalg.svd(batch, full_matrices=False)
+    assert_shape(batch.shape, (4, 2, 3))
+    assert u.shape == (4, 2, 2)
+    assert s.shape == (4, 2)
+    assert vh.shape == (4, 2, 3)
+    with assert_raises(np.linalg.LinAlgError):
+        np.linalg.svd(np.ones(3), full_matrices=False)  # E: parameter `a`
+    with assert_raises(np.linalg.LinAlgError):
+        np.linalg.svd(np.ones(()), full_matrices=False)  # E: parameter `a`
+
+
 def test_svd_all_component_pca_projection() -> None:
     x = np.random.randn(5, 3)
     x_centered = x - x.mean(axis=0)
