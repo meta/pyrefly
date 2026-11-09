@@ -3314,3 +3314,14 @@ class Child(Parent):
     features = (untyped(1).attr,)
 "#,
 );
+
+testcase!(
+    test_truthiness_marker_in_parent_attr_type,
+    r#"
+class A: ...
+class Parent:
+    x = A() or 42
+class Child(Parent):
+    x = A()
+    "#,
+);

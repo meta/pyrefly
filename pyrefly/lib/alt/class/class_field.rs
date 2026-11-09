@@ -2324,15 +2324,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let (ty, unpromoted_ty) = if matches!(value_ty, Type::DataFrame(_)) {
             (value_ty, None)
         } else {
-            let mut has_implicit_literal = value_ty.is_implicit_literal();
-            if !has_implicit_literal
+            let mut has_promotable = value_ty.is_promotable();
+            if !has_promotable
                 && matches!(
                     initialization,
                     ClassFieldInitialization::Method | ClassFieldInitialization::ClassMethod
                 )
             {
                 value_ty.universe(&mut |current_type_node| {
-                    has_implicit_literal |= current_type_node.is_implicit_literal();
+                    has_promotable |= current_type_node.is_promotable();
                 });
             }
             // Save any unpromoted literal types, we need them for enums
@@ -2341,7 +2341,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .and_then(|ann| ann.ty.as_ref())
                 .is_none()
                 && matches!(read_only_reason, None | Some(ReadOnlyReason::NamedTuple))
-                && has_implicit_literal
+                && has_promotable
             {
                 let pre = value_ty.clone();
                 (value_ty.promote(self.stdlib), Some(pre))

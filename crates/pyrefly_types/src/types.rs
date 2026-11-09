@@ -1260,11 +1260,13 @@ impl Type {
         matches!(self, Type::Never(_))
     }
 
-    pub fn is_implicit_literal(&self) -> bool {
+    pub fn is_promotable(&self) -> bool {
         match self {
             Type::Literal(lit) => lit.style == LitStyle::Implicit,
             Type::LiteralString(LitStyle::Implicit) => true,
-            _ => false,
+            Type::Union(xs) => xs.members.iter().any(Type::is_promotable),
+            Type::Intersect(xs) => xs.0.iter().any(Type::is_promotable),
+            _ => self.is_truthiness_marker(),
         }
     }
 
