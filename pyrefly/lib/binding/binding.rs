@@ -136,7 +136,7 @@ assert_words!(BindingAnnotation, 11);
 assert_words!(BindingClass, 11);
 assert_words!(BindingTParams, 9);
 assert_words!(BindingClassBaseType, 3);
-assert_words!(BindingClassMetadata, 12);
+assert_words!(BindingClassMetadata, 11);
 assert_words!(BindingDjangoRelations, 2);
 assert_bytes!(BindingClassMro, 4);
 assert_bytes!(BindingClassChecks, 4);
@@ -3825,14 +3825,6 @@ impl DisplayWith<Bindings> for BindingClassChecks {
     }
 }
 
-/// Information about a class that is marked as using array shapes (for shape typing).
-#[derive(Clone, Debug)]
-pub struct ShapedArrayMetadata {
-    pub shape_name: Name,
-    pub range: TextRange,
-    pub builtin_indexing: bool,
-}
-
 /// Binding for the class's metadata (anything obtained directly from base classes,
 /// except for the MRO which is kept separate to avoid cycles).
 #[derive(Clone, Debug)]
@@ -3854,8 +3846,6 @@ pub struct BindingClassMetadata {
     pub pydantic_before_validator_fields: Box<[Name]>,
     /// Django-specific field information.
     pub django_field_info: Box<DjangoFieldInfo>,
-    /// Shape parameter requested by `@shaped_array(shape="...")`.
-    pub shaped_array_metadata: Option<Box<ShapedArrayMetadata>>,
 }
 
 impl DisplayWith<Bindings> for BindingClassMetadata {

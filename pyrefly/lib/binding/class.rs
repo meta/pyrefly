@@ -267,7 +267,6 @@ impl<'a> BindingsBuilder<'a> {
         let pydantic_before_validator_fields = self.extract_field_validator_fields(&body);
         let mut attrs_decorators = AttrsDecoratorMethods::default();
         collect_attrs_decorator_methods(&body, &mut attrs_decorators);
-        let shaped_array_metadata = self.extract_shaped_array_metadata(&x.decorator_list);
         // This uses the full statement range; see `ShapeDeclarations::enclosing_class`.
         self.shape_declarations
             .push_class(x.range, class_indices.class_idx);
@@ -290,24 +289,6 @@ impl<'a> BindingsBuilder<'a> {
                 self.type_params_with_owner(tp, owner)
             })
             .unwrap_or_default();
-        let shaped_array_metadata = match shaped_array_metadata {
-            Some(metadata) if x.type_params.is_none() => {
-                // TODO(stroxler): This restriction seems 100% fine with experiments, I see no reason
-                // to support legacy-style class tparams right now. We may eventually need to, at which point
-                // we'd have to move this check to solve time.
-                self.error(
-                    metadata.range,
-                    ErrorKind::InvalidAnnotation,
-                    format!(
-                        "Shape parameter `{}` must be a scoped (PEP-695-style) type parameter of class `{}`",
-                        metadata.shape_name, x.name.id
-                    ),
-                );
-                None
-            }
-            metadata => metadata,
-        };
-
         let mut legacy = LegacyTParamCollector::new(x.type_params.is_some());
         let bases = x.bases().map(|base| {
             let mut base = base.clone();
@@ -695,7 +676,6 @@ impl<'a> BindingsBuilder<'a> {
                 pydantic_before_validator_fields: pydantic_before_validator_fields
                     .into_boxed_slice(),
                 django_field_info: Box::new(django_field_info),
-                shaped_array_metadata,
             },
         );
         self.insert_binding_idx(
@@ -1205,7 +1185,6 @@ impl<'a> BindingsBuilder<'a> {
                 pydantic_config_dict: PydanticConfigDict::default(),
                 pydantic_before_validator_fields: Box::default(),
                 django_field_info: Box::default(),
-                shaped_array_metadata: None,
             },
         );
         self.insert_binding_idx(

@@ -13,7 +13,6 @@ use pyrefly_types::callable::Callable;
 use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::class::PrecomputedTParams;
 use pyrefly_types::known_class::KnownClass;
-use pyrefly_types::quantified::Quantified;
 use pyrefly_types::special_form::SpecialForm;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::name::Name;
@@ -114,22 +113,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub fn get_metadata_for_class(&self, cls: &Class) -> &ClassMetadata {
         self.get_from_class(cls, &KeyClassMetadata(cls.index()))
             .unwrap_or(ClassMetadata::recursive())
-    }
-
-    pub fn shaped_array_shape_for_class(&self, cls: &Class) -> Option<Quantified> {
-        // Shaped-array registration is explicit per class, via the `@shaped_array` decorator.
-        self.get_metadata_for_class(cls)
-            .shaped_array_shape()
-            .cloned()
-    }
-
-    pub fn shaped_array_shape_for_class_type(&self, cls: &ClassType) -> Option<Quantified> {
-        self.shaped_array_shape_for_class(cls.class_object())
-    }
-
-    pub fn uses_builtin_shaped_array_indexing(&self, cls: &Class) -> bool {
-        self.get_metadata_for_class(cls)
-            .uses_builtin_shaped_array_indexing()
     }
 
     pub fn get_abstract_members_for_class(&self, cls: &Class) -> &AbstractClassMembers {

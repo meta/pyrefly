@@ -258,15 +258,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     _ => slice::from_ref(shape_expr),
                 };
                 let class = self.expr_infer(class_expr, errors);
-                if let Type::ClassDef(cls) = &class
-                    && !self.is_shaped_array_class(cls)
-                {
+                if let Type::ClassDef(cls) = &class {
                     let args = explicit_args.iter().chain(shape_args);
                     let targs = self.parse_class_type_args(cls, args, type_form_context, errors);
                     return self.specialize(cls, targs, range, errors);
                 }
-                // Other subscriptable bases, such as type aliases and registered
-                // shaped arrays, use their own specialization rules.
+                // Other subscriptable bases, such as type aliases, use their own
+                // specialization rules.
                 let args = Expr::Tuple(ExprTuple {
                     node_index: AtomicNodeIndex::default(),
                     range,

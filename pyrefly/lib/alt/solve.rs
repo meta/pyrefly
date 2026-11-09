@@ -22,7 +22,6 @@ use pyrefly_types::function::BodyKind;
 use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
-use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_types::type_alias::TypeAliasIndex;
 use pyrefly_types::type_alias::TypeAliasRef;
@@ -593,7 +592,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             pydantic_config_dict,
             pydantic_before_validator_fields,
             django_field_info,
-            shaped_array_metadata,
         } = binding;
 
         match &self.get_idx(*k).0 {
@@ -607,7 +605,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 pydantic_config_dict,
                 pydantic_before_validator_fields,
                 django_field_info,
-                shaped_array_metadata.as_deref(),
                 errors,
             ),
         }
@@ -8070,11 +8067,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             Some(self.bare_int_tuples())
                         } else if cls.is(KnownClass::ShapeExtensionsInt) {
                             Some(gradual_size())
-                        } else if self.shaped_array_shape_for_class_type(cls).is_some() {
-                            // Canonicalize bare shaped-array types to Type::ShapedArray(shapeless)
-                            // for consistency. Subscripted arrays are already converted to
-                            // Type::ShapedArray during annotation parsing, so only the bare case reaches here.
-                            Some(ShapedArrayType::shapeless(cls.clone()).to_type())
                         } else if cls.is(KnownClass::TypesNoneType) {
                             // Normalize type[NoneType] as None
                             Some(self.heap.mk_none())

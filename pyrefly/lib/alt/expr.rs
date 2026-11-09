@@ -31,7 +31,6 @@ use pyrefly_types::literal::Literal;
 use pyrefly_types::series::SeriesSchema;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
-use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::shaped_array::shape_to_tuple_carrier;
 use pyrefly_types::shaped_array::tuple_carrier_to_shape;
 use pyrefly_types::shaped_array::type_to_dim;
@@ -4038,16 +4037,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ),
                     }
                 }
-                // Shaped-array type parsing for registered array classes.
-                Type::ClassDef(ref cls) if self.is_shaped_array_class(cls) => {
-                    Type::type_of(self.parse_registered_shaped_array_type(
-                        cls,
-                        xs,
-                        range,
-                        type_form_context,
-                        errors,
-                    ))
-                }
                 Type::ClassDef(ref cls) if self.is_int_tuple_class(cls) => {
                     self.parse_int_tuple_type(xs, type_form_context, errors)
                 }
@@ -4553,11 +4542,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// Check if a class should use shaped-array type parsing.
-    pub(crate) fn is_shaped_array_class(&self, cls: &Class) -> bool {
-        self.shaped_array_shape_for_class(cls).is_some()
-    }
-
     pub(crate) fn shape_arg_to_int_tuple(&self, shape_arg: &Type) -> Option<IntTuple> {
         IntTuple::from_shape_arg_type(shape_arg)
             .or_else(|| tuple_carrier_to_shape(shape_arg))
@@ -4571,49 +4555,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 is_int_tuple_bound(&upper_bound, &int_type)
                     .then(|| IntTuple::unpacked(Vec::new(), shape_arg.clone(), Vec::new()))
             })
-    }
-
-    pub(crate) fn shaped_array_classtype_to_shaped_array_type(
-        &self,
-        cls: &ClassType,
-    ) -> ShapedArrayType {
-        let shape_param = self
-            .shaped_array_shape_for_class_type(cls)
-            .expect("registered shaped-array class should have shape metadata");
-        let shape_idx = self
-            .get_class_tparams(cls.class_object())
-            .iter()
-            .flat_map(|tparams| tparams.iter())
-            .position(|param| param == &shape_param)
-            .expect("shaped-array metadata should refer to a class type parameter");
-        let mut shape_arg = cls
-            .targs()
-            .as_slice()
-            .get(shape_idx)
-            .expect("class type should have an argument for each type parameter")
-            .clone();
-        self.expand_mut(&mut shape_arg);
-        match shape_param.kind() {
-            QuantifiedKind::TypeVar | QuantifiedKind::IntVar => {
-                let shape = self
-                    .shape_arg_to_int_tuple(&shape_arg)
-                    .unwrap_or_else(IntTuple::shapeless);
-                let mut base_class = cls.clone();
-                let shape_arg = base_class
-                    .targs_mut()
-                    .as_mut()
-                    .get_mut(shape_idx)
-                    .expect("class type should have an argument for each type parameter");
-                *shape_arg = shape.to_shape_arg_type();
-                ShapedArrayType::new(base_class, shape).with_tuple_carrier_shape_arg(shape_idx)
-            }
-            QuantifiedKind::TypeVarTuple => unreachable!(
-                "shaped-array metadata validation rejects TypeVarTuple shape parameters"
-            ),
-            QuantifiedKind::ParamSpec => {
-                unreachable!("shaped-array metadata validation rejects ParamSpec shape parameters")
-            }
-        }
     }
 
     /// Check if a class is a Int class (shape_extensions.Int)
@@ -5396,18 +5337,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// Return whether a tuple-carrier shape contains an unbounded tuple segment.
-    fn has_unbounded_tuple_carrier(ty: &Type) -> bool {
-        match ty {
-            Type::Tuple(Tuple::Unbounded(_)) => true,
-            Type::Tuple(Tuple::Unpacked(unpacked)) => {
-                Self::has_unbounded_tuple_carrier(unpacked.middle())
-            }
-            Type::Unpack(inner) => Self::has_unbounded_tuple_carrier(inner),
-            _ => false,
-        }
-    }
-
     pub(crate) fn parse_int_tuple_shape_args(
         &self,
         args: &[Expr],
@@ -5510,181 +5439,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .map(|shape| shape.to_shape_arg_type())
                 .unwrap_or_else(Type::any_error),
         )
-    }
-
-    /// Parse a registered shaped-array annotation.
-    ///
-    /// The registered shape parameter is a single ordinary type argument that
-    /// carries a tuple (e.g. `ndarray[Shape, DType]`). We specialize the class
-    /// normally and project the carrier into a shape via
-    /// `shaped_array_classtype_to_shaped_array_type`.
-    fn parse_registered_shaped_array_type(
-        &self,
-        cls: &Class,
-        args: &[Expr],
-        range: TextRange,
-        type_form_context: TypeFormContext<'_>,
-        errors: &ErrorCollector,
-    ) -> Type {
-        let shape_param = self
-            .shaped_array_shape_for_class(cls)
-            .expect("registered shaped-array class should have shape metadata");
-
-        let tparams = self.get_class_tparams(cls);
-        let shape_idx = tparams
-            .iter()
-            .flat_map(|tparams| tparams.iter())
-            .position(|param| param == &shape_param)
-            .expect("shaped-array metadata should refer to a class type parameter");
-        match shape_param.kind() {
-            QuantifiedKind::TypeVar | QuantifiedKind::IntVar => {}
-            QuantifiedKind::TypeVarTuple => unreachable!(
-                "shaped-array metadata validation rejects TypeVarTuple shape parameters"
-            ),
-            QuantifiedKind::ParamSpec => {
-                unreachable!("shaped-array metadata validation rejects ParamSpec shape parameters")
-            }
-        }
-        let validate_shape_slot = shape_idx < args.len()
-            && args.len() <= tparams.as_ref().map_or(0, |tparams| tparams.len());
-        let shape_param_accepts_int_tuple = matches!(
-            shape_param.upper_bound(self.stdlib, self.heap),
-            Type::IntTuple(_)
-        );
-        let shape_validation_arg = |carrier: &Type| {
-            if shape_param_accepts_int_tuple {
-                self.heap.mk_int_tuple(IntTuple::shapeless())
-            } else {
-                carrier.clone()
-            }
-        };
-        let mut shape_arg_carrier = None;
-        let mut shape_arg_failed_to_parse = false;
-        let type_argument_context = TypeFormContext::TypeArgument(&type_form_context);
-        let shape_type_argument_context = TypeFormContext::ShapeTypeArgument(&type_form_context);
-        let class_targs: Vec<Type> = args
-            .iter()
-            .enumerate()
-            .map(|(i, arg)| match arg {
-                Expr::List(ExprList { elts, .. }) if i == shape_idx => {
-                    match self.parse_int_tuple_shape_args(elts, shape_type_argument_context, errors)
-                    {
-                        Some(shape) => {
-                            let carrier = shape_to_tuple_carrier(&shape);
-                            shape_arg_carrier = Some(shape.to_shape_arg_type());
-                            shape_validation_arg(&carrier)
-                        }
-                        None => {
-                            shape_arg_failed_to_parse = true;
-                            Type::any_error()
-                        }
-                    }
-                }
-                _ => {
-                    if i == shape_idx
-                        && !self.bindings().shape_declarations.comment_targets.contains_key(&arg.range())
-                        && let Type::ClassDef(cls) = self.expr_infer(arg, &self.error_swallower())
-                        && self.is_int_tuple_class(&cls)
-                    {
-                        let carrier = self.bare_int_tuple_carrier();
-                        shape_arg_carrier = Some(IntTuple::shapeless().to_shape_arg_type());
-                        shape_validation_arg(&carrier)
-                    } else {
-                        let arg_context = if i == shape_idx {
-                            shape_type_argument_context
-                        } else {
-                            type_argument_context
-                        };
-                        match self.expr_untype(arg, arg_context, errors) {
-                            ty if i == shape_idx && ty.is_error() => {
-                                shape_arg_failed_to_parse = true;
-                                ty
-                            }
-                            Type::TypeLevelDslCall(call) if i == shape_idx => {
-                                if call.result_domain() == Some(TypeShapeDslDomain::IntTuple) {
-                                    let ty = Type::TypeLevelDslCall(call);
-                                    shape_arg_carrier = Some(ty);
-                                    shape_validation_arg(
-                                        &IntTuple::shapeless().to_shape_arg_type(),
-                                    )
-                                } else {
-                                    shape_arg_failed_to_parse = true;
-                                    self.error(
-                                        errors,
-                                        arg.range(),
-                                        ErrorKind::InvalidAnnotation,
-                                        "Expected a type-level shape DSL call with an `IntTuple` result in a shaped-array shape argument, got an `Int` result"
-                                            .to_owned(),
-                                    );
-                                    Type::any_error()
-                                }
-                            }
-                            Type::IntTuple(shape) if i == shape_idx => {
-                                let carrier = if shape.is_shapeless() {
-                                    self.bare_int_tuple_carrier()
-                                } else {
-                                    shape_to_tuple_carrier(&shape)
-                                };
-                                shape_arg_carrier = Some(shape.to_shape_arg_type());
-                                shape_validation_arg(&carrier)
-                            }
-                            ty => {
-                                if validate_shape_slot
-                                    && i == shape_idx
-                                    && Self::has_unbounded_tuple_carrier(&ty)
-                                {
-                                    self.error(
-                                        errors,
-                                        arg.range(),
-                                        ErrorKind::InvalidAnnotation,
-                                        "Unbounded tuple types cannot be used as shaped-array shape carriers"
-                                            .to_owned(),
-                                    );
-                                    Type::any_error()
-                                } else if i == shape_idx && matches!(ty, Type::Tuple(_)) {
-                                    if let Some(shape) = tuple_carrier_to_shape(&ty) {
-                                        shape_arg_carrier = Some(shape.to_shape_arg_type());
-                                        shape_validation_arg(&ty)
-                                    } else {
-                                        self.error(
-                                            errors,
-                                            arg.range(),
-                                            ErrorKind::InvalidAnnotation,
-                                            format!(
-                                                "Invalid shaped-array shape carrier `{}`",
-                                                self.for_display(ty)
-                                            ),
-                                        );
-                                        Type::any_error()
-                                    }
-                                } else {
-                                    ty
-                                }
-                            }
-                        }
-                    }
-                }
-            })
-            .collect();
-        if args.len() <= tparams.as_ref().map_or(0, |tparams| tparams.len())
-            && shape_arg_failed_to_parse
-        {
-            return Type::any_error();
-        }
-        let mut base_class =
-            self.specialize_nontypeddict_to_classtype(cls, class_targs, range, errors);
-        if let Some(carrier) = shape_arg_carrier
-            && let Some(shape_arg) = base_class.targs_mut().as_mut().get_mut(shape_idx)
-        {
-            *shape_arg = carrier;
-        }
-        if let Some(Type::TypeLevelDslCall(call)) = base_class.targs().as_slice().get(shape_idx)
-            && call.result_domain() == Some(TypeShapeDslDomain::IntTuple)
-        {
-            return Type::ClassType(base_class);
-        }
-        self.shaped_array_classtype_to_shaped_array_type(&base_class)
-            .to_type()
     }
 
     pub(crate) fn parse_int_tuple_type(

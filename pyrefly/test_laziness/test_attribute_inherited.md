@@ -50,7 +50,7 @@ a: Solutions
 b: Answers
 c: Answers
 
-(66 builtin demands hidden)
+(65 builtin demands hidden)
 a -> b::Exports(is_special_export)
 a -> b::Load(module_exists)
 a -> b::Exports(export_exists)
@@ -66,13 +66,11 @@ a -> b::KeyClassMetadata(ClassDefIndex(0))
   b -> c::KeyClassMetadata(ClassDefIndex(0))
   b -> c::KeyClassMetadata(ClassDefIndex(0))
   b -> c::KeyClassMetadata(ClassDefIndex(0))
-  b -> c::KeyClassMetadata(ClassDefIndex(0))
 a -> b::KeyClassMetadata(ClassDefIndex(0))
 a -> b::KeyAbstractClassCheck(ClassDefIndex(0))
   b -> c::KeyAbstractClassCheck(ClassDefIndex(0))
 a -> b::KeyClassSynthesizedFields(ClassDefIndex(0))
 a -> b::KeyClassMro(ClassDefIndex(0))
-  b -> c::KeyClassMetadata(ClassDefIndex(0))
   b -> c::KeyClassMetadata(ClassDefIndex(0))
   b -> c::KeyClassBaseType(ClassDefIndex(0))
   b -> c::KeyClassMro(ClassDefIndex(0))

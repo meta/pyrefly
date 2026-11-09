@@ -35,7 +35,6 @@ use starlark_map::small_map::SmallMap;
 
 use crate::binding::binding::KeyClass;
 use crate::binding::binding::LambdaKind;
-use crate::binding::binding::ShapedArrayMetadata;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::expr::Usage;
@@ -936,127 +935,6 @@ impl BindingsBuilder<'_> {
         }
 
         dims.into_boxed_slice()
-    }
-
-    /// Extract `@shaped_array(shape="Shape")` metadata from class decorators.
-    pub(super) fn extract_shaped_array_metadata(
-        &mut self,
-        decorators: &[Decorator],
-    ) -> Option<Box<ShapedArrayMetadata>> {
-        let mut metadata = None;
-        let mut seen_shaped_array = false;
-        for decorator in decorators {
-            let Some(call) = decorator.expression.as_call_expr() else {
-                if self.as_special_export(&decorator.expression) == Some(SpecialExport::ShapedArray)
-                {
-                    if seen_shaped_array {
-                        self.error(
-                            decorator.range(),
-                            ErrorKind::InvalidArgument,
-                            "Duplicate `@shaped_array` decorator".to_owned(),
-                        );
-                        continue;
-                    }
-                    seen_shaped_array = true;
-                    self.error(
-                        decorator.range(),
-                        ErrorKind::InvalidArgument,
-                        "`@shaped_array` requires a `shape` keyword argument".to_owned(),
-                    );
-                }
-                continue;
-            };
-            if self.as_special_export(&call.func) != Some(SpecialExport::ShapedArray) {
-                continue;
-            }
-            if seen_shaped_array {
-                self.error(
-                    decorator.range(),
-                    ErrorKind::InvalidArgument,
-                    "Duplicate `@shaped_array` decorator".to_owned(),
-                );
-                continue;
-            }
-            seen_shaped_array = true;
-
-            let mut invalid = false;
-            if let Some(arg) = call.arguments.args.first() {
-                self.error(
-                    arg.range(),
-                    ErrorKind::InvalidArgument,
-                    "`@shaped_array` expects `shape` as a keyword argument".to_owned(),
-                );
-                invalid = true;
-            }
-
-            let mut shape_keyword = None;
-            let mut builtin_indexing = true;
-            for keyword in &call.arguments.keywords {
-                let Some(arg) = &keyword.arg else {
-                    self.error(
-                        keyword.range(),
-                        ErrorKind::InvalidArgument,
-                        "Unpacking is not supported in `@shaped_array`".to_owned(),
-                    );
-                    invalid = true;
-                    continue;
-                };
-                if arg.as_str() == "shape" {
-                    if shape_keyword.is_none() {
-                        shape_keyword = Some(keyword);
-                    }
-                } else if arg.as_str() == "builtin_indexing" {
-                    let Expr::BooleanLiteral(value) = &keyword.value else {
-                        self.error(
-                            keyword.value.range(),
-                            ErrorKind::InvalidArgument,
-                            "`@shaped_array` `builtin_indexing` argument must be a boolean literal"
-                                .to_owned(),
-                        );
-                        invalid = true;
-                        continue;
-                    };
-                    builtin_indexing = value.value;
-                } else {
-                    self.error(
-                        keyword.range(),
-                        ErrorKind::InvalidArgument,
-                        format!(
-                            "Unexpected keyword argument `{}` for `@shaped_array`; expected `shape` or `builtin_indexing`",
-                            arg.id
-                        ),
-                    );
-                    invalid = true;
-                }
-            }
-
-            let Some(shape_keyword) = shape_keyword else {
-                if !invalid {
-                    self.error(
-                        call.range(),
-                        ErrorKind::InvalidArgument,
-                        "`@shaped_array` requires a `shape` keyword argument".to_owned(),
-                    );
-                }
-                continue;
-            };
-            let Expr::StringLiteral(shape) = &shape_keyword.value else {
-                self.error(
-                    shape_keyword.value.range(),
-                    ErrorKind::InvalidArgument,
-                    "`@shaped_array` `shape` argument must be a string literal".to_owned(),
-                );
-                continue;
-            };
-            if !invalid {
-                metadata = Some(Box::new(ShapedArrayMetadata {
-                    shape_name: Name::new(shape.value.to_str()),
-                    range: shape_keyword.value.range(),
-                    builtin_indexing,
-                }));
-            }
-        }
-        metadata
     }
 
     /// Record binding dependencies for a type parameter bound, including the
