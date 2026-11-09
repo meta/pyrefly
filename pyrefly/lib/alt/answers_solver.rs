@@ -1272,6 +1272,36 @@ impl CalcStack {
         top_scc.iterative.has_changed = true;
     }
 
+    /// Whether the inferred return type being calculated should be widened to
+    /// `Any`, given whether it exceeds the union width limit in this iteration.
+    ///
+    /// Within a warm iteration of an SCC, a member that was widened once stays
+    /// widened until the SCC restarts cold, so the widening is monotonic.
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "CalcId's Hash impl doesn't depend on mutable parts"
+    )]
+    pub fn widen_inferred_return(&self, exceeds_limit: bool) -> bool {
+        let mut scc_stack = self.scc_stack.borrow_mut();
+        let Some(top_scc) = scc_stack.last_mut() else {
+            return exceeds_limit;
+        };
+        let stack = self.stack.borrow();
+        let Some(current) = stack.last() else {
+            return exceeds_limit;
+        };
+        if top_scc.iterative.iteration < 2 || !top_scc.node_state.contains_key(current) {
+            return exceeds_limit;
+        }
+        let widened = &mut top_scc.iterative.widened_returns;
+        if exceeds_limit {
+            widened.insert(current.dupe());
+            true
+        } else {
+            widened.contains(current)
+        }
+    }
+
     /// Record `target` as a recursion break point in the top SCC's iteration state.
     ///
     /// Called when a back-edge hits `InProgressWithPreviousAnswer` — i.e., when
@@ -1471,6 +1501,12 @@ pub struct SccIterationState {
     /// break points; other non-converging members are downstream consequences.
     /// Used to limit non-convergence error reporting to only the break points.
     pub recursion_breaks: BTreeSet<CalcId>,
+    /// Members whose inferred return type exceeded the union width limit and
+    /// was widened to `Any` during a warm iteration. They stay widened until
+    /// the next cold start. Otherwise the widened answer could narrow the union
+    /// again in the next iteration, so the answers would alternate and never
+    /// converge.
+    pub widened_returns: BTreeSet<CalcId>,
 }
 
 // `SccNodeState` is used by both Phase 0 discovery and iterative fixpoint solving.
@@ -1622,6 +1658,7 @@ impl Scc {
                 answers: SccAnswers::new(),
                 has_changed: false,
                 recursion_breaks: BTreeSet::new(),
+                widened_returns: BTreeSet::new(),
             },
         }
     }
@@ -1736,6 +1773,7 @@ impl Scc {
             answers,
             has_changed: false,
             recursion_breaks: BTreeSet::new(),
+            widened_returns: BTreeSet::new(),
         };
 
         self
@@ -1848,6 +1886,7 @@ impl Scc {
             answers: SccAnswers::new(),
             has_changed: false,
             recursion_breaks: BTreeSet::new(),
+            widened_returns: BTreeSet::new(),
         };
         debug_assert!(
             self.node_state
@@ -3416,16 +3455,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 continue;
             }
 
+            // Convergence check: if this is iteration >= 2 and no answers
+            // changed, the fixpoint has converged.
+            if scc.iteration() >= 2 && !has_changed {
+                break;
+            }
+
             // Max iterations check: must happen after pop (so nodes are still
             // Done) but before advance (which resets nodes to Fresh).
             if scc.iteration() >= MAX_ITERATIONS {
                 exceeded_max_iterations = true;
-                break;
-            }
-
-            // Convergence check: if this is iteration >= 2 and no answers
-            // changed, the fixpoint has converged.
-            if scc.iteration() >= 2 && !has_changed {
                 break;
             }
 
@@ -4339,6 +4378,7 @@ mod scc_tests {
                 answers,
                 has_changed: false,
                 recursion_breaks: BTreeSet::new(),
+                widened_returns: BTreeSet::new(),
             },
         }
     }
@@ -5002,6 +5042,7 @@ mod scc_tests {
                     answers: SccAnswers::new(),
                     has_changed: false,
                     recursion_breaks: BTreeSet::new(),
+                    widened_returns: BTreeSet::new(),
                 },
             }
         };
@@ -5021,6 +5062,7 @@ mod scc_tests {
                     answers: SccAnswers::new(),
                     has_changed: false,
                     recursion_breaks: BTreeSet::new(),
+                    widened_returns: BTreeSet::new(),
                 },
             }
         };

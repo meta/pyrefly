@@ -4964,7 +4964,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // with `Any`. Inferred types there are capped when their own function is solved.
                 let return_ty = if return_ty.is_toplevel_callable() {
                     return_ty
-                } else if return_ty.union_width() > MAX_INFERRED_RETURN_UNION_WIDTH {
+                } else if self.stack().widen_inferred_return(
+                    return_ty.union_width() > MAX_INFERRED_RETURN_UNION_WIDTH,
+                ) {
                     self.heap.mk_any_implicit()
                 } else {
                     let any = self.heap.mk_any_implicit();
