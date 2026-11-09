@@ -195,7 +195,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         pydantic_config_dict: &PydanticConfigDict,
         pydantic_before_validator_fields: &[Name],
         django_field_info: &DjangoFieldInfo,
-        capture_init: Option<&[Name]>,
         shaped_array_metadata: Option<&ShapedArrayDecoratorMetadata>,
         errors: &ErrorCollector,
     ) -> ClassMetadata {
@@ -638,7 +637,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             is_factory_boy_factory,
             is_metaclass,
             explicit_slots,
-            capture_init.map(|names| names.to_vec()),
             shaped_array,
         )
     }

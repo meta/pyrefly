@@ -593,7 +593,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             pydantic_config_dict,
             pydantic_before_validator_fields,
             django_field_info,
-            capture_init,
             shaped_array_metadata,
         } = binding;
 
@@ -608,7 +607,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 pydantic_config_dict,
                 pydantic_before_validator_fields,
                 django_field_info,
-                capture_init.as_deref(),
                 shaped_array_metadata.as_deref(),
                 errors,
             ),

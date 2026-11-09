@@ -267,7 +267,6 @@ impl<'a> BindingsBuilder<'a> {
         let pydantic_before_validator_fields = self.extract_field_validator_fields(&body);
         let mut attrs_decorators = AttrsDecoratorMethods::default();
         collect_attrs_decorator_methods(&body, &mut attrs_decorators);
-        let capture_init = self.extract_capture_init(&body);
         let shaped_array_metadata = self.extract_shaped_array_metadata(&x.decorator_list);
         // This uses the full statement range; see `ShapeDeclarations::enclosing_class`.
         self.shape_declarations
@@ -696,7 +695,6 @@ impl<'a> BindingsBuilder<'a> {
                 pydantic_before_validator_fields: pydantic_before_validator_fields
                     .into_boxed_slice(),
                 django_field_info: Box::new(django_field_info),
-                capture_init: capture_init.map(|v| v.into_boxed_slice()),
                 shaped_array_metadata,
             },
         );
@@ -1207,7 +1205,6 @@ impl<'a> BindingsBuilder<'a> {
                 pydantic_config_dict: PydanticConfigDict::default(),
                 pydantic_before_validator_fields: Box::default(),
                 django_field_info: Box::default(),
-                capture_init: None,
                 shaped_array_metadata: None,
             },
         );

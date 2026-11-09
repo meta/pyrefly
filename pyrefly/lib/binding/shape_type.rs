@@ -29,7 +29,6 @@ use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
 use ruff_python_ast::ExprTuple;
 use ruff_python_ast::Identifier;
-use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtFunctionDef;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
@@ -1137,45 +1136,6 @@ impl BindingsBuilder<'_> {
             }
         }
         metadata
-    }
-
-    /// Extract `capture_init` names from `@uses_shape_dsl` on a class's `forward` method.
-    pub(super) fn extract_capture_init(&mut self, body: &[Stmt]) -> Option<Vec<Name>> {
-        let forward = body
-            .iter()
-            .filter_map(|stmt| stmt.as_function_def_stmt())
-            .find(|function| function.name.as_str() == "forward")?;
-
-        forward.decorator_list.iter().find_map(|decorator| {
-            let call = decorator.expression.as_call_expr()?;
-            if self.as_special_export(&call.func) != Some(SpecialExport::UsesShapeDsl) {
-                return None;
-            }
-            let capture_init = call.arguments.keywords.iter().find(|keyword| {
-                keyword
-                    .arg
-                    .as_ref()
-                    .is_some_and(|arg| arg.as_str() == "capture_init")
-            })?;
-            let list = capture_init.value.as_list_expr()?;
-            Some(
-                list.elts
-                    .iter()
-                    .filter_map(|element| {
-                        if let Some(string) = element.as_string_literal_expr() {
-                            Some(Name::new(string.value.to_str()))
-                        } else {
-                            self.error(
-                                element.range(),
-                                ErrorKind::InvalidArgument,
-                                "`capture_init` entries must be string literals".to_owned(),
-                            );
-                            None
-                        }
-                    })
-                    .collect(),
-            )
-        })
     }
 
     /// Record binding dependencies for a type parameter bound, including the

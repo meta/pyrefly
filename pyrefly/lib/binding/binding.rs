@@ -137,7 +137,7 @@ assert_words!(BindingAnnotation, 11);
 assert_words!(BindingClass, 11);
 assert_words!(BindingTParams, 9);
 assert_words!(BindingClassBaseType, 3);
-assert_words!(BindingClassMetadata, 14);
+assert_words!(BindingClassMetadata, 12);
 assert_words!(BindingDjangoRelations, 2);
 assert_bytes!(BindingClassMro, 4);
 assert_bytes!(BindingClassChecks, 4);
@@ -3862,9 +3862,6 @@ pub struct BindingClassMetadata {
     pub pydantic_before_validator_fields: Box<[Name]>,
     /// Django-specific field information.
     pub django_field_info: Box<DjangoFieldInfo>,
-    /// `__init__` parameter names to capture for shape inference, extracted from
-    /// `@uses_shape_dsl(..., capture_init=[...])` on a `forward` method.
-    pub capture_init: Option<Box<[Name]>>,
     /// Shape parameter requested by `@shaped_array(shape="...")`.
     pub shaped_array_metadata: Option<Box<ShapedArrayMetadata>>,
 }
