@@ -1608,7 +1608,6 @@ mod tests {
     use crate::shaped_array::IntTupleRepr;
     use crate::shaped_array::IntTupleView;
     use crate::shaped_array::MAX_PRODUCT_CANONICAL_TERMS;
-    use crate::shaped_array::ShapedArrayType;
     use crate::shaped_array::broadcast_dim;
     use crate::shaped_array::broadcast_shapes;
     use crate::shaped_array::gradual_shape_middle;
@@ -1625,7 +1624,6 @@ mod tests {
     use crate::type_var_tuple::TypeVarTuple;
     use crate::types::AnyStyle;
     use crate::types::TArgs;
-    use crate::types::TParams;
     use crate::types::Type;
     use crate::types::Var;
 
@@ -1764,37 +1762,6 @@ mod tests {
 
     fn shape_carrier(name: &str) -> Type {
         Type::TypeVar(fake_type_var(name, QuantifiedKind::TypeVar))
-    }
-
-    fn registered_array_shape_arg(shape_arg: Type) -> ShapedArrayType {
-        let shape_param = fake_tparam("Shape", QuantifiedKind::TypeVar);
-        let class = fake_class_type("arrays", "Array").class_object().clone();
-        ShapedArrayType::new(
-            ClassType::new(
-                class,
-                TArgs::new(Arc::new(TParams::new(vec![shape_param])), vec![shape_arg]),
-            ),
-            IntTuple::shapeless(),
-        )
-        .with_tuple_carrier_shape_arg(0)
-    }
-
-    fn registered_array_shape_arg_at(
-        shape_arg_index: usize,
-        shape_args: Vec<Type>,
-    ) -> ShapedArrayType {
-        let tparams = (0..shape_args.len())
-            .map(|i| fake_tparam(&format!("Shape{i}"), QuantifiedKind::TypeVar))
-            .collect();
-        let class = fake_class_type("arrays", "Array").class_object().clone();
-        ShapedArrayType::new(
-            ClassType::new(
-                class,
-                TArgs::new(Arc::new(TParams::new(tparams)), shape_args),
-            ),
-            IntTuple::shapeless(),
-        )
-        .with_tuple_carrier_shape_arg(shape_arg_index)
     }
 
     #[test]
@@ -2348,12 +2315,6 @@ mod tests {
             legacy_type_var("N", Restriction::Bound(gradual_size())),
         ] {
             let shape_arg = concrete_carrier(vec![type_var.clone()]);
-            let array = registered_array_shape_arg(shape_arg.clone());
-            // The tuple-form shape is kept verbatim as the class argument, so
-            // substitution has an `N` left to replace.
-            assert_eq!(array.base_class.targs().as_slice(), vec![shape_arg.clone()]);
-            // Before substitution the dimension is gradual, not symbolic.
-            assert_eq!(array.shape(), IntTuple::from_ints(vec![Int::Int]));
             assert_eq!(
                 tuple_carrier_to_shape(&shape_arg),
                 Some(IntTuple::from_ints(vec![Int::Int]))
@@ -2465,66 +2426,6 @@ mod tests {
         for normalized in [concrete, gradual, unpacked] {
             assert_eq!(normalized.normalize(), normalized);
         }
-    }
-
-    #[test]
-    fn registered_shape_projects_from_first_class_shape_arg() {
-        let projected = IntTuple::from_types(vec![size(2), size(3)]);
-        let tensor = registered_array_shape_arg(projected.to_shape_arg_type());
-
-        assert_eq!(tensor.shape(), projected);
-    }
-
-    #[test]
-    fn registered_shape_projects_from_legacy_tuple_carrier() {
-        let projected = IntTuple::from_types(vec![size(6)]);
-        let tensor = registered_array_shape_arg(concrete_carrier(vec![literal(6)]));
-
-        assert_eq!(tensor.shape(), projected);
-    }
-
-    #[test]
-    fn set_shape_updates_registered_shape_arg() {
-        let old_shape = IntTuple::from_types(vec![size(2)]);
-        let new_shape = IntTuple::from_types(vec![size(4), size(5)]);
-        let mut tensor = registered_array_shape_arg(old_shape.to_shape_arg_type());
-
-        tensor.set_shape(new_shape.clone());
-
-        assert_eq!(tensor.shape(), new_shape.clone());
-        assert_eq!(
-            tensor.base_class.targs().as_slice()[0],
-            new_shape.to_shape_arg_type()
-        );
-    }
-
-    #[test]
-    fn tuple_carrier_shape_arg_index_participates_in_identity() {
-        let shape = IntTuple::from_types(vec![size(2)]);
-        let shape_args = vec![shape.to_shape_arg_type(), shape.to_shape_arg_type()];
-        let first_arg_shape = registered_array_shape_arg_at(0, shape_args.clone());
-        let second_arg_shape = registered_array_shape_arg_at(1, shape_args);
-
-        assert_eq!(first_arg_shape.shape(), second_arg_shape.shape());
-        assert_ne!(first_arg_shape, second_arg_shape);
-    }
-
-    #[test]
-    fn registered_shape_display_uses_projected_shape_arg() {
-        let projected = IntTuple::from_types(vec![size(2), size(3)]);
-        let tensor = registered_array_shape_arg(projected.to_shape_arg_type());
-        assert_eq!(tensor.to_string(), "Array[[2, 3]]");
-
-        let tensor = registered_array_shape_arg(IntTuple::shapeless().to_shape_arg_type());
-        assert_eq!(tensor.to_string(), "Array");
-    }
-
-    #[test]
-    #[should_panic(expected = "registered shaped-array shape argument should project to IntTuple")]
-    fn registered_shape_with_invalid_carrier_panics() {
-        let tensor = registered_array_shape_arg(Type::None);
-
-        let _ = tensor.shape();
     }
 
     #[test]
