@@ -10,7 +10,15 @@ from numpy._shapes import (
     multivariate_normal_shape,
 )
 from numpy._typing import _ArrayLikeInt_co, _ShapeLike, ArrayLike
-from numpy.random._generator import Generator as _NumpyGenerator
+from numpy.random._generator import (
+    _ArrayF32,
+    _ArrayF64,
+    _DTypeLikeF32,
+    _DTypeLikeF64,
+    _DTypeLikeFloat,
+    _MethodExp,
+    Generator as _NumpyGenerator,
+)
 
 # Preserve NumPy's canonical re-exports before local shape-aware declarations.
 from numpy.random._mt19937 import (
@@ -84,7 +92,7 @@ from numpy.random.mtrand import (
 )
 from shape_extensions import Int, IntTuple, IntVar
 
-from .. import dtype, float64, ndarray
+from .. import dtype, float32, float64, ndarray
 
 @overload
 def randn() -> float: ...
@@ -149,6 +157,129 @@ class Generator(_NumpyGenerator):
         *,
         method: Literal["svd", "eigh", "cholesky"] = "svd",
     ) -> ndarray[IntTuple, dtype[float64]]: ...
+    @overload
+    def standard_normal(
+        self, size: None = None, dtype: _DTypeLikeFloat = ..., out: None = None
+    ) -> float: ...
+    @overload
+    def standard_normal[N: IntVar](
+        self, size: Int[N], dtype: _DTypeLikeF64 = ..., out: None = None
+    ) -> ndarray[[N], dtype[float64]]: ...
+    @overload
+    def standard_normal[Shape: IntTuple](
+        self, size: Shape, dtype: _DTypeLikeF64 = ..., out: None = None
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    @overload
+    def standard_normal[N: IntVar](
+        self, size: Int[N], dtype: _DTypeLikeF32, *, out: None = None
+    ) -> ndarray[[N], dtype[float32]]: ...
+    @overload
+    def standard_normal[Shape: IntTuple](
+        self, size: Shape, dtype: _DTypeLikeF32, *, out: None = None
+    ) -> ndarray[Shape, dtype[float32]]: ...
+    @overload
+    def standard_normal(
+        self, size: _ShapeLike, dtype: _DTypeLikeF64 = ..., out: None = None
+    ) -> _ArrayF64: ...
+    @overload
+    def standard_normal(
+        self, size: _ShapeLike, dtype: _DTypeLikeF32, *, out: None = None
+    ) -> _ArrayF32: ...
+    @overload
+    def standard_normal[ArrayT: _ArrayF64](
+        self, size: _ShapeLike | None = None, dtype: _DTypeLikeF64 = ..., *, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def standard_normal[ArrayT: _ArrayF32](
+        self, size: _ShapeLike | None = None, *, dtype: _DTypeLikeF32, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def standard_normal[ArrayT: _ArrayF32](
+        self, size: _ShapeLike | None, dtype: _DTypeLikeF32, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def standard_exponential(
+        self,
+        size: None = None,
+        dtype: _DTypeLikeFloat = ...,
+        method: _MethodExp = "zig",
+        out: None = None,
+    ) -> float: ...
+    @overload
+    def standard_exponential[N: IntVar](
+        self,
+        size: Int[N],
+        dtype: _DTypeLikeF64 = ...,
+        method: _MethodExp = "zig",
+        out: None = None,
+    ) -> ndarray[[N], dtype[float64]]: ...
+    @overload
+    def standard_exponential[Shape: IntTuple](
+        self,
+        size: Shape,
+        dtype: _DTypeLikeF64 = ...,
+        method: _MethodExp = "zig",
+        out: None = None,
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    @overload
+    def standard_exponential[N: IntVar](
+        self,
+        size: Int[N],
+        dtype: _DTypeLikeF32,
+        method: _MethodExp = "zig",
+        out: None = None,
+    ) -> ndarray[[N], dtype[float32]]: ...
+    @overload
+    def standard_exponential[Shape: IntTuple](
+        self,
+        size: Shape,
+        dtype: _DTypeLikeF32,
+        method: _MethodExp = "zig",
+        out: None = None,
+    ) -> ndarray[Shape, dtype[float32]]: ...
+    @overload
+    def standard_exponential(
+        self,
+        size: _ShapeLike,
+        dtype: _DTypeLikeF64 = ...,
+        method: _MethodExp = "zig",
+        out: None = None,
+    ) -> _ArrayF64: ...
+    @overload
+    def standard_exponential(
+        self,
+        size: _ShapeLike,
+        dtype: _DTypeLikeF32,
+        method: _MethodExp = "zig",
+        out: None = None,
+    ) -> _ArrayF32: ...
+    @overload
+    def standard_exponential[ArrayT: _ArrayF64](
+        self,
+        size: _ShapeLike | None = None,
+        dtype: _DTypeLikeF64 = ...,
+        method: _MethodExp = "zig",
+        *,
+        out: ArrayT,
+    ) -> ArrayT: ...
+    @overload
+    def standard_exponential[ArrayT: _ArrayF32](
+        self,
+        size: _ShapeLike | None = None,
+        *,
+        dtype: _DTypeLikeF32,
+        method: _MethodExp = "zig",
+        out: ArrayT,
+    ) -> ArrayT: ...
+    @overload
+    def standard_exponential[ArrayT: _ArrayF32](
+        self,
+        size: _ShapeLike | None,
+        dtype: _DTypeLikeF32,
+        method: _MethodExp = "zig",
+        *,
+        out: ArrayT,
+    ) -> ArrayT: ...
 
 def default_rng(
     seed: _ArrayLikeInt_co
