@@ -20,7 +20,6 @@
 //!  - `Forall` → unwraps body and converts recursively.
 //!  - `Callable` → TSP `FunctionType` with synthesized declaration.
 //!  - `Tuple` → TSP `ClassType` with type args.
-//!  - `Tensor` → TSP `ClassType` from its base class.
 //!  - `TypeAlias` → unwraps to the aliased type.
 //!  - `SpecialForm` → TSP `BuiltInType` with the form name.
 //!  - `Any`, `Never`, `Ellipsis` → TSP `BuiltInType`.
@@ -423,11 +422,6 @@ impl TypeConverter<'_> {
 
             // --- SuperInstance → convert as the class type ---
             PyreflyType::SuperInstance(si) => self.convert_class_type(&si.0, TypeFlags::INSTANCE),
-
-            // --- Tensor → ClassType from base_class ---
-            PyreflyType::ShapedArray(t) => {
-                self.convert_class_type(&t.base_class, TypeFlags::INSTANCE)
-            }
 
             PyreflyType::IntTuple(_) => builtin("tuple"),
 

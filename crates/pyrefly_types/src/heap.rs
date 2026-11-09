@@ -40,7 +40,6 @@ use crate::param_spec::ParamSpec;
 use crate::quantified::Quantified;
 use crate::sentinel::Sentinel;
 use crate::shaped_array::IntTuple;
-use crate::shaped_array::ShapedArrayType;
 use crate::special_form::SpecialForm;
 use crate::tuple::Tuple;
 use crate::type_alias::TypeAliasData;
@@ -434,11 +433,6 @@ impl TypeHeap {
     /// Create a `Type::Int` from a symbolic integer expression.
     pub fn mk_int(&self, symint: Int) -> Type {
         Type::Int(symint)
-    }
-
-    /// Create a `Type::ShapedArray` from a ShapedArrayType.
-    pub fn mk_shaped_array(&self, shaped_array: ShapedArrayType) -> Type {
-        Type::ShapedArray(Box::new(shaped_array))
     }
 
     /// Create a `Type::IntTuple` from a IntTuple.

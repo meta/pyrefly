@@ -241,26 +241,6 @@ pub(crate) fn simplify_shape_type(ty: &mut Type) {
     if let Type::IntTuple(shape) = ty {
         **shape = shape.normalize();
     }
-    if let Type::ShapedArray(tensor) = ty {
-        match tensor.tuple_carrier_shape_arg_index() {
-            Some(index)
-                if !matches!(
-                    tensor.base_class.targs().as_slice().get(index),
-                    Some(Type::IntTuple(_))
-                ) =>
-            {
-                let shape = tensor.shape();
-                tensor.set_shape(shape);
-            }
-            None => {
-                let shape = tensor.shape().normalize();
-                tensor.set_shape(shape);
-            }
-            // This traversal is post-order, so the first-class shape argument was normalized
-            // before its containing shaped array.
-            Some(_) => {}
-        }
-    }
 }
 
 #[cfg(test)]

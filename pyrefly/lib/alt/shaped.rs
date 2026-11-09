@@ -188,7 +188,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             );
             return ty;
         }
-        let ty = self.shaped_type(
+        self.shaped_type(
             ShapedAnnotation {
                 base_expr: base,
                 payload: &comment.payload,
@@ -199,13 +199,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             comment.range,
             context,
             errors,
-        );
-        match ty {
-            Type::ShapedArray(array) if matches!(context, TypeFormContext::BaseClassList) => {
-                self.heap.mk_class_type(array.base_class)
-            }
-            ty => ty,
-        }
+        )
     }
 
     fn shaped_type(
@@ -222,10 +216,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             base_errors,
             mode,
         } = annotation;
-        let base = match base {
-            Type::ShapedArray(array) => Type::ClassType(array.base_class),
-            other => other,
-        };
         if mode == ShapeCommentMode::Replace && carrier_int_tuple(&base).is_none() {
             errors.extend_filtered(base_errors, |error| {
                 error.error_kind() != ErrorKind::ImplicitAnyTypeArgument

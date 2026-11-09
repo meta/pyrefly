@@ -62,7 +62,6 @@ use crate::quantified::Quantified;
 use crate::sentinel::Sentinel;
 use crate::series::SeriesSchema;
 use crate::shaped_array::IntTuple;
-use crate::shaped_array::ShapedArrayType;
 use crate::simplify::unions;
 use crate::special_form::SpecialForm;
 use crate::stdlib::Stdlib;
@@ -902,9 +901,6 @@ pub enum Type {
     /// For a TypedDict type `C`, `Partial[C]` represents an object with any subset of read-write
     /// keys from `C`, where each present key has the same value type as in `C`.
     PartialTypedDict(TypedDict),
-    /// Shaped-array type with shape information.
-    /// Example: Tensor[2, 3] represents a 2x3 tensor
-    ShapedArray(Box<ShapedArrayType>),
     /// First-class tensor shape tuple.
     IntTuple(Box<IntTuple>),
     /// Named integer values captured by the experimental shape extensions.
@@ -1031,7 +1027,6 @@ impl Visit for Type {
             Type::ClassType(x) => x.visit(f),
             Type::TypedDict(x) => x.visit(f),
             Type::PartialTypedDict(x) => x.visit(f),
-            Type::ShapedArray(x) => x.visit(f),
             Type::IntTuple(x) => x.visit(f),
             Type::NamedInts(x) => x.visit(f),
             Type::DataFrame(x) => x.visit(f),
@@ -1095,7 +1090,6 @@ impl VisitMut for Type {
             Type::ClassType(x) => x.visit_mut(f),
             Type::TypedDict(x) => x.visit_mut(f),
             Type::PartialTypedDict(x) => x.visit_mut(f),
-            Type::ShapedArray(x) => x.visit_mut(f),
             Type::IntTuple(x) => x.visit_mut(f),
             Type::NamedInts(x) => x.visit_mut(f),
             Type::DataFrame(x) => x.visit_mut(f),
@@ -2465,7 +2459,6 @@ impl Type {
             | Type::ClassType(_)
             | Type::TypedDict(_)
             | Type::PartialTypedDict(_)
-            | Type::ShapedArray(_)
             | Type::IntTuple(_)
             | Type::NamedInts(_)
             | Type::DataFrame(_)
@@ -2551,7 +2544,6 @@ impl Type {
         match self {
             Type::Int(dim) => dim.materialize(),
             Type::IntTuple(tuple) => tuple.materialize(),
-            Type::ShapedArray(shaped) => shaped.materialize_inline_shape(),
             _ => {}
         }
         self.transform_toplevel_callable_signatures(|callable: &mut Callable, _| {

@@ -1757,15 +1757,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 match self.untype_opt(ty.clone(), x.range(), &errors) {
                     None => BaseClassParseResult::InvalidType(ty, x.range()),
-                    Some(Type::ShapedArray(array))
-                        if self
-                            .bindings()
-                            .shape_declarations
-                            .commented_bases
-                            .contains_key(&x.range()) =>
-                    {
-                        parse_base_class_type(self.heap.mk_class_type(array.base_class))
-                    }
                     Some(ty) => parse_base_class_type(ty),
                 }
             }

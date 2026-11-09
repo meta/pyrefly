@@ -4234,19 +4234,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         Some(&|| ErrorContext::Index(self.for_display(base.clone()))),
                     )
                 }
-                // Registered arrays use their declared indexing method.
-                Type::ShapedArray(_) => {
-                    let receiver = target.with_base(&base).getitem_receiver();
-                    self.call_method_or_error(
-                        receiver,
-                        &dunder::GETITEM,
-                        range,
-                        &[CallArg::expr(slice)],
-                        &[],
-                        errors,
-                        Some(&|| ErrorContext::Index(self.for_display(receiver.clone()))),
-                    )
-                }
                 Type::ClassType(ref cls) | Type::SelfType(ref cls)
                     if let Some(tuple) = self.as_tuple(cls)
                         && !self.class_overrides_tuple_getitem(cls) =>
@@ -4537,7 +4524,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         match ty {
             Type::ClassType(cls) => is_torch_tensor_class(cls),
-            Type::ShapedArray(shaped_array) => is_torch_tensor_class(&shaped_array.base_class),
             _ => false,
         }
     }

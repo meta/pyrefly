@@ -13,7 +13,6 @@ use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
 use pyrefly_util::display::commas_iter;
 
-use crate::class::ClassType;
 use crate::dimension::Int;
 use crate::dimension::ShapeError;
 use crate::dimension::canonicalize;
@@ -28,140 +27,7 @@ use crate::tuple::Tuple;
 use crate::type_level_dsl::TypeShapeDslDomain;
 use crate::types::Type;
 
-// ============================================================================
-// Shaped Array Types
-// ============================================================================
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(Visit, VisitMut, TypeEq)]
-enum ShapedArrayShapeStorage {
-    Inline(IntTuple),
-    TupleCarrier { index: usize },
-}
-
-/// A class instance with shape information.
-/// Example: Tensor[[2, 3]] represents a 2x3 tensor
-/// Example: Tensor (no brackets) represents a shapeless tensor (`IntTuple`)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(Visit, VisitMut, TypeEq)]
-pub struct ShapedArrayType {
-    /// Base shaped-array class (e.g., torch.Tensor)
-    pub base_class: ClassType,
-    shape: ShapedArrayShapeStorage,
-}
-
-impl ShapedArrayType {
-    /// Create a shaped-array type with shape information.
-    pub fn new(base_class: ClassType, shape: IntTuple) -> Self {
-        Self {
-            base_class,
-            shape: ShapedArrayShapeStorage::Inline(shape),
-        }
-    }
-
-    /// Create a shapeless shaped-array type (compatible with any shape).
-    pub fn shapeless(base_class: ClassType) -> Self {
-        Self {
-            base_class,
-            shape: ShapedArrayShapeStorage::Inline(IntTuple::shapeless()),
-        }
-    }
-
-    pub fn with_tuple_carrier_shape_arg(mut self, index: usize) -> Self {
-        self.shape = ShapedArrayShapeStorage::TupleCarrier { index };
-        self
-    }
-
-    pub fn to_type(self) -> Type {
-        Type::ShapedArray(Box::new(self))
-    }
-
-    pub fn tuple_carrier_shape_arg_index(&self) -> Option<usize> {
-        match self.shape {
-            ShapedArrayShapeStorage::Inline(_) => None,
-            ShapedArrayShapeStorage::TupleCarrier { index } => Some(index),
-        }
-    }
-
-    pub fn set_tuple_carrier_shape_arg(&mut self, index: usize) {
-        self.shape = ShapedArrayShapeStorage::TupleCarrier { index };
-    }
-
-    pub fn shape(&self) -> IntTuple {
-        match &self.shape {
-            ShapedArrayShapeStorage::Inline(shape) => shape.clone(),
-            ShapedArrayShapeStorage::TupleCarrier { index } => {
-                let shape_arg = self
-                    .base_class
-                    .targs()
-                    .as_slice()
-                    .get(*index)
-                    .expect("shape argument index should point to a class type argument");
-                IntTuple::from_shape_arg_or_tuple_carrier(shape_arg)
-                    .expect("registered shaped-array shape argument should project to IntTuple")
-            }
-        }
-    }
-
-    pub fn set_shape(&mut self, shape: IntTuple) {
-        match &mut self.shape {
-            ShapedArrayShapeStorage::Inline(stored_shape) => *stored_shape = shape,
-            ShapedArrayShapeStorage::TupleCarrier { index } => {
-                let shape_arg = self
-                    .base_class
-                    .targs_mut()
-                    .as_mut()
-                    .get_mut(*index)
-                    .expect("shape argument index should point to a class type argument");
-                *shape_arg = shape.to_shape_arg_type();
-            }
-        }
-    }
-
-    /// Returns rank if shape is concrete, None for variadic/shapeless
-    pub fn rank(&self) -> Option<usize> {
-        match self.shape().view() {
-            IntTupleView::Concrete(dims) => Some(dims.len()),
-            IntTupleView::Gradual | IntTupleView::Unpacked { .. } => None,
-        }
-    }
-
-    /// Returns true if the shaped array has no shape information.
-    /// (represented as a gradual `IntTuple`)
-    pub fn is_shapeless(&self) -> bool {
-        is_shapeless(&self.shape())
-    }
-
-    /// Materialize gradual dimensions of an inline shape (see `Int::materialize`).
-    /// `TupleCarrier` shapes store their dimensions as `Type` arguments on
-    /// `base_class`, so they are materialized by the generic `Type::materialize`
-    /// traversal instead.
-    pub fn materialize_inline_shape(&mut self) {
-        if let ShapedArrayShapeStorage::Inline(shape) = &mut self.shape {
-            shape.materialize();
-        }
-    }
-}
-
-impl Display for ShapedArrayType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let shape = self.shape();
-        if is_shapeless(&shape) {
-            write!(f, "{}", self.base_class.name())
-        } else if self.tuple_carrier_shape_arg_index().is_some() {
-            write!(
-                f,
-                "{}[{}]",
-                self.base_class.name(),
-                fmt_tuple_carrier(&shape)
-            )
-        } else {
-            write!(f, "{}[{}]", self.base_class.name(), shape)
-        }
-    }
-}
-
-/// Shape of a shaped array.
+/// An integer tuple describing an array shape.
 ///
 /// The storage is deliberately not a `Tuple`: fixed dimensions are always
 /// canonical `Int`s, while variadic middles carry the original tuple/type
@@ -726,32 +592,6 @@ fn fmt_unpacked_middle(middle: &Type) -> String {
         Type::Tuple(Tuple::Unbounded(elt)) if elt.is_any() => "tuple[int, ...]".to_owned(),
         Type::Tuple(Tuple::Unbounded(elt)) if is_gradual_size(elt) => "tuple[int, ...]".to_owned(),
         _ => format!("{middle}"),
-    }
-}
-
-fn fmt_tuple_carrier(shape: &IntTuple) -> String {
-    match shape.view() {
-        IntTupleView::Concrete(dims) => {
-            format!("[{}]", commas_iter(|| dims.iter()))
-        }
-        IntTupleView::Gradual => {
-            // No unbounded shape reaches here: the only caller (`Display`) handles
-            // the shapeless `IntTuple` case before calling this.
-            unreachable!("shapeless IntTuple is handled before fmt_tuple_carrier")
-        }
-        IntTupleView::Unpacked {
-            prefix,
-            middle,
-            suffix,
-        } => {
-            if prefix.is_empty() && suffix.is_empty() && is_tuple_carrier_shape_middle(middle) {
-                return middle.to_string();
-            }
-            let mut parts: Vec<String> = prefix.iter().map(|d| d.to_string()).collect();
-            parts.push(format!("*{}", fmt_unpacked_middle(middle)));
-            parts.extend(suffix.iter().map(|d| d.to_string()));
-            format!("[{}]", parts.join(", "))
-        }
     }
 }
 

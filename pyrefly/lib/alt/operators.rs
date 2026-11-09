@@ -1227,7 +1227,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 | Type::Int(_)
                 | Type::SelfType(_)
                 | Type::Quantified(_)
-                | Type::ShapedArray(_)
                 | Type::DataFrame(_)
                 | Type::Series(_)
                 | Type::Intersect(_) => {

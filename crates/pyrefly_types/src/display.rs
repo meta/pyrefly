@@ -42,7 +42,6 @@ use crate::quantified::QuantifiedIdentity;
 use crate::quantified::QuantifiedKind;
 use crate::shaped_array::IntTuple;
 use crate::shaped_array::IntTupleView;
-use crate::shaped_array::ShapedArrayType;
 use crate::shaped_array::is_tuple_carrier_shape_middle;
 use crate::stdlib::Stdlib;
 use crate::tuple::Tuple;
@@ -205,9 +204,6 @@ impl<'a> TypeDisplayContext<'a> {
 
     pub fn add(&mut self, t: &'a Type) {
         t.universe(&mut |t| {
-            if let Type::ShapedArray(shaped_array) = t {
-                self.add_qname(shaped_array.base_class.qname());
-            }
             if let Type::DataFrame(schema) = t {
                 self.add_qname(schema.underlying.qname());
             }
@@ -448,63 +444,6 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_str(", ")?;
             }
             self.fmt_targ(param, arg, output)?;
-        }
-        output.write_str("]")
-    }
-
-    fn fmt_shaped_array(
-        &self,
-        shaped_array: &ShapedArrayType,
-        output: &mut impl TypeOutput,
-    ) -> fmt::Result {
-        let shape_idx = match shaped_array.tuple_carrier_shape_arg_index() {
-            Some(index) => index,
-            None => {
-                output.write_qname(shaped_array.base_class.qname())?;
-                let shape = shaped_array.shape();
-                if !shape.is_shapeless() {
-                    output.write_str("[")?;
-                    output.write_str(&shape.to_string())?;
-                    output.write_str("]")?;
-                }
-                return Ok(());
-            }
-        };
-        self.fmt_shaped_array_as_class(shaped_array, shape_idx, output)
-    }
-
-    fn fmt_shaped_array_as_class(
-        &self,
-        shaped_array: &ShapedArrayType,
-        shape_idx: usize,
-        output: &mut impl TypeOutput,
-    ) -> fmt::Result {
-        let targs = shaped_array.base_class.targs();
-        let args = targs.as_slice();
-        args.get(shape_idx)
-            .expect("shape argument index should point to a class type argument");
-
-        output.write_qname(shaped_array.base_class.qname())?;
-        let shape = shaped_array.shape();
-        let display_count = targs.display_count().max(if shape.is_shapeless() {
-            0
-        } else {
-            shape_idx + 1
-        });
-        if display_count == 0 {
-            return Ok(());
-        }
-
-        output.write_str("[")?;
-        for (i, (param, arg)) in targs.iter_paired().take(display_count).enumerate() {
-            if i > 0 {
-                output.write_str(", ")?;
-            }
-            if i == shape_idx {
-                self.fmt_shape_as_tuple_carrier(&shape, output)?;
-            } else {
-                self.fmt_targ(param, arg, output)?;
-            }
         }
         output.write_str("]")
     }
@@ -1103,7 +1042,6 @@ impl<'a> TypeDisplayContext<'a> {
                 }
                 output.write_str("]")
             }
-            Type::ShapedArray(shaped_array) => self.fmt_shaped_array(shaped_array, output),
             Type::IntTuple(int_tuple) => {
                 if int_tuple.is_shapeless() {
                     output.write_str("IntTuple")

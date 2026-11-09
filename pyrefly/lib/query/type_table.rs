@@ -483,7 +483,6 @@ pub(super) fn type_to_indexed_shape(
         Type::Falsy => indexed_named_leaf(table, "Falsy"),
         Type::Truthy => indexed_named_leaf(table, "Truthy"),
         Type::Var(_) => indexed_named_leaf(table, "typing.Any"),
-        Type::ShapedArray(_) => indexed_named_leaf(table, "Tensor"),
         Type::IntTuple(_) => indexed_named_leaf(table, "IntTuple"),
         Type::NamedInts(_) => indexed_named_leaf(table, "NamedInts"),
         Type::DataFrame(schema) => type_to_indexed_shape(context, &schema.underlying_type(), table),

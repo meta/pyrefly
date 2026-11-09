@@ -340,7 +340,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::ClassType(class) => Some(class.class_object().dupe()),
             Type::Tuple(_) => Some(self.stdlib.tuple_object().dupe()),
             Type::TypedDict(TypedDict::TypedDict(dict)) => Some(dict.class_object().dupe()),
-            Type::ShapedArray(array) => Some(array.base_class.class_object().dupe()),
             Type::Int(_) => Some(self.stdlib.int().class_object().dupe()),
             _ => None,
         };
@@ -404,19 +403,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ty
         };
         let ty = self.validate_type_form(ty, range, type_form_context, errors);
-        let ty = match ty {
-            Type::ShapedArray(array)
-                if matches!(type_form_context, TypeFormContext::BaseClassList)
-                    && self
-                        .bindings()
-                        .shape_declarations
-                        .commented_bases
-                        .contains_key(&range) =>
-            {
-                self.heap.mk_class_type(array.base_class)
-            }
-            ty => ty,
-        };
         (ty, has_pydantic_strict_metadata)
     }
 

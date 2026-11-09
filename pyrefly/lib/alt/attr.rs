@@ -2656,7 +2656,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     value_ty,
                 )))
             }
-            Type::ShapedArray(tensor) => acc.push(AttributeBase1::ClassInstance(tensor.base_class)),
             Type::DataFrame(schema) => self.as_attribute_base1(schema.underlying_type(), acc),
             Type::Series(schema) => self.as_attribute_base1(schema.underlying_type(), acc),
             Type::Int(_) => {
