@@ -87,12 +87,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 TypeFormContext::FunctionArgument,
                 errors,
             ));
-            let shown = a.clone().without_truthiness_markers();
-            if !b.is_error() && !self.is_equivalent(&shown, &b) {
+            if !b.is_error() && !self.is_equivalent(&a, &b) {
                 // `a` is a subtype of `b` if every materialization of `a` is a subtype of every
                 // materialization of `b`.
-                let is_unspellable_subtype = !shown.is_spellable()
-                    && self.is_subset_eq(&shown.materialize(), &b.materialize());
+                let is_unspellable_subtype =
+                    !a.is_spellable() && self.is_subset_eq(&a.materialize(), &b.materialize());
                 let kind = if is_unspellable_subtype {
                     ErrorKind::AssertTypeUnspellableSubtype
                 } else {

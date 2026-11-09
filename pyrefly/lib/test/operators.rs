@@ -447,7 +447,7 @@ def not_none(author: Author | None) -> None:
     genre = author and author.genre
     reveal_type(genre)  # E: revealed type: (Author & Falsy) | Genre | None
     if genre is not None:
-        assert_type(genre, Author | Genre)
+        reveal_type(genre)  # E: revealed type: (Author & Falsy) | Genre
 "#,
 );
 
@@ -1575,7 +1575,7 @@ class C:
 testcase!(
     test_dunder_bool_short_circuit_and_discard,
     r#"
-from typing import assert_type, Literal
+from typing import assert_type, reveal_type, Literal
 class Falsey:
     def __bool__(self) -> Literal[False]:
         return False
@@ -1597,7 +1597,7 @@ assert_type(int() if Falsey() else str(), str)
 #
 # The runtime only uses truthiness in short-circuiting here, so it is actually
 # legal to use a non-boolable value as the rightmost entry of a bool op.
-assert_type(NotBoolable() or int(), int | NotBoolable)  # E: Expected `__bool__` to be a callable, got `int`
+reveal_type(NotBoolable() or int())  # E: revealed type: (NotBoolable & Truthy) | int  # E: Expected `__bool__` to be a callable, got `int`
 assert_type(int() or NotBoolable(), int | NotBoolable)
 "#,
 );

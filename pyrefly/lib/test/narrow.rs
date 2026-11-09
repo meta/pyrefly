@@ -4755,14 +4755,14 @@ def g(x: A | B | C) -> None:
 testcase!(
     test_class_may_be_falsy,
     r#"
-from typing import assert_type
+from typing import reveal_type
 
 class MyClass:
     name: str
 
 def myfn(x: MyClass | None):
     # `x` could be a falsy instance of a subclass of `MyClass`
-    assert_type(x and x.name, MyClass | str | None)
+    reveal_type(x and x.name)  # E: (MyClass & Falsy) | str | None
     "#,
 );
 
@@ -4783,7 +4783,7 @@ def myfn(x: MyClass | None):
 testcase!(
     test_class_with_bool_may_be_falsy,
     r#"
-from typing import assert_type, final
+from typing import reveal_type, final
 
 @final
 class MyClass:
@@ -4791,7 +4791,7 @@ class MyClass:
     def __bool__(self) -> bool: ...
 
 def myfn(x: MyClass | None):
-    assert_type(x and x.name, MyClass | str | None)
+    reveal_type(x and x.name)  # E: (MyClass & Falsy) | str | None
     "#,
 );
 
