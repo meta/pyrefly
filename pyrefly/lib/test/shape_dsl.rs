@@ -1184,16 +1184,15 @@ def f(
 );
 
 testcase!(
-    test_shaped_array_inttuple_bound,
-    legacy_shaped_array_env(),
+    test_inttuple_array_inttuple_bound,
+    shape_extensions_env(),
     r#"
 from typing import Any, Literal, reveal_type
-from shape_extensions import Int, Elements, IntTuple, IntVar, assert_shape, shaped_array
+from shape_extensions import Int, Elements, IntTuple, IntVar, assert_shape
 
 type _Shape = IntTuple
 type _AnyShape = tuple[Any, ...]
 
-@shaped_array(shape="Shape")
 class Array[Shape: _Shape = _AnyShape, DType = Any]:
     shape: Shape
 
@@ -1211,7 +1210,7 @@ def f[N: IntVar](
     unbounded: IntTuple,
 ) -> None:
     reveal_type(compact)  # E: revealed type: Array[[2, 3], int]
-    reveal_type(pep484)  # E: revealed type: Array[[2, 3], int]
+    reveal_type(pep484)  # E: revealed type: Array[tuple[Literal[2], Literal[3]], int]
     reveal_type(int_tuple)  # E: revealed type: Array[[2, 3], int]
     reveal_type(mixed_int_tuple)  # E: revealed type: Array[[2, 3, N], int]
     reveal_type(bare_dim)  # E: revealed type: Int[N]
@@ -1722,14 +1721,13 @@ def f[N: IntVar](x: Int[N], s: str) -> None:
 );
 
 testcase!(
-    test_shaped_array_elements_tuple_carriers_rfc,
-    legacy_shaped_array_env(),
+    test_inttuple_array_elements_tuple_carriers_rfc,
+    shape_extensions_env(),
     r#"
 from typing import Literal, reveal_type
-from shape_extensions import Elements, IntTuple, IntVar, shaped_array
+from shape_extensions import Elements, IntTuple, IntVar
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def concrete_tuple_carrier(
     result: Array[[1, *Elements[tuple[Literal[2], Literal[3]]], 4], int],
@@ -1771,13 +1769,12 @@ def inttuple_bound_still_works[S: IntTuple, OUT: IntVar](
 );
 
 testcase!(
-    test_shaped_array_unpacked_middle_solver_round_trip,
-    legacy_shaped_array_env(),
+    test_inttuple_array_unpacked_middle_solver_round_trip,
+    shape_extensions_env(),
     r#"
 from typing import reveal_type
-from shape_extensions import Elements, Int, IntTuple, shaped_array
+from shape_extensions import Elements, Int, IntTuple
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType]: ...
 
 def identity[Shape: IntTuple](x: Array[Shape, int]) -> Array[Shape, int]:
@@ -5191,13 +5188,12 @@ TypeForm(Tensor[broadcast(IntTuple[2], IntTuple[2])])  # E: Function call cannot
 );
 
 testcase!(
-    test_shaped_array_inttuple_non_shape_arg_does_not_reproject,
-    legacy_shaped_array_env(),
+    test_inttuple_array_inttuple_non_shape_arg_retains_separate_arguments,
+    shape_extensions_env(),
     r#"
-from shape_extensions import IntTuple, shaped_array
+from shape_extensions import IntTuple
 from typing import reveal_type
 
-@shaped_array(shape="Shape")
 class Array[Meta: IntTuple, Shape: IntTuple, DType]:
     shape: Shape
     def clone(self) -> Array[Meta, Shape, DType]: ...
@@ -5209,13 +5205,12 @@ def f[Shape: IntTuple](x: Array[IntTuple[1], Shape, int]) -> None:
 );
 
 testcase!(
-    test_shaped_array_inttuple_nonzero_shape_arg_display_projection_and_subset,
-    legacy_shaped_array_env(),
+    test_inttuple_array_inttuple_nonzero_shape_arg_display_and_subset,
+    shape_extensions_env(),
     r#"
-from shape_extensions import IntTuple, IntVar, shaped_array
+from shape_extensions import IntTuple, IntVar
 from typing import reveal_type
 
-@shaped_array(shape="Shape")
 class DTypeFirstArray[DType, Shape: IntTuple]:
     shape: Shape
     def dtype(self) -> DType: ...
@@ -6119,14 +6114,13 @@ def f(shape: tuple[Literal[2], Literal[3]]) -> None:
 );
 
 testcase!(
-    test_shaped_array_compact_list_accepts_unbounded_tuple_unpack,
-    legacy_shaped_array_env(),
+    test_inttuple_array_compact_list_accepts_unbounded_tuple_unpack,
+    shape_extensions_env(),
     r#"
 from typing import reveal_type
-from shape_extensions import shaped_array
+from shape_extensions import IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 # Bare `*tuple[...]` is spec-legal splat syntax and must work in shape positions.
 def f(x: Array[[2, *tuple[int, ...]], int]) -> None:
@@ -6135,14 +6129,13 @@ def f(x: Array[[2, *tuple[int, ...]], int]) -> None:
 );
 
 testcase!(
-    test_shaped_array_bare_splat_tuple_and_inttuple,
-    legacy_shaped_array_env(),
+    test_inttuple_array_bare_splat_tuple_and_inttuple,
+    shape_extensions_env(),
     r#"
 from typing import Literal, assert_type, reveal_type
-from shape_extensions import Elements, IntTuple, shaped_array
+from shape_extensions import Elements, IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def bare_concrete_tuple_splat(
     result: Array[[1, *tuple[Literal[2], Literal[3]], 4], int],
@@ -6176,13 +6169,12 @@ def bare_splat_matches_elements_spelling(
 );
 
 testcase!(
-    test_shaped_array_bare_splat_tuple_rejects_non_integer_elements,
-    legacy_shaped_array_env(),
+    test_inttuple_array_bare_splat_tuple_rejects_non_integer_elements,
+    shape_extensions_env(),
     r#"
-from shape_extensions import Elements, shaped_array
+from shape_extensions import Elements, IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def f(
     bad_fixed: Array[[1, *tuple[str], 2], int],  # E: Unpacked type in `IntTuple` must be an `IntTuple` or integer tuple, or a type variable bounded by one, got `tuple[str]`
@@ -6193,14 +6185,13 @@ def f(
 );
 
 testcase!(
-    test_shaped_array_bare_splat_unknown_and_any_carriers,
-    legacy_shaped_array_env(),
+    test_inttuple_array_bare_splat_unknown_and_any_carriers,
+    shape_extensions_env(),
     r#"
 from typing import Any, reveal_type
-from shape_extensions import Elements, shaped_array
+from shape_extensions import Elements, IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def f(
     bad_name: Array[[2, *Nope], int],  # E: Could not find name `Nope`
@@ -6216,13 +6207,12 @@ def h(x: Array[[2, *Elements[Any]], int]) -> None:
 );
 
 testcase!(
-    test_shaped_array_splat_rejects_symbolic_rank_inttuple,
-    legacy_shaped_array_env(),
+    test_inttuple_array_splat_rejects_symbolic_rank_inttuple,
+    shape_extensions_env(),
     r#"
-from shape_extensions import Elements, IntTuple, shaped_array
+from shape_extensions import Elements, IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def f[S: IntTuple](
     bare: Array[[1, *IntTuple[*Elements[S], 2]], int],  # E: Cannot expand a symbolic-rank `IntTuple[...]` value
@@ -6232,27 +6222,25 @@ def f[S: IntTuple](
 );
 
 testcase!(
-    test_shaped_array_compact_list_elements_rejects_non_inttuple_argument,
-    legacy_shaped_array_env(),
+    test_inttuple_array_compact_list_elements_rejects_non_inttuple_argument,
+    shape_extensions_env(),
     r#"
-from shape_extensions import Elements, shaped_array
+from shape_extensions import Elements, IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def f(bad: Array[[2, *Elements[int]], int]) -> None: ...  # E: `Elements[...]` requires an `IntTuple` or integer tuple, got `int`
 "#,
 );
 
 testcase!(
-    test_shaped_array_compact_list_accepts_inttuple_bound_typevar_unpack,
-    legacy_shaped_array_env(),
+    test_inttuple_array_compact_list_accepts_inttuple_bound_typevar_unpack,
+    shape_extensions_env(),
     r#"
 from typing import reveal_type
-from shape_extensions import IntTuple, shaped_array
+from shape_extensions import IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 # Bare `*S` checks identically to `*Elements[S]`; the wrapper only matters when
 # the annotation is evaluated at runtime.
@@ -6262,14 +6250,13 @@ def f[S: IntTuple](x: Array[[2, *S], int]) -> None:
 );
 
 testcase!(
-    test_shaped_array_bare_splat_typevar,
-    legacy_shaped_array_env(),
+    test_inttuple_array_bare_splat_typevar,
+    shape_extensions_env(),
     r#"
 from typing import assert_type, reveal_type
-from shape_extensions import Elements, IntTuple, IntVar, shaped_array
+from shape_extensions import Elements, IntTuple, IntVar
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def bare_tuple_bound_splat[U: tuple[int, ...], M: IntVar](
     result: Array[[*U, M], int],
@@ -6297,40 +6284,37 @@ def typevartuple_splat_still_rejected[*Ts](
 );
 
 testcase!(
-    test_shaped_array_compact_list_rejects_multiple_unpacked_carriers,
-    legacy_shaped_array_env(),
+    test_inttuple_array_compact_list_rejects_multiple_unpacked_carriers,
+    shape_extensions_env(),
     r#"
-from shape_extensions import Elements, IntTuple, shaped_array
+from shape_extensions import Elements, IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def f[S: IntTuple, T: IntTuple](bad: Array[[*Elements[S], *Elements[T]], int]) -> None: ...  # E: `IntTuple` can have at most one unpacked shape carrier
 "#,
 );
 
 testcase!(
-    test_shaped_array_elements_rejects_multiple_args,
-    legacy_shaped_array_env(),
+    test_inttuple_array_elements_rejects_multiple_args,
+    shape_extensions_env(),
     r#"
-from shape_extensions import Elements, IntTuple, shaped_array
+from shape_extensions import Elements, IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 def f[S: IntTuple, T: IntTuple](bad: Array[[*Elements[S, T]], int]) -> None: ...  # E: Expected 1 type argument for `Elements`, got 2
 "#,
 );
 
 testcase!(
-    test_shaped_array_elements_accepts_legacy_typevar_carrier,
-    legacy_shaped_array_env(),
+    test_inttuple_array_elements_accepts_legacy_typevar_carrier,
+    shape_extensions_env(),
     r#"
 from typing import TypeVar
-from shape_extensions import Elements, IntTuple, shaped_array
+from shape_extensions import Elements, IntTuple
 
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
+class Array[Shape: IntTuple, DType]: ...
 
 S = TypeVar("S", bound=IntTuple)
 
@@ -6720,13 +6704,12 @@ def g[S](x: Array[S, int]) -> None:
 );
 
 testcase!(
-    test_shaped_array_tuple_carrier_broadcast_keeps_shape_coherent,
-    legacy_shaped_array_env(),
+    test_inttuple_array_tuple_carrier_broadcast_keeps_shape_coherent,
+    shape_extensions_env(),
     r#"
 from typing import Any, reveal_type
-from shape_extensions import broadcast, IntTuple, shaped_array
+from shape_extensions import broadcast, IntTuple
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType]:
     shape: Shape
     def dtype(self) -> DType: ...
@@ -6754,13 +6737,12 @@ def f(
 );
 
 testcase!(
-    test_shaped_array_broadcast_gradual_size_keeps_precise_dimension,
-    legacy_shaped_array_env(),
+    test_inttuple_array_broadcast_gradual_size_keeps_precise_dimension,
+    shape_extensions_env(),
     r#"
 from typing import Literal, reveal_type
-from shape_extensions import broadcast, Int, IntTuple, shaped_array
+from shape_extensions import broadcast, Int, IntTuple
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType]:
     shape: Shape
     def __add__[OtherShape: IntTuple](self, other: Array[OtherShape, DType]) -> Array[broadcast(Shape, OtherShape), DType]: ...
@@ -11519,13 +11501,12 @@ def test(x: Tensor[[2, 3]]) -> None:
 /// is always gradual, because a concrete one flattens into the prefix.
 #[test]
 fn test_int_tuple_unpacked_middle_is_always_gradual() {
-    let mut env = legacy_shaped_array_env();
+    let mut env = shape_extensions_env();
     env.add(
         "main",
         r#"
-from shape_extensions import Elements, IntTuple, shaped_array
+from shape_extensions import Elements, IntTuple
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple, DType]: ...
 
 def variadic[S: IntTuple](x: Array[[2, *Elements[S], 3], int]) -> IntTuple[2, *Elements[S], 3]: ...
