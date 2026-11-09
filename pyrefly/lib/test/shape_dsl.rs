@@ -850,10 +850,13 @@ fn assert_shaped_array_shape(shape: &Quantified, name: &str, kind: QuantifiedKin
 }
 
 testcase!(
-    test_shape_extensions_does_not_export_shaped_array,
+    test_shape_extensions_does_not_export_legacy_dsl,
     shape_extensions_env(),
     r#"
 from shape_extensions import shaped_array  # E: Could not import `shaped_array` from `shape_extensions`
+from shape_extensions import uses_shape_dsl  # E: Could not import `uses_shape_dsl` from `shape_extensions`
+from shape_extensions.dsl import shape_dsl_function  # E: Could not import `shape_dsl_function` from `shape_extensions.dsl`
+from shape_extensions.dsl import ShapedArray  # E: Could not import `ShapedArray` from `shape_extensions.dsl`
 "#,
 );
 
@@ -1324,6 +1327,33 @@ def concrete(x: Array[float, [2, 3]], child: Matrix, default: Array) -> None:
 def symbolic[N: IntVar, S: IntTuple](x: Array[int, [N, *S, 3]]) -> None:
     assert_type(identity(x).copy(), Array[int, [N, *S, 3]])
     assert_type(identity(x).dtype(), int)
+"#,
+);
+
+testcase!(
+    test_inttuple_generic_declared_indexing_preserves_dtype_and_shape,
+    shape_extensions_env(),
+    r#"
+from shape_extensions import Index, IntTuple, IntVar, assert_shape, index_shape
+from typing import assert_type
+
+class Array[DType, Shape: IntTuple]:
+    shape: Shape
+    def __getitem__[I: Index](self, index: I) -> Array[DType, index_shape(Shape, I)]: ...
+
+def concrete(x: Array[float, [2, 3, 4]]) -> None:
+    assert_type(x[0], Array[float, [3, 4]])
+    assert_type(x[0].shape, IntTuple[3, 4])
+    assert_type(x[:, 0], Array[float, [2, 4]])
+    assert_type(x[None], Array[float, [1, 2, 3, 4]])
+    assert_shape(x[:, 0].shape, (2, 4))
+
+def symbolic[N: IntVar, S: IntTuple](x: Array[int, [N, *S, 3]]) -> None:
+    assert_type(x[0], Array[int, [*S, 3]])
+    assert_type(x[None], Array[int, [1, N, *S, 3]])
+
+def scalar(x: Array[int, []]) -> None:
+    x[0]  # E: Cannot index scalar tensor
 "#,
 );
 
