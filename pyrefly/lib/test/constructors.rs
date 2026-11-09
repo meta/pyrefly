@@ -1544,6 +1544,38 @@ ok: Callable[[int], list[C[int]]] = C
     "#,
 );
 
+// https://github.com/meta/pyrefly/issues/5591
+testcase!(
+    test_type_of_self_as_callable,
+    r#"
+from typing import Callable, reveal_type
+
+def identity[**P, R](cb: Callable[P, R]) -> Callable[P, R]:
+    return cb
+
+class C:
+    def __init__(self, x: int) -> None: ...
+
+    @classmethod
+    def method(cls) -> None:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> Self@C
+        ok: Callable[[int], C] = cls
+        bad: Callable[[str], C] = cls  # E: `type[Self@C]` is not assignable to `(str) -> C`
+
+    @classmethod
+    def make[S: C](cls: type[S]) -> S:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> S
+        return identity(cls)(1)
+
+class G[T]:
+    def __init__(self, x: T) -> None: ...
+
+    @classmethod
+    def method(cls) -> None:
+        reveal_type(identity(cls))  # E: revealed type: (x: T) -> Self@G
+    "#,
+);
+
 // Soft errors, such as the ignored-by-default `unknown-argument-type`, must not make the
 // `__init__` check look redundant.
 testcase!(

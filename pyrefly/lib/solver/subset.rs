@@ -2597,6 +2597,21 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             {
                 self.is_subset_eq(&self.type_order.constructor_to_callable(got_cls), want)
             }
+            (Type::Type(inner), Type::BoundMethod(_) | Type::Callable(_) | Type::Function(_))
+                if let Some(got_cls) = match &**inner {
+                    Type::SelfType(cls) => Some(cls),
+                    Type::Quantified(q) => match q.restriction() {
+                        Restriction::Bound(Type::ClassType(cls)) => Some(cls),
+                        _ => None,
+                    },
+                    _ => None,
+                } =>
+            {
+                let constructor = self
+                    .type_order
+                    .constructor_to_callable_for_self_type(got_cls, inner);
+                self.is_subset_eq(&constructor, want)
+            }
             (Type::ClassDef(got), Type::BoundMethod(_) | Type::Callable(_) | Type::Function(_)) => {
                 let constructor = self.type_order.constructor_to_callable_for_class_def(got);
                 self.is_subset_eq(&constructor, want)
