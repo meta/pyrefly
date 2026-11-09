@@ -9,7 +9,6 @@ use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_types::dimension::is_gradual_size;
 use pyrefly_types::function::FunctionKind;
 use pyrefly_types::known_class::KnownClass;
-use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::type_level_dsl::MAX_HELPER_GRAPH_EDGES;
@@ -25,53 +24,12 @@ use crate::binding::binding::KeyExport;
 use crate::binding::binding::KeyTParams;
 use crate::state::lsp::attribute_symbol_kind_from_type;
 use crate::state::require::Require;
-use crate::test::class_keywords::get_class_metadata;
 use crate::test::util::TestEnv;
 use crate::test::util::get_class;
 use crate::test::util::shape_extensions_env;
 use crate::test::util::testcase_for_macro;
 use crate::testcase;
 use crate::types::types::Type;
-
-pub(super) fn legacy_shaped_array_env() -> TestEnv {
-    let mut env = shape_extensions_env();
-    // This private top-level stub shadows the shipped package while its real submodules remain
-    // available through the site-package path. It deliberately duplicates only the public names
-    // and signatures needed by legacy tests, so additions here should stay narrowly scoped.
-    env.add_with_path(
-        "shape_extensions",
-        "shape_extensions/__init__.pyi",
-        r#"
-from typing import Any, Callable
-from shape_extensions import dsl as _dsl
-
-class D: ...
-class Elements: ...
-class Flag[T]: ...
-class Int[T]: ...
-class IntTuple: ...
-class IntTuples: ...
-class IntVar: ...
-
-def assert_shape(actual: Any, shape: Any, *, runtime: Any = None) -> Any: ...
-def shaped_array(
-    *, shape: str, builtin_indexing: bool = True
-) -> Callable[[type], type]: ...
-def type_shape_dsl_function[F: Callable](fn: F) -> F: ...
-
-@type_shape_dsl_function
-def gufunc_broadcast(spec: str, shapes: IntTuples) -> IntTuple:
-    return _dsl._gufunc_broadcast(spec, shapes)
-
-@type_shape_dsl_function
-def broadcast(left: IntTuple, right: IntTuple) -> IntTuple:
-    spec = "(),()->()"
-    shapes = _dsl.IntTuples((left, right))
-    return gufunc_broadcast(spec, shapes)
-"#,
-    );
-    env
-}
 
 fn shape_extensions_env_with_plain_torch() -> TestEnv {
     let mut env = shape_extensions_env();
@@ -826,11 +784,6 @@ def mixed_unused_domain(shape: IntTuple, dim: Int) -> Int:
 "#,
 );
 
-fn assert_shaped_array_shape(shape: &Quantified, name: &str, kind: QuantifiedKind) {
-    assert_eq!(shape.name().as_str(), name);
-    assert_eq!(shape.kind, kind);
-}
-
 testcase!(
     test_shape_extensions_does_not_export_legacy_dsl,
     shape_extensions_env(),
@@ -841,57 +794,6 @@ from shape_extensions.dsl import shape_dsl_function  # E: Could not import `shap
 from shape_extensions.dsl import ShapedArray  # E: Could not import `ShapedArray` from `shape_extensions.dsl`
 "#,
 );
-
-#[test]
-fn test_shaped_array_typevar_shape_is_metadata() {
-    let mut env = legacy_shaped_array_env();
-    env.add(
-        "main",
-        r#"
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class TupleCarrierArray[Shape, DType]: ...
-"#,
-    );
-    let (state, handle) = env.to_state();
-    let main = handle("main");
-    let reader = state.reader();
-    let metadata = get_class_metadata("TupleCarrierArray", &main, &reader);
-    let shape = metadata
-        .shaped_array_shape()
-        .expect("shaped array shape should be present");
-    assert_shaped_array_shape(shape, "Shape", QuantifiedKind::TypeVar);
-}
-
-#[test]
-fn test_shaped_array_class_targ_shape_is_first_class_inttuple() {
-    let mut env = legacy_shaped_array_env();
-    env.add(
-        "main",
-        r#"
-from shape_extensions import IntTuple, shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape: IntTuple, DType]: ...
-
-x: Array[[2, 3], int]
-"#,
-    );
-    let (state, handle) = env.to_state();
-    let main = handle("main");
-    let solutions = state.transaction().get_solutions(&main).unwrap();
-    match solutions.get(&KeyExport(Name::new("x"))) {
-        Type::ShapedArray(array) => {
-            let shape_arg = &array.base_class.targs().as_slice()[0];
-            assert!(
-                matches!(shape_arg, Type::IntTuple(_)),
-                "expected normalized shape argument to be `IntTuple`, got `{shape_arg}`"
-            );
-        }
-        ty => panic!("expected `x` to solve to a shaped array, got `{ty}`"),
-    }
-}
 
 #[test]
 fn test_legacy_intvar_binding_has_intvar_kind() {
@@ -1044,128 +946,6 @@ class Box[Shape: IntTuple](Generic[Shape]): ...
         "an unrelated IntTuple class should remain an ordinary class bound"
     );
 }
-
-testcase!(
-    test_shaped_array_invalid_metadata,
-    legacy_shaped_array_env(),
-    r#"
-from shape_extensions import shaped_array
-from typing import Any, Generic, TypeVarTuple
-
-kwargs: Any = {}
-
-@shaped_array  # E: `@shaped_array` requires a `shape` keyword argument
-class BareDecorator[Shape]: ...
-
-@shaped_array()  # E: `@shaped_array` requires a `shape` keyword argument  # E: Missing argument `shape` in function `shape_extensions.shaped_array`
-class MissingShape[Shape]: ...
-
-@shaped_array("Shape")  # E: `@shaped_array` expects `shape` as a keyword argument  # E: Expected argument `shape` to be passed by name in function `shape_extensions.shaped_array`
-class PositionalShape[Shape]: ...
-
-@shaped_array(dtype="Shape")  # E: Unexpected keyword argument `dtype` for `@shaped_array`; expected `shape`  # E: Missing argument `shape` in function `shape_extensions.shaped_array`  # E: Unexpected keyword argument `dtype` in function `shape_extensions.shaped_array`
-class WrongShapeKeyword[Shape]: ...
-
-@shaped_array(shape="Shape", **kwargs)  # E: Unpacking is not supported in `@shaped_array`
-class KwargsShape[Shape]: ...
-
-@shaped_array(shape="Shape", shape="Shape")  # E: Duplicate keyword argument `shape`  # E: Multiple values for argument `shape` in function `shape_extensions.shaped_array`
-class DuplicateShapeKeyword[Shape]: ...
-
-@shaped_array(shape=123)  # E: `@shaped_array` `shape` argument must be a string literal  # E: Argument `Literal[123]` is not assignable to parameter `shape` with type `str` in function `shape_extensions.shaped_array`
-class NonStringShape[Shape]: ...
-
-@shaped_array(shape="Shape", builtin_indexing=0)  # E: `@shaped_array` `builtin_indexing` argument must be a boolean literal  # E: Argument `Literal[0]` is not assignable to parameter `builtin_indexing` with type `bool` in function `shape_extensions.shaped_array`
-class NonBooleanBuiltinIndexing[Shape]: ...
-
-@shaped_array(shape="Shape")  # E: Shape parameter `Shape` must be a scoped (PEP-695-style) type parameter of class `NoTypeParams`
-class NoTypeParams: ...
-
-Shape = TypeVarTuple("Shape")
-
-@shaped_array(shape="Shape")  # E: Shape parameter `Shape` must be a scoped (PEP-695-style) type parameter of class `LegacyGeneric`
-class LegacyGeneric(Generic[*Shape]): ...
-
-@shaped_array(shape="Shape")
-@shaped_array(shape="Shape")  # E: Duplicate `@shaped_array` decorator
-class DuplicateDecorator[Shape]: ...
-
-@shaped_array  # E: `@shaped_array` requires a `shape` keyword argument
-@shaped_array(shape="Shape")  # E: Duplicate `@shaped_array` decorator
-class DuplicateDecoratorAfterInvalid[Shape]: ...
-
-@shaped_array(shape="Missing")  # E: Shape parameter `Missing` is not a type parameter of class `ShapeNotFound`
-class ShapeNotFound[Shape]: ...
-
-@shaped_array(shape="Shape")  # E: Shape parameter `Shape` must be a `TypeVar` or `IntVar`, got `TypeVarTuple`
-class TypeVarTupleShape[*Shape]: ...
-
-@shaped_array(shape="Shape")  # E: Shape parameter `Shape` must be a `TypeVar` or `IntVar`, got `ParamSpec`
-class ShapeIsParamSpec[**Shape, DType]: ...
-"#,
-);
-
-testcase!(
-    test_shaped_array_compact_list_carrier,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Literal, reveal_type
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]:
-    def dtype(self) -> DType: ...
-
-@shaped_array(shape="Shape")
-class DTypeFirstArray[DType, Shape]: ...
-
-def f(
-    compact: Array[[2, 3], int],
-    pep484: Array[tuple[Literal[2], Literal[3]], int],
-    scalar: Array[[], int],
-    dtype_first: DTypeFirstArray[int, [2, 3]],
-) -> None:
-    # Compact and PEP-484 forms reveal identically.
-    reveal_type(compact)  # E: revealed type: Array[[2, 3], int]
-    reveal_type(pep484)  # E: revealed type: Array[[2, 3], int]
-    reveal_type(scalar)  # E: revealed type: Array[[], int]
-    reveal_type(dtype_first)  # E: revealed type: DTypeFirstArray[int, [2, 3]]
-    reveal_type(compact.dtype())  # E: revealed type: int
-"#,
-);
-
-testcase!(
-    test_shaped_array_pep484_tuple_carrier_canonicalization,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Literal, reveal_type
-from shape_extensions import IntVar, shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def f(
-    compact: Array[[2, 3], int],
-    pep484: Array[tuple[Literal[2], Literal[3]], int],
-    compact_scalar: Array[[], int],
-    pep484_scalar: Array[tuple[()], int],
-) -> None:
-    # The compact and PEP-484 carriers canonicalize to the same shape.
-    reveal_type(compact)  # E: revealed type: Array[[2, 3], int]
-    reveal_type(pep484)  # E: revealed type: Array[[2, 3], int]
-    reveal_type(compact_scalar)  # E: revealed type: Array[[], int]
-    reveal_type(pep484_scalar)  # E: revealed type: Array[[], int]
-
-    # Closed concrete shapes are mutually assignable in both directions.
-    p: Array[tuple[Literal[2], Literal[3]], int] = compact
-    c: Array[[2, 3], int] = pep484
-    ps: Array[tuple[()], int] = compact_scalar
-    cs: Array[[], int] = pep484_scalar
-
-    wrong_rank2: Array[[2, 4], int] = pep484  # E: `Array[[2, 3], int]` is not assignable to `Array[[2, 4], int]`
-    wrong_rank0: Array[[1], int] = pep484_scalar  # E: `Array[[], int]` is not assignable to `Array[[1], int]`
-"#,
-);
 
 testcase!(
     test_inttuple_array_inttuple_bound,
@@ -5934,68 +5714,6 @@ def bad_size(x: Int[3, 4]) -> None:  # E: Expected 1 type argument for `Int`, go
 );
 
 testcase!(
-    test_shaped_array_unbounded_tuple_carrier_rejected,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Any, Literal, reveal_type
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-@shaped_array(shape="Shape")
-class DTypeFirstArray[DType, Shape]:
-    def dtype(self) -> DType: ...
-
-@shaped_array(shape="Shape")
-class ArrayWithDefault[Shape, DType = int]: ...
-
-# Unbounded tuple carriers have no concrete rank, so they cannot serve as a
-# shaped-array shape carrier. Each form is rejected at the shape argument with a
-# source-aware diagnostic; internally the slot degrades to an error type so that
-# solving never panics or cascades.
-def f_int(x: Array[tuple[int, ...], int]) -> None: ...  # E: Unbounded tuple types cannot be used as shaped-array shape carriers
-def f_any(x: Array[tuple[Any, ...], int]) -> None: ...  # E: Unbounded tuple types cannot be used as shaped-array shape carriers
-def f_object(x: Array[tuple[object, ...], int]) -> None: ...  # E: Unbounded tuple types cannot be used as shaped-array shape carriers
-def f_unpacked_middle(x: Array[tuple[Literal[2], *tuple[int, ...]], int]) -> None: ...  # E: Unbounded tuple types cannot be used as shaped-array shape carriers
-def f_nonfirst_shape(x: DTypeFirstArray[int, tuple[int, ...]]) -> None: ...  # E: Unbounded tuple types cannot be used as shaped-array shape carriers
-def f_defaulted_dtype(x: ArrayWithDefault[tuple[int, ...]]) -> None: ...  # E: Unbounded tuple types cannot be used as shaped-array shape carriers
-
-# The check is scoped to the registered shape slot. Unbounded tuple types remain
-# ordinary type arguments in non-shape positions.
-def non_shape_arg(x: DTypeFirstArray[tuple[int, ...], [2, 3]]) -> None:
-    reveal_type(x.dtype())  # E: revealed type: tuple[int, ...]
-
-# Wrong-arity annotations keep the ordinary arity diagnostic rather than adding
-# a shape-carrier diagnostic.
-def wrong_arity(x: Array[tuple[int, ...], int, str]) -> None: ...  # E: Expected 2 type arguments for `Array`, got 3
-"#,
-);
-
-testcase!(
-    test_shaped_array_fixed_tuple_carriers_still_accepted,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Literal, reveal_type
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-# Fixed PEP-484 tuple carriers remain valid: only unbounded tuples are rejected.
-def f(x: Array[tuple[Literal[2], Literal[3]], int]) -> None:
-    reveal_type(x)  # E: revealed type: Array[[2, 3], int]
-
-# Tuple-carrier shapes with a bounded variadic middle remain valid: only
-# rank-indefinite unbounded tuple middles are rejected.
-def with_typevartuple_middle[*Ts](x: Array[tuple[Literal[2], *Ts], int]) -> None: ...
-
-# Raw generic carriers (a bare type variable in the shape slot) remain valid.
-def g[S](x: Array[S, int]) -> None: ...
-"#,
-);
-
-testcase!(
     test_inttuple_array_compact_list_arity_error,
     shape_extensions_env(),
     r#"
@@ -6046,44 +5764,6 @@ class Array[Shape: IntTuple, DType]: ...
 def f(bad: Array[tuple[str], int]) -> None: ...  # E: is not assignable
 def g(bad: Array[tuple[Literal[2], str, Literal[4]], int]) -> None: ...  # E: is not assignable
 def h(bad: Array[tuple[Literal[1], *tuple[str], Literal[2]], int]) -> None: ...  # E: is not assignable
-"#,
-);
-
-testcase!(
-    test_shaped_array_recovers_invalid_solved_unpacked_middle,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Literal, reveal_type
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def make[*S](shape: tuple[*S]) -> Array[tuple[Literal[2], *S, Literal[4]], int]: ...
-
-def f(shape: tuple[str, str]) -> None:
-    x = make(shape)
-    reveal_type(x)  # E: revealed type: Array[[2, int, int, 4], int]
-    reveal_type(x[0])  # E: revealed type: Array[[int, int, 4], int]
-"#,
-);
-
-testcase!(
-    test_shaped_array_renormalizes_solved_concrete_unpacked_middle,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Literal, reveal_type
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def make[*S](shape: tuple[*S]) -> Array[tuple[Literal[1], *S, Literal[4]], int]: ...
-
-def f(shape: tuple[Literal[2], Literal[3]]) -> None:
-    x = make(shape)
-    reveal_type(x)  # E: revealed type: Array[[1, 2, 3, 4], int]
-    reveal_type(x[0])  # E: revealed type: Array[[2, 3, 4], int]
 "#,
 );
 
@@ -6297,64 +5977,6 @@ def f(x: Array[[*Elements[S], 3], int]) -> None: ...
 );
 
 testcase!(
-    test_shaped_array_annotation_parsing,
-    legacy_shaped_array_env(),
-    r#"
-from shape_extensions import Elements, IntTuple, shaped_array
-from typing import reveal_type
-
-@shaped_array(shape="Shape")
-class Array[Shape: IntTuple, DType]:
-    def __init__(self) -> None: ...
-    def dtype(self) -> DType: ...
-
-class Cpu: ...
-class Gpu: ...
-
-@shaped_array(shape="Shape")
-class ArrayWithDevice[Shape: IntTuple, DType, Device: (Gpu, Cpu)]:
-    def dtype(self) -> DType: ...
-    def device(self) -> Device: ...
-
-@shaped_array(shape="Shape")
-class DTypeFirstArray[DType, Shape: IntTuple]:
-    def dtype(self) -> DType: ...
-
-def f(
-    x: Array[[2, 3], int],
-    y: Array[[], int],
-    z: Array[[2, *Elements[IntTuple]], int],
-    w: ArrayWithDevice[[2, 3], str, Cpu],
-    w_scalar: ArrayWithDevice[[], str, Gpu],
-    dtype_first: DTypeFirstArray[str, [2, 3]],
-    dtype_first_scalar: DTypeFirstArray[str, []],
-) -> None:
-    reveal_type(x)  # E: revealed type: Array[[2, 3], int]
-    reveal_type(x.dtype())  # E: revealed type: int
-    reveal_type(y)  # E: revealed type: Array[[], int]
-    reveal_type(y.dtype())  # E: revealed type: int
-    reveal_type(z)  # E: revealed type: Array[[2, *tuple[int, ...]], int]
-    reveal_type(z.dtype())  # E: revealed type: int
-    reveal_type(w)  # E: revealed type: ArrayWithDevice[[2, 3], str, Cpu]
-    reveal_type(w.dtype())  # E: revealed type: str
-    reveal_type(w.device())  # E: revealed type: Cpu
-    reveal_type(w_scalar)  # E: revealed type: ArrayWithDevice[[], str, Gpu]
-    reveal_type(w_scalar.dtype())  # E: revealed type: str
-    reveal_type(w_scalar.device())  # E: revealed type: Gpu
-    reveal_type(dtype_first)  # E: revealed type: DTypeFirstArray[str, [2, 3]]
-    reveal_type(dtype_first.dtype())  # E: revealed type: str
-    reveal_type(dtype_first_scalar)  # E: revealed type: DTypeFirstArray[str, []]
-    reveal_type(dtype_first_scalar.dtype())  # E: revealed type: str
-
-def g(x: Array) -> None:
-    reveal_type(x)  # E: revealed type: Array
-
-def bad_arg_count(x: ArrayWithDevice[[2, 3], int]) -> None:  # E: Expected 3 type arguments for `ArrayWithDevice`, got 2
-    pass
-"#,
-);
-
-testcase!(
     test_inttuple_array_tuple_carrier_broadcast_keeps_shape_coherent,
     shape_extensions_env(),
     r#"
@@ -6418,210 +6040,6 @@ def f(
     known + gradual_then_mismatch  # E: Cannot broadcast dimension Int[5] with dimension Int[4] at position 1
     gradual_then_mismatch + known  # E: Cannot broadcast dimension Int[4] with dimension Int[5] at position 1
     known + mismatch  # E: Cannot broadcast dimension Int[5] with dimension Int[4] at position 1
-"#,
-);
-
-testcase!(
-    test_shaped_array_tuple_carrier_binds_generic,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Literal
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def use_shape[S](x: Array[S, int], shape: S) -> None: ...
-def get_shape[S](x: Array[S, int]) -> S: ...
-
-def f(
-    compact_2_3: Array[[2, 3], int],
-    pep484_2_3: Array[tuple[Literal[2], Literal[3]], int],
-) -> None:
-    shape_2_3: tuple[Literal[2], Literal[3]] = (2, 3)
-    shape_2_4: tuple[Literal[2], Literal[4]] = (2, 4)
-    use_shape(compact_2_3, shape_2_3)
-    use_shape(pep484_2_3, shape_2_3)
-    use_shape(compact_2_3, shape_2_4)  # E: Argument `tuple[Literal[2], Literal[4]]` is not assignable to parameter `shape` with type `IntTuple[2, 3]`
-    out: tuple[Literal[2], Literal[3]] = get_shape(compact_2_3)
-    bad: tuple[Literal[2], Literal[4]] = get_shape(compact_2_3)  # E: `IntTuple[2, 3]` is not assignable to `tuple[Literal[2], Literal[4]]`
-"#,
-);
-
-testcase!(
-    test_shaped_array_tuple_carrier_generic_return_reprojection,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Literal, reveal_type
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def make_array[S](shape: S) -> Array[S, float]: ...
-
-def f() -> None:
-    shape_2_3: tuple[Literal[2], Literal[3]] = (2, 3)
-    scalar_shape: tuple[()] = ()
-    reveal_type(make_array(shape_2_3))  # E: revealed type: Array[[2, 3], float]
-    reveal_type(make_array(scalar_shape))  # E: revealed type: Array[[], float]
-"#,
-);
-
-testcase!(
-    bug = "tuple literals passed to generic shape carriers are widened before return reprojection",
-    test_shaped_array_tuple_carrier_generic_return_literal_tuple_widens,
-    legacy_shaped_array_env(),
-    r#"
-from typing import assert_type
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def make_array[S](shape: S) -> Array[S, float]: ...
-
-def f() -> None:
-    assert_type(make_array((2, 3)), Array[[int, int], float])
-"#,
-);
-
-testcase!(
-    test_shaped_array_tuple_carrier_generic_identity_preserves_shape_and_dtype,
-    legacy_shaped_array_env(),
-    r#"
-from typing import reveal_type
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]:
-    def dtype(self) -> DType: ...
-
-def identity[S, D](x: Array[S, D]) -> Array[S, D]: ...
-
-def f(x_2_3_int: Array[[2, 3], int]) -> None:
-    reveal_type(identity(x_2_3_int))  # E: revealed type: Array[[2, 3], int]
-    reveal_type(identity(x_2_3_int).dtype())  # E: revealed type: int
-"#,
-);
-
-testcase!(
-    test_shaped_array_tuple_carrier_generic_preserves_unpacked_prefix,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Literal
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def get_shape[S](x: Array[S, int]) -> S: ...
-
-def f[*Ts](x: Array[tuple[Literal[2], *Ts], int]) -> None:
-    good: tuple[Literal[2], *Ts] = get_shape(x)
-    bad: tuple[Literal[3], *Ts] = get_shape(x)  # E: `IntTuple[2, *Ts]` is not assignable to `tuple[Literal[3], *Ts]`
-"#,
-);
-
-testcase!(
-    test_shaped_array_tuple_carrier_unpacked_middle_is_invariant,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Literal
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def use_shape[S](x: Array[S, int], shape: S) -> None: ...
-
-def f[*Ts](
-    x: Array[tuple[Literal[2], *Ts], int],
-    shape_2: tuple[Literal[2], *Ts],
-    shape_3: tuple[Literal[3], *Ts],
-) -> None:
-    use_shape(x, shape_2)
-    use_shape(x, shape_3)  # E: Argument `tuple[Literal[3], *Ts]` is not assignable to parameter `shape` with type `IntTuple[2, *Ts]`
-"#,
-);
-
-testcase!(
-    test_shaped_array_tuple_carrier_shape_attr_preserves_generic_carrier,
-    legacy_shaped_array_env(),
-    r#"
-from typing import Literal, reveal_type
-from shape_extensions import IntVar, shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def carrier[S](x: Array[S, float]) -> None:
-    reveal_type(x.shape)  # E: revealed type: S
-
-def concrete[M: IntVar](x: Array[[2, 4, M], float]) -> None:
-    reveal_type(x.shape)  # E: revealed type: tuple[Literal[2], Literal[4], Int[M]]
-
-def unpacked_prefix[*Ts](x: Array[tuple[Literal[2], *Ts], float]) -> None:
-    reveal_type(x.shape)  # E: revealed type: tuple[Literal[2], *Ts]
-
-def typevartuple[*Shape](x: Array[tuple[*Shape], float]) -> None:
-    reveal_type(x.shape)  # E: revealed type: tuple[*Shape]
-"#,
-);
-
-testcase!(
-    test_shaped_array_tuple_carrier_does_not_erase_dtype,
-    legacy_shaped_array_env(),
-    r#"
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def want_int(x: Array[[2, 3], int]) -> None: ...
-
-def f(x_str: Array[[2, 3], str]) -> None:
-    want_int(x_str)  # E: Argument `Array[[2, 3], str]` is not assignable to parameter `x` with type `Array[[2, 3], int]`
-"#,
-);
-
-testcase!(
-    test_shaped_array_tuple_carrier_closed_shapes_still_check_dimensions,
-    legacy_shaped_array_env(),
-    r#"
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def want_2_4(x: Array[[2, 4], int]) -> None: ...
-
-def f(x_2_3: Array[[2, 3], int]) -> None:
-    want_2_4(x_2_3)  # E: Argument `Array[[2, 3], int]` is not assignable to parameter `x` with type `Array[[2, 4], int]`
-"#,
-);
-
-testcase!(
-    bug = "closed-carrier diagnostic wording/placement is provisional until tuple<->IntTuple assignability lands",
-    test_shaped_array_invalid_closed_carrier,
-    legacy_shaped_array_env(),
-    r#"
-from shape_extensions import shaped_array
-
-@shaped_array(shape="Shape")
-class Array[Shape, DType]: ...
-
-def want_2_3(x: Array[[2, 3], int]) -> None: ...
-def want_bad(x: Array[tuple[str, str], int]) -> None: ...  # E: Invalid shaped-array shape carrier `tuple[str, str]`
-
-# `tuple[str, str]` is not a valid shape carrier. It projects to a shapeless
-# array internally; a source-aware diagnostic rejecting this form is deferred.
-def f(x_bad: Array[tuple[str, str], int]) -> None:  # E: Invalid shaped-array shape carrier `tuple[str, str]`
-    want_2_3(x_bad)
-    want_bad(x_bad)
-
-def g(x_2_3: Array[[2, 3], int]) -> None:
-    want_bad(x_2_3)
 "#,
 );
 
