@@ -459,3 +459,15 @@ def test_structured_array_field_assignment() -> None:
 
     values["x"] = np.ones(3)
     assert_shape(values.shape, (3,))
+
+
+def test_dtype_hasobject() -> None:
+    objects = np.empty(2, dtype=object)
+    floats = np.ones((2, 3))
+
+    object_flag = np.dtype(object).hasobject  # E: no attribute `hasobject`
+    float_flag = floats.dtype.hasobject  # E: no attribute `hasobject`
+    assert_shape(floats.shape, (2, 3))
+    assert object_flag is True
+    assert float_flag is False
+    assert objects.dtype.hasobject is True
