@@ -7,7 +7,6 @@
 
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::class::ClassType;
-use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::keywords::ConverterMap;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::Lit;
@@ -51,7 +50,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .collect();
         let mut union_type = self.unions(expanded_types);
         if let Type::Union(ref mut boxed_union) = union_type {
-            boxed_union.display_name = IdentityIgnored(Some((ModuleName::unknown(), display_name)));
+            boxed_union.set_display_name((ModuleName::unknown(), display_name));
         }
         union_type
     }
