@@ -789,22 +789,6 @@ impl CallArgPreEval<'_> {
                     solver.maybe_error_any_argument_type(&ty, range, arg_errors);
                     return Some(ty);
                 }
-                if matches!(
-                    solver.canonicalize_shape_dsl_type(hint.clone()),
-                    Type::ShapedArray(_)
-                ) {
-                    let ty = solver.reproject_tuple_carrier_shape(
-                        solver.canonicalize_shape_dsl_type(solver.expr_infer(x, arg_errors)),
-                    );
-                    solver.check_type_with_options(
-                        &ty,
-                        hint,
-                        range,
-                        TypeCheckOptions::new(call_errors, tcc).with_call_context(call_context),
-                    );
-                    solver.maybe_error_any_argument_type(&ty, range, arg_errors);
-                    return Some(ty);
-                }
                 let ty = solver
                     .expr_with_argument_cache(
                         x,
@@ -2781,49 +2765,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .collect();
 
         (
-            self.reproject_tuple_carrier_shape(ret),
+            ret,
             errors,
             return_type_errors,
             argmap,
             defaults_used,
             overload_table,
         )
-    }
-
-    /// After a call's return type is resolved, re-project the shape of registered
-    /// shaped arrays from their (now-substituted) base-class shape argument.
-    ///
-    /// Generic returns like `Array[S, float]` are stored shapeless at annotation
-    /// time because the shape argument `S` carries no per-dimension information.
-    /// Once `S` is bound to a concrete shape by call inference, the base-class
-    /// argument projects to a real shape, so we re-read it here.
-    ///
-    /// Scoped to TypeVar-mode shape parameters; TypeVarTuple
-    /// shapes are parsed into the shape field directly and need no reprojection.
-    fn reproject_tuple_carrier_shape(&self, ty: Type) -> Type {
-        ty.transform(&mut |ty| {
-            let shaped_array = match ty {
-                Type::ClassType(cls) => self.try_reproject_class_type_to_shaped_array(cls),
-                Type::ShapedArray(shaped_array) => {
-                    self.try_reproject_class_type_to_shaped_array(&shaped_array.base_class)
-                }
-                _ => return,
-            };
-            if let Some(shaped_array) = shaped_array {
-                *ty = shaped_array.to_type();
-            }
-        })
-    }
-
-    fn canonicalize_shape_dsl_type(&self, ty: Type) -> Type {
-        ty.transform(&mut |ty| {
-            if let Type::ClassType(cls) = ty
-                && self.shaped_array_shape_for_class_type(cls).is_some()
-            {
-                *ty = self
-                    .shaped_array_classtype_to_shaped_array_type(cls)
-                    .to_type();
-            }
-        })
     }
 }

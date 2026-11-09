@@ -2695,49 +2695,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         Some(classes)
     }
 
-    pub(crate) fn try_reproject_class_type_to_shaped_array(
-        &self,
-        cls: &ClassType,
-    ) -> Option<ShapedArrayType> {
-        // Cheap syntactic pre-filter, kept before any metadata lookup to preserve
-        // laziness: a shaped-array class always carries its shape as a tuple
-        // carrier, a first-class `IntTuple`, or an as-yet-unbound shape variable.
-        // Bailing here for any other class (notably scalar returns like `int`)
-        // avoids forcing that class's metadata on every call-return reprojection.
-        if !cls.targs().as_slice().iter().any(|arg| {
-            matches!(
-                arg,
-                Type::Tuple(_) | Type::IntTuple(_) | Type::Quantified(_) | Type::TypeVar(_)
-            )
-        }) {
-            return None;
-        }
-        let shape_param = self.shaped_array_shape_for_class_type(cls)?;
-        if !shape_param.is_type_var() {
-            return None;
-        }
-        // Decline reprojection when the shape argument does not project to a shape.
-        // `shaped_array_classtype_to_shaped_array_type` below shapeless-falls-back
-        // on an unconvertible arg (it is called from already-validated paths), but
-        // here we want to leave the class un-reprojected in that case. The builder
-        // recomputes this projection; that duplicate lookup is bounded by the cheap
-        // syntactic pre-filter above, so it only runs for plausible shaped arrays.
-        let shape_arg = self.shaped_array_shape_arg(cls)?;
-        self.shape_arg_to_int_tuple(&shape_arg)?;
-        Some(self.shaped_array_classtype_to_shaped_array_type(cls))
-    }
-
     fn as_attribute_base1(&self, ty: Type, acc: &mut Vec<AttributeBase1>) {
         match ty {
-            Type::ClassType(class_type) => {
-                if let Some(shaped_array) =
-                    self.try_reproject_class_type_to_shaped_array(&class_type)
-                {
-                    acc.push(AttributeBase1::ShapedArrayInstance(shaped_array))
-                } else {
-                    acc.push(AttributeBase1::ClassInstance(class_type))
-                }
-            }
+            Type::ClassType(class_type) => acc.push(AttributeBase1::ClassInstance(class_type)),
             Type::ClassDef(cls) => acc.push(AttributeBase1::ClassObject(ClassBase::ClassDef(
                 self.as_class_type_unchecked(&cls),
             ))),

@@ -4558,20 +4558,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.shaped_array_shape_for_class(cls).is_some()
     }
 
-    pub(crate) fn shaped_array_shape_arg_index(&self, cls: &ClassType) -> Option<usize> {
-        let shape_param = self.shaped_array_shape_for_class_type(cls)?;
-        self.get_class_tparams(cls.class_object())?
-            .iter()
-            .position(|param| param == &shape_param)
-    }
-
-    pub(crate) fn shaped_array_shape_arg(&self, cls: &ClassType) -> Option<Type> {
-        let shape_idx = self.shaped_array_shape_arg_index(cls)?;
-        let mut shape_arg = cls.targs().as_slice().get(shape_idx)?.clone();
-        self.expand_mut(&mut shape_arg);
-        Some(shape_arg)
-    }
-
     pub(crate) fn shape_arg_to_int_tuple(&self, shape_arg: &Type) -> Option<IntTuple> {
         IntTuple::from_shape_arg_type(shape_arg)
             .or_else(|| tuple_carrier_to_shape(shape_arg))
@@ -4591,9 +4577,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         cls: &ClassType,
     ) -> ShapedArrayType {
-        // Derive the index and argument from a single metadata lookup rather
-        // than re-resolving through `shaped_array_shape_arg_index`/`_arg`, which
-        // would force the (expensive) class shape metadata two more times.
         let shape_param = self
             .shaped_array_shape_for_class_type(cls)
             .expect("registered shaped-array class should have shape metadata");
