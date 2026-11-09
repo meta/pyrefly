@@ -2421,16 +2421,6 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 let got = self.shaped_array_as_carrier_class(tensor)?;
                 self.is_subset_eq(&got.to_type(), &Type::ClassType(cls.clone()))
             }
-            // NNModule is subtype of its class
-            (Type::NNModule(module), Type::ClassType(cls)) => self.is_subset_eq(
-                &Type::ClassType(module.class.clone()),
-                &Type::ClassType(cls.clone()),
-            ),
-            // NNModule-to-NNModule: delegate to class subtyping
-            (Type::NNModule(got), Type::NNModule(want)) => self.is_subset_eq(
-                &Type::ClassType(got.class.clone()),
-                &Type::ClassType(want.class.clone()),
-            ),
             (Type::DataFrame(got_schema), Type::DataFrame(want_schema)) => {
                 self.is_subset_eq(
                     &got_schema.underlying_type(),

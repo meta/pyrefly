@@ -1113,10 +1113,6 @@ impl<'a> TypeDisplayContext<'a> {
                     output.write_str("]")
                 }
             }
-            Type::NNModule(module) => {
-                // Display as the class name (e.g., MaxPool2d)
-                self.fmt_helper_generic(&Type::ClassType(module.class.clone()), false, output)
-            }
             Type::DataFrame(schema) if self.use_annotation_syntax => {
                 self.fmt_helper_generic(&schema.underlying_type(), false, output)
             }

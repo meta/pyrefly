@@ -2147,14 +2147,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             || ann.is_final()
                             || ann.has_qualifier(&Qualifier::ReadOnly)
                     });
-                    let value_ty = if annotation_fixes_type
-                        || matches!(value_ty, Type::NNModule(_) | Type::DataFrame(_))
-                    {
-                        // Shape and column inference need NNModule and DataFrame literals kept.
-                        value_ty
-                    } else {
-                        value_ty.promote(self.stdlib)
-                    };
+                    let value_ty =
+                        if annotation_fixes_type || matches!(value_ty, Type::DataFrame(_)) {
+                            // Column inference needs DataFrame literals kept.
+                            value_ty
+                        } else {
+                            value_ty.promote(self.stdlib)
+                        };
                     union_types.push(value_ty);
                     if overall_annotation.is_none() {
                         overall_annotation = annotation;
@@ -2321,9 +2320,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         );
 
         // Determine the final type, promoting literals when appropriate.
-        // Skip literal promotion for NNModule and DataFrame types: their captured
-        // fields/columns must preserve literal types for shape/column inference.
-        let (ty, unpromoted_ty) = if matches!(value_ty, Type::NNModule(_) | Type::DataFrame(_)) {
+        // Skip literal promotion for DataFrame types: their columns must
+        // preserve literal types for column inference.
+        let (ty, unpromoted_ty) = if matches!(value_ty, Type::DataFrame(_)) {
             (value_ty, None)
         } else {
             let mut has_implicit_literal = value_ty.is_implicit_literal();

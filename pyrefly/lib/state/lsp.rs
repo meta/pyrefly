@@ -2424,11 +2424,6 @@ impl<'a> Transaction<'a> {
                     .map(Vec1::into_vec)
                     .unwrap_or_default()
             }
-            Type::NNModule(module) => self.find_call_target_definitions(
-                handle,
-                preference,
-                module.class.clone().to_type(),
-            ),
             _ => vec![],
         }
     }

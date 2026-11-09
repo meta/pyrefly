@@ -2762,10 +2762,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // Use ShapedArrayInstance to preserve shape information through attribute lookup
                 acc.push(AttributeBase1::ShapedArrayInstance((*tensor).clone()))
             }
-            Type::NNModule(module) => {
-                // NNModule delegates attribute access to its underlying class
-                acc.push(AttributeBase1::ClassInstance(module.class.clone()))
-            }
             Type::DataFrame(schema) => self.as_attribute_base1(schema.underlying_type(), acc),
             Type::Series(schema) => self.as_attribute_base1(schema.underlying_type(), acc),
             Type::Int(_) => {

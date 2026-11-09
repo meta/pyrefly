@@ -10,7 +10,6 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Display;
 use std::hash::Hash;
-use std::hash::Hasher;
 use std::mem;
 use std::sync::Arc;
 
@@ -43,8 +42,6 @@ use crate::class::ClassType;
 use crate::data_frame::DataFrameSchema;
 use crate::dimension;
 use crate::dimension::Int;
-use crate::equality::TypeEq;
-use crate::equality::TypeEqCtx;
 use crate::function::Deprecation;
 use crate::function::FuncMetadata;
 use crate::function::Function;
@@ -843,100 +840,6 @@ pub struct Union {
     pub display_name: IdentityIgnored<Option<(ModuleName, Name)>>,
 }
 
-/// An nn.Module instance with captured constructor arguments.
-///
-/// Analogous to how `ShapedArrayType` wraps `ClassType` + shape info, `NNModuleType`
-/// wraps `ClassType` + a field map of captured init args. This allows DSL forward
-/// functions to access constructor parameters (e.g., `kernel_size`, `stride`)
-/// directly from the type, without requiring every shape-relevant parameter to
-/// be a generic type param on the class.
-///
-/// Created by init DSL functions during `construct_class`. When `forward` is
-/// called on an NNModule instance, the fields are injected as `Val::Module`
-/// into the DSL's bound_args.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NNModuleType {
-    /// The underlying nn.Module subclass (e.g., MaxPool2d).
-    pub class: ClassType,
-    /// Captured init args (e.g., kernel_size → Int(3), stride → None).
-    /// Ordered by constructor parameter order.
-    pub fields: SmallMap<Name, Type>,
-}
-
-impl Hash for NNModuleType {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.class.hash(state);
-        self.fields.len().hash(state);
-        for (k, v) in self.fields.iter() {
-            k.hash(state);
-            v.hash(state);
-        }
-    }
-}
-
-impl PartialOrd for NNModuleType {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for NNModuleType {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.class.cmp(&other.class).then_with(|| {
-            let len_cmp = self.fields.len().cmp(&other.fields.len());
-            if len_cmp != Ordering::Equal {
-                return len_cmp;
-            }
-            for ((k1, v1), (k2, v2)) in self.fields.iter().zip(other.fields.iter()) {
-                let c = k1.cmp(k2).then_with(|| v1.cmp(v2));
-                if c != Ordering::Equal {
-                    return c;
-                }
-            }
-            Ordering::Equal
-        })
-    }
-}
-
-impl Visit<Type> for NNModuleType {
-    fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
-        self.class.recurse(f);
-        for (_, ty) in self.fields.iter() {
-            f(ty);
-        }
-    }
-}
-
-impl VisitMut<Type> for NNModuleType {
-    fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
-        self.class.recurse_mut(f);
-        for (_, ty) in self.fields.iter_mut() {
-            f(ty);
-        }
-    }
-}
-
-impl TypeEq for NNModuleType {
-    fn type_eq(&self, other: &Self, ctx: &mut TypeEqCtx) -> bool {
-        crate::equality::TypeEq::type_eq(&self.class, &other.class, ctx)
-            && self.fields.len() == other.fields.len()
-            && self
-                .fields
-                .iter()
-                .zip(other.fields.iter())
-                .all(|((k1, v1), (k2, v2))| {
-                    k1 == k2 && crate::equality::TypeEq::type_eq(v1, v2, ctx)
-                })
-    }
-}
-
-impl NNModuleType {
-    /// Create a new NNModuleType with the given class and captured fields.
-    pub fn new(class: ClassType, fields: SmallMap<Name, Type>) -> Self {
-        Self { class, fields }
-    }
-}
-
 // Note: The fact that Literal and LiteralString are at the front is important for
 // optimisations in `unions_with_literals`.
 #[derive(Debug, Clone, PartialEq, Eq, TypeEq, PartialOrd, Ord, Hash)]
@@ -1006,10 +909,6 @@ pub enum Type {
     IntTuple(Box<IntTuple>),
     /// Named integer values captured by the experimental shape extensions.
     NamedInts(Box<NamedInts>),
-    /// nn.Module instance with captured constructor arguments.
-    /// Wraps a ClassType + field map of init args, enabling DSL forward
-    /// functions to access shape-relevant constructor parameters directly.
-    NNModule(Box<NNModuleType>),
     /// DataFrame instance with an ordered column schema.
     DataFrame(Box<DataFrameSchema>),
     /// Series instance carrying its element dtype.
@@ -1135,7 +1034,6 @@ impl Visit for Type {
             Type::ShapedArray(x) => x.visit(f),
             Type::IntTuple(x) => x.visit(f),
             Type::NamedInts(x) => x.visit(f),
-            Type::NNModule(x) => x.visit(f),
             Type::DataFrame(x) => x.visit(f),
             Type::Series(x) => x.visit(f),
             Type::Int(x) => x.visit(f),
@@ -1200,7 +1098,6 @@ impl VisitMut for Type {
             Type::ShapedArray(x) => x.visit_mut(f),
             Type::IntTuple(x) => x.visit_mut(f),
             Type::NamedInts(x) => x.visit_mut(f),
-            Type::NNModule(x) => x.visit_mut(f),
             Type::DataFrame(x) => x.visit_mut(f),
             Type::Series(x) => x.visit_mut(f),
             Type::Int(x) => x.visit_mut(f),
@@ -2571,7 +2468,6 @@ impl Type {
             | Type::ShapedArray(_)
             | Type::IntTuple(_)
             | Type::NamedInts(_)
-            | Type::NNModule(_)
             | Type::DataFrame(_)
             | Type::Series(_)
             | Type::Int(_)

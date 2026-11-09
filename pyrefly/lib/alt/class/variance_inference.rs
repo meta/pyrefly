@@ -451,17 +451,6 @@ fn on_type(
                 }
             }
         }
-        Type::NNModule(module) => {
-            // NNModule fields are invariant
-            for (_, ty) in module.fields.iter() {
-                on_type(
-                    path.with_direction(DirectionalVariance::Invariant),
-                    ty,
-                    on_edge,
-                    on_var,
-                );
-            }
-        }
         Type::DataFrame(schema) => {
             on_type(path, &schema.underlying_type(), on_edge, on_var);
         }

@@ -8153,7 +8153,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ty @ Type::Int(_) => Some(ty),
             ty @ Type::IntTuple(_) => Some(ty),
             ty @ Type::ShapedArray(_) => Some(ty),
-            ty @ Type::NNModule(_) => Some(ty),
             ty @ Type::DataFrame(_) => Some(ty),
             // Handle bare class definitions (e.g., Dim, Module) by canonicalizing them to type forms
             Type::ClassDef(cls) => {

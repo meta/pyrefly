@@ -819,27 +819,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     None => CallTargetLookup::Error(Type::ClassType(cls), vec![]),
                 }
             }
-            // NNModule instances delegate call dispatch to their underlying class.
-            // instance_as_dunder_call resolves the stubbed `__call__` proxy for nn.Module subclasses.
-            // We patch the BoundMethod's self object to be the NNModule type so
-            // that inject_module_attrs can detect NNModule and inject its fields.
-            Type::NNModule(module) => {
-                let nn_module_ty = Type::NNModule(module.clone());
-                let cls = module.class.clone();
-                let maybe_dunder_call = self.instance_as_dunder_call(&cls);
-                match maybe_dunder_call {
-                    Some(Type::BoundMethod(bm)) => {
-                        let patched = Type::BoundMethod(Box::new(BoundMethod {
-                            obj: nn_module_ty,
-                            ..*bm
-                        }));
-                        self.as_call_target_impl(patched, quantified)
-                    }
-                    Some(ty) => self.as_call_target_impl(ty, quantified),
-                    None => return CallTargetLookup::Error(Type::NNModule(module), vec![]),
-                }
-                .with_error_type(|_| Type::NNModule(module))
-            }
             Type::DataFrame(schema) => self
                 .as_call_target_impl(schema.underlying_type(), quantified)
                 .with_error_type(|_| Type::DataFrame(schema)),

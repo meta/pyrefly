@@ -2917,23 +2917,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         meta_shape_func: &dyn MetaShapeFunction,
         _range: TextRange,
     ) {
-        // For NNModule instances, inject captured fields directly into bound_args.
-        // The NNModule's fields already contain plain Type values from the constructor,
-        // so no Int[T] unwrapping is needed.
-        if let Some(Type::NNModule(module)) = bound_args.get("self") {
-            let module = module.clone();
-            for param_name in meta_shape_func.param_names() {
-                if param_name == "self" || bound_args.contains_key(param_name) {
-                    continue;
-                }
-                let name = Name::new(param_name);
-                if let Some(ty) = module.fields.get(&name) {
-                    bound_args.insert(param_name.to_owned(), ty.clone());
-                }
-            }
-            return;
-        }
-
         let cls = match bound_args.get("self") {
             Some(Type::ClassType(cls)) => cls.clone(),
             _ => return,
