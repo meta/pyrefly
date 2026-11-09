@@ -9,7 +9,7 @@ repository = "https://github.com/facebook/pyrefly"
 license = "MIT"
 
 [dependencies]
-anstream = "0.6.11"
+anstream = "1.0.0"
 anyhow = "1.0.104"
 append-only-vec = "0.1.10"
 argfile = "1.0.0"

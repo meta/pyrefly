@@ -41,7 +41,7 @@ name = "tsp"
 harness = false
 
 [dependencies]
-anstream = "0.6.11"
+anstream = "1.0.0"
 anyhow = "1.0.104"
 append-only-vec = "0.1.10"
 arc-swap = { version = "1.9.3", features = ["weak"] }
