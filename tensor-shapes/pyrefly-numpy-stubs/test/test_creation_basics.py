@@ -171,6 +171,25 @@ def test_eye_square_shape() -> None:
     assert_shape(np.eye(4).shape, (4, 4))
 
 
+def test_eye_rectangular_shapes() -> None:
+    rows = int("3")
+    cols = int("4")
+
+    explicit_square = np.eye(3, None)
+    wide = np.eye(3, 4)  # E: No matching overload
+    keyword = np.eye(3, M=4, k=1, dtype=np.float32)  # E: No matching overload
+    positional = np.eye(3, 4, 0, np.int8)  # E: No matching overload
+    configured = np.eye(rows, cols)  # E: No matching overload
+    assert_type(explicit_square, np.ndarray[[3, 3], np.dtype[np.float64]])
+    assert_shape(explicit_square.shape, (3, 3))
+    assert wide.shape == (3, 4)
+    assert wide.dtype == np.dtype(np.float64)
+    assert keyword.shape == (3, 4)
+    assert keyword.dtype == np.dtype(np.float32)
+    assert positional.dtype == np.dtype(np.int8)
+    assert configured.shape == (3, 4)
+
+
 def test_identity_square_shape() -> None:
     assert_shape(np.identity(5).shape, (5, 5))
 
