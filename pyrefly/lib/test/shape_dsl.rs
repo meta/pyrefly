@@ -8,6 +8,7 @@
 use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_types::dimension::is_gradual_size;
 use pyrefly_types::function::FunctionKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::tuple::Tuple;
@@ -1262,6 +1263,67 @@ def concrete_elements_middle(
 
 def assert_single_dim(x: Array[[3], int]) -> None:
     reveal_type(assert_shape(x.shape, (3,)))  # E: revealed type: IntTuple[3]
+"#,
+);
+
+#[test]
+fn test_inttuple_generic_class_retains_class_type() {
+    let mut env = shape_extensions_env();
+    env.add(
+        "main",
+        r#"
+from shape_extensions import IntTuple
+
+class Array[DType, Shape: IntTuple]:
+    shape: Shape
+
+x: Array[float, [2, 3]]
+"#,
+    );
+    let (state, handle) = env.to_state();
+    let main = handle("main");
+    let solutions = state.transaction().get_solutions(&main).unwrap();
+    let ty = solutions.get(&KeyExport(Name::new("x")));
+    let Type::ClassType(array) = ty else {
+        panic!("expected an ordinary generic class, got `{ty}`");
+    };
+    let [dtype, shape] = array.targs().as_slice() else {
+        panic!("expected dtype and shape arguments, got `{ty}`");
+    };
+    assert!(matches!(dtype, Type::ClassType(cls) if cls.is(KnownClass::Float)));
+    assert!(matches!(shape, Type::IntTuple(_)));
+}
+
+testcase!(
+    test_inttuple_generic_nonzero_shape_slot_self_and_defaults,
+    shape_extensions_env(),
+    r#"
+from shape_extensions import IntTuple, IntVar, assert_shape
+from typing import Self, assert_type
+
+class Array[DType = float, Shape: IntTuple = IntTuple]:
+    shape: Shape
+    def copy(self) -> Self: ...
+    def dtype(self) -> DType: ...
+
+def identity[DType, S: IntTuple](x: Array[DType, S]) -> Array[DType, S]:
+    return x
+
+class Matrix(Array[float, [2, 3]]): ...
+
+def concrete(x: Array[float, [2, 3]], child: Matrix, default: Array) -> None:
+    assert_type(identity(identity(x)), Array[float, [2, 3]])
+    assert_type(x.copy(), Array[float, [2, 3]])
+    assert_type(identity(x).shape, IntTuple[2, 3])
+    assert_type(x.dtype(), float)
+    assert_type(child.copy(), Matrix)
+    assert_type(default.copy(), Array[float, IntTuple])
+    assert_type(default.dtype(), float)
+    assert_shape(identity(x).shape, (2, 3))
+
+def symbolic[N: IntVar, S: IntTuple](x: Array[int, [N, *S, 3]]) -> None:
+    assert_type(identity(x).copy(), Array[int, [N, *S, 3]])
+    assert_type(identity(x).dtype(), int)
 "#,
 );
 
