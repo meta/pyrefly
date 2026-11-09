@@ -19,7 +19,7 @@ use crate::report::glean::schema::*;
 use crate::report::glean::facts::GleanPredicate;
 // Schema version
 pub const VERSION: i64 = 1;
-pub const SCHEMA_ID: &str = "f329796272b9314200433ac342cbc15c";
+pub const SCHEMA_ID: &str = "60aea86d7ff049228df605cf3fda4c67";
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct Unit {}

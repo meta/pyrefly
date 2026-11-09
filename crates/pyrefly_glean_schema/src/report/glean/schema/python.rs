@@ -140,6 +140,32 @@ impl GleanPredicate for Type {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct TargetUses {
+    pub id: u64,
+    pub key: Box<TargetUses_key>,
+}
+
+impl TargetUses {
+    pub fn new(target: Target, file: src::File, spans: Vec<src::ByteSpan>) -> Self {
+        TargetUses {
+            id: 0,
+            key: Box::new(TargetUses_key {
+                target,
+                file,
+                spans
+            }),
+        }
+    }
+}
+
+impl GleanPredicate for TargetUses {
+    fn GLEAN_name() -> String {
+        String::from("python.TargetUses.4")
+    }
+
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct StringLiteral {
     pub id: u64,
     pub key: Box<String>,
@@ -931,6 +957,31 @@ impl FunctionBySName {
 impl GleanPredicate for FunctionBySName {
     fn GLEAN_name() -> String {
         String::from("python.FunctionBySName.4")
+    }
+
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct DisambiguatedName {
+    pub id: u64,
+    pub key: Box<DisambiguatedName_key>,
+}
+
+impl DisambiguatedName {
+    pub fn new(name: Name, file: src::File) -> Self {
+        DisambiguatedName {
+            id: 0,
+            key: Box::new(DisambiguatedName_key {
+                name,
+                file
+            }),
+        }
+    }
+}
+
+impl GleanPredicate for DisambiguatedName {
+    fn GLEAN_name() -> String {
+        String::from("python.DisambiguatedName.4")
     }
 
 }
@@ -1773,6 +1824,19 @@ pub struct TypeInfo {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub enum Target {
+    local(DisambiguatedName),
+    external(Name),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct TargetUses_key {
+    pub target: Target,
+    pub file: src::File,
+    pub spans: Vec<src::ByteSpan>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct SearchVariableByName_key {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1957,6 +2021,12 @@ pub struct FunctionDeclaration_key {
 }
 
 pub type FunctionBySName_value = FunctionDeclaration;
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct DisambiguatedName_key {
+    pub name: Name,
+    pub file: src::File,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct DerivedClassToBase_key {
