@@ -184,7 +184,7 @@ $ echo "x: str = 0" > $TMPDIR/test.py && \
 ```scrut
 $ touch $TMPDIR/pyrefly.toml && \
 > printf "from typing import reveal_type\nreveal_type(1)\n" > $TMPDIR/test.py && \
-> $PYREFLY check $TMPDIR/test.py --min-severity=info --output-format=min-text
+> $PYREFLY check --python-version 3.13.0 $TMPDIR/test.py --min-severity=info --output-format=min-text
  INFO */test.py:2:12-15: revealed type: Literal[1] [reveal-type] (glob)
 [1]
 ```

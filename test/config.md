@@ -94,7 +94,7 @@ $ mkdir $TMPDIR/replace_with_any && \
 > printf 'replace-imports-with-any = ["module"]\n' > $TMPDIR/replace_with_any/pyrefly.toml && \
 > printf 'class Exported: ...\n' > $TMPDIR/replace_with_any/module.py && \
 > printf 'from typing import Any, assert_type\nfrom module import Exported, Missing\n\nassert_type(Exported, Any)\nassert_type(Missing, Any)\n' > $TMPDIR/replace_with_any/main.py && \
-> $PYREFLY check -c $TMPDIR/replace_with_any/pyrefly.toml --output-format=min-text $TMPDIR/replace_with_any/main.py
+> $PYREFLY check -c $TMPDIR/replace_with_any/pyrefly.toml --python-version 3.13.0 --output-format=min-text $TMPDIR/replace_with_any/main.py
  INFO 0 errors
 [0]
 ```
