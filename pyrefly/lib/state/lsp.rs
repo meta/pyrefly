@@ -3788,7 +3788,7 @@ impl<'a> Transaction<'a> {
         let ast = self.get_ast(handle)?;
         let error_collection = self.get_errors(vec![handle]);
         let collected = error_collection.collect_errors();
-        let unused = error_collection.collect_unused_ignore_errors_for_display(&collected);
+        let unused = error_collection.collect_ignore_diagnostics_for_display(&collected);
         let errors = collected
             .ordinary
             .into_iter()

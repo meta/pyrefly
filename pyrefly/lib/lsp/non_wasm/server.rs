@@ -4115,7 +4115,7 @@ impl Server {
                 // Unused-ignore diagnostics are synthesized rather than collected, and both
                 // the CLI and the LSP display path add them before matching. Leaving them
                 // out would match no baselined `unused-ignore` row, so a save would drop it.
-                let unused_ignores = errors.collect_unused_ignore_errors_for_display(&collected);
+                let unused_ignores = errors.collect_ignore_diagnostics_for_display(&collected);
                 collected.ordinary.extend(unused_ignores.ordinary);
                 collected.ordinary.extend(unused_ignores.hints);
                 collected.ordinary.append(&mut collected.hints);

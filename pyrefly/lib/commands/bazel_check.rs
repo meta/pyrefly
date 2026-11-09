@@ -852,7 +852,7 @@ fn compute_bazel_errors(
     // Unlike the shared display helper, this keeps hints so `--min-severity hint` can show them.
     let errors = transaction.get_errors(&modules_to_check);
     let collected = errors.collect_errors();
-    let unused = errors.collect_unused_ignore_errors_for_display(&collected);
+    let unused = errors.collect_ignore_diagnostics_for_display(&collected);
     let mut ordinary = collected.ordinary;
     ordinary.extend(collected.hints);
     ordinary.extend(unused.ordinary);

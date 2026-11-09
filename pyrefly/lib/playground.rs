@@ -438,7 +438,7 @@ impl Playground {
         for (filename, handle) in &self.handles {
             let errors = transaction.get_errors([handle]);
             let collected = errors.collect_errors();
-            let unused = errors.collect_unused_ignore_errors_for_display(&collected);
+            let unused = errors.collect_ignore_diagnostics_for_display(&collected);
             let mut output_errors = collected.ordinary;
             output_errors.extend(collected.hints);
             output_errors.extend(collected.directives);
