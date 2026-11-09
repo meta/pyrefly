@@ -1330,6 +1330,146 @@ mod tests {
     }
 
     #[test]
+    fn fancy_groups_broadcast_and_preserve_placement() {
+        let full_slice = || IndexOp::Slice {
+            start: None,
+            stop: None,
+            step: None,
+        };
+        for (case, rank, pre_ops, post_ops, has_ellipsis, expected) in [
+            (
+                "adjacent",
+                4,
+                vec![full_slice(), IndexOp::Fancy(dim(3)), IndexOp::Fancy(dim(1))],
+                vec![],
+                false,
+                vec![10, 3, 40],
+            ),
+            (
+                "slice separator",
+                5,
+                vec![
+                    full_slice(),
+                    IndexOp::Fancy(dim(3)),
+                    full_slice(),
+                    IndexOp::Fancy(dim(1)),
+                ],
+                vec![],
+                false,
+                vec![3, 10, 30, 50],
+            ),
+            (
+                "new-axis separator",
+                4,
+                vec![
+                    full_slice(),
+                    IndexOp::Fancy(dim(3)),
+                    IndexOp::NewAxis,
+                    IndexOp::Fancy(dim(1)),
+                ],
+                vec![],
+                false,
+                vec![3, 10, 1, 40],
+            ),
+            (
+                "transparent integer",
+                5,
+                vec![
+                    full_slice(),
+                    IndexOp::Fancy(dim(3)),
+                    IndexOp::Int,
+                    IndexOp::Fancy(dim(1)),
+                ],
+                vec![],
+                false,
+                vec![10, 3, 50],
+            ),
+            (
+                "leading integer",
+                4,
+                vec![IndexOp::Int, full_slice(), IndexOp::Fancy(dim(3))],
+                vec![],
+                false,
+                vec![20, 3, 40],
+            ),
+            (
+                "trailing integer",
+                4,
+                vec![
+                    full_slice(),
+                    IndexOp::Fancy(dim(3)),
+                    full_slice(),
+                    IndexOp::Int,
+                ],
+                vec![],
+                false,
+                vec![10, 3, 30],
+            ),
+            (
+                "basic integer",
+                2,
+                vec![IndexOp::Int],
+                vec![],
+                false,
+                vec![20],
+            ),
+            (
+                "zero-width ellipsis",
+                3,
+                vec![full_slice(), IndexOp::Fancy(dim(3))],
+                vec![IndexOp::Fancy(dim(1))],
+                true,
+                vec![3, 10],
+            ),
+            (
+                "positive-width ellipsis",
+                5,
+                vec![full_slice(), IndexOp::Fancy(dim(3))],
+                vec![IndexOp::Fancy(dim(1))],
+                true,
+                vec![3, 10, 30, 40],
+            ),
+        ] {
+            let source = IntTuple::new((1..=rank).map(|i| dim(i * 10)).collect());
+            assert_eq!(
+                index_shape_multi(&source, &pre_ops, &post_ops, has_ellipsis).unwrap(),
+                IntTuple::new(expected.into_iter().map(dim).collect()),
+                "{case}",
+            );
+        }
+    }
+
+    #[test]
+    fn fancy_groups_keep_symbolic_shapes_and_error_precedence() {
+        let middle = Type::Quantified(Box::new(fake_tparam("Ts", QuantifiedKind::TypeVarTuple)));
+        let source = IntTuple::unpacked_from_parts(
+            vec![dim(10), dim(20)],
+            middle.clone(),
+            vec![dim(30), dim(40)],
+        );
+        let symbol = scalar_symbol("N");
+        assert_eq!(
+            index_shape_multi(
+                &source,
+                &[IndexOp::Fancy(symbol.clone()), IndexOp::Fancy(dim(1))],
+                &[],
+                false
+            )
+            .unwrap(),
+            IntTuple::unpacked_from_parts(vec![symbol], middle, vec![dim(30), dim(40)]),
+        );
+        let incompatible = [IndexOp::Fancy(dim(2)), IndexOp::Fancy(dim(3))];
+        assert!(matches!(
+            index_shape_multi(&IntTuple::shapeless(), &incompatible, &[], false),
+            Err(ShapeError::ShapeComputation { .. }),
+        ));
+        assert!(matches!(
+            index_shape_multi(&IntTuple::new(vec![dim(10)]), &incompatible, &[], false),
+            Err(ShapeError::TooManyIndices { got: 2, max: 1 }),
+        ));
+    }
+
+    #[test]
     fn grouped_tensor_indices_use_multi_index_dispatch() {
         let index_shape = vec![dim(2), dim(3)];
         let ops = [
