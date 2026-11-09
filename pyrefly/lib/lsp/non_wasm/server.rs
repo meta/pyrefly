@@ -262,7 +262,6 @@ use pyrefly_util::telemetry::TelemetryServerState;
 use pyrefly_util::thread_pool::ThreadCount;
 use pyrefly_util::thread_pool::ThreadPool;
 use pyrefly_util::watch_pattern::WatchPattern;
-use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -387,8 +386,9 @@ use crate::state::subscriber::CompositeSubscriber;
 use crate::state::subscriber::PublishDiagnosticsSubscriber;
 use crate::state::subscriber::Subscriber;
 use crate::state::transaction_manager::TransactionManager;
-use crate::tsp::type_conversion::StdlibClasses;
-use crate::tsp::type_conversion::convert_type_with_resolvers;
+use crate::tsp::type_conversion::convert_type_in_transaction;
+#[cfg(test)]
+pub(crate) use crate::tsp::type_conversion::resolve_export_location;
 use crate::tsp::type_facts::TypeFact;
 use crate::tsp::type_facts::TypeFactsQuery;
 use crate::tsp::type_facts::type_fact;
@@ -7493,77 +7493,8 @@ impl Server {
         source_handle: &Handle,
         ty: &pyrefly_types::types::Type,
     ) -> tsp_types::Type {
-        // A `Def` function's name range, looked up in its module's binding table.
-        // The handle reuses `source_handle`'s `SysInfo` (as `get_class_fields`
-        // does for cross-module lookups) so the function's module is found under
-        // the same `SysInfo` the transaction computed it with; re-deriving a
-        // config-default `SysInfo` would miss the module in a multi-`SysInfo`
-        // transaction and silently collapse the range to zero.
-        let resolve_func_range = |func_id: &pyrefly_types::function::FuncDefId| {
-            let handle = Handle::new(
-                func_id.qname.module_name(),
-                func_id.qname.module_path().dupe(),
-                source_handle.sys_info().dupe(),
-            );
-            transaction
-                .get_answers(&handle)?
-                .bindings()
-                .function_def_range(func_id.def_index)
-        };
-        // An importable module's backing filesystem path.
-        let resolve_module_path = |module: &pyrefly_types::module::ModuleType| {
-            let module_name = ModuleName::from_str(&module.to_string());
-            let finding = transaction
-                .import_handle(source_handle, module_name, None)
-                .finding()?;
-            let path = to_real_path(finding.path())?;
-            Some(path.canonicalize().unwrap_or(path))
-        };
-        // An exported symbol's original definition, following re-exports.
-        let resolve_export = |module_name: ModuleName, name: &Name| {
-            resolve_export_location(transaction, source_handle, module_name, name)
-        };
-        // Sentinel-like types (`None`, `TypeGuard`/`TypeIs`, `Size`/`Dim`) are
-        // encoded as the stdlib's version-aware classes. Computing `ty` already
-        // populated this transaction's `Stdlib`, so `get_stdlib` stays on the
-        // warm path (see the doc comment above).
-        let stdlib = transaction.get_stdlib(source_handle);
-        convert_type_with_resolvers(
-            ty,
-            Some(&resolve_func_range),
-            Some(&resolve_module_path),
-            Some(&resolve_export),
-            StdlibClasses {
-                none_type: stdlib.none_type(),
-                bool_type: stdlib.bool(),
-                int_type: stdlib.int(),
-                tuple_class: stdlib.tuple_object(),
-            },
-        )
+        convert_type_in_transaction(transaction, source_handle, ty)
     }
-}
-
-/// Resolve an exported symbol's original definition (following re-exports) to a
-/// `(ModulePath, Range)`, looked up in `transaction` from `source_handle`'s
-/// import context.
-///
-/// The target module is reached via `import_handle`, so it inherits
-/// `source_handle`'s `SysInfo` — the one whose `Stdlib` this transaction already
-/// computed. That keeps the export lookup on the warm `get_stdlib` path:
-/// re-deriving the handle from the module path would pick a config-derived
-/// `SysInfo` that was never computed, panicking in `get_stdlib` whenever the
-/// transaction holds more than one `SysInfo`.
-pub(crate) fn resolve_export_location(
-    transaction: &Transaction,
-    source_handle: &Handle,
-    module_name: ModuleName,
-    name: &Name,
-) -> Option<(ModulePath, lsp_types::Range)> {
-    let target_handle = transaction
-        .import_handle(source_handle, module_name, None)
-        .finding()?;
-    let (module, range) = transaction.lookup_export_location(&target_handle, name)?;
-    Some((module.path().dupe(), module.to_lsp_range(range)))
 }
 
 impl TspInterface for Server {

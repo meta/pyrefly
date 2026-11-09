@@ -5,8 +5,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-pub mod requests;
-pub mod server;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod requests;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod server;
+pub mod session;
 pub mod type_conversion;
-pub mod type_facts;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod type_facts;
 pub mod validation;

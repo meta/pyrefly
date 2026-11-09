@@ -6,4 +6,5 @@
  */
 
 #![cfg(test)]
+mod session;
 pub mod tsp_interaction;
