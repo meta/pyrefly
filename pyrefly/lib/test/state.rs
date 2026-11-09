@@ -584,7 +584,6 @@ fn test_tensor_shapes_availability_uses_origin_sensitive_resolution() {
         r#"
 from typing import Any
 
-shaped_array: Any
 class IntTuple:
     def __class_getitem__(cls, params: Any) -> Any: ...
 "#,
@@ -783,7 +782,6 @@ def f(x: Tensor[[2, 3]]) -> None:
         r#"
 from typing import Any
 
-shaped_array: Any
 class IntTuple:
     def __class_getitem__(cls, params: Any) -> Any: ...
 "#,
@@ -913,7 +911,6 @@ class Float[*Shape]: ...
                 r#"
 from typing import Any
 
-shaped_array: Any
 class IntTuple:
     def __class_getitem__(cls, params: Any) -> Any: ...
 "#
@@ -987,7 +984,6 @@ fn test_tensor_shapes_find_invalidation_drops_shapes_on_removal() {
         r#"
 from typing import Any
 
-shaped_array: Any
 class IntTuple:
     def __class_getitem__(cls, params: Any) -> Any: ...
 "#,
