@@ -1149,7 +1149,6 @@ impl<'a> BindingsBuilder<'a> {
                 decorators: decorators.decorators,
                 legacy_tparams: legacy_tparams.into_boxed_slice(),
                 parent: parent.dupe(),
-                shape_dsl_def: shape_metadata.shape_dsl_def,
                 // The solver validates a type-level DSL function by inferring expressions in
                 // its body, which only have bindings if the body was bound.
                 type_shape_dsl_def: shape_metadata.type_shape_dsl_def.filter(|_| is_body_bound),

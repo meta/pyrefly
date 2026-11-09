@@ -11,8 +11,6 @@ use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::keywords::is_valid_identifier;
 use pyrefly_types::dimension::gradual_size;
-use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
-use pyrefly_types::meta_shape_dsl::convert_shape_dsl_function;
 use pyrefly_types::quantified::AnchorIndex;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedIdentity;
@@ -249,7 +247,6 @@ impl ShapeDeclarations {
 }
 
 pub(super) struct ShapeFunctionMetadata {
-    pub shape_dsl_def: Option<Arc<ShapeDslFunction>>,
     pub type_shape_dsl_def: Option<Arc<ParsedTypeShapeDslFunction>>,
 }
 
@@ -586,23 +583,12 @@ impl BindingsBuilder<'_> {
         is_top_level: bool,
         enclosing_class: Option<Idx<KeyClass>>,
     ) -> ShapeFunctionMetadata {
-        let is_shape_dsl = function.decorator_list.iter().any(|decorator| {
-            self.as_special_export(&decorator.expression) == Some(SpecialExport::ShapeDslFunction)
-        });
         let is_type_shape_dsl = function.decorator_list.iter().any(|decorator| {
             self.as_special_export(&decorator.expression)
                 == Some(SpecialExport::TypeShapeDslFunction)
         });
-        if is_shape_dsl && is_type_shape_dsl {
-            self.error(
-                function.name.range(),
-                ErrorKind::InvalidArgument,
-                "`@shape_dsl_function` and `@type_shape_dsl_function` cannot be combined"
-                    .to_owned(),
-            );
-        }
 
-        let type_shape_dsl_def = if is_type_shape_dsl && !is_shape_dsl {
+        let type_shape_dsl_def = if is_type_shape_dsl {
             match ParsedTypeShapeDslFunction::try_new(function.clone(), is_top_level) {
                 Ok(definition) => Some(Arc::new(definition)),
                 Err(error) => {
@@ -618,56 +604,6 @@ impl BindingsBuilder<'_> {
             None
         };
 
-        let shape_dsl_def = if is_shape_dsl && !is_type_shape_dsl {
-            if let Some(vararg) = &function.parameters.vararg {
-                self.error(
-                    vararg.range(),
-                    ErrorKind::InvalidArgument,
-                    "@shape_dsl_function: *args parameters are not supported in the shape DSL and will be ignored".to_owned(),
-                );
-            }
-            if let Some(kwarg) = &function.parameters.kwarg {
-                self.error(
-                    kwarg.range(),
-                    ErrorKind::InvalidArgument,
-                    "@shape_dsl_function: **kwargs parameters are not supported in the shape DSL and will be ignored".to_owned(),
-                );
-            }
-            if let Some(keyword_only) = function.parameters.kwonlyargs.first() {
-                self.error(
-                    keyword_only.range(),
-                    ErrorKind::InvalidArgument,
-                    "@shape_dsl_function: keyword-only parameters are not supported in the shape DSL and will be ignored".to_owned(),
-                );
-            }
-            if let Some(positional_only) = function.parameters.posonlyargs.first() {
-                self.error(
-                    positional_only.range(),
-                    ErrorKind::InvalidArgument,
-                    "@shape_dsl_function: positional-only parameters are not supported in the shape DSL and will be ignored".to_owned(),
-                );
-            }
-
-            match convert_shape_dsl_function(function) {
-                Ok(dsl_function) => {
-                    let dsl_function = Arc::new(dsl_function);
-                    self.metadata
-                        .push_shape_dsl(function.name.id.clone(), Arc::clone(&dsl_function));
-                    Some(dsl_function)
-                }
-                Err(error) => {
-                    self.error(
-                        error.range,
-                        ErrorKind::InvalidArgument,
-                        format!("@shape_dsl_function: {}", error.message),
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         self.record_shape_declaration(
             &function.decorator_list,
             &function.name,
@@ -675,10 +611,7 @@ impl BindingsBuilder<'_> {
             ShapeDeclarationOwner::Function(enclosing_class),
         );
 
-        ShapeFunctionMetadata {
-            shape_dsl_def,
-            type_shape_dsl_def,
-        }
+        ShapeFunctionMetadata { type_shape_dsl_def }
     }
 
     /// Record a shape declaration against the range its names are in scope for,

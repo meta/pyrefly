@@ -5,7 +5,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -24,11 +23,8 @@ use pyrefly_types::class::ClassType;
 use pyrefly_types::dimension::Int;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::function::FuncDefId;
-use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitStyle;
-use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
-use pyrefly_types::meta_shape_dsl::validate_shape_dsl_functions;
 use pyrefly_types::quantified::AnchorIndex;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedIdentity;
@@ -537,7 +533,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         decorators: &[Idx<KeyDecorator>],
         legacy_tparams: &[Idx<KeyLegacyTypeParam>],
         parent: &NestingContext,
-        shape_dsl_def: Option<Arc<ShapeDslFunction>>,
         type_shape_dsl_def: Option<Arc<ParsedTypeShapeDslFunction>>,
         errors: &ErrorCollector,
     ) -> UndecoratedFunction {
@@ -810,29 +805,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             def_index,
         });
 
-        let kind = if let Some(dsl_fn) = shape_dsl_def {
-            // Build the transitive closure of helper functions this DSL function calls,
-            // then validate cross-function call signatures.
-            let module_dsl_fns = self.bindings().metadata().shape_dsl_functions();
-            let fn_closure = compute_transitive_helpers(&dsl_fn, module_dsl_fns);
-            if let Err(type_errors) = validate_shape_dsl_functions(&fn_closure) {
-                for err in &type_errors {
-                    self.error(
-                        errors,
-                        err.range,
-                        ErrorKind::InvalidArgument,
-                        format!("@shape_dsl_function type error: {}", err.message),
-                    );
-                }
-                // Fall back to a normal function — the DSL evaluator must
-                // never run on a program that failed type checking.
-                FunctionKind::from_definition(func_id)
-            } else {
-                FunctionKind::ShapeDsl(func_id, dsl_fn, IdentityIgnored(fn_closure))
-            }
-        } else {
-            FunctionKind::from_definition(func_id)
-        };
+        let kind = FunctionKind::from_definition(func_id);
 
         flags.has_gradual_variadic_params = params_are_gradual_variadic(&params);
         let metadata = FuncMetadata { kind, flags };
@@ -1284,11 +1257,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 Some(SpecialDecorator::DataclassTransformCall(&call.keywords))
             }
-            _ if let Type::KwCall(call) = &decorator.ty
-                && call.has_function_kind(FunctionKind::UsesShapeDsl) =>
-            {
-                Some(SpecialDecorator::UsesShapeDsl)
-            }
             Some(CalleeKind::Function(FunctionKind::DefinesAssertShape)) => {
                 Some(SpecialDecorator::DefinesAssertShape)
             }
@@ -1390,7 +1358,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 flags.has_no_type_check = true;
                 true
             }
-            SpecialDecorator::UsesShapeDsl => true,
             SpecialDecorator::DefinesAssertShape => {
                 flags.is_assert_shape = true;
                 true
@@ -3194,35 +3161,4 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         }
     }
-}
-
-/// Compute the transitive closure of DSL helper functions called by `root`.
-///
-/// Starting from `root`, follows `call_targets()` through `module_dsl_fns`
-/// to collect every user-defined function reachable from `root`. The result
-/// always includes `root` itself as the first element.
-fn compute_transitive_helpers(
-    root: &Arc<ShapeDslFunction>,
-    module_dsl_fns: &[(Name, Arc<ShapeDslFunction>)],
-) -> Arc<Vec<Arc<ShapeDslFunction>>> {
-    let mut closure: Vec<Arc<ShapeDslFunction>> = vec![Arc::clone(root)];
-    let mut visited: HashSet<String> = HashSet::new();
-    visited.insert(root.name().to_owned());
-
-    let mut queue: Vec<String> = root.call_targets().into_iter().collect();
-    while let Some(name) = queue.pop() {
-        if !visited.insert(name.clone()) {
-            continue;
-        }
-        if let Some((_, dsl_fn)) = module_dsl_fns.iter().find(|(n, _)| n.as_str() == name) {
-            closure.push(Arc::clone(dsl_fn));
-            for target in dsl_fn.call_targets() {
-                if !visited.contains(&target) {
-                    queue.push(target);
-                }
-            }
-        }
-    }
-
-    Arc::new(closure)
 }

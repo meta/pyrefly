@@ -24,7 +24,6 @@ use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::function::Deprecation;
 use pyrefly_types::heap::TypeHeap;
-use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::type_alias::TypeAlias;
 use pyrefly_types::type_alias::TypeAliasIndex;
@@ -151,7 +150,7 @@ assert_words!(BindingYield, 4);
 assert_words!(BindingYieldFrom, 4);
 assert_words!(BindingDecorator, 9);
 assert_bytes!(BindingDecoratedFunction, 24);
-assert_words!(BindingUndecoratedFunction, 17);
+assert_words!(BindingUndecoratedFunction, 16);
 
 #[derive(Clone, Dupe, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AnyIdx {
@@ -2179,9 +2178,6 @@ pub struct BindingUndecoratedFunction {
     pub legacy_tparams: Box<[Idx<KeyLegacyTypeParam>]>,
     pub decorators: Box<[Idx<KeyDecorator>]>,
     pub parent: NestingContext,
-    /// When the function is decorated with `@shape_dsl_function`, this holds the
-    /// parsed DSL IR so the solver can produce `FunctionKind::ShapeDsl`.
-    pub shape_dsl_def: Option<Arc<ShapeDslFunction>>,
     /// Parsed source for a user-defined type-level shape DSL function.
     pub type_shape_dsl_def: Option<Arc<ParsedTypeShapeDslFunction>>,
 }

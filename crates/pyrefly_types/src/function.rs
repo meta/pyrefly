@@ -30,9 +30,7 @@ use crate::callable::Callable;
 use crate::class::Class;
 use crate::class::ClassType;
 use crate::equality::TypeEq;
-use crate::identity::IdentityIgnored;
 use crate::keywords::DataclassTransformMetadata;
-use crate::meta_shape_dsl::ShapeDslFunction;
 use crate::type_level_dsl::ResolvedTypeShapeDslFunction;
 use crate::types::Type;
 
@@ -467,14 +465,6 @@ pub enum FunctionKind {
     NumbaJit,
     /// `numba.njit()`
     NumbaNjit,
-    /// A function whose return type is computed by a shape DSL definition.
-    /// The `FuncDefId` provides source identity for display and lookup; the
-    /// `ShapeDslFunction` carries the parsed DSL IR.
-    ShapeDsl(
-        Arc<FuncDefId>,
-        Arc<ShapeDslFunction>,
-        IdentityIgnored<Arc<Vec<Arc<ShapeDslFunction>>>>,
-    ),
     /// A user-defined type-level shape DSL function.
     ///
     /// The first field preserves ordinary function identity for generic type-system machinery.
@@ -482,8 +472,6 @@ pub enum FunctionKind {
     /// used during evaluation, so changes anywhere in the shape-specific program affect
     /// incremental equality.
     TypeShapeDsl(Arc<FuncDefId>, Arc<ResolvedTypeShapeDslFunction>),
-    /// The `shape_extensions.uses_shape_dsl` decorator function itself.
-    UsesShapeDsl,
     /// The `shape_extensions.defines_assert_shape` decorator function itself.
     DefinesAssertShape,
     /// `sqlalchemy.orm.mapped_column()`.
@@ -496,7 +484,6 @@ impl FunctionKind {
         match self {
             Self::Def(func_id)
             | Self::SqlAlchemyMappedColumn(func_id)
-            | Self::ShapeDsl(func_id, ..)
             | Self::TypeShapeDsl(func_id, ..) => Some(FuncSymbol {
                 module: func_id.qname.module().dupe(),
                 cls: func_id.cls.as_ref().map(Dupe::dupe),
@@ -510,10 +497,9 @@ impl FunctionKind {
     /// Return the source definition carried by this function kind, if any.
     pub fn as_func_def_id(&self) -> Option<&FuncDefId> {
         match self {
-            Self::Def(id)
-            | Self::SqlAlchemyMappedColumn(id)
-            | Self::ShapeDsl(id, ..)
-            | Self::TypeShapeDsl(id, ..) => Some(id),
+            Self::Def(id) | Self::SqlAlchemyMappedColumn(id) | Self::TypeShapeDsl(id, ..) => {
+                Some(id)
+            }
             _ => None,
         }
     }
@@ -556,7 +542,6 @@ impl FunctionKind {
             ("typing" | "typing_extensions", "disjoint_base") => Self::DisjointBase,
             ("numba.core.decorators", "jit") => Self::NumbaJit,
             ("numba.core.decorators", "njit") => Self::NumbaNjit,
-            ("shape_extensions", "uses_shape_dsl") => Self::UsesShapeDsl,
             ("shape_extensions", "defines_assert_shape") => Self::DefinesAssertShape,
             ("sqlalchemy.orm" | "sqlalchemy.orm._orm_constructors", "mapped_column") => {
                 Self::SqlAlchemyMappedColumn(id)
@@ -603,8 +588,7 @@ impl FunctionKind {
             Self::NumbaNjit => ModuleName::from_str("numba"),
             Self::Synthesized(id) => id.module.name(),
             Self::Def(func_id) => func_id.qname.module_name(),
-            Self::ShapeDsl(id, _, _) | Self::TypeShapeDsl(id, _) => id.qname.module_name(),
-            Self::UsesShapeDsl => ModuleName::from_str("shape_extensions"),
+            Self::TypeShapeDsl(id, _) => id.qname.module_name(),
             Self::DefinesAssertShape => ModuleName::from_str("shape_extensions"),
             Self::SqlAlchemyMappedColumn(id) => id.qname.module_name(),
         }
@@ -648,8 +632,7 @@ impl FunctionKind {
             Self::NumbaNjit => Cow::Owned(Name::new_static("njit")),
             Self::Synthesized(id) => Cow::Borrowed(&id.name),
             Self::Def(func_id) => Cow::Borrowed(func_id.qname.id()),
-            Self::ShapeDsl(id, _, _) | Self::TypeShapeDsl(id, _) => Cow::Borrowed(id.qname.id()),
-            Self::UsesShapeDsl => Cow::Owned(Name::new_static("uses_shape_dsl")),
+            Self::TypeShapeDsl(id, _) => Cow::Borrowed(id.qname.id()),
             Self::DefinesAssertShape => Cow::Owned(Name::new_static("defines_assert_shape")),
             Self::SqlAlchemyMappedColumn(id) => Cow::Borrowed(id.qname.id()),
         }
@@ -693,8 +676,7 @@ impl FunctionKind {
             Self::TotalOrdering => None,
             Self::DisjointBase => None,
             Self::Def(func_id) => func_id.cls.clone(),
-            Self::ShapeDsl(id, _, _) | Self::TypeShapeDsl(id, _) => id.cls.clone(),
-            Self::UsesShapeDsl => None,
+            Self::TypeShapeDsl(id, _) => id.cls.clone(),
             Self::DefinesAssertShape => None,
             Self::SqlAlchemyMappedColumn(id) => id.cls.clone(),
         }

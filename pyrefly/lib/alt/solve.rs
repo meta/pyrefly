@@ -7750,7 +7750,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             &x.decorators,
             &x.legacy_tparams,
             &x.parent,
-            x.shape_dsl_def.clone(),
             x.type_shape_dsl_def.clone(),
             errors,
         )
