@@ -402,11 +402,13 @@ def test_contiguity_and_ownership_flags() -> None:
     a = np.ones((2, 3))
     view = a[:1]
 
-    contiguous = a.flags.c_contiguous  # E: no attribute `c_contiguous`
-    owns_data = a.flags.owndata  # E: no attribute `owndata`
+    contiguous = a.flags.c_contiguous
+    owns_data = a.flags.owndata
+    assert_type(contiguous, bool)
+    assert_type(owns_data, bool)
     assert_shape(a.shape, (2, 3))
     assert contiguous is True
     assert owns_data is True
     assert_type(a.T.flags.f_contiguous, bool)
     assert a.T.flags.f_contiguous is True
-    assert view.flags.owndata is False  # E: no attribute `owndata`
+    assert view.flags.owndata is False

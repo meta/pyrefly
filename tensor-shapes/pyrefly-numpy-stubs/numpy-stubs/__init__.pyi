@@ -658,6 +658,8 @@ class dtype(Generic[_ScalarT_co]):
     def __new__(cls, dtype: Any = ...) -> dtype: ...
     def __init__(self, dtype: Any = ...) -> None: ...
     @property
+    def hasobject(self) -> py_bool: ...
+    @property
     def str(self) -> py_str: ...
 
 _DTypeT_co = TypeVar("_DTypeT_co", default=Any, covariant=True)
@@ -667,7 +669,9 @@ _DTypeT_co = TypeVar("_DTypeT_co", default=Any, covariant=True)
 _dtype = dtype
 
 class _Flags:
+    c_contiguous: py_bool
     f_contiguous: py_bool
+    owndata: py_bool
     def __getitem__(self, key: str) -> py_bool: ...
 
 class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
