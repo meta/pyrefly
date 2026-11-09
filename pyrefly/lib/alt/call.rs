@@ -1291,6 +1291,35 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
     ) -> Type {
+        let enum_lookup = self.prepare_enum_lookup(
+            &cls,
+            &constructor_kind,
+            args,
+            keywords,
+            arg_errors,
+            errors,
+            context,
+        );
+        let enum_args;
+        let enum_keywords;
+        let (args, keywords) = match &enum_lookup {
+            Some(arg) if arg.is_positional => {
+                enum_args = [CallArg::Arg(CallValue::Plain(TypeOrExpr::Type(
+                    &arg.ty, arg.range,
+                )))];
+                (&enum_args[..], keywords)
+            }
+            Some(arg) => {
+                enum_keywords = [CallKeyword {
+                    range: keywords[0].range,
+                    arg: keywords[0].arg,
+                    value: CallValue::Plain(TypeOrExpr::Type(&arg.ty, arg.range)),
+                }];
+                (args, &enum_keywords[..])
+            }
+            None => (args, keywords),
+        };
+
         // Classes that override `__new__` and also define `__init__` check/infer args
         // twice, potentially leading to exponential check costs: `O(2^depth)`.
         let checks_args_twice = |cls: &ClassType, preserve_self| {
