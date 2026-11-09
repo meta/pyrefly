@@ -990,7 +990,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }))
                 .unwrap(),
                 &overload.metadata,
-                None, // no shape_transform for dataclass constructors
                 None,
                 &args.args.map(CallArg::expr_maybe_starred),
                 &args.keywords.map(CallKeyword::new),

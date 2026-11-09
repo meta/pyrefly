@@ -33,7 +33,6 @@ use crate::equality::TypeEq;
 use crate::identity::IdentityIgnored;
 use crate::keywords::DataclassTransformMetadata;
 use crate::meta_shape_dsl::ShapeDslFunction;
-use crate::meta_shape_dsl::ShapeTransform;
 use crate::type_level_dsl::ResolvedTypeShapeDslFunction;
 use crate::types::Type;
 
@@ -248,9 +247,6 @@ pub struct FuncFlags {
     /// `dataclass_transform` call. See
     /// https://typing.python.org/en/latest/spec/dataclasses.html#specification.
     pub dataclass_transform_metadata: Option<DataclassTransformMetadata>,
-    /// A function decorated with `@uses_shape_dsl`, whose return type should be
-    /// refined by evaluating the referenced shape-DSL function at call sites.
-    pub shape_transform: Option<Arc<ShapeTransform>>,
     /// A function decorated with `@defines_assert_shape`.
     pub is_assert_shape: bool,
     /// A method directly inside a `Protocol` class.
