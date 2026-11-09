@@ -176,11 +176,15 @@ def test_eye_rectangular_shapes() -> None:
     cols = int("4")
 
     explicit_square = np.eye(3, None)
-    wide = np.eye(3, 4)  # E: No matching overload
-    keyword = np.eye(3, M=4, k=1, dtype=np.float32)  # E: No matching overload
-    positional = np.eye(3, 4, 0, np.int8)  # E: No matching overload
-    configured = np.eye(rows, cols)  # E: No matching overload
+    wide = np.eye(3, 4)
+    keyword = np.eye(3, M=4, k=1, dtype=np.float32)
+    positional = np.eye(3, 4, 0, np.int8)
+    configured = np.eye(rows, cols)
     assert_type(explicit_square, np.ndarray[[3, 3], np.dtype[np.float64]])
+    assert_type(wide, np.ndarray[[3, 4], np.dtype[np.float64]])
+    assert_type(keyword, np.ndarray[[3, 4], np.dtype[np.float32]])
+    assert_type(positional, np.ndarray[[3, 4], np.dtype[np.int8]])
+    assert_type(configured, np.ndarray[[int, int], np.dtype[np.float64]])
     assert_shape(explicit_square.shape, (3, 3))
     assert wide.shape == (3, 4)
     assert wide.dtype == np.dtype(np.float64)
