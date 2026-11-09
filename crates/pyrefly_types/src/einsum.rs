@@ -52,45 +52,6 @@ pub(crate) struct EinsumEquation {
     pub(crate) output: Vec<usize>,
 }
 
-impl EinsumEquation {
-    /// Returns every pair of occurrences constrained to have the same extent.
-    ///
-    /// This returns all pairs rather than a chain. A consumer that can compare only known
-    /// dimensions would otherwise miss a mismatch when an unknown dimension splits the chain.
-    pub(crate) fn equalities(&self) -> impl Iterator<Item = (EinsumLocation, EinsumLocation)> + '_ {
-        self.labels.iter().flat_map(|label| {
-            label
-                .locations
-                .iter()
-                .enumerate()
-                .flat_map(|(index, first)| {
-                    label.locations[index + 1..]
-                        .iter()
-                        .map(move |second| (*first, *second))
-                })
-        })
-    }
-}
-
-/// A well-formed equation that shape evaluation does not yet model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EinsumUnsupported {
-    /// The output is inferred from labels rather than written after `->`.
-    ImplicitOutput,
-    /// A `...` group whose rank depends on the operands.
-    Ellipsis,
-}
-
-impl EinsumUnsupported {
-    pub(crate) fn message(self) -> String {
-        let feature = match self {
-            Self::ImplicitOutput => "implicit output",
-            Self::Ellipsis => "ellipsis",
-        };
-        format!("einsum: {feature} equations are not supported")
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EinsumEquationError {
     UnsupportedCharacter(char),
@@ -128,7 +89,7 @@ impl EinsumEquationError {
 
 pub(crate) enum EinsumClassification {
     Supported(EinsumEquation),
-    Unsupported(EinsumUnsupported),
+    Unsupported,
     Invalid(EinsumEquationError),
 }
 
@@ -499,10 +460,10 @@ pub(crate) fn parse_einsum_equation(spec: &str) -> EinsumClassification {
     // Unsupported is decided only after validating the rest of the equation, so an unimplemented
     // feature never hides an independent typo.
     if has_ellipsis {
-        return EinsumClassification::Unsupported(EinsumUnsupported::Ellipsis);
+        return EinsumClassification::Unsupported;
     }
     if arrows == 0 {
-        return EinsumClassification::Unsupported(EinsumUnsupported::ImplicitOutput);
+        return EinsumClassification::Unsupported;
     }
     EinsumClassification::Supported(EinsumEquation {
         input_ranks,
@@ -621,9 +582,7 @@ mod tests {
                     equation.input_ranks
                 )
             }
-            EinsumClassification::Unsupported(unsupported) => {
-                format!("unsupported: {}", unsupported.message())
-            }
+            EinsumClassification::Unsupported => "unsupported".to_owned(),
             EinsumClassification::Invalid(error) => format!("invalid: {}", error.message()),
         }
     }
@@ -643,43 +602,30 @@ mod tests {
     }
 
     #[test]
-    fn equalities_include_every_pair() {
-        let EinsumClassification::Supported(equation) = parse_einsum_equation("i,i,i->i") else {
-            panic!("`i,i,i->i` should be supported");
+    fn repeated_labels_check_literals_across_unknown_dimensions() {
+        let EinsumClassification::Supported(equation) = parse_einsum_equation("iii->i") else {
+            panic!("`iii->i` should be supported");
         };
-        let pairs = equation
-            .equalities()
-            .map(|(first, second)| {
-                (
-                    (first.input, first.dimension),
-                    (second.input, second.dimension),
-                )
-            })
-            .collect::<Vec<_>>();
+        let conflicting = IntTuple::new(vec![Int::Literal(2), Int::Int, Int::Literal(3)]);
         assert_eq!(
-            pairs,
-            vec![((0, 0), (1, 0)), ((0, 0), (2, 0)), ((1, 0), (2, 0))]
+            evaluate_einsum(&equation, &[conflicting]),
+            Err(ShapeError::ShapeComputation {
+                message: "einsum: index 'i' has conflicting dimensions 2 and 3".to_owned(),
+            })
+        );
+        let concrete = IntTuple::new(vec![Int::Literal(2); 3]);
+        assert_eq!(
+            evaluate_einsum(&equation, &[concrete]),
+            Ok(IntTuple::new(vec![Int::Literal(2)]))
         );
     }
 
     #[test]
     fn unsupported_equations_are_distinct_from_invalid_equations() {
-        assert_eq!(
-            classify("...ij,...jk->...ik"),
-            "unsupported: einsum: ellipsis equations are not supported"
-        );
-        assert_eq!(
-            classify("ij,jk"),
-            "unsupported: einsum: implicit output equations are not supported"
-        );
-        assert_eq!(
-            classify(""),
-            "unsupported: einsum: implicit output equations are not supported"
-        );
-        assert_eq!(
-            classify("   "),
-            "unsupported: einsum: implicit output equations are not supported"
-        );
+        assert_eq!(classify("...ij,...jk->...ik"), "unsupported");
+        assert_eq!(classify("ij,jk"), "unsupported");
+        assert_eq!(classify(""), "unsupported");
+        assert_eq!(classify("   "), "unsupported");
         assert_eq!(
             classify("...ij->...ii"),
             "invalid: einsum: output index 'i' appears more than once"

@@ -7153,7 +7153,7 @@ impl StructurallyValidatedTypeShapeDslFunction {
                         EinsumClassification::Supported(equation) => {
                             evaluate_einsum(&equation, operands)
                         }
-                        EinsumClassification::Unsupported(_) => {
+                        EinsumClassification::Unsupported => {
                             return DslOutcome::Value(DslValue::Unknown);
                         }
                         EinsumClassification::Invalid(error) => {
