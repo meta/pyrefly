@@ -3186,19 +3186,16 @@ impl<'a> BindingsBuilder<'a> {
         names
     }
 
-    pub fn bind_narrow_ops(
-        &mut self,
-        narrow_ops: &NarrowOps,
-        use_location: NarrowUseLocation,
-        usage: &Usage,
-    ) {
+    pub fn bind_narrow_ops(&mut self, narrow_ops: &NarrowOps, use_location: NarrowUseLocation) {
         let implied = self.scopes.implied_none_narrows(narrow_ops);
         for (name, (op, op_range)) in narrow_ops.0.iter_hashed().chain(implied.0.iter_hashed()) {
             // Narrowing operations should not pin partial types, but they also
             // should not permanently block pinning. Leave the first-use state
             // as Undetermined so a subsequent non-narrowing read can still pin.
-            let mut narrowing_usage = Usage::non_pinning_value_from(usage);
-            if let Some(initial_idx) = self.lookup_name(name, &mut narrowing_usage).found() {
+            if let Some(initial_idx) = self
+                .lookup_name(name, &mut Usage::NonPinningValue(None))
+                .found()
+            {
                 let narrowed_idx = self.insert_binding(
                     Key::Narrow(Box::new((name.into_key().clone(), *op_range, use_location))),
                     Binding::Narrow(initial_idx, Box::new(op.clone()), use_location),

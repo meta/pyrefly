@@ -557,7 +557,7 @@ impl<'a> BindingsBuilder<'a> {
             for x in comp.ifs.iter_mut() {
                 self.ensure_expr(x, &mut Usage::non_pinning_value_from(usage));
                 let narrow_ops = NarrowOps::from_expr(self, Some(x));
-                self.bind_narrow_ops(&narrow_ops, NarrowUseLocation::Span(comp.range), usage);
+                self.bind_narrow_ops(&narrow_ops, NarrowUseLocation::Span(comp.range));
             }
         }
     }
@@ -708,11 +708,11 @@ impl<'a> BindingsBuilder<'a> {
     /// expression that runs only when the narrows hold. A missing expression from
     /// parse-error recovery reads no names, so it needs no narrows, and two of them can
     /// share one empty range, which would give their narrows the same key.
-    fn bind_narrow_ops_for_branch(&mut self, narrow_ops: &NarrowOps, branch: &Expr, usage: &Usage) {
+    fn bind_narrow_ops_for_branch(&mut self, narrow_ops: &NarrowOps, branch: &Expr) {
         if matches!(branch, Expr::Name(name) if Ast::is_synthesized_empty_name(name)) {
             return;
         }
-        self.bind_narrow_ops(narrow_ops, NarrowUseLocation::Span(branch.range()), usage);
+        self.bind_narrow_ops(narrow_ops, NarrowUseLocation::Span(branch.range()));
     }
 
     fn record_yield(&mut self, mut x: ExprYield) {
@@ -880,7 +880,7 @@ impl<'a> BindingsBuilder<'a> {
                         if Ast::expr_contains_yield(&x.orelse) {
                             self.scopes.mark_has_yield_in_dead_code();
                         }
-                        self.bind_narrow_ops_for_branch(&narrow_ops, &x.body, usage);
+                        self.bind_narrow_ops_for_branch(&narrow_ops, &x.body);
                         self.ensure_expr(&mut x.body, usage);
                         self.finish_branch();
                     }
@@ -890,17 +890,17 @@ impl<'a> BindingsBuilder<'a> {
                         }
                         self.abandon_branch();
                         self.start_branch();
-                        self.bind_narrow_ops_for_branch(&narrow_ops.negate(), &x.orelse, usage);
+                        self.bind_narrow_ops_for_branch(&narrow_ops.negate(), &x.orelse);
                         self.ensure_expr(&mut x.orelse, usage);
                         self.finish_branch();
                     }
                     None => {
-                        self.bind_narrow_ops_for_branch(&narrow_ops, &x.body, usage);
+                        self.bind_narrow_ops_for_branch(&narrow_ops, &x.body);
                         self.ensure_expr(&mut x.body, usage);
                         // Negate the narrow ops for the `orelse`, then merge the Flows.
                         // TODO(stroxler): We eventually want to drop all narrows but merge values.
                         self.next_branch();
-                        self.bind_narrow_ops_for_branch(&narrow_ops.negate(), &x.orelse, usage);
+                        self.bind_narrow_ops_for_branch(&narrow_ops.negate(), &x.orelse);
                         self.ensure_expr(&mut x.orelse, usage);
                         self.finish_branch();
                     }
@@ -942,7 +942,7 @@ impl<'a> BindingsBuilder<'a> {
                         self.scopes.set_definitely_unreachable(true);
                     }
                     for value in values {
-                        self.bind_narrow_ops_for_branch(&narrow_ops, value, usage);
+                        self.bind_narrow_ops_for_branch(&narrow_ops, value);
                         self.ensure_expr(value, &mut Usage::non_pinning_value_from(usage));
                         let new_narrow_ops = get_narrow_ops(self, value, *op);
                         narrow_ops.and_all(new_narrow_ops);
@@ -954,11 +954,7 @@ impl<'a> BindingsBuilder<'a> {
                     // TODO(stroxler): We eventually want to drop all narrows but merge values.
                     // Once we have a way to do that, the negation will be unnecessary.
                     self.next_branch();
-                    self.bind_narrow_ops(
-                        &narrow_ops.negate(),
-                        NarrowUseLocation::End(*range),
-                        usage,
-                    );
+                    self.bind_narrow_ops(&narrow_ops.negate(), NarrowUseLocation::End(*range));
                     self.finish_branch();
                     self.finish_bool_op_fork();
                 }
@@ -1142,7 +1138,7 @@ impl<'a> BindingsBuilder<'a> {
                     for kw in call.arguments.keywords.iter_mut() {
                         self.ensure_expr(&mut kw.value, usage);
                     }
-                    self.bind_narrow_ops(&narrow_op, NarrowUseLocation::Span(call_range), usage);
+                    self.bind_narrow_ops(&narrow_op, NarrowUseLocation::Span(call_range));
                     return;
                 }
                 if matches!(

@@ -926,11 +926,7 @@ impl<'a> BindingsBuilder<'a> {
             if case_always_matches {
                 exhaustive = true;
             }
-            self.bind_narrow_ops(
-                &negated_prev_ops,
-                NarrowUseLocation::Start(case_range),
-                &Usage::NonPinningValue(None),
-            );
+            self.bind_narrow_ops(&negated_prev_ops, NarrowUseLocation::Start(case_range));
             // First try to project previous narrows directly onto the already-evaluated
             // match subject. This is required for cases like `match self.a`, where the
             // carried narrow is stored as a facet on `self` but the branch-local subject
@@ -971,17 +967,12 @@ impl<'a> BindingsBuilder<'a> {
             };
             let mut new_narrow_ops =
                 self.bind_pattern(match_subject.clone(), pattern, case_subject_idx);
-            self.bind_narrow_ops(
-                &new_narrow_ops.scope,
-                NarrowUseLocation::Span(case_range),
-                &Usage::NonPinningValue(None),
-            );
+            self.bind_narrow_ops(&new_narrow_ops.scope, NarrowUseLocation::Span(case_range));
             // Body-only narrows (e.g. sub-pattern facet narrows) apply positively to the
             // case body but are excluded from the negation accumulated below.
             self.bind_narrow_ops(
                 &new_narrow_ops.body_only,
                 NarrowUseLocation::Span(case_range),
-                &Usage::NonPinningValue(None),
             );
             // Reachability is checked before the guard is bound (below). This is
             // intentional: if the pattern itself can never match the subject type,
@@ -1014,11 +1005,7 @@ impl<'a> BindingsBuilder<'a> {
             if let Some(mut guard) = guard {
                 let guard_link = self.bind_bool_condition(&mut guard);
                 let guard_narrow_ops = NarrowOps::from_expr(self, Some(guard.as_ref()));
-                self.bind_narrow_ops(
-                    &guard_narrow_ops,
-                    NarrowUseLocation::Span(guard.range()),
-                    &Usage::NonPinningValue(None),
-                );
+                self.bind_narrow_ops(&guard_narrow_ops, NarrowUseLocation::Span(guard.range()));
                 // Route the guard through `BindingExpect::Bool` (like `if`/`while`) so it
                 // receives the same condition checks, e.g. `implicit-bool`.
                 self.insert_bool_condition(guard_link, *guard);
