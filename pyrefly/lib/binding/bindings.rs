@@ -2732,7 +2732,7 @@ impl<'a> BindingsBuilder<'a> {
             deferred.usage,
             Usage::StaticTypeInformation {
                 is_annotation: true
-            }
+            } | Usage::TypeAliasRhs
         ) {
             let range = self.idx_to_key(deferred.bound_name_idx).range();
             self.maybe_insert_implicit_alias_check(range, deferred.lookup_result_idx);

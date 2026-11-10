@@ -179,6 +179,17 @@
     },
     {
       "code": -2,
+      "column": 21,
+      "concise_description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "line": 87,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 25,
+      "stop_line": 87
+    },
+    {
+      "code": -2,
       "column": 22,
       "concise_description": "Bool literal cannot be used in annotations",
       "description": "Bool literal cannot be used in annotations",
@@ -1045,6 +1056,17 @@
     },
     {
       "code": -2,
+      "column": 22,
+      "concise_description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "line": 45,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 26,
+      "stop_line": 45
+    },
+    {
+      "code": -2,
       "column": 23,
       "concise_description": "Bool literal cannot be used in annotations",
       "description": "Bool literal cannot be used in annotations",
@@ -1393,6 +1415,17 @@
       "description": "Expected `BadAlias16` to be a type alias, got `Literal[3]`",
       "line": 60,
       "name": "invalid-type-alias",
+      "severity": "error",
+      "stop_column": 46,
+      "stop_line": 60
+    },
+    {
+      "code": -2,
+      "column": 42,
+      "concise_description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "line": 60,
+      "name": "invalid-annotation",
       "severity": "error",
       "stop_column": 46,
       "stop_line": 60

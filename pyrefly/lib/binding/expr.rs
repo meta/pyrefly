@@ -1560,9 +1560,11 @@ impl<'a> BindingsBuilder<'a> {
                 // implicit alias validation. We clear `is_annotation` to prevent
                 // `ImplicitAliasCheck` from being inserted for the value name.
                 let mut attr_value_usage = match *usage {
-                    Usage::StaticTypeInformation { .. } => Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
+                    Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs => {
+                        Usage::StaticTypeInformation {
+                            is_annotation: false,
+                        }
+                    }
                     ref u => u.clone(),
                 };
                 self.ensure_simple_attr(
@@ -1588,9 +1590,11 @@ impl<'a> BindingsBuilder<'a> {
                     .and_then(|tb| self.try_intercept_lookup(tb, &id));
                 // Same as above: args/kwargs attribute values are not type references.
                 let mut attr_value_usage = match *usage {
-                    Usage::StaticTypeInformation { .. } => Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
+                    Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs => {
+                        Usage::StaticTypeInformation {
+                            is_annotation: false,
+                        }
+                    }
                     ref u => u.clone(),
                 };
                 self.ensure_name(&name, &mut attr_value_usage, resolved.and(tparams_builder));
