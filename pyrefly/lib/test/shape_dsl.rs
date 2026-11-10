@@ -12203,6 +12203,43 @@ def shadowed(left: IntTuple, right: IntTuple) -> IntTuple:
 );
 
 testcase!(
+    bug = "Gradual products erase guarded target shapes",
+    test_type_shape_dsl_gradual_product_guards,
+    shape_extensions_env_with_torch(),
+    r#"
+import shape_extensions.dsl as dsl
+from shape_extensions import IntTuple, type_shape_dsl_function
+from torch import Tensor
+from typing import assert_type
+
+@type_shape_dsl_function
+def guarded_target(source: IntTuple, target: IntTuple) -> IntTuple:
+    count = dsl.prod(source)
+    expected = dsl.prod(target)
+    if dsl.is_concrete_int(count) and dsl.is_concrete_int(expected) and count != expected:
+        return dsl.Invalid("element counts must match")
+    return target
+
+@type_shape_dsl_function
+def unguarded_target(source: IntTuple, target: IntTuple) -> IntTuple:
+    count = dsl.prod(source)
+    if count == dsl.prod(target):
+        return target
+    return dsl.Invalid("element counts must match")
+
+def guarded[S: IntTuple](x: Tensor[S]) -> Tensor[guarded_target(S, IntTuple[2, 3])]: ...
+def unguarded[S: IntTuple](x: Tensor[S]) -> Tensor[unguarded_target(S, IntTuple[2, 3])]: ...
+
+def test(concrete: Tensor[[2, 3]], gradual: Tensor, partial: Tensor[[2, int]], bad: Tensor[[2, 4]]) -> None:
+    assert_type(guarded(concrete), Tensor[[2, 3]])
+    assert_type(guarded(gradual), Tensor[IntTuple])
+    assert_type(guarded(partial), Tensor[IntTuple])
+    assert_type(unguarded(gradual), Tensor[IntTuple])
+    guarded(bad)  # E: element counts must match
+"#,
+);
+
+testcase!(
     test_type_shape_dsl_prod,
     shape_extensions_env_with_torch(),
     r#"
