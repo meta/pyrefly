@@ -672,6 +672,10 @@ impl OutputArgs {
             // With no threshold set, warnings are printed but only errors make the exit
             // code nonzero.
             show_severity: min_severity.unwrap_or(Severity::Warn),
+            only: self
+                .only
+                .clone()
+                .or_else(|| config.and_then(|config| config.only.clone())),
         }
     }
 
@@ -702,6 +706,9 @@ struct OutputDefaults {
     /// Diagnostics at or above this severity are printed. It is never above
     /// `min_severity`.
     show_severity: Severity,
+    /// Diagnostics matching the specific kinds are reported.
+    /// If `None`, no filtering is applied and all error kinds are processed.
+    only: Option<Vec<ErrorKind>>,
 }
 
 #[derive(Clone, Debug, ValueEnum, Default, PartialEq, Eq)]
@@ -2161,8 +2168,7 @@ impl CheckArgs {
 
         let (baseline_status, unused_baseline_entries, retained_baseline_entries) =
             baseline_apply_result.resolve(self.output.update_baseline)?;
-        let only_filter = self
-            .output
+        let only_filter = defaults
             .only
             .as_ref()
             .map(|only| only.iter().collect::<SmallSet<&ErrorKind>>());
@@ -3593,6 +3599,31 @@ def go(w: Widget) -> int:
         assert_eq!(
             overridden.resolve(Some(&warn)).baseline_error_level,
             Severity::Error
+        );
+    }
+
+    #[test]
+    fn only_cli_and_config_precedence() {
+        let inherited = OutputArgs::parse_from(["pyrefly-check"]);
+        assert_eq!(inherited.resolve(None).only, None);
+        let config = ConfigFile {
+            only: Some(vec![ErrorKind::BadClassDefinition]),
+            ..Default::default()
+        };
+        assert_eq!(
+            inherited.resolve(Some(&config)).only,
+            Some(vec![ErrorKind::BadClassDefinition])
+        );
+
+        let overridden = OutputArgs::parse_from(["pyrefly-check", "--only", "bad-return"]);
+        assert_eq!(
+            overridden.resolve(None).only,
+            Some(vec![ErrorKind::BadReturn])
+        );
+
+        assert_eq!(
+            overridden.resolve(Some(&config)).only,
+            Some(vec![ErrorKind::BadReturn])
         );
     }
 

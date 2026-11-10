@@ -58,6 +58,9 @@ baseline-matching-mode = "concise-description"
 baseline-format = "minimal"
 baseline-auto-update = true
 
+# Diagnostics filtering
+only = ["bad-assignment", "bad-return"]
+
 # Error configuration
 [errors]
 bad-assignment = false
