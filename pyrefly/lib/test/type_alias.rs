@@ -1309,6 +1309,41 @@ type TupleDefault[*Ts = *tuple[Bad, ...]] = tuple[*Ts]  # E: `Bad` is not a vali
 );
 
 testcase!(
+    test_static_type_and_value_positions,
+    r#"
+from typing import Annotated, Callable, Literal
+from typing_extensions import TypeForm
+
+Bad = int if True else str
+class Base[T]: ...
+DynamicBase = Base if True else Base
+class Derived(DynamicBase[list[Bad]]): ...  # E: `Bad` is not a valid type alias
+
+list[Bad]([])  # E: `Bad` is not a valid type alias
+Annotated[Bad, Bad]  # E: `Bad` is not a valid type alias
+Callable[[Bad], None]  # E: `Bad` is not a valid type alias
+form: TypeForm = "Bad"  # E: `Bad` is not a valid type alias
+
+class Namespace:
+    Inner = int
+DynamicNamespace = Namespace if True else Namespace
+type Alias = DynamicNamespace.Inner
+
+def values(x: Annotated[int, Bad], y: Literal["Bad"]) -> None: ...
+"#,
+);
+
+testcase!(
+    test_static_generic_type_arguments,
+    r#"
+from __future__ import annotations
+Bad = int if True else str
+class Base[T]: ...
+Base[Bad]  # E: `Bad` is not a valid type alias
+"#,
+);
+
+testcase!(
     test_implicit_alias_exempt_class_constructors,
     r#"
 from typing import NamedTuple

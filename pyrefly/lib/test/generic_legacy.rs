@@ -662,12 +662,12 @@ class C1(Generic[Any]):  # E: Expected a type variable, got `Any`
     pass
 def f() -> Any: ...
 x = f()
-class C2(Generic[x]):  # E: Expected a type variable, got `Unknown`
+class C2(Generic[x]):  # E: Expected a type variable, got `Unknown`  # E: not a valid type alias: Function call
     pass
 
 # But Any(Error) is.
 T = oops()  # E:
-class C3(Generic[T]):
+class C3(Generic[T]):  # E: not a valid type alias: Function call
     pass
 
 class C4(Generic[int]):  # E: Expected a type variable, got `int`

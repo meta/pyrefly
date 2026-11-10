@@ -735,11 +735,7 @@ impl<'a> BindingsBuilder<'a> {
                 );
                 tparams = Some(legacy.lookup_keys().into_boxed_slice());
             } else if has_typeform_annotation && value.is_string_literal_expr() {
-                self.ensure_type_with_usage(
-                    &mut value,
-                    None,
-                    &mut Usage::Static(StaticUsage::Value),
-                );
+                self.ensure_type(&mut value, None);
             } else {
                 self.ensure_expr(&mut value, current.usage());
             }

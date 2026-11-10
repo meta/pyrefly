@@ -150,6 +150,14 @@ impl Usage {
         }
     }
 
+    /// The usage for a type argument, preserving the context of an enclosing type expression.
+    pub fn as_type(&self) -> Self {
+        match self {
+            Self::Static(StaticUsage::TypeExpression(_)) => self.clone(),
+            _ => Self::Static(StaticUsage::TypeExpression(TypeExpressionContext::Other)),
+        }
+    }
+
     /// Get the current binding idx, if any.
     pub fn current_idx(&self) -> Option<Idx<Key>> {
         match self {
@@ -802,13 +810,13 @@ impl<'a> BindingsBuilder<'a> {
                         &mut *slice,
                         None,
                         false,
-                        &mut Usage::Static(StaticUsage::Value),
+                        &mut usage.as_type(),
                     );
                 } else if let Some(special_export) = special_export
                     && special_export.is_static_type_subscript()
                 {
                     self.ensure_expr(&mut *value, usage);
-                    let mut type_usage = Usage::Static(StaticUsage::Value);
+                    let mut type_usage = usage.as_type();
                     if matches!(
                         special_export,
                         SpecialExport::Annotated | SpecialExport::Shaped
@@ -853,7 +861,7 @@ impl<'a> BindingsBuilder<'a> {
                         None,
                         false,
                         false,
-                        &mut Usage::Static(StaticUsage::Value),
+                        &mut usage.as_type(),
                         false,
                     );
                 } else {
@@ -1318,6 +1326,7 @@ impl<'a> BindingsBuilder<'a> {
             }
         }
         let expr_range = x.range();
+        let mut type_usage = usage.as_type();
         let invalid_proxy_method_use = !allow_proxy_method
             && matches!(
                 usage,
@@ -1391,11 +1400,11 @@ impl<'a> BindingsBuilder<'a> {
                     tparams_builder.as_deref_mut(),
                     in_string_literal,
                     check_runtime_name,
-                    usage,
+                    &mut type_usage,
                     allow_proxy_method,
                 );
                 let bound_as_shape = special == SpecialExport::Shaped
-                    && self.bind_shape_string(*range, tup, tparams_builder, usage);
+                    && self.bind_shape_string(*range, tup, tparams_builder, &mut type_usage);
                 if !bound_as_shape {
                     self.bind_annotated_metadata(&mut tup.elts[1..]);
                 }
@@ -1415,7 +1424,7 @@ impl<'a> BindingsBuilder<'a> {
                     &mut *slice,
                     tparams_builder,
                     in_string_literal,
-                    usage,
+                    &mut type_usage,
                 );
             }
             Expr::Subscript(ExprSubscript { value, slice, .. }) => {
@@ -1432,7 +1441,7 @@ impl<'a> BindingsBuilder<'a> {
                     tparams_builder,
                     in_string_literal,
                     true,
-                    usage,
+                    &mut type_usage,
                     allow_proxy_method,
                 );
             }
