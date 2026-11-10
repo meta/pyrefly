@@ -15,9 +15,12 @@ import warnings as warnings
 from collections.abc import Callable as Callable, Sequence
 from typing import (
     Any,
+    ClassVar,
     Literal,
     Optional as Optional,
     overload,
+    SupportsIndex,
+    SupportsInt,
     TYPE_CHECKING as TYPE_CHECKING,
 )
 
@@ -49,7 +52,6 @@ from torch import (
     selu_ as selu_,
     threshold_ as threshold_,
 )
-from torch._C import _ScalingType as ScalingType, _SwizzleType as SwizzleType
 from torch._C._nn import (
     elu_ as elu_,
     hardtanh_ as hardtanh_,
@@ -178,6 +180,35 @@ __all__ = [
     # Attention
     "scaled_dot_product_attention",
 ]
+
+# These nominal pybind types are exposed here but omitted from Torch's _C stubs.
+class ScalingType:
+    TensorWise: ClassVar[ScalingType]
+    RowWise: ClassVar[ScalingType]
+    BlockWise1x16: ClassVar[ScalingType]
+    BlockWise1x32: ClassVar[ScalingType]
+    BlockWise1x128: ClassVar[ScalingType]
+    BlockWise128x128: ClassVar[ScalingType]
+
+    def __init__(self, value: SupportsInt | SupportsIndex) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+    def __int__(self) -> int: ...
+    def __index__(self) -> int: ...
+
+class SwizzleType:
+    NO_SWIZZLE: ClassVar[SwizzleType]
+    SWIZZLE_32_4_4: ClassVar[SwizzleType]
+
+    def __init__(self, value: SupportsInt | SupportsIndex) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+    def __int__(self) -> int: ...
+    def __index__(self) -> int: ...
 
 # ====================================================================
 # Phase 3: Convolution & Pooling Operations

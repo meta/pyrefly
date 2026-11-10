@@ -406,6 +406,9 @@ from shape_extensions import (
     RegularNestedList,
 )
 
+type _CastingKind = Literal["no", "equiv", "safe", "same_kind", "same_value", "unsafe"]
+type _OrderKACF = Literal["K", "A", "C", "F"] | None
+
 # Preserve NumPy's canonical re-exports before local shape-aware declarations.
 from . import (
     char as char,
