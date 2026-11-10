@@ -32,7 +32,6 @@ use crate::types::lit_int::LitInt;
 use crate::types::literal::Lit;
 use crate::types::special_form::SpecialForm;
 use crate::types::tuple::Tuple;
-use crate::types::types::AnyStyle;
 use crate::types::types::Type;
 
 fn is_chained_attribute_access(x: &Expr) -> bool {
@@ -219,8 +218,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    fn apply_literal(&self, x: &Expr, errors: &ErrorCollector, literals: &mut Vec<Type>) {
-        match x {
+    fn apply_literal(&self, x: &Expr, errors: &ErrorCollector) -> Result<Type, ()> {
+        let invalid = |message| {
+            self.error(errors, x.range(), ErrorKind::InvalidLiteral, message);
+            Err(())
+        };
+        let literal = match x {
             Expr::UnaryOp(ExprUnaryOp {
                 op: UnaryOp::UAdd,
                 operand,
@@ -230,7 +233,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ..
             }) = &**operand =>
             {
-                literals.push(LitInt::from_ast(i).to_explicit_type())
+                LitInt::from_ast(i).to_explicit_type()
             }
             Expr::UnaryOp(ExprUnaryOp {
                 op: UnaryOp::USub,
@@ -241,103 +244,93 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ..
             }) = &**operand =>
             {
-                literals.push(LitInt::from_ast(i).negate().to_explicit_type())
+                LitInt::from_ast(i).negate().to_explicit_type()
             }
             Expr::NumberLiteral(n) if let Number::Int(i) = &n.value => {
-                literals.push(LitInt::from_ast(i).to_explicit_type())
+                LitInt::from_ast(i).to_explicit_type()
             }
             Expr::StringLiteral(x) => match Lit::from_string_literal(x) {
-                Some(lit) => literals.push(lit.to_explicit_type()),
-                None => literals.push(self.heap.mk_literal_string(LitStyle::Explicit)),
+                Some(lit) => lit.to_explicit_type(),
+                None => self.heap.mk_literal_string(LitStyle::Explicit),
             },
             Expr::BytesLiteral(x) => match Lit::from_bytes_literal(x) {
-                Some(lit) => literals.push(lit.to_explicit_type()),
-                None => literals.push(self.heap.mk_class_type(self.stdlib.bytes().clone())),
+                Some(lit) => lit.to_explicit_type(),
+                None => self.heap.mk_class_type(self.stdlib.bytes().clone()),
             },
-            Expr::BooleanLiteral(x) => {
-                literals.push(Lit::from_boolean_literal(x).to_explicit_type())
-            }
-            Expr::NoneLiteral(_) => literals.push(self.heap.mk_none()),
+            Expr::BooleanLiteral(x) => Lit::from_boolean_literal(x).to_explicit_type(),
+            Expr::NoneLiteral(_) => self.heap.mk_none(),
             Expr::Name(_) => {
                 fn is_valid_literal(x: &Type) -> bool {
                     match x {
-                        Type::None | Type::Literal(_) | Type::Any(AnyStyle::Error) => true,
+                        Type::None | Type::Literal(_) => true,
                         Type::Annotated(inner, _) => is_valid_literal(inner),
                         Type::Union(f) => f.members.iter().all(is_valid_literal),
                         _ => false,
                     }
                 }
-                let t = self.expr_untype(x, TypeFormContext::type_argument(), errors);
-                if is_valid_literal(&t) {
-                    literals.push(t)
-                } else {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::InvalidLiteral,
-                        format!("Invalid type inside literal, `{t}`"),
-                    );
-                    literals.push(self.heap.mk_any_error())
+                let resolution_errors = self.error_collector();
+                let ty = self.expr_untype(x, TypeFormContext::type_argument(), &resolution_errors);
+                let failed = resolution_errors.has_hard();
+                errors.extend(resolution_errors);
+                if failed {
+                    return Err(());
                 }
+                if !is_valid_literal(&ty) {
+                    return invalid(format!("Invalid type inside literal, `{ty}`"));
+                }
+                ty
             }
             Expr::Attribute(ExprAttribute {
-                node_index: _,
-                range,
                 value,
                 attr: member_name,
-                ctx: _,
+                ..
             }) if is_chained_attribute_access(value) => {
-                let ty = self.expr_infer(value, errors);
+                let resolution_errors = self.error_collector();
+                let ty = self.expr_infer(value, &resolution_errors);
+                let failed = resolution_errors.has_hard();
+                errors.extend(resolution_errors);
+                if failed {
+                    return Err(());
+                }
                 match ty {
                     Type::ClassDef(c)
                         if let Some(e) = self.get_enum_member(&c, &member_name.id) =>
                     {
-                        literals.push(e.to_explicit_type())
+                        e.to_explicit_type()
                     }
-                    ty @ Type::Any(AnyStyle::Error) => literals.push(ty),
                     _ => {
-                        self.error(
-                            errors,
-                            *range,
-                            ErrorKind::InvalidLiteral,
-                            format!(
-                                "`{}.{}` is not a valid enum member",
-                                value.display_with(self.module()),
-                                member_name.id
-                            ),
-                        );
-                        literals.push(self.heap.mk_any_error())
+                        return invalid(format!(
+                            "`{}.{}` is not a valid enum member",
+                            value.display_with(self.module()),
+                            member_name.id
+                        ));
                     }
                 }
             }
             Expr::Subscript(_) => {
-                let ty = self.expr_infer(x, errors);
+                let resolution_errors = self.error_collector();
+                let ty = self.expr_infer(x, &resolution_errors);
+                let failed = resolution_errors.has_hard();
+                errors.extend(resolution_errors);
+                if failed {
+                    return Err(());
+                }
+                let mut literals = Vec::new();
+                let mut failed = false;
                 self.map_over_union(&ty, |ty| match ty {
                     Type::Type(lit) if matches!(&**lit, Type::Literal(_)) => {
-                        literals.push((**lit).clone())
+                        literals.push((**lit).clone());
                     }
-                    ty @ Type::Any(AnyStyle::Error) => literals.push(ty.clone()),
-                    _ => {
-                        self.error(
-                            errors,
-                            x.range(),
-                            ErrorKind::InvalidLiteral,
-                            "Invalid literal expression".to_owned(),
-                        );
-                        literals.push(self.heap.mk_any_error())
-                    }
+                    _ => failed = true,
                 });
+                if failed {
+                    return invalid("Invalid literal expression".to_owned());
+                }
+                self.unions(literals)
             }
-            _ => {
-                self.error(
-                    errors,
-                    x.range(),
-                    ErrorKind::InvalidLiteral,
-                    "Invalid literal expression".to_owned(),
-                );
-                literals.push(self.heap.mk_any_error())
-            }
-        }
+            _ => return invalid("Invalid literal expression".to_owned()),
+        };
+        Ok(literal)
     }
 
     pub fn apply_special_form(
@@ -384,11 +377,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         "`Literal` arguments cannot be parenthesized".to_owned(),
                     );
                 }
-                let mut literals = Vec::new();
-                arguments
-                    .iter()
-                    .for_each(|x| self.apply_literal(x, errors, &mut literals));
-                self.heap.mk_type_of(self.unions(literals))
+                let mut literals = Vec::with_capacity(arguments.len());
+                let mut failed = false;
+                for argument in arguments {
+                    match self.apply_literal(argument, errors) {
+                        Ok(literal) => literals.push(literal),
+                        Err(()) => failed = true,
+                    }
+                }
+                self.heap.mk_type_of(if failed {
+                    self.heap.mk_any_error()
+                } else {
+                    self.unions(literals)
+                })
             }
             SpecialForm::Concatenate => {
                 if arguments.len() < 2 {

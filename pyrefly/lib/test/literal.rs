@@ -8,7 +8,6 @@
 use crate::testcase;
 
 testcase!(
-    bug = "Inherited error Any is accepted as a Literal parameter",
     test_literal_annotation_recovery_boundary,
     r#"
 from typing import Any, Literal, assert_type
@@ -18,9 +17,9 @@ Alias = Any
 
 def explicit(value: Literal[Any]) -> None: ...  # E: Invalid type inside literal
 def aliased(value: Literal[Alias]) -> None: ...  # E: Invalid type inside literal
-def missing(value: Literal[Value]) -> None: ...
-def attribute(value: Literal[Value.member]) -> None: ...
-def undefined(value: Literal[Undefined]) -> None: ...  # E: Could not find name `Undefined`
+def missing(value: Literal[Value]) -> None: ...  # E: Invalid type inside literal
+def attribute(value: Literal[Value.member]) -> None: ...  # E: not a valid enum member
+def undefined(value: Literal[Undefined]) -> None: ...  # E: Could not find name `Undefined`  # E: Invalid type inside literal
 def bad(value: Literal[1.5]) -> None: ...  # E: Invalid literal expression
 
 def check(value: Literal[1, "ok", None]) -> None:
