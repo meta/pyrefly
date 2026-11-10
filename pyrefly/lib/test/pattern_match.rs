@@ -281,7 +281,6 @@ def attribute_any(h: Holder) -> None:
 
 // Regression test for https://github.com/meta/pyrefly/issues/5549.
 testcase!(
-    bug = "Gradual bases cause false unreachable-case warnings",
     test_match_case_gradual_base,
     r#"
 from typing import Any, assert_type
@@ -297,10 +296,10 @@ def f(x: Any) -> str:
         case Mul():
             assert_type(x, Mul)
             return "mul"
-        case FloorDiv():  # E: Case pattern can never match subject of type `Any`
+        case FloorDiv():
             assert_type(x, FloorDiv)
             return "floordiv"
-        case str():  # E: Case pattern can never match subject of type `Any`
+        case str():
             assert_type(x, str)
             return "str"
     assert_type(x, Any)
@@ -310,7 +309,7 @@ def gradual_predecessor(x: Any) -> None:
     match x:
         case FloorDiv():
             assert_type(x, FloorDiv)
-        case str():  # E: Case pattern can never match subject of type `Any`
+        case str():
             assert_type(x, str)
 "#,
 );
