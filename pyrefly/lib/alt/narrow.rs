@@ -2983,7 +2983,6 @@ mod tests {
     use super::classify_match_case_op;
     use crate::binding::narrow::AtomicNarrowOp;
     use crate::binding::narrow::NarrowOp;
-    use crate::binding::narrow::NarrowSource;
 
     fn placeholder() -> NarrowOp {
         NarrowOp::Atomic(None, AtomicNarrowOp::Placeholder)
