@@ -2501,7 +2501,7 @@ impl<'a> BindingsBuilder<'a> {
                 self.scopes.mark_parameter_used(name.key());
                 self.scopes.mark_import_used(name.key());
                 self.scopes.mark_variable_used(name.key(), value_idx);
-                if !usage.is_static()
+                if usage.checks_initialization()
                     && matches!(
                         initialized,
                         InitializedInFlow::No
@@ -2541,7 +2541,7 @@ impl<'a> BindingsBuilder<'a> {
                     self.insert_implicit_builtin_binding(idx, module, name.key());
                 }
                 // NameReadInfo::Anywhere can only be InitializedInFlow::Yes or InitializedInFlow::No
-                if !usage.is_static() && matches!(initialized, InitializedInFlow::No) {
+                if usage.checks_initialization() && matches!(initialized, InitializedInFlow::No) {
                     // When we use a variable, we mark it as initialized
                     // If the variable was uninitialized before, this will
                     // prevent us from emitting errors for every subsequent usage

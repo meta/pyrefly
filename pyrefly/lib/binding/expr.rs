@@ -118,6 +118,8 @@ pub enum Usage {
     /// alias bindings should produce Binding::TypeAliasRef instead of
     /// Binding::Forward.
     TypeAliasRhs,
+    /// An expression that no binding type-checks, such as an invalid assignment target.
+    Unchecked,
 }
 
 impl Usage {
@@ -127,6 +129,7 @@ impl Usage {
             Self::CurrentIdx(idx) => Self::NonPinningValue(Some(*idx)),
             Self::NonPinningValue(idx) => Self::NonPinningValue(*idx),
             Self::StaticTypeInformation { .. } | Self::TypeAliasRhs => Self::NonPinningValue(None),
+            Self::Unchecked => Self::Unchecked,
         }
     }
 
@@ -135,7 +138,7 @@ impl Usage {
         match self {
             Usage::CurrentIdx(idx) => Some(*idx),
             Usage::NonPinningValue(idx) => *idx,
-            Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs => None,
+            Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs | Usage::Unchecked => None,
         }
     }
 
@@ -150,6 +153,10 @@ impl Usage {
             self,
             Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs
         )
+    }
+
+    pub fn checks_initialization(&self) -> bool {
+        !self.is_static() && !matches!(self, Usage::Unchecked)
     }
 }
 
@@ -415,9 +422,9 @@ impl<'a> BindingsBuilder<'a> {
                         Binding::OuterClassTypeParameter(lookup_result_idx, name.range),
                     );
                 }
-                // Uninitialized local errors are only reported when we are neither in a stub
-                // nor a static type context.
-                if !usage.is_static() && !self.module_info.path().is_interface() {
+                // Uninitialized local errors are only reported in usage contexts that check
+                // initialization, and never in stubs.
+                if usage.checks_initialization() && !self.module_info.path().is_interface() {
                     if let Some(unset_nodes) =
                         is_initialized.deferred_unset_nodes().map(|s| s.to_vec())
                     {

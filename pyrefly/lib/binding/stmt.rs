@@ -1303,12 +1303,7 @@ impl<'a> BindingsBuilder<'a> {
                             })
                         }
                         _ => {
-                            self.ensure_expr(
-                                &mut attr.value,
-                                &mut Usage::StaticTypeInformation {
-                                    is_annotation: false,
-                                },
-                            );
+                            self.ensure_expr(&mut attr.value, &mut Usage::Unchecked);
                             ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))
                         }
                     };
@@ -1401,20 +1396,10 @@ impl<'a> BindingsBuilder<'a> {
                         //
                         // We don't track first-usage in this context, since we won't analyze the usage anyway.
                         let mut e = illegal_target.clone();
-                        self.ensure_expr(
-                            &mut e,
-                            &mut Usage::StaticTypeInformation {
-                                is_annotation: false,
-                            },
-                        );
+                        self.ensure_expr(&mut e, &mut Usage::Unchecked);
                         // Even though the assignment target is invalid, we still need to analyze the RHS so errors
                         // (like invalid walrus targets) are reported.
-                        self.ensure_expr(
-                            &mut x.value,
-                            &mut Usage::StaticTypeInformation {
-                                is_annotation: false,
-                            },
-                        );
+                        self.ensure_expr(&mut x.value, &mut Usage::Unchecked);
                     }
                 }
             }
