@@ -28,7 +28,6 @@ def check(value: Literal[1, "ok", None]) -> None:
 );
 
 testcase!(
-    bug = "Invalid compound Literal arguments erase valid components",
     test_literal_partial_recovery,
     r#"
 from enum import Enum
@@ -43,25 +42,25 @@ type Scoped = Literal["ok", 1.5, None]  # E: Invalid literal expression
 AnnotatedLegacy: TypeAlias = Annotated[Legacy, "metadata"]
 
 def flat(value: Literal[1, 1.5, 3]) -> None:  # E: Invalid literal expression
-    assert_type(value, Any)
+    assert_type(value, Any | Literal[1, 3])
 
 def nested(value: Literal[Literal[1, 1.5], 3]) -> None:  # E: Invalid literal expression
-    assert_type(value, Any)
+    assert_type(value, Any | Literal[1, 3])
 
 def legacy(value: Literal[Legacy, "extra"]) -> None:  # E: Invalid type inside literal
-    assert_type(value, Any)
+    assert_type(value, Any | Literal[1, 3, "extra"])
 
 def scoped(value: Literal[Scoped, 4]) -> None:  # E: Invalid type inside literal
-    assert_type(value, Any)
+    assert_type(value, Any | Literal["ok", 4] | None)
 
 def annotated(value: Literal[AnnotatedLegacy, 4]) -> None:  # E: Invalid type inside literal
-    assert_type(value, Any)
+    assert_type(value, Annotated[Literal[1], "metadata"] | Annotated[Literal[3], "metadata"] | Any | Literal[4])
 
 def explicit_any(value: Literal[1, Any, 3]) -> None:  # E: Invalid type inside literal
-    assert_type(value, Any)
+    assert_type(value, Any | Literal[1, 3])
 
 def enum_member(value: Literal[E.A, E.invalid, "ok"]) -> None:  # E: not a valid enum member
-    assert_type(value, Any)
+    assert_type(value, Any | Literal[E.A, "ok"])
 
 def nonliteral_type(value: Literal[list[int]]) -> None:  # E: Invalid literal expression
     assert_type(value, Any)

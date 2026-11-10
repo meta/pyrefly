@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::mem::replace;
 use std::slice;
 
 use pyrefly_types::literal::LitStyle;
@@ -218,7 +219,43 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    fn apply_literal(&self, x: &Expr, errors: &ErrorCollector) -> Result<Type, ()> {
+    /// Append valid components even on failure; composition supplies recovery for invalid parts.
+    fn apply_literal(
+        &self,
+        x: &Expr,
+        errors: &ErrorCollector,
+        literals: &mut Vec<Type>,
+    ) -> Result<(), ()> {
+        fn append_literal_parts(ty: &Type, literals: &mut Vec<Type>) -> Result<(), ()> {
+            match ty {
+                Type::None | Type::Literal(_) => {
+                    literals.push(ty.clone());
+                    Ok(())
+                }
+                Type::Annotated(inner, metadata) => {
+                    let start = literals.len();
+                    let result = append_literal_parts(inner, literals);
+                    for literal in &mut literals[start..] {
+                        *literal = Type::Annotated(
+                            Box::new(replace(literal, Type::never())),
+                            metadata.clone(),
+                        );
+                    }
+                    result
+                }
+                Type::Union(union) => {
+                    let mut result = Ok(());
+                    for member in &union.members {
+                        if append_literal_parts(member, literals).is_err() {
+                            result = Err(());
+                        }
+                    }
+                    result
+                }
+                _ => Err(()),
+            }
+        }
+
         let invalid = |message| {
             self.error(errors, x.range(), ErrorKind::InvalidLiteral, message);
             Err(())
@@ -259,26 +296,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             },
             Expr::BooleanLiteral(x) => Lit::from_boolean_literal(x).to_explicit_type(),
             Expr::NoneLiteral(_) => self.heap.mk_none(),
-            Expr::Name(_) => {
-                fn is_valid_literal(x: &Type) -> bool {
-                    match x {
-                        Type::None | Type::Literal(_) => true,
-                        Type::Annotated(inner, _) => is_valid_literal(inner),
-                        Type::Union(f) => f.members.iter().all(is_valid_literal),
-                        _ => false,
-                    }
-                }
+            Expr::Name(_) | Expr::Subscript(_) => {
                 let resolution_errors = self.error_collector();
                 let ty = self.expr_untype(x, TypeFormContext::type_argument(), &resolution_errors);
                 let failed = resolution_errors.has_hard();
                 errors.extend(resolution_errors);
+                let result = append_literal_parts(&ty, literals);
                 if failed {
                     return Err(());
                 }
-                if !is_valid_literal(&ty) {
-                    return invalid(format!("Invalid type inside literal, `{ty}`"));
+                if result.is_err() {
+                    return invalid(match x {
+                        Expr::Name(_) => format!("Invalid type inside literal, `{ty}`"),
+                        _ => "Invalid literal expression".to_owned(),
+                    });
                 }
-                ty
+                return Ok(());
             }
             Expr::Attribute(ExprAttribute {
                 value,
@@ -307,30 +340,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                 }
             }
-            Expr::Subscript(_) => {
-                let resolution_errors = self.error_collector();
-                let ty = self.expr_infer(x, &resolution_errors);
-                let failed = resolution_errors.has_hard();
-                errors.extend(resolution_errors);
-                if failed {
-                    return Err(());
-                }
-                let mut literals = Vec::new();
-                let mut failed = false;
-                self.map_over_union(&ty, |ty| match ty {
-                    Type::Type(lit) if matches!(&**lit, Type::Literal(_)) => {
-                        literals.push((**lit).clone());
-                    }
-                    _ => failed = true,
-                });
-                if failed {
-                    return invalid("Invalid literal expression".to_owned());
-                }
-                self.unions(literals)
-            }
             _ => return invalid("Invalid literal expression".to_owned()),
         };
-        Ok(literal)
+        literals.push(literal);
+        Ok(())
     }
 
     pub fn apply_special_form(
@@ -378,18 +391,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     );
                 }
                 let mut literals = Vec::with_capacity(arguments.len());
-                let mut failed = false;
                 for argument in arguments {
-                    match self.apply_literal(argument, errors) {
-                        Ok(literal) => literals.push(literal),
-                        Err(()) => failed = true,
+                    if self.apply_literal(argument, errors, &mut literals).is_err() {
+                        literals.push(self.heap.mk_any_error());
                     }
                 }
-                self.heap.mk_type_of(if failed {
-                    self.heap.mk_any_error()
-                } else {
-                    self.unions(literals)
-                })
+                self.heap.mk_type_of(self.unions(literals))
             }
             SpecialForm::Concatenate => {
                 if arguments.len() < 2 {
