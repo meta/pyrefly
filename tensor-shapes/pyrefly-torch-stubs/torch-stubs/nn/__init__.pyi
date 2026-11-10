@@ -14,6 +14,7 @@ from typing import (
     Generic,
     Iterable,
     Iterator,
+    Literal,
     overload,
     Self,
     TYPE_CHECKING,
@@ -184,13 +185,41 @@ class Module:
         strict: bool = True,
         assign: bool = False,
     ) -> Any: ...
+    @overload
     def _register_load_state_dict_pre_hook(
         self,
-        hook: Callable[[dict[str, Tensor], str], None],
-        with_module: bool = False,
-    ) -> Any:
-        """Register a hook to be called before loading state_dict."""
-        ...
+        hook: Callable[
+            [
+                dict[str, Any],
+                str,
+                dict[str, Any],
+                bool,
+                list[str],
+                list[str],
+                list[str],
+            ],
+            object,
+        ],
+        with_module: Literal[False] = False,
+    ) -> Any: ...
+    @overload
+    def _register_load_state_dict_pre_hook(
+        self,
+        hook: Callable[
+            [
+                Module,
+                dict[str, Any],
+                str,
+                dict[str, Any],
+                bool,
+                list[str],
+                list[str],
+                list[str],
+            ],
+            object,
+        ],
+        with_module: Literal[True],
+    ) -> Any: ...
 
 class Parameter[Shape: IntTuple = IntTuple](Tensor[Shape]):
     @overload

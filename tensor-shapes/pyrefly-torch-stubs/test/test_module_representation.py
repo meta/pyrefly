@@ -99,17 +99,12 @@ def test_load_state_dict_pre_hook_arguments_and_ignored_returns() -> None:
         calls.append("with_module")
         return "ignored"
 
-    # E: not assignable
     default_handle = model._register_load_state_dict_pre_hook(without_module)
     false_handle = model._register_load_state_dict_pre_hook(
-        # E: not assignable
-        without_module,
-        with_module=False,
+        without_module, with_module=False
     )
     true_handle = model._register_load_state_dict_pre_hook(
-        # E: not assignable
-        with_module,
-        with_module=True,
+        with_module, with_module=True
     )
     result = model.load_state_dict(model.state_dict())
     assert_shape(model.weight.shape, (2, 3))
@@ -133,7 +128,9 @@ if TYPE_CHECKING:
         ) -> object:
             return object()
 
-        model._register_load_state_dict_pre_hook(two_arguments)
-        model._register_load_state_dict_pre_hook(two_arguments, with_module=True)
         # E: not assignable
+        model._register_load_state_dict_pre_hook(two_arguments)
+        # E: No matching overload
+        model._register_load_state_dict_pre_hook(two_arguments, with_module=True)
+        # E: No matching overload
         model._register_load_state_dict_pre_hook(module_hook, with_module=False)
