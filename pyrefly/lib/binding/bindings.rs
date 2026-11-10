@@ -3099,6 +3099,9 @@ impl<'a> BindingsBuilder<'a> {
             let mut bound = None;
             let mut constraints = None;
             let mut usage = Usage::Static(StaticUsage::Value);
+            let mut type_usage = Usage::Static(StaticUsage::TypeExpression(
+                TypeExpressionContext::ScopedTypeParam,
+            ));
             let kind = match x {
                 TypeParam::TypeVar(tv) => {
                     let mut kind = QuantifiedKind::TypeVar;
@@ -3118,7 +3121,7 @@ impl<'a> BindingsBuilder<'a> {
                                     invalid_intvar_constraint = true;
                                     self.ensure_expr(constraint, &mut usage);
                                 } else {
-                                    self.ensure_type_with_usage(constraint, None, &mut usage);
+                                    self.ensure_type_with_usage(constraint, None, &mut type_usage);
                                     constraint_exprs.push(constraint.clone());
                                 }
                             }
@@ -3130,7 +3133,8 @@ impl<'a> BindingsBuilder<'a> {
                             self.ensure_expr(bound_expr, &mut usage);
                             kind = QuantifiedKind::IntVar;
                         } else {
-                            bound = Some(self.record_type_parameter_bound(bound_expr, &mut usage));
+                            bound =
+                                Some(self.record_type_parameter_bound(bound_expr, &mut type_usage));
                         }
                     }
                     if let Some(default_expr) = &mut tv.default {
@@ -3140,7 +3144,7 @@ impl<'a> BindingsBuilder<'a> {
                         {
                             self.ensure_expr(default_expr, &mut usage);
                         } else {
-                            self.ensure_type_with_usage(default_expr, None, &mut usage);
+                            self.ensure_type_with_usage(default_expr, None, &mut type_usage);
                         }
                         default = Some((**default_expr).clone());
                     }
@@ -3148,14 +3152,14 @@ impl<'a> BindingsBuilder<'a> {
                 }
                 TypeParam::ParamSpec(x) => {
                     if let Some(default_expr) = &mut x.default {
-                        self.ensure_type_with_usage(default_expr, None, &mut usage);
+                        self.ensure_type_with_usage(default_expr, None, &mut type_usage);
                         default = Some((**default_expr).clone());
                     }
                     QuantifiedKind::ParamSpec
                 }
                 TypeParam::TypeVarTuple(x) => {
                     if let Some(default_expr) = &mut x.default {
-                        self.ensure_type_with_usage(default_expr, None, &mut usage);
+                        self.ensure_type_with_usage(default_expr, None, &mut type_usage);
                         default = Some((**default_expr).clone());
                     }
                     QuantifiedKind::TypeVarTuple

@@ -7442,6 +7442,17 @@
     },
     {
       "code": -2,
+      "column": 17,
+      "concise_description": "`t1` is not a valid type alias: Tuple literal cannot be used in annotations",
+      "description": "`t1` is not a valid type alias: Tuple literal cannot be used in annotations",
+      "line": 71,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 19,
+      "stop_line": 71
+    },
+    {
+      "code": -2,
       "column": 18,
       "concise_description": "Expected a type form, got instance of `Literal[3]`",
       "description": "Expected a type form, got instance of `Literal[3]`",

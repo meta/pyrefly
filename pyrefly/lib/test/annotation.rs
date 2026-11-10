@@ -212,6 +212,17 @@ class C:
 );
 
 testcase!(
+    test_unquoted_forward_reference_in_type_parameters_before_py314,
+    TestEnv::new_with_version(PythonVersion::new(3, 13, 0)),
+    r#"
+class Bound[T: list[A]]: ...
+class Constrained[T: (list[A], bytes)]: ...
+class Default[T = list[A]]: ...
+class A: ...
+"#,
+);
+
+testcase!(
     bug = "Function annotations routed through legacy tparam lookup miss unquoted forward refs",
     test_unquoted_function_annotation_forward_reference_before_py314,
     TestEnv::new_with_version(PythonVersion::new(3, 13, 0)),

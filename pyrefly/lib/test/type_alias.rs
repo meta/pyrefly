@@ -1292,6 +1292,23 @@ D: TypeAlias = BadOuter.Inner
 );
 
 testcase!(
+    test_bad_implicit_type_alias_in_type_parameters,
+    r#"
+from typing import Callable
+
+Bad = int if True else str
+
+class Bound[T: Bad]: ...  # E: `Bad` is not a valid type alias
+def constrained[T: (Bad, bytes)](x: T) -> T: return x  # E: `Bad` is not a valid type alias
+type Default[T = Bad] = list[T]  # E: `Bad` is not a valid type alias
+type NestedBound[T: list[Bad]] = T  # E: `Bad` is not a valid type alias
+type ForwardBound[T: "Bad"] = T  # E: `Bad` is not a valid type alias
+type ParamSpecDefault[**P = [Bad]] = Callable[P, None]  # E: `Bad` is not a valid type alias
+type TupleDefault[*Ts = *tuple[Bad, ...]] = tuple[*Ts]  # E: `Bad` is not a valid type alias
+"#,
+);
+
+testcase!(
     test_implicit_alias_exempt_class_constructors,
     r#"
 from typing import NamedTuple
