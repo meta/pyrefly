@@ -85,8 +85,7 @@ def test_generator_and_tensor_factories() -> None:
     assert_shape(torch.randint(0, 10, (3,), generator=generator).shape, (3,))
 
     tensor = torch.zeros((2, 3))
-    # These compatibility factories accept dynamic Python and NumPy inputs, so their
-    # stubs intentionally guarantee only an open shape.
+    # Dynamic tuple concatenation stays gradual, unlike literal tuple sizes.
     assert_shape(
         tensor.new_zeros(tensor.shape + (4,)).shape,
         IntTuple,
@@ -110,6 +109,55 @@ def test_new_factories_accept_list_sizes() -> None:
     assert_shape(ones.shape, IntTuple, runtime=(4, 5))
     assert_shape(empty.shape, IntTuple, runtime=(4, 5))
     assert_shape(full.shape, IntTuple, runtime=(4, 5))
+
+
+def test_tuple_factory_shapes() -> None:
+    tensor = torch.zeros((2, 3))
+    assert_shape(tensor.new_zeros((2, 3, 4)).shape, IntTuple, runtime=(2, 3, 4))
+    assert_shape(tensor.new_ones((0, 3)).shape, IntTuple, runtime=(0, 3))
+    assert_shape(tensor.new_empty(()).shape, IntTuple, runtime=())
+    assert_shape(tensor.new_full((2, 3), 1.0).shape, IntTuple, runtime=(2, 3))
+
+
+def test_full_like_options() -> None:
+    tensor = torch.zeros((2, 3))
+    typed = torch.full_like(
+        tensor,
+        1.0,
+        dtype=torch.float64,  # E: Unexpected keyword argument `dtype`
+    )
+    assert_shape(typed.shape, (2, 3))
+    assert typed.dtype == torch.float64
+    configured = torch.full_like(
+        tensor,
+        2.0,
+        device="cpu",  # E: Unexpected keyword argument `device`
+        layout=torch.strided,  # E: Unexpected keyword argument `layout`
+        requires_grad=True,  # E: Unexpected keyword argument `requires_grad`
+        memory_format=torch.preserve_format,  # E: Unexpected keyword argument `memory_format`
+    )
+    assert_shape(configured.shape, (2, 3))
+    assert configured.requires_grad
+
+
+def test_triangular_indices_options() -> None:
+    lower = torch.tril_indices(
+        3,
+        4,
+        dtype=torch.int64,  # E: Unexpected keyword argument `dtype`
+        device="cpu",  # E: Unexpected keyword argument `device`
+        layout=torch.strided,  # E: Unexpected keyword argument `layout`
+    )
+    upper = torch.triu_indices(
+        3,
+        4,
+        1,
+        dtype=torch.int64,  # E: Unexpected keyword argument `dtype`
+        device="cpu",  # E: Unexpected keyword argument `device`
+        layout=torch.strided,  # E: Unexpected keyword argument `layout`
+    )
+    assert_shape(lower.shape, (2, int), runtime=(2, 6))
+    assert_shape(upper.shape, (2, int), runtime=(2, 6))
 
 
 def test_arange() -> None:

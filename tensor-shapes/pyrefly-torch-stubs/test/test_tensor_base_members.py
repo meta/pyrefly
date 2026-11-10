@@ -71,6 +71,19 @@ def check_tensor_new_empty_size_tuple(tensor: Tensor) -> None:
     assert_type(tensor.new_empty((0,)), Tensor)
 
 
+def test_tensor_argsort_and_logit() -> None:
+    source = torch.tensor([[3.0, 1.0, 3.0], [2.0, 0.0, 0.0]])
+    indices = source.argsort(dim=1, descending=True, stable=True)
+    assert_shape(indices.shape, IntTuple, runtime=(2, 3))
+    assert torch.equal(
+        indices, torch.argsort(source, dim=1, descending=True, stable=True)
+    )
+    probabilities = torch.full((2, 3), 0.5)
+    logits = probabilities.logit(eps=0.1)
+    assert_shape(logits.shape, IntTuple, runtime=(2, 3))
+    assert torch.equal(logits, torch.zeros_like(logits))
+
+
 def check_tensor_add_alpha(tensor: Tensor) -> None:
     # `alpha` scales the added tensor in the real in-place signature.
     assert_type(tensor.add_(tensor, alpha=0.5), Tensor)
