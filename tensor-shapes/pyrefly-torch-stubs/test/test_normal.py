@@ -57,55 +57,35 @@ if TYPE_CHECKING:
 
 
 def test_distribution_normal_scalar_parameters() -> None:
-    # E: not assignable
-    # E: not assignable
     normal = Normal(0.0, 1.0)
     if TYPE_CHECKING:
-        # E: assert_type
         assert_type(normal, Normal[[]])
-    # E: assert_shape
     assert_shape(normal.loc.shape, ())
-    # E: assert_shape
     assert_shape(normal.scale.shape, ())
     value = torch.zeros(())
-    # E: assert_shape
-    # E: has no attribute
     assert_shape(normal.cdf(value).shape, ())
-    # E: has no attribute
     assert torch.equal(normal.cdf(value), torch.full((), 0.5))
-    # E: assert_shape
-    # E: has no attribute
     assert_shape(normal.cdf(torch.zeros((2, 3))).shape, (2, 3))
 
 
 def test_distribution_normal_broadcast_parameters() -> None:
     loc = torch.zeros((2, 1))
     scale = torch.ones((1, 3))
-    # E: not assignable
-    # E: Unexpected keyword
     normal = Normal(loc, scale, validate_args=True)
     if TYPE_CHECKING:
-        # E: assert_type
         assert_type(normal, Normal[[2, 3]])
-    # E: assert_shape
     assert_shape(normal.loc.shape, (2, 3))
-    # E: assert_shape
     assert_shape(normal.scale.shape, (2, 3))
     value = torch.zeros((4, 2, 3))
-    # E: assert_shape
-    # E: has no attribute
     assert_shape(normal.cdf(value).shape, (4, 2, 3))
-    # E: has no attribute
     assert torch.equal(normal.cdf(value), torch.full((4, 2, 3), 0.5))
-    # E: not assignable
     assert_shape(Normal(loc, 1.0).loc.shape, (2, 1))
-    # E: not assignable
     assert_shape(Normal(0.0, scale).scale.shape, (1, 3))
     with assert_raises(RuntimeError):
-        # E: not assignable
+        # E: Cannot broadcast dimension
         Normal(loc, torch.ones((3, 5)))
     with assert_raises(ValueError):
-        # E: has no attribute
+        # E: Cannot broadcast dimension
         normal.cdf(torch.zeros(5))
 
 
@@ -114,26 +94,14 @@ if TYPE_CHECKING:
     def check_distribution_normal_shapes[N: IntVar, M: IntVar](
         loc: Tensor[[N, 1]], scale: Tensor[[1, M]], unknown: Tensor[IntTuple]
     ) -> None:
-        # E: not assignable
         normal = Normal(loc, scale)
-        # E: assert_type
         assert_type(normal, Normal[[N, M]])
-        # E: assert_type
         assert_type(normal.loc, Tensor[[N, M]])
-        # E: assert_type
         assert_type(normal.scale, Tensor[[N, M]])
-        # E: assert_type
-        # E: has no attribute
         assert_type(normal.cdf(torch.zeros((4, 1, 1))), Tensor[[4, N, M]])
-        # E: not assignable
         assert_type(Normal(loc, 1.0), Normal[[N, 1]])
-        # E: not assignable
         assert_type(Normal(0.0, scale), Normal[[1, M]])
-        # E: not assignable
         assert_type(Normal(unknown, 1.0), Normal[IntTuple])
-        # E: not assignable
         assert_type(Normal(0.0, unknown), Normal[IntTuple])
         assert_type(Normal(unknown, unknown), Normal[IntTuple])
-        # E: assert_type
-        # E: has no attribute
         assert_type(normal.cdf(unknown), Tensor[IntTuple])
