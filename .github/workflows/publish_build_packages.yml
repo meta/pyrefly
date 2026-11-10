@@ -6,7 +6,9 @@ name: "Publish: Build packages"
 #
 # The Linux x86-64 (glibc and musl), Linux ARM64 (glibc), macOS, and Windows
 # x86-64 and ARM64 executables are optimized with PGO, trained by scripts/pgo.py
-# on its corpus. The Linux x86-64 glibc executable is also optimized with BOLT.
+# on its corpus. The Linux x86-64 executables (glibc and musl) are also
+# optimized with BOLT. BOLT would drop the linker's Cortex-A53 erratum 843419
+# workaround from the Linux ARM64 executable, so it is not used there.
 # Other targets are cross-compiled, so the training workload cannot run on the
 # build machine.
 
@@ -46,7 +48,7 @@ env:
   # The PGO training corpus pins its dependencies by date, so a fixed uv
   # version keeps the training workload reproducible.
   UV_VERSION: "0.11.17"
-  # The LLVM release whose BOLT optimizes the Linux x86-64 executable, and the
+  # The LLVM release whose BOLT optimizes the Linux x86-64 executables, and the
   # SHA-256 of its Linux x86-64 archive.
   BOLT_LLVM_VERSION: "22.1.8"
   BOLT_LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
@@ -261,6 +263,7 @@ jobs:
             os: ubuntu-latest
             arch: x64
             pgo: true
+            bolt: true
           # The ubuntu-latest (26.04) image ships Docker 29.4.2, whose seccomp
           # profile blocks 32-bit socket calls, so the i686 container has no
           # network: https://github.com/actions/runner-images/issues/14790
@@ -320,7 +323,7 @@ jobs:
           python scripts/pgo.py pgo --train-only
           echo "toolchain=$(rustc --version | cut -d ' ' -f2)" >> "$GITHUB_OUTPUT"
           RUSTFLAGS="-Cprofile-use=$GITHUB_WORKSPACE/target/pgo/pyrefly.profdata -Cllvm-args=--profile-summary-hot-count=$(cat target/pgo/pyrefly.profile-hot-count)"
-          if [ "${{ matrix.platform.target }}" = x86_64-unknown-linux-gnu ]; then
+          if [ "${{ matrix.platform.bolt }}" = true ]; then
             # BOLT needs the relocations to rewrite the executable.
             RUSTFLAGS="$RUSTFLAGS -Clink-arg=-Wl,--emit-relocs"
           fi
@@ -390,13 +393,13 @@ jobs:
           working-directory: pyrefly
       - name: Restore BOLT
         id: bolt-cache
-        if: ${{ matrix.platform.target == 'x86_64-unknown-linux-gnu' && env.PGO == 'true' }}
+        if: ${{ matrix.platform.bolt && env.PGO == 'true' }}
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/bolt
           key: bolt-${{ env.BOLT_LLVM_VERSION }}-${{ runner.os }}-${{ runner.arch }}
       - name: Download BOLT
-        if: ${{ matrix.platform.target == 'x86_64-unknown-linux-gnu' && env.PGO == 'true' && steps.bolt-cache.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.platform.bolt && env.PGO == 'true' && steps.bolt-cache.outputs.cache-hit != 'true' }}
         run: |
           # The release archive is 2 GB, so only BOLT's files are kept, and cached.
           name="LLVM-${BOLT_LLVM_VERSION}-Linux-X64"
@@ -408,7 +411,7 @@ jobs:
             "$name/bin/llvm-bolt" "$name/bin/merge-fdata" "$name/lib/libbolt_rt_instr.a"
           rm "$RUNNER_TEMP/llvm.tar.xz"
       - name: Optimize with BOLT
-        if: ${{ matrix.platform.target == 'x86_64-unknown-linux-gnu' && env.PGO == 'true' }}
+        if: ${{ matrix.platform.bolt && env.PGO == 'true' }}
         run: |
           # maturin's container leaves the wheel owned by root.
           sudo chown -R "$(id -u):$(id -g)" pyrefly/dist
@@ -446,6 +449,7 @@ jobs:
             os: ubuntu-latest
             arch: x64
             pgo: true
+            bolt: true
           # The instrumented build cannot compile jemalloc for ARM64 musl with
           # Ubuntu's musl toolchain, so this target stays cross-compiled.
           - target: aarch64-unknown-linux-musl
@@ -497,8 +501,13 @@ jobs:
           rustup component add llvm-tools
           python scripts/pgo.py pgo --train-only --target ${{ matrix.platform.target }}
           echo "toolchain=$(rustc --version | cut -d ' ' -f2)" >> "$GITHUB_OUTPUT"
+          # BOLT needs the relocations to rewrite the executable. It hooks its
+          # profile writer into DT_INIT and DT_FINI if the executable has them,
+          # but musl's static startup calls `_init` and `_fini` directly, so the
+          # linker leaves those out and BOLT hooks `.init_array` and
+          # `.fini_array`, which musl runs.
           {
-            echo "RUSTFLAGS=-Cprofile-use=$GITHUB_WORKSPACE/target/pgo/pyrefly.profdata -Cllvm-args=--profile-summary-hot-count=$(cat target/pgo/pyrefly.profile-hot-count)"
+            echo "RUSTFLAGS=-Cprofile-use=$GITHUB_WORKSPACE/target/pgo/pyrefly.profdata -Cllvm-args=--profile-summary-hot-count=$(cat target/pgo/pyrefly.profile-hot-count) -Clink-arg=-Wl,--emit-relocs -Clink-arg=-Wl,-init=__no_dt_init -Clink-arg=-Wl,-fini=__no_dt_fini"
             echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target"
           } >> "$GITHUB_ENV"
       - name: Build wheels
@@ -513,6 +522,34 @@ jobs:
       - name: Check PGO profile
         if: ${{ env.PGO == 'true' }}
         run: python scripts/pgo.py check --binary "target/${{ matrix.platform.target }}/release/pyrefly"
+      - name: Restore BOLT
+        id: bolt-cache
+        if: ${{ matrix.platform.bolt && env.PGO == 'true' }}
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/bolt
+          key: bolt-${{ env.BOLT_LLVM_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Download BOLT
+        if: ${{ matrix.platform.bolt && env.PGO == 'true' && steps.bolt-cache.outputs.cache-hit != 'true' }}
+        run: |
+          # The release archive is 2 GB, so only BOLT's files are kept, and cached.
+          name="LLVM-${BOLT_LLVM_VERSION}-Linux-X64"
+          curl --fail --location --retry 3 -o "$RUNNER_TEMP/llvm.tar.xz" \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${BOLT_LLVM_VERSION}/${name}.tar.xz"
+          echo "${BOLT_LLVM_SHA256}  $RUNNER_TEMP/llvm.tar.xz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/bolt"
+          tar -xJf "$RUNNER_TEMP/llvm.tar.xz" -C "$RUNNER_TEMP/bolt" --strip-components=1 \
+            "$name/bin/llvm-bolt" "$name/bin/merge-fdata" "$name/lib/libbolt_rt_instr.a"
+          rm "$RUNNER_TEMP/llvm.tar.xz"
+      - name: Optimize with BOLT
+        if: ${{ matrix.platform.bolt && env.PGO == 'true' }}
+        run: |
+          # maturin's container leaves the wheel owned by root.
+          sudo chown -R "$(id -u):$(id -g)" pyrefly/dist
+          python scripts/pgo.py bolt \
+            --llvm-dir "$RUNNER_TEMP/bolt" \
+            --binary "target/${{ matrix.platform.target }}/release/pyrefly" \
+            --wheel pyrefly/dist/"${PACKAGE_NAME}"-*.whl
       - name: Test wheel
         if: ${{ matrix.platform.target == 'x86_64-unknown-linux-musl' }}
         run: |
