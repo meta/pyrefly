@@ -701,6 +701,12 @@ int32: Any
 int64: Any
 uint8: Any
 uint16: dtype
+uint32: dtype
+uint64: dtype
+float8_e4m3fn: dtype
+float8_e5m2: dtype
+float8_e8m0fnu: dtype
+float4_e2m1fn_x2: dtype
 int: Any
 bool: Any
 contiguous_format: memory_format
@@ -4353,12 +4359,6 @@ int64: Any = ...  # torch.int64 dtype constant
 
 pi: builtins.float = ...  # torch.pi value constant
 inf: builtins.float = ...  # torch.inf value constant
-
-# dtype type (for type annotations)
-class dtype:
-    """PyTorch data type."""
-
-    ...
 
 float: dtype = ...
 complex64: dtype = ...
