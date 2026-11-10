@@ -103,7 +103,11 @@ pub enum AtomicNarrowOp {
     AnyElementIsNone,
     /// No element of the subject is `None`.
     NoElementIsNone,
-    /// Narrow an original tuple element using the evaluated match subject.
+    /// Narrow an original variable through an element of the evaluated match subject.
+    /// For `match (a, b):`, an anonymous binding `$S` stores the evaluated tuple.
+    /// Each case narrows `$S` with its pattern and exclusions from previous cases.
+    /// `MatchSubjectElement($S, 1)` narrows the original `b` to that case's `$S[1]` type.
+    /// The binding index identifies the narrowed `$S` for the current case.
     MatchSubjectElement(Idx<Key>, usize),
     /// Narrowing for sequence pattern matching - confirms the subject is a sequence type
     IsSequence,

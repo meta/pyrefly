@@ -8,6 +8,7 @@
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::nesting_context::NestingContext;
+use pyrefly_python::short_identifier::ShortIdentifier;
 use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprNumberLiteral;
@@ -68,7 +69,8 @@ enum MatchSubject {
     /// subject for branch narrowing while diagnostics still point at the source expression.
     Synthetic { display_subject_range: TextRange },
     /// Per-element subjects from a fixed-arity tuple match (e.g., `match x, y:`).
-    Tuple(Vec<Option<NarrowingSubject>>),
+    /// Each element retains the value binding from its evaluation to detect later writes.
+    Tuple(Vec<Option<(NarrowingSubject, Idx<Key>)>>),
 }
 
 impl MatchSubject {
@@ -208,7 +210,12 @@ impl<'a> BindingsBuilder<'a> {
         if let MatchSubject::Tuple(subjects) = match_subject {
             let mut ops = NarrowOps::new();
             for (index, subject) in subjects.iter().enumerate() {
-                if let Some(subject) = subject {
+                if let Some((subject, value_idx)) = subject
+                    && self
+                        .scopes
+                        .binding_idx_for_name(subject.name())
+                        .is_some_and(|(idx, _)| idx == *value_idx)
+                {
                     let op = NarrowOp::Atomic(
                         None,
                         AtomicNarrowOp::MatchSubjectElement(subject_idx, index),
@@ -216,11 +223,7 @@ impl<'a> BindingsBuilder<'a> {
                     ops.and_for_subject(subject, op.for_subject(subject), range);
                 }
             }
-            self.bind_narrow_ops(
-                &ops,
-                NarrowUseLocation::Span(range),
-                &Usage::NonPinningValue(None),
-            );
+            self.bind_narrow_ops(&ops, NarrowUseLocation::Span(range));
         }
     }
 
@@ -331,8 +334,7 @@ impl<'a> BindingsBuilder<'a> {
             }
             Pattern::MatchAs(p) => {
                 self.narrow_tuple_match_subject(&match_subject, subject_idx, p.range());
-                // If there's no name for this pattern, refine the variable being matched
-                // If there is a new name, refine that instead
+                // An alias needs its own narrows. Tuple elements also retain their original subjects.
                 let original_subject = match_subject.clone();
                 let alias_name = p
                     .name
@@ -348,11 +350,23 @@ impl<'a> BindingsBuilder<'a> {
                         Binding::PatternCapture(subject_idx),
                         FlowStyle::Other,
                     );
-                    subject = MatchSubject::Single(NarrowingSubject::Name(name.id.clone()));
+                    if !matches!(subject, MatchSubject::Tuple(_)) {
+                        subject = MatchSubject::Single(NarrowingSubject::Name(name.id.clone()));
+                    }
                 };
                 if let Some(pattern) = p.pattern {
                     let mut narrow_ops = self.bind_pattern(subject, *pattern, subject_idx);
-                    if let Some(alias_name) = &alias_name
+                    if matches!(original_subject, MatchSubject::Tuple(_))
+                        && let Some(alias_name) = &alias_name
+                        && let Some((op, range)) = narrow_ops.subject.clone()
+                    {
+                        // The alias and the evaluated tuple share the same pattern constraints.
+                        narrow_ops.scope.and_for_subject(
+                            &NarrowingSubject::Name(alias_name.clone()),
+                            op,
+                            range,
+                        );
+                    } else if let Some(alias_name) = &alias_name
                         && let Some((alias_op, range)) = narrow_ops.scope.0.get(alias_name).cloned()
                     {
                         if let Some(original_subject) = original_subject.as_single()
@@ -567,7 +581,14 @@ impl<'a> BindingsBuilder<'a> {
                                         i
                                     };
                                     match subjects.get(tuple_idx) {
-                                        Some(Some(s)) => MatchSubject::Single(s.clone()),
+                                        Some(Some((s, value_idx)))
+                                            if self
+                                                .scopes
+                                                .binding_idx_for_name(s.name())
+                                                .is_some_and(|(idx, _)| idx == *value_idx) =>
+                                        {
+                                            MatchSubject::Single(s.clone())
+                                        }
                                         _ => MatchSubject::None,
                                     }
                                 }
@@ -917,7 +938,31 @@ impl<'a> BindingsBuilder<'a> {
                 tuple_expr
                     .elts
                     .iter()
-                    .map(|elt| expr_to_subjects(elt).first().cloned())
+                    .map(|elt| {
+                        let subject = expr_to_subjects(elt).into_iter().next()?;
+                        let mut base = elt;
+                        let value_idx = loop {
+                            match base {
+                                Expr::Name(name) => {
+                                    break self
+                                        .value_idx_at_name_read(&ShortIdentifier::expr_name(name));
+                                }
+                                Expr::Named(named) => {
+                                    let Expr::Name(name) = &*named.target else {
+                                        break None;
+                                    };
+                                    break self.promised_idx(&Key::Definition(
+                                        ShortIdentifier::expr_name(name),
+                                    ));
+                                }
+                                Expr::Attribute(attr) => base = &attr.value,
+                                Expr::Subscript(subscript) => base = &subscript.value,
+                                Expr::Call(call) => base = &call.func,
+                                _ => break None,
+                            }
+                        }?;
+                        Some((subject, value_idx))
+                    })
                     .collect(),
             )
         } else {

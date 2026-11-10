@@ -2099,6 +2099,87 @@ def example(a: list[int] | None, b: list[int] | None) -> list[int]:
 );
 
 testcase!(
+    test_match_tuple_none_cases_alias,
+    r#"
+from typing import assert_type
+
+def f(a: str | None, b: int | None) -> str:
+    match a, b:
+        case None, None:
+            return ""
+        case (_, None) as pair:
+            assert_type(a, str)
+            assert_type(b, None)
+            assert_type(pair, tuple[str, None])
+            return a.upper()
+        case _:
+            assert_type(b, int)
+            return ""
+
+def all_cases(a: str | None, b: int | None) -> None:
+    match a, b:
+        case (None, None) as pair:
+            assert_type(pair, tuple[None, None])
+        case ((_, None) as pair) as other:
+            assert_type(a, str)
+            assert_type(b, None)
+            assert_type(pair, tuple[str, None])
+            assert_type(other, tuple[str, None])
+        case (None, _) as pair:
+            assert_type(b, int)
+            assert_type(pair, tuple[None, int])
+        case _ as pair:
+            assert_type(a, str)
+            assert_type(b, int)
+            assert_type(pair, tuple[str, int])
+
+def shadowed(a: object, b: int | None) -> None:
+    match a, b:
+        case (_, None) as a:
+            assert_type(a, tuple[object, None])
+            assert_type(b, None)
+"#,
+);
+
+testcase!(
+    test_match_tuple_subject_walrus_rebinding,
+    r#"
+from typing import assert_type
+
+def f(a: str | None) -> None:
+    match a, (a := None):
+        case None, None:
+            return
+        case _:
+            assert_type(a, None)
+            a.upper()  # E: Object of class `NoneType` has no attribute `upper`
+
+def positive_pattern(a: str | None) -> None:
+    match a, (a := None):
+        case str(), None:
+            assert_type(a, None)
+        case _:
+            pass
+
+def repeated_walrus(a: str | None) -> None:
+    match (a := "old"), (a := None):
+        case str(), None:
+            assert_type(a, None)
+        case _:
+            pass
+
+def valid_walrus(a: str | None, b: int | None) -> None:
+    match (a := a), b:
+        case None, None:
+            return
+        case _, None:
+            assert_type(a, str)
+        case _:
+            pass
+"#,
+);
+
+testcase!(
     test_match_tuple_none_cases_subject_rebinding,
     r#"
 from typing import assert_type
