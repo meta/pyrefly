@@ -1886,3 +1886,104 @@ def test_object_and_any(
     IntColor("1")  # E: Argument `Literal['1']` is not assignable to parameter `value` with type `IntColor | complex | float | int`
 "#,
 );
+
+// CPython converts scalar creation arguments into dataclass data-mixin values.
+testcase!(
+    bug = "Scalar dataclass creation values are mistaken for lookup values",
+    test_enum_lookup_scalar_dataclass_mixin,
+    r#"
+from dataclasses import dataclass
+from enum import Enum
+
+@dataclass
+class Data:
+    n: int
+
+class E(Data, Enum):
+    A = 1
+
+assert E(Data(1)) is E.A  # E: Argument `Data` is not assignable to parameter `value` with type `E | complex | float | int`
+assert E(value=Data(1)) is E.A  # E: Argument `Data` is not assignable to parameter `value` with type `E | complex | float | int`
+"#,
+);
+
+// Unhashable lookups compare against the value rewritten by the initializer.
+testcase!(
+    bug = "Initializer creation values are mistaken for lookup values",
+    test_enum_lookup_initializer_rewrites_value,
+    r#"
+from enum import Enum
+
+class Base(Enum):
+    def __init__(self, raw: str) -> None:
+        self._value_ = raw.encode()
+
+class E(Base):
+    A = "a"
+
+assert E(bytearray(b"a")) is E.A  # E: Argument `bytearray` is not assignable to parameter `value` with type `E | str`
+assert E(value=bytearray(b"a")) is E.A  # E: Argument `bytearray` is not assignable to parameter `value` with type `E | str`
+"#,
+);
+
+testcase!(
+    bug = "Partially compatible inputs are rejected at validation boundaries",
+    test_enum_lookup_partial_union_validation,
+    r#"
+from enum import Enum
+
+class E(Enum):
+    A = "a"
+
+def validate(value: str | None) -> E | None:
+    try:
+        return E(value)  # E: Argument `str | None` is not assignable to parameter `value` with type `E | str`
+    except ValueError:
+        return None
+
+def bounded[T: str | None](value: T) -> E | None:
+    try:
+        return E(value)  # E: Argument `T` is not assignable to parameter `value` with type `E | str`
+    except ValueError:
+        return None
+
+assert validate("a") is E.A
+assert validate(None) is None
+"#,
+);
+
+testcase!(
+    bug = "Nominal argument types do not capture custom equality",
+    test_enum_lookup_unmodeled_argument_equality,
+    r#"
+from enum import Enum
+
+class E(Enum):
+    A = 1
+
+class EqualToOne:
+    def __eq__(self, other: object) -> bool:
+        return other == 1
+
+assert E(EqualToOne()) is E.A  # E: Argument `EqualToOne` is not assignable to parameter `value` with type `E | complex | float | int`
+"#,
+);
+
+testcase!(
+    test_enum_lookup_disjoint_primitive_arguments,
+    r#"
+from enum import Enum
+from typing import Literal, assert_type
+
+raw: Literal["a"] = "a"
+class E(Enum):
+    A = raw
+
+assert_type(E.A.value, Literal["a"])
+
+def incompatible(value: int | None) -> E:
+    return E(value)  # E: Argument `int | None` is not assignable to parameter `value` with type `E | str`
+
+E(False)  # E: Argument `Literal[False]` is not assignable to parameter `value` with type `E | str`
+"#,
+);
