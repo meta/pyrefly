@@ -223,3 +223,24 @@ def test_shift_dtype_promotion_and_scalar_result() -> None:
     assert_shape(scalar.shape, IntTuple, runtime=())
     assert promoted.dtype == np.dtype(np.int64)
     assert isinstance(scalar, np.uint64)
+
+
+def test_array_arithmetic_with_numeric_lists() -> None:
+    values = np.ones(int("3"))
+    counts = np.full(3, 2, dtype=np.int64)
+    column = [[0.1], [0.2]]
+
+    added = values + column  # E: `+` is not supported
+    reflected = column + values  # E: `+` is not supported
+    subtracted = values - [1, 2, 3]  # E: `-` is not supported
+    divided = values / [[1.0], [2.0]]  # E: `/` is not supported
+    powered = counts ** [2, 2, 2]  # E: `**` is not supported
+    multiplied = values * [1.0, 2.0, 3.0]
+    assert_type(multiplied, list[float])
+    assert_shape(counts.shape, (3,))
+    assert added.shape == reflected.shape == divided.shape == (2, 3)
+    assert subtracted.shape == (3,)
+    assert powered.dtype == np.dtype(np.int64)
+    assert isinstance(multiplied, np.ndarray)
+    with assert_raises(TypeError):
+        values + ["a", "b", "c"]  # E: `+` is not supported
