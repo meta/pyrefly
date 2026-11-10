@@ -87,9 +87,18 @@ def test_ndarray_ordering_and_flattening_methods() -> None:
     assert_shape(a.argpartition(1).shape, (2, 3))
     assert_type(a.argsort(None), np.ndarray[[int], np.dtype[np.intp]])
     assert_type(a.argpartition(1, None), np.ndarray[[int], np.dtype[np.intp]])
-    assert_type(a.flatten(), np.ndarray[[int], np.dtype[np.float64]])
-    assert_type(a.ravel(), np.ndarray[[int], np.dtype[np.float64]])
+    assert_type(a.flatten(), np.ndarray[[6], np.dtype[np.float64]])
+    assert_type(a.ravel(), np.ndarray[[6], np.dtype[np.float64]])
+    assert_shape(a.flatten().shape, (6,))
+    assert_shape(a.ravel().shape, (6,))
     assert_shape(a.shape, (2, 3))
+
+
+def check_ndarray_flatten_and_ravel_symbolic[N: IntVar, M: IntVar](
+    a: np.ndarray[[N, M], np.dtype[np.float64]],
+) -> None:
+    assert_type(a.flatten(), np.ndarray[[N * M], np.dtype[np.float64]])
+    assert_type(a.ravel(), np.ndarray[[N * M], np.dtype[np.float64]])
 
 
 def test_ndarray_resize() -> None:
