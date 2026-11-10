@@ -28,6 +28,53 @@ def check(value: Literal[1, "ok", None]) -> None:
 );
 
 testcase!(
+    bug = "Invalid compound Literal arguments erase valid components",
+    test_literal_partial_recovery,
+    r#"
+from enum import Enum
+from typing import Annotated, Any, Literal, TypeAlias, assert_type
+
+class E(Enum):
+    A = 1
+    B = 2
+
+Legacy: TypeAlias = Literal[1, 1.5, 3]  # E: Invalid literal expression
+type Scoped = Literal["ok", 1.5, None]  # E: Invalid literal expression
+AnnotatedLegacy: TypeAlias = Annotated[Legacy, "metadata"]
+
+def flat(value: Literal[1, 1.5, 3]) -> None:  # E: Invalid literal expression
+    assert_type(value, Any)
+
+def nested(value: Literal[Literal[1, 1.5], 3]) -> None:  # E: Invalid literal expression
+    assert_type(value, Any)
+
+def legacy(value: Literal[Legacy, "extra"]) -> None:  # E: Invalid type inside literal
+    assert_type(value, Any)
+
+def scoped(value: Literal[Scoped, 4]) -> None:  # E: Invalid type inside literal
+    assert_type(value, Any)
+
+def annotated(value: Literal[AnnotatedLegacy, 4]) -> None:  # E: Invalid type inside literal
+    assert_type(value, Any)
+
+def explicit_any(value: Literal[1, Any, 3]) -> None:  # E: Invalid type inside literal
+    assert_type(value, Any)
+
+def enum_member(value: Literal[E.A, E.invalid, "ok"]) -> None:  # E: not a valid enum member
+    assert_type(value, Any)
+
+def nonliteral_type(value: Literal[list[int]]) -> None:  # E: Invalid literal expression
+    assert_type(value, Any)
+
+def all_invalid(value: Literal[1.5, int]) -> None:  # E: Invalid literal expression  # E: Invalid type inside literal
+    assert_type(value, Any)
+
+def valid(value: Literal[Literal[1, 3], E.A, "ok", None]) -> None:
+    assert_type(value, Literal[1, 3, E.A, "ok"] | None)
+"#,
+);
+
+testcase!(
     test_fstring_literal,
     r#"
 from typing import assert_type, Literal, LiteralString
