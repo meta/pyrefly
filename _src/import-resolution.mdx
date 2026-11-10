@@ -39,10 +39,16 @@ more information on the contents of the search path.
 4. Try to import from the site package path. See the
 [site package path section](#site-packages-path) for more information on the contents
 of the site package path.
-5. If [`enable-fallback-search-path`](configuration.mdx#enable-fallback-search-path) is
+5. If `--module-names` is given, look the module up in that file, a JSON object mapping file
+paths to module names, for files that a build system imports under a name their path doesn't
+give. When several files have the name, Pyrefly picks the one sharing the longest path prefix
+with the importing file. The listed files are also checked under these names. Because this
+comes after `typeshed` and the site package path, a file given a stdlib or installed module's
+name doesn't shadow that module.
+6. If [`enable-fallback-search-path`](configuration.mdx#enable-fallback-search-path) is
 set, try to import relative to the directories containing the importing file, skipping
 directories that belong to a regular package. This is a last resort: it only applies when nothing above found a match, not even a namespace package.
-6. Return an import error.
+7. Return an import error.
 
 When searching for a match in one of the above groups, Pyrefly performs the following process
 over two passes, one looking for stub *packages*, and the other looking for source *packages*. See
