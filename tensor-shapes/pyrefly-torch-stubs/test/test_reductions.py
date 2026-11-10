@@ -14,19 +14,9 @@ from torch import Tensor
 
 def test_sum_dtype_preserves_reduced_shape() -> None:
     tensor = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
-    reduced = tensor.sum(
-        dim=-1,
-        dtype=torch.float64,  # E: Unexpected keyword argument `dtype`
-    )
-    kept = tensor.sum(
-        dim=(1, 2),
-        keepdim=True,
-        dtype=torch.float64,  # E: Unexpected keyword argument `dtype`
-    )
-    scalar = torch.sum(
-        tensor,
-        dtype=torch.float64,  # E: Unexpected keyword argument `dtype`
-    )
+    reduced = tensor.sum(dim=-1, dtype=torch.float64)
+    kept = tensor.sum(dim=(1, 2), keepdim=True, dtype=torch.float64)
+    scalar = torch.sum(tensor, dtype=torch.float64)
     assert_shape(reduced.shape, (2, 3))
     assert_shape(kept.shape, (2, 1, 1))
     assert_shape(scalar.shape, ())
@@ -55,8 +45,8 @@ def test_log_softmax_preserves_shape() -> None:
     tensor = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
     functional = torch.log_softmax(tensor, dim=1, dtype=torch.float64)
     method = tensor.log_softmax(dim=1, dtype=torch.float64)
-    assert_shape(functional.shape, IntTuple, runtime=(2, 3, 4))
-    assert_shape(method.shape, IntTuple, runtime=(2, 3, 4))
+    assert_shape(functional.shape, (2, 3, 4))
+    assert_shape(method.shape, (2, 3, 4))
     assert functional.dtype == method.dtype == torch.float64
     assert torch.equal(functional, method)
 

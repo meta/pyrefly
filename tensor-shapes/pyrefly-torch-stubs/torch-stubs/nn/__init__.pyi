@@ -180,7 +180,7 @@ class Module:
     ) -> dict[str, Tensor]: ...
     def load_state_dict(
         self,
-        state_dict: dict[str, Tensor],
+        state_dict: Mapping[str, Any],
         strict: bool = True,
         assign: bool = False,
     ) -> Any: ...

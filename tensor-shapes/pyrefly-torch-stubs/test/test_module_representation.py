@@ -44,7 +44,7 @@ def test_extra_repr_override() -> None:
 
 def test_module_load_state_dict_mapping() -> None:
     model = torch.nn.Linear(3, 2)
-    result = model.load_state_dict(MappingProxyType(model.state_dict()))  # E:
+    result = model.load_state_dict(MappingProxyType(model.state_dict()))
     assert_shape(model.weight.shape, (2, 3))
     assert result.missing_keys == result.unexpected_keys == []
 
@@ -62,7 +62,7 @@ def test_module_load_state_dict_mapping() -> None:
 
     extra = ExtraState()
     state = MappingProxyType({"payload": torch.ones(2), "_extra_state": "restored"})
-    extra.load_state_dict(state)  # E:
+    extra.load_state_dict(state)
     assert_shape(extra.get_buffer("payload").shape, IntTuple, runtime=(2,))
     assert extra.extra == "restored"
     assert torch.equal(extra.get_buffer("payload"), torch.ones(2))

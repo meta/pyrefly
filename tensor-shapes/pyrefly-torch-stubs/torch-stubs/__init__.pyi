@@ -401,7 +401,6 @@ from torch._C._VariableFunctions import (
     log2_ as log2_,
     log10_ as log10_,
     log_ as log_,
-    log_softmax as log_softmax,
     logaddexp as logaddexp,
     logaddexp2 as logaddexp2,
     logcumsumexp as logcumsumexp,
@@ -434,7 +433,6 @@ from torch._C._VariableFunctions import (
     msort as msort,
     multiply as multiply,
     mvlgamma as mvlgamma,
-    nan_to_num as nan_to_num,
     nan_to_num_ as nan_to_num_,
     nanmean as nanmean,
     nanmedian as nanmedian,
@@ -1133,6 +1131,17 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     # These create new tensors; shape depends on size args, not self's shape.
 
     @overload
+    def new_zeros[NewShape: IntTuple](
+        self,
+        size: NewShape,
+        *,
+        dtype: Any = None,
+        layout: Any = None,
+        device: Any = None,
+        requires_grad: builtins.bool = False,
+        pin_memory: builtins.bool = False,
+    ) -> Tensor[NewShape]: ...
+    @overload
     def new_zeros(
         self,
         size: Sequence[builtins.int],
@@ -1160,6 +1169,17 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Create zero-filled tensor with same dtype/device."""
         ...
 
+    @overload
+    def new_ones[NewShape: IntTuple](
+        self,
+        size: NewShape,
+        *,
+        dtype: Any = None,
+        layout: Any = None,
+        device: Any = None,
+        requires_grad: builtins.bool = False,
+        pin_memory: builtins.bool = False,
+    ) -> Tensor[NewShape]: ...
     @overload
     def new_ones(
         self,
@@ -1196,6 +1216,15 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         ...
 
     @overload
+    def new_empty[NewShape: IntTuple](
+        self,
+        size: NewShape,
+        *,
+        dtype: Any = None,
+        device: Any = None,
+        requires_grad: builtins.bool = False,
+    ) -> Tensor[NewShape]: ...
+    @overload
     def new_empty(
         self,
         size: Sequence[builtins.int],
@@ -1216,6 +1245,16 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Create uninitialized tensor with same dtype/device."""
         ...
 
+    @overload
+    def new_full[NewShape: IntTuple](
+        self,
+        size: NewShape,
+        fill_value: _Scalar,
+        dtype: Any = None,
+        device: Any = None,
+        requires_grad: builtins.bool = False,
+    ) -> Tensor[NewShape]: ...
+    @overload
     def new_full(
         self,
         size: Sequence[builtins.int],
@@ -1503,7 +1542,11 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
         Keepdim: Flag[builtins.bool],
     ](
-        self: Tensor[Shape], dim: Dim = None, keepdim: Keepdim = False
+        self: Tensor[Shape],
+        dim: Dim = None,
+        keepdim: Keepdim = False,
+        *,
+        dtype: Any = None,
     ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
         """Sum along dimension(s). Shape inference via meta-shape: torch.Tensor.sum"""
         ...
@@ -1742,6 +1785,14 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Top k elements. Returns (values, indices). Shape inference via meta-shape: torch.Tensor.topk"""
         ...
 
+    def argsort(
+        self,
+        dim: builtins.int = -1,
+        descending: builtins.bool = False,
+        stable: builtins.bool = False,
+    ) -> Self: ...
+    def log_softmax(self, dim: builtins.int, dtype: Any = None) -> Self: ...
+    def logit(self, eps: builtins.float | None = None) -> Self: ...
     def sort[Shape: IntTuple](
         self: Tensor[Shape],
         dim: builtins.int = -1,
@@ -2734,7 +2785,11 @@ def sum[
     Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
     Keepdim: Flag[builtins.bool],
 ](
-    input: Tensor[Shape], dim: Dim = None, keepdim: Keepdim = False
+    input: Tensor[Shape],
+    dim: Dim = None,
+    keepdim: Keepdim = False,
+    *,
+    dtype: Any = None,
 ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
     """Sum along dimension(s). Shape inference via meta-shape: torch.sum"""
     ...
@@ -3430,6 +3485,18 @@ def std_mean[
     """Standard deviation and mean. Returns (std, mean). Shape inference via meta-shape: torch.std_mean"""
     ...
 
+def log_softmax[Shape: IntTuple](
+    input: Tensor[Shape], dim: builtins.int, dtype: Any = None
+) -> Tensor[Shape]: ...
+def nan_to_num[Shape: IntTuple](
+    input: Tensor[Shape],
+    nan: builtins.float = 0.0,
+    posinf: builtins.float | None = None,
+    neginf: builtins.float | None = None,
+    *,
+    out: Tensor | None = None,
+) -> Tensor[Shape]: ...
+
 # ==== Phase 1.3: Tensor Creation Operations ====
 
 def zeros_like[Shape: IntTuple](
@@ -3457,7 +3524,14 @@ def ones_like[Shape: IntTuple](
     ...
 
 def full_like[Shape: IntTuple](
-    input: Tensor[Shape], fill_value: builtins.float
+    input: Tensor[Shape],
+    fill_value: builtins.float,
+    *,
+    dtype: Any = None,
+    layout: Any = None,
+    device: Any = None,
+    requires_grad: builtins.bool = False,
+    memory_format: Any = None,
 ) -> Tensor[Shape]:
     """Create tensor with same shape filled with value. Shape inference via generic fixture signature."""
     ...
@@ -3494,13 +3568,25 @@ def triu[Shape: IntTuple](input: Tensor[Shape], diagonal: int = 0) -> Tensor[Sha
     ...
 
 def tril_indices(
-    row: builtins.int, col: builtins.int, offset: builtins.int = 0
+    row: builtins.int,
+    col: builtins.int,
+    offset: builtins.int = 0,
+    *,
+    dtype: Any = None,
+    device: Any = None,
+    layout: Any = None,
 ) -> Tensor[[2, Any]]:
     """Indices of the lower triangular part. The count depends on the argument values."""
     ...
 
 def triu_indices(
-    row: builtins.int, col: builtins.int, offset: builtins.int = 0
+    row: builtins.int,
+    col: builtins.int,
+    offset: builtins.int = 0,
+    *,
+    dtype: Any = None,
+    device: Any = None,
+    layout: Any = None,
 ) -> Tensor[[2, Any]]:
     """Indices of the upper triangular part. The count depends on the argument values."""
     ...

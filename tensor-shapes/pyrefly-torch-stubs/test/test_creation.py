@@ -91,7 +91,7 @@ def test_generator_and_tensor_factories() -> None:
         IntTuple,
         runtime=(2, 3, 4),
     )
-    assert_shape(tensor.new_ones((4, 5)).shape, IntTuple, runtime=(4, 5))
+    assert_shape(tensor.new_ones((4, 5)).shape, (4, 5))
     assert_shape(torch.as_tensor([1.0, 2.0]).shape, IntTuple, runtime=(2,))
     assert_shape(torch.from_numpy(tensor.numpy()).shape, (2, 3))
 
@@ -113,28 +113,24 @@ def test_new_factories_accept_list_sizes() -> None:
 
 def test_tuple_factory_shapes() -> None:
     tensor = torch.zeros((2, 3))
-    assert_shape(tensor.new_zeros((2, 3, 4)).shape, IntTuple, runtime=(2, 3, 4))
-    assert_shape(tensor.new_ones((0, 3)).shape, IntTuple, runtime=(0, 3))
-    assert_shape(tensor.new_empty(()).shape, IntTuple, runtime=())
-    assert_shape(tensor.new_full((2, 3), 1.0).shape, IntTuple, runtime=(2, 3))
+    assert_shape(tensor.new_zeros((2, 3, 4)).shape, (2, 3, 4))
+    assert_shape(tensor.new_ones((0, 3)).shape, (0, 3))
+    assert_shape(tensor.new_empty(()).shape, ())
+    assert_shape(tensor.new_full((2, 3), 1.0).shape, (2, 3))
 
 
 def test_full_like_options() -> None:
     tensor = torch.zeros((2, 3))
-    typed = torch.full_like(
-        tensor,
-        1.0,
-        dtype=torch.float64,  # E: Unexpected keyword argument `dtype`
-    )
+    typed = torch.full_like(tensor, 1.0, dtype=torch.float64)
     assert_shape(typed.shape, (2, 3))
     assert typed.dtype == torch.float64
     configured = torch.full_like(
         tensor,
         2.0,
-        device="cpu",  # E: Unexpected keyword argument `device`
-        layout=torch.strided,  # E: Unexpected keyword argument `layout`
-        requires_grad=True,  # E: Unexpected keyword argument `requires_grad`
-        memory_format=torch.preserve_format,  # E: Unexpected keyword argument `memory_format`
+        device="cpu",
+        layout=torch.strided,
+        requires_grad=True,
+        memory_format=torch.preserve_format,
     )
     assert_shape(configured.shape, (2, 3))
     assert configured.requires_grad
@@ -144,17 +140,17 @@ def test_triangular_indices_options() -> None:
     lower = torch.tril_indices(
         3,
         4,
-        dtype=torch.int64,  # E: Unexpected keyword argument `dtype`
-        device="cpu",  # E: Unexpected keyword argument `device`
-        layout=torch.strided,  # E: Unexpected keyword argument `layout`
+        dtype=torch.int64,
+        device="cpu",
+        layout=torch.strided,
     )
     upper = torch.triu_indices(
         3,
         4,
         1,
-        dtype=torch.int64,  # E: Unexpected keyword argument `dtype`
-        device="cpu",  # E: Unexpected keyword argument `device`
-        layout=torch.strided,  # E: Unexpected keyword argument `layout`
+        dtype=torch.int64,
+        device="cpu",
+        layout=torch.strided,
     )
     assert_shape(lower.shape, (2, int), runtime=(2, 6))
     assert_shape(upper.shape, (2, int), runtime=(2, 6))
