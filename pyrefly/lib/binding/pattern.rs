@@ -70,7 +70,10 @@ enum MatchSubject {
     Synthetic { display_subject_range: TextRange },
     /// Per-element subjects from a fixed-arity tuple match (e.g., `match x, y:`).
     /// Each element retains the value binding from its evaluation to detect later writes.
-    Tuple(Vec<Option<(NarrowingSubject, Idx<Key>)>>),
+    Tuple {
+        elements: Vec<Option<(NarrowingSubject, Idx<Key>)>>,
+        alias: Option<NarrowingSubject>,
+    },
 }
 
 impl MatchSubject {
@@ -78,6 +81,7 @@ impl MatchSubject {
     fn as_single(&self) -> Option<&NarrowingSubject> {
         match self {
             MatchSubject::Single(s) => Some(s),
+            MatchSubject::Tuple { alias, .. } => alias.as_ref(),
             _ => Option::None,
         }
     }
@@ -90,20 +94,21 @@ impl MatchSubject {
     fn has_local_subject(&self) -> bool {
         matches!(
             self,
-            MatchSubject::Synthetic { .. } | MatchSubject::Tuple(_)
+            MatchSubject::Synthetic { .. } | MatchSubject::Tuple { .. }
         )
     }
 
     fn subject_narrow_op(&self, op: NarrowOp, range: TextRange) -> PatternNarrowOps {
+        let mut narrow_ops = PatternNarrowOps::new();
         if let Some(subject) = self.as_single() {
-            let mut scope = NarrowOps::new();
-            scope.and_for_subject(subject, op.for_subject(subject), range);
-            PatternNarrowOps::from_scope(scope)
-        } else if self.has_local_subject() {
-            PatternNarrowOps::from_subject(op, range)
-        } else {
-            PatternNarrowOps::new()
+            narrow_ops
+                .scope
+                .and_for_subject(subject, op.for_subject(subject), range);
         }
+        if self.has_local_subject() {
+            narrow_ops.and_subject(Some((op, range)));
+        }
+        narrow_ops
     }
 
     fn subject_range(&self, fallback: TextRange) -> TextRange {
@@ -144,14 +149,6 @@ impl PatternNarrowOps {
         Self {
             scope,
             subject: None,
-            body_only: NarrowOps::new(),
-        }
-    }
-
-    fn from_subject(op: NarrowOp, range: TextRange) -> Self {
-        Self {
-            scope: NarrowOps::new(),
-            subject: Some((op, range)),
             body_only: NarrowOps::new(),
         }
     }
@@ -207,7 +204,10 @@ impl<'a> BindingsBuilder<'a> {
         subject_idx: Idx<Key>,
         range: TextRange,
     ) {
-        if let MatchSubject::Tuple(subjects) = match_subject {
+        if let MatchSubject::Tuple {
+            elements: subjects, ..
+        } = match_subject
+        {
             let mut ops = NarrowOps::new();
             for (index, subject) in subjects.iter().enumerate() {
                 if let Some((subject, value_idx)) = subject
@@ -350,34 +350,65 @@ impl<'a> BindingsBuilder<'a> {
                         Binding::PatternCapture(subject_idx),
                         FlowStyle::Other,
                     );
-                    if !matches!(subject, MatchSubject::Tuple(_)) {
-                        subject = MatchSubject::Single(NarrowingSubject::Name(name.id.clone()));
+                    let alias_subject = NarrowingSubject::Name(name.id.clone());
+                    if let MatchSubject::Tuple { alias, .. } = &mut subject {
+                        *alias = Some(alias_subject);
+                    } else {
+                        subject = MatchSubject::Single(alias_subject);
                     }
                 };
                 if let Some(pattern) = p.pattern {
                     let mut narrow_ops = self.bind_pattern(subject, *pattern, subject_idx);
-                    if matches!(original_subject, MatchSubject::Tuple(_))
-                        && let Some(alias_name) = &alias_name
-                        && let Some((op, range)) = narrow_ops.subject.clone()
-                    {
-                        // The alias and the evaluated tuple share the same pattern constraints.
-                        narrow_ops.scope.and_for_subject(
-                            &NarrowingSubject::Name(alias_name.clone()),
-                            op,
-                            range,
-                        );
-                    } else if let Some(alias_name) = &alias_name
-                        && let Some((alias_op, range)) = narrow_ops.scope.0.get(alias_name).cloned()
-                    {
-                        if let Some(original_subject) = original_subject.as_single()
-                            && alias_name != original_subject.name()
+                    if let Some(alias_name) = &alias_name {
+                        if matches!(original_subject, MatchSubject::Tuple { .. })
+                            && let Some((op, range)) = narrow_ops.subject.clone()
                         {
                             narrow_ops.scope.and_for_subject(
-                                original_subject,
-                                alias_op.for_subject(original_subject),
+                                &NarrowingSubject::Name(alias_name.clone()),
+                                op,
                                 range,
                             );
-                        } else if original_subject.has_local_subject() {
+                        }
+                        for ops in [&mut narrow_ops.scope, &mut narrow_ops.body_only] {
+                            let Some((alias_op, range)) = ops.0.get(alias_name).cloned() else {
+                                continue;
+                            };
+                            if let MatchSubject::Tuple { elements, .. } = &original_subject {
+                                // Rebase alias facets onto each original element that is still live.
+                                for (index, element) in elements.iter().enumerate() {
+                                    if let Some((subject, value_idx)) = element
+                                        && self
+                                            .scopes
+                                            .binding_idx_for_name(subject.name())
+                                            .is_some_and(|(idx, _)| idx == *value_idx)
+                                        && let Some(op) = alias_op.rebase_onto_subject(
+                                            &NarrowingSubject::Name(alias_name.clone()).with_facet(
+                                                UnresolvedFacetKind::Index(index as i64),
+                                            ),
+                                        )
+                                    {
+                                        ops.and_for_subject(
+                                            subject,
+                                            op.for_subject(subject),
+                                            range,
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(original_subject) = original_subject.as_single()
+                                && alias_name != original_subject.name()
+                            {
+                                ops.and_for_subject(
+                                    original_subject,
+                                    alias_op.for_subject(original_subject),
+                                    range,
+                                );
+                            }
+                        }
+                        if original_subject.is_synthetic()
+                            && let Some((alias_op, range)) =
+                                narrow_ops.scope.0.get(alias_name).cloned()
+                        {
                             narrow_ops.and_subject(Some((alias_op, range)));
                         }
                     }
@@ -428,7 +459,7 @@ impl<'a> BindingsBuilder<'a> {
                     NarrowOp::Atomic(None, len_narrow_op.clone()),
                 ]);
                 let element_facet_ops: Vec<NarrowOp> = if num_patterns == num_non_star_patterns {
-                    let facet_origin = if matches!(match_subject, MatchSubject::Tuple(_)) {
+                    let facet_origin = if matches!(match_subject, MatchSubject::Tuple { .. }) {
                         FacetOrigin::MatchSubject
                     } else {
                         FacetOrigin::Direct
@@ -487,7 +518,8 @@ impl<'a> BindingsBuilder<'a> {
                         NarrowOp::Atomic(facet, len_narrow_op.clone()),
                     ]);
                     narrow_ops.scope.0.insert(name, (scope_narrow_op, x.range));
-                } else if match_subject.has_local_subject() {
+                }
+                if match_subject.has_local_subject() {
                     let subject_op = if all_subpatterns_irrefutable {
                         combined_narrow_op
                     } else if sequence_fully_characterized {
@@ -563,7 +595,10 @@ impl<'a> BindingsBuilder<'a> {
                                 // For tuple subjects, map pattern index to the
                                 // correct tuple element. After a star, index from
                                 // the end since the star absorbs variable elements.
-                                MatchSubject::Tuple(subjects) => {
+                                MatchSubject::Tuple {
+                                    elements: subjects,
+                                    alias,
+                                } => {
                                     let tuple_idx = if seen_star {
                                         match subjects.len().checked_sub(num_patterns - i) {
                                             Some(idx) => idx,
@@ -580,16 +615,22 @@ impl<'a> BindingsBuilder<'a> {
                                     } else {
                                         i
                                     };
-                                    match subjects.get(tuple_idx) {
-                                        Some(Some((s, value_idx)))
-                                            if self
-                                                .scopes
-                                                .binding_idx_for_name(s.name())
-                                                .is_some_and(|(idx, _)| idx == *value_idx) =>
-                                        {
-                                            MatchSubject::Single(s.clone())
+                                    if let Some(alias) = alias {
+                                        MatchSubject::Single(alias.with_facet(
+                                            UnresolvedFacetKind::Index(tuple_idx as i64),
+                                        ))
+                                    } else {
+                                        match subjects.get(tuple_idx) {
+                                            Some(Some((s, value_idx)))
+                                                if self
+                                                    .scopes
+                                                    .binding_idx_for_name(s.name())
+                                                    .is_some_and(|(idx, _)| idx == *value_idx) =>
+                                            {
+                                                MatchSubject::Single(s.clone())
+                                            }
+                                            _ => MatchSubject::None,
                                         }
-                                        _ => MatchSubject::None,
                                     }
                                 }
                                 MatchSubject::Single(subject) if !seen_star => {
@@ -934,8 +975,8 @@ impl<'a> BindingsBuilder<'a> {
                 .iter()
                 .all(|elt| !matches!(elt, Expr::Starred(_)))
         {
-            MatchSubject::Tuple(
-                tuple_expr
+            MatchSubject::Tuple {
+                elements: tuple_expr
                     .elts
                     .iter()
                     .map(|elt| {
@@ -964,7 +1005,8 @@ impl<'a> BindingsBuilder<'a> {
                         Some((subject, value_idx))
                     })
                     .collect(),
-            )
+                alias: None,
+            }
         } else {
             match expr_to_subjects(&x.subject).first() {
                 Some(s) => MatchSubject::Single(s.clone()),

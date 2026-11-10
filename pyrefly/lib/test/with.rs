@@ -98,6 +98,49 @@ def f(x: str | bytes, again: bool) -> None:
 }
 
 testcase!(
+    test_with_narrow_match_tuple_subject,
+    r#"
+from contextlib import nullcontext, suppress
+from typing import assert_type
+
+def risky() -> None:
+    raise ValueError("suppressed before the match")
+
+def suppression(a: str | None) -> None:
+    with suppress(ValueError):
+        risky()
+        match a, 0:
+            case str(), _:
+                pass
+            case _:
+                return
+    assert_type(a, str | None)
+    a.upper()  # E: Object of class `NoneType` has no attribute `upper`
+
+def suppression_alias(a: str | None) -> None:
+    with suppress(ValueError):
+        risky()
+        match a, 0:
+            case (str(), _) as pair:
+                pass
+            case _:
+                return
+    assert_type(a, str | None)
+    a.upper()  # E: Object of class `NoneType` has no attribute `upper`
+
+def no_suppression(a: str | None) -> None:
+    with nullcontext():
+        match a, 0:
+            case str(), _:
+                pass
+            case _:
+                return
+    assert_type(a, str)
+    a.upper()
+"#,
+);
+
+testcase!(
     bug = "Hard returns keep the BASE missing-return diagnostic",
     test_with_narrow_hard_return_baseline,
     r#"

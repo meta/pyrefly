@@ -2142,6 +2142,48 @@ def shadowed(a: object, b: int | None) -> None:
 );
 
 testcase!(
+    test_match_tuple_alias_nested_facets,
+    r#"
+from typing import assert_type
+
+def nested_alias(a: tuple[str | None], b: None) -> None:
+    match a, b:
+        case ((str(),), None) as pair:
+            assert_type(a[0], str)
+            assert_type(pair[0][0], str)
+            pair[0][0].upper()
+
+def make_a() -> tuple[str | None]:
+    return (None,)
+
+def expression_alias(b: None) -> None:
+    match make_a(), b:
+        case ((str(),), None) as pair:
+            assert_type(pair[0][0], str)
+            pair[0][0].upper()
+
+class Holder:
+    value: tuple[str | None]
+
+def attribute_alias(h: Holder) -> None:
+    match h.value, None:
+        case ((str(),), None) as pair:
+            assert_type(h.value[0], str)
+            assert_type(pair[0][0], str)
+
+class Box:
+    value: str | None
+
+def class_alias(a: Box, b: None) -> None:
+    match a, b:
+        case ((Box(value=str()), None) as pair) as other:
+            assert_type(a.value, str)
+            assert_type(pair[0].value, str)
+            assert_type(other[0].value, str)
+"#,
+);
+
+testcase!(
     test_match_tuple_subject_walrus_rebinding,
     r#"
 from typing import assert_type

@@ -166,6 +166,7 @@ impl NarrowOp {
                     | AtomicNarrowOp::NotCall(_, _)
                     | AtomicNarrowOp::IsTruthy
                     | AtomicNarrowOp::IsFalsy
+                    | AtomicNarrowOp::MatchSubjectElement(_, _)
                     | AtomicNarrowOp::Placeholder
             ),
             Self::And(ops) | Self::Or(ops) => ops.iter().all(Self::is_plain_root),
