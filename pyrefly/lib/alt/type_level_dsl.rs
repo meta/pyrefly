@@ -39,7 +39,6 @@ use pyrefly_types::type_level_dsl::TypeShapeDslSlotReturnKind;
 use pyrefly_types::type_var::FlagDomain;
 use pyrefly_types::type_var::FlagMember;
 use pyrefly_types::type_var::Restriction;
-use pyrefly_types::types::AnyStyle;
 use pyrefly_types::types::CalleeKind;
 use pyrefly_types::types::Type;
 use pyrefly_util::display::pluralize;
@@ -1164,16 +1163,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 parameter_name: function.parameter_name(index).as_str(),
                 position: index + 1,
             };
-            let arg = self.parse_type_shape_dsl_argument(
+            let Ok(arg) = self.parse_type_shape_dsl_argument(
                 arg_expr,
                 *domain,
                 type_argument_context,
                 argument_context,
                 errors,
-            );
-            if arg.is_error() {
-                return arg;
-            }
+            ) else {
+                return Type::any_error();
+            };
             if !self.is_type_shape_dsl_argument(&arg, *domain) {
                 let article = match domain {
                     TypeShapeDslInputDomain::Flag(_) | TypeShapeDslInputDomain::NamedInts => "a",
@@ -1200,6 +1198,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     fn parse_type_shape_dsl_argument(
+        &self,
+        arg: &Expr,
+        domain: TypeShapeDslInputDomain,
+        type_form_context: TypeFormContext<'_>,
+        argument_context: TypeShapeDslArgumentContext<'_>,
+        errors: &ErrorCollector,
+    ) -> Result<Type, ()> {
+        let parse_errors = self.error_collector();
+        let ty = self.parse_type_shape_dsl_argument_inner(
+            arg,
+            domain,
+            type_form_context,
+            argument_context,
+            &parse_errors,
+        );
+        // Diagnostics produced by this parse, not an inherited Any flavor, signal failure.
+        let failed = parse_errors.has_hard();
+        errors.extend(parse_errors);
+        if failed { Err(()) } else { Ok(ty) }
+    }
+
+    fn parse_type_shape_dsl_argument_inner(
         &self,
         arg: &Expr,
         domain: TypeShapeDslInputDomain,
@@ -1257,7 +1277,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         type_form_context,
                         &dimension_errors,
                     ) {
-                    Ok(dimensions) => dimensions.into_iter().next().filter(|ty| !ty.is_error()),
+                    Ok(dimensions) => dimensions.into_iter().next(),
                     Err(DimensionExprError::Invalid) => None,
                     Err(DimensionExprError::InvalidExplicitIntWrapper) => {
                         errors.extend(dimension_errors);
@@ -1274,7 +1294,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 } else {
                     let ordinary_errors = self.error_collector();
                     let ty = self.expr_untype(arg, type_form_context, &ordinary_errors);
-                    if ty.is_error() {
+                    if ordinary_errors.has_hard() {
                         errors.extend(dimension_errors);
                         Type::any_error()
                     } else {
@@ -1329,7 +1349,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub(crate) fn is_int_tuples_dsl_argument(&self, ty: &Type) -> bool {
         let restriction = match ty {
-            Type::Any(style) => return *style != AnyStyle::Error,
+            Type::Any(_) => return true,
             Type::Tuple(_) | Type::Union(_) if is_int_tuples_type(ty) => return true,
             Type::TypeLevelDslCall(call) => {
                 return call.result_domain() == Some(TypeShapeDslDomain::IntTuples);
@@ -1374,9 +1394,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ),
             },
             TypeShapeDslInputDomain::Flag(domain) => {
-                if matches!(ty, Type::Any(AnyStyle::Error)) {
-                    return false;
-                }
                 domain.accepts_with_str_subclasses(ty, |member| match member {
                     Type::ClassType(cls) | Type::SelfType(cls) => {
                         self.has_superclass(cls.class_object(), self.stdlib.str().class_object())
@@ -1385,7 +1402,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 })
             }
             TypeShapeDslInputDomain::NamedInts => match ty {
-                Type::Any(style) => *style != AnyStyle::Error,
+                Type::Any(_) => true,
                 Type::NamedInts(_) => true,
                 Type::Quantified(q) if q.kind == QuantifiedKind::TypeVar => {
                     q.restriction.is_named_ints()

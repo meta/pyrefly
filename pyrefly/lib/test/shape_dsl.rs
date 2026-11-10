@@ -204,7 +204,6 @@ def test[N: IntVar](symbolic: Int[N], literal: Int[3], broad: Int) -> None:
 );
 
 testcase!(
-    bug = "Inherited Any aborts a DSL call instead of staying gradual",
     test_shape_dsl_gradual_annotation_argument_boundary,
     shape_extensions_env_with_torch(),
     r#"
@@ -235,10 +234,10 @@ def unknown_flag() -> Tensor[flags(Shape)]: ...
 def unknown_axes() -> Tensor[axes(Shape)]: ...
 def unknown_shapes() -> Tensor[shapes(Shape)]: ...
 
-assert_type(unknown_shape(), Tensor)
-assert_type(unknown_flag(), Tensor)
-assert_type(unknown_axes(), Tensor)
-assert_type(unknown_shapes(), Tensor)
+assert_type(unknown_shape(), Tensor[IntTuple])
+assert_type(unknown_flag(), Tensor[[]])
+assert_type(unknown_axes(), Tensor[[]])
+assert_type(unknown_shapes(), Tensor[[]])
 "#,
 );
 

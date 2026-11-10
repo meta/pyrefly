@@ -26,7 +26,6 @@ class ndarray[Shape: IntTuple = IntTuple, DType = Any]: ...
 }
 
 testcase!(
-    bug = "Imported unknown shapes are treated as failed shape parsing",
     test_shaped_gradual_annotation_recovery_boundary,
     shaped_env(),
     r#"
@@ -41,13 +40,13 @@ def recover(
     missing: Shaped[tuple[int, ...], "Shape"],
     explicit: Shaped[tuple[int, ...], "Any"],
     scalar_missing: Shaped[int, "Shape"],
-    scalar_alias: Shaped[int, "Alias"],  # E: Tensor shape dimensions must be integer literals or type variables
+    scalar_alias: Shaped[int, "Alias"],
     invalid: Shaped[int, "'bad'"],  # E: String literals are not valid tensor dimensions
 ) -> None:
-    assert_type(missing, tuple[int, ...])
+    assert_type(missing, Any)
     assert_type(explicit, Any)
-    assert_type(scalar_missing, int)
-    assert_type(scalar_alias, int)
+    assert_type(scalar_missing, Any)
+    assert_type(scalar_alias, Any)
     assert_type(invalid, int)
 "#,
 );
@@ -174,7 +173,7 @@ def f(
     unparsable: ndarray[Shaped[tuple[int, int], "[M, N"], dtype[float]],  # E: Could not parse `Shaped` shape string
     extra: ndarray[Shaped[tuple[int, int], "[M, N]", "extra"], dtype[float]],  # E: `Shaped` takes a type and a shape string
     text: ndarray[Shaped[tuple[int], "str"], dtype[float]],  # E: A `Shaped` shape must be a list of dimensions, a variadic shape, or a shape function call, got `str`
-    undefined: ndarray[Shaped[tuple[int], "Q"], dtype[float]],  # E: Could not find name `Q`
+    undefined: ndarray[Shaped[tuple[int], "Q"], dtype[float]],  # E: Could not find name `Q`  # E: does not agree with its shape
     # An appended shape is an ordinary type argument, checked as one.
     appended_text: Shaped[ndarray, "str"],  # E: `str` is not assignable to upper bound `IntTuple` of type variable `Shape`
     appended_dim: Shaped[ndarray, "M"],  # E: `M` is an `IntVar` and cannot be used as an ordinary type

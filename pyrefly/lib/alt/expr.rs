@@ -4628,13 +4628,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if context.allows_explicit_int_wrapper()
                 && matches!(base, Type::ClassDef(ref cls) if self.is_int_class(cls))
             {
-                let wrapper_errors = self.error_collector();
-                let wrapped = self.expr_untype(expr, type_form_context, &wrapper_errors);
-                errors.extend(wrapper_errors);
+                let wrapped = self.try_parse_int_type(
+                    Ast::unpack_slice(&x.slice),
+                    expr.range(),
+                    type_form_context,
+                    errors,
+                );
                 return match wrapped {
-                    Type::Int(_) => Ok(wrapped),
-                    Type::Any(AnyStyle::Explicit | AnyStyle::Implicit) => Ok(gradual_size()),
-                    _ => Err(DimensionExprError::InvalidExplicitIntWrapper),
+                    Ok(ty) => match self.untype(ty, expr.range(), errors) {
+                        ty @ Type::Int(_) => Ok(ty),
+                        Type::Any(_) => Ok(gradual_size()),
+                        _ => Err(DimensionExprError::InvalidExplicitIntWrapper),
+                    },
+                    Err(()) => Err(DimensionExprError::InvalidExplicitIntWrapper),
                 };
             }
         }
@@ -4720,7 +4726,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 Ok(Type::Quantified(q))
                             }
                             Some(ty @ Type::TypeVar(_)) => Ok(ty),
-                            Some(ty) if ty.is_error() => Ok(ty),
+                            Some(ty @ Type::Any(_)) => Ok(ty),
                             _ => {
                                 self.error(
                                     errors,
@@ -4904,13 +4910,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         type_form_context: TypeFormContext<'_>,
         errors: &ErrorCollector,
     ) -> Result<Vec<Type>, DimensionExprError> {
-        self.parse_dimension_list_with_context(
+        let dimension_errors = self.error_collector();
+        let result = self.parse_dimension_list_with_context(
             args,
             type_form_context,
-            errors,
+            &dimension_errors,
             DimensionExprContext::DslArgument,
             true,
-        )
+        );
+        let failed = dimension_errors.has_hard();
+        errors.extend(dimension_errors);
+        if failed {
+            // Preserve the specific wrapper/raw-IntVar failure; only an apparent success
+            // with parse errors becomes the generic speculative-dimension failure.
+            result.and(Err(DimensionExprError::Invalid))
+        } else {
+            result
+        }
     }
 
     fn parse_dimension_list_with_context(
@@ -5250,20 +5266,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
 
         match Ast::unpack_slice(&subscript.slice) {
-            [arg] => self
-                .validate_int_tuple_splat_carrier(
-                    // Inherit the ambient context so a type-level DSL call with an
-                    // `IntTuple` result (e.g. `broadcast(...)`) is parsed as the carrier.
-                    // The carrier is a shape position like `Int`/`IntTuple` arguments.
-                    self.expr_untype(
-                        arg,
-                        TypeFormContext::ShapeTypeArgument(&type_form_context),
-                        errors,
-                    ),
-                    arg.range(),
-                    errors,
-                )
-                .map(Some),
+            [arg] => {
+                let parse_errors = self.error_collector();
+                let ty = self.expr_untype(
+                    arg,
+                    TypeFormContext::ShapeTypeArgument(&type_form_context),
+                    &parse_errors,
+                );
+                let failed = parse_errors.has_hard();
+                errors.extend(parse_errors);
+                if failed {
+                    Err(())
+                } else {
+                    self.validate_int_tuple_splat_carrier(ty, arg.range(), errors)
+                        .map(Some)
+                }
+            }
             args => {
                 self.error(
                     errors,
@@ -5288,11 +5306,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) -> Result<Type, ()> {
         match argument {
-            // The carrier already failed to resolve; its diagnostic is
-            // reported, so fail quietly without a cascading second error.
-            argument if argument.is_error() => Err(()),
-            // Explicit `Any` is gradual: admit it as an unknown shape rather
-            // than erroring.
+            // Any is a gradual carrier, independently of how it was obtained.
             Type::Any(_) => Ok(self.bare_int_tuple_carrier()),
             Type::IntTuple(shape) => match shape.view() {
                 IntTupleView::Concrete(_) => Ok(shape_to_tuple_carrier(&shape)),
@@ -5358,7 +5372,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ) {
                 Ok(Some(middle_ty)) => middle_ty,
                 Ok(None) => {
-                    let got = self.expr_untype(value, TypeFormContext::type_argument(), errors);
+                    let parse_errors = self.error_collector();
+                    let got =
+                        self.expr_untype(value, TypeFormContext::type_argument(), &parse_errors);
+                    let failed = parse_errors.has_hard();
+                    errors.extend(parse_errors);
+                    if failed {
+                        return None;
+                    }
                     // Bare splats mirror `*Elements[...]`: tuple and `IntTuple` carriers plus
                     // type variables bound by them. Like bare `Int[N] + 1` arithmetic, there is
                     // no deferred-annotation guard yet; `Elements[...]` remains the spelling
@@ -5368,13 +5389,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             Ok(middle_ty) => middle_ty,
                             Err(()) => return None,
                         }
-                    } else if got.is_error() {
-                        // The name already failed to resolve; fail quietly
-                        // without a cascading second error.
-                        return None;
                     } else if matches!(got, Type::Any(_)) {
-                        // Explicit `Any` is gradual: admit it as an unknown
-                        // shape rather than erroring.
                         self.bare_int_tuple_carrier()
                     } else {
                         self.error(
@@ -5447,7 +5462,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         range: TextRange,
         type_form_context: TypeFormContext<'_>,
         errors: &ErrorCollector,
-    ) -> Type {
+    ) -> Result<Type, ()> {
         if args.len() != 1 {
             self.error(
                 errors,
@@ -5459,25 +5474,40 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     args.len()
                 ),
             );
-            return Type::any_error();
+            return Err(());
         }
 
         let argument_context = TypeFormContext::ShapeTypeArgument(&type_form_context);
-        let Some(dims) = self.parse_dimension_list(args, argument_context, errors) else {
-            return Type::any_error();
-        };
+        let dims = self
+            .parse_dimension_list(args, argument_context, errors)
+            .ok_or(())?;
         let dim = dims.into_iter().next().expect(
             "parse_dimension_list returns a non-empty list for a single validated argument",
         );
         // `Int[Any]` desugars to plain `Any` since it's maximally gradual.
         if matches!(dim, Type::Any(_)) {
-            return dim;
+            return Ok(dim);
         }
         let Some(symint) = Int::from_type(&dim) else {
             unreachable!("Int::from_type failed on non-Any dimension: {:?}", dim);
         };
         let size = canonicalize(self.heap.mk_int(symint));
-        self.heap.mk_type_of(size)
+        Ok(self.heap.mk_type_of(size))
+    }
+
+    pub(super) fn try_parse_int_type(
+        &self,
+        args: &[Expr],
+        range: TextRange,
+        type_form_context: TypeFormContext<'_>,
+        errors: &ErrorCollector,
+    ) -> Result<Type, ()> {
+        let parse_errors = self.error_collector();
+        let result =
+            self.parse_single_int_type("Int", args, range, type_form_context, &parse_errors);
+        let failed = parse_errors.has_hard();
+        errors.extend(parse_errors);
+        if failed { result.and(Err(())) } else { result }
     }
 
     /// Parse Int[3], Int[N], Int[N+1] into `Type::Int(...)`.
@@ -5488,7 +5518,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         type_form_context: TypeFormContext<'_>,
         errors: &ErrorCollector,
     ) -> Type {
-        self.parse_single_int_type("Int", args, range, type_form_context, errors)
+        self.try_parse_int_type(args, range, type_form_context, errors)
+            .unwrap_or_else(|()| Type::any_error())
     }
 
     /// Return the reason why we think `ty` is suspicious to use as a branching condition

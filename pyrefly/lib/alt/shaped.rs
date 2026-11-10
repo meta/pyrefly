@@ -52,14 +52,12 @@ use crate::binding::shape_type::BoundShapeComment;
 use crate::binding::shape_type::ShapeCommentMode;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
-use crate::types::types::AnyStyle;
 use crate::types::types::Type;
 
-/// The rank a carrier states to other checkers, if `base` is a carrier: a tuple
-/// type, or an explicit `Any`, which states no rank.
+/// The rank stated by a tuple carrier; gradual `Any` states no rank.
 fn carrier_int_tuple(base: &Type) -> Option<IntTuple> {
     match base {
-        Type::Any(AnyStyle::Explicit) => Some(IntTuple::shapeless()),
+        Type::Any(_) => Some(IntTuple::shapeless()),
         Type::IntTuple(shape) => Some((**shape).clone()),
         Type::Tuple(_) => tuple_carrier_to_shape(base),
         _ => None,
@@ -178,6 +176,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             TypeFormContext::type_argument()
         };
         let ty = self.expr_untype_without_shape_comment(base, written_context, &base_errors);
+        if matches!(context, TypeFormContext::BaseClassList) && base_errors.has_hard() {
+            // A shape payload cannot make an invalid written base legal.
+            errors.extend(base_errors);
+            return ty;
+        }
         if matches!(context, TypeFormContext::BaseClassList) && matches!(ty, Type::Tuple(_)) {
             errors.extend(base_errors);
             self.error(
@@ -216,7 +219,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             base_errors,
             mode,
         } = annotation;
-        if mode == ShapeCommentMode::Replace && carrier_int_tuple(&base).is_none() {
+        if mode == ShapeCommentMode::Replace
+            && (carrier_int_tuple(&base).is_none() || base_errors.has_hard())
+        {
             errors.extend_filtered(base_errors, |error| {
                 error.error_kind() != ErrorKind::ImplicitAnyTypeArgument
             });
@@ -226,14 +231,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::ClassType(cls) if cls.is(KnownClass::Int) => {
                 errors.extend(base_errors);
                 // `Shaped[int, "N"]` is `Int[N]`.
-                return match self.parse_int_type(
+                return match self.try_parse_int_type(
                     slice::from_ref(shape_expr),
                     range,
                     type_form_context,
                     errors,
                 ) {
-                    Type::Any(AnyStyle::Error) => base,
-                    int => self.untype(int, range, errors),
+                    Ok(int) => self.untype(int, range, errors),
+                    Err(()) => base,
                 };
             }
             Type::ClassType(cls) if !cls.tparams().is_empty() => {
@@ -272,9 +277,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 );
                 return self.untype(specialized, range, errors);
             }
-            // A class without type parameters ignores the shape, and an unresolved
-            // base was already reported.
-            Type::ClassType(_) | Type::Any(AnyStyle::Error | AnyStyle::Implicit) => {
+            // A non-generic class ignores the shape, independently of recovery provenance.
+            Type::ClassType(_) => {
                 errors.extend(base_errors);
                 return base;
             }
@@ -302,9 +306,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             _ => {
-                let shape = self.expr_untype(shape_expr, shape_context, errors);
-                // An invalid shape was already reported.
-                if matches!(shape, Type::Any(AnyStyle::Error)) {
+                let parse_errors = self.error_collector();
+                let shape = self.expr_untype(shape_expr, shape_context, &parse_errors);
+                let failed = parse_errors.has_hard();
+                errors.extend(parse_errors);
+                if failed {
                     return base;
                 }
                 if !self.is_int_tuple_dsl_argument(&shape) {
