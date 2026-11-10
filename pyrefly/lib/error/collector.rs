@@ -292,7 +292,12 @@ impl BorrowedCollectedErrors<'_> {
 }
 
 /// Collects the user errors (e.g. type errors) associated with a module.
-// Deliberately don't implement Clone,
+///
+/// IMPORTANT: to avoid accidentally duplicating or dropping errors, or coupling semantic decisions
+/// to diagnostic collection, the error collector:
+/// - Deliberately does not implement `Clone`.
+/// - Avoids examining specific errors for the purpose of influencing downstream analysis. I.e., do
+///   not add anything like a non-private `has_error_message` or `has_error_kind`.
 #[derive(Debug)]
 pub struct ErrorCollector {
     module_info: ModuleInfo,
@@ -449,16 +454,6 @@ impl ErrorCollector {
 
     pub fn is_empty(&self) -> bool {
         self.errors.lock().is_empty()
-    }
-
-    /// Whether the collector holds an error of the given kind.
-    #[expect(dead_code)]
-    pub(crate) fn has_error_kind(&self, kind: ErrorKind) -> bool {
-        self.errors
-            .lock()
-            .items
-            .iter()
-            .any(|error| error.error_kind() == kind)
     }
 
     pub fn len(&self) -> usize {
