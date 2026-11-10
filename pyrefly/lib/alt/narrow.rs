@@ -2736,11 +2736,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) {
         let (op, narrow_range) = narrow_ops_for_case;
-        if !Self::is_match_case_reachability_op(op) {
+        let can_check_pattern = Self::is_match_case_reachability_op(op);
+        if !can_check_pattern && (narrowing_subject.is_some() || prev_case_negations.is_none()) {
             return;
         }
         let subject_info = self.with_type_for_exhaustiveness_check(self.get_idx(*subject_idx));
         let subject_ty = subject_info.ty().clone();
+        // Earlier cases can exhaust an expression subject even when the current
+        // pattern is unclassifiable. Otherwise, preserve the classifier's veto.
+        if !can_check_pattern && !subject_ty.is_never() {
+            return;
+        }
         // Structural patterns such as tuples can narrow `object` to `Never`
         // spuriously.
         if subject_ty.is_object() {

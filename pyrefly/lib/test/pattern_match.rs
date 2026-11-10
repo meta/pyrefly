@@ -131,7 +131,6 @@ def ok_class_pattern(x: int) -> None:
 );
 
 testcase!(
-    bug = "exhausted expression subject does not report a later partial class pattern",
     test_match_case_unreachable_exhausted_expression_subject,
     r#"
 class A:
@@ -150,21 +149,21 @@ def constructor_subject() -> None:
     match A():
         case A():
             pass
-        case A(x=1):
+        case A(x=1):  # E: Case pattern can never match subject of type `A`
             pass
 
 def factory_subject() -> None:
     match make_a():
         case A():
             pass
-        case A(x=1):
+        case A(x=1):  # E: Case pattern can never match subject of type `A`
             pass
 
 def exhausted_or_subject(flag: bool) -> None:
     match make_union(flag):
         case A() | B():
             pass
-        case A(x=1) | B(y=2):
+        case A(x=1) | B(y=2):  # E: Case pattern can never match subject of type `A | B`
             pass
 "#,
 );
