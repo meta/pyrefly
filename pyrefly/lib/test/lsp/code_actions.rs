@@ -56,6 +56,7 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
             handle,
             TextRange::new(position, position),
             ImportFormat::Absolute,
+            InlayHintConfig::default(),
             None,
         )
         .unwrap_or_default()
@@ -975,6 +976,7 @@ fn code_action_imports_with_future_imports() {
                     &handles["main"],
                     TextRange::empty(TextSize::try_from(header.len()).unwrap()),
                     ImportFormat::Absolute,
+                    InlayHintConfig::default(),
                     None,
                 )
                 .unwrap();
@@ -1140,6 +1142,7 @@ fn insertion_test_implicit_import() {
                 handle,
                 TextRange::empty(position),
                 ImportFormat::Absolute,
+                InlayHintConfig::default(),
                 None,
             )
             .unwrap_or_default();
@@ -1181,6 +1184,7 @@ fn insertion_test_implicit_import() {
                 handle,
                 TextRange::empty(TextSize::new(0)),
                 ImportFormat::Absolute,
+                InlayHintConfig::default(),
                 None,
             )
             .unwrap_or_default();
@@ -1228,6 +1232,7 @@ np
             handle,
             TextRange::new(position, position),
             ImportFormat::Absolute,
+            InlayHintConfig::default(),
             None,
         )
         .unwrap_or_default();
@@ -1260,6 +1265,7 @@ fn insert_import_uses_file_line_ending() {
             handle,
             TextRange::new(position, position),
             ImportFormat::Absolute,
+            InlayHintConfig::default(),
             None,
         )
         .unwrap_or_default();
@@ -1621,6 +1627,7 @@ fn apply_contextmanager_fix(code: &str, minor: u32) -> Option<String> {
                 handle,
                 TextRange::empty(position),
                 ImportFormat::Absolute,
+                InlayHintConfig::default(),
                 None,
             )
             .unwrap_or_default();
@@ -2312,6 +2319,7 @@ fn remove_unused_ignore_results(
             &handle,
             TextRange::new(position, position),
             ImportFormat::Absolute,
+            InlayHintConfig::default(),
             None,
         )
         .unwrap_or_default()
@@ -2737,6 +2745,7 @@ fn unused_import_action_after_with_env(
             handle,
             TextRange::new(position, position),
             ImportFormat::Absolute,
+            InlayHintConfig::default(),
             None,
         )
         .unwrap_or_default();
@@ -3058,6 +3067,7 @@ fn redundant_cast_action_after(code: &str, cursor_offset: usize) -> Option<Strin
             handle,
             TextRange::new(position, position),
             ImportFormat::Absolute,
+            InlayHintConfig::default(),
             None,
         )
         .unwrap_or_default();
@@ -3083,6 +3093,7 @@ fn remove_unused_variable_action(code: &str, cursor_offset: usize) -> Option<(St
             handle,
             TextRange::new(position, position),
             ImportFormat::Absolute,
+            InlayHintConfig::default(),
             None,
         )
         .unwrap_or_default();
@@ -3447,6 +3458,7 @@ fn test_import_for_unimported_directives() {
                 handle,
                 TextRange::new(TextSize::new(0), TextSize::new(0)),
                 ImportFormat::Absolute,
+                InlayHintConfig::default(),
                 None,
             )
             .unwrap_or_default();
@@ -8105,6 +8117,7 @@ fn add_override_quickfix_edits(
             &handle,
             TextRange::new(position, position),
             ImportFormat::Absolute,
+            InlayHintConfig::default(),
             None,
         )
         .unwrap_or_default()
@@ -8267,7 +8280,7 @@ fn inferred_annotation_actions(
     let handle = handles.get("main").unwrap();
     let transaction = state.transaction();
     transaction
-        .insert_inferred_annotation_code_actions(handle, range, ImportFormat::Absolute, config)
+        .local_quickfix_code_actions_sorted(handle, range, ImportFormat::Absolute, config, None)
         .unwrap_or_default()
         .into_iter()
         .map(|(title, edits)| {

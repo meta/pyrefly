@@ -10,7 +10,6 @@ use pyrefly_build::handle::Handle;
 use pyrefly_python::module::Module;
 use ruff_text_size::TextRange;
 
-use crate::error::suppress::detect_line_ending;
 use crate::state::lsp::AllOffPartial;
 use crate::state::lsp::ImportFormat;
 use crate::state::lsp::InlayHintConfig;
@@ -35,14 +34,6 @@ pub(crate) fn insert_inferred_annotation_code_actions(
     let hints =
         transaction.inlay_hints_in_range(handle, inlay_hint_config, import_format, selection)?;
     let module = transaction.get_module_info(handle)?;
-    let line_ending = detect_line_ending(module.contents().as_str());
-    let normalize = |text: String| -> String {
-        if line_ending == "\n" {
-            text
-        } else {
-            text.replace('\n', line_ending)
-        }
-    };
     let mut actions = Vec::new();
     for hint in hints {
         let Some(edits) = hint.edits else {
@@ -53,14 +44,10 @@ pub(crate) fn insert_inferred_annotation_code_actions(
         action_edits.push((
             module.dupe(),
             TextRange::empty(hint.position),
-            normalize(edits.annotation),
+            edits.annotation,
         ));
         for (offset, import_text) in edits.imports {
-            action_edits.push((
-                module.dupe(),
-                TextRange::empty(offset),
-                normalize(import_text),
-            ));
+            action_edits.push((module.dupe(), TextRange::empty(offset), import_text));
         }
         actions.push((hint.position, title, action_edits));
     }
