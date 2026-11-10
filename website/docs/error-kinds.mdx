@@ -1140,6 +1140,21 @@ Decorator misuse that violates the typing spec — for example, `@dataclass` on 
 function — is reported under `bad-class-definition` or
 `bad-function-definition` instead, both of which default to `error`.
 
+## invalid-format-spec
+
+Default severity: `ignore`
+
+An f-string format specification is incompatible with the value's static type or
+with the known builtin formatting rules. This optional check validates literal,
+nonempty specifications, including unsupported formatting, incompatible presentation
+types, invalid flags, and unrecognized specifications.
+
+```python
+f"{None:>10}"  # invalid-format-spec, if enabled
+f"{'text':.2f}"  # invalid-format-spec, if enabled
+f"{1:.2d}"  # invalid-format-spec, if enabled
+```
+
 ## invalid-inheritance
 
 An error caused by incorrect inheritance in a class or type definition.

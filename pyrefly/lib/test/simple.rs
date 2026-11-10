@@ -833,6 +833,7 @@ c = f"{arr['foo']}"  # E: Cannot index into `list[int]`
 
 testcase!(
     test_checked_fstrings,
+    TestEnv::new().enable_invalid_format_spec_error(),
     r#"
 from datetime import date
 
@@ -865,6 +866,7 @@ f"{CustomFormat():whatever}"
 
 testcase!(
     test_checked_fstrings_custom_builtin_subclasses,
+    TestEnv::new().enable_invalid_format_spec_error(),
     r#"
 class CustomInt(int):
     def __format__(self, format_spec: str) -> str:
@@ -909,6 +911,7 @@ f"{CustomBytes():>10}"
 
 testcase!(
     test_checked_fstrings_builtin_options,
+    TestEnv::new().enable_invalid_format_spec_error(),
     r#"
 s = "s"
 f"{b'xy':>10}"  # E: doesn't support format specifiers
@@ -965,6 +968,7 @@ f"{1j:x>010}"
 
 testcase!(
     test_checked_fstrings_unknown_inheritance,
+    TestEnv::new().enable_invalid_format_spec_error(),
     r#"
 from typing import Any
 
@@ -1007,26 +1011,28 @@ from third_party import Scalar
 from typing import SupportsIndex
 
 def display(value: object, scalar: Scalar, index: SupportsIndex) -> None:
-    f"{value:>10}"  # E: doesn't support format specifiers
-    f"{scalar:.2f}"  # E: doesn't support format specifiers
-    f"{index:05d}"  # E: doesn't support format specifiers
+    f"{value:>10}"
+    f"{scalar:.2f}"
+    f"{index:05d}"
 
-f"{None:>10}"  # E: doesn't support format specifiers
-f"{'x':.2f}"  # E: Incompatible types in string interpolation
-f"{1:r}"  # E: Unrecognized format specification
-f"{1:.2d}"  # E: Precision is not allowed
+f"{None:>10}"
+f"{'x':.2f}"
+f"{1:r}"
+f"{1:.2d}"
 f"{len(False):d}"  # E: Protocol `Sized` requires attribute `__len__`
 "#,
 );
 
 testcase!(
     test_checked_fstrings_rule_suppression,
-    TestEnv::new().enable_unused_ignore_errors(),
+    TestEnv::new()
+        .enable_invalid_format_spec_error()
+        .enable_unused_ignore_errors(),
     r#"
-f"{None:>10}"  # pyrefly: ignore[invalid-argument]
-f"{'x':.2f}"  # pyrefly: ignore[bad-argument-type]
-f"{1:r}"  # pyrefly: ignore[invalid-argument]
-f"{1:.2d}"  # pyrefly: ignore[invalid-argument]
+f"{None:>10}"  # pyrefly: ignore[invalid-format-spec]
+f"{'x':.2f}"  # pyrefly: ignore[invalid-format-spec]
+f"{1:r}"  # pyrefly: ignore[invalid-format-spec]
+f"{1:.2d}"  # pyrefly: ignore[invalid-format-spec]
 "#,
 );
 

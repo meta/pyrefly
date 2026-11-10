@@ -293,6 +293,9 @@ pub enum ErrorKind {
     /// is reported under `BadClassDefinition` or `BadFunctionDefinition`
     /// instead, both of which default to `error`.
     InvalidDecorator,
+    /// An f-string format specification is incompatible with the value's static type
+    /// or the known builtin formatting rules.
+    InvalidFormatSpec,
     /// An error caused by incorrect inheritance in a class or type definition.
     /// e.g. a metaclass that is not a subclass of `type`.
     InvalidInheritance,
@@ -670,6 +673,7 @@ impl ErrorKind {
             ErrorKind::InvalidAbstractMethod => Severity::Ignore,
             ErrorKind::InvalidCast => Severity::Ignore,
             ErrorKind::InvalidDecorator => Severity::Warn,
+            ErrorKind::InvalidFormatSpec => Severity::Ignore,
             ErrorKind::MethodAssign => Severity::Ignore,
             ErrorKind::MisplacedIgnore => Severity::Warn,
             ErrorKind::MissingAttributePatchTarget => Severity::Warn,

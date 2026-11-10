@@ -552,7 +552,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Ok(parsed) => parsed,
                 Err(msg) => {
                     errors
-                        .error_builder(range, ErrorKind::InvalidArgument, msg)
+                        .error_builder(range, ErrorKind::InvalidFormatSpec, msg)
                         .emit();
                     return;
                 }
@@ -580,7 +580,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 errors
                     .error_builder(
                         range,
-                        ErrorKind::BadArgumentType,
+                        ErrorKind::InvalidFormatSpec,
                         format!(
                             "Incompatible types in string interpolation (expression has type `{}`, placeholder has type `{}`)",
                             self.for_display(actual.clone()),
@@ -644,7 +644,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 errors
                     .error_builder(
                         range,
-                        ErrorKind::InvalidArgument,
+                        ErrorKind::InvalidFormatSpec,
                         format!(
                             "Invalid format specification `{spec}` for type `{}`: {reason}",
                             self.for_display(actual.clone()),
@@ -657,7 +657,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors
             .error_builder(
                 range,
-                ErrorKind::InvalidArgument,
+                ErrorKind::InvalidFormatSpec,
                 format!(
                     "The type `{}` doesn't support format specifiers",
                     self.for_display(actual.clone()),
