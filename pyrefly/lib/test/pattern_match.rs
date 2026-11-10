@@ -131,6 +131,88 @@ def ok_class_pattern(x: int) -> None:
 );
 
 testcase!(
+    bug = "exhausted expression subject does not report a later partial class pattern",
+    test_match_case_unreachable_exhausted_expression_subject,
+    r#"
+class A:
+    x: int
+
+class B:
+    y: int
+
+def make_a() -> A:
+    return A()
+
+def make_union(flag: bool) -> A | B:
+    return A() if flag else B()
+
+def constructor_subject() -> None:
+    match A():
+        case A():
+            pass
+        case A(x=1):
+            pass
+
+def factory_subject() -> None:
+    match make_a():
+        case A():
+            pass
+        case A(x=1):
+            pass
+
+def exhausted_or_subject(flag: bool) -> None:
+    match make_union(flag):
+        case A() | B():
+            pass
+        case A(x=1) | B(y=2):
+            pass
+"#,
+);
+
+testcase!(
+    test_match_case_reachable_expression_subject_partial_patterns,
+    r#"
+class A:
+    x: int
+
+class B:
+    y: int
+
+def make_a() -> A:
+    return A()
+
+def make_union(flag: bool) -> A | B:
+    return A() if flag else B()
+
+def partial_alone() -> None:
+    match make_a():
+        case A(x=1):
+            pass
+
+def guarded_predecessor(flag: bool) -> None:
+    match make_a():
+        case A() if flag:
+            pass
+        case A(x=1):
+            pass
+
+def partial_predecessor() -> None:
+    match make_a():
+        case A(x=1):
+            pass
+        case A(x=2):
+            pass
+
+def live_or_subject(flag: bool) -> None:
+    match make_union(flag):
+        case A():
+            pass
+        case A(x=1) | B():
+            pass
+"#,
+);
+
+testcase!(
     test_match_case_unreachable_after_prior_case_exhausts_type,
     r#"
 from typing import assert_type
