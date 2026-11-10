@@ -51,3 +51,8 @@ compatibility with existing consumers, but its output is not identical to Source
 
 Type errors are still reported normally and can make the command return a nonzero exit status
 even when it writes an index.
+
+SCIP reporting supports one-shot checks, not `--watch`: incremental checks do not rewrite
+unchanged documents. It also conflicts with `--debug-info`, `--report-binding-memory`,
+`--report-glean`, `--report-pysa`, `--report-trace`, `--report-demand-tree`, and `--report-cinderx`:
+those reports need state that streaming SCIP releases.

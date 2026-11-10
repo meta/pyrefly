@@ -156,7 +156,7 @@ pub struct FullCheckArgs {
 
     /// Watch for file changes and re-check them.
     /// (Warning: This mode is highly experimental!)
-    #[arg(long, conflicts_with = "check_all")]
+    #[arg(long, conflicts_with_all = ["check_all", "report_scip"])]
     watch: bool,
 
     /// Type checking arguments and configuration
@@ -355,6 +355,8 @@ struct OutputArgs {
             "report_pysa",
             "report_trace",
             "report_demand_tree",
+            "debug_info",
+            "report_binding_memory",
         ]
     )]
     report_scip: Option<PathBuf>,
@@ -2568,6 +2570,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use clap::error::ErrorKind as ClapErrorKind;
     use protobuf::Message as _;
     use pyrefly_config::config::ConfigScope;
     use pyrefly_python::module::Module;
@@ -2832,10 +2835,8 @@ def go(w: Widget) -> int:
         assert!(!facts.contains("main.Widget"));
     }
 
-    // Known bug: streaming SCIP releases answers needed by the debugging reports and cannot
-    // reproduce unchanged documents from a watch-mode check.
     #[test]
-    fn scip_incompatible_options_are_accepted() {
+    fn scip_rejects_incompatible_options() {
         assert!(FullCheckArgs::try_parse_from(["check", "--report-scip", "index.scip"]).is_ok());
         for options in [
             &["--watch"][..],
@@ -2847,15 +2848,16 @@ def go(w: Widget) -> int:
                     .is_ok(),
                 "standalone options should remain valid: {options:?}"
             );
-            assert!(
-                FullCheckArgs::try_parse_from(
-                    ["check", "--report-scip", "index.scip"]
-                        .into_iter()
-                        .chain(options.iter().copied())
-                )
-                .is_ok(),
-                "document current acceptance of {options:?} with SCIP"
-            );
+            let error = FullCheckArgs::try_parse_from(
+                ["check", "--report-scip", "index.scip"]
+                    .into_iter()
+                    .chain(options.iter().copied()),
+            )
+            .expect_err("SCIP must reject options requiring retained state");
+            assert_eq!(error.kind(), ClapErrorKind::ArgumentConflict);
+            let message = error.to_string();
+            assert!(message.contains("--report-scip"), "{message}");
+            assert!(message.contains(options[0]), "{message}");
         }
     }
 
