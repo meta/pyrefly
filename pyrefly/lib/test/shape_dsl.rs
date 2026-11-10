@@ -204,6 +204,45 @@ def test[N: IntVar](symbolic: Int[N], literal: Int[3], broad: Int) -> None:
 );
 
 testcase!(
+    bug = "Inherited Any aborts a DSL call instead of staying gradual",
+    test_shape_dsl_gradual_annotation_argument_boundary,
+    shape_extensions_env_with_torch(),
+    r#"
+import shape_extensions.dsl as dsl
+from typing import Any, assert_type
+from missing_backend import Shape  # E: Cannot find module `missing_backend`
+from shape_extensions import IntTuple, IntTuples, NamedInts, type_shape_dsl_function
+from torch import Tensor
+
+@type_shape_dsl_function
+def shape(shape: IntTuple) -> IntTuple:
+    return shape
+
+@type_shape_dsl_function
+def flags(flag: bool) -> IntTuple:
+    return dsl.IntTuple(())
+
+@type_shape_dsl_function
+def axes(axes: NamedInts) -> IntTuple:
+    return dsl.IntTuple(())
+
+@type_shape_dsl_function
+def shapes(shapes: IntTuples) -> IntTuple:
+    return dsl.IntTuple(())
+
+def unknown_shape() -> Tensor[shape(Shape)]: ...
+def unknown_flag() -> Tensor[flags(Shape)]: ...
+def unknown_axes() -> Tensor[axes(Shape)]: ...
+def unknown_shapes() -> Tensor[shapes(Shape)]: ...
+
+assert_type(unknown_shape(), Tensor)
+assert_type(unknown_flag(), Tensor)
+assert_type(unknown_axes(), Tensor)
+assert_type(unknown_shapes(), Tensor)
+"#,
+);
+
+testcase!(
     test_type_shape_dsl_dimension_equality,
     shape_extensions_env_with_torch(),
     r#"

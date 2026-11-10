@@ -26,6 +26,52 @@ class ndarray[Shape: IntTuple = IntTuple, DType = Any]: ...
 }
 
 testcase!(
+    bug = "Imported unknown shapes are treated as failed shape parsing",
+    test_shaped_gradual_annotation_recovery_boundary,
+    shaped_env(),
+    r#"
+from typing import Any, assert_type
+from missing_backend import Shape  # E: Cannot find module `missing_backend`
+from shape_extensions import Shaped, shape_vars
+
+type Alias = Any
+
+@shape_vars("N")
+def recover(
+    missing: Shaped[tuple[int, ...], "Shape"],
+    explicit: Shaped[tuple[int, ...], "Any"],
+    scalar_missing: Shaped[int, "Shape"],
+    scalar_alias: Shaped[int, "Alias"],  # E: Tensor shape dimensions must be integer literals or type variables
+    invalid: Shaped[int, "'bad'"],  # E: String literals are not valid tensor dimensions
+) -> None:
+    assert_type(missing, tuple[int, ...])
+    assert_type(explicit, Any)
+    assert_type(scalar_missing, int)
+    assert_type(scalar_alias, int)
+    assert_type(invalid, int)
+"#,
+);
+
+testcase!(
+    test_shaped_wrong_dsl_result_preserves_scalar_base,
+    shaped_env(),
+    r#"
+import shape_extensions.dsl as dsl
+from typing import assert_type
+from shape_extensions import IntTuple, Shaped, shape_vars, type_shape_dsl_function
+
+@type_shape_dsl_function
+def vector(shape: IntTuple) -> IntTuple:
+    return dsl.IntTuple((2,))
+
+@shape_vars("N")
+def wrong() -> Shaped[int, "vector(IntTuple[2])"]: ...  # E: Expected a type-level shape DSL call with an `Int` result
+
+assert_type(wrong(), int)
+"#,
+);
+
+testcase!(
     test_shaped_class_shorthand_preserves_dsl_return_context,
     shaped_env(),
     r#"

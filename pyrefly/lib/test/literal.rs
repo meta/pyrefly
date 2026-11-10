@@ -8,6 +8,27 @@
 use crate::testcase;
 
 testcase!(
+    bug = "Inherited error Any is accepted as a Literal parameter",
+    test_literal_annotation_recovery_boundary,
+    r#"
+from typing import Any, Literal, assert_type
+from missing_backend import Value  # E: Cannot find module `missing_backend`
+
+Alias = Any
+
+def explicit(value: Literal[Any]) -> None: ...  # E: Invalid type inside literal
+def aliased(value: Literal[Alias]) -> None: ...  # E: Invalid type inside literal
+def missing(value: Literal[Value]) -> None: ...
+def attribute(value: Literal[Value.member]) -> None: ...
+def undefined(value: Literal[Undefined]) -> None: ...  # E: Could not find name `Undefined`
+def bad(value: Literal[1.5]) -> None: ...  # E: Invalid literal expression
+
+def check(value: Literal[1, "ok", None]) -> None:
+    assert_type(value, Literal[1, "ok"] | None)
+"#,
+);
+
+testcase!(
     test_fstring_literal,
     r#"
 from typing import assert_type, Literal, LiteralString
