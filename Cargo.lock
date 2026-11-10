@@ -2770,9 +2770,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "ruff_annotate_snippets"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a76908fcec558bf492b2cc08fc1e4a1f68e4e7a9fbc51bd72f874af5f3f0e5fc"
+checksum = "215b093326ddb35c43d0c29ae305367ed4205b0c26d06ffd5b8d187296b3658f"
 dependencies = [
  "anstyle",
  "memchr",
@@ -2781,9 +2781,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_cache"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "286ff8c2c3b7b92fd102555b8adba54fd11c72450feb9d2e4c037b64dc8bb6d3"
+checksum = "b87880d629d9c8ef4fb8aeae28de5c0a0a264d0242e50cd9f0ebd54a69d495e7"
 dependencies = [
  "char_str",
  "filetime",
@@ -2796,9 +2796,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_diagnostics"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0d214d2c7cc8195a18abc15f7e00f76082b33a89baf4bc42e3c66fc2a76205e"
+checksum = "01a860ab6b3b0351fa7101dfe334fc8bd060dd361c3d83685b0e5edfc968d2bd"
 dependencies = [
  "get-size2",
  "is-macro",
@@ -2807,9 +2807,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_notebook"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67d3a36e0cca419d14cbce7c3374c722d652e9ddad03af9d608c8ab160430285"
+checksum = "369bd04aeb258793f9d49d2519d82855ca9be7e12e1f57914c72c5e53d704cf7"
 dependencies = [
  "anyhow",
  "rand",
@@ -2824,9 +2824,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_ast"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5c31f9196e6333f154b92e6f6f9701d23ddfeee0b7fd45476aacbed7b74b440"
+checksum = "df8f77693e5f11e7d574c84a8dd63190142ae683749f5ef019bafeffb952fd19"
 dependencies = [
  "aho-corasick",
  "arrayvec",
@@ -2848,9 +2848,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_parser"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b5b7fd512a12be87d02bbc8d8352f8159a058d1f91e6749f234ca43cb351525"
+checksum = "c567873f6a0e094d3f72b37862a8420a6eb4b3fc2950b4975e5a61b46aab3acc"
 dependencies = [
  "bitflags 2.13.2",
  "bstr",
@@ -2872,9 +2872,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_python_trivia"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a867e9037e2c616342dcb77ff69344c59cf956bde079392a6da4b23138246a02"
+checksum = "78209bfee4543e650edffee040849c5ca828a05d60c7d3b8b53bb63d2dd49a70"
 dependencies = [
  "itertools 0.15.0",
  "memchr",
@@ -2887,9 +2887,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_source_file"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cd1f298a482a6765b5c6cb1a48e0bfcbfda5be7e1da903af58a59091953d595"
+checksum = "3b2159c6129bf08ecde949e8aca0edc5411fbcbaaecdbd401fd75385f5a74e95"
 dependencies = [
  "memchr",
  "ruff_text_size",
@@ -2898,9 +2898,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_text_size"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d05cadff8e7c3c5e2502b179e925892d71c4fb5c3cae9ad92aa131bd53e3348"
+checksum = "bb9ffcbeaefe5f3a7bef2c80dbf591a0fa1f9ec22c5ce7bf4f4c2397104e6496"
 dependencies = [
  "get-size2",
  "serde",
@@ -2908,9 +2908,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_unicode_names2"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea06a54e7c9ee4fd0b8d0bb04a1b7f029ebc7c26ad2736fcf7d5e464e0b29bc2"
+checksum = "7bc534053fd582ce4b3431d94f6e9f398bb214eb9baf497b06b5c8d6446f379d"
 dependencies = [
  "phf",
  "ruff_unicode_names2_generator",
@@ -2918,9 +2918,9 @@ dependencies = [
 
 [[package]]
 name = "ruff_unicode_names2_generator"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be96655e37811ac2d840bd87f6af7fe8a31522f685c222a96157f0dbbfbb59b2"
+checksum = "a3b540b2b312bde02dbfd5261013e06dda9d3ecd33cb6e62f962b019903ae56c"
 dependencies = [
  "phf_codegen",
  "rand",
