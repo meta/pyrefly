@@ -120,6 +120,114 @@ x = s
 );
 
 testcase!(
+    bug = "An unresolved imported name shadows the available overload",
+    test_signature_unresolved_import_missing_export,
+    TestEnv::one("backend", ""),
+    r#"
+from typing import Any, assert_type, overload
+from backend import Array  # E: Could not import `Array` from `backend`
+
+@overload
+def transform(x: Array) -> Any: ...
+@overload
+def transform(x: int) -> str: ...
+def transform(x: Any) -> Any: ...
+assert_type(transform(1), Any)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_contextual_return,
+    r#"
+from typing import assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+def transform[T](x: Array) -> list[T]:
+    raise RuntimeError
+
+result: list[str] = transform(1)
+assert_type(result, list[str])
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_operator,
+    r#"
+from typing import assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+class Left:
+    def __add__(self, other: Array) -> str:
+        return "left"
+
+class Right:
+    def __radd__(self, other: object) -> int:
+        return 0
+
+assert_type(Left() + Right(), str)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_generic_class,
+    r#"
+from typing import Any, assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+class Box[T]:
+    def get(self) -> T:
+        raise RuntimeError
+
+def exercise(box: Box[Array]) -> None:
+    assert_type(box.get(), Any)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_dataclass,
+    r#"
+from dataclasses import dataclass
+from typing import assert_type
+from missing_backend import Array, Other  # E: Cannot find module `missing_backend`
+
+@dataclass
+class Model:
+    array: Array
+    other: Other
+
+assert_type(Model(1, 2), Model)
+"#,
+);
+
+testcase!(
+    bug = "An entirely unresolved overload set accepts any argument",
+    test_signature_unresolved_import_all_overloads,
+    r#"
+from typing import Any, assert_type, overload
+from missing_backend import Array, Other  # E: Cannot find module `missing_backend`
+
+@overload
+def transform(x: Array) -> int: ...
+@overload
+def transform(x: Other) -> str: ...
+def transform(x: Any) -> Any: ...
+
+assert_type(transform(1), int)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_callable_alias,
+    r#"
+from typing import Any, Callable, assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+def exercise(transform: Callable[[Array], Array]) -> None:
+    assert_type(transform(1), Any)
+"#,
+);
+
+testcase!(
     test_overload_expansion_keeps_lambda_context,
     TestEnv::new().enable_implicit_any_lambda_error(),
     r#"
