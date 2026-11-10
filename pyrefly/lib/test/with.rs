@@ -141,6 +141,34 @@ def no_suppression(a: str | None) -> None:
 );
 
 testcase!(
+    bug = "Tuple-match Phi narrowing survives exception suppression",
+    test_with_narrow_match_tuple_multiple_survivors,
+    r#"
+from contextlib import suppress
+from typing import assert_type
+
+
+def risky() -> None:
+    raise ValueError("suppressed before the match")
+
+
+def multiple_survivors(a: str | None, b: int | None) -> None:
+    with suppress(ValueError):
+        risky()
+        match a, b:
+            case None, _:
+                return
+            case _, None:
+                pass
+            case _:
+                pass
+    # Suppression can skip the match, leaving a possibly None.
+    assert_type(a, str)
+    a.upper()
+"#,
+);
+
+testcase!(
     bug = "Hard returns keep the BASE missing-return diagnostic",
     test_with_narrow_hard_return_baseline,
     r#"
