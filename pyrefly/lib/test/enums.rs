@@ -1642,8 +1642,8 @@ FloatEnum(Fraction(1))
 class StrColorEnum(Enum):
     A = "a"
 
-StrColorEnum(Decimal("1"))  # E: Argument `Decimal` is not assignable to parameter `value` with type `StrColorEnum | str`
-StrColorEnum(Fraction(1))  # E: Argument `Fraction` is not assignable to parameter `value` with type `StrColorEnum | str`
+StrColorEnum(Decimal("1"))
+StrColorEnum(Fraction(1))
 
 class BytesEnum(Enum):
     A = b"a"
@@ -1743,7 +1743,7 @@ class E(MethodMixin, Enum):
     A = 1
 
 E(1)
-E(None)  # E: Argument `None` is not assignable to parameter `value` with type `E | complex | float | int`
+E(None)
     "#,
 );
 
@@ -1876,12 +1876,12 @@ def test_object_and_any(
     StrColor(obj)
     StrColor(any_val)
 
-    IntColor(opt_obj)  # E: Argument `object | None` is not assignable to parameter `value` with type `IntColor | complex | float | int`
-    StrColor(opt_obj)  # E: Argument `object | None` is not assignable to parameter `value` with type `StrColor | str`
-    StrColor(opt_str)  # E: Argument `str | None` is not assignable to parameter `value` with type `StrColor | str`
+    IntColor(opt_obj)
+    StrColor(opt_obj)
+    StrColor(opt_str)
 
-    IntColor(zulip_union)  # E: Argument `bool | int | str` is not assignable to parameter `value` with type `IntColor | complex | float | int`
-    StrColor(meson_union)  # E: Argument `bool | int | list[str] | str` is not assignable to parameter `value` with type `StrColor | str`
+    IntColor(zulip_union)
+    StrColor(meson_union)
 
     IntColor("1")  # E: Argument `Literal['1']` is not assignable to parameter `value` with type `IntColor | complex | float | int`
 "#,
@@ -1889,7 +1889,6 @@ def test_object_and_any(
 
 // CPython converts scalar creation arguments into dataclass data-mixin values.
 testcase!(
-    bug = "Scalar dataclass creation values are mistaken for lookup values",
     test_enum_lookup_scalar_dataclass_mixin,
     r#"
 from dataclasses import dataclass
@@ -1902,14 +1901,13 @@ class Data:
 class E(Data, Enum):
     A = 1
 
-assert E(Data(1)) is E.A  # E: Argument `Data` is not assignable to parameter `value` with type `E | complex | float | int`
-assert E(value=Data(1)) is E.A  # E: Argument `Data` is not assignable to parameter `value` with type `E | complex | float | int`
+assert E(Data(1)) is E.A
+assert E(value=Data(1)) is E.A
 "#,
 );
 
 // Unhashable lookups compare against the value rewritten by the initializer.
 testcase!(
-    bug = "Initializer creation values are mistaken for lookup values",
     test_enum_lookup_initializer_rewrites_value,
     r#"
 from enum import Enum
@@ -1921,13 +1919,12 @@ class Base(Enum):
 class E(Base):
     A = "a"
 
-assert E(bytearray(b"a")) is E.A  # E: Argument `bytearray` is not assignable to parameter `value` with type `E | str`
-assert E(value=bytearray(b"a")) is E.A  # E: Argument `bytearray` is not assignable to parameter `value` with type `E | str`
+assert E(bytearray(b"a")) is E.A
+assert E(value=bytearray(b"a")) is E.A
 "#,
 );
 
 testcase!(
-    bug = "Partially compatible inputs are rejected at validation boundaries",
     test_enum_lookup_partial_union_validation,
     r#"
 from enum import Enum
@@ -1937,13 +1934,13 @@ class E(Enum):
 
 def validate(value: str | None) -> E | None:
     try:
-        return E(value)  # E: Argument `str | None` is not assignable to parameter `value` with type `E | str`
+        return E(value)
     except ValueError:
         return None
 
 def bounded[T: str | None](value: T) -> E | None:
     try:
-        return E(value)  # E: Argument `T` is not assignable to parameter `value` with type `E | str`
+        return E(value)
     except ValueError:
         return None
 
@@ -1953,7 +1950,6 @@ assert validate(None) is None
 );
 
 testcase!(
-    bug = "Nominal argument types do not capture custom equality",
     test_enum_lookup_unmodeled_argument_equality,
     r#"
 from enum import Enum
@@ -1965,7 +1961,7 @@ class EqualToOne:
     def __eq__(self, other: object) -> bool:
         return other == 1
 
-assert E(EqualToOne()) is E.A  # E: Argument `EqualToOne` is not assignable to parameter `value` with type `E | complex | float | int`
+assert E(EqualToOne()) is E.A
 "#,
 );
 
