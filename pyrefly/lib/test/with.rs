@@ -680,7 +680,7 @@ class Envoy(Generic[T]):
     def __exit__(self) -> None: ...
 
 def use(e: Envoy) -> None:
-    with e:  # E: `__exit__` must be callable with the argument types (type[BaseException], BaseException, TracebackType) # E: `__exit__` must be callable with the argument types (None, None, None)
+    with e:  # E: `__exit__` must be callable with the argument types (type[BaseException], BaseException, TracebackType)\n  `__exit__` must be callable with the argument types (None, None, None)
         pass
     "#,
 );
@@ -701,6 +701,36 @@ class Foo:
         ...
 
 with Foo() as foo:  # E: Expected `__enter__` to be a callable, got `int`
+    pass
+    "#,
+);
+
+testcase!(
+    test_with_combines_enter_exit_and_return_errors,
+    r#"
+class Foo:
+    __enter__: int = 42
+    def __exit__(self, exc_type: int, exc_value: int, traceback: int) -> str:
+        return ""
+
+with Foo():  # E: Cannot use `Foo` as a context manager\n  Expected `__enter__` to be a callable, got `int`\n  `__exit__` must be callable with the argument types (type[BaseException], BaseException, TracebackType)\n  `__exit__` must be callable with the argument types (None, None, None)\n  Return type `str` of function `Foo.__exit__` is not assignable to expected return type `bool | None`
+    pass
+    "#,
+);
+
+testcase!(
+    test_with_preserves_exit_deprecation_when_enter_fails,
+    r#"
+from types import TracebackType
+from typing_extensions import deprecated
+
+class Foo:
+    __enter__: int = 42
+    @deprecated("Exit is deprecated")
+    def __exit__(self, exc_type: type[BaseException] | None, exc_value: BaseException | None, traceback: TracebackType | None) -> None:
+        pass
+
+with Foo():  # E: Expected `__enter__` to be a callable, got `int` # E: Exit is deprecated
     pass
     "#,
 );
@@ -743,7 +773,7 @@ class Foo:
     def __exit__(self, exc_type: int, exc_value: int, traceback: int) -> None:
         ...
 
-with Foo() as foo: # E: `__exit__` must be callable with the argument types (type[BaseException], BaseException, TracebackType) # E: `__exit__` must be callable with the argument types (None, None, None)
+with Foo() as foo: # E: `__exit__` must be callable with the argument types (type[BaseException], BaseException, TracebackType)\n  `__exit__` must be callable with the argument types (None, None, None)
     pass
     "#,
 );

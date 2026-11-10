@@ -452,6 +452,7 @@ impl ErrorCollector {
     }
 
     /// Whether the collector holds an error of the given kind.
+    #[expect(dead_code)]
     pub(crate) fn has_error_kind(&self, kind: ErrorKind) -> bool {
         self.errors
             .lock()
@@ -716,6 +717,34 @@ impl ErrorBuilder<'_> {
         self
     }
 
+    /// Append a diagnostic's details and editor metadata without repeating its header.
+    /// Duplicate details, annotations, and fixes are included once.
+    pub(crate) fn with_error_details(mut self, error: &Error) -> Self {
+        if self.active {
+            if let Some(details) = error.msg_details() {
+                let details = details
+                    .strip_prefix("  ")
+                    .expect("error details are indented")
+                    .to_owned();
+                if !self.details.contains(&details) {
+                    self.details.push(details);
+                }
+            }
+            for annotation in error.secondary_annotations() {
+                let annotation = (annotation.range, annotation.label.to_string());
+                if !self.annotations.contains(&annotation) {
+                    self.annotations.push(annotation);
+                }
+            }
+            for fix in error.quick_fixes() {
+                if !self.quick_fixes.contains(fix) {
+                    self.quick_fixes.push(fix.clone());
+                }
+            }
+        }
+        self
+    }
+
     /// Add a secondary labeled span.
     pub fn with_annotation(mut self, range: TextRange, label: String) -> Self {
         if self.active {
@@ -808,6 +837,40 @@ mod tests {
 
     fn add(errors: &ErrorCollector, range: TextRange, kind: ErrorKind, msg: String) {
         errors.error_builder(range, kind, msg).emit();
+    }
+
+    #[test]
+    fn test_error_builder_merges_details_and_metadata() {
+        let mi = ModuleInfo::new(
+            ModuleName::from_name(&Name::new_static("main")),
+            ModulePath::filesystem(Path::new("main.py").to_owned()),
+            Arc::new("contents".to_owned()),
+        );
+        let range = TextRange::new(TextSize::new(1), TextSize::new(2));
+        let error = Error::new(
+            mi.dupe(),
+            range,
+            "Protocol failure".to_owned(),
+            vec![
+                "Enter failed\n    Explanation".to_owned(),
+                "Exit failed".to_owned(),
+            ],
+            ErrorKind::BadContextManager,
+        )
+        .with_annotation(range, "Enter".to_owned())
+        .with_quick_fix(ErrorQuickFix::AssertNotNone);
+        let merged = ErrorCollector::new(mi, ErrorStyle::Delayed);
+        merged
+            .error_builder(
+                range,
+                ErrorKind::BadContextManager,
+                "Protocol failure".to_owned(),
+            )
+            .with_error_details(&error)
+            .with_error_details(&error)
+            .emit();
+        let merged = merged.finish();
+        assert_eq!(merged.iter().collect::<Vec<_>>(), vec![&error]);
     }
 
     #[test]
