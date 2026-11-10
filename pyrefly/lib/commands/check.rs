@@ -2832,6 +2832,33 @@ def go(w: Widget) -> int:
         assert!(!facts.contains("main.Widget"));
     }
 
+    // Known bug: streaming SCIP releases answers needed by the debugging reports and cannot
+    // reproduce unchanged documents from a watch-mode check.
+    #[test]
+    fn scip_incompatible_options_are_accepted() {
+        assert!(FullCheckArgs::try_parse_from(["check", "--report-scip", "index.scip"]).is_ok());
+        for options in [
+            &["--watch"][..],
+            &["--debug-info", "debug.json"][..],
+            &["--report-binding-memory", "memory.csv"][..],
+        ] {
+            assert!(
+                FullCheckArgs::try_parse_from(["check"].into_iter().chain(options.iter().copied()))
+                    .is_ok(),
+                "standalone options should remain valid: {options:?}"
+            );
+            assert!(
+                FullCheckArgs::try_parse_from(
+                    ["check", "--report-scip", "index.scip"]
+                        .into_iter()
+                        .chain(options.iter().copied())
+                )
+                .is_ok(),
+                "document current acceptance of {options:?} with SCIP"
+            );
+        }
+    }
+
     #[test]
     fn check_writes_scip_report() {
         let temp = TempDir::new().unwrap();
