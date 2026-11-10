@@ -3181,7 +3181,7 @@ impl Scopes {
             // `name` is absent from lexical scope, so it may resolve to an implicit builtin.
             match self.look_up_name_for_read(
                 Hashed::new(name),
-                &Usage::NonPinningValue(None),
+                &Usage::Inspection,
                 lookup,
                 current_module,
             ) {

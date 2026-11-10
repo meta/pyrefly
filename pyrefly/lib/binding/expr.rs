@@ -110,6 +110,8 @@ pub enum Usage {
     /// Value context that should not pin partial types.
     /// The idx (if present) is used for secondary-read detection.
     NonPinningValue(Option<Idx<Key>>),
+    /// A name lookup that no binding owns, such as when a narrowing looks up the name it narrows.
+    Inspection,
     /// Static type context that should not pin partial types.
     /// When `is_annotation` is true, implicit alias validation is applied.
     StaticTypeInformation { is_annotation: bool },
@@ -128,6 +130,7 @@ impl Usage {
         match other {
             Self::CurrentIdx(idx) => Self::NonPinningValue(Some(*idx)),
             Self::NonPinningValue(idx) => Self::NonPinningValue(*idx),
+            Self::Inspection => Self::Inspection,
             Self::StaticTypeInformation { .. } | Self::TypeAliasRhs => Self::NonPinningValue(None),
             Self::Unchecked => Self::Unchecked,
         }
@@ -138,7 +141,10 @@ impl Usage {
         match self {
             Usage::CurrentIdx(idx) => Some(*idx),
             Usage::NonPinningValue(idx) => *idx,
-            Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs | Usage::Unchecked => None,
+            Usage::Inspection
+            | Usage::StaticTypeInformation { .. }
+            | Usage::TypeAliasRhs
+            | Usage::Unchecked => None,
         }
     }
 
@@ -1111,7 +1117,7 @@ impl<'a> BindingsBuilder<'a> {
                         // `reveal_type` observes its first positional argument.
                         // Extra arguments are analyzed normally.
                         if matches!(first_arg, Expr::Name(_)) {
-                            self.ensure_expr(first_arg, &mut Usage::non_pinning_value_from(usage));
+                            self.ensure_expr(first_arg, &mut Usage::Inspection);
                         } else {
                             self.ensure_expr(first_arg, usage);
                         }

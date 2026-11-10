@@ -289,7 +289,7 @@ impl<'a> BindingsBuilder<'a> {
     ) -> PatternNarrowOps {
         // In typical code, match patterns are more like static types than normal values, so
         // we ignore match patterns for first-usage tracking.
-        let narrowing_usage = &mut Usage::NonPinningValue(None);
+        let narrowing_usage = &mut Usage::Inspection;
         match pattern {
             Pattern::MatchValue(mut p) => {
                 self.ensure_expr(&mut p.value, narrowing_usage);

@@ -162,7 +162,7 @@ impl<'a> BindingsBuilder<'a> {
         narrowed_idx: Idx<Key>,
     ) {
         let name = Hashed::new(&identifier.id);
-        let usage = Usage::NonPinningValue(None);
+        let usage = Usage::Inspection;
         let name_is_defined = match self.look_up_name_for_read(name, &usage) {
             NameReadInfo::Flow { .. }
             | NameReadInfo::Anywhere { .. }

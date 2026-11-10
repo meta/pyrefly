@@ -2442,8 +2442,7 @@ impl<'a> BindingsBuilder<'a> {
         let inner_fn_range = self.scopes.current_scope_range();
         for name in captures.into_iter() {
             let hashed_name = Hashed::new(&name);
-            let name_read_info =
-                self.look_up_name_for_read(hashed_name, &Usage::NonPinningValue(None));
+            let name_read_info = self.look_up_name_for_read(hashed_name, &Usage::Inspection);
             // We only seed captures that resolve to an enclosing static entry (`Anywhere`), which
             // includes already-materialized builtins. A not-yet-materialized builtin
             // (`ImplicitBuiltin`), a flow value, or a missing name are resolved when the inner
@@ -2590,7 +2589,7 @@ impl<'a> BindingsBuilder<'a> {
             let idx = if let Some(idx) = self.scopes.current_fork_base_idx(name) {
                 idx
             } else if let NameLookupResult::Found { idx, .. } =
-                self.lookup_name(Hashed::new(name), &mut Usage::NonPinningValue(None))
+                self.lookup_name(Hashed::new(name), &mut Usage::Inspection)
             {
                 idx
             } else {
@@ -3192,10 +3191,7 @@ impl<'a> BindingsBuilder<'a> {
             // Narrowing operations should not pin partial types, but they also
             // should not permanently block pinning. Leave the first-use state
             // as Undetermined so a subsequent non-narrowing read can still pin.
-            if let Some(initial_idx) = self
-                .lookup_name(name, &mut Usage::NonPinningValue(None))
-                .found()
-            {
+            if let Some(initial_idx) = self.lookup_name(name, &mut Usage::Inspection).found() {
                 let narrowed_idx = self.insert_binding(
                     Key::Narrow(Box::new((name.into_key().clone(), *op_range, use_location))),
                     Binding::Narrow(initial_idx, Box::new(op.clone()), use_location),
