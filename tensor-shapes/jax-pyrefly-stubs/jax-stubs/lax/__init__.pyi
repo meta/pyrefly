@@ -13,6 +13,7 @@ from jax._shapes import (
     collapse_to_end_shape,
     concatenate_shape,
     dot_shape,
+    lax_all_gather_shape,
     lax_associative_scan_shape,
     lax_axis_reduce_shape,
     lax_broadcast,
@@ -21,6 +22,7 @@ from jax._shapes import (
     lax_dynamic_slice_in_dim_shape,
     lax_dynamic_slice_shape,
     lax_fft_shape,
+    lax_psum_scatter_shape,
     lax_reduce_shape,
     lax_reshape_shape,
     lax_scan_shape,
@@ -78,6 +80,8 @@ from . import linalg as linalg
 type _Shape = IntTuple
 type _Scalar = int | float | complex
 type _Axis = int | tuple[int, ...] | None
+# Rank-changing rules require statically nonempty named axes.
+type _NonEmptyAxisName = str | int | tuple[Hashable, *tuple[Hashable, ...]]
 type _ShapedArrayLike[Shape: _Shape] = _Array[Shape] | np.ndarray[Shape]
 
 # Unary elementwise operators
@@ -1443,9 +1447,31 @@ def while_loop[T](
 # -----------------------------------------------------------------------------
 
 @overload
-def all_gather[Shape: _Shape = []](
+def all_gather[T](
+    x: T,
+    axis_name: tuple[()],
+    *,
+    axis_index_groups: Any = None,
+    axis: int = 0,
+    tiled: bool = False,
+    to: str = "varying",
+) -> T: ...
+@overload
+def all_gather[Shape: _Shape = [], Axis: Flag[int] = 0, Tiled: Flag[bool] = False](
     x: _ArrayLike[Shape],
-    axis_name: Hashable,
+    axis_name: _NonEmptyAxisName,
+    *,
+    axis_index_groups: Any = None,
+    axis: Axis = 0,
+    tiled: Tiled = False,
+    to: str = "varying",
+) -> _Array[lax_all_gather_shape(Shape, Axis, Tiled)]: ...
+
+# A runtime axis still returns an array, even when its shape cannot be calculated.
+@overload
+def all_gather(
+    x: _ArrayLike[Any],
+    axis_name: _NonEmptyAxisName,
     *,
     axis_index_groups: Any = None,
     axis: int = 0,
@@ -1453,15 +1479,28 @@ def all_gather[Shape: _Shape = []](
     to: str = "varying",
 ) -> _Array[IntTuple]: ...
 @overload
-def all_gather[T](
-    x: T,
+def all_gather(
+    x: _Array[Any],
     axis_name: Hashable,
     *,
     axis_index_groups: Any = None,
     axis: int = 0,
     tiled: bool = False,
     to: str = "varying",
-) -> T: ...
+) -> _Array[IntTuple]: ...
+
+# Arbitrary pytrees preserve their containers, but their leaves change shape.
+# TODO(stroxler): Map output shapes over pytree leaves without losing nominal types.
+@overload
+def all_gather(
+    x: Any,
+    axis_name: Hashable,
+    *,
+    axis_index_groups: Any = None,
+    axis: int = 0,
+    tiled: bool = False,
+    to: str = "varying",
+) -> Any: ...
 @overload
 def all_to_all[Shape: _Shape = []](
     x: _ArrayLike[Shape],
@@ -1473,15 +1512,15 @@ def all_to_all[Shape: _Shape = []](
     tiled: bool = False,
 ) -> _Array[IntTuple]: ...
 @overload
-def all_to_all[T](
-    x: T,
+def all_to_all(
+    x: Any,
     axis_name: Hashable,
     split_axis: int,
     concat_axis: int,
     *,
     axis_index_groups: Any = None,
     tiled: bool = False,
-) -> T: ...
+) -> Any: ...
 def axis_index(axis_name: Hashable) -> _Array[[]]: ...
 def axis_size(axis_name: Hashable) -> int: ...
 @overload
@@ -1602,8 +1641,35 @@ def psum[T](
     axis_index_groups: Any = None,
 ) -> T: ...
 @overload
-def psum_scatter[Shape: _Shape = []](
+def psum_scatter[T](
+    x: T,
+    axis_name: tuple[()],
+    *,
+    scatter_dimension: int = 0,
+    axis_index_groups: Any = None,
+    tiled: bool = False,
+) -> T: ...
+@overload
+def psum_scatter[Shape: _Shape = [], Axis: Flag[int] = 0, Tiled: Flag[bool] = False](
     x: _ArrayLike[Shape],
+    axis_name: _NonEmptyAxisName,
+    *,
+    scatter_dimension: Axis = 0,
+    axis_index_groups: Any = None,
+    tiled: Tiled = False,
+) -> _Array[lax_psum_scatter_shape(Shape, Axis, Tiled)]: ...
+@overload
+def psum_scatter(
+    x: _ArrayLike[Any],
+    axis_name: _NonEmptyAxisName,
+    *,
+    scatter_dimension: int = 0,
+    axis_index_groups: Any = None,
+    tiled: bool = False,
+) -> _Array[IntTuple]: ...
+@overload
+def psum_scatter(
+    x: _Array[Any],
     axis_name: Hashable,
     *,
     scatter_dimension: int = 0,
@@ -1611,14 +1677,14 @@ def psum_scatter[Shape: _Shape = []](
     tiled: bool = False,
 ) -> _Array[IntTuple]: ...
 @overload
-def psum_scatter[T](
-    x: T,
+def psum_scatter(
+    x: Any,
     axis_name: Hashable,
     *,
     scatter_dimension: int = 0,
     axis_index_groups: Any = None,
     tiled: bool = False,
-) -> T: ...
+) -> Any: ...
 @overload
 def pswapaxes[Shape: _Shape = []](
     x: _ArrayLike[Shape],

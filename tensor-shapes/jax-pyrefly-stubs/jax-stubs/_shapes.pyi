@@ -318,6 +318,46 @@ def svd_vt_shape(shape: IntTuple, full_matrices: bool) -> IntTuple:
         return dsl.concat(batch, dsl.IntTuple((n, n)))
     return dsl.concat(batch, dsl.IntTuple((dsl.Int.gradual(), n)))
 
+# Arithmetic gives both axis-normalization branches the same DSL value domain.
+# Negative bounds use subtraction because the DSL cannot negate Flag integers.
+@type_shape_dsl_function
+def lax_all_gather_shape(shape: IntTuple, axis: int, tiled: bool) -> IntTuple:
+    if tiled:
+        rank = len(shape)
+    else:
+        rank = len(shape) + 1
+    if axis < 0 - rank or axis >= rank:
+        return dsl.Invalid("all_gather axis out of bounds")
+    if axis < 0:
+        normalized = axis + rank
+    else:
+        normalized = axis + 0
+    # Axis names carry no group size; only the communicated dimension is gradual.
+    if tiled:
+        return dsl.IntTuple(
+            dsl.Int.gradual() if i == normalized else shape[i]
+            for i in range(len(shape))
+        )
+    return dsl.concat(
+        dsl.concat(shape[:normalized], dsl.IntTuple((dsl.Int.gradual(),))),
+        shape[normalized:],
+    )
+
+@type_shape_dsl_function
+def lax_psum_scatter_shape(shape: IntTuple, axis: int, tiled: bool) -> IntTuple:
+    rank = len(shape)
+    if axis < 0:
+        normalized = axis + rank
+    else:
+        normalized = axis + 0
+    if normalized < 0 or normalized >= rank:
+        return dsl.Invalid("psum_scatter dimension out of bounds")
+    if tiled:
+        return dsl.IntTuple(
+            dsl.Int.gradual() if i == normalized else shape[i] for i in range(rank)
+        )
+    return dsl.IntTuple(shape[i] for i in range(rank) if i != normalized)
+
 @type_shape_dsl_function
 def lax_reshape_shape(
     shape: IntTuple,
