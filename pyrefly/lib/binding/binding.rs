@@ -1283,6 +1283,18 @@ pub enum ExceptClauseCatches {
     Everything,
 }
 
+/// The earlier cases' effect on a match subject at the point a later case is checked.
+#[derive(Clone, Debug)]
+pub struct MatchCaseNegations {
+    /// Negations from earlier unguarded cases, in the same subject coordinates as
+    /// the current case's narrow op.
+    pub op: NarrowOp,
+    pub range: TextRange,
+    /// The match subject before `op` applies, so diagnostics can name it when
+    /// `op` has already reduced the case subject to `Never`.
+    pub declared_subject_idx: Idx<Key>,
+}
+
 #[derive(Clone, Debug)]
 pub enum BindingExpect {
     /// An expression where we need to check for type errors, but don't need the result type.
@@ -1328,10 +1340,12 @@ pub enum BindingExpect {
         narrowing_subject: Option<NarrowingSubject>,
         narrow_ops_for_case: Box<(NarrowOp, TextRange)>,
         /// Negations from earlier unguarded cases in the same match, in the
-        /// same subject coordinates as `narrow_ops_for_case`. Reachability
-        /// narrows by the current pattern first, then applies these, so an
-        /// `Any` subject can first become `bool` and then subtract `int`.
-        prev_case_negations: Option<Box<(NarrowOp, TextRange)>>,
+        /// same subject coordinates as `narrow_ops_for_case`, plus the match
+        /// subject before those negations so diagnostics can name it.
+        /// Reachability narrows by the current pattern first, then applies
+        /// these, so an `Any` subject can first become `bool` and then
+        /// subtract `int`.
+        prev_case_negations: Option<Box<MatchCaseNegations>>,
         case_range: TextRange,
     },
     /// Code following one or more points in a suite that control passes only conditionally, such
