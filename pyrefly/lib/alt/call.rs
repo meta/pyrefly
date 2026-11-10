@@ -3094,6 +3094,44 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    /// Preserve unknown `__new__` returns when a constructor is used as a class decorator.
+    pub(crate) fn class_decorator_constructor_to_callable(&self, cls: &ClassType) -> Type {
+        let mut constructor = self.constructor_to_callable(cls);
+        if let Some(new_member) =
+            self.get_class_member_with_defining_class(cls.class_object(), &dunder::NEW)
+            && new_member.value.is_function_without_return_annotation()
+            && let Some(new_metadata) = new_member.value.ty().toplevel_func_metadata()
+        {
+            // Ordinary construction gives an unannotated `__new__` a synthetic `Self` return.
+            // That fallback does not describe a decorator that returns its class argument.
+            constructor = self.unions(
+                constructor
+                    .into_unions()
+                    .into_iter()
+                    .map(|mut member| {
+                        if member
+                            .toplevel_func_metadata()
+                            .is_some_and(|meta| meta.kind == new_metadata.kind)
+                        {
+                            member.transform_toplevel_callable_signatures(|signature, _| {
+                                signature.ret = self.heap.mk_any_implicit();
+                            });
+                        }
+                        member
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(tparams) = self
+            .get_class_tparams(cls.class_object())
+            .filter(|p| !p.is_empty())
+        {
+            self.normalize_class_constructor_tparams(constructor, tparams)
+        } else {
+            constructor
+        }
+    }
+
     /// Convert a bare class definition while keeping its type parameters generic.
     pub fn constructor_to_callable_for_class_def(&self, cls: &Class) -> Type {
         let Some(class_tparams) = self

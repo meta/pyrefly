@@ -58,7 +58,6 @@ use crate::alt::call::CallStyle;
 use crate::alt::call::CallTarget;
 use crate::alt::callable::CallArg;
 use crate::alt::singledispatch::DispatcherDef;
-use crate::alt::types::decorated_function::ClassDecoratorKind;
 use crate::alt::types::decorated_function::Decorator;
 use crate::alt::types::decorated_function::SpecialDecorator;
 use crate::alt::types::decorated_function::UndecoratedFunction;
@@ -2293,63 +2292,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.singledispatch_dispatcher_as_callback(widened, &application.original_decoratee)
     }
 
-    /// Classify once for both the untyped warning and decorator application.
-    pub(crate) fn class_decorator_kind(&self, decorator: &Type) -> ClassDecoratorKind {
-        let mut untyped = false;
-        let mut warn = false;
-        for member in decorator.clone().into_unions() {
-            let instance_call = match &member {
-                Type::ClassType(instance) => self.instance_as_dunder_call(instance),
-                _ => None,
-            };
-            let callable = instance_call.as_ref().unwrap_or(&member);
-            if let Type::Any(style) = callable {
-                untyped = true;
-                warn |= *style != AnyStyle::Error;
-                continue;
-            }
-            let inferred = callable
+    /// Whether a return annotation explicitly opts out of tracking the class interface.
+    pub(crate) fn class_decorator_erases_class(&self, decorator: &Type) -> bool {
+        decorator.clone().into_unions().iter().any(|member| {
+            let inferred = member
                 .toplevel_func_metadata()
                 .is_some_and(|meta| meta.flags.is_return_inferred);
-            let mut signatures = callable.toplevel_callable_signatures().peekable();
-            // A union is untyped if any member is untyped. An overload is untyped
-            // only if every signature has an untyped return.
-            let mut member_untyped = signatures.peek().is_some();
-            let mut member_warn = false;
-            for (signature, _) in signatures {
-                let mut return_untyped = false;
-                for ret in signature.ret.clone().into_unions() {
-                    match ret {
-                        Type::Any(style) => {
-                            return_untyped = true;
-                            member_warn |= style == AnyStyle::Implicit;
-                        }
-                        Type::Type(inner) => match &*inner {
-                            Type::Any(AnyStyle::Explicit) if !inferred => {
-                                // An explicit erasure takes precedence over untyped alternatives.
-                                return ClassDecoratorKind::ErasesClass;
-                            }
-                            Type::Any(style) => {
-                                return_untyped = true;
-                                member_warn |= *style != AnyStyle::Error;
-                            }
-                            _ => {}
-                        },
-                        _ => {}
-                    }
-                }
-                member_untyped &= return_untyped;
-            }
-            if member_untyped {
-                untyped = true;
-                warn |= member_warn;
-            }
-        }
-        if untyped {
-            ClassDecoratorKind::Untyped { warn }
-        } else {
-            ClassDecoratorKind::Typed
-        }
+            !inferred
+                && member.toplevel_callable_signatures().any(|(signature, _)| {
+                    signature.ret.clone().into_unions().iter().any(|ret| {
+                        matches!(ret, Type::Type(inner) if matches!(&**inner, Type::Any(AnyStyle::Explicit)))
+                    })
+                })
+        })
     }
 
     pub(crate) fn apply_class_decorator(
@@ -2361,24 +2316,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Type {
         if self.stdlib.is_bootstrapping() {
             // Decorator inference depends on the builtins that bootstrapping is still constructing.
-            return decoratee;
-        }
-        let metadata = match &decorator {
-            Type::KwCall(call) => Some(&call.func_metadata),
-            _ => decorator.toplevel_func_metadata(),
-        };
-        if metadata.is_some_and(|meta| {
-            meta.flags.dataclass_transform_metadata.is_some()
-                || matches!(
-                    meta.kind,
-                    FunctionKind::Dataclass
-                        | FunctionKind::DataclassTransform
-                        | FunctionKind::DisjointBase
-                        | FunctionKind::Final
-                        | FunctionKind::RuntimeCheckable
-                        | FunctionKind::TotalOrdering
-                )
-        }) {
             return decoratee;
         }
         let call_target =

@@ -1122,6 +1122,132 @@ g(f)
 );
 
 testcase!(
+    test_class_decorator_untyped_constructor_result,
+    TestEnv::new().enable_untyped_class_decorator_error(),
+    r#"
+from typing import assert_type
+
+class Passthrough:
+    def __new__(cls, c):
+        return c
+
+@Passthrough  # E: Untyped class decorator
+class D:
+    x: int = 1
+
+assert_type(D, type[D])
+assert_type(D.x, int)
+
+def decorator_factory() -> type[Passthrough]:
+    return Passthrough
+
+@decorator_factory()  # E: Untyped class decorator
+class E:
+    x: int = 1
+
+assert_type(E, type[E])
+assert_type(E.x, int)
+
+class Wrapper[T]:
+    def __init__(self, wrapped: type[T]) -> None:
+        self.wrapped = wrapped
+
+@Wrapper
+class Wrapped:
+    x: int = 1
+
+assert_type(Wrapped.wrapped().x, int)
+"#,
+);
+
+testcase!(
+    test_class_decorator_selected_overload_returns_any,
+    r#"
+from typing import Any, assert_type, overload
+
+@overload
+def deco(cls: type) -> Any: ...
+@overload
+def deco(cls: str) -> int: ...
+def deco(cls: Any) -> Any: ...
+
+@deco
+class C:
+    x: int = 1
+
+assert_type(C, type[C])
+assert_type(C.x, int)
+
+@overload
+def erasing_overload(cls: type) -> Any: ...
+@overload
+def erasing_overload(cls: str) -> type[Any]: ...
+def erasing_overload(cls: Any) -> Any: ...
+
+@erasing_overload
+class D:
+    x: int = 1
+
+assert_type(D, type[D])
+assert_type(D.x, int)
+"#,
+);
+
+testcase!(
+    test_class_decorator_untyped_call_results_all,
+    TestEnv::new().with_class_decorator_behavior(ClassDecoratorBehavior::All),
+    r#"
+from typing import Any, assert_type, overload
+
+class Passthrough:
+    def __new__(cls, c):
+        return c
+
+@Passthrough
+class D: ...
+
+@overload
+def deco(cls: type) -> Any: ...
+@overload
+def deco(cls: str) -> int: ...
+def deco(cls: Any) -> Any: ...
+
+@deco
+class C: ...
+
+assert_type(D, Any)
+assert_type(C, Any)
+"#,
+);
+
+testcase!(
+    test_class_decorator_ignore_dataclass_transform_erasure,
+    TestEnv::new().with_class_decorator_behavior(ClassDecoratorBehavior::Ignore),
+    r#"
+from typing import Any, Callable, assert_type, dataclass_transform
+
+@dataclass_transform()
+def model(cls: type) -> type[Any]: ...
+
+@dataclass_transform()
+def factory(*, frozen: bool = False) -> Callable[[type], type[Any]]: ...
+
+@model
+class Direct:
+    x: int
+
+@factory(frozen=True)
+class Factory:
+    x: int
+
+assert_type(Direct(x=1).x, int)
+assert_type(Factory(x=1).x, int)
+Direct(x="wrong")  # E: Argument `Literal['wrong']` is not assignable to parameter `x` with type `int`
+Factory(x="wrong")  # E: Argument `Literal['wrong']` is not assignable to parameter `x` with type `int`
+"#,
+);
+
+testcase!(
     test_class_decorator_behavior_ignore,
     TestEnv::new().with_class_decorator_behavior(ClassDecoratorBehavior::Ignore),
     r#"

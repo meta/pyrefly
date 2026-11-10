@@ -1193,13 +1193,11 @@ Controls how class decorators affect the type bound to a class name.
 - `"ignore"`: Preserve the class type without inferring decorator results.
   An explicit `type[Any]` return annotation still erases the class interface.
   This is the default for the `basic` and `legacy` presets.
-- `"typed-only"`: Apply typed decorators. Preserve the class type when a
-  decorator has type `Any` or returns `Any`, `Unknown`, or `type[Unknown]`.
-  A bare `type` return annotation and an inferred `type[Any]` return preserve
-  the class interface. Return unions also follow these rules. An explicit
-  `type[Any]` return annotation takes precedence and permits class erasure.
-  A decorator union is untyped if any member is untyped. An overloaded
-  decorator is untyped only if every signature has an untyped return.
+- `"typed-only"`: Apply decorators whose call results are typed. Preserve the
+  class type when the result contains `Any`, `Unknown`, or `type[Unknown]` at
+  the top level. A bare `type` return annotation and an inferred `type[Any]`
+  return preserve the class interface. An explicit `type[Any]` return still
+  permits class erasure. Overloaded decorators use the selected overload's result.
   This is the default for the `default`, `strict`, and `all` presets.
 - `"all"`: Apply all decorator return types, including `Any` and `Unknown`.
   Decorators apply from the bottom of the decorator list to the top.
@@ -1218,11 +1216,9 @@ Special decorators such as `dataclass`, `dataclass_transform`, `final`,
 class behavior in all three modes. An invalid decorator also preserves the class
 during error recovery.
 
-The same untyped classification controls decorator application and the
-`untyped-class-decorator` diagnostic. An explicit `Any` return disables tracking
-without this warning. Implicit or inferred unknown types receive the warning
-only for the first untyped decorator in application order.
-Configure its severity separately to control reporting.
+The `untyped-class-decorator` diagnostic reports the first unknown call result
+when decorators are applied. An explicit `Any` return does not receive this
+warning. Configure its severity separately to control reporting.
 
 - Type: one of `"ignore"`, `"typed-only"`, `"all"`
 - Default: `"ignore"` for `basic` and `legacy`, `"typed-only"` otherwise

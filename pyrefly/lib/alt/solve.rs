@@ -19,6 +19,7 @@ use pyrefly_types::dimension::Int;
 use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::facet::FacetKind;
 use pyrefly_types::function::BodyKind;
+use pyrefly_types::function::FunctionKind;
 use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
@@ -75,7 +76,6 @@ use crate::alt::types::class_metadata::ClassMetadata;
 use crate::alt::types::class_metadata::ClassMro;
 use crate::alt::types::class_metadata::ClassSynthesizedFields;
 use crate::alt::types::class_metadata::DataclassKind;
-use crate::alt::types::decorated_function::ClassDecoratorKind;
 use crate::alt::types::decorated_function::Decorator;
 use crate::alt::types::decorated_function::UndecoratedFunction;
 use crate::alt::types::legacy_lookup::LegacyTypeParameterLookup;
@@ -7394,14 +7394,77 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     let mut obscured = false;
                     for decorator_key in decorators.iter().rev() {
                         let decorator = self.get_idx(*decorator_key);
+                        let metadata = match &decorator.ty {
+                            Type::KwCall(call) => Some(&call.func_metadata),
+                            ty => ty.toplevel_func_metadata(),
+                        };
                         if self.bindings().get(*decorator_key).is_class_metadata
                             || decorator.ty.is_error()
+                            || metadata.is_some_and(|meta| {
+                                meta.flags.dataclass_transform_metadata.is_some()
+                                    || matches!(
+                                        meta.kind,
+                                        FunctionKind::Dataclass
+                                            | FunctionKind::DataclassTransform
+                                            | FunctionKind::DisjointBase
+                                            | FunctionKind::Final
+                                            | FunctionKind::RuntimeCheckable
+                                            | FunctionKind::TotalOrdering
+                                    )
+                            })
                         {
                             continue;
                         }
+                        let callable = self.unions(
+                            decorator
+                                .ty
+                                .clone()
+                                .into_unions()
+                                .into_iter()
+                                .map(|member| match &member {
+                                    Type::ClassDef(cls) => self
+                                        .class_decorator_constructor_to_callable(
+                                            &self.as_class_type_unchecked(cls),
+                                        ),
+                                    Type::Type(inner) if let Type::ClassType(cls) = &**inner => {
+                                        self.class_decorator_constructor_to_callable(cls)
+                                    }
+                                    Type::ClassType(instance) => {
+                                        self.instance_as_dunder_call(instance).unwrap_or(member)
+                                    }
+                                    _ => member,
+                                })
+                                .collect(),
+                        );
+                        if behavior == ClassDecoratorBehavior::Ignore {
+                            if self.class_decorator_erases_class(&callable) {
+                                ty = self.heap.mk_type_of(self.heap.mk_any_explicit());
+                            }
+                            continue;
+                        }
                         let range = self.bindings().idx_to_key(*decorator_key).range();
-                        let kind = self.class_decorator_kind(&decorator.ty);
-                        if let ClassDecoratorKind::Untyped { warn } = kind {
+                        let decorated =
+                            self.apply_class_decorator(callable.clone(), ty.clone(), range, errors);
+                        let mut untyped = decorator.ty.is_any();
+                        let mut warn = untyped;
+                        for member in decorated.clone().into_unions() {
+                            match &member {
+                                Type::Any(style) => {
+                                    untyped = true;
+                                    warn |= *style == AnyStyle::Implicit;
+                                }
+                                Type::Type(inner)
+                                    if let Type::Any(style) = &**inner
+                                        && (*style != AnyStyle::Explicit
+                                            || !self.class_decorator_erases_class(&callable)) =>
+                                {
+                                    untyped = true;
+                                    warn |= *style != AnyStyle::Error;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if untyped {
                             if warn && !obscured {
                                 self.error(
                                     errors,
@@ -7415,23 +7478,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             }
                             obscured = true;
                         }
-                        match (behavior, kind) {
-                            (ClassDecoratorBehavior::Ignore, ClassDecoratorKind::ErasesClass) => {
-                                ty = self.heap.mk_type_of(self.heap.mk_any_explicit());
-                            }
-                            (ClassDecoratorBehavior::Ignore, _)
-                            | (
-                                ClassDecoratorBehavior::TypedOnly,
-                                ClassDecoratorKind::Untyped { .. },
-                            ) => {}
-                            _ => {
-                                ty = self.apply_class_decorator(
-                                    decorator.ty.clone(),
-                                    ty,
-                                    range,
-                                    errors,
-                                );
-                            }
+                        if behavior == ClassDecoratorBehavior::All || !untyped {
+                            ty = decorated;
                         }
                     }
                     ty
