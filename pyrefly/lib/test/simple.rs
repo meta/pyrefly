@@ -1000,6 +1000,37 @@ f"{D():>10}"
 );
 
 testcase!(
+    test_checked_fstrings_default_policy,
+    TestEnv::one_with_path("third_party", "third_party.pyi", "class Scalar: ..."),
+    r#"
+from third_party import Scalar
+from typing import SupportsIndex
+
+def display(value: object, scalar: Scalar, index: SupportsIndex) -> None:
+    f"{value:>10}"  # E: doesn't support format specifiers
+    f"{scalar:.2f}"  # E: doesn't support format specifiers
+    f"{index:05d}"  # E: doesn't support format specifiers
+
+f"{None:>10}"  # E: doesn't support format specifiers
+f"{'x':.2f}"  # E: Incompatible types in string interpolation
+f"{1:r}"  # E: Unrecognized format specification
+f"{1:.2d}"  # E: Precision is not allowed
+f"{len(False):d}"  # E: Protocol `Sized` requires attribute `__len__`
+"#,
+);
+
+testcase!(
+    test_checked_fstrings_rule_suppression,
+    TestEnv::new().enable_unused_ignore_errors(),
+    r#"
+f"{None:>10}"  # pyrefly: ignore[invalid-argument]
+f"{'x':.2f}"  # pyrefly: ignore[bad-argument-type]
+f"{1:r}"  # pyrefly: ignore[invalid-argument]
+f"{1:.2d}"  # pyrefly: ignore[invalid-argument]
+"#,
+);
+
+testcase!(
     test_ternary_expression,
     r#"
 from typing import assert_type, Literal
