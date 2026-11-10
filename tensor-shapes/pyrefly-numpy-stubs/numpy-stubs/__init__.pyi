@@ -785,6 +785,12 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
     def __add__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    # NumPy converts flat and two-level numeric lists to arrays before broadcasting.
+    # Their lengths are not tracked, so these results have gradual shapes and dtypes.
+    @overload
+    def __add__[ScalarT: _NumberScalar](
+        self, other: list[ScalarT] | list[list[ScalarT]]
+    ) -> ndarray: ...
     @overload
     def __add__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     @overload
@@ -792,11 +798,19 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
     @overload
+    def __radd__[ScalarT: _NumberScalar](
+        self, other: list[ScalarT] | list[list[ScalarT]]
+    ) -> ndarray: ...
+    @overload
     def __radd__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     @overload
     def __sub__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __sub__[ScalarT: _NumberScalar](
+        self, other: list[ScalarT] | list[list[ScalarT]]
+    ) -> ndarray: ...
     @overload
     def __sub__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     @overload
@@ -804,11 +818,19 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
     @overload
+    def __rsub__[ScalarT: _NumberScalar](
+        self, other: list[ScalarT] | list[list[ScalarT]]
+    ) -> ndarray: ...
+    @overload
     def __rsub__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     @overload
     def __truediv__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __truediv__[ScalarT: _NumberScalar](
+        self, other: list[ScalarT] | list[list[ScalarT]]
+    ) -> ndarray: ...
     @overload
     def __truediv__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     @overload
@@ -816,17 +838,29 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
     @overload
+    def __rtruediv__[ScalarT: _NumberScalar](
+        self, other: list[ScalarT] | list[list[ScalarT]]
+    ) -> ndarray: ...
+    @overload
     def __rtruediv__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     @overload
     def __mul__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
     @overload
+    def __mul__[ScalarT: _NumberScalar](
+        self, other: list[ScalarT] | list[list[ScalarT]]
+    ) -> ndarray: ...
+    @overload
     def __mul__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     @overload
     def __rmul__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __rmul__[ScalarT: _NumberScalar](
+        self, other: list[ScalarT] | list[list[ScalarT]]
+    ) -> ndarray: ...
     @overload
     def __rmul__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     def __floordiv__[OtherShape: _Shape = []](
@@ -849,11 +883,19 @@ class ndarray(Generic[_ShapeT_co, _DTypeT_co]):
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
     @overload
+    def __pow__[ScalarT: _NumberScalar](
+        self, other: list[ScalarT] | list[list[ScalarT]]
+    ) -> ndarray: ...
+    @overload
     def __pow__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     @overload
     def __rpow__[OtherShape: _Shape = []](
         self, other: ndarray[[*OtherShape]] | int | float
     ) -> ndarray[_broadcast_shape(_ShapeT_co, OtherShape), _DTypeT_co]: ...
+    @overload
+    def __rpow__[ScalarT: _NumberScalar](
+        self, other: list[ScalarT] | list[list[ScalarT]]
+    ) -> ndarray: ...
     @overload
     def __rpow__(self, other: complex | number | bool_) -> ndarray[_ShapeT_co]: ...
     # Scalar results also satisfy Python's truth-valued comparison protocols.
