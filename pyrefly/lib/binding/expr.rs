@@ -1285,26 +1285,6 @@ impl<'a> BindingsBuilder<'a> {
         );
     }
 
-    pub fn ensure_class_member_type(
-        &mut self,
-        x: &mut Expr,
-        mut tparams_builder: Option<&mut LegacyTParamCollector>,
-    ) {
-        let written_range = x.range();
-        let mut usage = Usage::StaticTypeInformation {
-            is_annotation: true,
-        };
-        self.ensure_type_impl(
-            x,
-            tparams_builder.as_deref_mut(),
-            false,
-            false,
-            &mut usage,
-            true,
-        );
-        self.bind_shape_comment(x, written_range, tparams_builder, &mut usage);
-    }
-
     /// Like `ensure_type`, but with a specific usage context. Used by type alias
     /// construction sites to pass `Usage::TypeAliasRhs`.
     pub fn ensure_type_with_usage(
