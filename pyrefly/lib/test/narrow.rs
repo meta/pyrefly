@@ -1310,6 +1310,54 @@ def f(cls: type[int], x: int | str) -> None:
 );
 
 testcase!(
+    bug = "Negative isinstance narrowing treats gradual ancestry as definite containment",
+    test_is_not_instance_gradual_base,
+    r#"
+from typing import Any, Never, Self, TypedDict, assert_type
+
+def make_base() -> Any:
+    return object
+
+class Mul: ...
+
+class FloorDiv(make_base()):
+    def check(self) -> None:
+        if not isinstance(self, Mul):
+            assert_type(self, Never)
+
+class Inherited(FloorDiv): ...
+
+class Data(TypedDict):
+    value: int
+
+def gradual_left(x: FloorDiv) -> None:
+    if not isinstance(x, Mul):
+        assert_type(x, Never)
+
+def gradual_right(x: str) -> None:
+    if not isinstance(x, FloorDiv):
+        assert_type(x, Never)
+
+def inherited_base(x: Inherited) -> None:
+    if not isinstance(x, Mul):
+        assert_type(x, Never)
+
+def union_member(x: FloorDiv | Mul) -> None:
+    if not isinstance(x, Mul):
+        assert_type(x, Never)
+
+def typed_dict(x: Data) -> None:
+    if not isinstance(x, FloorDiv):
+        assert_type(x, Never)
+
+# An Any type argument does not make the runtime class uncertain.
+def generic_argument(x: list[Any] | int) -> None:
+    if not isinstance(x, list):
+        assert_type(x, int)
+"#,
+);
+
+testcase!(
     test_is_not_instance_alias,
     r#"
 from typing import TypeAlias, assert_type
