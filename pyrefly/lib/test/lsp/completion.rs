@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::slice;
+
 use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::CompletionItemTag;
@@ -55,6 +57,55 @@ fn is_object_attribute(item: &CompletionItem) -> bool {
     item.sort_text
         .as_deref()
         .is_some_and(|sort_text| sort_text.starts_with("3a"))
+}
+
+#[test]
+fn completion_setattr_literal_name_boundaries() {
+    let source = r#"
+class C:
+    def __init__(self) -> None:
+        setattr(self, "x", 1)
+        setattr(self, "foo-bar", 1)
+        setattr(self, "class", 1)
+        setattr(self, "con" "cat", 1)
+        setattr(self, "esca\x70ed", 1)
+        setattr(self, "K", 1)
+        setattr(self, "match", 1)
+
+C().
+"#;
+    let (state, handle) = TestEnv::one("main", source).to_state();
+    let handle = handle("main");
+    let mut transaction = state.transaction();
+    transaction.run(slice::from_ref(&handle), Require::Everything, None);
+    let position = TextSize::try_from(source.rfind("C().").unwrap() + "C().".len()).unwrap();
+    let mut names = transaction
+        .completion(&handle, position, ImportFormat::Absolute, true, None)
+        .into_iter()
+        .map(|item| item.label)
+        .filter(|name| {
+            [
+                "x", "foo-bar", "class", "concat", "escaped", "K", "K", "match",
+            ]
+            .contains(&name.as_str())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["match", "x"]);
+}
+
+#[test]
+fn completion_setattr_line_continuation_name() {
+    let source = "class C:\n    def __init__(self) -> None:\n        setattr(self, \"\\\ncontinued\", 1)\n\nC().\n";
+    let (handles, state) = mk_multi_file_state(&[("main", source)], Require::Everything, false);
+    let handle = handles.get("main").unwrap();
+    let position = TextSize::try_from(source.rfind("C().").unwrap() + "C().".len()).unwrap();
+    let has_field = state
+        .transaction()
+        .completion(handle, position, ImportFormat::Absolute, true, None)
+        .iter()
+        .any(|item| item.label == "continued");
+    assert!(!has_field);
 }
 
 #[test]
@@ -383,6 +434,145 @@ Completion Results:
 }
 
 #[test]
+fn dot_complete_from_getattr_literal_parameter() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    def __getattr__(self, item: Literal["A", "B"]) -> object: ...
+
+A().
+#   ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let position = extract_cursors_for_test(code)[0];
+    assert_eq!(
+        dict_field_labels(&state.transaction(), &handles["main"], position),
+        ["A", "B"],
+    );
+}
+
+#[test]
+fn dot_complete_from_getattr_literal_parameter_filters_invalid_identifiers() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    def __getattr__(
+        self, item: Literal["good", "bad-name", "class", ""]
+    ) -> object: ...
+
+A().
+#   ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let position = extract_cursors_for_test(code)[0];
+    assert_eq!(
+        dict_field_labels(&state.transaction(), &handles["main"], position),
+        ["good"],
+    );
+}
+
+#[test]
+fn dot_complete_from_getattr_literal_parameter_union_receivers() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    def __getattr__(self, name: Literal["a", "shared"]) -> int: ...
+
+class B:
+    def __getattr__(self, name: Literal["b", "shared"]) -> str: ...
+
+class C: pass
+
+class Static:
+    @staticmethod
+    def __getattr__(name: Literal["static"]) -> bool: ...
+
+def f(both: A | B, missing: A | C, mixed_binding: A | Static):
+    both.
+#        ^
+    missing.
+#           ^
+    mixed_binding.
+#                 ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let txn = state.transaction();
+    let fields: Vec<Vec<String>> = extract_cursors_for_test(code)
+        .into_iter()
+        .map(|position| {
+            txn.completion(
+                &handles["main"],
+                position,
+                ImportFormat::Absolute,
+                true,
+                None,
+            )
+            .into_iter()
+            .filter(|item| {
+                // The method itself is a union and is classified as a field.
+                item.kind == Some(CompletionItemKind::Field)
+                    && !is_object_attribute(item)
+                    && item.label != "__getattr__"
+            })
+            .map(|item| format!("{}: {}", item.label, item.detail.unwrap()))
+            .collect()
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            vec!["a: int", "b: str", "shared: int | str"],
+            vec!["a: int", "shared: int"],
+            vec!["a: int", "shared: int", "static: bool"],
+        ],
+    );
+}
+
+#[test]
+fn dot_complete_from_getattr_literal_parameter_preserves_defined_fields() {
+    let code = r#"
+from typing import Literal
+
+class A:
+    real: str = ""
+    def __getattr__(self, name: Literal["real", "virtual"]) -> int: ...
+
+class B(A): pass
+
+B().
+#   ^
+B.
+# ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let txn = state.transaction();
+    let positions = extract_cursors_for_test(code);
+    assert_eq!(
+        dict_field_labels(&txn, &handles["main"], positions[0]),
+        ["real", "virtual"],
+    );
+    assert_eq!(
+        dict_field_labels(&txn, &handles["main"], positions[1]),
+        ["real"],
+    );
+    let real = txn
+        .completion(
+            &handles["main"],
+            positions[0],
+            ImportFormat::Absolute,
+            true,
+            None,
+        )
+        .into_iter()
+        .find(|item| item.label == "real")
+        .unwrap();
+    assert_eq!(real.detail.as_deref(), Some("str"));
+}
+
+#[test]
 fn dict_key_completion_from_literal() {
     let code = r#"
 def use_dict():
@@ -615,6 +805,41 @@ item: FooBar = {
     );
     assert!(
         !report.contains("- (Value) 'bar-mode': Literal['bar-mode']"),
+        "{report}"
+    );
+}
+
+// The checker tries the members of a union in order and records the expected type of the value
+// at the cursor from the last member it tried. Here the matching member sorts first, so that
+// record comes from `Bbb`, which the other key's value rules out.
+#[test]
+fn dict_value_completion_narrows_discriminated_typed_dict_union_independent_of_member_order() {
+    let code = r#"
+from typing import Literal, TypedDict
+
+class Aaa(TypedDict):
+    kind: Literal["aaa"]
+    mode: Literal["aaa-mode"]
+
+class Bbb(TypedDict):
+    kind: Literal["bbb"]
+    mode: Literal["bbb-mode"]
+
+item: Aaa | Bbb = {
+    "kind": "aaa",
+    "mode": "|",
+#            ^
+}
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    let report = strip_ansi(&report);
+    assert!(
+        report.contains("- (Value) 'aaa-mode': Literal['aaa-mode']"),
+        "{report}"
+    );
+    assert!(
+        !report.contains("- (Value) 'bbb-mode': Literal['bbb-mode']"),
         "{report}"
     );
 }
@@ -4332,6 +4557,51 @@ Completion Results:
 # a.b.py
 
 # a.b.c.py
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+// https://github.com/facebook/pyrefly/issues/5223
+#[test]
+fn autoimport_skips_module_name_with_non_identifier() {
+    let code = r#"
+T = Migration
+#           ^
+x = initial
+#         ^
+"#;
+    let report = get_batched_lsp_operations_report_allow_error(
+        &[
+            ("main", code),
+            ("pkg.migrations.0001_initial", "class Migration: ...\n"),
+            ("pkg.models", "class Migration: ...\n"),
+            ("pkg.initial_data", ""),
+        ],
+        get_test_report(Default::default(), ImportFormat::Absolute),
+    );
+    assert_eq!(
+        r#"
+# main.py
+2 | T = Migration
+                ^
+Completion Results:
+- (Class) Migration: from pkg.models import Migration
+
+
+4 | x = initial
+              ^
+Completion Results:
+- (Module) pkg.initial_data: import pkg.initial_data
+
+
+
+# pkg.migrations.0001_initial.py
+
+# pkg.models.py
+
+# pkg.initial_data.py
 "#
         .trim(),
         report.trim(),

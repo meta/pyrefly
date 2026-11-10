@@ -184,7 +184,7 @@ $ echo "x: str = 0" > $TMPDIR/test.py && \
 ```scrut
 $ touch $TMPDIR/pyrefly.toml && \
 > printf "from typing import reveal_type\nreveal_type(1)\n" > $TMPDIR/test.py && \
-> $PYREFLY check $TMPDIR/test.py --min-severity=info --output-format=min-text
+> $PYREFLY check --python-version 3.13.0 $TMPDIR/test.py --min-severity=info --output-format=min-text
  INFO */test.py:2:12-15: revealed type: Literal[1] [reveal-type] (glob)
 [1]
 ```
@@ -250,8 +250,9 @@ $ touch $TMPDIR/pyrefly.toml && \
 
 ## `--output-format junit-xml` omits warnings unless `--min-severity=warn`
 
-Severity filtering happens before formatting, so by default a warning-level
-finding produces an empty suite:
+The suite lists only the diagnostics that make the exit code nonzero. By default
+a warning is printed but doesn't affect the exit code, so it produces an empty
+suite:
 
 ```scrut {output_stream: stdout}
 $ touch $TMPDIR/pyrefly.toml && \
@@ -280,6 +281,21 @@ $ touch $TMPDIR/pyrefly.toml && \
   </testsuite>
 </testsuites>
 [1]
+```
+
+## `--report-pysa` defaults `--min-severity` to `error`
+
+Pysa treats every type error as a failure, so its file leaves warnings out unless
+`--min-severity` says otherwise:
+
+```scrut
+$ mkdir -p $TMPDIR/pysa_warn && cd $TMPDIR/pysa_warn && touch pyrefly.toml && \
+> echo "x: str = 0" > warn.py && \
+> $PYREFLY check --warn=bad-assignment --report-pysa default --report-pysa-format json warn.py > /dev/null 2>&1; \
+> $PYREFLY check --warn=bad-assignment --min-severity=warn --report-pysa warn --report-pysa-format json warn.py > /dev/null 2>&1; \
+> $JQ -c '.errors | map(.kind)' default/errors.json warn/errors.json
+[]
+["bad-assignment"]
 ```
 
 ## `--output-format sarif` emits a complete SARIF report

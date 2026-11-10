@@ -69,15 +69,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 )
                 .ty;
         };
-        let target_ty = target.infer(self, errors);
+        let target_ty = match target.infer(self, errors) {
+            Type::TypeAlias(alias) => self.get_type_alias(&alias).as_value(self.stdlib),
+            ty => ty,
+        };
         // A class object / `type[C]` is callable via its constructor; normalize to that signature
         // so the same argument checking and partial construction apply, with the instance as the return.
         let target_ty = match target_ty {
-            // A bare protocol or abstract class can't be instantiated, so flag it at construction
-            // where the problem originates (a `type[C]` value below can still be a concrete
-            // subclass). Mirror the direct-instantiation path in `call.rs`.
-            Type::ClassDef(cls) => {
-                let metadata = self.get_metadata_for_class(&cls);
+            // A class name refers to the exact class, while a `type[C]` value may hold a
+            // concrete subclass. Mirror the direct-instantiation checks in `call.rs`.
+            ty @ (Type::ClassDef(_) | Type::SpecializedClassDef(_)) => {
+                let (cls, instance) = match &ty {
+                    Type::ClassDef(cls) => (cls, self.promote_silently(cls)),
+                    Type::SpecializedClassDef(cls) => {
+                        (cls.class_object(), Type::ClassType(cls.clone()))
+                    }
+                    _ => unreachable!("the target is a bare or specialized class definition"),
+                };
+                let metadata = self.get_metadata_for_class(cls);
                 if metadata.is_protocol() {
                     self.error(
                         errors,
@@ -89,7 +98,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ),
                     );
                 } else if !metadata.is_new_type() {
-                    let abstract_members = self.get_abstract_members_for_class(&cls);
+                    let abstract_members = self.get_abstract_members_for_class(cls);
                     let unimplemented = abstract_members.unimplemented_abstract_methods();
                     if !unimplemented.is_empty() {
                         self.error(
@@ -118,9 +127,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         );
                     }
                 }
-                match self.promote_silently(&cls) {
+                match instance {
                     Type::ClassType(instance) => self.constructor_to_callable(&instance),
-                    _ => Type::ClassDef(cls),
+                    _ => ty,
                 }
             }
             Type::Type(inner) => match *inner {

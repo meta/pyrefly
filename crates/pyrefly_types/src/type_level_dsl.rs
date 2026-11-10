@@ -70,6 +70,7 @@ use crate::function::FuncDefId;
 use crate::gufunc::GufuncClassification;
 use crate::gufunc::evaluate_gufunc;
 use crate::gufunc::parse_gufunc_signature;
+use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::map_int_tuples::MapIntTuples;
 use crate::quantified::Quantified;
@@ -7152,7 +7153,7 @@ impl StructurallyValidatedTypeShapeDslFunction {
                         EinsumClassification::Supported(equation) => {
                             evaluate_einsum(&equation, operands)
                         }
-                        EinsumClassification::Unsupported(_) => {
+                        EinsumClassification::Unsupported => {
                             return DslOutcome::Value(DslValue::Unknown);
                         }
                         EinsumClassification::Invalid(error) => {
@@ -8680,7 +8681,7 @@ fn lower_parameter(ty: &Type, domain: TypeShapeDslInputDomain) -> DslValue {
             }
             match ty {
                 Type::None => DslValue::FlagNone,
-                Type::ClassType(cls) if cls.is_builtin("int") => DslValue::GradualInt,
+                Type::ClassType(cls) if cls.is(KnownClass::Int) => DslValue::GradualInt,
                 Type::Int(Int::Literal(value)) => DslValue::FlagInt(*value),
                 // Symbolic shape integers satisfy `Flag[int]`, but DSL flag operations inspect
                 // only concrete runtime values. Generic substitution does not re-evaluate a call

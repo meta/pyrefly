@@ -20,7 +20,6 @@
 //!  - `Forall` → unwraps body and converts recursively.
 //!  - `Callable` → TSP `FunctionType` with synthesized declaration.
 //!  - `Tuple` → TSP `ClassType` with type args.
-//!  - `Tensor`/`NNModule` → TSP `ClassType` from their base class.
 //!  - `TypeAlias` → unwraps to the aliased type.
 //!  - `SpecialForm` → TSP `BuiltInType` with the form name.
 //!  - `Any`, `Never`, `Ellipsis` → TSP `BuiltInType`.
@@ -327,6 +326,9 @@ impl TypeConverter<'_> {
 
             // --- Class definitions (the class object itself, e.g. `type[int]`) ---
             PyreflyType::ClassDef(cls) => convert_class_def(cls),
+            PyreflyType::SpecializedClassDef(ct) => {
+                self.convert_class_type(ct, TypeFlags::INSTANTIABLE)
+            }
 
             // --- Literals (Literal[42], Literal["hi"], etc.) ---
             PyreflyType::Literal(lit) => convert_literal(lit),
@@ -501,15 +503,7 @@ impl TypeConverter<'_> {
             // --- SuperInstance → convert as the class type ---
             PyreflyType::SuperInstance(si) => self.convert_class_type(&si.0, TypeFlags::INSTANCE),
 
-            // --- Tensor → ClassType from base_class ---
-            PyreflyType::ShapedArray(t) => {
-                self.convert_class_type(&t.base_class, TypeFlags::INSTANCE)
-            }
-
             PyreflyType::IntTuple(_) => builtin("tuple"),
-
-            // --- NNModule → ClassType from class ---
-            PyreflyType::NNModule(m) => self.convert_class_type(&m.class, TypeFlags::INSTANCE),
 
             // --- DataFrame / Series → convert the underlying instance type ---
             PyreflyType::DataFrame(schema) => self.convert(&schema.underlying_type()),
@@ -574,6 +568,9 @@ impl TypeConverter<'_> {
 
             // --- Materialization is a solver artifact ---
             PyreflyType::Materialization => builtin("unknown"),
+
+            // --- `Falsy` and `Truthy` only appear inside an intersection, which converts to its fallback ---
+            PyreflyType::Falsy | PyreflyType::Truthy => builtin("unknown"),
 
             // --- Type-level DSL calls are forced at function-call return boundaries ---
             PyreflyType::TypeLevelDslCall(_) => builtin("unknown"),

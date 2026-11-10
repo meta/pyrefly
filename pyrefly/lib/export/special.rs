@@ -44,9 +44,12 @@ pub enum SpecialExport {
     Quit,
     OsExit,
     Len,
+    Any,
+    All,
     Range,
     Bool,
     BuiltinsType,
+    BuiltinsObject,
     TypingType,
     NoTypeCheck,
     NotImplemented,
@@ -64,6 +67,7 @@ pub enum SpecialExport {
     PydanticToSnake,
     HasAttr,
     GetAttr,
+    SetAttr,
     Callable,
     BuiltinsDict,
     TypingDict,
@@ -82,12 +86,9 @@ pub enum SpecialExport {
     Final,
     TypingMapping,
     TypeForm,
-    UsesShapeDsl,
-    ShapeDslFunction,
     TypeShapeDslFunction,
     MapIntTuples,
     NamedInts,
-    ShapedArray,
     StaticJaxtyping,
     Shaped,
     ShapeVars,
@@ -137,6 +138,8 @@ impl SpecialExport {
             "quit" => Some(Self::Quit),
             "_exit" => Some(Self::OsExit),
             "len" => Some(Self::Len),
+            "any" => Some(Self::Any),
+            "all" => Some(Self::All),
             "range" => Some(Self::Range),
             "bool" => Some(Self::Bool),
             "type" => Some(Self::BuiltinsType),
@@ -155,6 +158,8 @@ impl SpecialExport {
             "to_snake" => Some(Self::PydanticToSnake),
             "hasattr" => Some(Self::HasAttr),
             "getattr" => Some(Self::GetAttr),
+            "setattr" => Some(Self::SetAttr),
+            "object" => Some(Self::BuiltinsObject),
             "TypeAliasType" => Some(Self::TypeAliasType),
             "Callable" => Some(Self::Callable),
             "dict" => Some(Self::BuiltinsDict),
@@ -174,12 +179,9 @@ impl SpecialExport {
             "Final" => Some(Self::Final),
             "Mapping" => Some(Self::TypingMapping),
             "TypeForm" => Some(Self::TypeForm),
-            "uses_shape_dsl" => Some(Self::UsesShapeDsl),
-            "shape_dsl_function" => Some(Self::ShapeDslFunction),
             "type_shape_dsl_function" => Some(Self::TypeShapeDslFunction),
             "MapIntTuples" => Some(Self::MapIntTuples),
             "NamedInts" => Some(Self::NamedInts),
-            "shaped_array" => Some(Self::ShapedArray),
             "static_jaxtyping" => Some(Self::StaticJaxtyping),
             "ProxyMethod" => Some(Self::ProxyMethod),
             "Sentinel" => Some(Self::Sentinel),
@@ -237,12 +239,16 @@ impl SpecialExport {
             Self::Enum | Self::StrEnum | Self::IntEnum => matches!(m.as_str(), "enum"),
             Self::Super
             | Self::Len
+            | Self::Any
+            | Self::All
             | Self::Range
             | Self::Quit
             | Self::Bool
             | Self::BuiltinsType
+            | Self::BuiltinsObject
             | Self::HasAttr
             | Self::GetAttr
+            | Self::SetAttr
             | Self::ClassMethod
             | Self::StaticMethod
             | Self::BuiltinsDict
@@ -274,10 +280,7 @@ impl SpecialExport {
                 "typing" | "typing_extensions" | "collections.abc"
             ),
             Self::Deprecated => matches!(m.as_str(), "warnings" | "typing_extensions"),
-            Self::UsesShapeDsl => matches!(m.as_str(), "shape_extensions"),
-            Self::ShapeDslFunction => matches!(m.as_str(), "shape_extensions.dsl"),
             Self::TypeShapeDslFunction => matches!(m.as_str(), "shape_extensions"),
-            Self::ShapedArray => matches!(m.as_str(), "shape_extensions"),
             Self::StaticJaxtyping => matches!(m.as_str(), "shape_extensions"),
             Self::Shaped => matches!(m.as_str(), "shape_extensions"),
             Self::ShapeVars => matches!(m.as_str(), "shape_extensions"),

@@ -6,6 +6,7 @@
  */
 
 use pyrefly_python::dunder;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::typed_dict::AnonymousTypedDictInner;
 use pyrefly_types::typed_dict::TypedDict;
 use pyrefly_types::typed_dict::TypedDictField;
@@ -901,8 +902,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let converter_param = self
             .attrs_converters_combinator_param(args, annotated_field_ty, errors)
             .or_else(|| {
+                // attrs treats `converter=None` as no converter.
                 map.0
                     .get(&DataclassFieldKeywords::CONVERTER)
+                    .filter(|converter| !converter.is_none())
                     .map(|converter| self.get_converter_param(converter, annotated_field_ty))
             });
         // Note that we intentionally don't try to fill in `default`, since we can't distinguish
@@ -987,7 +990,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }))
                 .unwrap(),
                 &overload.metadata,
-                None, // no shape_transform for dataclass constructors
                 None,
                 &args.args.map(CallArg::expr_maybe_starred),
                 &args.keywords.map(CallKeyword::new),
@@ -1053,6 +1055,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub(crate) fn constructor_to_callable_distributed(&self, ty: &Type) -> Option<Type> {
         let instance = match ty {
             Type::ClassDef(cls) => self.promote_silently(cls),
+            Type::SpecializedClassDef(cls) => Type::ClassType(cls.clone()),
             Type::Type(inner) => (**inner).clone(),
             _ => return None,
         };
@@ -1162,7 +1165,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub fn compute_kw_only_fields_by_class(&self, cls: &Class) -> SmallMap<Class, SmallSet<Name>> {
-        let is_kw_only_marker = |ty: &Type| matches!(ty, Type::ClassType(cls) if cls.has_qname("dataclasses", "KW_ONLY"));
+        let is_kw_only_marker =
+            |ty: &Type| matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::DataclassesKwOnly));
 
         let compute_for_class = |target_cls: &Class| -> SmallSet<Name> {
             let mut kw_only_fields = SmallSet::new();
@@ -1378,14 +1382,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     || field_flags.pydantic_has_custom_schema
                 {
                     Some(self.heap.mk_any_explicit())
+                } else if dataclass.is_pydantic_lax_field(&name, &field_flags) {
+                    converter_table.get(&field.ty()).cloned()
                 } else {
-                    field_flags.converter_param.clone().or_else(|| {
-                        if !strict {
-                            converter_table.get(&field.ty()).cloned()
-                        } else {
-                            None
-                        }
-                    })
+                    field_flags.converter_param.clone()
                 };
 
                 if field_flags.init_by_name {

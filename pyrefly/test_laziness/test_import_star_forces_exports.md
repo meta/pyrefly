@@ -37,7 +37,7 @@ a: Solutions
 b: Answers
 c: Exports
 
-(35 builtin demands hidden)
+(34 builtin demands hidden)
 a -> b::Exports(is_special_export)
 b -> c::Exports(get_wildcard)
 a -> b::Load(module_exists)

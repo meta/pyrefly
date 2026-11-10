@@ -6,6 +6,446 @@
  */
 
 use crate::django_testcase;
+use crate::test::django::util::django_env;
+use crate::testcase;
+
+django_testcase!(
+    test_union_field_instance_contract,
+    r#"
+from typing import Protocol, assert_type
+from django.db import models
+
+def flag() -> bool: ...
+
+class HasName(Protocol):
+    name: str
+
+class Record(models.Model):
+    name = models.CharField[str, str](max_length=20) if flag() else models.TextField[str, str]()
+    different = models.CharField[str, str](max_length=20) if flag() else models.IntegerField[int, int]()
+
+class ActiveBase(models.Model):
+    is_active: bool | models.BooleanField[bool, bool]
+
+class ActiveChild(ActiveBase):
+    is_active = models.BooleanField()
+
+def update(record: Record) -> None:
+    assert_type(record.name, str)
+    record.name = "hello"
+    record.name = object()  # E: not assignable to attribute `name`
+    assert_type(record.different, str | int)
+    record.different = "hello"  # E: not assignable to attribute `different`
+    record.different = 1  # E: not assignable to attribute `different`
+
+value: HasName = Record()
+"#,
+);
+
+django_testcase!(
+    bug = "Override checks use the getter instead of the inferred setter",
+    test_field_inferred_setter_override_contract,
+    r#"
+from django.db import models
+
+class WideSetter(models.Model):
+    name: models.CharField[str | int, str] = models.CharField(max_length=200)
+
+class Child(WideSetter):
+    name = models.CharField(max_length=100)  # E: inconsistent
+"#,
+);
+
+testcase!(
+    test_field_instance_contract_compatibility,
+    django_env().enable_missing_override_decorator_error(),
+    r#"
+from typing import Protocol
+from django.db import models
+
+class HasName(Protocol):
+    name: str
+
+class ReadOnlyName(Protocol):
+    @property
+    def name(self) -> str: ...
+
+class AnyName(Protocol):
+    name: object
+
+class Base(models.Model):
+    name = models.TextField()
+    class Meta:
+        abstract = True
+
+class Contact(Base):
+    name = models.CharField(max_length=200)
+
+def accept_name(value: HasName) -> None: ...
+def accept_read_only_name(value: ReadOnlyName) -> None: ...
+
+accept_name(Contact())
+accept_read_only_name(Contact())
+accept_name(Base())
+accept_any_name: AnyName = Contact()  # E: not assignable
+
+class WrongOverride(Base):
+    name = models.IntegerField()  # E: inconsistent
+
+class WrongName(models.Model):
+    name = models.IntegerField()
+
+accept_name(WrongName())  # E: not assignable
+
+class PlainBase(models.Model):
+    name: str
+
+class FieldChild(PlainBase):
+    name = models.CharField(max_length=200)
+
+class FieldBase(models.Model):
+    name: models.CharField[str, str] = models.CharField(max_length=200)
+
+class PlainChild(FieldBase):
+    name: str = "Alice"
+
+class WideSetter(models.Model):
+    name: models.CharField[str | int, str] = models.CharField(max_length=200)
+
+class NarrowSetter(WideSetter):
+    name: models.CharField[str, str] = models.CharField(max_length=200)  # E: inconsistent
+"#,
+);
+
+django_testcase!(
+    test_field_explicit_type_arguments,
+    r#"
+from typing import Any, Literal, assert_type
+from django.db import models
+from django.db.models.fields import _FieldDescriptor
+
+class Contact(models.Model):
+    name: models.CharField[str, str] = models.CharField(max_length=200)
+    code = models.CharField[str, str](max_length=20)
+    permissive: models.CharField[Any, str] = models.CharField(max_length=200)
+    literal = models.CharField[str, Literal["fixed"]](max_length=20)
+
+def update(contact: Contact) -> None:
+    contact.name = "Alice"
+    contact.name = 123  # E: not assignable
+    contact.code = 123  # E: not assignable
+    contact.permissive = 123
+
+assert_type(Contact().name, str)
+assert_type(Contact.name, _FieldDescriptor[models.CharField[str, str]])
+assert_type(Contact.code, _FieldDescriptor[models.CharField[str, str]])
+assert_type(Contact.permissive, _FieldDescriptor[models.CharField[Any, str]])
+assert_type(Contact().literal, Literal["fixed"])
+"#,
+);
+
+django_testcase!(
+    test_field_access_on_class_and_instance,
+    r#"
+from typing import assert_type
+
+from django.db import models
+from django.db.models.expressions import Combinable
+from django.db.models.fields import _FieldDescriptor
+
+class Contact(models.Model):
+    address = models.CharField(max_length=200)
+
+contact = Contact(address="123 Fake St")
+assert_type(contact.address, str)
+assert_type(
+    Contact.address,
+    _FieldDescriptor[models.CharField[str | int | Combinable, str]],
+)
+assert_type(Contact.address.field.max_length, int | None)
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/5322
+django_testcase!(
+    test_field_expression_assignment,
+    r#"
+from typing import assert_type
+from django.db import models
+from django.db.models import F, Value
+
+class Book(models.Model):
+    is_draft = models.BooleanField()
+    pages = models.IntegerField()
+    title = models.CharField(max_length=100)
+    optional_pages = models.IntegerField(null=True)
+    ordinary: bool = False
+
+def update(book: Book) -> None:
+    book.is_draft = F("other")
+    assert_type(book.is_draft, bool)
+    book.is_draft = Value(True)
+    assert_type(book.is_draft, bool)
+    book.pages = F("pages") + 1
+    assert_type(book.pages, int)
+    book.title = Value("New title")
+    assert_type(book.title, str)
+    book.optional_pages = F("pages")
+    assert_type(book.optional_pages, int | None)
+    book.optional_pages = None
+    book.is_draft = "invalid"  # E: is not assignable to attribute `is_draft`
+    book.is_draft = None  # E: is not assignable to attribute `is_draft`
+    book.ordinary = F("other")  # E: is not assignable to attribute `ordinary`
+
+class SpecialBook(Book):
+    pass
+
+def update_subclass(book: SpecialBook) -> None:
+    book.is_draft = F("other")
+    assert_type(book.is_draft, bool)
+"#,
+);
+
+django_testcase!(
+    test_field_assignment_narrowing,
+    r#"
+from typing import assert_type
+from django.db import models
+from django.db.models import F
+
+class Author(models.Model):
+    name = models.CharField(max_length=100)
+
+class Book(models.Model):
+    pages = models.IntegerField(null=True)
+    title = models.CharField(max_length=100, null=True)
+    author = models.ForeignKey(Author, on_delete=models.CASCADE, null=True)
+
+    def set_pages(self, pages: int) -> int:
+        self.pages = pages
+        return self.pages + 1
+
+def update(book: Book, pages: int, title: str, author: Author) -> None:
+    book.pages = pages
+    assert_type(book.pages, int)
+    book.title = title
+    assert_type(book.title, str)
+    book.author = author
+    assert_type(book.author, Author)
+    book.author.name.upper()
+    book.pages = F("pages") + 1
+    assert_type(book.pages, int | None)
+    book.pages = "123"
+    assert_type(book.pages, int | None)
+    book.pages = None
+    assert_type(book.pages, None)
+
+def defaults(book: Book) -> int:
+    if book.pages is None:
+        book.pages = 1
+    if book.title is None:
+        book.title = "Untitled"
+    book.title.upper()
+    return book.pages + 1
+
+def update_generic[T: Book](book: T, pages: int) -> int:
+    book.pages = pages
+    return book.pages + 1
+"#,
+);
+
+django_testcase!(
+    test_field_choices_assignment,
+    r#"
+from typing import Literal, assert_type
+from django.db import models
+from django.db.models import F, Value
+
+class Card(models.Model):
+    suit = models.CharField(max_length=1, choices=(("A", "A"), ("B", "B")))
+    optional_suit = models.CharField(max_length=1, choices=(("A", "A"), ("B", "B")), null=True)
+
+def update(card: Card, suit: Literal["A", "B"]) -> None:
+    card.suit = suit
+    assert_type(card.suit, Literal["A", "B"])
+    card.suit = "INVALID"  # E: is not assignable to attribute `suit`
+    card.suit = 1  # E: is not assignable to attribute `suit`
+    card.optional_suit = "INVALID"  # E: is not assignable to attribute `optional_suit`
+    card.optional_suit = None
+    assert_type(card.optional_suit, None)
+    card.suit = F("suit")
+    assert_type(card.suit, Literal["A", "B"])
+    card.suit = Value("A")
+    assert_type(card.suit, Literal["A", "B"])
+    card.optional_suit = F("suit")
+    assert_type(card.optional_suit, Literal["A", "B"] | None)
+"#,
+);
+
+django_testcase!(
+    test_field_expression_assignment_receivers,
+    r#"
+from typing import assert_type
+from django.db import models
+from django.db.models import F, Value
+
+class Counter(models.Model):
+    count = models.IntegerField()
+    optional_count = models.IntegerField(null=True)
+
+    def bump(self) -> None:
+        self.count = F("count") + 1
+        assert_type(self.count, int)
+        self.optional_count = Value(1)
+        assert_type(self.optional_count, int | None)
+
+    def bump_explicit(self: Counter) -> None:
+        self.count = F("count") + 1
+
+class SpecialCounter(Counter):
+    def bump(self) -> None:
+        self.count = F("count") + 1
+        assert_type(self.count, int)
+
+def update[T: Counter](counter: T) -> None:
+    counter.count = F("count") + 1
+    assert_type(counter.count, int)
+    counter.optional_count = Value(1)
+    assert_type(counter.optional_count, int | None)
+"#,
+);
+
+django_testcase!(
+    test_inherited_field_explicit_annotation,
+    r#"
+from typing import Final
+from django.db import models
+
+class Counter(models.Model):
+    count = models.IntegerField()
+
+class AnnotatedCounter(Counter):
+    def reset(self) -> None:
+        self.count: int = "123"  # E: `Literal['123']` is not assignable to attribute `count` with type `int`
+
+class FinalCounter(Counter):
+    def __init__(self) -> None:
+        self.count: Final[int] = 1  # E: `FinalCounter.count` is read-only, but `Counter.count` is read-write
+
+    def reset(self) -> None:
+        self.count = 2  # E: Cannot set field `count`
+
+class PlainCounter(Counter):
+    count: int
+
+    def reset(self) -> None:
+        self.count = "123"  # E: is not assignable to attribute `count` with type `int`
+"#,
+);
+
+django_testcase!(
+    test_field_override_compatibility,
+    r#"
+from django.db import models
+
+class AbstractName(models.Model):
+    name = models.CharField(max_length=100)
+
+    class Meta:
+        abstract = True
+
+class EmailName(AbstractName):
+    name = models.EmailField()
+
+class TextName(AbstractName):
+    name = models.TextField()
+
+class AnnotatedName(AbstractName):
+    name: str
+
+class PropertyName(AbstractName):
+    @property
+    def name(self) -> str:
+        return "name"
+
+    @name.setter
+    def name(self, value: str) -> None:
+        pass
+
+class BadName(AbstractName):
+    name: int  # E: Class member `BadName.name` overrides parent class `AbstractName` in an inconsistent manner
+
+class ExplicitSetter(models.Model):
+    @property
+    def count(self) -> int:
+        return 1
+
+    @count.setter
+    def count(self, value: str) -> None:
+        pass
+
+class FieldSetter(ExplicitSetter):
+    count = models.IntegerField()
+
+class BytesSetter(models.Model):
+    @property
+    def count(self) -> int:
+        return 1
+
+    @count.setter
+    def count(self, value: bytes) -> None:
+        pass
+
+class BadFieldSetter(BytesSetter):
+    count = models.IntegerField()  # E: `BadFieldSetter.count` has type `Combinable | float | int | str`, which is not assignable from `(value: bytes) -> None`
+"#,
+);
+
+django_testcase!(
+    test_field_intersection_assignment,
+    r#"
+from typing import ClassVar, Final
+from django.db import models
+from django.db.models import F
+
+class CharRecord(models.Model):
+    value = models.CharField(max_length=100)
+
+class TextRecord(models.Model):
+    value = models.TextField()
+
+class PlainRecord:
+    value: str
+
+class FinalRecord:
+    value: Final[str] = "fixed"
+
+class ClassRecord:
+    value: ClassVar[str] = "shared"
+
+def update_char(record: CharRecord) -> None:
+    if isinstance(record, TextRecord):
+        record.value = "text"
+        record.value = F("value")
+        record.value = 1  # E: is not assignable to attribute `value`
+    if isinstance(record, PlainRecord):
+        record.value = "text"
+        record.value = F("value")  # E: is not assignable to attribute `value`
+    if isinstance(record, FinalRecord):
+        record.value = "text"  # E: Cannot set field `value`
+    if isinstance(record, ClassRecord):
+        record.value = "text"  # E: Cannot set field `value`
+
+def update_text(record: TextRecord) -> None:
+    if isinstance(record, CharRecord):
+        record.value = F("value")
+        record.value = 1  # E: is not assignable to attribute `value`
+
+def update_final(record: FinalRecord) -> None:
+    if isinstance(record, CharRecord):
+        record.value = "text"  # E: Cannot set field `value`
+"#,
+);
 
 django_testcase!(
     test_textfield_nullable,
@@ -497,7 +937,7 @@ assert_type(Ordinary.records.get(), Base)
 );
 
 django_testcase!(
-    test_queryset_manager_inferred_custom_interface,
+    test_queryset_manager_inferred_manager_replacements,
     r#"
 from typing import assert_type
 from django.db import models
@@ -516,11 +956,14 @@ class Base(ModelBase):
     standard = models.Manager[ModelBase]()
     base_manager = BaseManager[ModelBase]()
 
-class InvalidManager(Base):
-    records = models.Manager()  # E: overrides parent class `Base` in an inconsistent manner
+class PlainManager(Base):
+    records = models.Manager()
 
-class InvalidQuerySet(Base):
-    records = Q.as_manager()  # E: overrides parent class `Base` in an inconsistent manner
+class GeneratedManager(Base):
+    records = Q.as_manager()
+
+assert_type(PlainManager.records.get(), PlainManager)
+assert_type(GeneratedManager.records.get(), GeneratedManager)
 
 class Valid(Base):
     records = SpecificManager()

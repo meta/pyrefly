@@ -647,3 +647,29 @@ def unannotated():
         "Expected errors in IDE mode (Require::Everything)"
     );
 }
+
+#[test]
+fn test_unannotated_staticmethod_batch_skipped_body() {
+    use crate::state::errors::Errors;
+    use crate::state::require::Require;
+    use crate::test::util::TestEnv;
+
+    let code = r#"
+class C:
+    @staticmethod
+    def f(self):
+        self.phantom = 1
+
+c = C()
+_ = c.phantom
+"#;
+    let mut batch_env = TestEnv::new_skip_check_no_infer().with_run_require(Require::Errors);
+    batch_env.add("main", code);
+    let (batch_state, batch_handle) = batch_env.to_state();
+    let batch_errors: Errors = batch_state
+        .transaction()
+        .get_errors([&batch_handle("main")]);
+    let errs = batch_errors.collect_errors().ordinary;
+    assert_eq!(errs.len(), 1);
+    assert!(errs[0].msg().contains("has no attribute `phantom`"));
+}

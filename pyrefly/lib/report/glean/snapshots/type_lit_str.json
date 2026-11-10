@@ -1552,6 +1552,332 @@
             "id": 0,
             "key": "type_lit_str.py"
           },
+          "spans": [
+            {
+              "length": 1,
+              "start": 100
+            },
+            {
+              "length": 1,
+              "start": 119
+            },
+            {
+              "length": 1,
+              "start": 181
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "type_lit_str.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "type_lit_str.B"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 1,
+              "start": 123
+            },
+            {
+              "length": 1,
+              "start": 183
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "type_lit_str.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "type_lit_str.B.A"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 3,
+              "start": 203
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "int"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 114
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "list"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 126
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "bool"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 198
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing.List"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 198
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "type_lit_str.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "type_lit_str.typing.List"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 108
+            },
+            {
+              "length": 5,
+              "start": 19
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing.Union"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 108
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "type_lit_str.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "type_lit_str.Union"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 149
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "False"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 6,
+              "start": 191
+            },
+            {
+              "length": 6,
+              "start": 32
+            },
+            {
+              "length": 6,
+              "start": 5
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
+          "spans": [
+            {
+              "length": 6,
+              "start": 191
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "type_lit_str.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "type_lit_str.typing"
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.TargetUses.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "type_lit_str.py"
+          },
           "xrefs": [
             {
               "source": {
@@ -2567,6 +2893,6 @@
     "predicate": "python.Module.4"
   },
   {
-    "schema_id": "f329796272b9314200433ac342cbc15c"
+    "schema_id": "60aea86d7ff049228df605cf3fda4c67"
   }
 ]

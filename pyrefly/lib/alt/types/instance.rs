@@ -11,7 +11,6 @@ use pyrefly_types::class::ClassType;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::quantified::Quantified;
-use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::simplify::intersect;
 use pyrefly_types::simplify::unions;
 use pyrefly_types::stdlib::Stdlib;
@@ -33,8 +32,6 @@ pub enum InstanceKind<'a> {
     Protocol(Type),
     Metaclass(ClassBase),
     LiteralString,
-    /// Shaped-array instance: Self is substituted with the full shaped-array type.
-    ShapedArray(ShapedArrayType),
 }
 
 /// Wrapper to hold a specialized instance of a class , unifying ClassType and TypedDict.
@@ -102,14 +99,6 @@ impl<'a> Instance<'a> {
         }
     }
 
-    pub fn of_shaped_array(shaped_array: &'a ShapedArrayType) -> Self {
-        Self {
-            kind: InstanceKind::ShapedArray(shaped_array.clone()),
-            class: shaped_array.base_class.class_object(),
-            targs: shaped_array.base_class.targs(),
-        }
-    }
-
     /// Instantiate a type that is relative to the class type parameters
     /// by substituting in the type arguments.
     pub fn instantiate_member(&self, raw_member: &mut Type) {
@@ -146,7 +135,6 @@ impl<'a> Instance<'a> {
             InstanceKind::Protocol(self_type) => self_type.clone(),
             InstanceKind::Metaclass(cls) => cls.clone().to_type(heap),
             InstanceKind::LiteralString => heap.mk_literal_string(LitStyle::Implicit),
-            InstanceKind::ShapedArray(shaped_array) => shaped_array.clone().to_type(),
         }
     }
 
@@ -183,8 +171,7 @@ impl<'a> Instance<'a> {
             InstanceKind::Protocol(..)
             | InstanceKind::Metaclass(..)
             | InstanceKind::TypeVar(..)
-            | InstanceKind::LiteralString
-            | InstanceKind::ShapedArray(..) => Some(DescriptorBase::Instance(ClassType::new(
+            | InstanceKind::LiteralString => Some(DescriptorBase::Instance(ClassType::new(
                 self.class.dupe(),
                 self.targs.clone(),
             ))),

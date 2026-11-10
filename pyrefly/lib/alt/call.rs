@@ -9,18 +9,17 @@ use std::iter;
 use std::sync::Arc;
 
 use itertools::Itertools;
+use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::function::BodyKind;
-use pyrefly_types::literal::LitStyle;
-use pyrefly_types::meta_shape_dsl::ShapeTransform;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::typed_dict::TypedDictInner;
 use pyrefly_types::types::CalleeKind;
-use pyrefly_types::types::NNModuleType;
 use pyrefly_types::types::TArgs;
 use pyrefly_types::types::TParams;
 use pyrefly_util::prelude::SliceExt;
@@ -44,11 +43,14 @@ use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::attr::NoAccessReason;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
+use crate::alt::callable::CallValue;
 use crate::alt::callable::CallWithTypes;
+use crate::alt::callable::ConstructorArguments;
 use crate::alt::callable::ReturnTypeResolutionError;
 use crate::alt::class::class_field::ClassAttribute;
 use crate::alt::class::class_field::DescriptorBase;
 use crate::alt::class::dataclass::ReplaceKind;
+use crate::alt::expr::ExprCallee;
 use crate::alt::expr::TypeOrExpr;
 use crate::alt::nn_module_specials::is_nn_sequential;
 use crate::alt::unwrap::HintRef;
@@ -117,6 +119,8 @@ fn nests_calls(x: &Expr, depth: u32) -> bool {
 pub enum ConstructorKind {
     // `MyClass`
     BareClassName,
+    // `MyClass[int]`
+    SpecializedClassName,
     // `type[MyClass]`
     TypeOfClass,
     // `type[Self]`
@@ -268,7 +272,7 @@ impl CallTargetLookup {
     }
 }
 
-/// Result of `construct_{class,typed_dict}_inner`
+/// A constructor outcome whose diagnostics remain local until `take`.
 struct ConstructedInstance {
     ty: Type,
     /// Does the type match the provided hint? False if no hint was provided
@@ -464,6 +468,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 _ => unreachable!(),
             },
+            Type::SpecializedClassDef(cls) => CallTargetLookup::Ok(Box::new(CallTarget::Class(
+                cls,
+                ConstructorKind::SpecializedClassName,
+                None,
+            ))),
+            Type::Type(inner) if matches!(&*inner, Type::SpecializedClassDef(_)) => {
+                CallTargetLookup::Ok(Box::new(CallTarget::Class(
+                    self.stdlib.generic_alias().clone(),
+                    ConstructorKind::TypeOfClass,
+                    None,
+                )))
+            }
             Type::Type(f) if matches!(&*f, Type::ClassType(_)) => {
                 let Type::ClassType(cls) = *f else {
                     unreachable!("guarded by matches! above")
@@ -802,27 +818,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     None => CallTargetLookup::Error(Type::ClassType(cls), vec![]),
                 }
             }
-            // NNModule instances delegate call dispatch to their underlying class.
-            // instance_as_dunder_call resolves the stubbed `__call__` proxy for nn.Module subclasses.
-            // We patch the BoundMethod's self object to be the NNModule type so
-            // that inject_module_attrs can detect NNModule and inject its fields.
-            Type::NNModule(module) => {
-                let nn_module_ty = Type::NNModule(module.clone());
-                let cls = module.class.clone();
-                let maybe_dunder_call = self.instance_as_dunder_call(&cls);
-                match maybe_dunder_call {
-                    Some(Type::BoundMethod(bm)) => {
-                        let patched = Type::BoundMethod(Box::new(BoundMethod {
-                            obj: nn_module_ty,
-                            ..*bm
-                        }));
-                        self.as_call_target_impl(patched, quantified)
-                    }
-                    Some(ty) => self.as_call_target_impl(ty, quantified),
-                    None => return CallTargetLookup::Error(Type::NNModule(module), vec![]),
-                }
-                .with_error_type(|_| Type::NNModule(module))
-            }
             Type::DataFrame(schema) => self
                 .as_call_target_impl(schema.underlying_type(), quantified)
                 .with_error_type(|_| Type::DataFrame(schema)),
@@ -867,13 +862,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         let members = &f.members;
                         let mut targets = Vec::new();
                         for member in members {
-                            if let CallTargetLookup::Ok(target) = self.as_call_target_impl(
-                                member.clone(),
-                                Some(
-                                    q.clone()
-                                        .with_restriction(Restriction::Bound(member.clone())),
-                                ),
-                            ) {
+                            // The receiver is `q` narrowed to `member`, which binding a member
+                            // expresses as the intersection of the two.
+                            if let CallTargetLookup::Ok(target) =
+                                self.as_call_target_impl(member.clone(), Some((*q).clone()))
+                            {
                                 targets.push(*target);
                             } else {
                                 return CallTargetLookup::Error(Type::Quantified(q), vec![]);
@@ -888,12 +881,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Restriction::Constraints(constraints) => {
                     let mut targets = Vec::new();
                     for constraint in constraints {
-                        if let CallTargetLookup::Ok(target) = self.as_call_target_impl(
-                            constraint.clone(),
-                            Some(q.clone().with_restriction(Restriction::Constraints(vec![
-                                constraint.clone(),
-                            ]))),
-                        ) {
+                        if let CallTargetLookup::Ok(target) =
+                            self.as_call_target_impl(constraint.clone(), Some((*q).clone()))
+                        {
                             targets.push(*target);
                         } else {
                             return CallTargetLookup::Error(Type::Quantified(q), vec![]);
@@ -945,8 +935,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
     ) {
-        if let Some(metadata) = target.function_metadata()
-            && let Some(deprecation) = &metadata.flags.deprecation
+        let Some(metadata) = target.function_metadata() else {
+            return;
+        };
+        // A callback's deprecated `__call__` applies to calls, not references to the callback.
+        let callback = if metadata.flags.deprecation.is_none()
+            && let FunctionKind::CallbackProtocol(cls) = &metadata.kind
+        {
+            self.instance_as_dunder_call(cls)
+        } else {
+            None
+        };
+        if let Some(deprecation) = metadata
+            .flags
+            .deprecation
+            .as_deref()
+            .or_else(|| callback.as_ref().and_then(Type::function_deprecation))
         {
             let header = format!(
                 "`{}` is deprecated",
@@ -975,11 +979,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
     ) -> CallTarget {
+        let target = self.resolve_call_target_or_error(ty, call_style, range, errors, context);
+        self.report_call_deprecation(&target, range, errors, context);
+        target
+    }
+
+    fn resolve_call_target_or_error(
+        &self,
+        ty: Type,
+        call_style: CallStyle,
+        range: TextRange,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+    ) -> CallTarget {
         match self.as_call_target(ty) {
-            CallTargetLookup::Ok(target) => {
-                self.report_call_deprecation(&target, range, errors, context);
-                *target
-            }
+            CallTargetLookup::Ok(target) => *target,
             CallTargetLookup::Error(ty, ..) => {
                 // Re-query `__call__` only on the error path so ordinary calls don't pay for
                 // preserving the original access error through call target resolution.
@@ -1200,21 +1214,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// Handles union hint decomposition for class and TypedDict construction.
-    /// When the hint is a union, tries each member independently and keeps only
-    /// successful constructions, preferring those assignable to their hint member.
-    /// Falls back to constructing with no hint if all members produce errors or
-    /// the union is too wide.
+    /// Selects a constructor outcome without publishing its diagnostics.
+    /// Prefers the first hint match without hard call errors or specialization failures.
+    /// Otherwise keeps the first outcome without hard call errors, or constructs without a hint.
+    /// Hints wider than `MAX_HINT_WIDTH` are ignored.
     fn construct_with_hint(
         &self,
-        arguments_range: TextRange,
-        errors: &ErrorCollector,
-        arg_errors: &ErrorCollector,
-        return_errors: &ErrorCollector,
-        context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
         construct: impl Fn(Option<&Type>) -> ConstructedInstance,
-    ) -> Type {
+    ) -> ConstructedInstance {
         if let Some(hint) = hint
             && let hints = hint.types()
             && hints.len() <= MAX_HINT_WIDTH
@@ -1229,14 +1237,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // Take the first successful match. We require the result to be assignable to the
                     // hint so that, in a case like `x: list[X] | None = [XChild()]`, we choose the
                     // `list[X]` branch with contextually typed results.
-                    return ret.take(
-                        arguments_range,
-                        errors,
-                        arg_errors,
-                        return_errors,
-                        context,
-                        self,
-                    );
+                    return ret;
                 }
                 if ret_no_match_hint.is_none() {
                     ret_no_match_hint = Some(ret);
@@ -1245,26 +1246,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if let Some(ret) = ret_no_match_hint {
                 // Even if none of the results were assignable to their hints, we still keep the
                 // first contextually typed result if it only produced specialization errors.
-                return ret.take(
-                    arguments_range,
-                    errors,
-                    arg_errors,
-                    return_errors,
-                    context,
-                    self,
-                );
+                return ret;
             }
         }
         // If the hint is too wide or always produces non-specialization errors, don't use it.
-        let ret = construct(None);
-        ret.take(
-            arguments_range,
-            errors,
-            arg_errors,
-            return_errors,
-            context,
-            self,
-        )
+        construct(None)
     }
 
     fn construct_class(
@@ -1287,8 +1273,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self.get_dunder_new(cls, preserve_self).is_some()
                 && self.get_dunder_init(cls, false).is_some()
         };
-        let is_deeply_nested =
-            |x: &TypeOrExpr| matches!(x, TypeOrExpr::Expr(e) if nests_calls(e, FLATTEN_CALL_DEPTH));
+        let is_deeply_nested = |x: &CallValue| {
+            matches!(
+                x.as_type_or_expr(),
+                TypeOrExpr::Expr(e) if nests_calls(e, FLATTEN_CALL_DEPTH)
+            )
+        };
 
         // Infer deeply nested arguments once, up front. Shallower nesting costs only a constant
         // factor, and flattening it would discard the parameter hint for no benefit.
@@ -1324,25 +1314,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             None => (args, keywords),
         };
 
-        self.construct_with_hint(
+        let hint = HintRef::filter_for_constructor(hint, cls.targs());
+        let prepared = ConstructorArguments::new(hint);
+        let (args, keywords) = prepared.prepare(args, keywords);
+
+        self.construct_with_hint(hint, |hint| {
+            self.construct_class_inner(
+                cls.clone(),
+                constructor_kind.clone(),
+                &args,
+                &keywords,
+                arguments_range,
+                callee_range,
+                context,
+                hint,
+            )
+        })
+        .take(
             arguments_range,
             errors,
             arg_errors,
             return_errors,
             context,
-            HintRef::filter_for_constructor(hint, cls.targs()),
-            |hint| {
-                self.construct_class_inner(
-                    cls.clone(),
-                    constructor_kind.clone(),
-                    args,
-                    keywords,
-                    arguments_range,
-                    callee_range,
-                    context,
-                    hint,
-                )
-            },
+            self,
         )
     }
 
@@ -1582,7 +1576,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if class_metadata.is_pydantic_model()
             && let Some(dataclass) = class_metadata.dataclass_metadata()
         {
-            self.check_pydantic_argument_range_constraints(
+            self.check_pydantic_argument_constraints(
                 cls.class_object(),
                 dataclass,
                 args,
@@ -1612,7 +1606,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Normalize builtins.tuple instances to structural Type::Tuple so downstream
         // match arms (concat, unpacking, except, etc.) handle them directly.
         if let Type::ClassType(ref ct) = result
-            && ct.class_object().is_builtin("tuple")
+            && ct.class_object().is(KnownClass::Tuple)
             && ct.targs().as_slice().len() == 1
         {
             let targ = ct.targs().as_slice()[0].clone();
@@ -1621,23 +1615,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .unwrap_or_else(|| self.heap.mk_unbounded_tuple(targ));
             ConstructedInstance {
                 ty,
-                matched_hint,
-                arg_errors,
-                return_errors,
-                errors,
-                specialization_errors,
-            }
-        } else if let Type::ClassType(ct) = result {
-            // Check for init capture: if the class has a registered init capture,
-            // extract constructor arg values and wrap in Type::NNModule.
-            ConstructedInstance {
-                ty: self.maybe_wrap_nn_module(
-                    &ct.clone(),
-                    args,
-                    keywords,
-                    &arg_errors,
-                    Type::ClassType(ct),
-                ),
                 matched_hint,
                 arg_errors,
                 return_errors,
@@ -1656,60 +1633,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// If the class has a registered init capture, extract constructor arg values
-    /// and wrap the result in `Type::NNModule`. Otherwise return the result as-is.
-    ///
-    /// This enables shape-aware module instance tracking: the NNModule carries
-    /// captured constructor args (e.g., kernel_size, stride) so DSL forward
-    /// functions can access them without requiring type params on the class.
-    fn maybe_wrap_nn_module(
-        &self,
-        ct: &ClassType,
-        args: &[CallArg],
-        keywords: &[CallKeyword],
-        errors: &ErrorCollector,
-        result: Type,
-    ) -> Type {
-        let class_metadata = self.get_metadata_for_class(ct.class_object());
-        let capture_names: &[Name] = if let Some(names) = class_metadata.capture_init() {
-            names
-        } else {
-            return result;
-        };
-
-        let infer_type_or_expr = |toe: TypeOrExpr, errors: &ErrorCollector| -> Type {
-            let ty = match toe {
-                TypeOrExpr::Type(ty, _) => ty.clone(),
-                TypeOrExpr::Expr(e) => self.expr_infer(e, errors),
-            };
-            // NNModule fields carry captured constructor args (e.g., padding=Literal[1]) that DSL
-            // forward functions need as literals to compute output shapes.
-            ty.with_literal_style(LitStyle::Explicit)
-        };
-
-        let mut fields = SmallMap::new();
-        for (i, param_name) in capture_names.iter().enumerate() {
-            // First check keyword args.
-            if let Some(kw) = keywords.iter().find(|k| {
-                k.arg
-                    .is_some_and(|id| id.id.as_str() == param_name.as_str())
-            }) {
-                fields.insert(param_name.clone(), infer_type_or_expr(kw.value, errors));
-            } else if i < args.len() {
-                // Map positional arg by index to the capture param name.
-                if let CallArg::Arg(toe) = &args[i] {
-                    fields.insert(param_name.clone(), infer_type_or_expr(*toe, errors));
-                }
-            }
-            // If neither keyword nor positional, the param uses its default.
-            // We leave it absent from the fields map; the forward DSL function
-            // will use its own default for that parameter.
-        }
-
-        self.heap
-            .mk_nn_module(NNModuleType::new(ct.clone(), fields))
-    }
-
     fn construct_typed_dict(
         &self,
         typed_dict: TypedDictInner,
@@ -1722,23 +1645,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
     ) -> Type {
-        self.construct_with_hint(
+        let hint = HintRef::filter_for_constructor(hint, typed_dict.targs());
+        let prepared = ConstructorArguments::new(hint);
+        let (args, keywords) = prepared.prepare(args, keywords);
+        self.construct_with_hint(hint, |hint| {
+            self.construct_typed_dict_inner(
+                typed_dict.clone(),
+                &args,
+                &keywords,
+                arguments_range,
+                context,
+                hint,
+            )
+        })
+        .take(
             arguments_range,
             errors,
             arg_errors,
             return_errors,
             context,
-            HintRef::filter_for_constructor(hint, typed_dict.targs()),
-            |hint| {
-                self.construct_typed_dict_inner(
-                    typed_dict.clone(),
-                    args,
-                    keywords,
-                    arguments_range,
-                    context,
-                    hint,
-                )
-            },
+            self,
         )
     }
 
@@ -1850,11 +1776,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) {
-        let builtin_names = ["str", "int", "bool", "bytes"];
-        if !builtin_names
-            .iter()
-            .any(|name| cls.has_qname("builtins", name))
-        {
+        if !matches!(
+            cls.known(),
+            Some(KnownClass::Str | KnownClass::Int | KnownClass::Bool | KnownClass::Bytes)
+        ) {
             return;
         }
         if let Some(arg_ty) = self.first_arg_type(args, errors) {
@@ -1954,9 +1879,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if let Some(m) = metadata
                 && (matches!(
                     m.kind,
-                    FunctionKind::Dataclass
-                        | FunctionKind::DataclassTransform
-                        | FunctionKind::UsesShapeDsl
+                    FunctionKind::Dataclass | FunctionKind::DataclassTransform
                 ) || m.kind.is_signature_preserving_decorator()
                     || m.flags.dataclass_transform_metadata.is_some())
             {
@@ -1968,7 +1891,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let wrapped_arg = self.functools_wrapped_arg(metadata, args, keywords, errors);
         let outcome = match call_target {
             CallTarget::Class(cls, constructor_kind, as_quantified_bound) => {
-                if cls.has_qname("typing", "Any") {
+                if cls.is(KnownClass::TypingAny) {
                     return CallOutcome::of_ty(self.error_with_context(
                         call_errors,
                         arguments_range,
@@ -1978,7 +1901,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ));
                 }
                 let metadata = self.get_metadata_for_class(cls.class_object());
-                if metadata.is_protocol() && constructor_kind == ConstructorKind::BareClassName {
+                let is_direct_class = matches!(
+                    &constructor_kind,
+                    ConstructorKind::BareClassName | ConstructorKind::SpecializedClassName
+                );
+                if metadata.is_protocol() && is_direct_class {
                     self.error_with_context(
                         call_errors,
                         arguments_range,
@@ -1993,9 +1920,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     let abstract_members = self.get_abstract_members_for_class(cls.class_object());
                     let unimplemented_abstract_methods =
                         abstract_members.unimplemented_abstract_methods();
-                    if constructor_kind == ConstructorKind::BareClassName
-                        && !unimplemented_abstract_methods.is_empty()
-                    {
+                    if is_direct_class && !unimplemented_abstract_methods.is_empty() {
                         self.error_with_context(
                             call_errors,
                             arguments_range,
@@ -2011,9 +1936,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             ),
                             context,
                         );
-                    } else if constructor_kind == ConstructorKind::BareClassName
-                        && metadata.is_explicitly_abstract()
-                    {
+                    } else if is_direct_class && metadata.is_explicitly_abstract() {
                         self.error_with_context(
                             call_errors,
                             arguments_range,
@@ -2026,7 +1949,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         );
                     }
                 }
-                if cls.has_qname("builtins", "bool") {
+                if cls.is(KnownClass::Bool) {
                     match self.first_arg_type(args, errors) {
                         None => (),
                         Some(ty) => {
@@ -2085,7 +2008,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ) => self.call_infer_inner(
                 signature,
                 Some(&metadata.kind),
-                metadata.flags.shape_transform.as_deref(),
                 tparams.as_deref(),
                 Some(obj),
                 args,
@@ -2100,7 +2022,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ),
             CallTarget::Callable(TargetWithTParams(tparams, callable)) => self.call_infer_inner(
                 callable,
-                None,
                 None,
                 tparams.as_deref(),
                 None,
@@ -2123,7 +2044,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             )) => self.call_infer_inner(
                 callable,
                 Some(&metadata.kind),
-                metadata.flags.shape_transform.as_deref(),
                 tparams.as_deref(),
                 None,
                 args,
@@ -2140,7 +2060,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let (ty, _callable, overload_table) = self.call_overloads(
                     overloads,
                     &metadata,
-                    metadata.flags.shape_transform.as_deref(),
                     None,
                     args,
                     keywords,
@@ -2158,7 +2077,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let (ty, _callable, overload_table) = self.call_overloads(
                     overloads,
                     &meta,
-                    meta.flags.shape_transform.as_deref(),
                     Some(obj),
                     args,
                     keywords,
@@ -2375,12 +2293,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         );
         for arg in &args {
             let (CallArg::Arg(value) | CallArg::Star(value, _)) = arg;
-            if let TypeOrExpr::Type(ty, _) = value {
+            if let TypeOrExpr::Type(ty, _) = value.as_type_or_expr() {
                 roots.push(ty);
             }
         }
         for keyword in &keywords {
-            if let TypeOrExpr::Type(ty, _) = &keyword.value {
+            if let TypeOrExpr::Type(ty, _) = keyword.value.as_type_or_expr() {
                 roots.push(ty);
             }
         }
@@ -2598,7 +2516,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callable: Callable,
         callable_name: Option<&FunctionKind>,
-        shape_transform: Option<&ShapeTransform>,
         tparams: Option<&TParams>,
         self_obj: Option<Type>,
         args: &[CallArg],
@@ -2620,7 +2537,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let res_no_hint = self.callable_infer(
             callable,
             callable_name,
-            shape_transform,
             tparams,
             self_obj,
             args,
@@ -2644,7 +2560,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let res_with_hint = self.callable_infer(
                     callable,
                     callable_name,
-                    shape_transform,
                     tparams,
                     self_obj,
                     args,
@@ -3049,83 +2964,88 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub fn expr_call_infer(
         &self,
-        x: &ExprCall,
-        mut callee_ty: Type,
+        mut callee: ExprCallee,
         hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> Type {
         // nn.Sequential chain: thread input through each module's forward method.
         // Must be checked before generic Module forward dispatch, which would erase shapes.
-        if let Type::ClassType(cls) = &callee_ty
+        if let Type::ClassType(cls) = &callee.ty
             && is_nn_sequential(cls)
-            && x.arguments.args.len() == 1
-            && x.arguments.keywords.is_empty()
+            && callee.expr.arguments.args.len() == 1
+            && callee.expr.arguments.keywords.is_empty()
         {
-            let input_ty = self.expr_infer(&x.arguments.args[0], errors);
+            let input_ty = self.expr_infer(&callee.expr.arguments.args[0], errors);
             if let Some(result) =
-                self.try_nn_sequential_chain_forward(cls, input_ty, x.range(), errors)
+                self.try_nn_sequential_chain_forward(cls, input_ty, callee.expr.range(), errors)
             {
                 return result;
             }
         }
 
-        let django_annotate_call = self.infer_django_annotate_call(&callee_ty, &x.arguments);
-        let polars_call = self.infer_polars_call_specialization(&callee_ty, &x.arguments, errors);
+        let django_annotate_call =
+            self.infer_django_annotate_call(&callee.ty, &callee.expr.arguments);
+        let polars_call =
+            self.infer_polars_call_specialization(&callee.ty, &callee.expr.arguments, errors);
 
-        let result = if matches!(&callee_ty, Type::ClassDef(cls) if cls.is_builtin("super")) {
+        let result = if matches!(&callee.ty, Type::ClassDef(cls) if cls.is(KnownClass::Super)) {
             // Because we have to construct a binding for super in order to fill in implicit arguments,
             // we can't handle things like local aliases to super. If we hit a case where the binding
             // wasn't constructed, fall back to `Any`.
-            self.get_hashed_opt(Hashed::new(&Key::SuperInstance(x.range())))
+            self.get_hashed_opt(Hashed::new(&Key::SuperInstance(callee.expr.range())))
                 .map_or_else(
                     || self.heap.mk_any_implicit(),
                     |type_info| type_info.ty().clone(),
                 )
         } else {
-            self.expand_mut(&mut callee_ty);
-            self.check_unittest_mock_patch_target(&callee_ty, &x.arguments, errors);
+            self.expand_mut(&mut callee.ty);
+            self.check_unittest_mock_patch_target(&callee.ty, &callee.expr.arguments, errors);
 
             let call = CallWithTypes::new();
-            let (args, kws) = if callee_ty.is_union() {
+            let (args, kws) = if callee.ty.is_union() {
                 // If we have a union we will distribute over it, and end up duplicating each function call.
                 (
-                    x.arguments
+                    callee
+                        .expr
+                        .arguments
                         .args
                         .map(|x| call.call_arg(&CallArg::expr_maybe_starred(x), self, errors)),
-                    x.arguments
+                    callee
+                        .expr
+                        .arguments
                         .keywords
                         .map(|x| call.call_keyword(&CallKeyword::new(x), self, errors)),
                 )
             } else {
                 (
-                    x.arguments.args.map(CallArg::expr_maybe_starred),
-                    x.arguments.keywords.map(CallKeyword::new),
+                    callee.expr.arguments.args.map(CallArg::expr_maybe_starred),
+                    callee.expr.arguments.keywords.map(CallKeyword::new),
                 )
             };
 
-            let result = self.distribute_over_union(&callee_ty, |ty| {
+            let result = self.distribute_over_union(&callee.ty, |ty| {
                 // NotImplemented is a singleton constant, not a callable class.
-                if matches!(ty, Type::ClassType(cls) if cls.is_builtin("_NotImplementedType") || cls.has_qname("types", "NotImplementedType"))
+                if matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::NotImplementedType) || cls.is(KnownClass::TypesNotImplementedType))
                 {
                     return self.error(
                         errors,
-                        x.func.range(),
+                        callee.expr.func.range(),
                         ErrorKind::NotCallable,
                         "`NotImplemented` is not callable. Did you mean `NotImplementedError`?".to_owned(),
                     );
                 }
                 self.check_pydantic_model_validate_constraints(
                     ty,
-                    &x.arguments.args,
-                    &x.arguments.keywords,
+                    &callee.expr.arguments.args,
+                    &callee.expr.arguments.keywords,
                     errors,
                 );
                 match ty.callee_kind() {
                 Some(CalleeKind::Function(FunctionKind::AssertType)) => self
                     .call_assert_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
@@ -3134,17 +3054,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }) => self
                     .call_assert_shape(
                         ty,
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
                 Some(CalleeKind::Function(FunctionKind::RevealType)) => self
                     .call_reveal_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
@@ -3152,14 +3072,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // For typing.cast, we have to hard-code a check for whether the first argument
                     // is a type, so it's simplest to special-case the entire call.
                     self.call_typing_cast(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         errors,
                     )
                 }
                 Some(CalleeKind::Function(FunctionKind::InspectUnwrap))
-                    if let Some(ret) = self.call_inspect_unwrap(x, errors) =>
+                    if let Some(ret) = self.call_inspect_unwrap(callee.expr, errors) =>
                 {
                     ret
                 }
@@ -3184,8 +3104,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range,
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     )
@@ -3195,8 +3115,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range,
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     )
@@ -3209,8 +3129,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range,
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     )
@@ -3221,9 +3141,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ) =>
                 {
                     self.call_typeform(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         errors,
                     )
                 }
@@ -3232,50 +3152,77 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ty.clone(),
                         &args,
                         &kws,
-                        x.func.range(),
-                        &x.arguments,
+                        callee.expr.func.range(),
+                        &callee.expr.arguments,
                         hint,
                         errors,
                     ),
                 // Treat assert_type and reveal_type like pseudo-builtins for convenience. Note that we still
                 // log a name-not-found error, but we also assert/reveal the type as requested.
-                None if ty.is_error() && is_special_name(&x.func, "assert_type") => self
+                None if ty.is_error() && is_special_name(&callee.expr.func, "assert_type") => self
                     .call_assert_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
-                None if ty.is_error() && is_special_name(&x.func, "reveal_type") => self
+                None if ty.is_error() && is_special_name(&callee.expr.func, "reveal_type") => self
                     .call_reveal_type(
-                        &x.arguments.args,
-                        &x.arguments.keywords,
-                        x.arguments.range,
+                        &callee.expr.arguments.args,
+                        &callee.expr.arguments.keywords,
+                        callee.expr.arguments.range,
                         hint,
                         errors,
                     ),
                 Some(CalleeKind::Function(FunctionKind::IsInstance))
-                    if self.has_exactly_two_posargs(&x.arguments) =>
+                    if self.has_exactly_two_posargs(&callee.expr.arguments) =>
                 {
-                    self.call_isinstance(&x.arguments.args[0], &x.arguments.args[1], errors)
+                    self.call_isinstance(&callee.expr.arguments.args[0], &callee.expr.arguments.args[1], errors)
                 }
                 Some(CalleeKind::Function(FunctionKind::IsSubclass))
-                    if self.has_exactly_two_posargs(&x.arguments) =>
+                    if self.has_exactly_two_posargs(&callee.expr.arguments) =>
                 {
-                    self.call_issubclass(&x.arguments.args[0], &x.arguments.args[1], errors)
+                    self.call_issubclass(&callee.expr.arguments.args[0], &callee.expr.arguments.args[1], errors)
                 }
                 Some(CalleeKind::Function(FunctionKind::Len))
-                    if x.arguments.args.len() == 1
-                        && x.arguments.keywords.is_empty()
-                        && !matches!(&x.arguments.args[0], Expr::Starred(_)) =>
+                    if callee.expr.arguments.args.len() == 1
+                        && callee.expr.arguments.keywords.is_empty()
+                        && !matches!(&callee.expr.arguments.args[0], Expr::Starred(_)) =>
                 {
                     self.call_len(
                         &args,
                         ty.clone(),
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
+                        hint,
+                        errors,
+                    )
+                }
+                Some(CalleeKind::Function(FunctionKind::Def(func)))
+                    if func.has_toplevel_qname("builtins", "getattr")
+                        && callee.expr.arguments.keywords.is_empty()
+                        && let Some(Expr::StringLiteral(attr_literal)) = callee.expr.arguments.args.get(1)
+                        && let attr_name = Name::new(attr_literal.value.to_string())
+                        && !Ast::is_mangled_attr(&attr_name) =>
+                {
+                    let (obj, default) = match args.as_slice() {
+                        [CallArg::Arg(obj), CallArg::Arg(_)] => (*obj, None),
+                        [CallArg::Arg(obj), CallArg::Arg(_), CallArg::Arg(default)] => (*obj, Some(*default)),
+                        _ => return self.freeform_call_infer(
+                            ty.clone(), &args, &kws, callee.expr.func.range(),
+                            callee.expr.arguments.range(), hint, errors,
+                        ).ty,
+                    };
+                    self.call_getattr(
+                        obj,
+                        &attr_name,
+                        attr_literal.range(),
+                        default,
+                        ty.clone(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     )
@@ -3283,16 +3230,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // `f.register(C)(impl)`: applying the tagged factory decorator by call.
                 _ if let Type::KwCall(kw) = ty
                     && matches!(&kw.func_metadata.kind, FunctionKind::SingleDispatchRegister(_))
-                    && x.arguments.args.len() == 1
-                    && x.arguments.keywords.is_empty() =>
+                    && callee.expr.arguments.args.len() == 1
+                    && callee.expr.arguments.keywords.is_empty() =>
                 {
                     self.apply_singledispatch_register(
                         ty,
-                        &x.arguments.args[0],
+                        &callee.expr.arguments.args[0],
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     )
@@ -3301,40 +3248,40 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .call_singledispatch_register(
                         fallback_first,
                         ty,
-                        &x.arguments,
+                        &callee.expr.arguments,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     ),
                 _ if matches!(ty, Type::ClassDef(cls) if cls == self.stdlib.builtins_type().class_object())
-                    && x.arguments.args.len() == 1 && x.arguments.keywords.is_empty() =>
+                    && callee.expr.arguments.args.len() == 1 && callee.expr.arguments.keywords.is_empty() =>
                 {
                     // We may be able to provide a more precise type when the constructor for `builtins.type`
                     // is called with a single argument.
-                    let arg_ty = self.expr_infer(&x.arguments.args[0], errors);
+                    let arg_ty = self.expr_infer(&callee.expr.arguments.args[0], errors);
                     self.type_of(arg_ty)
                 }
                 _ if matches!(ty, Type::ClassDef(cls) if cls == self.stdlib.builtins_type().class_object())
-                    && x.arguments.args.len() == 3 =>
+                    && callee.expr.arguments.args.len() == 3 =>
                 {
-                    self.check_dynamic_type_bases(&x.arguments.args[1], errors);
-                    self.freeform_call_infer(ty.clone(), &args, &kws, x.func.range(), x.arguments.range(), hint, errors)
+                    self.check_dynamic_type_bases(&callee.expr.arguments.args[1], errors);
+                    self.freeform_call_infer(ty.clone(), &args, &kws, callee.expr.func.range(), callee.expr.arguments.range(), hint, errors)
                         .ty
                 }
-                _ if let Some(ret) = self.call_builtin_enumerate(ty, x, errors) => ret,
+                _ if let Some(ret) = self.call_builtin_enumerate(ty, callee.expr, errors) => ret,
                 // `functools.partial(func, ...)` synthesizes the remaining callable instead of the
                 // opaque stub, so calls on the result are checked (see `alt::functools`).
-                _ if matches!(ty, Type::ClassDef(cls) if cls.has_toplevel_qname("functools", "partial")) =>
+                _ if matches!(ty, Type::ClassDef(cls) if cls.is(KnownClass::FunctoolsPartial)) =>
                 {
                     self.call_functools_partial(
                         ty,
                         &args,
                         &kws,
-                        x.func.range(),
-                        x.arguments.range(),
+                        callee.expr.func.range(),
+                        callee.expr.arguments.range(),
                         hint,
                         errors,
                     )
@@ -3354,18 +3301,47 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.widen_singledispatch_dispatch_param(ty.clone()),
                     &args,
                     &kws,
-                    x.func.range(),
-                    x.arguments.range(),
+                    callee.expr.func.range(),
+                    callee.expr.arguments.range(),
                     hint,
                     errors,
                 ).ty,
                 _ => {
                     // Match expression inference so deprecation warnings share the value's range.
-                    let mut callee = &*x.func;
-                    while let Expr::Named(named) = callee {
-                        callee = &named.value;
+                    let mut callee_func = &*callee.expr.func;
+                    while let Expr::Named(named) = callee_func {
+                        callee_func = &named.value;
                     }
-                    self.freeform_call_infer(ty.clone(), &args, &kws, callee.range(), x.arguments.range(), hint, errors).ty
+                    let target = self.resolve_call_target_or_error(
+                        ty.clone(),
+                        CallStyle::FreeForm,
+                        callee_func.range(),
+                        errors,
+                        None,
+                    );
+                    // Match check_for_deprecated_call's function reference check: each
+                    // branch reports it at its own range. Property and `__call__`
+                    // deprecations still need call-site checks, and call inference
+                    // separately reports deprecated overloads.
+                    let reference_already_checked = matches!(callee_func, Expr::If(..) | Expr::BoolOp(..))
+                        && ty.function_deprecation().is_some()
+                        && ty.property_metadata().is_none();
+                    if !reference_already_checked {
+                        self.report_call_deprecation(&target, callee_func.range(), errors, None);
+                    }
+                    self.call_infer_with_callee_range(
+                        target,
+                        &args,
+                        &kws,
+                        callee.expr.arguments.range(),
+                        Some(callee_func.range()),
+                        errors,
+                        errors,
+                        errors,
+                        None,
+                        hint,
+                        None,
+                    ).ty
                 }
             }});
             // TypeIs and TypeGuard functions return bool at runtime
@@ -3390,7 +3366,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let Type::ClassType(cls) = callee_ty else {
             return;
         };
-        if !cls.has_qname("unittest.mock", "_patcher") {
+        if !cls.is(KnownClass::UnittestMockPatcher) {
             return;
         }
         if arguments.args.len() > 1 || arguments.keywords.iter().any(|kw| kw.arg.is_none()) {
@@ -3577,7 +3553,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Option<Type> {
         // `enumerate` is a class in the bundled typeshed, so `ClassDef` is the normal path. The
         // `builtins.enumerate` function form is accepted defensively for alternate stubs.
-        let is_enumerate = matches!(ty, Type::ClassDef(cls) if cls.is_builtin("enumerate"))
+        let is_enumerate = matches!(ty, Type::ClassDef(cls) if cls.is(KnownClass::Enumerate))
             || matches!(
                 ty.callee_kind(),
                 Some(CalleeKind::Function(FunctionKind::Def(func)))

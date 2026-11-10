@@ -35,13 +35,13 @@ use crate::data_frame::SchemaCompleteness;
 use crate::function::Function;
 use crate::function::FunctionKind;
 use crate::heap::TypeHeap;
+use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::quantified::Quantified;
 use crate::quantified::QuantifiedIdentity;
 use crate::quantified::QuantifiedKind;
 use crate::shaped_array::IntTuple;
 use crate::shaped_array::IntTupleView;
-use crate::shaped_array::ShapedArrayType;
 use crate::shaped_array::is_tuple_carrier_shape_middle;
 use crate::stdlib::Stdlib;
 use crate::tuple::Tuple;
@@ -170,8 +170,9 @@ pub struct TypeDisplayContext<'a> {
     always_display_builtins_module_name: bool,
     always_display_expanded_unions: bool,
     render_self_type_as_self: bool,
-    /// Render a `DataFrame` as its plain underlying class rather than the schema form.
-    strip_library_schemas: bool,
+    /// Render a type that has no annotation syntax as one that does: a schema form as its plain
+    /// class, and an intersection as its fallback type.
+    use_annotation_syntax: bool,
     /// Render types as source annotations: valid Python that references every name it uses.
     render_source_annotation: bool,
     /// Optional stdlib reference for resolving builtin type locations
@@ -203,9 +204,6 @@ impl<'a> TypeDisplayContext<'a> {
 
     pub fn add(&mut self, t: &'a Type) {
         t.universe(&mut |t| {
-            if let Type::ShapedArray(shaped_array) = t {
-                self.add_qname(shaped_array.base_class.qname());
-            }
             if let Type::DataFrame(schema) = t {
                 self.add_qname(schema.underlying.qname());
             }
@@ -217,10 +215,12 @@ impl<'a> TypeDisplayContext<'a> {
             if let Type::Function(func) = t
                 && let FunctionKind::CallbackProtocol(cls) = &func.metadata.kind
                 && matches!(
-                    cls.qname().module_name().as_str(),
-                    "functools" | "singledispatch"
+                    cls.known(),
+                    Some(
+                        KnownClass::FunctoolsSingleDispatchCallable
+                            | KnownClass::SingleDispatchCallable
+                    )
                 )
-                && cls.name().as_str() == "_SingleDispatchCallable"
             {
                 self.add_qname(cls.qname());
             }
@@ -253,9 +253,9 @@ impl<'a> TypeDisplayContext<'a> {
         self.always_display_expanded_unions = true;
     }
 
-    /// Emit schema types as their plain class, for surfaces that write a type back as source.
-    pub fn strip_library_schemas(&mut self) {
-        self.strip_library_schemas = true;
+    /// Emit only annotation syntax, for surfaces that write a type back as source.
+    pub fn use_annotation_syntax(&mut self) {
+        self.use_annotation_syntax = true;
     }
 
     pub fn render_self_type_as_self(&mut self) {
@@ -448,63 +448,6 @@ impl<'a> TypeDisplayContext<'a> {
         output.write_str("]")
     }
 
-    fn fmt_shaped_array(
-        &self,
-        shaped_array: &ShapedArrayType,
-        output: &mut impl TypeOutput,
-    ) -> fmt::Result {
-        let shape_idx = match shaped_array.tuple_carrier_shape_arg_index() {
-            Some(index) => index,
-            None => {
-                output.write_qname(shaped_array.base_class.qname())?;
-                let shape = shaped_array.shape();
-                if !shape.is_shapeless() {
-                    output.write_str("[")?;
-                    output.write_str(&shape.to_string())?;
-                    output.write_str("]")?;
-                }
-                return Ok(());
-            }
-        };
-        self.fmt_shaped_array_as_class(shaped_array, shape_idx, output)
-    }
-
-    fn fmt_shaped_array_as_class(
-        &self,
-        shaped_array: &ShapedArrayType,
-        shape_idx: usize,
-        output: &mut impl TypeOutput,
-    ) -> fmt::Result {
-        let targs = shaped_array.base_class.targs();
-        let args = targs.as_slice();
-        args.get(shape_idx)
-            .expect("shape argument index should point to a class type argument");
-
-        output.write_qname(shaped_array.base_class.qname())?;
-        let shape = shaped_array.shape();
-        let display_count = targs.display_count().max(if shape.is_shapeless() {
-            0
-        } else {
-            shape_idx + 1
-        });
-        if display_count == 0 {
-            return Ok(());
-        }
-
-        output.write_str("[")?;
-        for (i, (param, arg)) in targs.iter_paired().take(display_count).enumerate() {
-            if i > 0 {
-                output.write_str(", ")?;
-            }
-            if i == shape_idx {
-                self.fmt_shape_as_tuple_carrier(&shape, output)?;
-            } else {
-                self.fmt_targ(param, arg, output)?;
-            }
-        }
-        output.write_str("]")
-    }
-
     fn fmt_shape_as_tuple_carrier(
         &self,
         shape: &IntTuple,
@@ -603,7 +546,9 @@ impl<'a> TypeDisplayContext<'a> {
     /// written with the `|` syntax.
     fn needs_parens_in_sequence(&self, t: &Type) -> bool {
         match t {
-            Type::Callable(_) | Type::Function(_) | Type::Intersect(_) => true,
+            Type::Callable(_) | Type::Function(_) => true,
+            Type::Intersect(x) if self.use_annotation_syntax => self.needs_parens_in_sequence(&x.1),
+            Type::Intersect(_) => true,
             // Overloads are already wrapped in `Overload[...]`, and query mode wraps bound methods in `BoundMethod[...]`.
             Type::BoundMethod(m) => {
                 !matches!(m.func, BoundMethodType::Overload(_))
@@ -1026,10 +971,14 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_qname(cls.qname())?;
                 output.write_str("]")
             }
+            Type::SpecializedClassDef(class_type) => {
+                output.write_str("type[")?;
+                output.write_qname(class_type.qname())?;
+                output.write_targs(class_type.targs())?;
+                output.write_str("]")
+            }
             Type::ClassType(class_type)
-                if class_type.qname().module_name().as_str() == "builtins"
-                    && class_type.qname().id().as_str() == "tuple"
-                    && class_type.targs().as_slice().len() == 1 =>
+                if class_type.is(KnownClass::Tuple) && class_type.targs().as_slice().len() == 1 =>
             {
                 output.write_qname(class_type.qname())?;
                 output.write_str("[")?;
@@ -1093,7 +1042,6 @@ impl<'a> TypeDisplayContext<'a> {
                 }
                 output.write_str("]")
             }
-            Type::ShapedArray(shaped_array) => self.fmt_shaped_array(shaped_array, output),
             Type::IntTuple(int_tuple) => {
                 if int_tuple.is_shapeless() {
                     output.write_str("IntTuple")
@@ -1103,11 +1051,7 @@ impl<'a> TypeDisplayContext<'a> {
                     output.write_str("]")
                 }
             }
-            Type::NNModule(module) => {
-                // Display as the class name (e.g., MaxPool2d)
-                self.fmt_helper_generic(&Type::ClassType(module.class.clone()), false, output)
-            }
-            Type::DataFrame(schema) if self.strip_library_schemas => {
+            Type::DataFrame(schema) if self.use_annotation_syntax => {
                 self.fmt_helper_generic(&schema.underlying_type(), false, output)
             }
             Type::DataFrame(schema) => {
@@ -1130,7 +1074,7 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_str("]")?;
                 Ok(())
             }
-            Type::Series(schema) if self.strip_library_schemas => {
+            Type::Series(schema) if self.use_annotation_syntax => {
                 self.fmt_helper_generic(&schema.underlying_type(), false, output)
             }
             Type::Series(schema) => {
@@ -1228,10 +1172,12 @@ impl<'a> TypeDisplayContext<'a> {
                 // signature, but should still reveal as `_SingleDispatchCallable[T]`.
                 if let FunctionKind::CallbackProtocol(cls) = &metadata.kind
                     && matches!(
-                        cls.qname().module_name().as_str(),
-                        "functools" | "singledispatch"
+                        cls.known(),
+                        Some(
+                            KnownClass::FunctoolsSingleDispatchCallable
+                                | KnownClass::SingleDispatchCallable
+                        )
                     )
-                    && cls.name().as_str() == "_SingleDispatchCallable"
                 {
                     return self.fmt_helper_generic(
                         &Type::ClassType((**cls).clone()),
@@ -1563,6 +1509,9 @@ impl<'a> TypeDisplayContext<'a> {
                     self.fmt_type_sequence(union_members, " | ", true, output)
                 }
             }
+            Type::Intersect(x) if self.use_annotation_syntax => {
+                self.fmt_helper_generic(&x.1, false, output)
+            }
             Type::Intersect(x) => self.fmt_type_sequence(x.0.iter(), " & ", true, output),
             Type::Tuple(t) => {
                 if self.always_display_builtins_module_name {
@@ -1762,6 +1711,8 @@ impl<'a> TypeDisplayContext<'a> {
             }
             Type::SpecialForm(x) => write!(output, "{x}"),
             Type::Ellipsis => output.write_str("..."),
+            Type::Falsy => output.write_str("Falsy"),
+            Type::Truthy => output.write_str("Truthy"),
             Type::Any(style) => match style {
                 AnyStyle::Explicit => self.maybe_fmt_with_module("typing", "Any", output),
                 AnyStyle::Implicit | AnyStyle::Error if self.render_source_annotation => {
@@ -1899,7 +1850,7 @@ impl Display for Type {
 fn annotation_context<'a>(ty: &'a Type, stdlib: Option<&'a Stdlib>) -> TypeDisplayContext<'a> {
     let mut ctx = TypeDisplayContext::new(&[ty]);
     ctx.render_self_type_as_self();
-    ctx.strip_library_schemas();
+    ctx.use_annotation_syntax();
     if let Some(stdlib) = stdlib {
         ctx.set_stdlib(stdlib);
     }
@@ -2028,7 +1979,6 @@ pub mod tests {
     use crate::quantified::QuantifiedKind;
     use crate::quantified::QuantifiedOrigin;
     use crate::shaped_array::IntTuple;
-    use crate::shaped_array::ShapedArrayType;
     use crate::tuple::Tuple;
     use crate::type_alias::TypeAlias;
     use crate::type_alias::TypeAliasData;
@@ -2125,17 +2075,6 @@ pub mod tests {
                 metadata: FuncMetadata::method(&class, Name::new(method_name)),
             }),
         }))
-    }
-
-    #[test]
-    fn test_display_shaped_array_type_uses_base_class_name() {
-        let array = ClassType::new(fake_class("Array", "arrays", 0), TArgs::default());
-        let shaped =
-            ShapedArrayType::new(array.clone(), IntTuple::new(vec![Int::Literal(2)])).to_type();
-        let shapeless = ShapedArrayType::shapeless(array).to_type();
-
-        assert_eq!(shaped.to_string(), "Array[2]");
-        assert_eq!(shapeless.to_string(), "Array");
     }
 
     #[test]
@@ -2423,79 +2362,6 @@ pub mod tests {
             ))
             .to_string(),
             "Int[N * (M * K)]"
-        );
-    }
-
-    #[test]
-    fn test_display_shaped_array_keeps_size_wrapper_out_of_shapes() {
-        let heap = TypeHeap::new();
-        let n = fake_tparam(0, "N", QuantifiedKind::IntVar).to_type(&heap);
-        let m = fake_tparam(1, "M", QuantifiedKind::IntVar).to_type(&heap);
-        let shape = IntTuple::new(vec![
-            Int::Literal(3),
-            Int::Symbolic(Box::new(n.clone())),
-            Int::Mul(
-                Box::new(Int::Symbolic(Box::new(n))),
-                Box::new(Int::Symbolic(Box::new(m))),
-            ),
-        ]);
-        let array = ClassType::new(fake_class("Array", "arrays", 0), TArgs::default());
-
-        assert_eq!(
-            ShapedArrayType::new(array, shape).to_type().to_string(),
-            "Array[3, N, N * M]"
-        );
-    }
-
-    #[test]
-    fn test_display_tuple_carrier_shape_keeps_size_wrapper_out_of_shapes() {
-        let heap = TypeHeap::new();
-        let shape_param = fake_tparams(vec![fake_tparam(0, "Shape", QuantifiedKind::TypeVar)]);
-        let n = fake_tparam(1, "N", QuantifiedKind::IntVar).to_type(&heap);
-        let shape = IntTuple::new(vec![Int::Literal(3), Int::Symbolic(Box::new(n))]);
-        let array = ClassType::new(
-            fake_class("Array", "arrays", 0),
-            TArgs::new(shape_param, vec![shape.to_shape_arg_type()]),
-        );
-
-        assert_eq!(
-            ShapedArrayType::new(array, shape)
-                .with_tuple_carrier_shape_arg(0)
-                .to_type()
-                .to_string(),
-            "Array[[3, N]]"
-        );
-    }
-
-    #[test]
-    fn test_display_unpacked_shape_strips_top_level_parens() {
-        let heap = TypeHeap::new();
-        let shape_param = fake_tparams(vec![fake_tparam(0, "Shape", QuantifiedKind::TypeVar)]);
-        let n = fake_tparam(1, "N", QuantifiedKind::IntVar).to_type(&heap);
-        let m = fake_tparam(2, "M", QuantifiedKind::IntVar).to_type(&heap);
-        let shape = IntTuple::unpacked(
-            vec![Int::Add(
-                Box::new(Int::Symbolic(Box::new(n))),
-                Box::new(Int::Literal(1)),
-            )],
-            Type::IntTuple(Box::new(IntTuple::shapeless())),
-            vec![Int::Mul(
-                Box::new(Int::Literal(2)),
-                Box::new(Int::Symbolic(Box::new(m))),
-            )],
-        );
-        let array = ClassType::new(
-            fake_class("Array", "arrays", 0),
-            TArgs::new(shape_param, vec![shape.to_shape_arg_type()]),
-        );
-        let shaped = ShapedArrayType::new(array, shape).with_tuple_carrier_shape_arg(0);
-        assert_eq!(
-            shaped.to_string(),
-            "Array[[N + 1, *tuple[int, ...], 2 * M]]"
-        );
-        assert_eq!(
-            shaped.to_type().to_string(),
-            "Array[[N + 1, *tuple[int, ...], 2 * M]]"
         );
     }
 
@@ -3532,6 +3398,20 @@ def overloaded_func[T](
         ]);
         let ctx = TypeDisplayContext::new(&[&x]);
         assert_eq!(ctx.display(&x).to_string(), "(Any & LiteralString) | None");
+    }
+
+    #[test]
+    fn test_intersection_annotation_syntax() {
+        let x = Type::union(vec![
+            Type::Intersect(Box::new((
+                vec![Type::LiteralString(LitStyle::Implicit), Type::None],
+                Type::LiteralString(LitStyle::Implicit),
+            ))),
+            Type::None,
+        ]);
+        let mut ctx = TypeDisplayContext::new(&[&x]);
+        ctx.use_annotation_syntax();
+        assert_eq!(ctx.display(&x).to_string(), "LiteralString | None");
     }
 
     #[test]

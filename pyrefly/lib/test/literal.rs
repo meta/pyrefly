@@ -644,3 +644,13 @@ def foo():
     assert_type(x, Color)
     "#,
 );
+
+// Control characters in a string literal type are written as escapes, as `repr` writes them,
+// so that displaying the type never sends a raw control character to a terminal or editor.
+testcase!(
+    test_string_literal_control_characters_are_escaped,
+    r#"
+from typing import reveal_type
+reveal_type("\x00\x1b[31m\t\x7f\x9b☃")  # E: revealed type: Literal['\x00\x1b[31m\t\x7f\x9b☃']
+"#,
+);

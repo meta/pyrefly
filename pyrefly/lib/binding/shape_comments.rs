@@ -22,8 +22,8 @@
 //!
 //! - `# shapes: <names>`, on its own line above a function or class definition or
 //!   between its decorators, declares names as `@shape_vars("<names>")` does.
-//! - `# shaped: <shape>`, after a parameter, a return annotation, or an annotated
-//!   assignment, applies the shape as `Shaped[<annotation>, "<shape>"]` does.
+//! - `# shaped: <shape>`, after a parameter, a return annotation, an annotated
+//!   assignment, or a class base, applies the shape as `Shaped[<annotation>, "<shape>"]` does.
 //! - `# shaped: = <payload>` replaces the attached type component, and
 //!   `# shaped: [0][1] = <payload>` replaces the written type argument
 //!   that the path selects. `type =`, `.N`, and `.args[N]` remain accepted aliases.
@@ -118,6 +118,8 @@ enum Owner {
         annotation: TextRange,
         component: Box<[TypeComponentStep]>,
     },
+    /// A whole base expression; unlike a type argument, it cannot be replaced.
+    BaseClass(TextRange),
     UnannotatedParameter,
     /// The header of a function with no return annotation.
     MissingReturn,
@@ -190,6 +192,16 @@ impl ShapeComments {
                         .push(comment);
                     continue;
                 }
+                (Directive::Annotation(comment), [Owner::BaseClass(base)]) => {
+                    if matches!(&comment.target, ShapeCommentTarget::Replace(path) if path.is_empty())
+                    {
+                        "A shape comment cannot replace a whole base class; refine its type arguments instead"
+                            .to_owned()
+                    } else {
+                        comments.annotations.entry(*base).or_default().push(comment);
+                        continue;
+                    }
+                }
                 (Directive::Annotation(_), [Owner::MissingReturn]) => {
                     "A `# shaped:` comment after a function header needs a return annotation"
                         .to_owned()
@@ -199,7 +211,7 @@ impl ShapeComments {
                 }
                 (Directive::Annotation(_), [] | [Owner::Definition(_)]) => {
                     "A `# shaped:` comment must end the line of a parameter, a return \
-                     annotation, an annotated assignment, or a complete type component"
+                     annotation, an annotated assignment, a class base, or a complete type component"
                         .to_owned()
                 }
             };
@@ -478,7 +490,26 @@ impl<'a> StatementVisitor<'a> for Claims<'_> {
                     }
                 }
             }
-            Stmt::ClassDef(x) => self.claim_declaration(&x.decorator_list, &x.name),
+            Stmt::ClassDef(x) => {
+                self.claim_declaration(&x.decorator_list, &x.name);
+                for base in x.bases() {
+                    let line = self.line(base.end());
+                    // Keywords are runtime expressions, not base type arguments.
+                    if self.directives.contains_key(&line)
+                        && !x.arguments.as_ref().is_some_and(|args| {
+                            args.keywords
+                                .iter()
+                                .any(|keyword| self.line(keyword.end()) == line)
+                        })
+                        && !x.body.iter().any(|stmt| {
+                            matches!(stmt, Stmt::AnnAssign(_)) && self.line(stmt.end()) == line
+                        })
+                    {
+                        self.claim(line, Owner::BaseClass(base.range()));
+                    }
+                    self.claim_components(base.range(), base, &mut Vec::new(), Some(line));
+                }
+            }
             Stmt::AnnAssign(x) => {
                 let line = self.line(x.end());
                 self.claim(

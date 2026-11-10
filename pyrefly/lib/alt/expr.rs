@@ -6,6 +6,7 @@
  */
 
 use std::cell::LazyCell;
+use std::cell::RefCell;
 use std::fmt;
 use std::fmt::Display;
 use std::iter::once;
@@ -24,17 +25,12 @@ use pyrefly_types::dimension::canonicalize;
 use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::dimension::int_type_is_provably_negative;
 use pyrefly_types::function::FunctionKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::literal::Literal;
 use pyrefly_types::series::SeriesSchema;
-use pyrefly_types::shape_index::IndexOp;
-use pyrefly_types::shape_index::index_shape_int;
-use pyrefly_types::shape_index::index_shape_multi;
-use pyrefly_types::shape_index::index_shape_slice;
-use pyrefly_types::shape_index::index_shape_tensor;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
-use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::shaped_array::shape_to_tuple_carrier;
 use pyrefly_types::shaped_array::tuple_carrier_to_shape;
 use pyrefly_types::shaped_array::type_to_dim;
@@ -87,6 +83,7 @@ use vec1::vec1;
 
 use crate::alt::answers::AttributeReferenceKind;
 use crate::alt::answers::LookupAnswer;
+use crate::alt::answers::TraceSideEffects;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::answers_solver::TypeCheckOptions;
 use crate::alt::call::CallStyle;
@@ -100,6 +97,7 @@ use crate::alt::shape_extension::is_int_tuple_bound;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::solve::UntypeContext;
 use crate::alt::unwrap::HintRef;
+use crate::alt::unwrap::MAX_HINT_WIDTH;
 use crate::binding::binding::Binding;
 use crate::binding::binding::BindingClass;
 use crate::binding::binding::Key;
@@ -145,9 +143,30 @@ pub enum TypeOrExpr<'a> {
     Expr(&'a Expr),
 }
 
-pub(crate) enum PreparedExprCall {
+/// Inference under concrete hints, owned by one constructor argument.
+/// The key preserves hint member order and distinguishes inference without a hint.
+#[derive(Debug, Default)]
+pub struct ArgumentCache {
+    outcomes: RefCell<SmallMap<Option<Vec<Type>>, CachedArgument>>,
+}
+
+#[derive(Debug)]
+struct CachedArgument {
+    ty: TypeInfo,
+    errors: ErrorCollector,
+    hint_errors: ErrorCollector,
+    traces: Option<TraceSideEffects>,
+}
+
+pub(crate) enum PreparedExprCall<'a> {
     Resolved(Type),
-    Callee(Type),
+    Callee(ExprCallee<'a>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ExprCallee<'a> {
+    pub ty: Type,
+    pub expr: &'a ExprCall,
 }
 
 /// Where a dimension expression appears, which controls whether a plain
@@ -224,22 +243,6 @@ impl<'a> TypeOrExpr<'a> {
             TypeOrExpr::Type(ty, _) => ty.clone(),
             TypeOrExpr::Expr(x) => solver.expr_infer(x, errors),
         }
-    }
-
-    pub fn transform<Ans: LookupAnswer>(
-        &self,
-        solver: &AnswersSolver<Ans>,
-        errors: &ErrorCollector,
-        owner: &'a Owner<Type>,
-        transformation: impl Fn(&Type) -> Type,
-    ) -> (Self, bool) {
-        let ty = self.infer(solver, errors);
-        let transformed = transformation(&ty);
-        let changed = ty != transformed;
-        (
-            TypeOrExpr::Type(owner.push(transformed), self.range()),
-            changed,
-        )
     }
 }
 
@@ -444,57 +447,6 @@ impl Display for ConditionRedundantReason {
 }
 
 pub(crate) const MAX_TUPLE_LENGTH: usize = 256;
-
-fn is_integer_index_scalar_type(ty: &Type) -> bool {
-    match ty {
-        Type::Literal(lit) => matches!(lit.value, Lit::Int(_)),
-        Type::ClassType(cls) => cls.is_builtin("int"),
-        Type::Int(_) => true,
-        Type::Union(union) => {
-            !union.members.is_empty() && union.members.iter().all(is_integer_index_scalar_type)
-        }
-        _ => false,
-    }
-}
-
-fn classify_shaped_array_index_type(ty: &Type) -> Option<IndexOp> {
-    match ty {
-        Type::None => Some(IndexOp::NewAxis),
-        Type::ShapedArray(index) => {
-            let shape_index = index.tuple_carrier_shape_arg_index()?;
-            let targs = index.base_class.targs().as_slice();
-            targs
-                .get(shape_index)
-                .expect("registered shape index must reference a type argument");
-            let mut scalar_types = targs
-                .iter()
-                .enumerate()
-                .filter_map(|(i, ty)| (i != shape_index).then_some(ty));
-            let scalar_type = scalar_types.next()?;
-            if scalar_types.next().is_some() || !is_integer_index_scalar_type(scalar_type) {
-                return None;
-            }
-            index
-                .shape()
-                .as_concrete()
-                .map(|dims| IndexOp::ShapedArrayIndex(dims.to_vec()))
-        }
-        Type::Tuple(Tuple::Concrete(elements))
-            if elements.iter().all(is_integer_index_scalar_type) =>
-        {
-            Some(IndexOp::Fancy(Int::Literal(elements.len() as i64)))
-        }
-        Type::Tuple(Tuple::Unbounded(element)) if is_integer_index_scalar_type(element) => {
-            Some(IndexOp::Fancy(Int::Int))
-        }
-        Type::ClassType(cls) if cls.has_qname("builtins", "list") => match cls.targs().as_slice() {
-            [element] if is_integer_index_scalar_type(element) => Some(IndexOp::Fancy(Int::Int)),
-            _ => None,
-        },
-        _ if is_integer_index_scalar_type(ty) => Some(IndexOp::Int),
-        _ => None,
-    }
-}
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn synthesized_functional_class_type(&self, call: &ExprCall) -> Option<Type> {
@@ -834,6 +786,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Infer a type for an expression, with options to influence the inference and control whether
     /// and how the type is checked against an expected type.
     pub fn expr_with_options(&self, x: &Expr, options: ExprOptions<'_, '_, '_>) -> TypeInfo {
+        self.expr_with_argument_cache(x, options, None)
+    }
+
+    /// Checks the argument in its current context and reuses only compatible cached inference.
+    pub(crate) fn expr_with_argument_cache(
+        &self,
+        x: &Expr,
+        options: ExprOptions<'_, '_, '_>,
+        cache: Option<&ArgumentCache>,
+    ) -> TypeInfo {
         match options.expectation {
             ExprExpectation::Check {
                 want,
@@ -841,11 +803,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 context,
                 call_context,
             } if !want.is_any() => {
-                let got = self.expr_infer_impl(
+                let got = self.expr_infer_argument(
                     x,
                     Some(HintRef::new(want, Some(errors))),
                     options.errors,
                     options.type_form_context,
+                    cache,
                 );
                 let check_options = match call_context {
                     Some(call_context) => {
@@ -863,12 +826,73 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             ExprExpectation::Check { .. } => {
-                self.expr_infer_impl(x, None, options.errors, options.type_form_context)
+                self.expr_infer_argument(x, None, options.errors, options.type_form_context, cache)
             }
             ExprExpectation::Infer(hint) => {
-                self.expr_infer_impl(x, hint, options.errors, options.type_form_context)
+                self.expr_infer_argument(x, hint, options.errors, options.type_form_context, cache)
             }
         }
+    }
+
+    /// Shares successful inference under the same closed hint, excluding first-use state.
+    fn expr_infer_argument(
+        &self,
+        x: &Expr,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+        type_form_context: Option<TypeFormContext<'_>>,
+        cache: Option<&ArgumentCache>,
+    ) -> TypeInfo {
+        let Some(cache) = cache.filter(|_| {
+            type_form_context.is_none()
+                && hint.is_none_or(|hint| {
+                    hint.errors().is_some()
+                        && !hint.types().iter().any(Type::may_contain_placeholder_var)
+                })
+                && self.active_first_use_types().is_empty()
+        }) else {
+            return self.expr_infer_impl(x, hint, errors, type_form_context);
+        };
+        let key = hint.map(|hint| hint.types().to_vec());
+        if let Some(cached) = cache.outcomes.borrow().get(&key)
+            && (cached.traces.is_some() || !self.current().tracing_enabled())
+        {
+            errors.extend_from(&cached.errors);
+            if let Some(errors) = hint.as_ref().and_then(HintRef::errors) {
+                errors.extend_from(&cached.hint_errors);
+            }
+            if let Some(traces) = &cached.traces {
+                self.trace_state().replay_traces(traces);
+            }
+            return cached.ty.clone();
+        }
+        let local_errors = self.error_collector();
+        let local_hint_errors = self.error_collector();
+        let local_hint = hint.map(|hint| hint.with_errors(Some(&local_hint_errors)));
+        let (ty, traces) = self.trace_state().capture_traces(|| {
+            self.expr_infer_impl(x, local_hint, &local_errors, type_form_context)
+        });
+        errors.extend_from(&local_errors);
+        if let Some(errors) = hint.as_ref().and_then(HintRef::errors) {
+            errors.extend_from(&local_hint_errors);
+        }
+        if !ty.has_facets()
+            && !ty.ty().may_contain_placeholder_var()
+            && !local_errors.has_hard()
+            && !local_hint_errors.has_hard()
+            && cache.outcomes.borrow().len() < MAX_HINT_WIDTH
+        {
+            cache.outcomes.borrow_mut().insert(
+                key,
+                CachedArgument {
+                    ty: ty.clone(),
+                    errors: local_errors,
+                    hint_errors: local_hint_errors,
+                    traces,
+                },
+            );
+        }
+        ty
     }
 
     /// The core logic for inferring a type for an expression.
@@ -903,8 +927,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
         type_form_context: Option<TypeFormContext<'_>>,
     ) -> TypeInfo {
-        // The value of an assignment expression is checked separately.
-        let mut check_deprecation = !matches!(x, Expr::Named(..));
+        // Assignment values and branches of conditional and boolean expressions are checked separately.
+        let mut check_deprecation = !matches!(x, Expr::Named(..) | Expr::If(..) | Expr::BoolOp(..));
         let res = match x {
             Expr::Name(x) => {
                 if Ast::is_synthesized_empty_name(x) {
@@ -915,7 +939,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .clone();
                     // Complements PromoteForward for seeded captures.
                     if self.bindings().should_promote_at_range(x.range) {
-                        result.map_ty(|ty| ty.promote_shallow_implicit_literals(self.stdlib))
+                        result.map_ty(|ty| ty.promote_shallow(self.stdlib))
                     } else {
                         result
                     }
@@ -940,13 +964,32 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         // already been checked.
                         check_deprecation = false;
                     }
-                    self.subscript_infer(
-                        &base,
-                        &x.slice,
-                        x.range(),
-                        type_form_context.unwrap_or(TypeFormContext::TypeExpression),
-                        errors,
-                    )
+                    // A qualifier like `NotRequired[int]` is a legal runtime value, which
+                    // typeshed types as `object`.
+                    if type_form_context.is_none()
+                        && let Type::Type(inner) = base.ty()
+                        && matches!(
+                            **inner,
+                            Type::SpecialForm(
+                                SpecialForm::ClassVar
+                                    | SpecialForm::Final
+                                    | SpecialForm::ReadOnly
+                                    | SpecialForm::Required
+                                    | SpecialForm::NotRequired
+                            )
+                        )
+                    {
+                        self.expr_infer(&x.slice, errors);
+                        TypeInfo::of_ty(self.heap.mk_class_type(self.stdlib.object().clone()))
+                    } else {
+                        self.subscript_infer(
+                            &base,
+                            &x.slice,
+                            x.range(),
+                            type_form_context.unwrap_or(TypeFormContext::TypeExpression),
+                            errors,
+                        )
+                    }
                 }
             }
             Expr::Named(x) => match &*x.target {
@@ -1056,7 +1099,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     hint,
                     errors,
                     errors,
-                    |cur_hint, callable_errors, _| {
+                    (),
+                    |(), cur_hint, callable_errors, _| {
                         let _lambda_context = self.enter_lambda_binding_context(
                             param_ids
                                 .iter()
@@ -1104,7 +1148,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                         self.solver().expand_with_bounds(&mut resolved);
                                         let promoted = resolved
                                             .with_literal_style(LitStyle::Implicit)
-                                            .promote_implicit_literals(self.stdlib);
+                                            .promote(self.stdlib);
                                         // A `None` default almost always denotes an optional value,
                                         // so infer `Any | None` to keep the parameter permissive
                                         // rather than strictly `None`.
@@ -1375,7 +1419,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                 }
                 let prepared = self.prepare_expr_call(x, errors);
-                self.finish_prepared_expr_call(x, prepared, hint, errors)
+                self.finish_prepared_expr_call(prepared, hint, errors)
             }
             Expr::FString(x) => {
                 let mut all_literal_strings = true;
@@ -1467,11 +1511,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    pub(crate) fn prepare_expr_call(
+    pub(crate) fn prepare_expr_call<'a>(
         &self,
-        x: &ExprCall,
+        x: &'a ExprCall,
         errors: &ErrorCollector,
-    ) -> PreparedExprCall {
+    ) -> PreparedExprCall<'a> {
         if let Some(ty) = self.synthesized_functional_class_type(x) {
             return PreparedExprCall::Resolved(ty);
         }
@@ -1490,17 +1534,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             self.expr_infer(&x.func, errors)
         };
-        PreparedExprCall::Callee(callee_ty)
+        PreparedExprCall::Callee(ExprCallee {
+            ty: callee_ty,
+            expr: x,
+        })
     }
 
     pub(crate) fn finish_prepared_expr_call(
         &self,
-        x: &ExprCall,
         prepared: PreparedExprCall,
         hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> Type {
-        let mut callee_ty = match prepared {
+        let mut callee = match prepared {
             PreparedExprCall::Resolved(ty) => return ty,
             PreparedExprCall::Callee(callee_ty) => callee_ty,
         };
@@ -1508,48 +1554,50 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Instantiating a subscripted generic whose type argument is an out-of-scope legacy
         // TypeVar (e.g. `list[T]()` at module scope) is an error: `T` is not bound by any
         // enclosing generic scope. Only subscript callees can introduce such a raw TypeVar.
-        if matches!(&*x.func, Expr::Subscript(_)) {
-            self.quantify_call_base_legacy_typevars(&mut callee_ty, x.func.range());
-            self.check_legacy_typevar_scoping(&mut callee_ty, x.func.range(), errors);
+        if matches!(&*callee.expr.func, Expr::Subscript(_)) {
+            self.quantify_call_base_legacy_typevars(&mut callee.ty, callee.expr.func.range());
+            self.check_legacy_typevar_scoping(&mut callee.ty, callee.expr.func.range(), errors);
         }
 
-        self.check_pytorch_tensor_item_call(x, &callee_ty, errors);
-        self.check_pytorch_tensor_cuda_call(x, &callee_ty, errors);
-        self.check_pytorch_print_tensor(x, &callee_ty, errors);
-        self.check_pytorch_redundant_to_call(x, &callee_ty, errors);
-        self.check_sqlalchemy_keyword_call(x, errors);
-        if let Some(d) = self.call_to_dict(&callee_ty, &x.arguments) {
-            self.dict_infer(&d, hint, x.range(), errors)
+        self.check_pytorch_tensor_item_call(callee.expr, &callee.ty, errors);
+        self.check_pytorch_tensor_cuda_call(callee.expr, &callee.ty, errors);
+        self.check_pytorch_print_tensor(callee.expr, &callee.ty, errors);
+        self.check_pytorch_redundant_to_call(callee.expr, &callee.ty, errors);
+        self.check_sqlalchemy_keyword_call(callee.expr, errors);
+        if let Some(d) = self.call_to_dict(&callee.ty, &callee.expr.arguments) {
+            self.dict_infer(&d, hint, callee.expr.range(), errors)
         } else if let Some(ty) = self
             .anonymous_typed_dict_get_or_setdefault_with_literal(
-                &x.func,
-                &x.arguments,
+                &callee.expr.func,
+                &callee.expr.arguments,
                 "get",
                 errors,
             )
             .or_else(|| {
                 self.anonymous_typed_dict_get_or_setdefault_with_literal(
-                    &x.func,
-                    &x.arguments,
+                    &callee.expr.func,
+                    &callee.expr.arguments,
                     "setdefault",
                     errors,
                 )
             })
         {
             ty
-        } else if let Some(ty) =
-            self.anonymous_typed_dict_pop_with_literal(&x.func, &x.arguments, errors)
-        {
+        } else if let Some(ty) = self.anonymous_typed_dict_pop_with_literal(
+            &callee.expr.func,
+            &callee.expr.arguments,
+            errors,
+        ) {
             ty
         } else if let Some((obj_ty, key_expr, key)) =
-            self.is_dict_get_with_literal(&x.func, &x.arguments, errors)
+            self.is_dict_get_with_literal(&callee.expr.func, &callee.expr.arguments, errors)
         {
             let facet = FacetKind::Key(key.to_string());
             if obj_ty.has_value_less_presence(&facet) {
                 self.subscript_infer_for_type_with_key_present(
                     obj_ty.ty(),
                     key_expr,
-                    x.range(),
+                    callee.expr.range(),
                     errors,
                     true,
                     TypeFormContext::TypeExpression,
@@ -1557,19 +1605,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             } else {
                 obj_ty
                     .at_facet(&facet, || {
-                        self.expr_call_infer(x, callee_ty.clone(), hint, errors)
+                        self.expr_call_infer(callee.clone(), hint, errors)
                     })
                     .into_ty()
             }
         } else {
-            let regex_pattern = Self::regex_pattern_argument(&x.arguments);
+            let regex_pattern = Self::regex_pattern_argument(&callee.expr.arguments);
             let regex_flags_position =
-                regex_pattern.and_then(|_| self.regex_flags_position(&callee_ty));
-            let ret = self.expr_call_infer(x, callee_ty, hint, errors);
+                regex_pattern.and_then(|_| self.regex_flags_position(&callee.ty));
             if let (Some(pattern), Some(flags_position)) = (regex_pattern, regex_flags_position) {
-                self.regex_validate_pattern_argument(pattern, &x.arguments, flags_position, errors);
+                self.regex_validate_pattern_argument(
+                    pattern,
+                    &callee.expr.arguments,
+                    flags_position,
+                    errors,
+                );
             }
-            ret
+            self.expr_call_infer(callee, hint, errors)
         }
     }
 
@@ -1608,7 +1660,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
         }
-        ty.promote_implicit_literals(self.stdlib)
+        ty.promote(self.stdlib)
     }
 
     fn dict_key_infer_with_hint(
@@ -1637,6 +1689,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Report references to deprecated classes, functions, and methods.
     fn check_for_deprecated_call(&self, ty: &Type, range: TextRange, errors: &ErrorCollector) {
+        if let Type::Union(union) = ty {
+            for member in &union.members {
+                self.check_for_deprecated_call(member, range, errors);
+            }
+            return;
+        }
         if ty.property_metadata().is_some() {
             // This prevents misfiring deprecation warnings on property setters and deleters.
             return;
@@ -1652,6 +1710,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // the same module, and resolving it could force the alias that is being solved.
         let cls = match ty {
             Type::ClassDef(cls) => Some(cls),
+            _ if let Some(TypeAliasData::Value(alias)) = alias
+                && let Type::SpecializedClassDef(cls) = alias.as_type_ref() =>
+            {
+                Some(cls.class_object())
+            }
             _ if let Some(TypeAliasData::Value(alias)) = alias
                 && let Type::Type(inner) = alias.as_type_ref()
                 && let Type::ClassType(cls) = &**inner =>
@@ -2351,7 +2414,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// If this is a `dict` call that can be converted to an equivalent dict literal (e.g., `dict(x=1)` => `{'x': 1}`),
     /// return the items in the converted dict.
     fn call_to_dict(&self, callee_ty: &Type, args: &Arguments) -> Option<Vec<DictItem>> {
-        if !matches!(callee_ty, Type::ClassDef(class) if class.is_builtin("dict")) {
+        if !matches!(callee_ty, Type::ClassDef(class) if class.is(KnownClass::Dict)) {
             return None;
         }
         if !args.args.is_empty() {
@@ -2455,7 +2518,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Type::Literal(literal) => match literal.value {
                     Lit::Int(value) => value.as_i64().map(|value| value & 64 != 0),
                     Lit::Bool(_) => Some(false),
-                    Lit::Enum(value) if value.class.has_qname("re", "RegexFlag") => {
+                    Lit::Enum(value) if value.class.is(KnownClass::ReRegexFlag) => {
                         Some(matches!(value.member.as_str(), "X" | "VERBOSE"))
                     }
                     _ => None,
@@ -2530,8 +2593,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let result = if let Some(default) = args.args.get(1) {
             self.union(
                 field.ty,
-                self.expr_infer(default, errors)
-                    .promote_implicit_literals(self.stdlib),
+                self.expr_infer(default, errors).promote(self.stdlib),
             )
         } else {
             self.heap.mk_optional(field.ty)
@@ -2567,8 +2629,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let result = if let Some(default) = args.args.get(1) {
             self.union(
                 field.ty,
-                self.expr_infer(default, errors)
-                    .promote_implicit_literals(self.stdlib),
+                self.expr_infer(default, errors).promote(self.stdlib),
             )
         } else {
             field.ty
@@ -2640,6 +2701,32 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
+    /// Intersect each class instance in `ty` whose truthiness is not statically known with
+    /// `Truthy` or `Falsy`. `x and y` returns `x` only when it is falsy, and `x or y` only when it
+    /// is truthy, so this lets a narrow of the result to the other truthiness remove `x`.
+    ///
+    /// `int`, `str` and `bytes` are not marked: their falsy values are the literals `0`, `""` and
+    /// `b""`, which a falsy narrow already produces, and an unmarked class lets a literal default
+    /// such as the `""` in `x or ""` collapse into it.
+    fn mark_truthiness(&self, ty: &Type, truthy: bool, range: TextRange) -> Type {
+        let swallow = self.error_swallower();
+        let marker = if truthy { Type::Truthy } else { Type::Falsy };
+        self.distribute_over_union(ty, |t| match t {
+            Type::ClassType(cls)
+                if matches!(
+                    cls.known(),
+                    Some(KnownClass::Int | KnownClass::Str | KnownClass::Bytes)
+                ) =>
+            {
+                t.clone()
+            }
+            Type::ClassType(_) if self.as_bool(t, range, &swallow).is_none() => self
+                .heap
+                .mk_intersect(vec![t.clone(), marker.clone()], t.clone()),
+            _ => t.clone(),
+        })
+    }
+
     // Helper method for inferring the type of a boolean operation over a sequence of values.
     fn boolop(
         &self,
@@ -2693,7 +2780,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         Some(acc) => self.union(acc, t.clone()),
                     });
                     let t = if i != last_index {
-                        self.atomic_narrow(&t, &result_narrow, value.range(), errors)
+                        let t = self.atomic_narrow(&t, &result_narrow, value.range(), errors);
+                        self.mark_truthiness(&t, target, value.range())
                     } else {
                         t
                     };
@@ -2947,18 +3035,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 *ty = self.heap.mk_type_of(self.heap.mk_any_implicit())
             }
             Type::ClassDef(cls) => {
-                if cls.is_builtin("tuple") {
+                if cls.is(KnownClass::Tuple) {
                     Self::add_implicit_any_error(errors, range, "class `tuple`".to_owned(), None);
                     *ty = self
                         .heap
                         .mk_type_of(self.heap.mk_unbounded_tuple(self.heap.mk_any_implicit()));
-                } else if cls.is_builtin("type") {
+                } else if cls.is(KnownClass::Type) {
                     // `type`` is equivalent to `type[Any]`. As a result, the class def itself
                     // has type `type[type[Any]]`.
                     *ty = self
                         .heap
                         .mk_type_of(self.heap.mk_type_of(self.heap.mk_any_implicit()));
-                } else if cls.has_toplevel_qname("typing", "Any") {
+                } else if cls.is(KnownClass::TypingAny) {
                     // This is the one place a written `Any` becomes `AnyStyle::Explicit`, so it
                     // is where the diagnostic belongs: `range` is the expression that spells
                     // `Any`, and an `Any` reaching some other position by flowing out of a
@@ -2971,7 +3059,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         )
                         .emit();
                     *ty = self.heap.mk_type_of(self.heap.mk_any_explicit())
-                } else if cls.has_toplevel_qname("typing", "NamedTuple") {
+                } else if cls.is(KnownClass::TypingNamedTuple) {
                     // When `NamedTuple` is used as a type annotation (e.g. TypeVar bound),
                     // resolve to `NamedTupleFallback` — the class that actually appears in
                     // the MRO of user-defined NamedTuple subclasses.
@@ -2984,7 +3072,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     *ty = self.heap.mk_type_of(self.promote(cls, range, errors));
                 }
             }
-            Type::ClassType(cls) if cls.is_builtin("type") => {
+            Type::SpecializedClassDef(cls) => {
+                *ty = self.heap.mk_type_of(Type::ClassType(cls.clone()));
+            }
+            Type::ClassType(cls) if cls.is(KnownClass::Type) => {
                 *ty = self.heap.mk_type_of(self.heap.mk_any_implicit());
             }
             _ => {}
@@ -3697,9 +3788,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// must be parsed by that path rather than specialized as generics. `IntTuple` is handled
     /// directly by the base-class parser; shaped arrays specialize correctly as generics.
     pub(crate) fn has_special_class_subscript(&self, cls: &Class) -> bool {
-        cls.is_builtin("type")
-            || cls.has_toplevel_qname("pyre_extensions", "PyreReadOnly")
-            || cls.has_toplevel_qname("pyre_extensions", "ReadOnly")
+        cls.is(KnownClass::Type)
+            || cls.is(KnownClass::PyreExtensionsPyreReadOnly)
+            || cls.is(KnownClass::PyreExtensionsReadOnly)
             || self.is_int_class(cls)
             || self.is_map_int_tuples_class(cls)
     }
@@ -3718,7 +3809,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let is_builtin_sequence = |base: &Type| match base {
             Type::Tuple(_) => true,
             Type::ClassType(cls) | Type::SelfType(cls) => {
-                cls.is_builtin("list")
+                cls.is(KnownClass::List)
                     || (self.as_tuple(cls).is_some() && !self.class_overrides_tuple_getitem(cls))
             }
             _ => false,
@@ -3920,7 +4011,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 // Note that we have to check for `builtins.type` by name here because this code runs
                 // when we're bootstrapping the stdlib and don't have access to class objects yet.
-                Type::ClassDef(cls) if cls.is_builtin("type") => {
+                Type::ClassDef(cls) if cls.is(KnownClass::Type) => {
                     let (arguments, _) = match slice {
                             Expr::Tuple(x) => (x.elts.as_slice(), x.parenthesized),
                             _ => (slice::from_ref(slice), false),
@@ -3930,8 +4021,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // TODO: pyre_extensions.PyreReadOnly is a non-standard type system extension that marks read-only
                 // objects. We don't support it yet.
                 Type::ClassDef(cls)
-                    if cls.has_toplevel_qname("pyre_extensions", "PyreReadOnly")
-                        || cls.has_toplevel_qname("pyre_extensions", "ReadOnly") =>
+                    if cls.is(KnownClass::PyreExtensionsPyreReadOnly)
+                        || cls.is(KnownClass::PyreExtensionsReadOnly) =>
                 {
                     match xs.len() {
                         1 => self.expr_infer(&xs[0], errors),
@@ -3946,16 +4037,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ),
                     }
                 }
-                // Shaped-array type parsing for registered array classes.
-                Type::ClassDef(ref cls) if self.is_shaped_array_class(cls) => {
-                    Type::type_of(self.parse_registered_shaped_array_type(
-                        cls,
-                        xs,
-                        range,
-                        type_form_context,
-                        errors,
-                    ))
-                }
                 Type::ClassDef(ref cls) if self.is_int_tuple_class(cls) => {
                     self.parse_int_tuple_type(xs, type_form_context, errors)
                 }
@@ -3963,7 +4044,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.parse_int_type(xs, range, type_form_context, errors)
                 }
                 Type::ClassDef(ref cls)
-                    if cls.has_toplevel_qname("shape_extensions", "ProxyMethod") =>
+                    if cls.is(KnownClass::ShapeExtensionsProxyMethod) =>
                 {
                     self.proxy_method_subscript_infer(cls, xs, range, errors)
                 }
@@ -4153,35 +4234,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         Some(&|| ErrorContext::Index(self.for_display(base.clone()))),
                     )
                 }
-                // Tensor indexing: tensor[0] reduces dimensionality
-                Type::ShapedArray(ref shaped_array_type)
-                    if self.uses_builtin_shaped_array_indexing(
-                        shaped_array_type.base_class.class_object(),
-                    ) =>
-                {
-                    self.infer_shaped_array_index(shaped_array_type, slice, range, errors)
-                }
-                // Shaped arrays that opt out of built-in indexing use their declared method.
-                Type::ShapedArray(_) => {
-                    let receiver = target.with_base(&base).getitem_receiver();
-                    self.call_method_or_error(
-                        receiver,
-                        &dunder::GETITEM,
-                        range,
-                        &[CallArg::expr(slice)],
-                        &[],
-                        errors,
-                        Some(&|| ErrorContext::Index(self.for_display(receiver.clone()))),
-                    )
-                }
-                // Shaped arrays that have not gone through annotation
-                // canonicalization still use tensor indexing logic.
-                Type::ClassType(ref cls)
-                    if self.uses_builtin_shaped_array_indexing(cls.class_object()) =>
-                {
-                    let shaped_array_type = self.shaped_array_classtype_to_shaped_array_type(cls);
-                    self.infer_shaped_array_index(&shaped_array_type, slice, range, errors)
-                }
                 Type::ClassType(ref cls) | Type::SelfType(ref cls)
                     if let Some(tuple) = self.as_tuple(cls)
                         && !self.class_overrides_tuple_getitem(cls) =>
@@ -4205,7 +4257,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         errors,
                     )
                 }
-                Type::ClassType(ref cls) | Type::SelfType(ref cls) if cls.is_builtin("list") => {
+                Type::ClassType(ref cls) | Type::SelfType(ref cls) if cls.is(KnownClass::List) => {
                     let index_arg = match builtin_sequence_slice_ty {
                         Some(ty) => CallArg::ty(ty, slice.range()),
                         None => CallArg::expr(slice),
@@ -4462,235 +4514,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
-    /// Handle tensor indexing operations
-    /// - Integer index: reduces dimensionality by 1 (removes first dimension)
-    /// - Slice: preserves dimensionality (keeps all dimensions)
-    fn infer_shaped_array_index(
-        &self,
-        shaped_array_type: &ShapedArrayType,
-        index: &Expr,
-        range: TextRange,
-        errors: &ErrorCollector,
-    ) -> Type {
-        // Convert a slice bound expression to a dimension type.
-        // For unary negation (-expr), we preserve the Mul(-1, ...) wrapper
-        // without canonicalizing, so adjust_negative can detect negative bounds
-        // even after the distributive law would otherwise distribute -1 across sums.
-        let to_dim = |expr: &Expr| -> Int {
-            // Detect syntactic unary minus: -(inner)
-            if let Expr::UnaryOp(x) = expr
-                && x.op == UnaryOp::USub
-            {
-                let inner_ty = self.expr_infer(&x.operand, errors);
-                let inner_dim = match type_to_dim(&inner_ty) {
-                    Some(Int::Literal(val)) => {
-                        // Literal negation: just negate the value directly
-                        return Int::Literal(-val);
-                    }
-                    Some(dim) => dim,
-                    None => return Int::Int,
-                };
-                // Wrap in Mul(-1, ...) WITHOUT canonicalizing.
-                // This preserves the structural signal for adjust_negative.
-                // The final canonicalization happens in `IntTuple`.
-                return Int::Mul(Box::new(Int::Literal(-1)), Box::new(inner_dim));
-            }
-            let ty = self.expr_infer(expr, errors);
-            type_to_dim(&ty).unwrap_or(Int::Int)
-        };
-
-        let classify = |expr: &Expr, inferred: Option<&Type>| -> Option<IndexOp> {
-            match expr {
-                Expr::Slice(ExprSlice {
-                    lower, upper, step, ..
-                }) => {
-                    let start = lower.as_ref().map(|e| to_dim(e));
-                    let stop = upper.as_ref().map(|e| to_dim(e));
-                    let step_val = step.as_ref().map(|e| to_dim(e));
-                    Some(IndexOp::Slice {
-                        start,
-                        stop,
-                        step: step_val,
-                    })
-                }
-                Expr::List(ExprList { elts, .. })
-                    if elts.iter().all(|elt| !matches!(elt, Expr::Starred(_)))
-                        && elts.iter().all(|elt| {
-                            matches!(
-                                classify_shaped_array_index_type(&self.expr_infer(elt, errors)),
-                                Some(IndexOp::Int)
-                            )
-                        }) =>
-                {
-                    Some(IndexOp::Fancy(Int::Literal(elts.len() as i64)))
-                }
-                _ => match inferred {
-                    Some(ty) => classify_shaped_array_index_type(ty),
-                    None => classify_shaped_array_index_type(&self.expr_infer(expr, errors)),
-                },
-            }
-        };
-
-        match index {
-            // Slice operation: tensor[start:stop:step]
-            Expr::Slice(ExprSlice {
-                lower, upper, step, ..
-            }) => {
-                let start = lower.as_ref().map(|e| to_dim(e));
-                let stop = upper.as_ref().map(|e| to_dim(e));
-                let step_val = step.as_ref().map(|e| to_dim(e));
-                match index_shape_slice(&shaped_array_type.shape(), start, stop, step_val) {
-                    Ok(shape) => self
-                        .shaped_array_with_shape(shaped_array_type, shape)
-                        .to_type(),
-                    Err(err) => self.error(errors, range, ErrorKind::BadIndex, err.to_string()),
-                }
-            }
-            // Bare ellipsis: tensor[...] - preserves entire shape
-            Expr::EllipsisLiteral(_) => shaped_array_type.clone().to_type(),
-            // None index: tensor[None] - inserts a new dimension of size 1 at the front
-            Expr::NoneLiteral(_) => {
-                match index_shape_multi(&shaped_array_type.shape(), &[IndexOp::NewAxis], &[], false)
-                {
-                    Ok(shape) => self
-                        .shaped_array_with_shape(shaped_array_type, shape)
-                        .to_type(),
-                    Err(err) => self.error(errors, range, ErrorKind::BadIndex, err.to_string()),
-                }
-            }
-            // Tuple index: tensor[:, -1, :] - apply each index to corresponding dimension
-            Expr::Tuple(ExprTuple { elts, .. }) => {
-                // Check for ellipsis and validate at most one
-                let mut ellipsis_pos: Option<usize> = None;
-                for (i, elt) in elts.iter().enumerate() {
-                    if matches!(elt, Expr::EllipsisLiteral(_)) {
-                        if ellipsis_pos.is_some() {
-                            return self.error(
-                                errors,
-                                range,
-                                ErrorKind::BadIndex,
-                                "Multiple ellipsis not allowed in tensor index".to_owned(),
-                            );
-                        }
-                        ellipsis_pos = Some(i);
-                    }
-                }
-
-                // Split indices at ellipsis into pre and post groups
-                let (pre_exprs, post_exprs) = match ellipsis_pos {
-                    Some(pos) => (&elts[..pos], &elts[pos + 1..]),
-                    None => (&elts[..], &elts[0..0]),
-                };
-
-                // Classify all index expressions into IndexOps
-                let pre_ops: Option<Vec<IndexOp>> =
-                    pre_exprs.iter().map(|expr| classify(expr, None)).collect();
-                let post_ops: Option<Vec<IndexOp>> =
-                    post_exprs.iter().map(|expr| classify(expr, None)).collect();
-                let (Some(pre_ops), Some(post_ops)) = (pre_ops, post_ops) else {
-                    return self.shaped_array_shapeless(shaped_array_type).to_type();
-                };
-
-                match index_shape_multi(
-                    &shaped_array_type.shape(),
-                    &pre_ops,
-                    &post_ops,
-                    ellipsis_pos.is_some(),
-                ) {
-                    Ok(shape) => self
-                        .shaped_array_with_shape(shaped_array_type, shape)
-                        .to_type(),
-                    Err(err) => self.error(errors, range, ErrorKind::BadIndex, err.to_string()),
-                }
-            }
-            _ => {
-                let index_ty = self.expr_infer(index, errors);
-                if let Type::Tuple(tuple) = &index_ty {
-                    let Tuple::Concrete(elements) = tuple else {
-                        return self.shaped_array_shapeless(shaped_array_type).to_type();
-                    };
-                    let Some(ops) = elements
-                        .iter()
-                        .map(classify_shaped_array_index_type)
-                        .collect::<Option<Vec<_>>>()
-                    else {
-                        return self.shaped_array_shapeless(shaped_array_type).to_type();
-                    };
-                    return match index_shape_multi(&shaped_array_type.shape(), &ops, &[], false) {
-                        Ok(shape) => self
-                            .shaped_array_with_shape(shaped_array_type, shape)
-                            .to_type(),
-                        Err(err) => self.error(errors, range, ErrorKind::BadIndex, err.to_string()),
-                    };
-                }
-
-                match classify(index, Some(&index_ty)) {
-                    Some(IndexOp::Int) => match index_shape_int(&shaped_array_type.shape()) {
-                        Ok(shape) => self
-                            .shaped_array_with_shape(shaped_array_type, shape)
-                            .to_type(),
-                        Err(err) => self.error(errors, range, ErrorKind::BadIndex, err.to_string()),
-                    },
-                    Some(IndexOp::ShapedArrayIndex(idx_dims)) => {
-                        match index_shape_tensor(&shaped_array_type.shape(), &idx_dims) {
-                            Ok(shape) => self
-                                .shaped_array_with_shape(shaped_array_type, shape)
-                                .to_type(),
-                            Err(err) => {
-                                self.error(errors, range, ErrorKind::BadIndex, err.to_string())
-                            }
-                        }
-                    }
-                    Some(op @ IndexOp::Fancy(_)) | Some(op @ IndexOp::NewAxis) => {
-                        match index_shape_multi(&shaped_array_type.shape(), &[op], &[], false) {
-                            Ok(shape) => self
-                                .shaped_array_with_shape(shaped_array_type, shape)
-                                .to_type(),
-                            Err(err) => {
-                                self.error(errors, range, ErrorKind::BadIndex, err.to_string())
-                            }
-                        }
-                    }
-                    Some(IndexOp::Slice { .. }) => {
-                        unreachable!("slice indices are handled before generic index dispatch")
-                    }
-                    None => self.shaped_array_shapeless(shaped_array_type).to_type(),
-                }
-            }
-        }
-    }
-
     fn is_pytorch_tensor_type(ty: &Type) -> bool {
         fn is_torch_tensor_class(cls: &ClassType) -> bool {
-            let module = cls.class_object().module_name();
-            let module = module.as_str();
-            cls.name().as_str() == "Tensor" && matches!(module, "torch" | "torch._tensor")
+            matches!(
+                cls.known(),
+                Some(KnownClass::TorchTensor | KnownClass::TorchTensorTensor)
+            )
         }
 
         match ty {
             Type::ClassType(cls) => is_torch_tensor_class(cls),
-            Type::ShapedArray(shaped_array) => is_torch_tensor_class(&shaped_array.base_class),
             _ => false,
         }
-    }
-
-    /// Check if a class should use shaped-array type parsing.
-    pub(crate) fn is_shaped_array_class(&self, cls: &Class) -> bool {
-        self.shaped_array_shape_for_class(cls).is_some()
-    }
-
-    pub(crate) fn shaped_array_shape_arg_index(&self, cls: &ClassType) -> Option<usize> {
-        let shape_param = self.shaped_array_shape_for_class_type(cls)?;
-        self.get_class_tparams(cls.class_object())?
-            .iter()
-            .position(|param| param == &shape_param)
-    }
-
-    pub(crate) fn shaped_array_shape_arg(&self, cls: &ClassType) -> Option<Type> {
-        let shape_idx = self.shaped_array_shape_arg_index(cls)?;
-        let mut shape_arg = cls.targs().as_slice().get(shape_idx)?.clone();
-        self.expand_mut(&mut shape_arg);
-        Some(shape_arg)
     }
 
     pub(crate) fn shape_arg_to_int_tuple(&self, shape_arg: &Type) -> Option<IntTuple> {
@@ -4708,120 +4543,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             })
     }
 
-    pub(crate) fn shaped_array_classtype_to_shaped_array_type(
-        &self,
-        cls: &ClassType,
-    ) -> ShapedArrayType {
-        // Derive the index and argument from a single metadata lookup rather
-        // than re-resolving through `shaped_array_shape_arg_index`/`_arg`, which
-        // would force the (expensive) class shape metadata two more times.
-        let shape_param = self
-            .shaped_array_shape_for_class_type(cls)
-            .expect("registered shaped-array class should have shape metadata");
-        let shape_idx = self
-            .get_class_tparams(cls.class_object())
-            .iter()
-            .flat_map(|tparams| tparams.iter())
-            .position(|param| param == &shape_param)
-            .expect("shaped-array metadata should refer to a class type parameter");
-        let mut shape_arg = cls
-            .targs()
-            .as_slice()
-            .get(shape_idx)
-            .expect("class type should have an argument for each type parameter")
-            .clone();
-        self.expand_mut(&mut shape_arg);
-        match shape_param.kind() {
-            QuantifiedKind::TypeVar | QuantifiedKind::IntVar => {
-                let shape = self
-                    .shape_arg_to_int_tuple(&shape_arg)
-                    .unwrap_or_else(IntTuple::shapeless);
-                let mut base_class = cls.clone();
-                let shape_arg = base_class
-                    .targs_mut()
-                    .as_mut()
-                    .get_mut(shape_idx)
-                    .expect("class type should have an argument for each type parameter");
-                *shape_arg = shape.to_shape_arg_type();
-                ShapedArrayType::new(base_class, shape).with_tuple_carrier_shape_arg(shape_idx)
-            }
-            QuantifiedKind::TypeVarTuple => unreachable!(
-                "shaped-array metadata validation rejects TypeVarTuple shape parameters"
-            ),
-            QuantifiedKind::ParamSpec => {
-                unreachable!("shaped-array metadata validation rejects ParamSpec shape parameters")
-            }
-        }
-    }
-
-    /// Build a shaped-array type with a new semantic shape.
-    ///
-    /// Registered arrays store their shape in the metadata-selected class type
-    /// argument; unregistered arrays store it inline. Non-shape class arguments
-    /// such as `DType` are preserved.
-    pub(crate) fn shaped_array_with_shape(
-        &self,
-        tensor: &ShapedArrayType,
-        shape: IntTuple,
-    ) -> ShapedArrayType {
-        match self.shaped_array_shape_for_class_type(&tensor.base_class) {
-            Some(shape_param) => match shape_param.kind() {
-                QuantifiedKind::TypeVar | QuantifiedKind::IntVar => {
-                    let shape_idx = self
-                        .shaped_array_shape_arg_index(&tensor.base_class)
-                        .expect("shaped-array metadata should refer to a class type parameter");
-                    let mut tensor = tensor.clone();
-                    // A registered shaped-array class stores its shape in the
-                    // carrier argument at `shape_idx`, so `TupleCarrier` is the
-                    // coherent style regardless of the input's prior style (e.g. a
-                    // stale `Unknown`): we normalize it to match where the shape
-                    // now actually lives.
-                    tensor.set_tuple_carrier_shape_arg(shape_idx);
-                    tensor.set_shape(shape);
-                    tensor
-                }
-                QuantifiedKind::TypeVarTuple => unreachable!(
-                    "shaped-array metadata validation rejects TypeVarTuple shape parameters"
-                ),
-                QuantifiedKind::ParamSpec => {
-                    unreachable!(
-                        "shaped-array metadata validation rejects ParamSpec shape parameters"
-                    )
-                }
-            },
-            None => {
-                // A `TupleCarrier` shape lives in a registered class argument, so
-                // such a tensor always takes the `Some` branch above; only inline
-                // arrays (no registration metadata) reach here. Assert that
-                // invariant, since `new` produces an inline shape and would
-                // otherwise silently drop a carrier index -- which participates in
-                // `ShapedArrayType` identity / `Eq` / `Hash`.
-                assert!(
-                    tensor.tuple_carrier_shape_arg_index().is_none(),
-                    "a tuple-carrier shaped array reached the unregistered-class branch"
-                );
-                ShapedArrayType::new(tensor.base_class.clone(), shape)
-            }
-        }
-    }
-
-    /// Build a shapeless shaped-array type while keeping the raw tuple carrier
-    /// coherent. A plain `ShapedArrayType::shapeless` would leave the old carrier
-    /// (e.g. an unknown-rank `S`) on `base_class`, so `.shape` would stale-read the
-    /// pre-operation shape. Routing through `shaped_array_with_shape` rewrites the
-    /// carrier to the shapeless form too.
-    fn shaped_array_shapeless(&self, tensor: &ShapedArrayType) -> ShapedArrayType {
-        self.shaped_array_with_shape(tensor, IntTuple::shapeless())
-    }
-
     /// Check if a class is a Int class (shape_extensions.Int)
     fn is_int_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "Int")
+        cls.is(KnownClass::ShapeExtensionsInt)
     }
 
     /// Check if a class is the IntVar class (shape_extensions.IntVar)
     fn is_int_var_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "IntVar")
+        cls.is(KnownClass::ShapeExtensionsIntVar)
     }
 
     fn is_builtin_abs_call(&self, call: &ExprCall) -> bool {
@@ -4855,7 +4584,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             if comment.mode == ShapeCommentMode::Append
                 && !matches!(self.expr_infer(expr, &self.error_swallower()),
-                    Type::ClassDef(cls) if cls.is_builtin("int"))
+                    Type::ClassDef(cls) if cls.is(KnownClass::Int))
             {
                 self.error(errors, comment.range, ErrorKind::InvalidAnnotation,
                     "A concise shape comment on a scalar type argument requires `int`; use `type =` to replace another dimension".to_owned());
@@ -4954,12 +4683,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let expr_type = self.expr_infer(expr, errors);
 
                 match &expr_type {
-                    Type::ClassDef(cls) if cls.has_toplevel_qname("typing", "Any") => {
+                    Type::ClassDef(cls) if cls.is(KnownClass::TypingAny) => {
                         // typing.Any in a type annotation position (e.g., Tensor[16, Any])
                         // Use Explicit since the user wrote Any explicitly
                         Ok(Type::Any(AnyStyle::Explicit))
                     }
-                    Type::ClassDef(cls) if cls.is_builtin("int") => Ok(gradual_size()),
+                    Type::ClassDef(cls) if cls.is(KnownClass::Int) => Ok(gradual_size()),
                     _ if context.allows_explicit_int_wrapper()
                         && let Some(dimension) = type_to_dim(&expr_type) =>
                     {
@@ -5369,8 +5098,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             result
         } else {
             let targs = self.parse_class_type_args(cls, xs.iter(), type_form_context, errors);
-            self.heap
-                .mk_type_of(self.specialize(cls, targs, range, errors))
+            match self.specialize(cls, targs, range, errors) {
+                Type::ClassType(class_type) => Type::SpecializedClassDef(class_type),
+                Type::TypedDict(typed_dict) => self.heap.mk_type_of(Type::TypedDict(typed_dict)),
+                _ => unreachable!("specializing a class produces a class or TypedDict instance"),
+            }
         }
     }
 
@@ -5489,7 +5221,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     fn is_shape_elements_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "Elements")
+        cls.is(KnownClass::ShapeExtensionsElements)
     }
 
     /// Parse `Elements[S]` in `*Elements[S]`, returning the bare `S` argument.
@@ -5588,18 +5320,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 );
                 Err(())
             }
-        }
-    }
-
-    /// Return whether a tuple-carrier shape contains an unbounded tuple segment.
-    fn has_unbounded_tuple_carrier(ty: &Type) -> bool {
-        match ty {
-            Type::Tuple(Tuple::Unbounded(_)) => true,
-            Type::Tuple(Tuple::Unpacked(unpacked)) => {
-                Self::has_unbounded_tuple_carrier(unpacked.middle())
-            }
-            Type::Unpack(inner) => Self::has_unbounded_tuple_carrier(inner),
-            _ => false,
         }
     }
 
@@ -5705,181 +5425,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .map(|shape| shape.to_shape_arg_type())
                 .unwrap_or_else(Type::any_error),
         )
-    }
-
-    /// Parse a registered shaped-array annotation.
-    ///
-    /// The registered shape parameter is a single ordinary type argument that
-    /// carries a tuple (e.g. `ndarray[Shape, DType]`). We specialize the class
-    /// normally and project the carrier into a shape via
-    /// `shaped_array_classtype_to_shaped_array_type`.
-    fn parse_registered_shaped_array_type(
-        &self,
-        cls: &Class,
-        args: &[Expr],
-        range: TextRange,
-        type_form_context: TypeFormContext<'_>,
-        errors: &ErrorCollector,
-    ) -> Type {
-        let shape_param = self
-            .shaped_array_shape_for_class(cls)
-            .expect("registered shaped-array class should have shape metadata");
-
-        let tparams = self.get_class_tparams(cls);
-        let shape_idx = tparams
-            .iter()
-            .flat_map(|tparams| tparams.iter())
-            .position(|param| param == &shape_param)
-            .expect("shaped-array metadata should refer to a class type parameter");
-        match shape_param.kind() {
-            QuantifiedKind::TypeVar | QuantifiedKind::IntVar => {}
-            QuantifiedKind::TypeVarTuple => unreachable!(
-                "shaped-array metadata validation rejects TypeVarTuple shape parameters"
-            ),
-            QuantifiedKind::ParamSpec => {
-                unreachable!("shaped-array metadata validation rejects ParamSpec shape parameters")
-            }
-        }
-        let validate_shape_slot = shape_idx < args.len()
-            && args.len() <= tparams.as_ref().map_or(0, |tparams| tparams.len());
-        let shape_param_accepts_int_tuple = matches!(
-            shape_param.upper_bound(self.stdlib, self.heap),
-            Type::IntTuple(_)
-        );
-        let shape_validation_arg = |carrier: &Type| {
-            if shape_param_accepts_int_tuple {
-                self.heap.mk_int_tuple(IntTuple::shapeless())
-            } else {
-                carrier.clone()
-            }
-        };
-        let mut shape_arg_carrier = None;
-        let mut shape_arg_failed_to_parse = false;
-        let type_argument_context = TypeFormContext::TypeArgument(&type_form_context);
-        let shape_type_argument_context = TypeFormContext::ShapeTypeArgument(&type_form_context);
-        let class_targs: Vec<Type> = args
-            .iter()
-            .enumerate()
-            .map(|(i, arg)| match arg {
-                Expr::List(ExprList { elts, .. }) if i == shape_idx => {
-                    match self.parse_int_tuple_shape_args(elts, shape_type_argument_context, errors)
-                    {
-                        Some(shape) => {
-                            let carrier = shape_to_tuple_carrier(&shape);
-                            shape_arg_carrier = Some(shape.to_shape_arg_type());
-                            shape_validation_arg(&carrier)
-                        }
-                        None => {
-                            shape_arg_failed_to_parse = true;
-                            Type::any_error()
-                        }
-                    }
-                }
-                _ => {
-                    if i == shape_idx
-                        && !self.bindings().shape_declarations.comment_targets.contains_key(&arg.range())
-                        && let Type::ClassDef(cls) = self.expr_infer(arg, &self.error_swallower())
-                        && self.is_int_tuple_class(&cls)
-                    {
-                        let carrier = self.bare_int_tuple_carrier();
-                        shape_arg_carrier = Some(IntTuple::shapeless().to_shape_arg_type());
-                        shape_validation_arg(&carrier)
-                    } else {
-                        let arg_context = if i == shape_idx {
-                            shape_type_argument_context
-                        } else {
-                            type_argument_context
-                        };
-                        match self.expr_untype(arg, arg_context, errors) {
-                            ty if i == shape_idx && ty.is_error() => {
-                                shape_arg_failed_to_parse = true;
-                                ty
-                            }
-                            Type::TypeLevelDslCall(call) if i == shape_idx => {
-                                if call.result_domain() == Some(TypeShapeDslDomain::IntTuple) {
-                                    let ty = Type::TypeLevelDslCall(call);
-                                    shape_arg_carrier = Some(ty);
-                                    shape_validation_arg(
-                                        &IntTuple::shapeless().to_shape_arg_type(),
-                                    )
-                                } else {
-                                    shape_arg_failed_to_parse = true;
-                                    self.error(
-                                        errors,
-                                        arg.range(),
-                                        ErrorKind::InvalidAnnotation,
-                                        "Expected a type-level shape DSL call with an `IntTuple` result in a shaped-array shape argument, got an `Int` result"
-                                            .to_owned(),
-                                    );
-                                    Type::any_error()
-                                }
-                            }
-                            Type::IntTuple(shape) if i == shape_idx => {
-                                let carrier = if shape.is_shapeless() {
-                                    self.bare_int_tuple_carrier()
-                                } else {
-                                    shape_to_tuple_carrier(&shape)
-                                };
-                                shape_arg_carrier = Some(shape.to_shape_arg_type());
-                                shape_validation_arg(&carrier)
-                            }
-                            ty => {
-                                if validate_shape_slot
-                                    && i == shape_idx
-                                    && Self::has_unbounded_tuple_carrier(&ty)
-                                {
-                                    self.error(
-                                        errors,
-                                        arg.range(),
-                                        ErrorKind::InvalidAnnotation,
-                                        "Unbounded tuple types cannot be used as shaped-array shape carriers"
-                                            .to_owned(),
-                                    );
-                                    Type::any_error()
-                                } else if i == shape_idx && matches!(ty, Type::Tuple(_)) {
-                                    if let Some(shape) = tuple_carrier_to_shape(&ty) {
-                                        shape_arg_carrier = Some(shape.to_shape_arg_type());
-                                        shape_validation_arg(&ty)
-                                    } else {
-                                        self.error(
-                                            errors,
-                                            arg.range(),
-                                            ErrorKind::InvalidAnnotation,
-                                            format!(
-                                                "Invalid shaped-array shape carrier `{}`",
-                                                self.for_display(ty)
-                                            ),
-                                        );
-                                        Type::any_error()
-                                    }
-                                } else {
-                                    ty
-                                }
-                            }
-                        }
-                    }
-                }
-            })
-            .collect();
-        if args.len() <= tparams.as_ref().map_or(0, |tparams| tparams.len())
-            && shape_arg_failed_to_parse
-        {
-            return Type::any_error();
-        }
-        let mut base_class =
-            self.specialize_nontypeddict_to_classtype(cls, class_targs, range, errors);
-        if let Some(carrier) = shape_arg_carrier
-            && let Some(shape_arg) = base_class.targs_mut().as_mut().get_mut(shape_idx)
-        {
-            *shape_arg = carrier;
-        }
-        if let Some(Type::TypeLevelDslCall(call)) = base_class.targs().as_slice().get(shape_idx)
-            && call.result_domain() == Some(TypeShapeDslDomain::IntTuple)
-        {
-            return Type::ClassType(base_class);
-        }
-        self.shaped_array_classtype_to_shaped_array_type(&base_class)
-            .to_type()
     }
 
     pub(crate) fn parse_int_tuple_type(
@@ -5989,7 +5534,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // instance that defines `__bool__` or `__len__` at runtime.
                 let metadata = self.get_metadata_for_class(cls);
                 let is_abstract =
-                    cls.is_builtin("object") || metadata.is_protocol() || metadata.extends_abc();
+                    cls.is(KnownClass::Object) || metadata.is_protocol() || metadata.extends_abc();
                 // Skip warning for classes coming from stubs. Stub-only classes often have
                 // dynamic runtime behavior (e.g. `datetime`, `asyncio.Future`, `Lock`,
                 // sqlalchemy `Session`) that the stubs don't model, and the idiomatic

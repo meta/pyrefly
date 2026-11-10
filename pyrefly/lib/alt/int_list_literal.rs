@@ -8,6 +8,7 @@
 //! Literal-value inference for `shape_extensions.IntListLiteral`.
 
 use pyrefly_types::class::ClassType;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::types::Type;
@@ -26,7 +27,7 @@ pub(crate) fn int_list_literal(ty: &Type) -> Option<IntListLiteral> {
     let Type::ClassType(cls) = ty else {
         return None;
     };
-    if !cls.has_qname("shape_extensions", "IntListLiteral") {
+    if !cls.is(KnownClass::ShapeExtensionsIntListLiteral) {
         return None;
     }
     let [_] = cls.targs().as_slice() else {

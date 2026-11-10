@@ -30,13 +30,17 @@ use crate::solver::solver::QuantifiedHandle;
 use crate::solver::solver::SubsetError;
 use crate::types::callable::Required;
 use crate::types::class::Class;
+use crate::types::class::ClassDef;
 use crate::types::class::ClassType;
+use crate::types::env::TypeEnv;
 use crate::types::quantified::Quantified;
 use crate::types::stdlib::Stdlib;
+use crate::types::type_var::Restriction;
 use crate::types::typed_dict::TypedDict;
 use crate::types::typed_dict::TypedDictField;
 use crate::types::types::Forall;
 use crate::types::types::Forallable;
+use crate::types::types::TParams;
 use crate::types::types::Type;
 
 /// `TypeOrder` provides a minimal API allowing `Subset` to request additional
@@ -47,6 +51,29 @@ use crate::types::types::Type;
 /// subset relations.
 #[derive(Clone_, Copy_, Dupe_)]
 pub struct TypeOrder<'solver, Ans: LookupAnswer>(&'solver AnswersSolver<'solver, 'solver, Ans>);
+
+/// Every method delegates to the solver, so a `TypeOrder` reads the same data as its solver.
+impl<Ans: LookupAnswer> TypeEnv for TypeOrder<'_, Ans> {
+    fn stdlib(&self) -> &Stdlib {
+        self.0.stdlib
+    }
+
+    fn class_def<'a>(&'a self, cls: &'a Class) -> &'a ClassDef {
+        self.0.class_def(cls)
+    }
+
+    fn class_tparams<'a>(&'a self, cls: &'a Class) -> &'a TParams {
+        self.0.class_tparams(cls)
+    }
+
+    fn type_var_restriction<'a>(&'a self, q: &'a Quantified) -> &'a Restriction {
+        self.0.type_var_restriction(q)
+    }
+
+    fn type_var_default<'a>(&'a self, q: &'a Quantified) -> Option<&'a Type> {
+        self.0.type_var_default(q)
+    }
+}
 
 impl<'solver, Ans: LookupAnswer> TypeOrder<'solver, Ans> {
     pub fn new(solver: &'solver AnswersSolver<'solver, 'solver, Ans>) -> Self {
@@ -78,10 +105,6 @@ impl<'solver, Ans: LookupAnswer> TypeOrder<'solver, Ans> {
         self.0.as_class_type_unchecked(class)
     }
 
-    pub fn shaped_array_shape_for_class_type(self, cls: &ClassType) -> Option<Quantified> {
-        self.0.shaped_array_shape_for_class_type(cls)
-    }
-
     pub fn has_metaclass(self, cls: &Class, metaclass: &ClassType) -> bool {
         let metadata = self.0.get_metadata_for_class(cls);
         self.0
@@ -111,8 +134,12 @@ impl<'solver, Ans: LookupAnswer> TypeOrder<'solver, Ans> {
         }
     }
 
-    pub fn get_enum_member_count(self, cls: &Class) -> Option<usize> {
-        self.0.get_enum_member_count(cls)
+    pub fn enum_literal_covers_class(self, cls: &Class, member: &Name) -> bool {
+        self.0.enum_literal_covers_class(cls, member)
+    }
+
+    pub fn get_expandable_enum_member_count(self, cls: &Class) -> Option<usize> {
+        self.0.get_expandable_enum_member_count(cls)
     }
 
     pub fn instance_as_dunder_call(self, class_type: &ClassType) -> Option<Type> {

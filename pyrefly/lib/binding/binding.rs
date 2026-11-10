@@ -24,7 +24,6 @@ use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::function::Deprecation;
 use pyrefly_types::heap::TypeHeap;
-use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::type_alias::TypeAlias;
 use pyrefly_types::type_alias::TypeAliasIndex;
@@ -77,6 +76,8 @@ use crate::binding::base_class::BaseClassGeneric;
 use crate::binding::bindings::BindingEntry;
 use crate::binding::bindings::BindingTable;
 use crate::binding::bindings::Bindings;
+use crate::binding::bindings::InitializationStatus;
+use crate::binding::bindings::UnsetNodeId;
 use crate::binding::classmethod::MethodReceiverKind;
 use crate::binding::django::DjangoFieldInfo;
 use crate::binding::narrow::NarrowOp;
@@ -135,7 +136,7 @@ assert_words!(BindingAnnotation, 11);
 assert_words!(BindingClass, 11);
 assert_words!(BindingTParams, 9);
 assert_words!(BindingClassBaseType, 3);
-assert_words!(BindingClassMetadata, 14);
+assert_words!(BindingClassMetadata, 11);
 assert_words!(BindingDjangoRelations, 2);
 assert_bytes!(BindingClassMro, 4);
 assert_bytes!(BindingClassChecks, 4);
@@ -149,7 +150,7 @@ assert_words!(BindingYield, 4);
 assert_words!(BindingYieldFrom, 4);
 assert_words!(BindingDecorator, 9);
 assert_bytes!(BindingDecoratedFunction, 24);
-assert_words!(BindingUndecoratedFunction, 18);
+assert_words!(BindingUndecoratedFunction, 16);
 
 #[derive(Clone, Dupe, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AnyIdx {
@@ -992,6 +993,9 @@ pub enum Key {
     SuppressedException(TextRange),
     /// A suppression-only query for a narrow view, separate from normal with completion.
     SuppressionNarrow(TextRange),
+    /// The termination of a merged flow whose live branches each ended in a statement that
+    /// may have type `Never`. Solves to `Never` only if every branch does.
+    FlowTermination(TextRange),
     /// One syntactic exception-class expression from an `except` clause. A clause
     /// listing a tuple of classes has one of these per element.
     ExceptionClass(TextRange),
@@ -1040,6 +1044,7 @@ impl Ranged for Key {
             Self::PatternNarrow(r) => *r,
             Self::Exhaustive(_, r) => *r,
             Self::SuppressedException(r) | Self::SuppressionNarrow(r) => *r,
+            Self::FlowTermination(r) => *r,
             Self::ExceptionClass(r) => *r,
             Self::BranchTest(r) => *r,
             Self::BranchEnd(r) | Self::FunctoolsWrapperMutation(r) => *r,
@@ -1095,6 +1100,7 @@ impl DisplayWith<ModuleInfo> for Key {
                 write!(f, "Key::SuppressedException({})", ctx.display(r))
             }
             Self::SuppressionNarrow(r) => write!(f, "Key::SuppressionNarrow({})", ctx.display(r)),
+            Self::FlowTermination(r) => write!(f, "Key::FlowTermination({})", ctx.display(r)),
             Self::ExceptionClass(r) => write!(f, "Key::ExceptionClass({})", ctx.display(r)),
             Self::BranchTest(r) => write!(f, "Key::BranchTest({})", ctx.display(r)),
             Self::BranchEnd(r) => write!(f, "Key::BranchEnd({})", ctx.display(r)),
@@ -1294,14 +1300,15 @@ pub enum BindingExpect {
         existing: Idx<KeyAnnotation>,
         name: Name,
     },
-    /// Validate a function implementation's implicit return without making the
-    /// published return type depend on the function body.
+    /// Validate a function's return annotation without making the published
+    /// return type depend on the function body.
     ValidateImplicitReturn {
         annotation: Idx<KeyAnnotation>,
         implicit_return: Idx<Key>,
         is_async: bool,
         is_generator: bool,
         has_explicit_return: bool,
+        diverges_without_exit: bool,
     },
     /// Expression used in a boolean context (`bool()`, `if`, or `while`)
     Bool(Expr),
@@ -1310,7 +1317,7 @@ pub enum BindingExpect {
     MatchExhaustiveness {
         subject_idx: Idx<Key>,
         narrowing_subject: Option<NarrowingSubject>,
-        narrow_ops_for_fall_through: (Box<NarrowOp>, TextRange),
+        narrow_ops_for_fall_through: Box<(NarrowOp, TextRange)>,
         subject_range: TextRange,
         // Should we show the raw expression of the match subject instead of the name?
         show_subject_expr: bool,
@@ -1319,7 +1326,12 @@ pub enum BindingExpect {
     MatchCaseReachability {
         subject_idx: Idx<Key>,
         narrowing_subject: Option<NarrowingSubject>,
-        narrow_ops_for_case: (Box<NarrowOp>, TextRange),
+        narrow_ops_for_case: Box<(NarrowOp, TextRange)>,
+        /// Negations from earlier unguarded cases in the same match, in the
+        /// same subject coordinates as `narrow_ops_for_case`. Reachability
+        /// narrows by the current pattern first, then applies these, so an
+        /// `Any` subject can first become `bool` and then subtract `int`.
+        prev_case_negations: Option<Box<(NarrowOp, TextRange)>>,
         case_range: TextRange,
     },
     /// Code following one or more points in a suite that control passes only conditionally, such
@@ -1355,24 +1367,27 @@ pub enum BindingExpect {
     PrivateAttributeAccess(Box<PrivateAttributeAccessCheck>),
     /// Deferred check for uninitialized variables. This is a "dangling" binding
     /// that doesn't affect any other types - it only exists to emit an error at
-    /// solve time if any of the termination keys don't have Never type.
+    /// solve time if some path on which the variable is unset reaches the use.
     UninitializedCheck {
         /// The variable name (for error messages).
         name: Name,
         /// The range of the variable usage (for error location).
         range: TextRange,
-        /// Termination keys from branches that don't define the variable.
-        /// At solve time, we check if ALL of these have Never type.
-        /// If any don't, the variable may be uninitialized.
-        termination_keys: Vec<Idx<Key>>,
+        /// The latest merges on the paths on which the variable is unset. If any of those paths
+        /// reaches the use, the variable may be uninitialized.
+        unset_nodes: Vec<UnsetNodeId>,
     },
-    /// Check whether a class-body attribute is initialized on every completing path.
+    /// Check whether an attribute is initialized on every completing path.
     UninitializedAttributeCheck {
         name: Name,
         range: TextRange,
         class: Idx<KeyClass>,
-        /// All missing paths must terminate. None means a path lacks termination evidence.
-        termination_keys: Option<Vec<Idx<Key>>>,
+        /// Instance attributes can also be provided by `__getattr__`.
+        is_instance: bool,
+        /// The bare class-body annotation that declares the attribute, if any.
+        declared_annotation: Option<Idx<KeyAnnotation>>,
+        /// Any of these flows can establish initialization.
+        initializations: Vec<InitializationStatus>,
     },
     /// Check for forward reference string literal in union type.
     /// At runtime, `type.__or__` cannot handle string literals, so expressions
@@ -1535,29 +1550,33 @@ impl DisplayWith<Bindings> for BindingExpect {
             Self::UninitializedCheck {
                 name,
                 range,
-                termination_keys,
+                unset_nodes,
             } => {
                 write!(
                     f,
                     "UninitializedCheck({}, {}, {:?})",
                     name,
                     ctx.module().display(range),
-                    termination_keys
+                    unset_nodes
                 )
             }
             Self::UninitializedAttributeCheck {
                 name,
                 range,
                 class,
-                termination_keys,
+                is_instance,
+                declared_annotation,
+                initializations,
             } => {
                 write!(
                     f,
-                    "UninitializedAttributeCheck({}, {}, {:?}, {:?})",
+                    "UninitializedAttributeCheck({}, {}, {:?}, {}, {:?}, {:?})",
                     name,
                     ctx.module().display(range),
                     class,
-                    termination_keys
+                    is_instance,
+                    declared_annotation,
+                    initializations
                 )
             }
             Self::ForwardRefUnion {
@@ -2060,7 +2079,13 @@ impl IsAsync {
 #[derive(Clone, Debug)]
 pub enum FunctionParameter {
     Annotated(Idx<KeyAnnotation>),
-    Unannotated(Idx<KeyUndecoratedFunction>, AnnotationTarget, Name),
+    /// The final field is the type that the docstring declares for the parameter, if any.
+    Unannotated(
+        Idx<KeyUndecoratedFunction>,
+        AnnotationTarget,
+        Name,
+        Option<Idx<KeyAnnotation>>,
+    ),
 }
 
 #[derive(Clone, Debug)]
@@ -2153,15 +2178,8 @@ pub struct BindingUndecoratedFunction {
     pub legacy_tparams: Box<[Idx<KeyLegacyTypeParam>]>,
     pub decorators: Box<[Idx<KeyDecorator>]>,
     pub parent: NestingContext,
-    /// When the function is decorated with `@shape_dsl_function`, this holds the
-    /// parsed DSL IR so the solver can produce `FunctionKind::ShapeDsl`.
-    pub shape_dsl_def: Option<Arc<ShapeDslFunction>>,
     /// Parsed source for a user-defined type-level shape DSL function.
     pub type_shape_dsl_def: Option<Arc<ParsedTypeShapeDslFunction>>,
-    /// Identifier of the IR function passed as the first positional argument to
-    /// `@uses_shape_dsl(ir_fn)`. Extracted at binding time so the solver can
-    /// resolve it to a `FunctionKind::ShapeDsl` type.
-    pub uses_shape_dsl_ir_name: Option<ShortIdentifier>,
 }
 
 impl DisplayWith<Bindings> for BindingUndecoratedFunction {
@@ -2484,8 +2502,14 @@ pub struct ExhaustiveBinding {
 #[derive(Clone, Debug)]
 pub struct SuiteGate {
     pub condition: GateCondition,
-    /// Where this gate's dead region would begin, i.e. the statement following it.
+    /// Where this gate's dead region would begin: the first statement following it that is not a
+    /// `raise` or a failing `assert`.
     pub start: TextSize,
+    /// The expression statement at `start`, if that is what the region begins with. One of type
+    /// `Never` is a divergence marker like a `raise`, the shape `assert_never` takes, and is not
+    /// reported even when the gate is closed. The gate that statement opens covers whatever
+    /// follows it.
+    pub expr_at_start: Option<Idx<Key>>,
 }
 
 /// What must hold for control to pass a [`SuiteGate`].
@@ -3096,7 +3120,7 @@ impl DisplayWith<Bindings> for Binding {
                 "FunctionParameter({})",
                 match x.as_ref() {
                     FunctionParameter::Annotated(k) => ctx.display(*k).to_string(),
-                    FunctionParameter::Unannotated(k, _, _) => ctx.display(*k).to_string(),
+                    FunctionParameter::Unannotated(k, _, _, _) => ctx.display(*k).to_string(),
                 }
             ),
             Self::SuperInstance(x) => match &x.0 {
@@ -3469,7 +3493,20 @@ impl AnnotationTarget {
 pub enum BindingAnnotation {
     /// The type is annotated to be this key, will have the outer type removed.
     /// Optionally occurring within a class, in which case Self refers to this class.
-    AnnotateExpr(AnnotationTarget, Expr, Option<Idx<KeyClass>>),
+    /// For a parameter/return annotation of an `@override` method, the final field
+    /// identifies the method itself, so the solver can compare against the base
+    /// signature (e.g. to exempt dictated annotations from `explicit-any`); `None`
+    /// otherwise. This implies the class field is `Some`. Name, async-ness and
+    /// parameter shape are read from the function binding, not duplicated here.
+    AnnotateExpr(
+        AnnotationTarget,
+        Expr,
+        Option<Idx<KeyClass>>,
+        Option<Idx<KeyUndecoratedFunction>>,
+    ),
+    /// The type that a docstring declares for the unannotated parameter with this name.
+    /// Docstrings are informal, so a type that does not check is dropped without an error.
+    DocstringParam(Name, Expr),
     /// A special form declaration like `Literal: _SpecialForm`.
     SpecialForm(AnnotationTarget, SpecialForm),
 }
@@ -3477,15 +3514,22 @@ pub enum BindingAnnotation {
 impl DisplayWith<Bindings> for BindingAnnotation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Bindings) -> fmt::Result {
         match self {
-            Self::AnnotateExpr(target, x, class_key) => write!(
+            Self::AnnotateExpr(target, x, class_key, override_func) => write!(
                 f,
-                "AnnotateExpr({target}, {}, {})",
+                "AnnotateExpr({target}, {}, {}, {})",
                 ctx.module().display(x),
                 match class_key {
                     None => "None".to_owned(),
                     Some(t) => ctx.display(*t).to_string(),
-                }
+                },
+                match override_func {
+                    None => "None".to_owned(),
+                    Some(t) => ctx.get(*t).def.name.id.to_string(),
+                },
             ),
+            Self::DocstringParam(name, x) => {
+                write!(f, "DocstringParam({name}, {})", ctx.module().display(x))
+            }
             Self::SpecialForm(target, sf) => write!(f, "SpecialForm({target}, {sf})"),
         }
     }
@@ -3548,11 +3592,13 @@ pub enum ClassFieldDefinition {
     /// `initialized_in_recognized_method` is true if the field is assigned in a recognized
     /// instance attribute-defining method (e.g., `__init__`), meaning a Final field
     /// declared here is legally initialized even without a class-body value.
+    /// `initialized_in_method` is true if any method of the class assigns the field.
     /// `initialized_on_new_instance` is true if `__new__` assigns the field on the instance
-    /// it creates. Only the `uninitialized-instance-variable` check reads it.
+    /// it creates.
     DeclaredByAnnotation {
         annotation: Idx<KeyAnnotation>,
         initialized_in_recognized_method: bool,
+        initialized_in_method: bool,
         initialized_on_new_instance: bool,
     },
     /// Declared with no annotation or assignment (this is impossible
@@ -3605,13 +3651,15 @@ impl DisplayWith<Bindings> for ClassFieldDefinition {
             Self::DeclaredByAnnotation {
                 annotation,
                 initialized_in_recognized_method,
+                initialized_in_method,
                 initialized_on_new_instance,
             } => {
                 write!(
                     f,
-                    "ClassFieldDefinition::DeclaredByAnnotation({}, initialized_in_recognized_method={}, initialized_on_new_instance={})",
+                    "ClassFieldDefinition::DeclaredByAnnotation({}, initialized_in_recognized_method={}, initialized_in_method={}, initialized_on_new_instance={})",
                     ctx.display(*annotation),
                     initialized_in_recognized_method,
+                    initialized_in_method,
                     initialized_on_new_instance,
                 )
             }
@@ -3783,14 +3831,6 @@ impl DisplayWith<Bindings> for BindingClassChecks {
     }
 }
 
-/// Information about a class that is marked as using array shapes (for shape typing).
-#[derive(Clone, Debug)]
-pub struct ShapedArrayMetadata {
-    pub shape_name: Name,
-    pub range: TextRange,
-    pub builtin_indexing: bool,
-}
-
 /// Binding for the class's metadata (anything obtained directly from base classes,
 /// except for the MRO which is kept separate to avoid cycles).
 #[derive(Clone, Debug)]
@@ -3812,11 +3852,6 @@ pub struct BindingClassMetadata {
     pub pydantic_before_validator_fields: Box<[Name]>,
     /// Django-specific field information.
     pub django_field_info: Box<DjangoFieldInfo>,
-    /// `__init__` parameter names to capture for shape inference, extracted from
-    /// `@uses_shape_dsl(..., capture_init=[...])` on a `forward` method.
-    pub capture_init: Option<Box<[Name]>>,
-    /// Shape parameter requested by `@shaped_array(shape="...")`.
-    pub shaped_array_metadata: Option<Box<ShapedArrayMetadata>>,
 }
 
 impl DisplayWith<Bindings> for BindingClassMetadata {

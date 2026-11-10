@@ -527,6 +527,41 @@
             "id": 0,
             "key": "simple.py"
           },
+          "spans": [
+            {
+              "length": 11,
+              "start": 85
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "simple.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "simple.hello_world"
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.TargetUses.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "simple.py"
+          },
           "xrefs": [
             {
               "source": {
@@ -703,6 +738,6 @@
     "predicate": "python.Module.4"
   },
   {
-    "schema_id": "f329796272b9314200433ac342cbc15c"
+    "schema_id": "60aea86d7ff049228df605cf3fda4c67"
   }
 ]

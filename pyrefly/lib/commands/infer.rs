@@ -308,7 +308,7 @@ fn hint_to_string(
     typing_imports: &mut BTreeSet<&'static str>,
     uses_incomplete: &mut bool,
 ) -> String {
-    let hint = hint.promote_implicit_literals(stdlib);
+    let hint = hint.promote(stdlib);
     let hint = hint.explicit_any().clean_var();
     let hint = match hint {
         Type::Union(u) => unions_with_literals(u.members, stdlib, enum_members, heap),
@@ -412,12 +412,7 @@ impl InferArgs {
                     &|cls| {
                         transaction
                             .ad_hoc_solve(&handle, "infer_enum_metadata", |solver| {
-                                let meta = solver.get_metadata_for_class(cls);
-                                if meta.is_enum() {
-                                    Some(solver.get_enum_members(cls).len())
-                                } else {
-                                    None
-                                }
+                                solver.get_expandable_enum_member_count(cls)
                             })
                             .flatten()
                     },
@@ -809,6 +804,29 @@ Example(42)
         return c
     example("a")
     "#,
+            None,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_return_intersection() -> anyhow::Result<()> {
+        // `Author & Falsy` has no annotation syntax, so its fallback type `Author` is written.
+        assert_annotations(
+            r#"
+class Genre: ...
+class Author:
+    genre: Genre | None
+def f(author: Author | None):
+    return author and author.genre
+"#,
+            r#"
+class Genre: ...
+class Author:
+    genre: Genre | None
+def f(author: Author | None) -> Author | Genre | None:
+    return author and author.genre
+"#,
             None,
         );
         Ok(())

@@ -22,6 +22,6 @@ exec >&2
 # shellcheck source=/dev/null
 source scripts/setup_cargo.sh
 
-cargo install wasm-pack wasm-opt
+cargo install wasm-opt
 
 yarn install

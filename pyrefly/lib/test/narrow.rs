@@ -4755,14 +4755,14 @@ def g(x: A | B | C) -> None:
 testcase!(
     test_class_may_be_falsy,
     r#"
-from typing import assert_type
+from typing import reveal_type
 
 class MyClass:
     name: str
 
 def myfn(x: MyClass | None):
     # `x` could be a falsy instance of a subclass of `MyClass`
-    assert_type(x and x.name, MyClass | str | None)
+    reveal_type(x and x.name)  # E: (MyClass & Falsy) | str | None
     "#,
 );
 
@@ -4783,7 +4783,7 @@ def myfn(x: MyClass | None):
 testcase!(
     test_class_with_bool_may_be_falsy,
     r#"
-from typing import assert_type, final
+from typing import reveal_type, final
 
 @final
 class MyClass:
@@ -4791,7 +4791,7 @@ class MyClass:
     def __bool__(self) -> bool: ...
 
 def myfn(x: MyClass | None):
-    assert_type(x and x.name, MyClass | str | None)
+    reveal_type(x and x.name)  # E: (MyClass & Falsy) | str | None
     "#,
 );
 
@@ -5135,5 +5135,438 @@ def f(a: Fraction | str, b: UserString | int) -> None:
         assert_type(a, Fraction)
     if b == "x":
         assert_type(b, UserString)
+    "#,
+);
+
+testcase!(
+    test_narrow_tuple_elements_any_is_none,
+    r#"
+from typing import assert_type
+
+def f(a: int | None, b: str | None):
+    values = (a, b)
+    if any(v is None for v in values):
+        assert_type(values, tuple[int | None, str | None])
+        raise ValueError()
+    assert_type(values, tuple[int, str])
+
+def g(a: int | None, b: str | None):
+    values = (a, b)
+    if all(v is not None for v in values):
+        assert_type(values, tuple[int, str])
+    else:
+        assert_type(values, tuple[int | None, str | None])
+
+def h(a: int | None, b: str | None):
+    values = (a, b)
+    if any(v is None for v in values if v != 0):
+        raise ValueError()
+    assert_type(values, tuple[int | None, str | None])
+    "#,
+);
+
+testcase!(
+    test_narrow_tuple_elements_none_check_drops_impossible_members,
+    r#"
+from typing import assert_type
+
+def f(values: tuple[None, str] | tuple[int, int] | tuple[int | None]):
+    if any(v is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[int, int] | tuple[int])
+
+def g(values: tuple[None, str] | tuple[int, int] | tuple[int | None]):
+    if all(v is not None for v in values):
+        assert_type(values, tuple[int, int] | tuple[int])
+    "#,
+);
+
+testcase!(
+    test_narrow_tuple_elements_none_check_alias_and_shadowing,
+    r#"
+from typing import Iterable, assert_type
+
+def mixed_any(values: tuple[int | None, str | None], use_builtin: bool):
+    if use_builtin:
+        check = any
+    else:
+        def check(it: Iterable[bool]) -> bool:
+            return False
+    if check(v is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[int | None, str | None])
+
+def mixed_all(values: tuple[int | None, str | None], use_builtin: bool):
+    if use_builtin:
+        check = all
+    else:
+        def check(it: Iterable[bool]) -> bool:
+            return True
+    if check(v is not None for v in values):
+        assert_type(values, tuple[int | None, str | None])
+
+def shadowed(values: tuple[int | None, str | None]):
+    def any(it: Iterable[bool]) -> bool:
+        return False
+    if any(v is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[int | None, str | None])
+    "#,
+);
+
+testcase!(
+    test_narrow_tuple_elements_none_check_through_variable,
+    r#"
+from typing import assert_type
+
+def f(a: int | None, b: str | None):
+    values = (a, b)
+    ok = all(v is not None for v in values)
+    if ok:
+        assert_type(values, tuple[int, str])
+    "#,
+);
+
+// Every branch refers to the same builtin, including through shared alias bindings.
+testcase!(
+    test_special_export_phi_shared_ancestors,
+    r#"
+from typing import Any, assert_type, cast
+
+def merged_len(values: tuple[int] | tuple[int, int], flag: bool):
+    if flag:
+        size = len
+    else:
+        size = len
+    if size(values) == 1:
+        assert_type(values, tuple[int])
+
+def conditional_len(values: tuple[int] | tuple[int, int], flag: bool):
+    size = len
+    if flag:
+        size = len
+    if size(values) == 1:
+        assert_type(values, tuple[int])
+
+def nested_len(values: tuple[int] | tuple[int, int], a: bool, b: bool):
+    size = len
+    if a:
+        if b:
+            size = len
+    if size(values) == 1:
+        assert_type(values, tuple[int])
+
+def merged_cast(value: Any, flag: bool):
+    if flag:
+        convert = cast
+    else:
+        convert = cast
+    assert_type(convert("str", value), str)
+
+def merged_all(values: tuple[int | None, str | None], flag: bool):
+    if flag:
+        check = all
+    else:
+        check = all
+    if check(v is not None for v in values):
+        assert_type(values, tuple[int, str])
+    "#,
+);
+
+testcase!(
+    test_special_export_historical_callees,
+    r#"
+from typing import Any, Callable, Iterable, assert_type
+
+class Checks:
+    def all(self, it: Iterable[bool]) -> bool:
+        return True
+
+def custom_all_alias(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    check = fake
+    saved = check
+    check = all
+    if saved(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+        return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def custom_any_alias(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    check = fake
+    saved = check
+    check = any
+    if saved(v is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[int | None])
+    return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def custom_all_saved(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    check = fake
+    ok = check(v is not None for v in values)
+    check = all
+    if ok:
+        assert_type(values, tuple[int | None])
+        return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def custom_any_saved(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    check = fake
+    missing = check(v is None for v in values)
+    check = any
+    if missing:
+        raise ValueError()
+    assert_type(values, tuple[int | None])
+    return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def builtin_all_alias(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    from builtins import all as check
+    saved = check
+    check = fake
+    if saved(v is not None for v in values):
+        assert_type(values, tuple[int])
+
+def builtin_all_saved(values: tuple[int | None], fake: Callable[[Iterable[bool]], bool]):
+    from builtins import all as check
+    ok = check(v is not None for v in values)
+    check = fake
+    if ok:
+        assert_type(values, tuple[int])
+
+def repeated_name(values: tuple[int | None]):
+    check = all
+    saved = check
+    check = saved
+    if check(v is not None for v in values):
+        assert_type(values, tuple[int])
+
+def qualified_custom_saved(values: tuple[int | None], fake: Checks):
+    b = fake
+    ok = b.all(v is not None for v in values)
+    import builtins as b
+    if ok:
+        assert_type(values, tuple[int | None])
+        return values[0] + 1  # E: `+` is not supported between `None` and `Literal[1]`
+
+def qualified_builtin_saved(values: tuple[int | None], fake: Checks):
+    import builtins as b
+    ok = b.all(v is not None for v in values)
+    b = fake
+    if ok:
+        assert_type(values, tuple[int])
+
+def qualified_cast(value: Any):
+    import typing as t
+    saved = t.cast
+    t = value
+    assert_type(saved("int", value), int)
+    "#,
+);
+
+testcase!(
+    test_special_export_loop_import_identity,
+    r#"
+import builtins as b
+from builtins import hasattr as has
+from typing import assert_type
+
+class Base:
+    pass
+
+def cold_hasattr(xs: list[Base]):
+    for x in xs:
+        if hasattr(x, "attr"):
+            return x.attr
+
+def warm_hasattr(xs: list[Base]):
+    for x in xs:
+        if hasattr(x, "attr"):
+            return x.attr
+
+def warm_while(xs: list[Base]):
+    while xs:
+        x = xs.pop()
+        if hasattr(x, "attr"):
+            return x.attr
+
+def cold_type(parts: list[int | str]):
+    for part in parts:
+        if type(part) is int:
+            assert_type(part, int)
+
+def warm_type(parts: list[int | str]):
+    for part in parts:
+        if type(part) is int:
+            assert_type(part, int)
+
+def qualified_capture(xs: list[Base]):
+    for x in xs:
+        if b.hasattr(x, "attr"):
+            return x.attr
+
+def imported_capture(xs: list[Base]):
+    for x in xs:
+        if has(x, "attr"):
+            return x.attr
+
+def qualified_local(xs: list[Base]):
+    import builtins as local_b
+    for x in xs:
+        if local_b.hasattr(x, "attr"):
+            return x.attr
+
+def plain_module(xs: list[Base]):
+    import builtins
+    for x in xs:
+        if builtins.hasattr(x, "attr"):
+            return x.attr
+
+def nested_loops(xs: list[Base], ys: list[int]):
+    import builtins as local_b
+    for x in xs:
+        for y in ys:
+            if local_b.hasattr(x, "attr"):
+                return x.attr
+            if y:
+                continue
+            break
+
+def tuple_guard(values: tuple[int | None], xs: list[int]):
+    for _ in xs:
+        if any(v is None for v in values):
+            raise ValueError()
+        assert_type(values, tuple[int])
+
+def saved_tuple_guard(values: tuple[int | None], xs: list[int]):
+    for _ in xs:
+        ok = all(v is not None for v in values)
+        if ok:
+            assert_type(values, tuple[int | None])
+    "#,
+);
+
+testcase!(
+    test_special_export_loop_rebinding,
+    r#"
+from typing import Iterable, assert_type
+
+def fake(it: Iterable[bool]) -> bool:
+    return True
+
+def reassigned(values: tuple[int | None], xs: list[int]):
+    from builtins import all as check
+    for _ in xs:
+        if check(v is not None for v in values):
+            assert_type(values, tuple[int | None])
+        check = fake
+
+def conditional(values: tuple[int | None], xs: list[int], flag: bool):
+    from builtins import all as check
+    for _ in xs:
+        if check(v is not None for v in values):
+            assert_type(values, tuple[int | None])
+        if flag:
+            check = fake
+
+def walrus(values: tuple[int | None], xs: list[int]):
+    from builtins import all as check
+    for _ in xs:
+        if check(v is not None for v in values):
+            assert_type(values, tuple[int | None])
+        _ = (check := fake)
+
+def loop_target(values: tuple[int | None]):
+    from builtins import all as check
+    for check in [fake]:
+        if check(v is not None for v in values):
+            assert_type(values, tuple[int | None])
+    "#,
+);
+
+testcase!(
+    test_tuple_none_check_matching_and_invalidation,
+    r#"
+from typing import AsyncIterable, assert_type
+
+def unsupported_predicates(values: tuple[int | None], other: int | None):
+    if any(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+    if all(v is None for v in values):
+        assert_type(values, tuple[int | None])
+    if any(other is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[int | None])
+
+def filtered_all(values: tuple[int | None], flag: bool):
+    if all(v is not None for v in values if flag):
+        assert_type(values, tuple[int | None])
+
+def multiple_generators(values: tuple[int | None]):
+    if all(v is not None for row in [values] for v in row):
+        assert_type(values, tuple[int | None])
+
+async def asynchronous_generator(values: tuple[int | None] | AsyncIterable[int | None]):
+    if all(v is not None async for v in values):  # E: not assignable to parameter `iterable` # E: not an async iterable
+        assert_type(values, tuple[int | None] | AsyncIterable[int | None])
+
+def reassigned_subject(values: tuple[int | None], replacement: tuple[int | None]):
+    ok = all(v is not None for v in values)
+    values = replacement
+    if ok:
+        assert_type(values, tuple[int | None])
+
+def conditional_reassignment(values: tuple[int | None], replacement: tuple[int | None], flag: bool):
+    ok = all(v is not None for v in values)
+    if flag:
+        values = replacement
+    if ok:
+        assert_type(values, tuple[int | None])
+
+def shadowed_all(values: tuple[int | None]):
+    def all(it) -> bool:
+        return True
+    if all(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+
+def different_builtins(values: tuple[int | None], flag: bool):
+    if flag:
+        check = any
+    else:
+        check = all
+    if check(v is not None for v in values):
+        assert_type(values, tuple[int | None])
+
+def empty_tuple(values: tuple[()] | tuple[None]):
+    if any(v is None for v in values):
+        raise ValueError()
+    assert_type(values, tuple[()])
+
+def asserted_all(values: tuple[int | None]):
+    assert all(v is not None for v in values)
+    assert_type(values, tuple[int])
+
+def negated_saved_any(values: tuple[int | None]):
+    missing = any(v is None for v in values)
+    if not missing:
+        assert_type(values, tuple[int])
+
+def unchanged_mutable(values: list[int | None]):
+    ok = all(v is not None for v in values)
+    values.append(None)
+    if ok:
+        assert_type(values, list[int | None])
+    "#,
+);
+
+testcase!(
+    test_tuple_none_check_keywords,
+    r#"
+from typing import assert_type
+
+def any_keywords(values: tuple[int | None]):
+    if any((v is None for v in values), unexpected=True):  # E: Unexpected keyword
+        raise ValueError()
+    assert_type(values, tuple[int | None])
+
+def all_keywords(values: tuple[int | None]):
+    if all((v is not None for v in values), unexpected=True):  # E: Unexpected keyword
+        assert_type(values, tuple[int | None])
     "#,
 );

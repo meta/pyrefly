@@ -449,7 +449,163 @@ def f(test: bool, e1: E1, e2: E2):
     x: Literal[E1.X, E1.Y] = e1
     y: Literal[E1.X, E1.Y, 1] = e1
     z: Literal[E2.X, E2.Y] = e2  # E: `E2` is not assignable to `Literal[E2.X, E2.Y]`
+    single: Literal[E2.X] = e2  # E: `E2` is not assignable to `Literal[E2.X]`
     "#,
+);
+
+testcase!(
+    test_enum_literal_union_member_compatibility,
+    r#"
+from enum import Enum
+from typing import Literal
+
+class Unset(Enum):
+    _UNSET = "UNSET"
+
+def takes_member(x: Literal["a", "b", Unset._UNSET] | None) -> None: ...
+def takes_class(x: Literal["a", "b"] | Unset | None) -> None: ...
+
+def f(x: Literal["a"] | Literal[Unset._UNSET] | None) -> None:
+    takes_member(x)
+    takes_class(x)
+"#,
+);
+
+testcase!(
+    test_single_member_flag_not_assignable_to_literal,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal
+
+class SingleFlag(Flag):
+    X = 1
+
+class SingleIntFlag(IntFlag):
+    X = 1
+
+def check(flag: SingleFlag, int_flag: SingleIntFlag) -> None:
+    x: Literal[SingleFlag.X] = flag  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X]`
+    y: Literal[SingleIntFlag.X] = int_flag  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X]`
+"#,
+);
+
+testcase!(
+    test_single_member_enum_literal_compatibility,
+    r#"
+from enum import Enum, IntEnum, StrEnum, nonmember
+from typing import Literal
+
+class Base(Enum):
+    pass
+
+class Single(Base):
+    X = 1
+    ALIAS = X
+    extra = nonmember(2)
+
+    def method(self) -> None: ...
+
+class SingleInt(IntEnum):
+    X = 1
+
+class SingleStr(StrEnum):
+    X = "x"
+
+class Other(Enum):
+    X = 1
+
+def check(single: Single, int_enum: SingleInt, str_enum: SingleStr, other: Other) -> None:
+    member: Literal[Single.X] = single
+    alias: Literal[Single.ALIAS] = single
+    int_member: Literal[SingleInt.X] = int_enum
+    str_member: Literal[SingleStr.X] = str_enum
+    wrong: Literal[Single.X] = other  # E: `Other` is not assignable to `Literal[Single.X]`
+"#,
+);
+
+testcase!(
+    test_indirect_single_member_flag_not_assignable_to_literal,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal
+
+class BaseFlag(Flag):
+    pass
+
+class BaseIntFlag(IntFlag):
+    pass
+
+class SingleFlag(BaseFlag):
+    X = 1
+
+class SingleIntFlag(BaseIntFlag):
+    X = 1
+
+def check(flag: SingleFlag, int_flag: SingleIntFlag) -> None:
+    x: Literal[SingleFlag.X] = flag  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X]`
+    y: Literal[SingleIntFlag.X] = int_flag  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X]`
+"#,
+);
+
+testcase!(
+    test_flag_literal_union_normalization,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal, assert_type
+
+class SingleFlag(Flag):
+    X = 1
+
+class SingleIntFlag(IntFlag):
+    X = 1
+
+class MultiFlag(Flag):
+    X = 1
+    Y = 2
+
+class MultiIntFlag(IntFlag):
+    X = 1
+    Y = 2
+
+def check(single: SingleFlag, single_int: SingleIntFlag, multi: MultiFlag, multi_int: MultiIntFlag, condition: bool) -> None:
+    optional: Literal[SingleFlag.X] | None = single  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X] | None`
+    optional_int: Literal[SingleIntFlag.X] | None = single_int  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X] | None`
+    complete: Literal[MultiFlag.X, MultiFlag.Y] = multi  # E: `MultiFlag` is not assignable to `Literal[MultiFlag.X, MultiFlag.Y]`
+    complete_int: Literal[MultiIntFlag.X, MultiIntFlag.Y] = multi_int  # E: `MultiIntFlag` is not assignable to `Literal[MultiIntFlag.X, MultiIntFlag.Y]`
+
+    assert_type(SingleFlag.X if condition else None, Literal[SingleFlag.X] | None)
+    assert_type(SingleIntFlag.X if condition else None, Literal[SingleIntFlag.X] | None)
+    assert_type(MultiFlag.X if condition else MultiFlag.Y, Literal[MultiFlag.X, MultiFlag.Y])
+    assert_type(MultiIntFlag.X if condition else MultiIntFlag.Y, Literal[MultiIntFlag.X, MultiIntFlag.Y])
+"#,
+);
+
+testcase!(
+    test_flag_literals_in_typed_dict_values,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal, TypedDict, assert_type
+
+class Bits(Flag):
+    A = 1
+    B = 2
+
+class IntBits(IntFlag):
+    A = 1
+    B = 2
+
+class Values(TypedDict, closed=True):
+    a: Literal[Bits.A]
+    b: Literal[Bits.B]
+
+class IntValues(TypedDict, closed=True):
+    a: Literal[IntBits.A]
+    b: Literal[IntBits.B]
+
+def check(values: Values, int_values: IntValues) -> None:
+    assert_type(next(iter(values.values())), Literal[Bits.A, Bits.B])
+    assert_type(next(iter(int_values.values())), Literal[IntBits.A, IntBits.B])
+"#,
 );
 
 testcase!(

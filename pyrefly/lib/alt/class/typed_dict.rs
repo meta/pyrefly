@@ -852,7 +852,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             unions_with_literals(
                 values,
                 self.stdlib,
-                &|cls| self.get_enum_member_count(cls),
+                &|cls| self.get_expandable_enum_member_count(cls),
                 self.heap,
             )
         }

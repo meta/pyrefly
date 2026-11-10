@@ -80,20 +80,38 @@ ERROR */hidden2.py:1:26-35: `str` is not assignable to `int` [bad-assignment] (g
 [1]
 ```
 
-## We show how many warnings are hidden
+## A warning is shown with exit code 0
 
-```scrut {output_stream: stderr}
+```scrut
 $ echo "x: str = 0" > $TMPDIR/test.py && \
-> $PYREFLY check $TMPDIR/test.py --warn=bad-assignment
- INFO 0 errors (1 warning not shown, use `--min-severity=warn` to see it)* (glob)
+> $PYREFLY check $TMPDIR/test.py --warn=bad-assignment --output-format=min-text --summary=none
+ WARN */test.py:1:10-11: `Literal[0]` is not assignable to `str` [bad-assignment] (glob)
 [0]
 ```
 
-## We show how many warnings are hidden, pluralized
+## The summary counts shown warnings next to the errors
 
 ```scrut {output_stream: stderr}
 $ printf 'x: str = 0\ny: str = 0\n' > $TMPDIR/test.py && \
 > $PYREFLY check $TMPDIR/test.py --warn=bad-assignment
- INFO 0 errors (2 warnings not shown, use `--min-severity=warn` to see them)* (glob)
+ INFO 0 errors (2 warnings)* (glob)
+[0]
+```
+
+## `--min-severity=warn` prints a warning and exits with code 1
+
+```scrut {output_stream: stderr}
+$ echo "x: str = 0" > $TMPDIR/test.py && \
+> $PYREFLY check $TMPDIR/test.py --warn=bad-assignment --min-severity=warn
+ INFO 1 diagnostic* (glob)
+[1]
+```
+
+## We show how many warnings are hidden by `--min-severity=error`
+
+```scrut {output_stream: stderr}
+$ echo "x: str = 0" > $TMPDIR/test.py && \
+> $PYREFLY check $TMPDIR/test.py --warn=bad-assignment --min-severity=error
+ INFO 0 errors (1 warning not shown, use `--min-severity=warn` to see it)* (glob)
 [0]
 ```

@@ -15,7 +15,7 @@ use pyrefly_types::callable::Param;
 use pyrefly_types::callable::ParamOverlay;
 use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::display::TypeDisplayContext;
-use pyrefly_types::meta_shape_dsl::ShapeTransform;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::type_output::DisplayOutput;
 use pyrefly_types::type_output::TypeOutput;
@@ -25,6 +25,7 @@ use pyrefly_util::display::count;
 use pyrefly_util::gas::Gas;
 use pyrefly_util::owner::Owner;
 use pyrefly_util::prelude::VecExt;
+use ruff_python_ast::Expr;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use starlark_map::small_set::SmallSet;
@@ -37,6 +38,7 @@ use crate::alt::call::TargetWithTParams;
 use crate::alt::callable::ArgMap;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
+use crate::alt::callable::CallValue;
 use crate::alt::callable::CallWithTypes;
 use crate::alt::callable::ReturnTypeResolutionError;
 use crate::alt::expr::TypeOrExpr;
@@ -148,7 +150,20 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
                 return None;
             }
         };
-        let expanded_types = self.expand_type(value.infer(self.solver, errors));
+        // These expressions need parameter context and cannot produce an expandable type.
+        let expanded_types = match value.as_type_or_expr() {
+            TypeOrExpr::Expr(
+                Expr::Lambda(_)
+                | Expr::List(_)
+                | Expr::Dict(_)
+                | Expr::Set(_)
+                | Expr::ListComp(_)
+                | Expr::DictComp(_)
+                | Expr::SetComp(_)
+                | Expr::Generator(_),
+            ) => Vec::new(),
+            _ => self.expand_type(value.infer(self.solver, errors)),
+        };
         if expanded_types.is_empty() {
             // Nothing to expand here, try the next argument.
             self.expand(errors, owner)
@@ -161,14 +176,16 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
                     let mut new_keywords = keywords.clone();
                     match idx {
                         Either::Left(i) => {
-                            let new_value = TypeOrExpr::Type(ty, posargs[i].range());
+                            let new_value =
+                                CallValue::Plain(TypeOrExpr::Type(ty, posargs[i].range()));
                             new_posargs[i] = match posargs[i] {
                                 CallArg::Arg(_) => CallArg::Arg(new_value),
                                 CallArg::Star(_, range) => CallArg::Star(new_value, range),
                             }
                         }
                         Either::Right(i) => {
-                            let new_value = TypeOrExpr::Type(ty, keywords[i].range());
+                            let new_value =
+                                CallValue::Plain(TypeOrExpr::Type(ty, keywords[i].range()));
                             new_keywords[i] = CallKeyword {
                                 range: keywords[i].range(),
                                 arg: keywords[i].arg,
@@ -194,24 +211,18 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
     fn expand_type(&self, ty: Type) -> Vec<Type> {
         match ty {
             Type::Union(f) => f.members,
-            Type::ClassType(cls) if cls.is_builtin("bool") => {
+            Type::ClassType(cls) if cls.is(KnownClass::Bool) => {
                 vec![
                     Lit::Bool(true).to_implicit_type(),
                     Lit::Bool(false).to_implicit_type(),
                 ]
             }
-            Type::ClassType(cls)
-                if self
-                    .solver
-                    .get_metadata_for_class(cls.class_object())
-                    .is_enum() =>
-            {
-                self.solver
-                    .get_enum_members(cls.class_object())
-                    .into_iter()
-                    .map(Lit::to_implicit_type)
-                    .collect()
-            }
+            Type::ClassType(cls) if self.solver.is_expandable_enum(cls.class_object()) => self
+                .solver
+                .get_enum_members(cls.class_object())
+                .into_iter()
+                .map(Lit::to_implicit_type)
+                .collect(),
             Type::Type(f) if matches!(&*f, Type::Union(_)) => {
                 // Repeated match because pattern guards cannot move out of bindings.
                 let Type::Union(u) = *f else {
@@ -308,7 +319,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         overloads: Vec1<TargetWithTParams<Function>>,
         metadata: &FuncMetadata,
-        shape_transform: Option<&ShapeTransform>,
         self_obj: Option<Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -370,7 +380,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let (mut closest_overload, mut matched) = self.find_closest_overload(
                     &arity_compatible_overloads,
                     metadata,
-                    shape_transform,
                     self_obj.as_ref(),
                     &args,
                     &keywords,
@@ -400,7 +409,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         let (cur_closest, cur_matched) = self.find_closest_overload(
                             &arity_compatible_overloads,
                             metadata,
-                            shape_transform,
                             self_obj.as_ref(),
                             cur_args,
                             cur_keywords,
@@ -860,7 +868,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         overloads: &Vec1<&'c TargetWithTParams<Function>>,
         metadata: &FuncMetadata,
-        shape_transform: Option<&ShapeTransform>,
         self_obj: Option<&Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -880,7 +887,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let mut called_overload = self.call_overload(
                 callable,
                 metadata,
-                shape_transform,
                 self_obj,
                 args,
                 keywords,
@@ -1025,7 +1031,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             let res = self.call_overload(
                                 o.func,
                                 metadata,
-                                shape_transform,
                                 self_obj,
                                 &materialized_args,
                                 &materialized_keywords,
@@ -1058,7 +1063,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let contextual_overload = self.call_overload(
                     overload.func,
                     metadata,
-                    shape_transform,
                     self_obj,
                     args,
                     keywords,
@@ -1138,14 +1142,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             collect(obj);
         }
         for arg in args {
-            if let CallArg::Arg(TypeOrExpr::Type(ty, _))
-            | CallArg::Star(TypeOrExpr::Type(ty, _), _) = arg
-            {
+            let (CallArg::Arg(value) | CallArg::Star(value, _)) = arg;
+            if let TypeOrExpr::Type(ty, _) = value.as_type_or_expr() {
                 collect(ty);
             }
         }
         for kw in keywords {
-            if let TypeOrExpr::Type(ty, _) = &kw.value {
+            if let TypeOrExpr::Type(ty, _) = kw.value.as_type_or_expr() {
                 collect(ty);
             }
         }
@@ -1156,7 +1159,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callable: &'c TargetWithTParams<Function>,
         metadata: &FuncMetadata,
-        shape_transform: Option<&ShapeTransform>,
         self_obj: Option<&Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -1172,25 +1174,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut overload_ctor_targs = ctor_targs.as_ref().map(|x| (**x).clone());
         let tparams = callable.0.as_deref();
 
-        // `@uses_shape_dsl` may sit on a single overload (e.g. a shape-DSL variant that
-        // follows a plain-TypeVar fast path). The set-wide `shape_transform` only carries
-        // the first overload's decorator, so prefer this overload's own transform and only
-        // fall back to the set-wide one (e.g. an implementation-level decorator).
-        let shape_transform = callable
-            .1
-            .metadata
-            .flags
-            .shape_transform
-            .as_deref()
-            .or(shape_transform);
-
         let arg_errors = self.error_collector();
         let call_errors = self.error_collector();
         let (res, specialization_errors, return_type_errors, argmap, defaults_used, table) = self
             .callable_infer(
                 callable.1.signature.clone(),
                 Some(&metadata.kind),
-                shape_transform,
                 tparams,
                 self_obj.cloned(),
                 args,

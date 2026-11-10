@@ -60,6 +60,8 @@ use serde::de::DeserializeOwned;
 use serde_with::skip_serializing_none;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
+use toml::Table;
+use toml::Value;
 use tracing::debug;
 use tracing::error;
 #[cfg(not(target_arch = "wasm32"))]
@@ -620,6 +622,10 @@ pub struct ConfigFile {
     #[serde(skip)]
     pub search_path_from_args: Vec<PathBuf>,
 
+    /// Set only by the `--reveal-type-qualified-names` command-line flag.
+    #[serde(skip)]
+    pub reveal_type_qualified_names: bool,
+
     /// The list of directories where imports are
     /// imported from, including type checked files.
     /// Does not include command-line overrides or the import root!
@@ -799,6 +805,7 @@ impl Default for ConfigFile {
                 skip_interpreter_query: false,
             },
             search_path_from_args: Vec::new(),
+            reveal_type_qualified_names: false,
             search_path_from_file: Vec::new(),
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -1146,18 +1153,66 @@ impl ConfigFile {
         ));
         if !self.disable_search_path_heuristics {
             result.push(ImportLookupPathPart::ImportRoot(self.import_root.as_ref()));
-            result.push(ImportLookupPathPart::FallbackSearchPath(
+        }
+        let fallback_search_path = (!self.disable_search_path_heuristics).then(|| {
+            ImportLookupPathPart::FallbackSearchPath(
                 &self.fallback_search_path,
                 origin.and_then(|p| p.parent()),
-            ));
-        }
+            )
+        });
+        // A directory-relative fallback search path is only consulted when everything
+        // else fails, so it comes after the site package path.
+        let (fallback_before_site_packages, fallback_after_site_packages) =
+            match self.fallback_search_path {
+                FallbackSearchPath::DirectoryRelative(_) => (None, fallback_search_path),
+                FallbackSearchPath::Explicit(_) | FallbackSearchPath::Empty => {
+                    (fallback_search_path, None)
+                }
+            };
+        result.extend(fallback_before_site_packages);
         result.push(ImportLookupPathPart::SitePackagePath(
             self.python_environment.site_package_path.as_ref().unwrap(),
         ));
         result.push(ImportLookupPathPart::InterpreterSitePackagePath(
             &self.python_environment.interpreter_site_package_path,
         ));
+        result.extend(fallback_after_site_packages);
         result
+    }
+
+    /// Serialize settings not covered by the interpreter and import-path output.
+    /// Unset options and defaults omitted by config serialization are not included.
+    pub fn remaining_settings(&self) -> Result<String> {
+        // Error severities use a HashMap, including inside sub-configs. Sort all
+        // tables for stable output while preserving the order of array elements.
+        fn sort_tables(value: Value) -> Value {
+            match value {
+                Value::Table(table) => Value::Table(
+                    table
+                        .into_iter()
+                        .sorted_by(|(a, _), (b, _)| a.cmp(b))
+                        .map(|(key, value)| (key, sort_tables(value)))
+                        .collect(),
+                ),
+                Value::Array(values) => Value::Array(values.into_iter().map(sort_tables).collect()),
+                value => value,
+            }
+        }
+
+        let mut settings = Table::try_from(self).context("Failed to serialize config to TOML")?;
+        for key in [
+            "python-interpreter-path",
+            "fallback-python-interpreter-name",
+            "python-interpreter-find-command",
+            "conda-environment",
+            "skip-interpreter-query",
+            "search-path",
+            "site-packages-path",
+        ] {
+            settings.remove(key);
+        }
+        toml::to_string_pretty(&sort_tables(Value::Table(settings)))
+            .context("Failed to serialize remaining config settings to TOML")
     }
 
     pub fn get_sys_info(&self) -> SysInfo {
@@ -1272,6 +1327,14 @@ impl ConfigFile {
                  // we can use unwrap here, because the value in the root config must
                  // be set in `ConfigFile::configure()`.
                  self.root.treat_all_caps_as_final.unwrap())
+    }
+
+    pub fn infer_param_types_from_docstring(&self, path: &ModulePath) -> bool {
+        self.get_from_config_overrides(ConfigBase::get_infer_param_types_from_docstring, path)
+            .unwrap_or_else(||
+                 // we can use unwrap here, because the value in the root config must
+                 // be set in `ConfigFile::configure()`.
+                 self.root.infer_param_types_from_docstring.unwrap())
     }
 
     pub fn enabled_ignores(&self, path: &ModulePath) -> Cow<'_, SmallSet<Tool>> {
@@ -1765,6 +1828,7 @@ impl ConfigFile {
             apply_preset_default!(type_ignore_unknown_tag_behavior);
             apply_preset_default!(replace_untyped_imports_with_any);
             apply_preset_default!(treat_all_caps_as_final);
+            apply_preset_default!(infer_param_types_from_docstring);
         }
 
         if self.root.errors.is_none() {
@@ -1833,6 +1897,10 @@ impl ConfigFile {
 
         if self.root.treat_all_caps_as_final.is_none() {
             self.root.treat_all_caps_as_final = Some(false);
+        }
+
+        if self.root.infer_param_types_from_docstring.is_none() {
+            self.root.infer_param_types_from_docstring = Some(false);
         }
 
         if self.root.type_ignore_unknown_tag_behavior.is_none() {
@@ -2455,8 +2523,6 @@ mod tests {
     use pyrefly_util::test_path::TestPath;
     use starlark_map::smallset;
     use tempfile::TempDir;
-    use toml::Table;
-    use toml::Value;
 
     use super::*;
     use crate::base::ExtraConfigs;
@@ -2537,6 +2603,107 @@ mod tests {
     }
 
     #[test]
+    fn test_remaining_settings() {
+        let config: ConfigFile = toml::from_str(
+            r#"
+            python-interpreter-path = "python"
+            fallback-python-interpreter-name = "python3"
+            python-interpreter-find-command = ["find-python"]
+            conda-environment = "test"
+            skip-interpreter-query = true
+            search-path = ["src"]
+            site-package-path = ["packages"]
+            use-ignore-files = false
+            replace-imports-with-any = ["vendor.*", "!vendor.safe"]
+            not-a-real-key = "quoted \"value\"\nnext line"
+
+            [errors]
+            missing-import = "warn"
+            bad-assignment = "error"
+
+            [coverage]
+            includes = ["src/**"]
+
+            [[sub-config]]
+            matches = "src/**"
+            check-unannotated-defs = false
+
+            [sub-config.errors]
+            missing-import = "ignore"
+            bad-assignment = "warn"
+
+            [[sub-config]]
+            matches = "tests/**"
+            check-unannotated-defs = true
+            "#,
+        )
+        .unwrap();
+        let all_settings = Table::try_from(&config).unwrap();
+        let settings: Table = toml::from_str(&config.remaining_settings().unwrap()).unwrap();
+        for key in [
+            "python-interpreter-path",
+            "fallback-python-interpreter-name",
+            "python-interpreter-find-command",
+            "conda-environment",
+            "skip-interpreter-query",
+            "search-path",
+            "site-packages-path",
+        ] {
+            assert!(all_settings.contains_key(key), "{key} is not serialized");
+            assert!(!settings.contains_key(key), "{key} is already printed");
+        }
+        assert_eq!(settings["use-ignore-files"].as_bool(), Some(false));
+        assert_eq!(
+            settings["not-a-real-key"].as_str(),
+            Some("quoted \"value\"\nnext line")
+        );
+        assert_eq!(
+            settings["replace-imports-with-any"],
+            Value::try_from(["vendor.*", "!vendor.safe"]).unwrap()
+        );
+        assert_eq!(
+            settings["coverage"]["includes"],
+            Value::try_from(["src/**/*"]).unwrap()
+        );
+        let overrides = settings["sub-config"].as_array().unwrap();
+        assert_eq!(overrides.len(), 2);
+        assert_eq!(overrides[0]["matches"].as_str(), Some("src/**/*"));
+        assert_eq!(overrides[1]["matches"].as_str(), Some("tests/**/*"));
+        assert_eq!(
+            overrides[0]["check-unannotated-defs"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(overrides[1]["check-unannotated-defs"].as_bool(), Some(true));
+        for (errors, severities) in [
+            (&settings["errors"], ["error", "warn"]),
+            (&overrides[0]["errors"], ["warn", "ignore"]),
+        ] {
+            assert_eq!(
+                errors.as_table().unwrap().keys().collect::<Vec<_>>(),
+                ["bad-assignment", "missing-import"]
+            );
+            assert_eq!(errors["bad-assignment"].as_str(), Some(severities[0]));
+            assert_eq!(errors["missing-import"].as_str(), Some(severities[1]));
+        }
+    }
+
+    #[test]
+    fn test_remaining_settings_resolved_defaults() {
+        let mut config = ConfigFile::default();
+        config.interpreters.skip_interpreter_query = true;
+        config.root.check_unannotated_defs = Some(false);
+        assert!(config.configure().is_empty());
+
+        let settings: Table = toml::from_str(&config.remaining_settings().unwrap()).unwrap();
+        assert_eq!(settings["check-unannotated-defs"].as_bool(), Some(false));
+        assert_eq!(settings["infer-return-types"].as_str(), Some("checked"));
+        assert!(settings.contains_key("python-version"));
+        assert!(!settings.contains_key("required-version"));
+        assert!(!settings.contains_key("disable-search-path-heuristics"));
+        assert!(!settings.contains_key("use-ignore-files"));
+    }
+
+    #[test]
     fn deserialize_pyrefly_config() {
         let config_str = r#"
              project-includes = ["tests", "./implementation"]
@@ -2589,6 +2756,7 @@ mod tests {
                 .unwrap(),
                 project_excludes: Globs::new(vec!["tests/untyped/**".to_owned()]).unwrap(),
                 search_path_from_args: Vec::new(),
+                reveal_type_qualified_names: false,
                 search_path_from_file: vec![PathBuf::from("../..")],
                 disable_search_path_heuristics: false,
                 enable_fallback_search_path: false,
@@ -2650,6 +2818,7 @@ mod tests {
                     spec_compliant_overloads: None,
                     legacy_overload_expansion: None,
                     treat_all_caps_as_final: None,
+                    infer_param_types_from_docstring: None,
                 },
                 source_db: Default::default(),
                 target_configs: Default::default(),
@@ -2681,6 +2850,7 @@ mod tests {
                         spec_compliant_overloads: None,
                         legacy_overload_expansion: None,
                         treat_all_caps_as_final: None,
+                        infer_param_types_from_docstring: None,
                     }
                 }],
                 coverage: CoverageConfig {
@@ -2999,6 +3169,7 @@ mod tests {
                 .unwrap(),
             project_excludes: Globs::new(vec!["tests/untyped/**".to_owned()]).unwrap(),
             search_path_from_args: Vec::new(),
+            reveal_type_qualified_names: false,
             search_path_from_file: vec![PathBuf::from("../..")],
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -3088,6 +3259,7 @@ mod tests {
                 skip_interpreter_query: false,
             },
             search_path_from_args: Vec::new(),
+            reveal_type_qualified_names: false,
             search_path_from_file: search_path,
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -3375,6 +3547,7 @@ output-format = "omit-errors"
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
                 treat_all_caps_as_final: None,
+                infer_param_types_from_docstring: None,
             },
             sub_configs: vec![
                 SubConfig {
@@ -3881,6 +4054,20 @@ output-format = "omit-errors"
     }
 
     #[test]
+    fn test_infer_param_types_from_docstring() {
+        let path = ModulePath::filesystem(PathBuf::from("/project/foo.py"));
+
+        let mut config = ConfigFile::default();
+        config.configure();
+        assert!(!config.infer_param_types_from_docstring(&path));
+
+        let mut config =
+            ConfigFile::parse_config("infer-param-types-from-docstring = true").unwrap();
+        config.configure();
+        assert!(config.infer_param_types_from_docstring(&path));
+    }
+
+    #[test]
     fn test_preset_default_is_noop() {
         let mut with_preset = ConfigFile {
             preset: Some(Preset::Default),
@@ -4095,6 +4282,7 @@ output-format = "omit-errors"
                 "Basic preset should keep {kind:?} as Hint"
             );
         }
+        assert_eq!(errors.severity(ErrorKind::RevealType), Severity::Info);
         // A representative sample of kinds that should be silenced. Exhaustive
         // enumeration is covered by `test_preset_fields_propagate`.
         for kind in [
@@ -4755,6 +4943,7 @@ output-format = "omit-errors"
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
                 treat_all_caps_as_final: None,
+                infer_param_types_from_docstring: None,
             },
             sub_configs: vec![],
             ..Default::default()
@@ -4799,6 +4988,7 @@ output-format = "omit-errors"
                 spec_compliant_overloads: None,
                 legacy_overload_expansion: None,
                 treat_all_caps_as_final: None,
+                infer_param_types_from_docstring: None,
             },
             sub_configs: vec![],
             ..Default::default()
@@ -5456,6 +5646,7 @@ bad-override = "error"
 
         let mut config = ConfigFile {
             search_path_from_args: vec![mylib_dir.clone()],
+            reveal_type_qualified_names: false,
             import_root: Some(root.path().to_path_buf()),
             interpreters: Interpreters {
                 skip_interpreter_query: true,

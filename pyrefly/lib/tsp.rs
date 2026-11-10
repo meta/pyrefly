@@ -7,9 +7,8 @@
 
 //! Internal TSP support shared by the native server and WASI hosts.
 //!
-//! The Rust interface is unstable; only transport-independent type conversion
-//! is available on WASI. The browser (`wasm32-unknown-unknown`) build does not
-//! expose this module.
+//! The Rust interface is unstable. WASI hosts can use transaction-aware type
+//! conversion without linking the native server or its transports.
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod requests;

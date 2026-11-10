@@ -8,6 +8,8 @@
 //! Tests of the `State` object.
 
 use std::mem;
+use std::num::NonZeroUsize;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,17 +23,28 @@ use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::lock::Mutex;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
+use pyrefly_util::thread_pool::ThreadCount;
+use ruff_python_ast::name::Name;
+use starlark_map::Hashed;
 use starlark_map::small_map::SmallMap;
 
+use crate::alt::answers::Solutions;
+use crate::binding::binding::KeyExport;
+use crate::binding::binding::KeyTParams;
 use crate::config::config::ConfigFile;
+use crate::config::error::ErrorDisplayConfig;
 use crate::config::finder::ConfigFinder;
+use crate::error::error::Error;
 use crate::error::error::print_errors;
+use crate::export::exports::ExportLocation;
 use crate::state::errors::Errors;
 use crate::state::load::FileContents;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::state::subscriber::TestSubscriber;
 use crate::test::util::init_test;
+use crate::test::util::report_unreachable_at_warn;
+use crate::types::types::Type;
 
 #[derive(Default, Clone, Dupe, Debug)]
 struct IncrementalData(Arc<Mutex<SmallMap<ModuleName, Arc<String>>>>);
@@ -79,6 +92,10 @@ impl Incremental {
     }
 
     fn with_files(files: Vec<String>) -> Self {
+        Self::with_files_and_threads(files, TEST_THREAD_COUNT)
+    }
+
+    fn with_files_and_threads(files: Vec<String>, threads: ThreadCount) -> Self {
         init_test();
         let data = IncrementalData::default();
 
@@ -92,6 +109,12 @@ impl Incremental {
             );
         }
         config.source_db = Some(ArcId::new(Box::new(sourcedb)));
+        report_unreachable_at_warn(
+            config
+                .root
+                .errors
+                .get_or_insert_with(ErrorDisplayConfig::default),
+        );
         config.configure();
         let config = ArcId::new(config);
 
@@ -99,7 +122,7 @@ impl Incremental {
             data: data.dupe(),
             files,
             require: None,
-            state: State::new(ConfigFinder::new_constant(config), TEST_THREAD_COUNT),
+            state: State::new(ConfigFinder::new_constant(config), threads),
             to_set: Vec::new(),
         }
     }
@@ -561,11 +584,8 @@ fn test_type_shape_dsl_helper_edit_invalidates_caller() {
     i.set(
         "shape_extensions",
         r#"
-from typing import Callable
-
 class Int: pass
 class IntTuple: pass
-def shaped_array[T](*, shape: str) -> Callable[[type[T]], type[T]]: ...
 def type_shape_dsl_function[F](fn: F) -> F: return fn
 "#,
     );
@@ -583,9 +603,8 @@ def leaf(first: Int, second: Int) -> Int:
         "main",
         r#"
 from helpers import leaf
-from shape_extensions import Int, IntTuple, shaped_array, type_shape_dsl_function
+from shape_extensions import Int, IntTuple, type_shape_dsl_function
 
-@shaped_array(shape="Shape")
 class Tensor[Shape: IntTuple]: ...
 
 @type_shape_dsl_function
@@ -638,7 +657,6 @@ fn test_type_shape_dsl_broadcast_edit_invalidates_importer() {
         "shape_extensions",
         r#"
 class IntTuple: pass
-def shaped_array[T](*, shape: str): ...
 def type_shape_dsl_function[F](fn: F) -> F: return fn
 
 @type_shape_dsl_function
@@ -649,9 +667,8 @@ def broadcast(left: IntTuple, right: IntTuple) -> IntTuple:
     i.set(
         "main",
         r#"
-from shape_extensions import IntTuple, broadcast, shaped_array
+from shape_extensions import IntTuple, broadcast
 
-@shaped_array(shape="Shape")
 class Tensor[Shape: IntTuple]: ...
 
 def chosen() -> Tensor[broadcast(IntTuple[2], IntTuple[3])]: ...
@@ -672,7 +689,6 @@ result: Tensor[[2]] = chosen()
         "shape_extensions",
         r#"
 class IntTuple: pass
-def shaped_array[T](*, shape: str): ...
 def type_shape_dsl_function[F](fn: F) -> F: return fn
 
 @type_shape_dsl_function
@@ -1307,6 +1323,20 @@ fn test_fine_grained_related_export_recompute() {
 
     // Change `x` - main SHOULD be recomputed since it imports `x`
     i.set("foo", "x: str = 'changed'\ny: int = 2");
+    i.check(&["main"], &["foo", "main"]);
+}
+
+#[test]
+fn test_parse_error_survives_dependency_recompute() {
+    let mut i = Incremental::new();
+    i.set("foo", "x: int = 1");
+    i.set(
+        "main",
+        "from foo import x\nprint(x)\nif  # E: Parse error: Expected an expression",
+    );
+    i.check(&["main"], &["main", "foo"]);
+
+    i.set("foo", "x: str = 'changed'");
     i.check(&["main"], &["foo", "main"]);
 }
 
@@ -3076,4 +3106,1123 @@ def first(shapes: IntTuple) -> IntTuple:
     let changed = i.unchecked(&["consumer", "helpers"]);
     changed.check_recompute(&["consumer", "helpers", "main"]);
     changed.check_errors();
+}
+
+/// Whether an imported `Final` settles a test depends on whether a module on the way to it defines
+/// or star-imports it under a test of the environment, which can change without changing its type.
+#[test]
+fn test_final_moved_under_environment_test_rechecks_importer() {
+    let mut i = Incremental::new();
+    let errors = |i: &mut Incremental| {
+        i.unchecked(&["main"])
+            .errors
+            .collect_display_errors()
+            .map(|error| error.msg().to_owned())
+    };
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("foo", "from bar import DEBUG as DEBUG");
+    i.set(
+        "main",
+        "from foo import DEBUG\nif DEBUG:\n    x = 1\nelse:\n    x = ''\nobserved: str = x",
+    );
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "bar",
+        "import sys\nfrom typing import Final\nif sys.platform != 'win32':\n    DEBUG: Final = False",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("foo", "from bar import *");
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "foo",
+        "import sys\nfrom bar import *\nif sys.platform == 'win32':\n    DEBUG = True",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+
+    i.set("foo", "from bar import *");
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set(
+        "foo",
+        "import sys\nif sys.platform != 'win32':\n    from bar import *",
+    );
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+}
+
+/// A star import in a suite this configuration rules out brings in whatever the other module
+/// defines, so defining the constant there must recheck the importer.
+#[test]
+fn test_constant_defined_behind_skipped_star_import_rechecks_importer() {
+    let mut i = Incremental::new();
+    let errors = |i: &mut Incremental| {
+        i.unchecked(&["main"])
+            .errors
+            .collect_display_errors()
+            .map(|error| error.msg().to_owned())
+    };
+    i.set("bar", "from typing import Final\nDEBUG: Final = False");
+    i.set("baz", "");
+    i.set(
+        "foo",
+        "import sys\nfrom bar import DEBUG as DEBUG\nif sys.platform == 'win32':\n    from baz import *",
+    );
+    i.set(
+        "main",
+        "from foo import DEBUG\nif DEBUG:\n    x = 1\nelse:\n    x = ''\nobserved: str = x",
+    );
+    assert_eq!(errors(&mut i), ["This code is unreachable"]);
+
+    i.set("baz", "from typing import Final\nDEBUG: Final = True");
+    let unsettled = errors(&mut i);
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    assert!(
+        unsettled[0].contains("not assignable to `str`"),
+        "{unsettled:?}"
+    );
+}
+
+/// Module `b` of the type-parameter tests. It uses `a.Foo` directly, and it exposes `Foo` and
+/// copies of `Foo`'s type parameters to other modules: as a class object, in aliases, in the bounds
+/// and defaults of its own classes, and in function signatures.
+const TPARAMS_B: &str = r#"
+from typing import Generic, TypeAlias, TypeVar, reveal_type
+from a import Foo
+
+S = TypeVar("S", default=Foo[int])
+R = TypeVar("R", bound=Foo[int])
+
+FooAlias = Foo
+FooBool = Foo[bool]
+FooExplicit: TypeAlias = Foo
+type FooTypeAlias = Foo
+
+class BDefault[T = Foo[int]]: ...
+class BBound[T: Foo[int]]: ...
+class LegacyDefault(Generic[S]): ...
+class LegacyBound(Generic[R]): ...
+
+def make() -> Foo: ...
+def make_bool() -> Foo[bool]: ...
+def take_int(x: Foo[int]) -> None: ...
+def ident[X: Foo[int]](x: X) -> X: ...
+
+x1: Foo[bool]
+x2: Foo[str]
+x3: Foo[bool, str]
+reveal_type(Foo())
+
+def direct(v: Foo, w: Foo[bool]) -> Foo[int]:
+    reveal_type(v)
+    return w
+"#;
+
+/// More modules that use `a.Foo`: `b_specialize` imports it from `a`, and each `c_*` module sees it
+/// only through what `b` exports. Each imports as little as possible and avoids assignability
+/// checks between specializations of `Foo` unless they are what it tests, so that it is rechecked
+/// only when what it reads changes.
+const TPARAMS_USERS: &[(&str, &str)] = &[
+    // Only specializes `Foo`, which reads its type parameters and nothing else of it.
+    (
+        "b_specialize",
+        r#"
+from a import Foo
+x1: Foo[bool]
+x2: Foo[str]
+x3: Foo[bool, str]
+"#,
+    ),
+    // `Foo`'s class object, re-bound in `b`, only specialized.
+    (
+        "c_specialize",
+        r#"
+from b import FooAlias
+y1: FooAlias[bool]
+y2: FooAlias[str]
+y3: FooAlias[bool, str]
+"#,
+    ),
+    // `Foo`'s class object, re-bound in `b`.
+    (
+        "c_class",
+        r#"
+from typing import reveal_type
+from b import FooAlias
+y1: FooAlias[bool]
+y2: FooAlias[str]
+y3: FooAlias[bool, str]
+reveal_type(FooAlias())
+def f(v: FooAlias) -> FooAlias[int]:
+    reveal_type(v)
+    return v
+def g(w: FooAlias[bool]) -> FooAlias[int]:
+    return w
+"#,
+    ),
+    // A class in `b` with a scoped type parameter bounded by `Foo[int]`.
+    (
+        "c_bound",
+        r#"
+from typing import reveal_type
+from b import BBound
+y: BBound[int]
+def f(x: BBound) -> None:
+    reveal_type(x)
+"#,
+    ),
+    // A class in `b` with a legacy type variable bounded by `Foo[int]`.
+    (
+        "c_legacy_bound",
+        r#"
+from typing import reveal_type
+from b import LegacyBound
+y: LegacyBound[int]
+def f(x: LegacyBound) -> None:
+    reveal_type(x)
+"#,
+    ),
+    // A class in `b` with a scoped type parameter defaulting to `Foo[int]`.
+    (
+        "c_default",
+        r#"
+from typing import reveal_type
+from b import BDefault
+def default_of[T](x: BDefault[T]) -> T: ...
+def f(x: BDefault) -> None:
+    reveal_type(x)
+    reveal_type(default_of(x))
+"#,
+    ),
+    // A class in `b` with a legacy type variable defaulting to `Foo[int]`.
+    (
+        "c_legacy_default",
+        r#"
+from typing import reveal_type
+from b import LegacyDefault
+def default_of[T](x: LegacyDefault[T]) -> T: ...
+def f(x: LegacyDefault) -> None:
+    reveal_type(x)
+    reveal_type(default_of(x))
+"#,
+    ),
+    // Uses the classes in `b` whose scoped type parameters embed `Foo[int]`, without reading
+    // anything of `Foo` itself.
+    (
+        "c_never",
+        r#"
+from typing import Never
+from b import BBound, BDefault
+def f(x: BBound[Never], y: BDefault) -> None: ...
+"#,
+    ),
+    // Uses the classes in `b` whose legacy type variables embed `Foo[int]`, without reading
+    // anything of `Foo` itself.
+    (
+        "c_legacy_never",
+        r#"
+from typing import Never
+from b import LegacyBound, LegacyDefault
+def f(x: LegacyBound[Never], y: LegacyDefault) -> None: ...
+"#,
+    ),
+    // Functions in `b` whose signatures mention `Foo`.
+    (
+        "c_function",
+        r#"
+from typing import reveal_type
+from b import ident, make, make_bool
+reveal_type(make())
+reveal_type(make_bool())
+y: int = make_bool()
+ident(1)
+"#,
+    ),
+    // Assignability between signatures in `b`, which depends on `Foo`'s variance.
+    (
+        "c_function_variance",
+        r#"
+from b import make_bool, take_int
+take_int(make_bool())
+"#,
+    ),
+    // An implicit type alias in `b`.
+    (
+        "c_alias",
+        r#"
+from typing import reveal_type
+from b import FooBool
+y: int = FooBool()
+def f(x: FooBool) -> None:
+    reveal_type(x)
+"#,
+    ),
+    // An explicit `TypeAlias` in `b`.
+    (
+        "c_explicit_alias",
+        r#"
+from typing import reveal_type
+from b import FooExplicit
+y: FooExplicit[bool]
+def f(x: FooExplicit) -> None:
+    reveal_type(x)
+"#,
+    ),
+    // A `type` statement in `b`.
+    (
+        "c_type_alias",
+        r#"
+from typing import reveal_type
+from b import FooTypeAlias
+y: int = FooTypeAlias()
+def f(x: FooTypeAlias) -> None:
+    reveal_type(x)
+"#,
+    ),
+];
+
+/// What a rebuild must reproduce for `module`: its errors, and its exported answers in `Debug`
+/// form. The `Debug` form includes the type parameters that classes and type arguments carry, so
+/// a stale copy of them is visible even where no error shows it.
+fn tparams_snapshot(i: &Incremental, errors: &[Error], module: &str) -> Vec<String> {
+    let mut res = errors
+        .iter()
+        .filter(|e| e.path().as_path() == Path::new(module))
+        .map(|e| {
+            format!(
+                "error {} {:?}: {}",
+                e.display_range(),
+                e.error_kind(),
+                e.msg()
+            )
+        })
+        .collect::<Vec<_>>();
+    let transaction = i.state.transaction();
+    let handle = i.handle(module);
+    let solutions = transaction.get_solutions(&handle).unwrap();
+    for (name, location) in transaction.get_exports(&handle).iter() {
+        if !matches!(location, ExportLocation::ThisModule(_)) {
+            continue;
+        }
+        let Some(ty) = solutions.get_hashed_opt(Hashed::new(&KeyExport(name.clone()))) else {
+            continue;
+        };
+        res.push(format!("export {name}: {ty:?}"));
+        if let Type::ClassDef(cls) = ty
+            && let Some(tparams) = solutions.get_hashed_opt(Hashed::new(&KeyTParams(cls.index())))
+        {
+            res.push(format!("export {name} type parameters: {tparams:?}"));
+        }
+    }
+    res.sort();
+    res
+}
+
+/// The modules whose errors or exported answers differ from a clean check after a rebuild in
+/// `assert_tparams_rebuild_matches_clean`, for each way it applies the edit. A correct rebuild
+/// leaves none, so a test lists modules here only to document a known bug.
+struct StaleModules {
+    a_edited: &'static [&'static str],
+    a_and_b_edited: &'static [&'static str],
+}
+
+impl StaleModules {
+    const NONE: Self = Self {
+        a_edited: &[],
+        a_and_b_edited: &[],
+    };
+
+    /// `b`'s PEP 695 classes `BBound` and `BDefault` carry copies of `Foo`'s type parameters in
+    /// their bound and default, `Foo[int]`. `Class` equality ignores the type parameters that a
+    /// class carries, so `b`'s exports compare equal after the edit, and `c_never`, which uses
+    /// those classes and nothing else of `Foo`, is not rechecked and keeps the old copies.
+    const C_NEVER: Self = Self {
+        a_edited: &["c_never"],
+        a_and_b_edited: &["c_never"],
+    };
+}
+
+/// Check that changing `Foo` in module `a` from `before` to `after` and rechecking gives every
+/// module the errors and exported answers that checking the edited sources from scratch gives,
+/// except for exactly the modules in `stale`.
+///
+/// The edit is checked twice: on its own, and together with a comment-only edit to `b`. The
+/// comment forces `b` to be rechecked, so a module that imports from `b` is stale only if what `b`
+/// exports hides the change.
+fn assert_tparams_rebuild_matches_clean(before: &str, after: &str, stale: StaleModules) {
+    let files = ["a", "b"]
+        .into_iter()
+        .chain(TPARAMS_USERS.iter().map(|(m, _)| *m))
+        .collect::<Vec<_>>();
+    let checked = |a: &str, b: &str| {
+        let mut i = Incremental::with_files(files.map(|x| (*x).to_owned()));
+        i.set("a", a);
+        i.set("b", b);
+        for (m, contents) in TPARAMS_USERS {
+            i.set(m, contents);
+        }
+        let errors = i.unchecked(&files).errors.collect_display_errors();
+        (i, errors)
+    };
+    let touched_b = format!("{TPARAMS_B}# touched\n");
+    let mut failures = Vec::new();
+    for (variant, b_after, expected_stale) in [
+        ("a edited", TPARAMS_B, stale.a_edited),
+        ("a and b edited", &touched_b, stale.a_and_b_edited),
+    ] {
+        let (mut rebuilt, initial_errors) = checked(before, TPARAMS_B);
+        rebuilt.set("a", after);
+        if b_after != TPARAMS_B {
+            rebuilt.set("b", b_after);
+        }
+        let result = rebuilt.unchecked(&files);
+        let rebuilt_errors = result.errors.collect_display_errors();
+        let (clean, clean_errors) = checked(after, b_after);
+        let b_errors = |errors: &[Error]| {
+            errors
+                .iter()
+                .filter(|e| e.path().as_path() == Path::new("b"))
+                .map(|e| e.msg())
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(
+            b_errors(&initial_errors),
+            b_errors(&clean_errors),
+            "the edit does not change the errors of `b`, so the test observes nothing"
+        );
+        let mut actual_stale = Vec::new();
+        let mut unexpected = Vec::new();
+        for m in &files {
+            let got = tparams_snapshot(&rebuilt, &rebuilt_errors, m);
+            let want = tparams_snapshot(&clean, &clean_errors, m);
+            if got == want {
+                continue;
+            }
+            actual_stale.push(*m);
+            if !expected_stale.contains(m) {
+                let stale = got
+                    .iter()
+                    .filter(|x| !want.contains(x))
+                    .map(|x| format!("    stale:   {x}"));
+                let missing = want
+                    .iter()
+                    .filter(|x| !got.contains(x))
+                    .map(|x| format!("    missing: {x}"));
+                unexpected.push(format!(
+                    "`{m}` differs from a clean check\n{}",
+                    stale.chain(missing).collect::<Vec<_>>().join("\n")
+                ));
+            }
+        }
+        actual_stale.sort();
+        let mut expected_stale = expected_stale.to_vec();
+        expected_stale.sort();
+        if actual_stale != expected_stale {
+            failures.push(format!(
+                "[{variant}] stale modules: expected {expected_stale:?}, got {actual_stale:?} (rechecked: {:?})\n{}",
+                result.changed,
+                unexpected.join("\n")
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+// Bug: `Class` carries `Foo`'s scoped type parameters, and `Class` equality ignores them, so
+// changing a bound changes no export of `a` and no module that uses `Foo` is rechecked. Rechecking
+// `b` fixes `b` alone.
+#[test]
+fn test_tparams_pep695_bound_change_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        "class Foo[T: int]: ...",
+        "class Foo[T: str]: ...",
+        StaleModules {
+            a_edited: &[
+                "b",
+                "b_specialize",
+                "c_alias",
+                "c_bound",
+                "c_class",
+                "c_default",
+                "c_explicit_alias",
+                "c_legacy_bound",
+                "c_legacy_default",
+                "c_legacy_never",
+                "c_never",
+                "c_specialize",
+                "c_type_alias",
+            ],
+            a_and_b_edited: &[
+                "b_specialize",
+                "c_bound",
+                "c_class",
+                "c_default",
+                "c_legacy_bound",
+                "c_never",
+                "c_specialize",
+            ],
+        },
+    );
+}
+
+// Bug: `Class` carries `Foo`'s scoped type parameters, and `Class` equality ignores them, so
+// changing constraints changes no export of `a` and no module that uses `Foo` is rechecked.
+// Rechecking `b` fixes `b` alone.
+#[test]
+fn test_tparams_pep695_constraints_change_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        "class Foo[T: (int, bytes)]: ...",
+        "class Foo[T: (str, bytes)]: ...",
+        StaleModules {
+            a_edited: &[
+                "b",
+                "b_specialize",
+                "c_alias",
+                "c_bound",
+                "c_class",
+                "c_default",
+                "c_explicit_alias",
+                "c_legacy_bound",
+                "c_legacy_default",
+                "c_legacy_never",
+                "c_never",
+                "c_specialize",
+                "c_type_alias",
+            ],
+            a_and_b_edited: &[
+                "b_specialize",
+                "c_bound",
+                "c_class",
+                "c_default",
+                "c_legacy_bound",
+                "c_never",
+                "c_specialize",
+            ],
+        },
+    );
+}
+
+// Bug: `Class` carries `Foo`'s scoped type parameters, and `Class` equality ignores them, so
+// changing a default changes no export of `a` and no module that uses `Foo` is rechecked.
+// Rechecking `b` fixes `b` alone.
+#[test]
+fn test_tparams_pep695_default_change_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        "class Foo[T = int]: ...",
+        "class Foo[T = str]: ...",
+        StaleModules {
+            a_edited: &[
+                "b",
+                "b_specialize",
+                "c_alias",
+                "c_bound",
+                "c_class",
+                "c_default",
+                "c_explicit_alias",
+                "c_function",
+                "c_function_variance",
+                "c_legacy_bound",
+                "c_legacy_default",
+                "c_legacy_never",
+                "c_never",
+                "c_specialize",
+                "c_type_alias",
+            ],
+            a_and_b_edited: &[
+                "b_specialize",
+                "c_bound",
+                "c_class",
+                "c_default",
+                "c_never",
+                "c_specialize",
+            ],
+        },
+    );
+}
+
+#[test]
+fn test_tparams_pep695_variance_change_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        "class Foo[T]:\n    def get(self) -> T: ...",
+        "class Foo[T]:\n    def get(self) -> T: ...\n    def set(self, x: T) -> None: ...",
+        StaleModules::NONE,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_pep695_arity_change_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        "class Foo[T]: ...",
+        "class Foo[T, U]: ...",
+        StaleModules::C_NEVER,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_pep695_becoming_generic_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        "class Foo: ...",
+        "class Foo[T]: ...",
+        StaleModules::C_NEVER,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_pep695_becoming_non_generic_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        "class Foo[T]: ...",
+        "class Foo: ...",
+        StaleModules::C_NEVER,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_pep695_order_change_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        "class Foo[T: int, U: str]: ...",
+        "class Foo[U: str, T: int]: ...",
+        StaleModules::C_NEVER,
+    );
+}
+
+/// `Foo` declared with legacy type variables.
+fn legacy_foo(tvars: &str, class: &str) -> String {
+    format!("from typing import Generic, TypeVar\n{tvars}\n{class}\n")
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_legacy_bound_change_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        &legacy_foo("T = TypeVar('T', bound=int)", "class Foo(Generic[T]): ..."),
+        &legacy_foo("T = TypeVar('T', bound=str)", "class Foo(Generic[T]): ..."),
+        StaleModules::C_NEVER,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_legacy_constraints_change_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        &legacy_foo("T = TypeVar('T', int, bytes)", "class Foo(Generic[T]): ..."),
+        &legacy_foo("T = TypeVar('T', str, bytes)", "class Foo(Generic[T]): ..."),
+        StaleModules::C_NEVER,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_legacy_default_change_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        &legacy_foo(
+            "T = TypeVar('T', default=int)",
+            "class Foo(Generic[T]): ...",
+        ),
+        &legacy_foo(
+            "T = TypeVar('T', default=str)",
+            "class Foo(Generic[T]): ...",
+        ),
+        StaleModules::C_NEVER,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_legacy_variance_change_propagates() {
+    let class = "class Foo(Generic[T]):\n    def get(self) -> T: ...";
+    assert_tparams_rebuild_matches_clean(
+        &legacy_foo("T = TypeVar('T')", class),
+        &legacy_foo("T = TypeVar('T', covariant=True)", class),
+        StaleModules::C_NEVER,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_legacy_arity_change_propagates() {
+    let tvars = "T = TypeVar('T')\nU = TypeVar('U')";
+    assert_tparams_rebuild_matches_clean(
+        &legacy_foo(tvars, "class Foo(Generic[T]): ..."),
+        &legacy_foo(tvars, "class Foo(Generic[T, U]): ..."),
+        StaleModules::C_NEVER,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_legacy_becoming_generic_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        &legacy_foo("T = TypeVar('T')", "class Foo: ..."),
+        &legacy_foo("T = TypeVar('T')", "class Foo(Generic[T]): ..."),
+        StaleModules::C_NEVER,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_legacy_becoming_non_generic_propagates() {
+    assert_tparams_rebuild_matches_clean(
+        &legacy_foo("T = TypeVar('T')", "class Foo(Generic[T]): ..."),
+        &legacy_foo("T = TypeVar('T')", "class Foo: ..."),
+        StaleModules::C_NEVER,
+    );
+}
+
+// Bug: `c_never` keeps old copies of `Foo`'s type parameters (see `StaleModules::C_NEVER`).
+#[test]
+fn test_tparams_legacy_order_change_propagates() {
+    let tvars = "T = TypeVar('T', bound=int)\nU = TypeVar('U', bound=str)";
+    assert_tparams_rebuild_matches_clean(
+        &legacy_foo(tvars, "class Foo(Generic[T, U]): ..."),
+        &legacy_foo(tvars, "class Foo(Generic[U, T]): ..."),
+        StaleModules::C_NEVER,
+    );
+}
+
+/// Check that rebuilding modules whose type parameters refer to classes, including their own
+/// class, after a comment-only edit leaves their exports unchanged, so that the module `user`,
+/// which imports from them, is not rechecked. Fixpoint iteration builds copies of type parameters
+/// inside other type parameters, so this checks that comparing those copies in export diffing does
+/// not report spurious changes, at several thread counts.
+fn assert_tparams_exports_stable(sources: &[(&str, &str)], user: &str) {
+    let mut files = sources.map(|(m, _)| (*m).to_owned());
+    files.push("user".to_owned());
+    let names = files.map(|x| x.as_str());
+    for threads in [1, 2, 3, 8] {
+        for _ in 0..3 {
+            let mut i = Incremental::with_files_and_threads(
+                files.clone(),
+                ThreadCount::NumThreads(NonZeroUsize::new(threads).unwrap()),
+            );
+            for (m, contents) in sources {
+                i.set(m, contents);
+            }
+            i.set("user", user);
+            i.unchecked(&names);
+            for (m, contents) in sources {
+                i.set(m, &format!("{contents}\n# comment\n"));
+            }
+            let res = i.unchecked(&names);
+            assert!(
+                !res.changed.contains(&"user".to_owned()),
+                "a comment-only edit changed the exports at {threads} threads: rechecked {:?}",
+                res.changed
+            );
+        }
+    }
+}
+
+#[test]
+fn test_tparams_exports_stable_self_bound() {
+    assert_tparams_exports_stable(
+        &[("rec", "class N[T: 'N']: ...\nclass M[T: 'list[M]']: ...")],
+        "from rec import M, N\nx: N[N]\ny: M[list[M]]",
+    );
+}
+
+#[test]
+fn test_tparams_exports_stable_mutual_bound() {
+    assert_tparams_exports_stable(
+        &[("rec", "class A[T: 'B']: ...\nclass B[U: 'A']: ...")],
+        "from rec import A, B\nx: A[B[A]]",
+    );
+}
+
+#[test]
+fn test_tparams_exports_stable_mutual_bound_across_modules() {
+    assert_tparams_exports_stable(
+        &[
+            ("rec", "from rec2 import B\nclass A[T: B]: ..."),
+            ("rec2", "from rec import A\nclass B[U: A]: ..."),
+        ],
+        "from rec import A\nfrom rec2 import B\nx: A[B[A]]",
+    );
+}
+
+#[test]
+fn test_tparams_exports_stable_self_default() {
+    assert_tparams_exports_stable(
+        &[(
+            "rec",
+            "class D[T = 'D']: ...\nclass P[T = 'list[P]']: ...\nclass Q[T, U = 'Q[int]']: ...",
+        )],
+        "from rec import D, P, Q\nx: D\ny: P\nz: Q[str]",
+    );
+}
+
+#[test]
+fn test_tparams_exports_stable_self_constraints() {
+    assert_tparams_exports_stable(
+        &[("rec", "class C[T: ('C', int)]: ...")],
+        "from rec import C\nx: C[int]",
+    );
+}
+
+#[test]
+fn test_tparams_exports_stable_restricted_bound() {
+    assert_tparams_exports_stable(
+        &[(
+            "rec",
+            "class Foo[X: int]: ...\nclass B[T: Foo[int]]: ...\ny = B[Foo[bool]]()",
+        )],
+        "from rec import B, Foo, y\nx: B[Foo[bool]] = y",
+    );
+}
+
+#[test]
+fn test_tparams_exports_stable_legacy() {
+    assert_tparams_exports_stable(
+        &[(
+            "rec",
+            r#"
+from typing import Generic, TypeVar
+T = TypeVar("T", bound="L")
+D = TypeVar("D", default="LD")
+U = TypeVar("U", bound="LB")
+V = TypeVar("V", bound="LA")
+class L(Generic[T]): ...
+class LD(Generic[D]): ...
+class LA(Generic[U]): ...
+class LB(Generic[V]): ...
+class Mixed[W: L[L]]: ...
+"#,
+        )],
+        "from rec import L, LA, LB, LD, Mixed\nx: L[L]\ny: LD\nz: LA[LB[LA]]\nw: Mixed[L[L]]",
+    );
+}
+
+/// Check `main`, which imports `bar`, in a project where `foo` names two files. `main` sees
+/// `shadow/foo.py`, while `bar` is checked with its own configuration, sees `lib/foo.py` and
+/// re-exports it. The type parameters that reach `main` through `bar` are declared in
+/// `lib/foo.py`, so their bounds and defaults must come from there, even though `foo` names
+/// `shadow/foo.py` in `main`.
+fn check_with_shadowed_module(shadow_foo: &str) {
+    const LIB_FOO: &str = r#"
+from typing import Generic, TypeVar
+A = TypeVar("A")
+B = TypeVar("B", default=int)
+C = TypeVar("C", bound=int)
+class Box(Generic[B]): ...
+def f(x: C) -> C: ...
+def g[T: int](x: T) -> T: ...
+"#;
+    const MAIN: &str = r#"
+from typing import assert_type
+from bar import Box, f, g
+def use(b: Box) -> None:
+    assert_type(b, Box[int])
+f(1)
+f("x")  # E: `str` is not assignable to upper bound `int` of type variable `C`
+g(1)
+g("x")  # E: `str` is not assignable to upper bound `int` of type variable `T`
+"#;
+    init_test();
+    let config = |modules: &[(&str, &str)]| {
+        let mut config = ConfigFile::default();
+        config.python_environment.set_empty_to_default();
+        let mut sourcedb = MapDatabase::new(config.get_sys_info());
+        for (name, path) in modules {
+            sourcedb.insert(
+                ModuleName::from_str(name),
+                ModulePath::memory(PathBuf::from(path)),
+            );
+        }
+        config.source_db = Some(ArcId::new(Box::new(sourcedb)));
+        config.configure();
+        ArcId::new(config)
+    };
+    let main_config = config(&[
+        ("main", "main.py"),
+        ("foo", "shadow/foo.py"),
+        ("bar", "lib/bar.py"),
+    ]);
+    let lib_config = config(&[("foo", "lib/foo.py"), ("bar", "lib/bar.py")]);
+    let sys_info = main_config.get_sys_info();
+    let (main_load, main_fallback) = (main_config.dupe(), main_config.dupe());
+    let finder = ConfigFinder::new_custom(
+        Box::new(move |_, path| {
+            Ok(Some(if path.as_path().starts_with("lib") {
+                lib_config.dupe()
+            } else {
+                main_config.dupe()
+            }))
+        }),
+        Box::new(move |_| (main_load.dupe(), Vec::new())),
+        Box::new(move |_, _| main_fallback.dupe()),
+        Box::new(|config, _| config),
+        Box::new(|| {}),
+    );
+    let state = State::new(finder, TEST_THREAD_COUNT);
+    let mut transaction = state.new_committable_transaction(Require::Exports, None);
+    transaction.as_mut().set_memory(
+        [
+            ("main.py", MAIN),
+            ("shadow/foo.py", shadow_foo),
+            ("lib/foo.py", LIB_FOO),
+            ("lib/bar.py", "from foo import *\n"),
+        ]
+        .map(|(path, contents)| {
+            (
+                PathBuf::from(path),
+                Some(Arc::new(FileContents::from_source(contents.to_owned()))),
+            )
+        })
+        .to_vec(),
+    );
+    let main = Handle::new(
+        ModuleName::from_str("main"),
+        ModulePath::memory(PathBuf::from("main.py")),
+        sys_info,
+    );
+    state.run_with_committing_transaction(
+        transaction,
+        &[main.dupe()],
+        Require::Everything,
+        None,
+        None,
+    );
+    state
+        .transaction()
+        .get_errors([&main])
+        .check_against_expectations()
+        .unwrap();
+}
+
+#[test]
+fn test_shadowed_module_tparams_absent_from_shadowing_module() {
+    check_with_shadowed_module(
+        r#"
+from typing import TypeVar
+A = TypeVar("A")
+"#,
+    );
+}
+
+#[test]
+fn test_shadowed_module_tparams_differ_in_shadowing_module() {
+    check_with_shadowed_module(
+        r#"
+from typing import Generic, TypeVar
+A = TypeVar("A")
+B = TypeVar("B", default=str)
+C = TypeVar("C", bound=str)
+class Box(Generic[B]): ...
+def g[T: str](x: T) -> T: ...
+"#,
+    );
+}
+
+/// Editing a type parameter's bound rechecks the modules that read the bound, and not the ones
+/// that only use its class.
+// Bug: `Class` carries `Foo`'s scoped type parameters, and `Class` equality ignores them, so the
+// edit changes no export of `foo` and `main`, which reads the bound, is not rechecked.
+#[test]
+fn test_tparams_bound_change_rechecks_only_readers() {
+    let mut i = Incremental::new();
+    i.set("foo", "class Foo[T: int]: ...");
+    i.set(
+        "main",
+        "from foo import Foo\ndef f(x: Foo[bool]) -> None: ...",
+    );
+    i.set("bar", "from foo import Foo\ndef g(x: Foo) -> None: ...");
+    i.check(&["foo", "main", "bar"], &["foo", "main", "bar"]);
+    i.set("foo", "class Foo[T: str]: ...");
+    i.check_ignoring_expectations(&["foo", "main", "bar"], &["foo"]);
+}
+
+/// The messages of the errors in the last check.
+fn error_messages(res: &IncrementalResult) -> Vec<String> {
+    res.errors
+        .collect_display_errors()
+        .map(|error| error.msg().to_owned())
+}
+
+/// Renaming a class keeps its index, so the types that refer to it, such as the return type of
+/// `make`, still compare equal. The rename must still recompute `main`, whose error names the
+/// class.
+// Bug: `Class` equality ignores the class name, so the rename changes no export of `foo`, `main`
+// is not recomputed, and its error keeps the old name.
+#[test]
+fn test_class_rename_invalidates_class_dependency() {
+    let mut i = Incremental::new();
+    i.set("foo", "class Foo: ...\ndef make() -> Foo: ...");
+    i.set(
+        "main",
+        "from foo import make\nx: int = make()  # E: `Foo` is not assignable to `int`",
+    );
+    i.check(&["main", "foo"], &["foo", "main"]);
+
+    i.set("foo", "class Bar: ...\ndef make() -> Bar: ...");
+    let res = i.unchecked(&["main", "foo"]);
+    res.check_recompute(&["foo"]);
+    assert_eq!(error_messages(&res), ["`Foo` is not assignable to `int`"]);
+}
+
+/// Deprecating a class must recompute `main`, which sees the class only through the return type
+/// of `make`. The comment keeps every range the same, so only the deprecation changes.
+#[test]
+fn test_class_deprecation_invalidates_class_dependency() {
+    let mut i = Incremental::new();
+    i.set(
+        "foo",
+        "from warnings import deprecated\n#deprecated('x')\nclass Foo: ...\ndef make() -> Foo: ...",
+    );
+    i.set(
+        "main",
+        "from foo import make\nx: int = make()  # E: `Foo` is not assignable to `int`",
+    );
+    i.check(&["main", "foo"], &["foo", "main"]);
+
+    i.set(
+        "foo",
+        "from warnings import deprecated\n@deprecated('x')\nclass Foo: ...\ndef make() -> Foo: ...",
+    );
+    i.unchecked(&["main", "foo"])
+        .check_recompute(&["foo", "main"]);
+}
+
+/// Making a class a protocol must recompute `main`, which uses the class, so `main` sees that
+/// `Bar` now matches `Foo`. The padding keeps every range the same.
+#[test]
+fn test_class_protocol_change_invalidates_class_dependency() {
+    let mut i = Incremental::new();
+    i.set(
+        "foo",
+        "from typing import Protocol\nclass Foo(        ):\n    def m(self) -> int: ...",
+    );
+    i.set(
+        "main",
+        "from foo import Foo\nclass Bar:\n    def m(self) -> int: ...\nx: Foo = Bar()  # E: `Bar` is not assignable to `Foo`",
+    );
+    i.check(&["main", "foo"], &["foo", "main"]);
+
+    i.set(
+        "foo",
+        "from typing import Protocol\nclass Foo(Protocol):\n    def m(self) -> int: ...",
+    );
+    let res = i.unchecked(&["main", "foo"]);
+    res.check_recompute(&["foo", "main"]);
+    assert_eq!(error_messages(&res), Vec::<String>::new());
+}
+
+/// Edits that do not change `Foo`'s definition do not recompute `main`, which only depends on
+/// `Foo`: an edit above `Foo` only moves it, and adding a class after `Foo` leaves `Foo` and its
+/// index the same.
+#[test]
+fn test_unrelated_class_edit_does_not_invalidate_class_dependency() {
+    let mut i = Incremental::new();
+    i.set(
+        "foo",
+        "def f() -> int:\n    return 1\nclass Foo: ...\ndef make() -> Foo: ...",
+    );
+    i.set(
+        "main",
+        "from foo import make\nx: int = make()  # E: `Foo` is not assignable to `int`",
+    );
+    i.check(&["main", "foo"], &["foo", "main"]);
+
+    i.set(
+        "foo",
+        "def f() -> int:\n    return 12\nclass Foo: ...\ndef make() -> Foo: ...",
+    );
+    i.check(&["main", "foo"], &["foo"]);
+
+    i.set(
+        "foo",
+        "def f() -> int:\n    return 12\nclass Foo: ...\ndef make() -> Foo: ...\nclass Bar: ...",
+    );
+    i.check(&["main", "foo"], &["foo"]);
+}
+
+/// Rebuilding a module with fewer classes moves the classes after the removed one to lower
+/// indices. The modules that depend on them, directly or through a chain, must end up reporting
+/// the current classes.
+#[test]
+fn test_fewer_classes_rebuild_reports_current_classes() {
+    let mut i = Incremental::new();
+    // A chain of modules makes it more likely that `main` reads `bar`'s types while `foo` is
+    // being rebuilt.
+    i.set("foo", "class Foo: ...\nclass Bar:\n    x: int = 1");
+    i.set("bar", "from foo import Bar\nbar = Bar()");
+    i.set("baz", "from bar import bar\nbaz = bar");
+    i.set(
+        "main",
+        "from typing import reveal_type\nfrom baz import baz\nreveal_type(baz)  # E: revealed type: Bar\ny: str = baz.x  # E: `int` is not assignable to `str`",
+    );
+    i.check(&["main", "bar", "baz"], &["foo", "bar", "baz", "main"]);
+
+    i.set("foo", "class Bar:\n    x: int = 1");
+    let res = i.unchecked(&["main", "foo"]);
+    assert_eq!(
+        error_messages(&res),
+        ["revealed type: Bar", "`int` is not assignable to `str`"]
+    );
+}
+
+/// A union keeps its class members ordered by name, so renaming a class in one module can reorder
+/// a union in another, even when no export of the first module changes and the second module reads
+/// nothing else about the class. The rebuild must still equal a clean check.
+// Bug: `Class` equality ignores the class name, so the rename changes no export of `foo` and `bar`
+// is not rechecked. `bar` keeps exporting `obj` as `Abc` and `f` as returning `Abc | Bar`, where a
+// clean check gives `Foo` and `Bar | Foo`.
+#[test]
+fn test_class_rename_reorders_union_in_importer() {
+    let foo = |name: &str| {
+        format!("def make():\n    class {name}: ...\n    return {name}()\nobj = make()\n")
+    };
+    let bar = r#"
+from foo import obj
+class Bar: ...
+def f(c: bool):
+    return obj if c else Bar()
+"#;
+    let exported = |solutions: &Solutions| {
+        ["obj", "Bar", "f"]
+            .map(|name| format!("{:?}", solutions.get(&KeyExport(Name::new_static(name)))))
+    };
+
+    let mut i = Incremental::new();
+    i.set("foo", &foo("Abc"));
+    i.set("bar", bar);
+    i.check(&["bar"], &["bar", "foo"]);
+    i.set("foo", &foo("Foo"));
+    i.unchecked(&["bar"]).check_recompute(&["foo"]);
+    let incremental = i
+        .state
+        .transaction()
+        .get_solutions(&i.handle("bar"))
+        .unwrap();
+
+    let mut clean = Incremental::new();
+    clean.set("foo", &foo("Foo"));
+    clean.set("bar", bar);
+    clean.check(&["bar"], &["bar", "foo"]);
+    let expected = clean
+        .state
+        .transaction()
+        .get_solutions(&clean.handle("bar"))
+        .unwrap();
+
+    assert_ne!(exported(&incremental), exported(&expected));
 }

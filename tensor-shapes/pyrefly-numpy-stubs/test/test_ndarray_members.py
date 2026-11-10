@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any, assert_type, Literal, TYPE_CHECKING
+from typing import Any, assert_type, cast, Literal, TYPE_CHECKING
 
 import numpy as np
 from shape_extensions import assert_shape, IntTuple, IntVar
@@ -369,3 +369,46 @@ def test_ndarray_mutating_methods() -> None:
     assert_type(a.setflags(write=True), None)
     assert_type(a.sort(), None)
     assert_shape(a.shape, (2, 3))
+
+
+def test_transpose_property_for_any_rank() -> None:
+    matrix = np.ones((2, 3), dtype=np.int8)
+    cube = np.ones((2, 3, 4), dtype=np.float32)
+    vector = np.ones(3)
+    scalar = np.ones(())
+    unknown = cast(np.ndarray, cube)
+
+    assert_type(matrix.T, np.ndarray[[3, 2], np.dtype[np.int8]])
+    cube_t = cube.T
+    vector_t = vector.T
+    scalar_t = scalar.T
+    first = cube.T[0]
+    assert_type(cube_t, np.ndarray[[4, 3, 2], np.dtype[np.float32]])
+    assert_type(vector_t, np.ndarray[[3], np.dtype[np.float64]])
+    assert_type(scalar_t, np.ndarray[[], np.dtype[np.float64]])
+    assert_type(first, np.ndarray[[3, 2], np.dtype[np.float32]])
+    assert_type(unknown.T, np.ndarray)
+    assert_shape(matrix.T.shape, (3, 2))
+    assert cube_t.shape == (4, 3, 2)
+    assert cube_t.dtype == np.dtype(np.float32)
+    assert vector_t.shape == (3,)
+    assert isinstance(scalar_t, np.ndarray)
+    assert scalar_t.shape == ()
+    assert first.shape == (3, 2)
+    assert unknown.T.shape == (4, 3, 2)
+
+
+def test_contiguity_and_ownership_flags() -> None:
+    a = np.ones((2, 3))
+    view = a[:1]
+
+    contiguous = a.flags.c_contiguous
+    owns_data = a.flags.owndata
+    assert_type(contiguous, bool)
+    assert_type(owns_data, bool)
+    assert_shape(a.shape, (2, 3))
+    assert contiguous is True
+    assert owns_data is True
+    assert_type(a.T.flags.f_contiguous, bool)
+    assert a.T.flags.f_contiguous is True
+    assert view.flags.owndata is False

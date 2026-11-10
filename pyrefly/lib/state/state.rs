@@ -107,10 +107,10 @@ use crate::binding::scope::builtin_module_for_name;
 use crate::binding::table::TableKeyed;
 use crate::config::config::ConfigFile;
 use crate::config::environment::environment::PythonEnvironment;
-use crate::config::error_kind::ErrorKind;
 use crate::config::finder::ConfigError;
 use crate::config::finder::ConfigFinder;
 use crate::error::collector::ErrorCollector;
+use crate::error::style::ErrorStyle;
 use crate::export::exports::Export;
 use crate::export::exports::ExportLocation;
 use crate::export::exports::ExportOrigin;
@@ -149,6 +149,7 @@ use crate::types::class::Class;
 use crate::types::class::ClassDefIndex;
 use crate::types::class::ClassFields;
 use crate::types::class::PrecomputedTParams;
+use crate::types::env::TypeEnv;
 use crate::types::function::Deprecation;
 use crate::types::stdlib::Stdlib;
 use crate::types::types::TParams;
@@ -935,24 +936,35 @@ impl<'a> Transaction<'a> {
         self.with_module_inner(handle, |x| x.get_answers())
     }
 
-    /// Look up the `ClassFields` for a class, which may be defined in another module.
+    /// Look up the `BindingsMetadata` of a module.
     /// Falls back to `Solutions` metadata when answers are evicted (e.g. during `coverage`).
+    pub fn get_bindings_metadata(&self, handle: &Handle) -> Option<Arc<BindingsMetadata>> {
+        match self.get_answers(handle) {
+            Some(answers) => Some(answers.bindings().metadata().dupe()),
+            None => Some(self.get_solutions(handle)?.metadata().dupe()),
+        }
+    }
+
+    /// Look up the `ClassFields` for a class, which may be defined in another module.
     pub fn get_class_fields(&self, source_handle: &Handle, class: &Class) -> Option<ClassFields> {
-        let handle = Handle::new(
-            class.module_name(),
-            class.module_path().dupe(),
-            source_handle.sys_info().dupe(),
-        );
-        if let Some(answers) = self.get_answers(&handle) {
-            answers.bindings().get_class_fields(class.index()).cloned()
-        } else {
-            Some(
-                self.get_solutions(&handle)?
-                    .metadata()
-                    .get_class_checked(class.index())?
-                    .fields
-                    .clone(),
-            )
+        let handle = source_handle.for_module(class.module_name(), class.module_path().dupe());
+        Some(
+            self.get_bindings_metadata(&handle)?
+                .get_class_checked(class.index())?
+                .fields
+                .clone(),
+        )
+    }
+
+    /// A `TypeEnv` for reading the definition data of types in `handle`'s answers.
+    pub fn type_env(&self, handle: &Handle) -> TransactionTypeEnv<'_> {
+        let config = self.get_module(handle).config.read();
+        TransactionTypeEnv {
+            transaction: self,
+            handle: handle.dupe(),
+            stdlib: self.get_stdlib(handle),
+            thread_state: ThreadState::new(config.recursion_limit_config()),
+            answer_scope: AnswerScope::new(),
         }
     }
 
@@ -984,8 +996,18 @@ impl<'a> Transaction<'a> {
                 .filter_map(|handle| {
                     self.with_module_config_inner(handle, |config, x| {
                         let load = x.get_load()?;
+                        let parse_errors = x.parse_errors();
+                        let binding_errors = x.binding_errors();
+                        let solve_diagnostics = x.solve_errors();
                         let module_ranges = x.module_ranges();
-                        Some((load, module_ranges, config.dupe()))
+                        Some((
+                            load,
+                            parse_errors,
+                            binding_errors,
+                            solve_diagnostics,
+                            module_ranges,
+                            config.dupe(),
+                        ))
                     })
                 })
                 .collect(),
@@ -1001,8 +1023,18 @@ impl<'a> Transaction<'a> {
                     .values()
                     .filter_map(|x| {
                         let load = x.state.get_load()?;
+                        let parse_errors = x.state.parse_errors();
+                        let binding_errors = x.state.binding_errors();
+                        let solve_diagnostics = x.state.solve_errors();
                         let module_ranges = x.state.module_ranges();
-                        Some((load, module_ranges, x.config.dupe()))
+                        Some((
+                            load,
+                            parse_errors,
+                            binding_errors,
+                            solve_diagnostics,
+                            module_ranges,
+                            x.config.dupe(),
+                        ))
                     })
                     .collect(),
             );
@@ -1013,16 +1045,36 @@ impl<'a> Transaction<'a> {
             .iter_unordered()
             .filter_map(|x| {
                 let load = x.1.state.get_load()?;
+                let parse_errors = x.1.state.parse_errors();
+                let binding_errors = x.1.state.binding_errors();
+                let solve_diagnostics = x.1.state.solve_errors();
                 let module_ranges = x.1.state.module_ranges();
-                Some((load, module_ranges, x.1.config.read().dupe()))
+                Some((
+                    load,
+                    parse_errors,
+                    binding_errors,
+                    solve_diagnostics,
+                    module_ranges,
+                    x.1.config.read().dupe(),
+                ))
             })
             .collect::<Vec<_>>();
         for (k, v) in self.readable.modules.iter() {
             if self.data.updated_modules.get(k).is_none()
                 && let Some(load) = v.state.get_load()
             {
+                let parse_errors = v.state.parse_errors();
+                let binding_errors = v.state.binding_errors();
+                let solve_diagnostics = v.state.solve_errors();
                 let module_ranges = v.state.module_ranges();
-                res.push((load, module_ranges, v.config.dupe()));
+                res.push((
+                    load,
+                    parse_errors,
+                    binding_errors,
+                    solve_diagnostics,
+                    module_ranges,
+                    v.config.dupe(),
+                ));
             }
         }
         Errors::new(res)
@@ -1030,6 +1082,15 @@ impl<'a> Transaction<'a> {
 
     pub fn config_finder(&self) -> &ConfigFinder {
         &self.data.state.config_finder
+    }
+
+    /// Run `op` on the state's thread pool. See `State::install`.
+    pub fn install<OP, R>(&self, op: OP) -> R
+    where
+        OP: FnOnce() -> R + Send,
+        R: Send,
+    {
+        self.data.state.install(op)
     }
 
     /// Search through the export table of every module we know about.
@@ -1382,7 +1443,7 @@ impl<'a> Transaction<'a> {
                 guard.store_load(Some(Arc::new(Load::load_from_data(
                     module_data.handle.module(),
                     module_data.handle.path().dupe(),
-                    old_load.errors.style(),
+                    old_load.error_style,
                     file_contents,
                     self_error,
                 ))));
@@ -1396,7 +1457,8 @@ impl<'a> Transaction<'a> {
             && let Some(old_load) = guard.get_load()
         {
             guard.store_load(Some(Arc::new(Load {
-                errors: ErrorCollector::new(old_load.module_info.dupe(), old_load.errors.style()),
+                load_errors: old_load.load_errors.dupe(),
+                error_style: old_load.error_style,
                 module_info: old_load.module_info.clone(),
             })));
             rebuild(false);
@@ -1447,10 +1509,8 @@ impl<'a> Transaction<'a> {
                 // Create new ErrorCollector to clear old errors from the previous config
                 if let Some(old_load) = guard.get_load() {
                     guard.store_load(Some(Arc::new(Load {
-                        errors: ErrorCollector::new(
-                            old_load.module_info.dupe(),
-                            old_load.errors.style(),
-                        ),
+                        load_errors: old_load.load_errors.dupe(),
+                        error_style: old_load.error_style,
                         module_info: old_load.module_info.clone(),
                     })));
                 }
@@ -1576,6 +1636,9 @@ impl<'a> Transaction<'a> {
                 legacy_overload_expansion: config
                     .legacy_overload_expansion(module_data.handle.path()),
                 treat_all_caps_as_final: config.treat_all_caps_as_final(module_data.handle.path()),
+                infer_param_types_from_docstring: config
+                    .infer_param_types_from_docstring(module_data.handle.path()),
+                reveal_type_qualified_names: config.reveal_type_qualified_names,
                 recursion_limit_config: config.recursion_limit_config(),
                 pysa_context,
                 cinderx_enabled: self.data.cinderx_reporter.is_some(),
@@ -1839,17 +1902,6 @@ impl<'a> Transaction<'a> {
         (res, created)
     }
 
-    fn add_error(
-        &self,
-        module_data: &ArcId<ModuleDataMut>,
-        range: TextRange,
-        msg: String,
-        kind: ErrorKind,
-    ) {
-        let load = module_data.state.get_load().unwrap();
-        load.errors.error_builder(range, kind, msg).emit();
-    }
-
     fn lookup<'b>(&'b self, module_data: &'b ArcId<ModuleDataMut>) -> TransactionHandle<'b> {
         TransactionHandle {
             transaction: self,
@@ -1872,15 +1924,6 @@ impl<'a> Transaction<'a> {
             .exports(&self.lookup(module_data))
             .contains_key(name)
         {
-            self.add_error(
-                module_data,
-                TextRange::default(),
-                format!(
-                    "Stdlib import failure, was expecting `{}` to contain `{name}`",
-                    module_data.handle.module()
-                ),
-                ErrorKind::MissingModuleAttribute,
-            );
             return None;
         }
 
@@ -1890,37 +1933,23 @@ impl<'a> Transaction<'a> {
             thread_state,
             &answer_scope,
         );
-        let class = match t {
-            Some(Type::ClassDef(cls)) => Some(cls.dupe()),
-            ty => {
-                self.add_error(
-                    module_data,
-                    TextRange::default(),
-                    format!(
-                        "Did not expect non-class type `{}` for stdlib import `{}.{name}`",
-                        ty.map_or_else(|| "<KeyError>".to_owned(), |t| t.to_string()),
-                        module_data.handle.module()
-                    ),
-                    ErrorKind::MissingModuleAttribute,
-                );
-                None
-            }
+        let Some(Type::ClassDef(class)) = t else {
+            return None;
         };
-        class.map(|class| {
-            let tparams = match class.precomputed_tparams() {
-                PrecomputedTParams::NotGeneric => None,
-                PrecomputedTParams::FromBinding => self
-                    .lookup_answer(
-                        module_data,
-                        &KeyTParams(class.index()),
-                        thread_state,
-                        &answer_scope,
-                    )
-                    .map(Dupe::dupe),
-                PrecomputedTParams::Precomputed(tparams) => Some(tparams.dupe()),
-            };
-            (class, tparams)
-        })
+        let class = class.dupe();
+        let tparams = match class.precomputed_tparams() {
+            PrecomputedTParams::NotGeneric => None,
+            PrecomputedTParams::FromBinding => self
+                .lookup_answer(
+                    module_data,
+                    &KeyTParams(class.index()),
+                    thread_state,
+                    &answer_scope,
+                )
+                .map(Dupe::dupe),
+            PrecomputedTParams::Precomputed(tparams) => Some(tparams.dupe()),
+        };
+        Some((class, tparams))
     }
 
     fn lookup_export(&self, module_data: &ArcId<ModuleDataMut>) -> Arc<Exports> {
@@ -1999,13 +2028,12 @@ impl<'a> Transaction<'a> {
         }
 
         // Slow path: need full solve_exported_key for computation.
-        let load = module_data.state.get_load().unwrap();
         let stdlib = self.get_stdlib(&module_data.handle);
         let lookup = self.lookup(module_data);
         answers.solve_exported_key(
             &lookup,
             &lookup,
-            &load.errors,
+            answers.errors(),
             &stdlib,
             &self.data.state.uniques,
             key,
@@ -2357,7 +2385,7 @@ impl<'a> Transaction<'a> {
         let lookup = self.lookup(module_data);
         let load = module_data.state.get_load()?;
         let answers = module_data.state.get_answers()?;
-        let errors = &load.errors;
+        let errors = ErrorCollector::new(load.module_info.dupe(), ErrorStyle::Delayed);
         let stdlib = self.get_stdlib(handle);
         let recurser = VarRecurser::new();
         let config = module_data.config.read();
@@ -2366,7 +2394,7 @@ impl<'a> Transaction<'a> {
         let solver = AnswersSolver::new(
             &lookup,
             &answers,
-            errors,
+            &errors,
             &lookup,
             &self.data.state.uniques,
             &recurser,
@@ -2670,6 +2698,9 @@ impl<'a> Transaction<'a> {
                 spec_compliant_overloads: config.spec_compliant_overloads(m.handle.path()),
                 legacy_overload_expansion: config.legacy_overload_expansion(m.handle.path()),
                 treat_all_caps_as_final: config.treat_all_caps_as_final(m.handle.path()),
+                infer_param_types_from_docstring: config
+                    .infer_param_types_from_docstring(m.handle.path()),
+                reveal_type_qualified_names: config.reveal_type_qualified_names,
                 recursion_limit_config: config.recursion_limit_config(),
                 pysa_context: None,
                 cinderx_enabled: false,
@@ -2814,6 +2845,52 @@ impl<'a> Transaction<'a> {
     }
 }
 
+/// A `TypeEnv` that reads definition data from a transaction, for use after solving.
+///
+/// It reads a class's answers from its module's `Solutions`, or from its `Answers`, solving the
+/// answer on demand if the module has not been fully solved. `answer_scope` retains the
+/// `Solutions` or `Answers` of every module read, and it is append-only and lives as long as the
+/// env. So every borrow the env returns stays valid for the env's lifetime, even if the
+/// transaction later replaces a module's `Answers` with its `Solutions`. Like `AnswerScope`, the
+/// env is not `Sync`.
+pub struct TransactionTypeEnv<'a> {
+    transaction: &'a Transaction<'a>,
+    /// The module this env was created for. Other modules are looked up with its `SysInfo`.
+    handle: Handle,
+    stdlib: Arc<Stdlib>,
+    thread_state: ThreadState,
+    answer_scope: Box<AnswerScope>,
+}
+
+impl TypeEnv for TransactionTypeEnv<'_> {
+    fn stdlib(&self) -> &Stdlib {
+        &self.stdlib
+    }
+
+    fn class_tparams<'b>(&'b self, cls: &'b Class) -> &'b TParams {
+        let key = match cls.precomputed_tparams() {
+            PrecomputedTParams::NotGeneric => return TParams::empty_ref(),
+            PrecomputedTParams::Precomputed(tparams) => return tparams,
+            PrecomputedTParams::FromBinding => KeyTParams(cls.index()),
+        };
+        let handle = Handle::new(
+            cls.module_name(),
+            cls.module_path().dupe(),
+            self.handle.sys_info().dupe(),
+        );
+        // There is no answer only if the class's module was rebuilt without this class, in which
+        // case the solver also treats the class as having no type parameters.
+        self.transaction
+            .lookup_answer(
+                self.transaction.get_module(&handle),
+                &key,
+                &self.thread_state,
+                &self.answer_scope,
+            )
+            .map_or(TParams::empty_ref(), |tparams| &**tparams)
+    }
+}
+
 pub(crate) struct TransactionHandle<'a> {
     transaction: &'a Transaction<'a>,
     module_data: &'a ArcId<ModuleDataMut>,
@@ -2822,7 +2899,9 @@ pub(crate) struct TransactionHandle<'a> {
     /// Keyed by ModulePath (cheap to hash — discriminant + interned u64) rather
     /// than Handle, since ModulePath uniquely identifies the target module within
     /// a TransactionHandle (module name is derivable, sys_info is invariant).
-    deferred_deps: RefCell<FxHashMap<ModulePath, (Handle, ModuleDeps)>>,
+    /// Each entry also remembers the target module, so that repeated lookups of
+    /// the same module skip the transaction's shared module map.
+    deferred_deps: RefCell<FxHashMap<ModulePath, DeferredDeps<'a>>>,
     /// Cache of cross-module `BindingsMetadata` for class field lookups.
     /// Keyed by `ArcId::id()` (pointer-as-usize) to avoid atomic refcount
     /// operations and to get a cheap 8-byte hash key.
@@ -2832,6 +2911,14 @@ pub(crate) struct TransactionHandle<'a> {
     ///   2. The cache is append-only — entries are never removed or replaced,
     ///      so references into existing entries remain valid.
     metadata_cache: UnsafeCell<FxHashMap<usize, Arc<BindingsMetadata>>>,
+}
+
+/// Dependencies of a `TransactionHandle`'s module on one target module, not yet
+/// flushed to `module_data.deps`.
+struct DeferredDeps<'a> {
+    handle: Handle,
+    module_data: &'a ArcId<ModuleDataMut>,
+    deps: ModuleDeps,
 }
 
 /// Result of looking up a target module's `Answers` for a cross-module
@@ -2844,7 +2931,6 @@ enum TargetAnswers<'a> {
     /// its operation (commit or solve) using the contained data.
     Available {
         answers: Arc<Answers>,
-        load: Option<Arc<Load>>,
         module_data: &'a ArcId<ModuleDataMut>,
     },
     /// The target module's `Answers` have been evicted but `Solutions` exist.
@@ -2863,15 +2949,28 @@ impl<'a> TransactionHandle<'a> {
         path: Option<&ModulePath>,
         dep: ModuleDep,
     ) -> FindingOrError<&'a ArcId<ModuleDataMut>> {
-        let handle = match path {
-            Some(path) => {
-                // Explicit path — already resolved. Bypass imports entirely.
-                FindingOrError::new_finding(Handle::new(
+        let resolve = move |path: &ModulePath| {
+            let mut deferred_deps = self.deferred_deps.borrow_mut();
+            let deferred = deferred_deps.entry(path.dupe()).or_insert_with(|| {
+                let handle = Handle::new(
                     module,
                     path.dupe(),
                     self.module_data.handle.sys_info().dupe(),
-                ))
-            }
+                );
+                let module_data = self.transaction.get_imported_module(&handle);
+                DeferredDeps {
+                    handle,
+                    module_data,
+                    deps: ModuleDeps::default(),
+                }
+            });
+            deferred.deps.add_dep(dep);
+            deferred.module_data
+        };
+        match path {
+            // Explicit path — already resolved. Bypass imports entirely. Most lookups take this
+            // path, so it resolves directly rather than through a `FindingOrError`.
+            Some(path) => FindingOrError::new_finding(resolve(path)),
             None => {
                 // No path — needs find_import. Check imports cache first.
                 let imports_read = self.module_data.imports.read();
@@ -2902,26 +3001,9 @@ impl<'a> TransactionHandle<'a> {
                         finding
                     }
                 };
-                path.map(|path| {
-                    Handle::new(
-                        module,
-                        path.dupe(),
-                        self.module_data.handle.sys_info().dupe(),
-                    )
-                })
+                path.map(|path| resolve(&path))
             }
-        };
-
-        handle.map(|handle| {
-            let res = self.transaction.get_imported_module(&handle);
-            self.deferred_deps
-                .borrow_mut()
-                .entry(handle.path().dupe())
-                .or_insert_with(|| (handle, ModuleDeps::default()))
-                .1
-                .add_dep(dep);
-            res
-        })
+        }
     }
 
     /// Helper to get exports for a module with the correct lookup context.
@@ -2974,10 +3056,8 @@ impl<'a> TransactionHandle<'a> {
         };
 
         if let Some(answers) = module_data.state.get_answers() {
-            let load = module_data.state.get_load();
             TargetAnswers::Available {
                 answers,
-                load,
                 module_data,
             }
         } else if module_data.state.get_solutions().is_some()
@@ -3022,14 +3102,21 @@ impl Drop for TransactionHandle<'_> {
         let mut deps_lock = self.module_data.deps.write();
         // Detach from the frozen snapshot on first write, if still shared.
         let deps = Arc::make_mut(&mut deps_lock);
-        for (_path, (target_handle, new_deps)) in deferred {
-            match deps.entry(target_handle.dupe()) {
+        for (
+            _path,
+            DeferredDeps {
+                handle: target_handle,
+                module_data: target,
+                deps: new_deps,
+            },
+        ) in deferred
+        {
+            match deps.entry(target_handle) {
                 Entry::Occupied(mut e) => {
                     e.get_mut().merge(new_deps);
                 }
                 Entry::Vacant(e) => {
                     e.insert(new_deps);
-                    let target = self.transaction.get_module(&target_handle);
                     let mut rdeps = target.rdeps.lock();
                     let inserted = Arc::make_mut(&mut rdeps).insert(self.module_data.handle.dupe());
                     assert!(inserted);
@@ -3041,8 +3128,7 @@ impl Drop for TransactionHandle<'_> {
 
 /// One step of a walk along a chain of re-exports, as seen from a single module.
 enum ExportStep<T> {
-    /// The chain ends at a definition in this module, carrying the value read
-    /// off its `Export`.
+    /// The chain ends in this module, carrying the value read off it.
     Resolved(T),
     /// The name is re-exported from another module, under the given name if the
     /// re-export renamed it.
@@ -3063,6 +3149,14 @@ impl<'a> LookupExport for TransactionHandle<'a> {
         self.with_exports(
             module,
             |exports, lookup| exports.wildcard(lookup),
+            ModuleDep::Wildcard,
+        )
+    }
+
+    fn get_environment_wildcard(&self, module: ModuleName) -> Option<Arc<SmallSet<Name>>> {
+        self.with_exports(
+            module,
+            |exports, lookup| exports.environment_wildcard(lookup),
             ModuleDep::Wildcard,
         )
     }
@@ -3220,32 +3314,45 @@ impl<'a> LookupExport for TransactionHandle<'a> {
     fn export_origin(&self, mut module: ModuleName, name: &Name) -> ExportOrigin {
         let mut seen = HashSet::new();
         let mut name = name.clone();
+        let mut under_environment = false;
 
-        let is_final = loop {
+        // The finality of the definition the chain ends at, if it ends at one.
+        let definition = loop {
             // A chain may pass through a module more than once under different
             // names, so only a repeated (module, name) pair is a real cycle.
             if !seen.insert((module, name.clone())) {
-                break false;
+                break None;
             }
 
-            let next = self
+            let (next, defined_under_environment) = self
                 .with_exports(
                     module,
-                    |exports, lookup| match exports.exports(lookup).get(&name) {
-                        Some(ExportLocation::ThisModule(Export { is_final, .. })) => {
-                            ExportStep::Resolved(*is_final)
-                        }
-                        Some(ExportLocation::OtherModule(other_module, original_name)) => {
-                            ExportStep::Redirect(*other_module, original_name.clone())
-                        }
-                        None => ExportStep::Resolved(false),
+                    |exports, lookup| {
+                        let under_environment =
+                            exports.environment_wildcard(lookup).contains(&name);
+                        let step = match exports.exports(lookup).get(&name) {
+                            // The name is the imported module itself, not a name inside it.
+                            _ if exports.imports_module(&name) => ExportStep::Resolved(None),
+                            Some(ExportLocation::ThisModule(Export { is_final, .. })) => {
+                                ExportStep::Resolved(Some((
+                                    *is_final,
+                                    exports.final_has_declared_type(&name),
+                                )))
+                            }
+                            Some(ExportLocation::OtherModule(other_module, original_name)) => {
+                                ExportStep::Redirect(*other_module, original_name.clone())
+                            }
+                            None => ExportStep::Resolved(None),
+                        };
+                        (step, under_environment)
                     },
                     ModuleDep::ExportOrigin(name.clone()),
                 )
-                .unwrap_or(ExportStep::Resolved(false));
+                .unwrap_or((ExportStep::Resolved(None), false));
+            under_environment |= defined_under_environment;
 
             match next {
-                ExportStep::Resolved(is_final) => break is_final,
+                ExportStep::Resolved(definition) => break definition,
                 ExportStep::Redirect(other_module, original_name) => {
                     if let Some(original_name) = original_name {
                         name = original_name;
@@ -3257,7 +3364,10 @@ impl<'a> LookupExport for TransactionHandle<'a> {
 
         ExportOrigin {
             origin: (module, name),
-            is_final,
+            is_final: definition.is_some_and(|(is_final, _)| is_final),
+            final_has_declared_type: definition.is_some_and(|(_, declared)| declared),
+            ends_at_definition: definition.is_some(),
+            defined_under_environment: under_environment,
         }
     }
 }
@@ -3318,20 +3428,16 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
             TargetAnswers::Evicted => true,
             TargetAnswers::Available {
                 answers: target_answers,
-                load,
                 module_data,
+                ..
             } => {
-                let target_load = load.expect(
-                    "target module has Answers but no Load; this should be unreachable \
-                     because Load is computed before Answers",
-                );
                 let stdlib = self.transaction.get_stdlib(&module_data.handle);
                 let lookup = self.transaction.lookup(module_data);
                 target_answers.solve_idx_erased(
                     any_idx,
                     &lookup,
                     &lookup,
-                    &target_load.errors,
+                    target_answers.errors(),
                     &stdlib,
                     &self.transaction.data.state.uniques,
                     thread_state,
@@ -3356,30 +3462,20 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
         }
     }
 
-    fn publish_reserved_in_module(&self, reserved: &mut ReservedSlot<'_, '_, '_, Self>) -> bool {
+    fn publish_reserved_in_module(&self, reserved: &mut ReservedSlot<'_, '_, '_, Self>) {
         let calc_id = reserved.calc_id().dupe();
         match self.lookup_target_answers(&calc_id) {
-            TargetAnswers::ModuleNotFound => false,
+            TargetAnswers::ModuleNotFound => {}
             TargetAnswers::Evicted => {
                 // An identical contender would wait on our first shared pending
                 // slot. Reaching Solutions here therefore requires a worker with
                 // a non-equivalent SCC that did not need this reservation. Its
                 // result and side effects won; discard ours.
                 drop(reserved.take_side_effects());
-                false
             }
-            TargetAnswers::Available { answers, load, .. } => {
+            TargetAnswers::Available { answers, .. } => {
                 let (errors, traces) = reserved.take_side_effects();
-                if let (Some(errors), Some(target_load)) = (errors, load) {
-                    let errors = Arc::try_unwrap(errors)
-                        .expect("cross-module SCC errors Arc has unexpected extra references");
-                    target_load.errors.extend(errors);
-                }
-                if let Some(traces) = traces {
-                    answers.merge_trace_side_effects(traces);
-                }
-                answers.publish_reserved_preliminary(reserved);
-                true
+                answers.publish_reserved_preliminary(reserved, errors, traces);
             }
         }
     }

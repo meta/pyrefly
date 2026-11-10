@@ -40,34 +40,14 @@ jobs:
           --output "$RUNNER_TEMP/wasi-sdk.tar.gz"
         echo "b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4  $RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum --check
         tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$RUNNER_TEMP"
-    - name: Check WASI library
+    - name: Check WASI library and build the sandbox
       env:
+        WASI_SDK_PATH: ${{ runner.temp }}/wasi-sdk-34.0-x86_64-linux
         CC_wasm32_wasip1: ${{ runner.temp }}/wasi-sdk-34.0-x86_64-linux/bin/clang
         AR_wasm32_wasip1: ${{ runner.temp }}/wasi-sdk-34.0-x86_64-linux/bin/llvm-ar
-      run: cargo check -p pyrefly --lib --target wasm32-wasip1 --locked
-
-  check_wasm_browser:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v6
-    - uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: stable
-        targets: wasm32-unknown-unknown
-    - name: set up rust cache
-      uses: Swatinem/rust-cache@v2
-      with:
-        prefix-key: pyrefly-wasm-browser
-    - name: Install browser C toolchain
       run: |
-        sudo apt-get update
-        sudo apt-get install --no-install-recommends --yes clang llvm
-    - name: Build browser package
-      working-directory: pyrefly_wasm
-      env:
-        CC_wasm32_unknown_unknown: clang
-        AR_wasm32_unknown_unknown: llvm-ar
-      run: cargo build --lib --target wasm32-unknown-unknown --locked
+        cargo check -p pyrefly --lib --target wasm32-wasip1 --locked
+        cargo build -p pyrefly_wasm --lib --target wasm32-wasip1 --locked
 
   test:
     runs-on: ${{ matrix.os }}

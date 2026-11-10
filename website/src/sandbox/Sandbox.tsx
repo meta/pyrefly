@@ -35,6 +35,7 @@ import {
     setSemanticTokensLegendForMonaco,
 } from './configured-monaco';
 import { editor } from 'monaco-editor';
+import { gotoDefinition, type PyreflyLocation } from './gotoDefinition';
 import type { PyreflyErrorMessage } from './SandboxResults';
 import { DEFAULT_SANDBOX_PROGRAM } from './DefaultSandboxProgram';
 import { usePythonWorker } from './usePythonWorker';
@@ -58,7 +59,11 @@ export interface PyreflyState {
     setActiveFile: (filename: string) => void;
     getErrors: () => ReadonlyArray<PyreflyErrorMessage>;
     autoComplete: (line: number, column: number) => any;
-    gotoDefinition: (line: number, column: number) => monaco.IRange[] | null;
+    gotoDefinition: (
+        line: number,
+        column: number,
+        withContents: boolean
+    ) => ReadonlyArray<PyreflyLocation> | null;
     hover: (line: number, column: number) => any;
     inlayHint: (callArgumentNames: boolean) => any;
     semanticTokens: (range: any) => any;
@@ -110,6 +115,8 @@ export default function Sandbox({
     const [errors, setErrors] =
         useState<ReadonlyArray<PyreflyErrorMessage> | null>([]);
     const [internalError, setInternalError] = useState('');
+    // Increases when the module is ready again after a crash.
+    const [wasmRestarts, setWasmRestarts] = useState(0);
     const [loading, setLoading] = useState(true);
     const [pyreService, setPyreService] = useState<PyreflyState | null>(null);
     const [editorHeightforCodeSnippet, setEditorHeightforCodeSnippet] =
@@ -139,9 +146,9 @@ export default function Sandbox({
     const createNewFile = useCallback(
         (fileName: string, content: string = '') => {
             // Lets see if model already exists in Monaco
-            const existingModel = monaco.editor
-                .getModels()
-                .find((m) => m.uri.path === `/${fileName}`);
+            const existingModel = monaco.editor.getModel(
+                monaco.Uri.file(`/${fileName}`)
+            );
 
             let newModel;
             if (existingModel) {
@@ -164,24 +171,30 @@ export default function Sandbox({
         []
     );
 
-    // Switch to a different file
+    // Switch to a different file. Returns whether `fileName` is a sandbox file.
     const switchToFile = useCallback(
         (fileName: string) => {
-            if (models.has(fileName)) {
-                setActiveFileName(fileName);
-                // If editor exists, immediately switch the model
-                const editor = editorRef.current;
-                const targetModel = models.get(fileName);
-                if (editor && targetModel) {
-                    editor.setModel(targetModel);
-                }
-                if (pyreService) {
-                    pyreService.setActiveFile(fileName);
-                }
+            if (!models.has(fileName)) {
+                return false;
             }
+            setActiveFileName(fileName);
+            // If editor exists, immediately switch the model
+            const editor = editorRef.current;
+            const targetModel = models.get(fileName);
+            if (editor && targetModel) {
+                editor.setModel(targetModel);
+            }
+            if (pyreService) {
+                pyreService.setActiveFile(fileName);
+            }
+            return true;
         },
         [models, pyreService]
     );
+    // The editor opener, which `onEditorMount` registers once, calls the
+    // current `switchToFile` through this ref.
+    const switchToFileRef = useRef(switchToFile);
+    switchToFileRef.current = switchToFile;
 
     // Create a new temporary file
     const createNewTempFile = useCallback(() => {
@@ -277,6 +290,11 @@ export default function Sandbox({
             }
 
             const finalName = inputValue.trim();
+            // Monaco reads a backslash in a file URI as a path separator on
+            // Windows, so the model path would differ from the file name.
+            if (finalName.includes('\\')) {
+                return false;
+            }
             if (
                 !finalName.endsWith('.py') &&
                 !finalName.endsWith('.pyi') &&
@@ -702,7 +720,10 @@ export default function Sandbox({
     }, [isInViewport, pythonVersion]); // Re-run when isInViewport or pythonVersion changes
 
     // Need to add createModel handler in case monaco model was not created at mount time
-    monaco.editor.onDidCreateModel((_newModel) => {
+    monaco.editor.onDidCreateModel((newModel) => {
+        if (newModel.uri.scheme !== 'file') {
+            return;
+        }
         const curModel = fetchCurMonacoModelAndTriggerUpdate(activeFileName);
         if (curModel) {
             setModels((prev) => new Map(prev).set(activeFileName, curModel));
@@ -722,7 +743,7 @@ export default function Sandbox({
     // Recheck when pyre service or model changes
     useEffect(() => {
         forceRecheck();
-    }, [pyreService, model, showParameterHints]);
+    }, [pyreService, model, showParameterHints, wasmRestarts]);
 
     function updateAllFiles(forceUpdate: boolean): boolean {
         if (models.size > 0 && pyreService && model) {
@@ -760,7 +781,7 @@ export default function Sandbox({
             pyreService.autoComplete(l, c)
         );
         setGetDefFunction(model, (l: number, c: number) =>
-            pyreService.gotoDefinition(l, c)
+            gotoDefinition(pyreService, l, c)
         );
         setHoverFunctionForMonaco(model, (l: number, c: number) =>
             pyreService.hover(l, c)
@@ -828,8 +849,18 @@ export default function Sandbox({
             setErrors(errors);
         } catch (e) {
             console.error(e);
-            setInternalError(JSON.stringify(e));
+            setInternalError(String(e));
             setErrors([]);
+            // An edit while the module replaces an instance that crashed
+            // throws `not ready`. Check again when the module is ready, so that
+            // the results do not wait for the next edit. A check that crashes
+            // is not run again, because it would crash again.
+            if (String(e).includes('not ready')) {
+                pyreflyWasmInitializedPromise
+                    ?.then((pyrefly) => pyrefly.default())
+                    .then(() => setWasmRestarts((count) => count + 1))
+                    .catch((initError) => setInternalError(String(initError)));
+            }
         }
     }
 
@@ -869,6 +900,27 @@ export default function Sandbox({
             );
         }
         editorRef.current = editor;
+
+        // Go to a definition in another sandbox file.
+        const opener = monaco.editor.registerEditorOpener({
+            openCodeEditor(source, resource, selectionOrPosition) {
+                if (
+                    source !== editor ||
+                    resource.scheme !== 'file' ||
+                    !switchToFileRef.current(resource.path.slice(1))
+                ) {
+                    return false;
+                }
+                if (monaco.Range.isIRange(selectionOrPosition)) {
+                    editor.setSelection(selectionOrPosition);
+                    editor.revealRangeInCenterIfOutsideViewport(
+                        selectionOrPosition
+                    );
+                }
+                return true;
+            },
+        });
+        editor.onDidDispose(() => opener.dispose());
 
         // Add keyboard shortcut for Command+Enter (Mac) or Ctrl+Enter (Windows/Linux)
         editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
@@ -1094,9 +1146,7 @@ function getVersionFromURL(): string | null {
 function fetchCurMonacoModelAndTriggerUpdate(
     fileName: string
 ): editor.ITextModel | null {
-    const model = monaco.editor
-        .getModels()
-        .filter((model) => model?.uri?.path === `/${fileName}`)[0];
+    const model = monaco.editor.getModel(monaco.Uri.file(`/${fileName}`));
 
     if (model == null) {
         return null;

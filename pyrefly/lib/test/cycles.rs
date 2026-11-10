@@ -7,6 +7,9 @@
 
 use std::fmt::Write;
 
+use ruff_text_size::Ranged;
+
+use crate::config::error_kind::ErrorKind;
 use crate::test::util::TestEnv;
 use crate::test::util::testcase_for_macro;
 use crate::testcase;
@@ -826,6 +829,102 @@ reveal_type(g(1))  # E: revealed type: Literal[0] | Unknown
 "#,
 );
 
+#[test]
+fn nonconvergent_cross_module_diagnostics_are_owned_by_their_module() {
+    let mut env = TestEnv::new();
+    env.add(
+        "a",
+        r#"
+from b import D, E
+
+class C:
+    type X = int | list[D.Y]
+
+class Padding1:
+    type Value = int
+
+class Padding2:
+    type Value = int
+
+class F:
+    type Z = int | list[E.W]
+"#,
+    );
+    env.add(
+        "b",
+        r#"
+from a import C, F
+
+class D:
+    type Y = str | list[C.X]
+
+class E:
+    type W = str | list[F.Z]
+"#,
+    );
+    env.add(
+        "main",
+        r#"
+from a import C, F
+from b import D, E
+x: C.X
+y: D.Y
+z: F.Z
+w: E.W
+"#,
+    );
+    let (state, handle) = env.to_state();
+    let transaction = state.transaction();
+    for name in ["a", "b"] {
+        let module_handle = handle(name);
+        let errors = transaction
+            .get_errors([&module_handle])
+            .collect_errors()
+            .ordinary;
+        let mut count = 0;
+        for error in errors
+            .iter()
+            .filter(|error| error.error_kind() == ErrorKind::NonConvergentRecursion)
+        {
+            count += 1;
+            assert_eq!(
+                error.module().name(),
+                module_handle.module(),
+                "diagnostic for {} was stored in {name}'s snapshot",
+                error.module().name(),
+            );
+            assert_eq!(
+                error.module().path(),
+                module_handle.path(),
+                "diagnostic for {} had the wrong path",
+                error.module().name(),
+            );
+            assert!(
+                error.range().start() < error.range().end(),
+                "nonconvergence diagnostic should point at its member binding",
+            );
+        }
+        assert!(
+            count > 0,
+            "{name} should contain a nonconvergence diagnostic"
+        );
+    }
+
+    let main_handle = handle("main");
+    let main_errors = transaction
+        .get_errors([&main_handle])
+        .collect_errors()
+        .ordinary;
+    assert_eq!(
+        main_errors
+            .iter()
+            .filter(|error| error.error_kind() == ErrorKind::NonConvergentRecursion)
+            .count(),
+        0,
+        "the driver module should not contain nonconvergence diagnostics",
+    );
+}
+
 // Verify that two disjoint inferred-return SCCs solve independently. Each
 // pair has its own concrete base case and no dependencies on the other pair.
 testcase!(
@@ -855,5 +954,23 @@ reveal_type(f(1))  # E: revealed type: Literal[0]
 reveal_type(g(1))  # E: revealed type: Literal[0]
 reveal_type(h("a"))  # E: revealed type: Literal['done']
 reveal_type(k("a"))  # E: revealed type: Literal['done']
+"#,
+);
+
+// A recursive call whose result is returned directly makes the inferred union
+// grow with each iteration until it exceeds the width limit and is replaced
+// with `Unknown`. That `Unknown` then shrinks the union again in the next
+// iteration, so the fixpoint must keep the widened answer to converge.
+testcase!(
+    iterative_widened_return_converges,
+    r#"
+from typing import reveal_type
+
+def f(x: int):
+    if x:
+        return f(x - 1)
+    return [f(x - 1)]
+
+reveal_type(f(1))  # E: revealed type: Unknown
 "#,
 );

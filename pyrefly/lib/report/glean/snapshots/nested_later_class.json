@@ -765,6 +765,126 @@
             }
           ],
           "target": {
+            "external": {
+              "id": 0,
+              "key": "str"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "nested_later_class.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 31
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "nested_later_class.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "nested_later_class.Outer"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "nested_later_class.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 37
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "nested_later_class.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "nested_later_class.Outer.Inner"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "nested_later_class.py"
+          },
+          "spans": [
+            {
+              "length": 6,
+              "start": 45
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "nested_later_class.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "nested_later_class.Outer.Inner.method"
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.TargetUses.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "nested_later_class.py"
+          },
+          "spans": [
+            {
+              "length": 3,
+              "start": 113
+            },
+            {
+              "length": 3,
+              "start": 15
+            }
+          ],
+          "target": {
             "id": 0,
             "key": "str"
           }
@@ -1276,6 +1396,6 @@
     "predicate": "python.Module.4"
   },
   {
-    "schema_id": "f329796272b9314200433ac342cbc15c"
+    "schema_id": "60aea86d7ff049228df605cf3fda4c67"
   }
 ]

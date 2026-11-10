@@ -15,6 +15,7 @@ use pyrefly_python::ast::Ast;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::data_frame::DataFrameKind;
 use pyrefly_types::facet::FacetKind;
+use pyrefly_types::known_class::KnownClass;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
@@ -371,7 +372,7 @@ impl<'a> Transaction<'a> {
                 if unpacked.arguments.args.is_empty()
                     && matches!(
                         self.get_type_trace(handle, unpacked.func.range()),
-                        Some(Type::ClassDef(class)) if class.is_builtin("dict")
+                        Some(Type::ClassDef(class)) if class.is(KnownClass::Dict)
                     ) =>
             {
                 for keyword in &unpacked.arguments.keywords {
@@ -843,20 +844,23 @@ impl<'a> Transaction<'a> {
         })
     }
 
+    /// Returns whether `position` is in a string-literal value of a dict literal whose expected
+    /// type is a `TypedDict` with that key, in which case the completions for the value come
+    /// from here.
     pub(crate) fn add_dict_value_literal_completions(
         &self,
         handle: &Handle,
         module: &ModModule,
         position: TextSize,
         completions: &mut Vec<RankedCompletion>,
-    ) {
+    ) -> bool {
         let Some((dict, key_lit, value_lit)) =
             Self::dict_literal_value_string_literal_at(module, position)
         else {
-            return;
+            return false;
         };
         if position < value_lit.range().start() || position > value_lit.range().end() {
-            return;
+            return false;
         }
         let Some(members) = self.narrowed_typed_dict_members_for_dict_literal(
             handle,
@@ -865,14 +869,15 @@ impl<'a> Transaction<'a> {
             Some(key_lit.range()),
             Some(value_lit.range()),
         ) else {
-            return;
+            return false;
         };
         let Some(field_ty) =
             self.typed_dict_field_type_from_members(handle, members, key_lit.value.to_str())
         else {
-            return;
+            return false;
         };
         Self::add_literal_completions_from_type(&field_ty, completions, true);
+        true
     }
 
     /// Collects column names that are present in every member of a DataFrame union.
@@ -1122,7 +1127,7 @@ impl<'a> Transaction<'a> {
             || in_keyword_value
             || !matches!(
                 self.get_type_trace(handle, call.func.range()),
-                Some(Type::ClassDef(class)) if class.is_builtin("dict")
+                Some(Type::ClassDef(class)) if class.is(KnownClass::Dict)
             )
         {
             return None;

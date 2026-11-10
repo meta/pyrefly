@@ -3495,7 +3495,8 @@ def f(x: int | str):
         raises()
     else:
         raises()
-    assert_type(x, Never)  # E: This code is unreachable
+    assert_type(x, Never)
+    print(1)  # E: This code is unreachable
 "#,
 );
 
@@ -3533,6 +3534,101 @@ def f(x: int) -> str:
     else:
         maybe_raises()
     return y  # E: `y` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_nested_noreturn_branches_terminate_outer_branch,
+    r#"
+from typing import NoReturn
+
+def raises() -> NoReturn:
+    raise Exception()
+
+def f(cond: bool, cond2: bool) -> str:
+    if cond:
+        x = "defined"
+    else:
+        if cond2:
+            raises()
+        else:
+            raises()
+    return x
+"#,
+);
+
+testcase!(
+    test_nested_noreturn_and_non_noreturn_branches,
+    r#"
+from typing import NoReturn
+
+def raises() -> NoReturn:
+    raise Exception()
+
+def maybe_raises() -> None:
+    if True:
+        raise Exception()
+
+def f(cond: bool, cond2: bool) -> str:
+    if cond:
+        x = "defined"
+    else:
+        if cond2:
+            raises()
+        else:
+            maybe_raises()
+    return x  # E: `x` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_nested_exhaustive_match_terminates_outer_branch,
+    r#"
+class A: ...
+
+def f(flag: bool, x: A) -> int:
+    if flag:
+        y = 1
+    else:
+        match x:
+            case A():
+                raise ValueError("x")
+    return y
+"#,
+);
+
+testcase!(
+    test_nested_non_exhaustive_match_does_not_terminate_outer_branch,
+    r#"
+class A: ...
+class B: ...
+
+def f(flag: bool, x: A | B) -> int:
+    if flag:
+        y = 1
+    else:
+        match x:
+            case A():
+                raise ValueError("x")
+    return y  # E: `y` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_nested_noreturn_in_loop_does_not_terminate,
+    r#"
+from typing import NoReturn
+
+def raises() -> NoReturn:
+    raise Exception()
+
+def f(cond: bool, xs: list[int]) -> str:
+    if cond:
+        x = "defined"
+    else:
+        for _ in xs:
+            raises()
+    return x  # E: `x` may be uninitialized
 "#,
 );
 
@@ -3780,6 +3876,105 @@ match x:
 print(y)
     "#,
 );
+
+// Regression test for https://github.com/facebook/pyrefly/issues/5186.
+testcase!(
+    test_noreturn_try_except_narrowing,
+    r#"
+from __future__ import annotations
+from typing import Never, assert_type
+
+def fail() -> Never:
+    raise Exception()
+
+def try_never(x: str | None) -> str:
+    if x is None:
+        try:
+            fail()
+        except Exception:
+            raise Exception()
+    assert_type(x, str)
+    return x
+
+def except_never(x: str | None) -> str:
+    if x is None:
+        try:
+            raise Exception()
+        except Exception:
+            fail()
+    assert_type(x, str)
+    return x
+
+def nested_try(x: str | None) -> str:
+    if x is None:
+        try:
+            try:
+                fail()
+            except ValueError:
+                raise
+        except Exception:
+            raise
+    assert_type(x, str)
+    return x
+
+def handler_returns(x: str | None) -> None:
+    if x is None:
+        try:
+            fail()
+        except Exception:
+            pass
+    assert_type(x, str | None)
+
+def try_returns(x: str | None) -> None:
+    if x is None:
+        try:
+            print(x)
+        except Exception:
+            raise
+    assert_type(x, str | None)
+"#,
+);
+
+testcase!(
+    test_noreturn_single_live_branch_initialization,
+    r#"
+from typing import Never
+
+def fail() -> Never:
+    raise Exception()
+
+def f(flag: bool, values: list[int]) -> None:
+    for value in values:
+        x = value
+    if flag:
+        return
+    else:
+        fail()
+    print(x)  # E: This code is unreachable
+
+def returns() -> None:
+    pass
+
+def ordinary_call(flag: bool, values: list[int]) -> None:
+    for value in values:
+        x = value
+    if flag:
+        return
+    else:
+        returns()
+    print(x)  # E: `x` may be uninitialized
+"#,
+);
+
+#[test]
+fn test_noreturn_single_live_branch_long_guard_chain() -> anyhow::Result<()> {
+    let mut contents = String::from("def f(x: str | None) -> str:\n");
+    for _ in 0..100 {
+        contents.push_str("    if x is None:\n        return ''\n");
+    }
+    contents.push_str("    return x\n");
+    testcase_for_macro(TestEnv::new(), &contents, file!(), line!())
+}
 
 // Issue #2406: NoReturn in except block should make variable always initialized
 testcase!(
@@ -4323,6 +4518,28 @@ def genuinely_live(value: bool, mixed: Literal[False] | Literal[True]) -> None:
 "#,
 );
 
+// The value of a walrus test is the value it assigns.
+testcase!(
+    test_unreachable_branch_suite_from_walrus_test,
+    r#"
+from typing import Literal
+
+def falsy(value: Literal[False]) -> None:
+    if x := value:
+        print(1)  # E: This code is unreachable
+
+def truthy(value: Literal[True]) -> None:
+    if x := value:
+        print(2)
+    else:
+        print(3)  # E: This code is unreachable
+
+def in_a_bool_op(value: Literal[False], other: bool) -> None:
+    if (x := value) and other:
+        print(4)  # E: This code is unreachable
+"#,
+);
+
 // A test that consults the runtime environment decides its branch under this configuration only,
 // so neither the branch it guards nor the ones below it may be reported.
 testcase!(
@@ -4574,18 +4791,16 @@ def after_environment_clause() -> None:
 "#,
 );
 
-// The first `if` leaves `x` set or unset depending on keys of its own suites. The second `if`'s
-// `else` never reaches the merge, but a branch whose state depends on keys is not decided by its
-// own termination key, so its doubt carries through.
+// The first `if` leaves `x` unset on the path through its `else`. That path reaches the read only
+// through the second `if`'s `else`, so it needs both suites to reach their ends.
 testcase!(
-    bug = "A branch that never reaches the merge keeps doubt it carries from an earlier `if`",
-    test_doubt_from_earlier_if_survives_branch_that_never_returns,
+    test_unset_path_from_earlier_if_needs_every_branch_on_it,
     r#"
 from typing import NoReturn
 
 def stop() -> NoReturn: ...
 
-def f(c: bool, d: bool) -> None:
+def cut_off_later(c: bool, d: bool) -> None:
     if c:
         x = 1
     else:
@@ -4594,7 +4809,242 @@ def f(c: bool, d: bool) -> None:
         x = 2
     else:
         stop()
+    print(x)
+
+def cut_off_earlier(c: bool, d: bool) -> None:
+    if c:
+        x = 1
+    else:
+        stop()
+    if d:
+        x = 2
+    else:
+        print(0)
+    print(x)
+
+def not_cut_off(c: bool, d: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    if d:
+        x = 2
+    else:
+        print(0)
     print(x)  # E: `x` may be uninitialized
+
+def cut_off_two_merges_later(c: bool, d: bool, e: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    if d:
+        print(0)
+    else:
+        print(1)
+    if e:
+        x = 2
+    else:
+        stop()
+    print(x)
+
+# Branches that carry the same unset paths share one node, and a merge in which every branch
+# carries them adds no node at all.
+def many_later_merges(c: bool, e: list[bool]) -> None:
+    if c:
+        x = 1
+    if e[0]: print(0)
+    if e[1]: print(1)
+    if e[2]: print(2)
+    if e[3]: print(3)
+    if e[4]: print(4)
+    if e[5]: print(5)
+    if e[6]: print(6)
+    if e[7]: print(7)
+    if e[8]: print(8)
+    if e[9]: print(9)
+    if e[10]: print(10)
+    if e[11]: print(11)
+    if e[12]: print(12)
+    if e[13]: print(13)
+    if e[14]: print(14)
+    if e[15]: print(15)
+    if e[16]: print(16)
+    if e[17]: print(17)
+    if e[18]: print(18)
+    if e[19]: print(19)
+    if e[20]: print(20)
+    if e[21]: print(21)
+    if e[22]: print(22)
+    if e[23]: print(23)
+    if e[24]: print(24)
+    if e[25]: print(25)
+    if e[26]: print(26)
+    if e[27]: print(27)
+    if e[28]: print(28)
+    if e[29]: print(29)
+    print(x)  # E: `x` may be uninitialized
+
+# A value assigned inside nested `if`s carries the unset paths to the outer merge beside the earlier
+# value. The two share their earlier nodes, so the graph grows by a few nodes per `if` instead of
+# doubling.
+def nested_later_merges(c: bool, d: list[bool], e: list[bool]) -> None:
+    if c:
+        x = 0
+    if d[0]:
+        if e[0]: x = 1
+    if d[1]:
+        if e[1]: x = 2
+    if d[2]:
+        if e[2]: x = 3
+    if d[3]:
+        if e[3]: x = 4
+    if d[4]:
+        if e[4]: x = 5
+    if d[5]:
+        if e[5]: x = 6
+    if d[6]:
+        if e[6]: x = 7
+    if d[7]:
+        if e[7]: x = 8
+    if d[8]:
+        if e[8]: x = 9
+    if d[9]:
+        if e[9]: x = 10
+    if d[10]:
+        if e[10]: x = 11
+    if d[11]:
+        if e[11]: x = 12
+    if d[12]:
+        if e[12]: x = 13
+    if d[13]:
+        if e[13]: x = 14
+    if d[14]:
+        if e[14]: x = 15
+    if d[15]:
+        if e[15]: x = 16
+    if d[16]:
+        if e[16]: x = 17
+    if d[17]:
+        if e[17]: x = 18
+    if d[18]:
+        if e[18]: x = 19
+    if d[19]:
+        if e[19]: x = 20
+    if d[20]:
+        if e[20]: x = 21
+    if d[21]:
+        if e[21]: x = 22
+    if d[22]:
+        if e[22]: x = 23
+    if d[23]:
+        if e[23]: x = 24
+    if d[24]:
+        if e[24]: x = 25
+    if d[25]:
+        if e[25]: x = 26
+    if d[26]:
+        if e[26]: x = 27
+    if d[27]:
+        if e[27]: x = 28
+    if d[28]:
+        if e[28]: x = 29
+    if d[29]:
+        if e[29]: x = 30
+    print(x)  # E: `x` may be uninitialized
+
+# The same nesting stays exact: a later branch that never returns cuts off every path.
+def nested_then_cut_off(c: bool, d: list[bool], e: list[bool]) -> None:
+    if c:
+        x = 0
+    if d[0]:
+        if e[0]: x = 1
+    if d[1]:
+        if e[1]: x = 2
+    if d[2]:
+        if e[2]: x = 3
+    if d[3]:
+        if e[3]: x = 4
+    if d[4]:
+        if e[4]: x = 5
+    if d[5]:
+        x = 6
+    else:
+        stop()
+    print(x)
+
+# Two branches carry the unset paths through one merge, and only one of them never returns.
+def shared_merge(c: bool, d: bool, e: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    if d:
+        x = 2
+    elif e:
+        stop()
+    else:
+        pass
+    print(x)  # E: `x` may be uninitialized
+"#,
+);
+
+// A `match`, a `try`, and a loop's `else` are merges too, and a branch of one that never returns
+// cuts off the paths that pass through it.
+testcase!(
+    test_unset_path_from_earlier_if_cut_off_by_other_merges,
+    r#"
+from typing import NoReturn
+
+def stop() -> NoReturn: ...
+
+def through_match(c: bool, v: int) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    match v:
+        case 0:
+            x = 2
+        case _:
+            stop()
+    print(x)
+
+def through_try(c: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    try:
+        x = 2
+    except ValueError:
+        stop()
+    print(x)
+
+def through_for_else(c: bool, d: bool, r: list[int]) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    for i in r:
+        if d:
+            x = 2
+            break
+    else:
+        stop()
+    print(x)
+
+def through_while_else(c: bool, d: bool) -> None:
+    if c:
+        x = 1
+    else:
+        pass
+    while d:
+        x = 2
+        break
+    else:
+        stop()
+    print(x)
 "#,
 );
 
@@ -5011,6 +5461,419 @@ def reads(c: C, u: Cfg | OtherCfg, h: Holder, pick: bool) -> None:
 "#,
 );
 
+fn env_imported_constants() -> TestEnv {
+    let mut env = TestEnv::new();
+    env.add(
+        "cfg",
+        r#"
+from typing import Final, Literal
+
+def enabled():
+    return False
+
+DEBUG: Final = False
+ON: Final[Literal[True]] = True
+TYPED: Final[bool] = False
+INFERRED: Final = enabled()
+PLAIN = False
+ANNOTATED: Literal[False] = False
+"#,
+    );
+    env.add("reexport", "from cfg import DEBUG as DEBUG");
+    env.add("pkg", "");
+    env.add("pkg.sub", "from typing import Final\nOFF: Final = False");
+    env.add(
+        "plat",
+        r#"
+import sys
+from typing import Final
+
+if sys.platform == "win32":
+    IS_WIN: Final = True
+    from cfg import ON as CHOSEN
+    import cfg as config
+    from cfg import *
+else:
+    IS_WIN: Final = False
+    from cfg import DEBUG as CHOSEN
+    import pkg.sub as config
+    from pkg.sub import *
+"#,
+    );
+    env.add(
+        "holder",
+        r#"
+import pkg.sub as sub_alias
+import plat
+import settings
+from chooser import chooser as conf
+held = plat.config
+"#,
+    );
+    env.add(
+        "chooser",
+        r#"
+import sys
+
+if sys.platform == "win32":
+    import cfg as chooser
+else:
+    import pkg.sub as chooser
+"#,
+    );
+    env.add(
+        "early",
+        r#"
+import sys
+from typing import Final
+
+def flag() -> bool: ...
+
+if flag():
+    EARLY: Final = False
+    LATE: Final = False
+elif sys.platform == "win32":
+    LATE: Final = True
+else:
+    raise ImportError()
+"#,
+    );
+    env.add(
+        "star_defaults",
+        "from typing import Final\nOVERRIDE: Final = False\nfrom win_override import *",
+    );
+    env.add(
+        "win_override",
+        "import sys\nif sys.platform == \"win32\":\n    OVERRIDE = True",
+    );
+    env.add(
+        "settings",
+        "from typing import Final\nOFF: Final = False\nsettings = 1",
+    );
+    env.add_with_path("rpkg", "rpkg/__init__.py", "from . import sub");
+    env.add("rpkg.sub", "from typing import Final\nOFF: Final = False");
+    env.add("win_sub", "from typing import Final\nOFF: Final = True");
+    env.add(
+        "nested_win",
+        r#"
+import sys
+from typing import Final
+
+G: Final = False
+DEEP: Final = False
+if sys.platform == "win32":
+    if sys.version_info < (3, 10):
+        G: Final = True
+        from win_deep import *
+"#,
+    );
+    env.add("win_deep", "from typing import Final\nDEEP: Final = True");
+    env.add(
+        "defaults_then_win",
+        r#"
+import sys
+from pkg.sub import *
+
+if sys.platform == "win32":
+    from win_sub import *
+"#,
+    );
+    env.add(
+        "rebinder",
+        r#"
+from cfg import DEBUG
+
+def enable() -> None:
+    global DEBUG
+    DEBUG = True
+"#,
+    );
+    env
+}
+
+// Another module can reassign its variables, and tests patch them, so a name from another module
+// settles a test only if it is `Final` with a declared type: `Final[T]`, or a bare `Final` assigned
+// a literal. A name, or a module, defined or imported under a test of the environment has another
+// value elsewhere.
+testcase!(
+    test_final_from_another_module_settles_tests,
+    env_imported_constants(),
+    r#"
+import cfg
+import cfg as cfg_alias
+import defaults_then_win
+import holder
+import plat
+import rpkg
+import star_defaults
+import sys
+from cfg import ANNOTATED, DEBUG, INFERRED, ON, PLAIN, TYPED
+from early import EARLY, LATE
+from holder import held
+from pkg import sub
+from star_defaults import OVERRIDE
+from pkg.sub import OFF as LOCAL_OFF
+from plat import IS_WIN
+from reexport import DEBUG as REEXPORTED
+from typing import Literal, assert_type
+
+if sys.platform == "win32":
+    import cfg as chosen
+    from win_sub import OFF as LOCAL_OFF
+else:
+    import pkg.sub as chosen
+aliased = chosen
+
+def settled() -> None:
+    if DEBUG:
+        print(1)  # E: This code is unreachable
+    if ON:
+        x = 1
+    else:
+        x = 2  # E: This code is unreachable
+    assert_type(x, Literal[1])
+    if cfg.DEBUG:
+        print(2)  # E: This code is unreachable
+    if REEXPORTED:
+        print(3)  # E: This code is unreachable
+    if cfg_alias.DEBUG:
+        print(31)  # E: This code is unreachable
+    if sub.OFF:
+        print(32)  # E: This code is unreachable
+    if holder.sub_alias.OFF:
+        print(33)  # E: This code is unreachable
+    if rpkg.sub.OFF:
+        print(34)  # E: This code is unreachable
+    if holder.settings.OFF:
+        print(35)  # E: This code is unreachable
+    if EARLY:
+        print(37)  # E: This code is unreachable
+
+def not_settled() -> None:
+    if TYPED:
+        print(4)
+    if INFERRED:
+        print(5)
+    if PLAIN:
+        print(6)
+    if ANNOTATED:
+        print(7)
+    if cfg.PLAIN:
+        print(8)
+    if IS_WIN:
+        print(9)
+    if plat.CHOSEN:
+        print(10)
+    if plat.OFF:
+        print(11)
+    if chosen.OFF:
+        print(12)
+    if plat.config.OFF:
+        print(13)
+    if defaults_then_win.OFF:
+        print(14)
+    if LOCAL_OFF:
+        print(15)
+    if aliased.OFF:
+        print(16)
+    if holder.held.OFF:
+        print(17)
+    if held.OFF:
+        print(18)
+    if LATE:
+        print(19)
+    if holder.conf.OFF:
+        print(20)
+    if OVERRIDE:
+        print(21)
+    if star_defaults.OVERRIDE:
+        print(22)
+"#,
+);
+
+// The imported name is not itself `Final`, so a module that rebinds or deletes it settles nothing
+// through it, while a submodule attribute still settles.
+testcase!(
+    test_final_from_another_module_rebound_by_importer,
+    env_imported_constants(),
+    r#"
+import pkg.sub
+from cfg import DEBUG, ON
+
+def enable() -> None:
+    global DEBUG
+    DEBUG = True
+
+del ON
+
+def reads() -> None:
+    if DEBUG:
+        print(1)
+    if pkg.sub.OFF:
+        print(2)  # E: This code is unreachable
+    if ON:
+        print(3)
+"#,
+);
+
+// Another configuration may run a definition that this one rules out two tests deep, or one that
+// a star import in a suite this configuration rules out brings in.
+testcase!(
+    test_override_in_skipped_suite_settles_nothing,
+    env_imported_constants(),
+    r#"
+import nested_win
+import sys
+from typing import Final
+
+G: Final = False
+if sys.platform == "win32":
+    if sys.version_info < (3, 10):
+        G: Final = True
+if G:
+    print(1)
+
+OFF: Final = False
+if sys.platform == "win32":
+    from win_sub import *
+if OFF:
+    print(2)
+
+if nested_win.G:
+    print(3)
+
+DEEP: Final = False
+if sys.platform == "win32":
+    if sys.version_info < (3, 10):
+        from win_deep import *
+if DEEP:
+    print(4)
+
+if nested_win.DEEP:
+    print(5)
+"#,
+);
+
+// Only the importing module's own `global` declarations are checked, not those of a module the
+// name is re-exported through.
+testcase!(
+    bug = "A re-exporting module that rebinds a `Final` through `global` still settles it",
+    test_final_reexported_by_rebinding_module,
+    env_imported_constants(),
+    r#"
+import rebinder
+
+rebinder.enable()
+if rebinder.DEBUG:
+    print(1)  # E: This code is unreachable
+"#,
+);
+
+// A test of the environment chooses which definition the configuration sees, and another
+// configuration chooses another, so the definition settles nothing.
+testcase!(
+    test_definition_under_environment_test_settles_nothing,
+    r#"
+import sys
+from typing import Final, Literal
+
+def flag() -> bool: ...
+
+if sys.platform == "win32":
+    IS_WIN: Final = True
+    def native() -> Literal[True]: ...
+else:
+    IS_WIN: Final = False
+    def native() -> Literal[False]: ...
+
+if IS_WIN:
+    print(1)
+if native():
+    print(2)
+
+def f() -> None:
+    if IS_WIN:
+        print(3)
+
+# The test chooses whether a function or class exists, but not what its body defines.
+if sys.version_info >= (3, 8):
+    def g(flag: Literal[False]) -> None:
+        if flag:
+            print(4)  # E: This code is unreachable
+
+    class C:
+        OFF: Final = False
+        if OFF:
+            print(5)  # E: This code is unreachable
+
+    # A read inside the same suite exists exactly when the definition does.
+    SAME: Final = False
+    if SAME:
+        print(6)  # E: This code is unreachable
+    if flag():
+        pass
+    AFTER_NESTED: Final = False
+OUTSIDE: Final = False
+if OUTSIDE:
+    print(7)  # E: This code is unreachable
+if SAME:
+    print(8)
+if AFTER_NESTED:
+    print(11)
+
+# Another configuration sees the definition in the suite this one rules out.
+OVERRIDDEN: Final = False
+if sys.platform == "win32":
+    OVERRIDDEN: Final = True
+if OVERRIDDEN:
+    print(9)
+
+# A definition before the first test of the environment is the same in every configuration, but
+# a suite after it may override it.
+if flag():
+    CHAINED: Final = False
+elif sys.platform == "win32":
+    CHAINED: Final = True
+else:
+    raise ValueError()
+if CHAINED:
+    print(10)
+if flag():
+    EARLIER: Final = False
+elif sys.platform == "win32":
+    raise ValueError()
+else:
+    raise ValueError()
+if EARLIER:
+    print(17)  # E: This code is unreachable
+
+# An override nested in the same suite may run before a read there.
+if sys.platform == "linux":
+    NESTED: Final = False
+    if sys.version_info < (3, 10):
+        NESTED: Final = True
+    if NESTED:
+        print(12)
+
+# Another configuration may choose a suite after the one this configuration chooses.
+LATER: Final = False
+if sys.platform == "linux":
+    pass
+else:
+    LATER: Final = True
+if LATER:
+    print(13)
+
+# A suite that runs is followed by the code after it, so an override nested in it reaches there.
+CHOSEN_OUTER: Final = False
+if sys.platform == "linux":
+    if sys.version_info < (3, 10):
+        CHOSEN_OUTER: Final = True
+if CHOSEN_OUTER:
+    print(15)
+"#,
+);
+
 // The paths inside a suite that declarations settle as dead never reach the end, whether the
 // suite ends in an expression or in a nested `if`.
 testcase!(
@@ -5204,14 +6067,13 @@ def mixed_with_return() -> None:
 "#,
 );
 
-// Two kinds of path the compound gate never reports. A branch the environment pruned decides the
-// statement under this configuration only. An exhaustive chain is dead only by narrowing, which
-// `assert_never` deliberately relies on, so reporting it would condemn the idiom.
+// A branch the environment pruned decides the statement under this configuration only, and a
+// suite dead under one configuration is live under another, so the compound gate never reports it.
 testcase!(
-    test_no_compound_gate_for_environment_or_exhaustiveness,
+    test_no_compound_gate_for_environment,
     r#"
 import sys
-from typing import Never, NoReturn, assert_never
+from typing import NoReturn
 
 def never() -> NoReturn: ...
 
@@ -5221,16 +6083,192 @@ def environment_decided() -> None:
     else:
         never()
     print(1)
+"#,
+);
+
+// A `match` that narrowing proves exhaustive, and whose every case diverges, cannot be passed
+// either. The proof is the one that already reports a dead `case` and types the function's
+// implicit return as `Never`, so the code after it is dead by the same token.
+testcase!(
+    test_unreachable_after_type_exhaustive_match,
+    r#"
+from typing import NoReturn
+
+def never() -> NoReturn: ...
 
 class Dog: pass
 class Cat: pass
 
+def exhaustive_match(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            raise ValueError()
+        case Cat():
+            never()
+    print(1)  # E: This code is unreachable
+
+# One case returns normally, so the statement is passed.
+def one_case_falls_through(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            raise ValueError()
+        case Cat():
+            pass
+    print(2)
+
+# A value escapes every case, so the statement is passed.
+def not_exhaustive(pet: Dog | Cat | None) -> None:
+    match pet:
+        case Dog():
+            raise ValueError()
+        case Cat():
+            raise ValueError()
+    print(3)
+
+# An `if` chain's fall-through is dead code only when its test settles it. Its narrowing is not
+# trusted here, since a test can be settled by a value the check deliberately ignores.
 def exhaustive_chain(pet: Dog | Cat) -> None:
     if isinstance(pet, Dog):
         return
     if isinstance(pet, Cat):
         return
+    print(4)
+"#,
+);
+
+// `assert_never` relies on exactly that deadness: it sits where narrowing proves nothing runs, so
+// the checker confirms the proof and the runtime enforces it. It is exempt as a statement, not as
+// a mechanism. A divergence marker, a `raise`, a failing `assert` or an expression of type
+// `Never`, is never where a dead region begins, and the code after the marker is still reported.
+testcase!(
+    test_divergence_marker_after_exhaustive_match_is_not_reported,
+    r#"
+from typing import Never, NoReturn, assert_never, assert_type
+
+class Dog: pass
+class Cat: pass
+
+def never() -> NoReturn: ...
+
+def idiom(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
     assert_never(pet)
+
+def idiom_in_case(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+        case _:
+            assert_never(pet)
+
+def idiom_in_chain(pet: Dog | Cat) -> None:
+    if isinstance(pet, Dog):
+        return
+    if isinstance(pet, Cat):
+        return
+    assert_never(pet)
+
+# The `Never` came in through the argument rather than from the call, and the statement still
+# says that nothing continues.
+def type_assertion(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    assert_type(pet, Never)
+
+def custom_helper(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            raise ValueError()
+        case Cat():
+            raise ValueError()
+    never()
+
+def defensive_raise(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    raise AssertionError("unreachable")
+
+def defensive_assert(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    assert False, "unreachable"
+
+def after_the_marker(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    assert_never(pet)
+    print(1)  # E: This code is unreachable
+
+def after_the_raise(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    raise AssertionError("unreachable")
+    print(2)  # E: This code is unreachable
+
+def after_the_type_assertion(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    assert_type(pet, Never)
+    print(3)  # E: This code is unreachable
+
+# A call that returns is not a marker, so the region begins there.
+def returning_call_is_not_a_marker(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    print(4)  # E: This code is unreachable
+    print(5)
+"#,
+);
+
+// The exemption is about the statement, not about where the deadness came from, so a defensive
+// marker after a call that never returns is not reported either. The code after it still is.
+testcase!(
+    test_divergence_marker_after_a_diverging_call,
+    r#"
+from typing import NoReturn
+
+def never() -> NoReturn: ...
+
+def defensive_raise() -> None:
+    never()
+    raise AssertionError("unreachable")
+
+def two_calls() -> None:
+    never()
+    never()
+    print(1)  # E: This code is unreachable
+
+def after_defensive_raise() -> None:
+    never()
+    raise AssertionError("unreachable")
+    print(2)  # E: This code is unreachable
 "#,
 );
 

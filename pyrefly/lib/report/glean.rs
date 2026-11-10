@@ -430,10 +430,10 @@ fn module_names_only_change_reported_names() {
         .unwrap()["facts"][0]["key"]["file"]["key"]
         .as_str()
         .unwrap();
-    let naming = GleanNaming {
-        module_names: HashMap::from([(file.to_owned(), "public.api".to_owned())]),
-        stdlib_root: None,
-    };
+    let naming = GleanNaming::new(
+        HashMap::from([(file.to_owned(), "public.api".to_owned())]),
+        None,
+    );
     let renamed = glean(&transaction, original, false, &naming);
     assert!(renamed.contains("public.api.Widget"));
     assert!(!renamed.contains("original.Widget"));

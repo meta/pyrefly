@@ -9,13 +9,12 @@ use std::iter;
 
 use dupe::Dupe;
 use pyrefly_python::dunder;
+use pyrefly_python::keywords::is_valid_identifier;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitEnum;
-use pyrefly_types::shaped_array::ShapedArrayType;
-use pyrefly_types::shaped_array::shape_to_tuple_carrier;
-use pyrefly_types::shaped_array::shape_to_tuple_carrier_arg;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::typed_dict::TypedDictInner;
 use pyrefly_types::types::Forallable;
@@ -27,6 +26,7 @@ use pyrefly_util::suggest::best_suggestion;
 use ruff_python_ast::helpers::is_dunder;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
+use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 use vec1::Vec1;
 
@@ -119,6 +119,8 @@ pub enum AttrSubsetError {
         got: Type,
         want: Type,
         subset_error: SubsetError,
+        // Allows override diagnostics to distinguish read and write failures.
+        read_compatible: bool,
     },
     // `want` is not a subtype of `got`
     // applies to property setters
@@ -205,6 +207,7 @@ impl AttrSubsetError {
                 got,
                 want,
                 subset_error: _,
+                read_compatible: _,
             } => {
                 format!(
                     "`{child_class}.{attr_name}` has type `{}`, which is not consistent with `{}` in `{parent_class}.{attr_name}` (the type of read-write attributes cannot be changed)",
@@ -299,15 +302,22 @@ pub enum NoAccessReason {
 
 /// How to check the value assigned to an attribute on one member of the base.
 pub enum AttrSetter {
-    /// Check the value against a declared type. If `narrow` is true, the checked type of the
-    /// value may be used to narrow the attribute.
-    Declared { ty: Type, narrow: bool },
+    /// Check the value against a declared type and apply the specified narrowing rule.
+    Declared { ty: Type, narrow: AttrNarrowing },
     /// Call `__setattr__` with the value.
     SetAttr(Type),
     /// Call a property setter with the value.
     PropertySetter(Type),
     /// Call a descriptor's `__set__` with the value.
     DescriptorSetter(Type, DescriptorBase),
+}
+
+/// When an assignment can narrow the attribute's read type.
+pub enum AttrNarrowing {
+    Always,
+    Never,
+    /// Narrow only when the assigned value fits the read type.
+    IfAssignable(Type),
 }
 
 #[derive(Debug)]
@@ -375,6 +385,18 @@ impl NoAccessReason {
                     "Proxy method `{attr_name}` of class `{class_name}` cannot resolve target method `{target}`"
                 )
             }
+        }
+    }
+
+    pub fn error_kind(&self, default: ErrorKind) -> ErrorKind {
+        match self {
+            NoAccessReason::SuperMethodNeedsImplementation(_) => ErrorKind::AbstractMethodCall,
+            NoAccessReason::ClassUseOfInstanceAttribute(_)
+            | NoAccessReason::ClassAttributeIsGeneric(_)
+            | NoAccessReason::SettingReadOnlyProperty(_)
+            | NoAccessReason::SettingReadOnlyDescriptor(_)
+            | NoAccessReason::ProxyMethodClassAccess(_)
+            | NoAccessReason::ProxyMethodTargetInvalid { .. } => default,
         }
     }
 }
@@ -540,22 +562,6 @@ enum AttributeBase1 {
     /// Bound methods prefer exposing builtin `types.MethodType` attributes but fall back to the
     /// underlying function's attributes when the builtin ones are missing.
     BoundMethod(BoundMethodType),
-    /// Shaped-array instance with shape information preserved for method resolution.
-    ///
-    /// This variant exists to handle `Type::ShapedArray` specially during attribute lookup.
-    /// Unlike `ClassInstance`, which only tracks the class type, `ShapedArrayInstance` preserves
-    /// the full `ShapedArrayType` including shape information.
-    ///
-    /// **Why this is needed:**
-    /// Tensor-like methods often use `Self` in their return type (e.g., `def reshape(self, ...) -> Self`).
-    /// When we look up such a method on `Tensor[N, M]`, we need to substitute `Self` with the
-    /// full shaped-array type so the result type is `Tensor[...]` with proper shape tracking, not
-    /// just the base class.
-    ///
-    /// **Invariant:** The `ShapedArrayType::base_class` is always a valid class type from which
-    /// attributes are looked up. The shape information in the shaped-array type is preserved through
-    /// the substitution of `Self` in attribute types.
-    ShapedArrayInstance(ShapedArrayType),
 }
 
 impl AttributeBase1 {
@@ -641,7 +647,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             |attr_base| self.lookup_attr(attr_base, attr_name),
         );
         let mut types = Vec::new();
-        let mut error_messages = Vec::new();
+        let mut access_errors: Vec<(ErrorKind, String)> = Vec::new();
         let mut success = true;
         let (found, not_found, error) = lookup_result.decompose();
         if found.is_empty()
@@ -666,13 +672,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Ok(ty) => types.push(ty),
                 Err(err) => {
                     can_narrow_none = false;
-                    error_messages.push(err.to_error_msg(attr_name));
+                    access_errors.push((err.error_kind(error_kind), err.to_error_msg(attr_name)));
                     success = false;
                 }
             }
         }
         for err in not_found {
-            error_messages.push(err.to_error_msg(attr_name));
+            access_errors.push((error_kind, err.to_error_msg(attr_name)));
             success = false;
         }
         for err in error {
@@ -686,19 +692,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // `.register` on a singledispatch dispatcher needs the fallback's first param, only
             // available here; the tagging logic lives in `singledispatch.rs`.
             self.tag_singledispatch_register(base, attr_name, self.unions(types))
-        } else if !error_messages.is_empty() {
-            error_messages.sort();
-            error_messages.dedup();
-            let (header, mut details) = if error_messages.len() > 1 {
+        } else if !access_errors.is_empty() {
+            access_errors.sort();
+            access_errors.dedup();
+            let (kind, header, mut details) = if access_errors.len() > 1 {
                 (
+                    error_kind,
                     format!(
                         "Object of type `{}` has no attribute `{attr_name}`",
                         self.for_display(base.clone())
                     ),
-                    error_messages,
+                    access_errors.into_iter().map(|(_, msg)| msg).collect(),
                 )
             } else {
-                (error_messages.remove(0), Vec::new())
+                let (kind, msg) = access_errors.remove(0);
+                (kind, msg, Vec::new())
             };
             // Skip suggestions when we have a partial union failure to avoid suggesting
             // attributes from the types that have them when the problem is that some types
@@ -711,7 +719,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 details.push(format!("Did you mean `{suggestion}`?"));
             }
             let mut builder = errors
-                .error_builder(range, error_kind, header)
+                .error_builder(range, kind, header)
                 .with_details(details)
                 .with_context(context);
             if can_narrow_none {
@@ -1127,7 +1135,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         got.clone()
                     }
                 };
-                narrow.then_some(got_ty)
+                match narrow {
+                    AttrNarrowing::Always => Some(got_ty),
+                    AttrNarrowing::Never => None,
+                    AttrNarrowing::IfAssignable(read_type) => {
+                        self.is_subset_eq(&got_ty, &read_type).then_some(got_ty)
+                    }
+                }
             }
             AttrSetter::SetAttr(setattr_ty) => {
                 self.call_setattr(
@@ -1226,7 +1240,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Attribute::Simple(attr_ty) => {
                     setters.push(Some(AttrSetter::Declared {
                         ty: attr_ty,
-                        narrow: true,
+                        narrow: AttrNarrowing::Always,
                     }));
                 }
                 Attribute::ClassAttribute(class_attr) => {
@@ -1250,7 +1264,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // the class to special-case dataclass converters.
                     let instance_class = match &found_on {
                         AttributeBase1::ClassInstance(cls) => Some(cls),
-                        AttributeBase1::ShapedArrayInstance(tensor) => Some(&tensor.base_class),
                         _ => None,
                     };
                     let class_base = match &found_on {
@@ -1369,7 +1382,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ];
         !relevant_dunders.iter().any(|dunder: &&Name| {
             let field = self.get_class_member_with_defining_class(cls, dunder);
-            field.is_some_and(|field| !field.defining_class.is_builtin("object"))
+            field.is_some_and(|field| !field.defining_class.is(KnownClass::Object))
         })
     }
 
@@ -1465,7 +1478,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return None;
         };
         let ty = match class_attr {
-            ClassAttribute::ReadWrite(ty, ..) | ClassAttribute::ReadOnly(ty, _) => ty,
+            ClassAttribute::ReadWrite { read_type: ty, .. } | ClassAttribute::ReadOnly(ty, _) => ty,
             _ => return None,
         };
         let Type::BoundMethod(bound_method) = ty else {
@@ -1488,9 +1501,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         new_bound_method.func = BoundMethodType::Overload(filtered_overload);
         let new_method = self.heap.mk_bound_method(new_bound_method);
         Some(Attribute::ClassAttribute(match class_attr {
-            ClassAttribute::ReadWrite(_, is_method, is_instance_var) => {
-                ClassAttribute::ReadWrite(new_method, *is_method, *is_instance_var)
-            }
+            ClassAttribute::ReadWrite {
+                is_method,
+                is_instance_var,
+                write_type: set_type,
+                ..
+            } => ClassAttribute::ReadWrite {
+                read_type: new_method,
+                is_method: *is_method,
+                is_instance_var: *is_instance_var,
+                write_type: set_type.clone(),
+            },
             ClassAttribute::ReadOnly(_, reason) => {
                 ClassAttribute::ReadOnly(new_method, reason.clone())
             }
@@ -1532,13 +1553,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             // `as_attribute_base` promotes literals, so we should promote here too
             // In the future, we should refactor `get_protocol_attribute` to reuse the `AttributeBase`, to ensure the logic is identical
-            let got = got.clone().promote_implicit_literals(self.stdlib);
+            let got = got.clone().promote(self.stdlib);
             if (!got_attrs.is_empty())
                 && let Some(want) = self.get_protocol_attribute(protocol, got.clone(), attr_name)
             {
                 let want_is_dunder_method = attr_name.starts_with("__")
                     && attr_name.ends_with("__")
-                    && matches!(want, ClassAttribute::ReadWrite(_, IsMethod::Yes, _));
+                    && matches!(
+                        want,
+                        ClassAttribute::ReadWrite {
+                            is_method: IsMethod::Yes,
+                            ..
+                        }
+                    );
                 for (got_attr, _) in got_attrs.iter() {
                     // A `__getattr__` fallback is not evidence that the missing member exists
                     // when Python would not consult `__getattr__` for it: `__getattr__` governs
@@ -1741,6 +1768,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let found_on = found_on.clone();
 
         let mut types = Vec::with_capacity(candidates.len());
+        let mut write_types = None;
         let mut read_only_reason = None;
         let mut is_class_attribute = false;
         let mut is_method = IsMethod::No;
@@ -1749,29 +1777,47 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let [(attribute, _)] = base_results.as_slice() else {
                 return None;
             };
-            let ty = match attribute {
-                Attribute::Simple(ty) => ty,
-                Attribute::ClassAttribute(ClassAttribute::ReadWrite(
-                    ty,
-                    base_is_method,
-                    base_is_instance_var,
-                )) => {
+            let projected;
+            let attribute = if let Attribute::ClassAttribute(ClassAttribute::Descriptor(
+                desc,
+                DescriptorBase::Instance(_) | DescriptorBase::SelfInstance(_),
+            )) = attribute
+            {
+                projected = Attribute::class_attribute(self.descriptor_as_attribute(desc)?);
+                &projected
+            } else {
+                attribute
+            };
+            let (ty, set_type) = match attribute {
+                Attribute::Simple(ty) => (ty, None),
+                Attribute::ClassAttribute(ClassAttribute::ReadWrite {
+                    read_type: ty,
+                    is_method: base_is_method,
+                    is_instance_var: base_is_instance_var,
+                    write_type: set_type,
+                }) => {
                     is_class_attribute = true;
                     if *base_is_method == IsMethod::Yes {
                         is_method = IsMethod::Yes;
                     }
                     is_instance_var |= *base_is_instance_var;
-                    ty
+                    (ty, set_type.as_ref())
                 }
                 Attribute::ClassAttribute(ClassAttribute::ReadOnly(ty, reason)) => {
                     is_class_attribute = true;
                     // A write has to be valid for every base, so the result is read-only if any of
                     // them are.
                     read_only_reason.get_or_insert_with(|| reason.clone());
-                    ty
+                    (ty, None)
                 }
                 _ => return None,
             };
+            if set_type.is_some() && write_types.is_none() {
+                write_types = Some(types.clone());
+            }
+            if let Some(write_types) = &mut write_types {
+                write_types.push(set_type.unwrap_or(ty).clone());
+            }
             types.push(ty.clone());
         }
         let combined = match combine {
@@ -1783,11 +1829,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Some(reason) => {
                     Attribute::class_attribute(ClassAttribute::read_only(combined, reason))
                 }
-                None => Attribute::class_attribute(ClassAttribute::ReadWrite(
-                    combined,
+                None => Attribute::class_attribute(ClassAttribute::ReadWrite {
+                    read_type: combined,
                     is_method,
                     is_instance_var,
-                )),
+                    write_type: write_types.map(|types| self.intersect_guarantees(&types)),
+                }),
             }
         } else {
             Attribute::simple(combined)
@@ -1819,33 +1866,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     base,
                 )),
             },
-            AttributeBase1::ShapedArrayInstance(tensor) => {
-                if attr_name.as_str() == "shape" {
-                    if let Some(attr) = self.get_shaped_array_attribute(tensor, attr_name) {
-                        acc.found_class_attribute(attr, base);
-                        return;
-                    }
-                    let shape = if tensor.tuple_carrier_shape_arg_index().is_some() {
-                        shape_to_tuple_carrier_arg(&tensor.shape())
-                    } else {
-                        shape_to_tuple_carrier(&tensor.shape())
-                    };
-                    acc.found_type(shape, base);
-                    return;
-                }
-
-                // For all other attributes, delegate to get_shaped_array_attribute which
-                // handles Self-type substitution via InstanceKind::ShapedArray.
-                let metadata = self.get_metadata_for_class(tensor.base_class.class_object());
-                match self.get_shaped_array_attribute(tensor, attr_name) {
-                    Some(attr) => acc.found_class_attribute(attr, base),
-                    None if metadata.has_base_any() => acc.found_type(Type::any_implicit(), base),
-                    None => acc.not_found(NotFoundOn::ClassInstance(
-                        tensor.base_class.class_object().dupe(),
-                        base,
-                    )),
-                }
-            }
             AttributeBase1::ClassInstance(class) => {
                 // Special handling for nn.ModuleDict with TypedDict type argument
                 if let Some(attr) = self.try_nn_module_dict_attr(class, attr_name) {
@@ -2017,7 +2037,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         match metaclass_attr {
                             Some(meta_attr)
                                 if self.class_attribute_is_data_descriptor(&meta_attr)
-                                    || metaclass.class_object().is_builtin("type") =>
+                                    || metaclass.class_object().is(KnownClass::Type) =>
                             {
                                 acc.found_class_attribute(meta_attr, base)
                             }
@@ -2034,7 +2054,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         {
                             let metadata = self.get_metadata_for_class(class.class_object());
                             let metaclass = metadata.metaclass(self.stdlib);
-                            if !metaclass.class_object().is_builtin("type") {
+                            if !metaclass.class_object().is(KnownClass::Type) {
                                 let metaclass_attr =
                                     self.get_metaclass_attribute(class, metaclass, attr_name);
                                 match metaclass_attr {
@@ -2181,7 +2201,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let inherited_from_object = self.field_is_inherited_from(
                     self.stdlib.generic_alias().class_object(),
                     attr_name,
-                    ("builtins", "object"),
+                    KnownClass::Object,
                 );
                 for (b, exclude) in [(&generic_alias, inherited_from_object), (&origin, false)] {
                     if exclude {
@@ -2278,7 +2298,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         metaclass.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     )
                 {
                     acc.not_found(NotFoundOn::ClassInstance(
@@ -2303,7 +2323,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let inherited_from_object = self.field_is_inherited_from(
                     self.stdlib.generic_alias().class_object(),
                     dunder_name,
-                    ("builtins", "object"),
+                    KnownClass::Object,
                 );
                 for (b, exclude) in [(&generic_alias, inherited_from_object), (&origin, false)] {
                     if exclude {
@@ -2334,7 +2354,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         cls.class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(cls.class_object().clone(), base))
@@ -2349,26 +2369,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     && self.field_is_inherited_from(
                         self.stdlib.method_type().class_object(),
                         dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
+                        KnownClass::Object,
                     ) =>
             {
                 acc.not_found(NotFoundOn::ClassInstance(
                     self.stdlib.method_type().class_object().clone(),
-                    base,
-                ))
-            }
-            AttributeBase1::ShapedArrayInstance(tensor)
-                if (*dunder_name == dunder::SETATTR
-                    || *dunder_name == dunder::DELATTR
-                    || *dunder_name == dunder::GETATTRIBUTE)
-                    && self.field_is_inherited_from(
-                        tensor.base_class.class_object(),
-                        dunder_name,
-                        (ModuleName::builtins().as_str(), "object"),
-                    ) =>
-            {
-                acc.not_found(NotFoundOn::ClassInstance(
-                    tensor.base_class.class_object().clone(),
                     base,
                 ))
             }
@@ -2628,52 +2633,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         Some(classes)
     }
 
-    pub(crate) fn try_reproject_class_type_to_shaped_array(
-        &self,
-        cls: &ClassType,
-    ) -> Option<ShapedArrayType> {
-        // Cheap syntactic pre-filter, kept before any metadata lookup to preserve
-        // laziness: a shaped-array class always carries its shape as a tuple
-        // carrier, a first-class `IntTuple`, or an as-yet-unbound shape variable.
-        // Bailing here for any other class (notably scalar returns like `int`)
-        // avoids forcing that class's metadata on every call-return reprojection.
-        if !cls.targs().as_slice().iter().any(|arg| {
-            matches!(
-                arg,
-                Type::Tuple(_) | Type::IntTuple(_) | Type::Quantified(_) | Type::TypeVar(_)
-            )
-        }) {
-            return None;
-        }
-        let shape_param = self.shaped_array_shape_for_class_type(cls)?;
-        if !shape_param.is_type_var() {
-            return None;
-        }
-        // Decline reprojection when the shape argument does not project to a shape.
-        // `shaped_array_classtype_to_shaped_array_type` below shapeless-falls-back
-        // on an unconvertible arg (it is called from already-validated paths), but
-        // here we want to leave the class un-reprojected in that case. The builder
-        // recomputes this projection; that duplicate lookup is bounded by the cheap
-        // syntactic pre-filter above, so it only runs for plausible shaped arrays.
-        let shape_arg = self.shaped_array_shape_arg(cls)?;
-        self.shape_arg_to_int_tuple(&shape_arg)?;
-        Some(self.shaped_array_classtype_to_shaped_array_type(cls))
-    }
-
     fn as_attribute_base1(&self, ty: Type, acc: &mut Vec<AttributeBase1>) {
         match ty {
-            Type::ClassType(class_type) => {
-                if let Some(shaped_array) =
-                    self.try_reproject_class_type_to_shaped_array(&class_type)
-                {
-                    acc.push(AttributeBase1::ShapedArrayInstance(shaped_array))
-                } else {
-                    acc.push(AttributeBase1::ClassInstance(class_type))
-                }
-            }
+            Type::ClassType(class_type) => acc.push(AttributeBase1::ClassInstance(class_type)),
             Type::ClassDef(cls) => acc.push(AttributeBase1::ClassObject(ClassBase::ClassDef(
                 self.as_class_type_unchecked(&cls),
             ))),
+            Type::SpecializedClassDef(class) => {
+                acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(class)));
+            }
             Type::SelfType(class_type) => acc.push(AttributeBase1::SelfType(class_type)),
             Type::Type(ty) => self.as_attribute_base1_of_type(*ty, acc),
             Type::TypedDict(TypedDict::TypedDict(td))
@@ -2687,14 +2655,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.heap.mk_class_type(self.stdlib.str().clone()),
                     value_ty,
                 )))
-            }
-            Type::ShapedArray(tensor) => {
-                // Use ShapedArrayInstance to preserve shape information through attribute lookup
-                acc.push(AttributeBase1::ShapedArrayInstance((*tensor).clone()))
-            }
-            Type::NNModule(module) => {
-                // NNModule delegates attribute access to its underlying class
-                acc.push(AttributeBase1::ClassInstance(module.class.clone()))
             }
             Type::DataFrame(schema) => self.as_attribute_base1(schema.underlying_type(), acc),
             Type::Series(schema) => self.as_attribute_base1(schema.underlying_type(), acc),
@@ -2953,6 +2913,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             | Type::Concatenate(_, _)
             | Type::ParamSpecValue(_)
             | Type::Materialization
+            | Type::Falsy
+            | Type::Truthy
             | Type::Ellipsis => {}
         }
     }
@@ -2960,6 +2922,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// `as_attribute_base1` helper for `Type::Type(ty)`.
     fn as_attribute_base1_of_type(&self, ty: Type, acc: &mut Vec<AttributeBase1>) {
         match ty {
+            Type::SpecializedClassDef(_) => acc.push(AttributeBase1::ClassObject(
+                ClassBase::ClassDef(self.stdlib.generic_alias().clone()),
+            )),
             Type::SelfType(class_type) => {
                 acc.push(AttributeBase1::ClassObject(ClassBase::SelfType(class_type)))
             }
@@ -2974,31 +2939,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::Literal(lit) => acc.push(AttributeBase1::ClassObject(ClassBase::ClassType(
                 lit.value.general_class_type(self.stdlib).clone(),
             ))),
-            Type::Tuple(tuple) => self.as_attribute_base1(
-                self.heap
-                    .mk_type_of(self.heap.mk_class_type(self.erase_tuple_type(tuple))),
-                acc,
-            ),
+            Type::Tuple(tuple) => acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(
+                self.erase_tuple_type(tuple),
+            ))),
             Type::ClassType(class) => {
-                let class_base = AttributeBase1::ClassObject(ClassBase::ClassType(class.clone()));
-                if !class.targs().is_empty() {
-                    // If the class type has type arguments, at runtime it's also a GenericAlias
-
-                    // FIXME:
-                    // If `C` is a generic class, then the type of the expression `C` is `type[C]`.
-                    // We're relying on this behaviour to give `C[int]` the
-                    // runtime generic alias type, but this is technically
-                    // incorrect as `type[C[int]]` should be instances of `type`
-                    // and not `GenericAlias`.
-                    // Therefore, if we ever have a value of `type[C[int]]`
-                    // (e.g. via inheritance), we should not treat it as a
-                    // `GenericAlias`. However, such cases are rare in practice.
-                    acc.push(AttributeBase1::GenericAlias(ClassBase::ClassType(
-                        class.clone(),
-                    )));
-                } else {
-                    acc.push(class_base)
-                }
+                acc.push(AttributeBase1::ClassObject(ClassBase::ClassType(class)))
             }
             Type::ClassDef(class) => {
                 // type[ClassDef(C)] is C.__class__: C's metaclass, viewed as a class object.
@@ -3325,7 +3270,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
 
         match ty {
-            Type::ClassDef(_) | Type::Type(_) => true,
+            Type::ClassDef(_) | Type::SpecializedClassDef(_) | Type::Type(_) => true,
             Type::TypeAlias(_)
             | Type::UntypedAlias(_)
             | Type::KwCall(_)
@@ -3618,7 +3563,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .into_iter()
                     .filter_map(|(attr, _)| {
                         match &attr {
-                            Attribute::ClassAttribute(ClassAttribute::ReadWrite(ty, ..))
+                            Attribute::ClassAttribute(ClassAttribute::ReadWrite {
+                                read_type: ty,
+                                ..
+                            })
                             | Attribute::ClassAttribute(ClassAttribute::ReadOnly(ty, _))
                             | Attribute::Simple(ty)
                             | Attribute::ClassAttribute(ClassAttribute::Property(ty, _, _))
@@ -3674,9 +3622,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         is_from_object: false,
                     });
                 }
-            }
-            AttributeBase1::ShapedArrayInstance(tensor) => {
-                self.completions_class_type(&tensor.base_class, expected_attribute_name, res)
             }
             AttributeBase1::LiteralString => {
                 self.completions_class_type(self.stdlib.str(), expected_attribute_name, res)
@@ -3754,7 +3699,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Vec<AttrInfo> {
         let annotated_fields = self.django_annotated_fields(&base);
         let mut res = Vec::new();
-        if let Some(base) = self.as_attribute_base(base) {
+        if let Some(base) = self.as_attribute_base(base.clone()) {
             self.completions_inner(
                 base,
                 expected_attribute_name,
@@ -3762,6 +3707,65 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 include_object,
                 &mut res,
             );
+        }
+        if expected_attribute_name.is_none() {
+            // Look up receivers separately so one missing __getattr__ does not discard the others.
+            let getattrs = base
+                .into_unions()
+                .into_iter()
+                .filter_map(|base| {
+                    self.type_of_magic_dunder_attr(
+                        &base,
+                        &dunder::GETATTR,
+                        TextRange::default(),
+                        &self.error_swallower(),
+                        None,
+                        "completion_getattr",
+                        false,
+                    )
+                })
+                .flat_map(Type::into_unions);
+            let mut literal_attrs: SmallMap<Name, Vec<Type>> = SmallMap::new();
+            for getattr in getattrs {
+                // Bound signatures retain self/cls as their first positional parameter.
+                let param_index = usize::from(matches!(&getattr, Type::BoundMethod(_)));
+                for (callable, _) in getattr.toplevel_callable_signatures() {
+                    let Some(param) = callable.get_positional_param(param_index) else {
+                        continue;
+                    };
+                    let members = match param {
+                        Type::Union(union) => union.members.as_slice(),
+                        _ => std::slice::from_ref(param),
+                    };
+                    for member in members {
+                        let Type::Literal(lit) = member else {
+                            continue;
+                        };
+                        let Lit::Str(value) = &lit.value else {
+                            continue;
+                        };
+                        if !is_valid_identifier(value.as_str()) {
+                            continue;
+                        }
+                        let name = Name::new(value);
+                        if res.iter().any(|info| info.name == name) {
+                            continue;
+                        }
+                        let types = literal_attrs.entry(name).or_default();
+                        if include_types {
+                            types.push(callable.ret.clone());
+                        }
+                    }
+                }
+            }
+            res.extend(literal_attrs.into_iter().map(|(name, types)| AttrInfo {
+                name,
+                ty: include_types.then(|| self.unions(types)),
+                is_deprecated: false,
+                definition: AttrDefinition::Synthetic,
+                is_reexport: false,
+                is_from_object: false,
+            }));
         }
         for (name, ty) in annotated_fields {
             if expected_attribute_name.is_none_or(|expected| expected == &name)

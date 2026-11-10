@@ -432,6 +432,133 @@
             }
           ],
           "target": {
+            "external": {
+              "id": 0,
+              "key": "dataclasses"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "calls.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 52
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "True"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "calls.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 77
+            },
+            {
+              "length": 5,
+              "start": 92
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "print"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "calls.py"
+          },
+          "spans": [
+            {
+              "length": 9,
+              "start": 24
+            },
+            {
+              "length": 9,
+              "start": 35
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "dataclasses.dataclass"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "calls.py"
+          },
+          "spans": [
+            {
+              "length": 9,
+              "start": 35
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "calls.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "calls.dataclass"
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.TargetUses.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "calls.py"
+          },
+          "spans": [
+            {
+              "length": 11,
+              "start": 5
+            }
+          ],
+          "target": {
             "id": 0,
             "key": "dataclasses"
           }
@@ -857,6 +984,6 @@
     "predicate": "python.Module.4"
   },
   {
-    "schema_id": "f329796272b9314200433ac342cbc15c"
+    "schema_id": "60aea86d7ff049228df605cf3fda4c67"
   }
 ]

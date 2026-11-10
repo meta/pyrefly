@@ -33,9 +33,11 @@ use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_python::sys_info::SysInfo;
+use pyrefly_types::class::Class;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::function::FuncMetadata;
 use pyrefly_types::function::FunctionKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_types::typed_dict::TypedDict;
 use pyrefly_types::typed_dict::TypedDictInner;
@@ -56,6 +58,7 @@ use ruff_python_ast::ExprAttribute;
 use ruff_python_ast::ExprCall;
 use ruff_python_ast::ExprContext;
 use ruff_python_ast::ExprName;
+use ruff_python_ast::ExprStringLiteral;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::Keyword;
 use ruff_python_ast::ModModule;
@@ -76,12 +79,14 @@ use vec1::vec1;
 
 use crate::ModuleInfo;
 use crate::alt::answers::Index;
+use crate::alt::answers::IndexedAttribute;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::attr::AttrDefinition;
 use crate::alt::attr::AttrInfo;
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
+use crate::binding::metadata::BindingsMetadata;
 use crate::config::error_kind::ErrorKind;
 use crate::error::error::ErrorQuickFix;
 use crate::error::suppress::detect_line_ending;
@@ -376,21 +381,16 @@ fn definition_matcher(
     }
 }
 
-/// The references in `references_by_module` that point at the definition at `definition_range`
-/// in `module`. Both `Index` reference maps are keyed and shaped alike, so they share this scan.
-fn recorded_references(
-    references_by_module: &SmallMap<ModulePath, Vec<(TextRange, TextRange)>>,
-    module: &Module,
-    definition_range: TextRange,
-) -> Vec<TextRange> {
-    let matches_definition = definition_matcher(module, definition_range);
-    references_by_module
-        .get(module.path())
-        .into_iter()
-        .flatten()
-        .filter(|(def_range, _)| matches_definition(*def_range, module.code_at(*def_range)))
-        .map(|(_, ref_range)| *ref_range)
-        .collect()
+/// Parses a forward-reference string such as `"list[Foo]"` into the expression the binder
+/// built from it. Only strings whose source text is exactly their value are parsed: escapes
+/// or implicit concatenation shift the ranges of the names parsed from a string.
+fn exact_forward_ref(literal: &ExprStringLiteral, source: &str) -> Option<Expr> {
+    let part = literal.as_single_part_string()?;
+    if &source[part.content_range()] == part.as_str() {
+        Ast::parse_type_literal(literal, source).ok()
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -442,7 +442,7 @@ pub(crate) fn attribute_symbol_kind_from_type(ty: &Type) -> SymbolKind {
                 SymbolKind::Method
             }
         }
-        Type::ClassDef(_) | Type::Type(_) => SymbolKind::Class,
+        Type::ClassDef(_) | Type::SpecializedClassDef(_) | Type::Type(_) => SymbolKind::Class,
         Type::TypeAlias(_) | Type::UntypedAlias(_) => SymbolKind::TypeAlias,
         Type::Module(_) => SymbolKind::Module,
         _ => SymbolKind::Attribute,
@@ -1004,14 +1004,7 @@ impl<'a> Transaction<'a> {
         let covering_nodes = Ast::locate_node(&module, position);
         let mut ranges = Vec::new();
 
-        // The binder parses forward-reference strings with `Ast::parse_type_literal`, so
-        // parsing again yields the same ranges under which types were recorded.
-        if let Some(AnyNodeRef::ExprStringLiteral(literal)) = covering_nodes
-            .iter()
-            .find(|node| matches!(node, AnyNodeRef::ExprStringLiteral(_)))
-            && let Some(info) = self.get_module_info(handle)
-            && let Ok(parsed) = Ast::parse_type_literal(literal, info.contents())
-        {
+        if let Some(parsed) = self.forward_ref_at(handle, &covering_nodes) {
             ranges.extend(
                 Ast::locate_node_in(AnyNodeRef::from(&parsed), position)
                     .iter()
@@ -1086,7 +1079,42 @@ impl<'a> Transaction<'a> {
     ) -> Option<IdentifierWithContext> {
         let mod_module = self.get_ast(handle)?;
         let covering_nodes = Ast::locate_node(&mod_module, position);
+        if let Some(forward_ref) = self.type_forward_ref_at(handle, &covering_nodes) {
+            return Self::identifier_from_covering_nodes(&Ast::locate_node_in(
+                AnyNodeRef::from(&forward_ref),
+                position,
+            ));
+        }
         Self::identifier_from_covering_nodes(&covering_nodes)
+    }
+
+    /// The string literal in `covering_nodes` parsed as a forward reference, such as `list[Foo]`
+    /// from `x: "list[Foo]"`. It is parsed as in the binder, so its nodes carry the ranges under
+    /// which keys and types were recorded.
+    fn forward_ref_at(&self, handle: &Handle, covering_nodes: &[AnyNodeRef]) -> Option<Expr> {
+        let literal = covering_nodes.iter().find_map(|node| match node {
+            AnyNodeRef::ExprStringLiteral(literal) => Some(*literal),
+            _ => None,
+        })?;
+        exact_forward_ref(literal, self.get_module_info(handle)?.contents())
+    }
+
+    /// Like `forward_ref_at`, but only for strings the binder treated as types. The binder only
+    /// parses strings in type positions, so a string counts only if a name in it has a key:
+    /// ordinary strings and `Literal["..."]` values stay strings.
+    fn type_forward_ref_at(&self, handle: &Handle, covering_nodes: &[AnyNodeRef]) -> Option<Expr> {
+        fn any_name(x: &Expr, f: &impl Fn(&ExprName) -> bool) -> bool {
+            let mut found = matches!(x, Expr::Name(name) if f(name));
+            x.recurse(&mut |x| found = found || any_name(x, f));
+            found
+        }
+        let parsed = self.forward_ref_at(handle, covering_nodes)?;
+        let answers = self.get_answers(handle)?;
+        let bindings = answers.bindings();
+        any_name(&parsed, &|name| {
+            bindings.is_valid_key(&Key::BoundName(ShortIdentifier::expr_name(name)))
+        })
+        .then_some(parsed)
     }
 
     pub(crate) fn identifier_from_covering_nodes(
@@ -1445,11 +1473,8 @@ impl<'a> Transaction<'a> {
             if code_at_range != identifier.id.as_str() {
                 return None;
             }
-            let definition_handle = Handle::new(
-                item.module.name(),
-                item.module.path().dupe(),
-                handle.sys_info().dupe(),
-            );
+            let definition_handle =
+                handle.for_module(item.module.name(), item.module.path().dupe());
             let id = Identifier::new(Name::new(code_at_range), item.definition_range);
             Some(ResolutionKind::KeyInModule(
                 definition_handle,
@@ -1986,6 +2011,45 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// The current `Module` of the module that defines `cls`. Use it, not `cls.module()`, with
+    /// ranges read from current class metadata: a `Class` keeps the `Module` from when its type
+    /// was solved, and a module is not rechecked when a dependency only moves code around.
+    fn class_module(&self, handle: &Handle, cls: &Class) -> Option<Module> {
+        self.get_module_info(&handle.for_module(cls.module_name(), cls.module_path().dupe()))
+    }
+
+    /// The references in `references_by_module` that point at the definition at `definition_range`
+    /// in `module`. Both `Index` attribute reference maps are keyed and shaped alike, so they share
+    /// this scan.
+    fn recorded_attribute_references(
+        &self,
+        handle: &Handle,
+        references_by_module: &SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
+        module: &Module,
+        definition_range: TextRange,
+    ) -> Vec<TextRange> {
+        let Some(references) = references_by_module.get(module.path()) else {
+            return Vec::new();
+        };
+        // Recording an entry demanded `module` up to its answers, so its metadata exists except
+        // during an uncommitted rebuild, when no stored attribute can be matched anyway.
+        let Some(metadata) =
+            self.get_bindings_metadata(&handle.for_module(module.name(), module.path().dupe()))
+        else {
+            return Vec::new();
+        };
+        let matches_definition = definition_matcher(module, definition_range);
+        references
+            .iter()
+            .filter(|(attribute, _)| {
+                attribute
+                    .current_range(&metadata)
+                    .is_some_and(|range| matches_definition(range, attribute.name.as_str()))
+            })
+            .map(|(_, reference_range)| *reference_range)
+            .collect()
+    }
+
     pub(crate) fn resolve_attribute_definition(
         &self,
         handle: &Handle,
@@ -2002,7 +2066,7 @@ impl<'a> Transaction<'a> {
                 // If prefer_pyi is false and the current module is a .pyi file,
                 // try to find the corresponding .py file
                 let text_range_with_module_info =
-                    TextRangeWithModule::new(cls.module().dupe(), range);
+                    TextRangeWithModule::new(self.class_module(handle, &cls)?, range);
                 if !preference.prefer_pyi
                     && cls.module_path().is_interface()
                     && let Some((exec_module, exec_range, exec_docstring)) = self
@@ -2155,7 +2219,9 @@ impl<'a> Transaction<'a> {
             let symbol_kind = match type_ {
                 Type::Callable(_) | Type::Function(_) => SymbolKind::Function,
                 Type::BoundMethod(_) => SymbolKind::Method,
-                Type::ClassDef(_) | Type::Type(_) => SymbolKind::Class,
+                Type::ClassDef(_) | Type::SpecializedClassDef(_) | Type::Type(_) => {
+                    SymbolKind::Class
+                }
                 Type::Module(_) => SymbolKind::Module,
                 Type::TypeAlias(_) => SymbolKind::TypeAlias,
                 _ => *symbol_kind,
@@ -2281,8 +2347,7 @@ impl<'a> Transaction<'a> {
                             .map(|base| base.class_object()),
                     )
                     .any(|base| {
-                        base.has_toplevel_qname("torch.nn", "Module")
-                            || base.has_toplevel_qname("torch.nn.modules.module", "Module")
+                        base.is(KnownClass::TorchModule) || base.is(KnownClass::TorchModulesModule)
                     })
             })
             .unwrap_or(false);
@@ -2359,11 +2424,6 @@ impl<'a> Transaction<'a> {
                     .map(Vec1::into_vec)
                     .unwrap_or_default()
             }
-            Type::NNModule(module) => self.find_call_target_definitions(
-                handle,
-                preference,
-                module.class.clone().to_type(),
-            ),
             _ => vec![],
         }
     }
@@ -2634,8 +2694,8 @@ impl<'a> Transaction<'a> {
     }
 
     /// For a cursor inside a subscript's brackets (e.g. `c[0]`) that isn't on a
-    /// named identifier, return the subscript dunder method type so hover matches
-    /// the spaced form `c [0]`.
+    /// named identifier or a nested operator, return the subscript dunder method
+    /// type so hover matches the spaced form `c [0]`.
     pub(crate) fn subscript_operator_type_at(
         &self,
         handle: &Handle,
@@ -2647,13 +2707,27 @@ impl<'a> Transaction<'a> {
             return None;
         }
         let module = self.get_ast(handle)?;
-        let subscript =
-            Ast::locate_node(&module, position)
-                .into_iter()
-                .find_map(|node| match node {
-                    AnyNodeRef::ExprSubscript(subscript) => Some(subscript),
-                    _ => None,
-                })?;
+        let covering_nodes = Ast::locate_node(&module, position);
+        // Nested operators own their hover; the enclosing brackets must not replace it.
+        if covering_nodes
+            .iter()
+            .find(|node| node.as_expr_ref().is_some())
+            .is_some_and(|node| {
+                matches!(
+                    node,
+                    AnyNodeRef::ExprBinOp(_)
+                        | AnyNodeRef::ExprBoolOp(_)
+                        | AnyNodeRef::ExprUnaryOp(_)
+                        | AnyNodeRef::ExprCompare(_)
+                )
+            })
+        {
+            return None;
+        }
+        let subscript = covering_nodes.into_iter().find_map(|node| match node {
+            AnyNodeRef::ExprSubscript(subscript) => Some(subscript),
+            _ => None,
+        })?;
         // Only fire inside the bracket region, never on the base expression.
         if position < subscript.value.range().end() {
             return None;
@@ -2748,7 +2822,7 @@ impl<'a> Transaction<'a> {
                 .find_map(|class| {
                     let fields = solver.get_class_fields(class)?;
                     Some((
-                        class.module().dupe(),
+                        self.class_module(handle, class)?,
                         fields.field_decl_range(name)?,
                         fields.field_docstring_range(name),
                     ))
@@ -2930,11 +3004,7 @@ impl<'a> Transaction<'a> {
         handle: &Handle,
         module: &ModuleInfo,
     ) -> Arc<ModModule> {
-        let module_handle = Handle::new(
-            module.name(),
-            module.path().dupe(),
-            handle.sys_info().dupe(),
-        );
+        let module_handle = handle.for_module(module.name(), module.path().dupe());
         self.get_ast(&module_handle)
             .unwrap_or_else(|| Ast::parse(module.contents(), module.source_type()).0.into())
     }
@@ -2961,6 +3031,19 @@ impl<'a> Transaction<'a> {
             .collect()
     }
 
+    fn setattr_name_literal_at(
+        &self,
+        handle: &Handle,
+        position: TextSize,
+    ) -> Option<(Identifier, TextRange)> {
+        self.get_answers(handle)?
+            .bindings()
+            .setattr_name_literals()
+            .iter()
+            .find(|(name, _)| name.range.contains_inclusive(position))
+            .cloned()
+    }
+
     /// Find the definition, metadata and optionally the docstring for the given position.
     pub fn find_definition(
         &self,
@@ -2972,14 +3055,30 @@ impl<'a> Transaction<'a> {
             return Err(EmptyResponseReason::AstNotFound);
         };
         let covering_nodes = Ast::locate_node(&mod_module, position);
+        // Inside a forward-reference string, resolve against the type expression parsed from it.
+        let forward_ref = self.type_forward_ref_at(handle, &covering_nodes);
+        let covering_nodes = match &forward_ref {
+            Some(forward_ref) => Ast::locate_node_in(AnyNodeRef::from(forward_ref), position),
+            None => covering_nodes,
+        };
 
         if covering_nodes
             .iter()
             .any(|node| matches!(node, AnyNodeRef::ExprStringLiteral(_)))
-            && let Some(definition) =
-                self.find_definition_for_dunder_all_entry(handle, position, preference)
         {
-            return Ok(vec1![definition]);
+            if let Some((name, receiver_range)) = self.setattr_name_literal_at(handle, position) {
+                return self.find_definition_for_attribute(
+                    handle,
+                    receiver_range,
+                    &name.id,
+                    preference,
+                );
+            }
+            if let Some(definition) =
+                self.find_definition_for_dunder_all_entry(handle, position, preference)
+            {
+                return Ok(vec1![definition]);
+            }
         }
 
         if let Some(AnyNodeRef::ExprStringLiteral(literal)) = covering_nodes
@@ -3448,7 +3547,6 @@ impl<'a> Transaction<'a> {
     }
 
     /// Finds ancestor declarations directly from class fields and the MRO.
-    /// Each range belongs to the module snapshot stored on its declaring class.
     pub fn parent_declarations(
         &self,
         handle: &Handle,
@@ -3477,8 +3575,9 @@ impl<'a> Transaction<'a> {
                     .filter_map(|ancestor| {
                         let class = ancestor.class_object();
                         let range = solver.get_class_fields(class)?.field_decl_range(name)?;
-                        seen.insert((class.module().path().dupe(), range))
-                            .then(|| TextRangeWithModule::new(class.module().dupe(), range))
+                        let module = self.class_module(handle, class)?;
+                        seen.insert((class.module_path().dupe(), range))
+                            .then(|| TextRangeWithModule::new(module, range))
                     })
                     .collect(),
             )
@@ -3533,10 +3632,9 @@ impl<'a> Transaction<'a> {
         };
 
         if let Some(func_id) = metadata.kind.as_func_def_id() {
-            let def_handle = Handle::new(
+            let def_handle = handle.for_module(
                 func_id.qname.module_name(),
                 func_id.qname.module_path().dupe(),
-                handle.sys_info().dupe(),
             );
             // The binding table already holds the `def` name, so this stays a
             // read-only lookup with nothing to solve.
@@ -3547,7 +3645,7 @@ impl<'a> Transaction<'a> {
             return Some(
                 bindings
                     .function_def_range(func_id.def_index)
-                    .map(|range| TextRangeWithModule::new(func_id.qname.module().dupe(), range))
+                    .map(|range| TextRangeWithModule::new(bindings.module().dupe(), range))
                     .ok_or_else(not_found),
             );
         }
@@ -3657,8 +3755,8 @@ impl<'a> Transaction<'a> {
         for module_name in module_names {
             let module_name_str = module_name.as_str();
 
-            // Skip builtins module
-            if module_name_str == "builtins" {
+            // Skip builtins, and modules no import statement can name.
+            if module_name_str == "builtins" || !module_name.is_importable() {
                 continue;
             }
 
@@ -4543,7 +4641,12 @@ impl<'a> Transaction<'a> {
             }
         }
 
-        Some(identifier_context?.identifier.range)
+        identifier_context
+            .map(|context| context.identifier.range)
+            .or_else(|| {
+                self.setattr_name_literal_at(handle, position)
+                    .map(|(name, _)| name.range)
+            })
     }
 
     pub fn find_local_references(
@@ -4636,7 +4739,8 @@ impl<'a> Transaction<'a> {
                 references.extend(ranges.iter().copied());
             }
         }
-        references.extend(recorded_references(
+        references.extend(self.recorded_attribute_references(
+            handle,
             &index.externally_defined_attribute_references,
             module,
             definition_range,
@@ -4747,6 +4851,24 @@ impl<'a> Transaction<'a> {
                 options.include_declaration,
             )?
         };
+        if matches!(
+            definition_metadata,
+            DefinitionMetadata::Attribute | DefinitionMetadata::VariableOrAttribute(_)
+        ) && let Some(answers) = self.get_answers(handle)
+        {
+            let literals = answers
+                .bindings()
+                .setattr_name_literals()
+                .iter()
+                .filter(|(name, _)| name.id == definition_name)
+                .cloned()
+                .collect::<Vec<_>>();
+            references.extend(self.attribute_references_from_ranges(
+                handle,
+                &literals,
+                &TextRangeWithModule::new(module.dupe(), definition_range),
+            ));
+        }
         // Constructor call sites are indexed separately because the AST scan for
         // `<expr>.<name>` cannot see them: `Foo()` never spells `__init__`.
         if options.include_constructor_call_sites {
@@ -4794,7 +4916,8 @@ impl<'a> Transaction<'a> {
         else {
             return Vec::new();
         };
-        recorded_references(
+        self.recorded_attribute_references(
+            handle,
             &index.lock().constructor_references,
             module,
             definition_range,
@@ -4807,14 +4930,13 @@ impl<'a> Transaction<'a> {
         definition_range: TextRange,
         expected_name: &Name,
     ) -> Vec<TextRange> {
-        // We first find all the attributes of the form `<expr>.<expected_name>`.
-        // These are candidates for the references of `definition`.
+        // Attributes with this name are candidates; receiver types determine their definitions.
         let relevant_attributes = if let Some(mod_module) = self.get_ast(handle) {
-            fn f(x: &Expr, expected_name: &Name, res: &mut Vec<ExprAttribute>) {
+            fn f(x: &Expr, expected_name: &Name, res: &mut Vec<(Identifier, TextRange)>) {
                 if let Expr::Attribute(x) = x
                     && &x.attr.id == expected_name
                 {
-                    res.push(x.clone());
+                    res.push((x.attr.clone(), x.value.range()));
                 }
                 x.recurse(&mut |x| f(x, expected_name, res));
             }
@@ -4824,13 +4946,31 @@ impl<'a> Transaction<'a> {
         } else {
             Vec::new()
         };
-        // For each attribute we found above, we will test whether it actually will jump to the
-        // given `definition`.
+        let Some(module) = self.get_module_info(handle) else {
+            return Vec::new();
+        };
+        self.attribute_references_from_ranges(
+            handle,
+            &relevant_attributes,
+            &TextRangeWithModule::new(module, definition_range),
+        )
+    }
+
+    /// Resolve attribute-name ranges by receiver type and definition identity.
+    fn attribute_references_from_ranges(
+        &self,
+        handle: &Handle,
+        attributes: &[(Identifier, TextRange)],
+        target: &TextRangeWithModule,
+    ) -> Vec<TextRange> {
+        if attributes.is_empty() {
+            return Vec::new();
+        }
         self.ad_hoc_solve(handle, "attribute_references", |solver| {
             let mut references = Vec::new();
-            for attribute in relevant_attributes {
+            for (attribute, receiver_range) in attributes {
                 if let Some(answers) = self.get_answers(handle)
-                    && let Some(base_type) = answers.get_type_trace(attribute.value.range())
+                    && let Some(base_type) = answers.get_type_trace(*receiver_range)
                 {
                     for AttrInfo {
                         name,
@@ -4839,7 +4979,7 @@ impl<'a> Transaction<'a> {
                         definition,
                         is_reexport: _,
                         is_from_object: _,
-                    } in solver.completions(base_type, Some(expected_name), false, false)
+                    } in solver.completions(base_type, Some(&attribute.id), false, false)
                     {
                         if let Some((TextRangeWithModule { module, range }, _)) = self
                             .resolve_attribute_definition(
@@ -4848,10 +4988,10 @@ impl<'a> Transaction<'a> {
                                 definition,
                                 FindPreference::default(),
                             )
-                            && module.path() == module.path()
-                            && range == definition_range
+                            && module.path() == target.module.path()
+                            && range == target.range
                         {
-                            references.push(attribute.attr.range());
+                            references.push(attribute.range);
                         }
                     }
                 }
@@ -4988,15 +5128,35 @@ impl<'a> Transaction<'a> {
                     false
                 }
             };
-            fn f(x: &Expr, is_valid_use: &impl Fn(&ExprName) -> bool, res: &mut Vec<TextRange>) {
+            let module_info = self.get_module_info(handle);
+            // Only strings that mention the name can hold a forward reference to it.
+            let forward_ref = |x: &ExprStringLiteral| {
+                let source = module_info.as_ref()?.contents();
+                if x.value.to_str().contains(expected_name.as_str()) {
+                    exact_forward_ref(x, source)
+                } else {
+                    None
+                }
+            };
+            fn f(
+                x: &Expr,
+                is_valid_use: &impl Fn(&ExprName) -> bool,
+                forward_ref: &impl Fn(&ExprStringLiteral) -> Option<Expr>,
+                res: &mut Vec<TextRange>,
+            ) {
                 if let Expr::Name(x) = x
                     && is_valid_use(x)
                 {
                     res.push(x.range());
                 }
-                x.recurse(&mut |x| f(x, is_valid_use, res));
+                if let Expr::StringLiteral(x) = x
+                    && let Some(parsed) = forward_ref(x)
+                {
+                    f(&parsed, is_valid_use, forward_ref, res);
+                }
+                x.recurse(&mut |x| f(x, is_valid_use, forward_ref, res));
             }
-            mod_module.visit(&mut |x| f(x, &is_valid_use, &mut references));
+            mod_module.visit(&mut |x| f(x, &is_valid_use, &forward_ref, &mut references));
         }
 
         Some(references)
@@ -5186,6 +5346,9 @@ impl<'a> Transaction<'a> {
     ) -> Result<Vec<(Handle, Name, Export)>, Cancelled> {
         self.search_exports(
             |handle, exports_data, exports| {
+                if !handle.module().is_importable() {
+                    return Vec::new();
+                }
                 let name = Name::new(name);
                 match exports.get(&name) {
                     Some(location) => {
@@ -5284,6 +5447,9 @@ impl<'a> Transaction<'a> {
     ) -> Result<Vec<(Handle, Handle, Name, Export)>, Cancelled> {
         let mut res = self.search_exports(
             |handle, exports_data, exports| {
+                if !handle.module().is_importable() {
+                    return Vec::new();
+                }
                 let matcher = SkimMatcherV2::default().smart_case();
                 self.fuzzy_match_exports(handle, exports_data, exports, &matcher, pattern)
             },
@@ -5455,6 +5621,7 @@ fn reduce_symbol_matches(results: &mut Vec<SymbolMatch>, memory_paths: &HashSet<
 
 trait RdepTransaction {
     fn solutions_index(&self, handle: &Handle) -> Option<Arc<Mutex<Index>>>;
+    fn bindings_metadata(&self, handle: &Handle) -> Option<Arc<BindingsMetadata>>;
     fn module_info(&self, handle: &Handle) -> Option<Module>;
     fn transitive_rdeps(&self, handle: Handle) -> HashSet<Handle>;
     fn run_for_handles(&mut self, handles: &[Handle], require: Require) -> Result<(), Cancelled>;
@@ -5477,6 +5644,10 @@ impl<'a> RdepTransaction for Transaction<'a> {
     fn solutions_index(&self, handle: &Handle) -> Option<Arc<Mutex<Index>>> {
         self.get_solutions(handle)
             .and_then(|solutions| solutions.get_index())
+    }
+
+    fn bindings_metadata(&self, handle: &Handle) -> Option<Arc<BindingsMetadata>> {
+        self.get_bindings_metadata(handle)
     }
 
     fn module_info(&self, handle: &Handle) -> Option<Module> {
@@ -5517,6 +5688,10 @@ impl<'a> RdepTransaction for CancellableTransaction<'a> {
         self.as_ref()
             .get_solutions(handle)
             .and_then(|solutions| solutions.get_index())
+    }
+
+    fn bindings_metadata(&self, handle: &Handle) -> Option<Arc<BindingsMetadata>> {
+        self.as_ref().get_bindings_metadata(handle)
     }
 
     fn module_info(&self, handle: &Handle) -> Option<Module> {
@@ -5563,22 +5738,29 @@ fn find_child_implementations_impl<T: RdepTransaction>(
     handle: &Handle,
     definition: &TextRangeWithModule,
 ) -> Vec<TextRange> {
-    let mut child_implementations = Vec::new();
-
-    if let Some(index) = transaction.solutions_index(handle) {
-        let index_lock = index.lock();
-        for (child_range, parent_methods) in &index_lock.parent_methods_map {
-            for (parent_module_path, parent_range) in parent_methods {
-                if parent_module_path == definition.module.path()
-                    && *parent_range == definition.range
-                {
-                    child_implementations.push(*child_range);
-                }
-            }
-        }
-    }
-
-    child_implementations
+    let Some(index) = transaction.solutions_index(handle) else {
+        return Vec::new();
+    };
+    let Some(metadata) = transaction.bindings_metadata(
+        &handle.for_module(definition.module.name(), definition.module.path().dupe()),
+    ) else {
+        return Vec::new();
+    };
+    let matches_definition = definition_matcher(&definition.module, definition.range);
+    let index = index.lock();
+    index
+        .parent_methods_map
+        .iter()
+        .filter(|(_, parents)| {
+            parents.iter().any(|(parent_path, parent)| {
+                parent_path == definition.module.path()
+                    && parent
+                        .current_range(&metadata)
+                        .is_some_and(|range| matches_definition(range, parent.name.as_str()))
+            })
+        })
+        .map(|(child_range, _)| *child_range)
+        .collect()
 }
 
 fn compute_transitive_rdeps_for_definition_impl<T: RdepTransaction>(
@@ -5618,10 +5800,9 @@ fn compute_transitive_rdeps_for_definition_impl<T: RdepTransaction>(
     for fs_counterpart_of_in_memory_handles in transitive_rdeps
         .iter()
         .filter_map(|handle| match handle.path().details() {
-            ModulePathDetails::Memory(path_buf) => Some(Handle::new(
+            ModulePathDetails::Memory(path_buf) => Some(handle.for_module(
                 handle.module(),
                 ModulePath::filesystem((**path_buf).clone()),
-                handle.sys_info().dupe(),
             )),
             _ => None,
         })
@@ -5645,11 +5826,9 @@ fn patch_definition_for_handle_impl<T: RdepTransaction>(
     match definition.module.path().details() {
         ModulePathDetails::Memory(path_buf) if handle.path() != definition.module.path() => {
             let TextRangeWithModule { module, range } = definition;
-            let new_module = if let Some(info) = transaction.module_info(&Handle::new(
-                module.name(),
-                ModulePath::filesystem((**path_buf).clone()),
-                handle.sys_info().dupe(),
-            )) {
+            let new_module = if let Some(info) = transaction.module_info(
+                &handle.for_module(module.name(), ModulePath::filesystem((**path_buf).clone())),
+            ) {
                 info
             } else {
                 return TextRangeWithModule {
@@ -5858,11 +6037,9 @@ impl<'a> CancellableTransaction<'a> {
             compute_transitive_rdeps_for_definition_impl(self, *handle.sys_info(), &definition)?;
         let mut methods = HashMap::new();
         let filesystem_handle = match module.path().details() {
-            ModulePathDetails::Memory(path) => Some(Handle::new(
-                module.name(),
-                ModulePath::filesystem((**path).clone()),
-                *handle.sys_info(),
-            )),
+            ModulePathDetails::Memory(path) => {
+                Some(handle.for_module(module.name(), ModulePath::filesystem((**path).clone())))
+            }
             _ => None,
         };
         for (i, range) in ranges.iter().enumerate() {
@@ -5876,6 +6053,10 @@ impl<'a> CancellableTransaction<'a> {
                 methods.insert((patched.module.path().dupe(), patched.range), i);
             }
         }
+        let metadata_by_path: SmallMap<ModulePath, Arc<BindingsMetadata>> = iter::once(handle)
+            .chain(filesystem_handle.as_ref())
+            .filter_map(|h| Some((h.path().dupe(), self.as_ref().get_bindings_metadata(h)?)))
+            .collect();
         for candidate in candidates {
             if cancellation.is_cancelled() {
                 return Err(Cancelled);
@@ -5894,8 +6075,11 @@ impl<'a> CancellableTransaction<'a> {
                 if cancellation.is_cancelled() {
                     return Err(Cancelled);
                 }
-                for (parent_path, parent_range) in parents {
-                    if let Some(i) = methods.get(&(parent_path.dupe(), *parent_range)) {
+                for (parent_path, parent) in parents {
+                    if let Some(metadata) = metadata_by_path.get(parent_path)
+                        && let Some(range) = parent.current_range(metadata)
+                        && let Some(i) = methods.get(&(parent_path.dupe(), range))
+                    {
                         results[*i]
                             .implementations
                             .push(TextRangeWithModule::new(child_module.dupe(), *child_range));
