@@ -1532,7 +1532,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // TODO: flag incompatible `__new__` return annotations at the method definition.
                 } else if self.is_compatible_constructor_return(&ret, cls.class_object()) {
                     dunder_new_ret = Some(ret);
-                } else if !matches!(ret, Type::Any(AnyStyle::Error | AnyStyle::Implicit)) {
+                } else if !matches!(
+                    ret,
+                    Type::Any(AnyStyle::Error | AnyStyle::MissingImport | AnyStyle::Implicit)
+                ) {
                     // The constructor spec makes an explicitly declared `Any` a foreign return:
                     // use that result and skip `__init__`, just as for another returned class.
                     // The error/implicit-Any exception above is our recovery policy, not a spec rule:

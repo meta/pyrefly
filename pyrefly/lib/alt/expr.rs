@@ -1220,7 +1220,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                     "The return type of this lambda is unknown; it is inferred as an implicit `Any`".to_owned(),
                                 );
                             }
-                            Type::Any(AnyStyle::Error) => self.error_unknown_from_error(
+                            Type::Any(AnyStyle::Error | AnyStyle::MissingImport) => self.error_unknown_from_error(
                                 callable_errors,
                                 lambda.body.range(),
                                 "The return type of this lambda",
@@ -2865,8 +2865,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // An error `Any` is reported where it arises, not at every access it flows through: a
         // failed access, such as a missing attribute, is itself the cause, and an access on a base
         // that is already an error `Any` only propagates it.
-        let from_error_here =
-            !attr_errors.has_hard() && !matches!(base.ty(), Type::Any(AnyStyle::Error));
+        let from_error_here = !attr_errors.has_hard()
+            && !matches!(
+                base.ty(),
+                Type::Any(AnyStyle::Error | AnyStyle::MissingImport)
+            );
         errors.extend(attr_errors);
         match result.ty() {
             // Like pyright, every access whose type is an implicit `Any` is reported, including
@@ -2882,11 +2885,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ),
                 );
             }
-            Type::Any(AnyStyle::Error) if from_error_here => self.error_unknown_from_error(
-                errors,
-                x.attr.range,
-                format!("The type of attribute `{}`", x.attr.id),
-            ),
+            Type::Any(AnyStyle::Error | AnyStyle::MissingImport) if from_error_here => self
+                .error_unknown_from_error(
+                    errors,
+                    x.attr.range,
+                    format!("The type of attribute `{}`", x.attr.id),
+                ),
             Type::Any(AnyStyle::Explicit) => self.error_explicit_any_use(
                 errors,
                 x.attr.range,
@@ -3850,7 +3854,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     let mut failures = Vec::new();
                     for member in specialized {
                         let snapshot = self.solver().snapshot_reachable_vars(&roots);
-                        let member_errors = if matches!(index_ty, Type::Any(AnyStyle::Error)) {
+                        let member_errors = if matches!(index_ty, Type::Any(AnyStyle::Error | AnyStyle::MissingImport)) {
                             self.error_swallower()
                         } else {
                             self.error_collector()

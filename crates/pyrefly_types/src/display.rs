@@ -1715,10 +1715,14 @@ impl<'a> TypeDisplayContext<'a> {
             Type::Truthy => output.write_str("Truthy"),
             Type::Any(style) => match style {
                 AnyStyle::Explicit => self.maybe_fmt_with_module("typing", "Any", output),
-                AnyStyle::Implicit | AnyStyle::Error if self.render_source_annotation => {
+                AnyStyle::Implicit | AnyStyle::Error | AnyStyle::MissingImport
+                    if self.render_source_annotation =>
+                {
                     self.maybe_fmt_with_module("typing", "Any", output)
                 }
-                AnyStyle::Implicit | AnyStyle::Error => output.write_str("Unknown"),
+                AnyStyle::Implicit | AnyStyle::Error | AnyStyle::MissingImport => {
+                    output.write_str("Unknown")
+                }
             },
             Type::TypeAlias(ta) => match &**ta {
                 TypeAliasData::Value(ta) if is_toplevel => {

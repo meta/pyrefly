@@ -2572,7 +2572,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ),
                     );
                 }
-                AnyStyle::Error => self.error_unknown_from_error(
+                AnyStyle::Error | AnyStyle::MissingImport => self.error_unknown_from_error(
                     errors,
                     self.target_value_range(binding).unwrap_or(target_range),
                     format!("The type of `{name}`"),
@@ -4596,7 +4596,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     )
                 }
             }
-            Type::Any(AnyStyle::Error) => match_args,
+            Type::Any(AnyStyle::Error | AnyStyle::MissingImport) => match_args,
             _ => self.error_with_context(
                 errors,
                 range,
@@ -4836,11 +4836,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         ),
                     );
                 }
-                Type::Any(AnyStyle::Error) => self.error_unknown_from_error(
-                    errors,
-                    expr.range(),
-                    format!("The type of `{name}`"),
-                ),
+                Type::Any(AnyStyle::Error | AnyStyle::MissingImport) => self
+                    .error_unknown_from_error(
+                        errors,
+                        expr.range(),
+                        format!("The type of `{name}`"),
+                    ),
                 Type::Any(AnyStyle::Explicit) => self.error_explicit_any_use(
                     errors,
                     expr.range(),
@@ -5165,7 +5166,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             .to_owned(),
                     );
                 }
-                Type::Any(AnyStyle::Error) => {
+                Type::Any(AnyStyle::Error | AnyStyle::MissingImport) => {
                     self.error_unknown_from_error(errors, range, "The type of the returned value")
                 }
                 Type::Any(AnyStyle::Explicit) => {
@@ -6410,10 +6411,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         submodule_error: FindError,
         errors: &ErrorCollector,
     ) -> Type {
-        if matches!(self.exports.module_exists(m), FindingOrError::Error(..)) {
-            // The per-statement `Binding::Module` reports the
-            // missing-module diagnostic; nothing to do here.
-            return self.heap.mk_any_error();
+        match self.exports.module_exists(m) {
+            FindingOrError::Error(FindError::MissingImport(..)) => {
+                return self.heap.mk_any(AnyStyle::MissingImport);
+            }
+            FindingOrError::Error(_) => {
+                // The per-statement `Binding::Module` reports the diagnostic.
+                return self.heap.mk_any_error();
+            }
+            FindingOrError::Finding(_) => {}
         }
         if matches!(submodule_error, FindError::MissingImport(..)) {
             if !fallback.is_unreachable {
@@ -6425,7 +6431,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     )
                     .emit();
             }
-            self.heap.mk_any_error()
+            self.heap.mk_any(AnyStyle::MissingImport)
         } else {
             self.heap.mk_any_implicit()
         }

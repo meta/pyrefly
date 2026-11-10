@@ -188,7 +188,7 @@ impl TypeInfo {
                 // Keep error-Any absorption here so assigned facet types stay in the join.
                 let ty = match &join_style {
                     JoinStyle::NarrowOf(base)
-                        if matches!(base.ty, Type::Any(AnyStyle::Error))
+                        if matches!(base.ty, Type::Any(style) if style.is_error())
                             && tys.iter().any(|ty| ty == &base.ty) =>
                     {
                         base.ty.clone()

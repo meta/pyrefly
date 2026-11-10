@@ -47,6 +47,7 @@ use crate::error::context::TypeCheckKind;
 use crate::error::error::ErrorQuickFix;
 use crate::error::style::ErrorStyle;
 use crate::solver::solver::SubsetError;
+use crate::state::loader::FindError;
 use crate::state::loader::FindingOrError;
 use crate::types::callable::Params;
 use crate::types::class::Class;
@@ -2493,6 +2494,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         match self.exports.module_exists(module_name) {
             FindingOrError::Finding(_) => (),
+            FindingOrError::Error(FindError::MissingImport(..)) => {
+                return Some(Attribute::simple(self.heap.mk_any(AnyStyle::MissingImport)));
+            }
             FindingOrError::Error(_) => return Some(Attribute::simple(self.heap.mk_any_error())), // This module doesn't exist, we must have already errored
         };
 

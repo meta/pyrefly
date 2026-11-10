@@ -1018,7 +1018,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     "The type of this argument is unknown".to_owned(),
                 );
             }
-            Type::Any(AnyStyle::Error) => {
+            Type::Any(AnyStyle::Error | AnyStyle::MissingImport) => {
                 self.error_unknown_from_error(arg_errors, range, "The type of this argument")
             }
             Type::Any(AnyStyle::Explicit) => {

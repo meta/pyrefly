@@ -447,16 +447,24 @@ pub enum AnyStyle {
     /// There was an error, so we made up `Any`.
     /// If this `Any` is used in an error position, don't report another error.
     Error,
+    /// An import could not be resolved. Retains error recovery behavior while identifying
+    /// signatures that depend on unavailable imports.
+    MissingImport,
 }
 
 impl AnyStyle {
+    /// Whether this `Any` is recovery from a diagnostic.
+    pub fn is_error(self) -> bool {
+        matches!(self, Self::Error | Self::MissingImport)
+    }
+
     /// Downgrade an explicit `Any` to an implicit one, for a type that is derived from an `Any`
     /// rather than being the user's `Any` itself, so that the derived type is not reported as a
     /// use of an annotation the user wrote. An operation on an `Any` operand keeps the operand's
     /// style instead of downgrading it: see `Type::merge_any_operands`.
     pub fn propagate(self) -> Type {
         match self {
-            Self::Implicit | Self::Error => Type::Any(self),
+            Self::Implicit | Self::Error | Self::MissingImport => Type::Any(self),
             Self::Explicit => Type::Any(Self::Implicit),
         }
     }
@@ -466,6 +474,7 @@ impl AnyStyle {
     /// implicit `Any` beats an explicit one for the same reason.
     pub fn merge(self, other: Self) -> Type {
         match (self, other) {
+            (Self::MissingImport, _) | (_, Self::MissingImport) => Type::Any(Self::MissingImport),
             (Self::Error, _) | (_, Self::Error) => Type::Any(Self::Error),
             (Self::Implicit, _) | (_, Self::Implicit) => Type::Any(Self::Implicit),
             (Self::Explicit, Self::Explicit) => Type::Any(Self::Explicit),
@@ -1372,7 +1381,7 @@ impl Type {
     }
 
     pub fn is_error(&self) -> bool {
-        matches!(self, Type::Any(AnyStyle::Error))
+        matches!(self, Type::Any(style) if style.is_error())
     }
 
     /// Whether this is an implicit `Any` or a union with an implicit `Any` member. Like pyright's
@@ -2879,8 +2888,18 @@ mod tests {
         // relies on that matching `AnyStyle::merge`. These agree only because the variants are
         // declared weakest-first; this guards the coupling so reordering them fails here rather
         // than silently changing which `Any` a union keeps.
-        for a in [AnyStyle::Explicit, AnyStyle::Implicit, AnyStyle::Error] {
-            for b in [AnyStyle::Explicit, AnyStyle::Implicit, AnyStyle::Error] {
+        for a in [
+            AnyStyle::Explicit,
+            AnyStyle::Implicit,
+            AnyStyle::Error,
+            AnyStyle::MissingImport,
+        ] {
+            for b in [
+                AnyStyle::Explicit,
+                AnyStyle::Implicit,
+                AnyStyle::Error,
+                AnyStyle::MissingImport,
+            ] {
                 assert_eq!(Type::Any(a.max(b)), a.merge(b));
             }
         }
