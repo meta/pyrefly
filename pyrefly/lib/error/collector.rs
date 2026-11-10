@@ -31,7 +31,7 @@ use crate::error::style::ErrorStyle;
 use crate::module::module_info::ModuleInfo;
 use crate::state::errors::find_containing_range;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 struct ModuleErrors {
     /// Set to `true` when we have no duplicates and are sorted.
     clean: bool,
@@ -49,6 +49,17 @@ impl ModuleDiagnostics {
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &Error> {
         self.0.iter()
+    }
+
+    /// Replay finalized diagnostics into an inference attempt while retaining the snapshot.
+    pub(crate) fn replay(&self, errors: &ErrorCollector) {
+        if errors.is_active() {
+            let replayed = ModuleErrors {
+                clean: true,
+                items: self.0.to_vec(),
+            };
+            errors.errors.lock().extend(replayed);
+        }
     }
 }
 
@@ -298,6 +309,8 @@ impl BorrowedCollectedErrors<'_> {
 /// - Deliberately does not implement `Clone`.
 /// - Avoids examining specific errors for the purpose of influencing downstream analysis. I.e., do
 ///   not add anything like a non-private `has_error_message` or `has_error_kind`.
+/// - Only consumes other error collectors (i.e., takes ownership of them when taking errors). Do
+///   not copy errors from borrowed collectors.
 #[derive(Debug)]
 pub struct ErrorCollector {
     module_info: ModuleInfo,
@@ -334,14 +347,6 @@ impl ErrorCollector {
     pub fn extend(&self, other: ErrorCollector) {
         if self.is_active() {
             self.errors.lock().extend(other.errors.into_inner());
-        }
-    }
-
-    /// Copies diagnostics from cached inference into the current attempt.
-    pub(crate) fn extend_from(&self, other: &ErrorCollector) {
-        if self.is_active() {
-            let errors = other.errors.lock().clone();
-            self.errors.lock().extend(errors);
         }
     }
 

@@ -109,6 +109,7 @@ use crate::binding::narrow::int_from_slice;
 use crate::binding::shape_type::ShapeCommentMode;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
 use crate::error::context::ErrorContext;
 use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
@@ -153,8 +154,8 @@ pub struct ArgumentCache {
 #[derive(Debug)]
 struct CachedArgument {
     ty: TypeInfo,
-    errors: ErrorCollector,
-    hint_errors: ErrorCollector,
+    errors: ModuleDiagnostics,
+    hint_errors: ModuleDiagnostics,
     traces: Option<TraceSideEffects>,
 }
 
@@ -857,9 +858,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if let Some(cached) = cache.outcomes.borrow().get(&key)
             && (cached.traces.is_some() || !self.current().tracing_enabled())
         {
-            errors.extend_from(&cached.errors);
+            cached.errors.replay(errors);
             if let Some(errors) = hint.as_ref().and_then(HintRef::errors) {
-                errors.extend_from(&cached.hint_errors);
+                cached.hint_errors.replay(errors);
             }
             if let Some(traces) = &cached.traces {
                 self.trace_state().replay_traces(traces);
@@ -872,25 +873,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let (ty, traces) = self.trace_state().capture_traces(|| {
             self.expr_infer_impl(x, local_hint, &local_errors, type_form_context)
         });
-        errors.extend_from(&local_errors);
-        if let Some(errors) = hint.as_ref().and_then(HintRef::errors) {
-            errors.extend_from(&local_hint_errors);
-        }
         if !ty.has_facets()
             && !ty.ty().may_contain_placeholder_var()
             && !local_errors.has_hard()
             && !local_hint_errors.has_hard()
             && cache.outcomes.borrow().len() < MAX_HINT_WIDTH
         {
-            cache.outcomes.borrow_mut().insert(
-                key,
-                CachedArgument {
-                    ty: ty.clone(),
-                    errors: local_errors,
-                    hint_errors: local_hint_errors,
-                    traces,
-                },
-            );
+            let cached = CachedArgument {
+                ty: ty.clone(),
+                errors: local_errors.finish(),
+                hint_errors: local_hint_errors.finish(),
+                traces,
+            };
+            cached.errors.replay(errors);
+            if let Some(errors) = hint.as_ref().and_then(HintRef::errors) {
+                cached.hint_errors.replay(errors);
+            }
+            cache.outcomes.borrow_mut().insert(key, cached);
+        } else {
+            errors.extend(local_errors);
+            if let Some(errors) = hint.as_ref().and_then(HintRef::errors) {
+                errors.extend(local_hint_errors);
+            }
         }
         ty
     }
