@@ -2217,6 +2217,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // async context manager in a sync `with`), both would otherwise surface as
             // identical-header `bad-context-manager` errors on the same range. The enter
             // half's error wins, since it is the first protocol failure in reading order.
+            // Only a `bad-context-manager` error from the enter half hides the exit half's
+            // errors, because that is the only kind that duplicates them.
             let enter_errors = ErrorCollector::new(errors.module().clone(), ErrorStyle::Delayed);
             let enter_type = self.context_value_enter(
                 context_manager_type,
@@ -2233,9 +2235,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 &exit_errors,
                 Some(&context),
             );
-            if !enter_errors.is_empty() {
-                errors.extend(enter_errors);
-            } else {
+            let enter_failed = enter_errors.has_error_kind(ErrorKind::BadContextManager);
+            errors.extend(enter_errors);
+            if !enter_failed {
                 errors.extend(exit_errors);
             }
             let exit_type = self.union(exit.with_exception, exit.without_exception);

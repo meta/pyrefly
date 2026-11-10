@@ -598,7 +598,6 @@ with async_context():  # E: Cannot use `_AsyncGeneratorContextManager[None]` as 
 
 // Regression test for https://github.com/facebook/pyrefly/issues/5548
 testcase!(
-    bug = "An __enter__ error that is off by default hides the __exit__ errors",
     test_exit_error_reported_for_unparameterized_generic,
     r#"
 from typing import Generic, TypeVar
@@ -610,7 +609,7 @@ class Envoy(Generic[T]):
     def __exit__(self) -> None: ...
 
 def use(e: Envoy) -> None:
-    with e:
+    with e:  # E: `__exit__` must be callable with the argument types (type[BaseException], BaseException, TracebackType) # E: `__exit__` must be callable with the argument types (None, None, None)
         pass
     "#,
 );
