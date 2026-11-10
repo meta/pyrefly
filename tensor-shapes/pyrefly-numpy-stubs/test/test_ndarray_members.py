@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, assert_type, cast, Literal, TYPE_CHECKING
 
 import numpy as np
-from shape_extensions import assert_shape, IntTuple, IntVar
+from shape_extensions import assert_raises, assert_shape, IntTuple, IntVar
 
 
 def test_ndarray_properties_and_shape_preserving_methods() -> None:
@@ -396,3 +396,41 @@ def test_transpose_property_for_any_rank() -> None:
     assert scalar_t.shape == ()
     assert first.shape == (3, 2)
     assert unknown.T.shape == (4, 3, 2)
+
+
+def test_contiguity_and_ownership_flags() -> None:
+    a = np.ones((2, 3))
+    view = a[:1]
+
+    contiguous = a.flags.c_contiguous
+    owns_data = a.flags.owndata
+    assert_type(contiguous, bool)
+    assert_type(owns_data, bool)
+    assert_shape(a.shape, (2, 3))
+    assert contiguous is True
+    assert owns_data is True
+    assert_type(a.T.flags.f_contiguous, bool)
+    assert a.T.flags.f_contiguous is True
+    assert view.flags.owndata is False
+
+
+class _ViewSubclass(np.ndarray):
+    pass
+
+
+def test_view_with_positional_array_subclass() -> None:
+    values = np.ones((2, 3))
+
+    keyword = values.view(type=_ViewSubclass)
+    positional = values.view(_ViewSubclass)
+    reinterpreted = values.view(np.int64)
+    assert_type(keyword, _ViewSubclass)
+    assert_type(positional, _ViewSubclass)
+    assert_type(reinterpreted, np.ndarray[IntTuple, np.dtype[np.int64]])
+    assert_shape(values.shape, (2, 3))
+    assert type(keyword) is _ViewSubclass
+    assert type(positional) is _ViewSubclass
+    assert positional.shape == (2, 3)
+    assert positional.dtype == np.dtype(np.float64)
+    with assert_raises(TypeError):
+        values.view(object)  # E: No matching overload

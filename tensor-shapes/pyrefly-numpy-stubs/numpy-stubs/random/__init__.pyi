@@ -103,6 +103,62 @@ def randn[Shape: IntTuple](*dims: *Shape) -> ndarray[Shape, dtype[float64]]: ...
 # every other method keeps NumPy's own annotation.
 class Generator(_NumpyGenerator):
     @overload
+    def random(
+        self, size: None = None, dtype: _DTypeLikeFloat = ..., out: None = None
+    ) -> float: ...
+    @overload
+    def random[N: IntVar](
+        self, size: Int[N], dtype: _DTypeLikeF64 = ..., out: None = None
+    ) -> ndarray[[N], dtype[float64]]: ...
+    @overload
+    def random[Shape: IntTuple](
+        self, size: Shape, dtype: _DTypeLikeF64 = ..., out: None = None
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    @overload
+    def random[N: IntVar](
+        self, size: Int[N], dtype: _DTypeLikeF32, out: None = None
+    ) -> ndarray[[N], dtype[float32]]: ...
+    @overload
+    def random[Shape: IntTuple](
+        self, size: Shape, dtype: _DTypeLikeF32, out: None = None
+    ) -> ndarray[Shape, dtype[float32]]: ...
+    @overload
+    def random(
+        self, size: _ShapeLike, dtype: _DTypeLikeF64 = ..., out: None = None
+    ) -> _ArrayF64: ...
+    @overload
+    def random(
+        self, size: _ShapeLike, dtype: _DTypeLikeF32, out: None = None
+    ) -> _ArrayF32: ...
+    @overload
+    def random[ArrayT: _ArrayF64](
+        self, size: _ShapeLike | None = None, dtype: _DTypeLikeF64 = ..., *, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def random[ArrayT: _ArrayF32](
+        self, size: _ShapeLike | None = None, *, dtype: _DTypeLikeF32, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def random[ArrayT: _ArrayF64](
+        self, size: _ShapeLike | None, dtype: _DTypeLikeF64, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def random[ArrayT: _ArrayF32](
+        self, size: _ShapeLike | None, dtype: _DTypeLikeF32, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def standard_cauchy(self, size: None = None) -> float: ...
+    @overload
+    def standard_cauchy[N: IntVar](
+        self, size: Int[N]
+    ) -> ndarray[[N], dtype[float64]]: ...
+    @overload
+    def standard_cauchy[Shape: IntTuple](
+        self, size: Shape
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    @overload
+    def standard_cauchy(self, size: _ShapeLike) -> _ArrayF64: ...
+    @overload
     def multivariate_normal[MeanShape: IntTuple, CovShape: IntTuple](
         self,
         /,

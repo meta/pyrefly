@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use itertools::Either;
 use itertools::Itertools;
-use pyrefly_python::qname::QName;
 use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::dimension::is_gradual_size;
@@ -3026,10 +3025,6 @@ pub enum SubsetError {
     OpenTypedDict(Box<OpenTypedDictSubsetError>),
     /// Tensor shape check failed
     Shape(ShapeError),
-    /// We do not currently permit ShapedArray subtyping because there is no known use case and
-    /// it would complicate the shape comparison. This is not a fundamental limitation,
-    /// just a way to keep the complexity of an experimental feature lower.
-    ShapedArraySubtyping(QName, QName),
     /// An invariant was violated - used for cases that should be unreachable when - if there is ever a bug - we
     /// would prefer to not panic and get a text location for reproducing rather than just a crash report.
     /// Note: always use `ErrorCollector::internal_error` to log internal errors.
@@ -3080,9 +3075,6 @@ impl SubsetError {
             SubsetError::TypedDict(err) => Some(err.to_error_msg()),
             SubsetError::OpenTypedDict(err) => Some(err.to_error_msg()),
             SubsetError::Shape(err) => Some(err.to_string()),
-            SubsetError::ShapedArraySubtyping(got, want) => Some(format!(
-                "Pyrefly does not support subtyping relationships between shaped arrays `{got}` and `{want}` at this time. If you need this, consider filing an issue."
-            )),
             SubsetError::InternalError(msg) => Some(format!("Pyrefly internal error: {msg}")),
             SubsetError::TypeOfProtocolNeedsConcreteClass(want) => Some(format!(
                 "Only concrete classes may be assigned to `type[{want}]` because `{want}` is a protocol"
@@ -4430,11 +4422,9 @@ mod tests {
     use pyrefly_types::quantified::QuantifiedIdentity;
     use pyrefly_types::quantified::QuantifiedOrigin;
     use pyrefly_types::shaped_array::IntTuple;
-    use pyrefly_types::shaped_array::ShapedArrayType;
     use pyrefly_types::type_var::PreInferenceVariance;
     use pyrefly_types::types::AnyStyle;
     use pyrefly_types::types::TArgs;
-    use pyrefly_types::types::TParams;
     use pyrefly_types::types::Union;
     use ruff_python_ast::Identifier;
     use ruff_text_size::TextSize;
@@ -4962,180 +4952,6 @@ mod tests {
             ])
             .to_shape_arg_type()
         );
-    }
-
-    #[test]
-    fn simplify_mut_normalizes_inline_shaped_array() {
-        let (solver, var) = solver_with_answer(Type::Tuple(Tuple::Concrete(vec![Type::Int(
-            Int::Literal(2),
-        )])));
-        let shape =
-            IntTuple::unpacked(vec![Int::Literal(1)], Type::Var(var), vec![Int::Literal(3)]);
-        let mut ty = ShapedArrayType::new(fake_array(TArgs::default()), shape).to_type();
-
-        solver.expand_mut(&mut ty);
-
-        let Type::ShapedArray(array) = ty else {
-            panic!("expected shaped array")
-        };
-        assert_eq!(
-            array.shape(),
-            IntTuple::from_types(vec![
-                Type::Int(Int::Literal(1)),
-                Type::Int(Int::Literal(2)),
-                Type::Int(Int::Literal(3)),
-            ])
-        );
-        assert_eq!(array.tuple_carrier_shape_arg_index(), None);
-    }
-
-    #[test]
-    fn simplify_mut_flattens_tuple_unpack_in_inline_shaped_array() {
-        let nested = Type::Unpack(Box::new(Type::Tuple(Tuple::Concrete(vec![
-            Type::Int(Int::Literal(2)),
-            Type::Int(Int::Literal(3)),
-        ]))));
-        let (solver, var) = solver_with_answer(Type::Tuple(Tuple::Concrete(vec![nested])));
-        let shape =
-            IntTuple::unpacked(vec![Int::Literal(1)], Type::Var(var), vec![Int::Literal(4)]);
-        let mut ty = ShapedArrayType::new(fake_array(TArgs::default()), shape).to_type();
-
-        solver.expand_mut(&mut ty);
-
-        let Type::ShapedArray(array) = ty else {
-            panic!("expected shaped array")
-        };
-        assert_eq!(
-            array.shape(),
-            IntTuple::from_types(vec![
-                Type::Int(Int::Literal(1)),
-                Type::Int(Int::Literal(2)),
-                Type::Int(Int::Literal(3)),
-                Type::Int(Int::Literal(4)),
-            ])
-        );
-        assert_eq!(array.tuple_carrier_shape_arg_index(), None);
-    }
-
-    #[test]
-    fn simplify_mut_normalizes_concrete_tuple_carrier_as_first_class_shape_arg() {
-        let nested = Type::Unpack(Box::new(Type::Tuple(Tuple::Concrete(vec![
-            Type::Int(Int::Literal(2)),
-            Type::Int(Int::Literal(3)),
-        ]))));
-        let (solver, var) = solver_with_answer(Type::Tuple(Tuple::Concrete(vec![nested])));
-        let shape_param = quantified(QuantifiedKind::TypeVar, 0);
-        let base_class = fake_array(TArgs::new(
-            Arc::new(TParams::new(vec![shape_param])),
-            vec![Type::Var(var)],
-        ));
-        let mut ty = ShapedArrayType::new(base_class, IntTuple::shapeless())
-            .with_tuple_carrier_shape_arg(0)
-            .to_type();
-
-        solver.expand_mut(&mut ty);
-
-        let Type::ShapedArray(array) = ty else {
-            panic!("expected shaped array")
-        };
-        let expected =
-            IntTuple::from_types(vec![Type::Int(Int::Literal(2)), Type::Int(Int::Literal(3))]);
-        assert_eq!(array.shape(), expected);
-        assert_eq!(
-            array.base_class.targs().as_slice()[0],
-            expected.to_shape_arg_type()
-        );
-        assert_eq!(array.tuple_carrier_shape_arg_index(), Some(0));
-    }
-
-    #[test]
-    fn simplify_mut_normalizes_gradual_tuple_carrier_as_first_class_shape_arg() {
-        let (solver, var) =
-            solver_with_answer(Type::Tuple(Tuple::Unbounded(Box::new(gradual_size()))));
-        let shape_param = quantified(QuantifiedKind::TypeVar, 0);
-        let base_class = fake_array(TArgs::new(
-            Arc::new(TParams::new(vec![shape_param])),
-            vec![Type::Var(var)],
-        ));
-        let mut ty = ShapedArrayType::new(base_class, IntTuple::shapeless())
-            .with_tuple_carrier_shape_arg(0)
-            .to_type();
-
-        solver.expand_mut(&mut ty);
-
-        let Type::ShapedArray(array) = ty else {
-            panic!("expected shaped array")
-        };
-        let expected = IntTuple::shapeless();
-        assert_eq!(array.shape(), expected);
-        assert_eq!(
-            array.base_class.targs().as_slice()[0],
-            expected.to_shape_arg_type()
-        );
-        assert_eq!(array.tuple_carrier_shape_arg_index(), Some(0));
-    }
-
-    #[test]
-    fn simplify_mut_normalizes_existing_first_class_tuple_carrier() {
-        let (solver, var) = solver_with_answer(Type::Tuple(Tuple::Concrete(vec![
-            Type::Int(Int::Literal(2)),
-            Type::Int(Int::Literal(3)),
-        ])));
-        let shape =
-            IntTuple::unpacked(vec![Int::Literal(1)], Type::Var(var), vec![Int::Literal(4)]);
-        let shape_param = quantified(QuantifiedKind::TypeVar, 0);
-        let base_class = fake_array(TArgs::new(
-            Arc::new(TParams::new(vec![shape_param])),
-            vec![shape.to_shape_arg_type()],
-        ));
-        let mut ty = ShapedArrayType::new(base_class, IntTuple::shapeless())
-            .with_tuple_carrier_shape_arg(0)
-            .to_type();
-
-        solver.expand_mut(&mut ty);
-
-        let Type::ShapedArray(array) = ty else {
-            panic!("expected shaped array")
-        };
-        let expected = IntTuple::from_types(vec![
-            Type::Int(Int::Literal(1)),
-            Type::Int(Int::Literal(2)),
-            Type::Int(Int::Literal(3)),
-            Type::Int(Int::Literal(4)),
-        ]);
-        assert_eq!(array.shape(), expected);
-        assert_eq!(
-            array.base_class.targs().as_slice()[0],
-            expected.to_shape_arg_type()
-        );
-        assert_eq!(array.tuple_carrier_shape_arg_index(), Some(0));
-    }
-
-    #[test]
-    fn simplify_mut_preserves_whole_shape_typevar_carrier_as_first_class_shape_arg() {
-        let carrier = Type::Quantified(Box::new(quantified(QuantifiedKind::TypeVar, 1)));
-        let (solver, var) = solver_with_answer(carrier.clone());
-        let shape_param = quantified(QuantifiedKind::TypeVar, 0);
-        let base_class = fake_array(TArgs::new(
-            Arc::new(TParams::new(vec![shape_param])),
-            vec![Type::Var(var)],
-        ));
-        let mut ty = ShapedArrayType::new(base_class, IntTuple::shapeless())
-            .with_tuple_carrier_shape_arg(0)
-            .to_type();
-
-        solver.expand_mut(&mut ty);
-
-        let Type::ShapedArray(array) = ty else {
-            panic!("expected shaped array")
-        };
-        let expected = IntTuple::unpacked(Vec::new(), carrier, Vec::new());
-        assert_eq!(array.shape(), expected);
-        assert_eq!(
-            array.base_class.targs().as_slice()[0],
-            expected.to_shape_arg_type()
-        );
-        assert_eq!(array.to_string(), "Array[T]");
     }
 
     #[test]

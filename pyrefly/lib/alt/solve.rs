@@ -22,7 +22,6 @@ use pyrefly_types::function::BodyKind;
 use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
-use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_types::type_alias::TypeAliasIndex;
 use pyrefly_types::type_alias::TypeAliasRef;
@@ -140,6 +139,7 @@ use crate::binding::binding::ReturnImplicit;
 use crate::binding::binding::ReturnType;
 use crate::binding::binding::ReturnTypeKind;
 use crate::binding::binding::SizeExpectation;
+use crate::binding::binding::SuiteGate;
 use crate::binding::binding::SuperStyle;
 use crate::binding::binding::TypeAliasParams;
 use crate::binding::binding::TypeParameter;
@@ -593,8 +593,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             pydantic_config_dict,
             pydantic_before_validator_fields,
             django_field_info,
-            capture_init,
-            shaped_array_metadata,
         } = binding;
 
         match &self.get_idx(*k).0 {
@@ -608,8 +606,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 pydantic_config_dict,
                 pydantic_before_validator_fields,
                 django_field_info,
-                capture_init.as_deref(),
-                shaped_array_metadata.as_deref(),
                 errors,
             ),
         }
@@ -3272,7 +3268,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             BindingExpect::GatedSuiteReachability { gates, end } => {
                 // Everything from the first gate that cannot be passed is dead, so report from
                 // there; later gates describe code that region already covers.
-                if let Some(gate) = gates.iter().find(|gate| match &gate.condition {
+                let closed = |gate: &SuiteGate| match &gate.condition {
                     GateCondition::ManagerSuppresses { contexts, kind } => {
                         contexts.iter().all(|context| {
                             self.context_manager_definitely_does_not_suppress(
@@ -3281,14 +3277,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             )
                         })
                     }
-                    GateCondition::ExpressionReturns { result } => {
-                        self.get_idx(*result).ty().is_never()
-                            && self.statement_is_a_diverging_call(*result)
-                    }
+                    GateCondition::ExpressionReturns { result } => self.statement_diverges(*result),
                     GateCondition::SomePathReturns { last_exprs } => last_exprs
                         .iter()
                         .any(|xs| self.all_paths_diverge(xs, DivergenceQuestion::DeadCode)),
-                }) {
+                };
+                // A dead region never begins with a divergence marker, an expression of type
+                // `Never` such as `assert_never(x)`. The marker is judged by its type alone:
+                // whether the `Never` is the call's own or came in through an argument, as for
+                // `assert_type(x, Never)`, the statement says the same thing. A marker opens the
+                // next gate, whose start is the statement after it, so the region begins there
+                // instead, whether or not that gate is closed on its own; a marker that nothing
+                // follows leaves nothing to report.
+                let is_marker = |gate: &SuiteGate| {
+                    gate.expr_at_start
+                        .is_some_and(|result| self.get_idx(result).ty().is_never())
+                };
+                if let Some(first) = gates.iter().position(closed)
+                    && let Some(gate) = gates[first..].iter().find(|gate| !is_marker(gate))
+                {
                     errors
                         .error_builder(
                             TextRange::new(gate.start, *end),
@@ -4664,7 +4671,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     let got = self.expr_infer(expr, errors);
                     if let Some(annot_ty) = &annot_ty
-                        && call.arguments.find_keyword("converter").is_none()
+                        // attrs treats `converter=None` as no converter.
+                        && call.arguments.find_keyword("converter").is_none_or(|converter| {
+                            self.expr_infer(&converter.value, &self.error_swallower())
+                                .is_none()
+                        })
                         && self
                             .bindings()
                             .get_class_fields(spec.class_def_index)
@@ -4965,7 +4976,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // with `Any`. Inferred types there are capped when their own function is solved.
                 let return_ty = if return_ty.is_toplevel_callable() {
                     return_ty
-                } else if return_ty.union_width() > MAX_INFERRED_RETURN_UNION_WIDTH {
+                } else if self.stack().widen_inferred_return(
+                    return_ty.union_width() > MAX_INFERRED_RETURN_UNION_WIDTH,
+                ) {
                     self.heap.mk_any_implicit()
                 } else {
                     let any = self.heap.mk_any_implicit();
@@ -5255,6 +5268,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    /// Whether control never gets past this expression statement: its result is `Never`, and the
+    /// call that produced it is the reason. This is what makes the statement a divergence marker
+    /// and the code after it dead.
+    fn statement_diverges(&self, result: Idx<Key>) -> bool {
+        self.get_idx(result).ty().is_never() && self.statement_is_a_diverging_call(result)
+    }
+
     /// Whether this expression statement is a call to something that never returns.
     ///
     /// A `Never` result does not say so on its own. A call whose receiver was narrowed away has
@@ -5327,9 +5347,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         self.context_manager_definitely_does_not_suppress(e.ty(), *kind)
                     }
                 },
+                // A `match` with no irrefutable case is passed only when some value escapes
+                // every pattern. That is the proof behind `unreachable-match-case` and the
+                // function's implicit return, and it holds for dead code too; the `assert_never`
+                // that relies on it is exempt as a divergence marker, not by refusing the proof.
                 LastStmt::Exhaustive(_) => e.ty().is_never(),
                 // Code is reported dead only by the suite's test, never by the narrowing that
-                // also makes a fall-through dead, since that would condemn `assert_never`.
+                // also makes a fall-through dead. An `if` test can be settled by a value the
+                // check does not trust, an inferred `keep = True` for one, and the narrowing
+                // of the fall-through would report what the test itself does not.
                 LastStmt::BranchEnd(_) => match question {
                     DivergenceQuestion::ImplicitReturn => e.ty().is_never(),
                     DivergenceQuestion::DeadCode => dead_by_test(k),
@@ -7748,9 +7774,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             &x.decorators,
             &x.legacy_tparams,
             &x.parent,
-            x.shape_dsl_def.clone(),
             x.type_shape_dsl_def.clone(),
-            x.uses_shape_dsl_ir_name,
             errors,
         )
     }
@@ -8070,11 +8094,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             Some(self.bare_int_tuples())
                         } else if cls.is(KnownClass::ShapeExtensionsInt) {
                             Some(gradual_size())
-                        } else if self.shaped_array_shape_for_class_type(cls).is_some() {
-                            // Canonicalize bare shaped-array types to Type::ShapedArray(shapeless)
-                            // for consistency. Subscripted arrays are already converted to
-                            // Type::ShapedArray during annotation parsing, so only the bare case reaches here.
-                            Some(ShapedArrayType::shapeless(cls.clone()).to_type())
                         } else if cls.is(KnownClass::TypesNoneType) {
                             // Normalize type[NoneType] as None
                             Some(self.heap.mk_none())
@@ -8150,8 +8169,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Int and Tensor are already type forms.
             ty @ Type::Int(_) => Some(ty),
             ty @ Type::IntTuple(_) => Some(ty),
-            ty @ Type::ShapedArray(_) => Some(ty),
-            ty @ Type::NNModule(_) => Some(ty),
             ty @ Type::DataFrame(_) => Some(ty),
             // Handle bare class definitions (e.g., Dim, Module) by canonicalizing them to type forms
             Type::ClassDef(cls) => {

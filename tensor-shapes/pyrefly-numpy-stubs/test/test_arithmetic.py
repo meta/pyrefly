@@ -167,8 +167,8 @@ def test_scalar_defaults_preserve_unknown_shapes() -> None:
 
 
 def check_array_like_operands() -> None:
-    # NumPy coerces sequences in these operand positions; the overlay models
-    # arrays and scalars only.
+    # NumPy coerces a list operand of `@`, but the overlay still accepts only arrays
+    # there.
     matrix = np.eye(3)
     scale = np.float64(2.0)
 
@@ -223,3 +223,30 @@ def test_shift_dtype_promotion_and_scalar_result() -> None:
     assert_shape(scalar.shape, IntTuple, runtime=())
     assert promoted.dtype == np.dtype(np.int64)
     assert isinstance(scalar, np.uint64)
+
+
+def test_array_arithmetic_with_numeric_lists() -> None:
+    values = np.ones(int("3"))
+    counts = np.full(3, 2, dtype=np.int64)
+    column = [[0.1], [0.2]]
+
+    added = values + column
+    reflected = column + values
+    subtracted = values - [1, 2, 3]
+    divided = values / [[1.0], [2.0]]
+    powered = counts ** [2, 2, 2]
+    multiplied = values * [1.0, 2.0, 3.0]
+    assert_type(added, np.ndarray)
+    assert_type(reflected, np.ndarray)
+    assert_type(subtracted, np.ndarray)
+    assert_type(divided, np.ndarray)
+    assert_type(powered, np.ndarray)
+    assert_type(multiplied, np.ndarray)
+    assert_type(values + 1.0, np.ndarray[[int], np.dtype[np.float64]])
+    assert_shape(counts.shape, (3,))
+    assert added.shape == reflected.shape == divided.shape == (2, 3)
+    assert subtracted.shape == (3,)
+    assert powered.dtype == np.dtype(np.int64)
+    assert isinstance(multiplied, np.ndarray)
+    with assert_raises(TypeError):
+        values + ["a", "b", "c"]  # E: `+` is not supported

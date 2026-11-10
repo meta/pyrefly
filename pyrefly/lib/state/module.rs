@@ -36,6 +36,7 @@
 use std::sync::Arc;
 
 use dupe::Dupe;
+use dupe::OptionDupedExt;
 use parking_lot::Condvar;
 use parking_lot::Mutex;
 use ruff_python_ast::ModModule;
@@ -503,12 +504,12 @@ impl ModuleStateReader for ModuleState {
 
     fn module_ranges(&self) -> Option<Arc<ModuleRanges>> {
         if let Some(answers) = self.steps.answers.as_ref() {
-            Some(answers.bindings().module_ranges().dupe())
+            answers.bindings().module_ranges().duped()
         } else {
             self.steps
                 .solutions
                 .as_ref()
-                .map(|s| s.module_ranges().dupe())
+                .and_then(|s| s.module_ranges().duped())
         }
     }
 }
@@ -536,11 +537,11 @@ impl ModuleStateReader for ModuleStateMut {
 
     fn module_ranges(&self) -> Option<Arc<ModuleRanges>> {
         self.with_answers(|answers| {
-            answers.map(|answers| answers.bindings().module_ranges().dupe())
+            answers.map(|answers| answers.bindings().module_ranges().duped())
         })
-        .or_else(|| {
+        .unwrap_or_else(|| {
             self.with_solutions(|solutions| {
-                solutions.map(|solutions| solutions.module_ranges().dupe())
+                solutions.and_then(|solutions| solutions.module_ranges().duped())
             })
         })
     }

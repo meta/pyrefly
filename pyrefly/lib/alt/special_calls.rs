@@ -87,12 +87,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 TypeFormContext::FunctionArgument,
                 errors,
             ));
-            let shown = a.clone().without_truthiness_markers();
-            if !b.is_error() && !self.is_equivalent(&shown, &b) {
+            if !b.is_error() && !self.is_equivalent(&a, &b) {
                 // `a` is a subtype of `b` if every materialization of `a` is a subtype of every
                 // materialization of `b`.
-                let is_unspellable_subtype = !shown.is_spellable()
-                    && self.is_subset_eq(&shown.materialize(), &b.materialize());
+                let is_unspellable_subtype =
+                    !a.is_spellable() && self.is_subset_eq(&a.materialize(), &b.materialize());
                 let kind = if is_unspellable_subtype {
                     ErrorKind::AssertTypeUnspellableSubtype
                 } else {
@@ -349,10 +348,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let actual = self
                 .solver()
                 .force(self.expr_infer_with_hint(&args[0], hint, errors));
-            let (actual_shape, return_actual) = match &actual {
-                Type::ShapedArray(array) => (Some(array.shape()), true),
-                _ if actual.is_any() => (Some(IntTuple::shapeless()), false),
-                _ => (self.assert_shape_input_to_int_tuple(&actual), false),
+            let actual_shape = if actual.is_any() {
+                Some(IntTuple::shapeless())
+            } else {
+                self.assert_shape_input_to_int_tuple(&actual)
             };
             if let Some(actual_shape) = actual_shape {
                 if let Some(shape) = self.parse_assert_shape_expr(&args[1], errors) {
@@ -385,7 +384,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             ),
                         );
                     }
-                    if return_actual { actual } else { expected }
+                    expected
                 } else {
                     self.heap.mk_any_error()
                 }

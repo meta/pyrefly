@@ -458,7 +458,7 @@ x2: list[A] = True and [B()]
 testcase!(
     test_context_boolop_soft,
     r#"
-from typing import TypedDict, assert_type
+from typing import TypedDict, assert_type, reveal_type
 class A: ...
 class B(A): ...
 class C: ...
@@ -467,9 +467,9 @@ class TD(TypedDict):
     x: int
 def test(x: list[A] | None, y: list[C] | None, z: TD | None) -> None:
     assert_type(x or [B()], list[A])
-    assert_type(x or [0], list[A] | list[int])
-    assert_type(x or y or [B()], list[A] | list[C])
-    assert_type(x or y or [D()], list[A] | list[C])
+    reveal_type(x or [0])  # E: (list[A] & Truthy) | list[int]
+    reveal_type(x or y or [B()])  # E: list[A] | (list[C] & Truthy)
+    reveal_type(x or y or [D()])  # E: (list[A] & Truthy) | list[C]
     assert_type(z or {"x": 0}, TD)
     assert_type(z or {"x": ""}, TD | dict[str, str])
 "#,

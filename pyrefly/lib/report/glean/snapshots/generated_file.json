@@ -17,6 +17,10 @@
   },
   {
     "facts": [],
+    "predicate": "python.TargetUses.4"
+  },
+  {
+    "facts": [],
     "predicate": "python.XRefsViaNameByTarget.4"
   },
   {
@@ -414,6 +418,6 @@
     "predicate": "python.Module.4"
   },
   {
-    "schema_id": "f329796272b9314200433ac342cbc15c"
+    "schema_id": "60aea86d7ff049228df605cf3fda4c67"
   }
 ]

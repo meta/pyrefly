@@ -341,12 +341,19 @@ pub fn common_alias_target_module(alias: &str) -> Option<&'static str> {
 }
 
 /// Prepare an import edit after the module docstring and future-import header.
-pub(crate) fn prepare_import_insertion(
+pub(crate) fn prepare_import_insertion(ast: &ModModule, import_text: String) -> (TextSize, String) {
+    prepare_import_insertion_in_range(ast, ast.range, import_text)
+}
+
+/// Prepare an import within a source region, such as a notebook cell, using the existing AST.
+pub(crate) fn prepare_import_insertion_in_range(
     ast: &ModModule,
+    range: TextRange,
     mut import_text: String,
 ) -> (TextSize, String) {
     if let Some(first_stmt) = ast.body.iter().find(|stmt| {
-        !is_docstring_stmt(stmt)
+        range.contains(stmt.range().start())
+            && !is_docstring_stmt(stmt)
             && !matches!(stmt, Stmt::ImportFrom(import)
                 if import.level == 0
                     && import.module.as_ref().is_some_and(|module| module.id.as_str() == "__future__"))
@@ -354,10 +361,10 @@ pub(crate) fn prepare_import_insertion(
         return (first_stmt.range().start(), import_text);
     }
     // Appending after a header needs a line boundary, even without a final newline.
-    if !ast.range.is_empty() {
+    if !range.is_empty() {
         import_text.insert(0, '\n');
     }
-    (ast.range.end(), import_text)
+    (range.end(), import_text)
 }
 
 /// Insert `import <module>` (optionally with an alias) at the top of the file.

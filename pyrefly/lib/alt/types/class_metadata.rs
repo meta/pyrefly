@@ -18,7 +18,6 @@ use pyrefly_derive::VisitMut;
 use pyrefly_python::dunder;
 use pyrefly_types::function::Deprecation;
 use pyrefly_types::known_class::KnownClass;
-use pyrefly_types::quantified::Quantified;
 use pyrefly_types::typed_dict::ExtraItems;
 use pyrefly_util::display::commas_iter;
 use pyrefly_util::visit::Visit as VisitTrait;
@@ -50,30 +49,6 @@ use crate::types::types::Type;
 #[derive(Clone, Debug, TypeEq, PartialEq, Eq)]
 pub struct SlotsInfo {
     pub names: SmallSet<Name>,
-}
-
-/// Metadata for a class registered with `@shaped_array`.
-#[derive(Clone, Debug, TypeEq, PartialEq, Eq)]
-pub struct ShapedArrayMetadata {
-    shape: Quantified,
-    builtin_indexing: bool,
-}
-
-impl ShapedArrayMetadata {
-    pub fn new(shape: Quantified, builtin_indexing: bool) -> Self {
-        Self {
-            shape,
-            builtin_indexing,
-        }
-    }
-
-    pub fn shape(&self) -> &Quantified {
-        &self.shape
-    }
-
-    pub fn uses_builtin_indexing(&self) -> bool {
-        self.builtin_indexing
-    }
 }
 
 impl SlotsInfo {
@@ -149,10 +124,6 @@ pub struct ClassMetadata {
     /// Whether this class is a metaclass (i.e., a subclass of `type`).
     is_metaclass: bool,
     explicit_slots: ExplicitSlots,
-    /// `__init__` parameter names to capture for shape inference, extracted from
-    /// `@uses_shape_dsl(..., capture_init=[...])` on a `forward` method.
-    capture_init: Option<Vec<Name>>,
-    shaped_array: Option<ShapedArrayMetadata>,
 }
 
 impl VisitMut<Type> for ClassMetadata {
@@ -176,9 +147,6 @@ impl VisitMut<Type> for ClassMetadata {
         if let Some(dataclass_transform_metadata) = &mut self.dataclass_transform_metadata {
             dataclass_transform_metadata.visit_mut(f);
         }
-        if let Some(shaped_array) = &mut self.shaped_array {
-            shaped_array.shape.visit_mut(f);
-        }
     }
 }
 
@@ -200,9 +168,6 @@ impl VisitTrait<Type> for ClassMetadata {
         }
         if let Some(dataclass_transform_metadata) = &self.dataclass_transform_metadata {
             dataclass_transform_metadata.visit(f);
-        }
-        if let Some(shaped_array) = &self.shaped_array {
-            shaped_array.shape.visit(f);
         }
     }
 }
@@ -244,8 +209,6 @@ static RECURSIVE_CLASS_METADATA: ClassMetadata = ClassMetadata {
     django_rest_framework_serializer_kind: None,
     is_metaclass: false,
     explicit_slots: ExplicitSlots::Absent,
-    capture_init: None,
-    shaped_array: None,
 };
 
 impl ClassMetadata {
@@ -276,8 +239,6 @@ impl ClassMetadata {
         is_factory_boy_factory: bool,
         is_metaclass: bool,
         explicit_slots: ExplicitSlots,
-        capture_init: Option<Vec<Name>>,
-        shaped_array: Option<ShapedArrayMetadata>,
     ) -> ClassMetadata {
         ClassMetadata {
             metaclass,
@@ -306,8 +267,6 @@ impl ClassMetadata {
             is_factory_boy_factory,
             is_metaclass,
             explicit_slots,
-            capture_init,
-            shaped_array,
         }
     }
 
@@ -490,24 +449,6 @@ impl ClassMetadata {
 
     pub fn django_model_metadata(&self) -> Option<&DjangoModelMetadata> {
         self.django_model_metadata.as_ref()
-    }
-
-    pub fn capture_init(&self) -> Option<&[Name]> {
-        self.capture_init.as_deref()
-    }
-
-    pub fn is_shaped_array(&self) -> bool {
-        self.shaped_array.is_some()
-    }
-
-    pub fn shaped_array_shape(&self) -> Option<&Quantified> {
-        self.shaped_array.as_ref().map(ShapedArrayMetadata::shape)
-    }
-
-    pub fn uses_builtin_shaped_array_indexing(&self) -> bool {
-        self.shaped_array
-            .as_ref()
-            .is_some_and(ShapedArrayMetadata::uses_builtin_indexing)
     }
 }
 

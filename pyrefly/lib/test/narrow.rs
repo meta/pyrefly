@@ -1310,6 +1310,53 @@ def f(cls: type[int], x: int | str) -> None:
 );
 
 testcase!(
+    test_is_not_instance_gradual_base,
+    r#"
+from typing import Any, Self, TypedDict, assert_type
+
+def make_base() -> Any:
+    return object
+
+class Mul: ...
+
+class FloorDiv(make_base()):
+    def check(self) -> None:
+        if not isinstance(self, Mul):
+            assert_type(self, Self)
+
+class Inherited(FloorDiv): ...
+
+class Data(TypedDict):
+    value: int
+
+def gradual_left(x: FloorDiv) -> None:
+    if not isinstance(x, Mul):
+        assert_type(x, FloorDiv)
+
+def gradual_right(x: str) -> None:
+    if not isinstance(x, FloorDiv):
+        assert_type(x, str)
+
+def inherited_base(x: Inherited) -> None:
+    if not isinstance(x, Mul):
+        assert_type(x, Inherited)
+
+def union_member(x: FloorDiv | Mul) -> None:
+    if not isinstance(x, Mul):
+        assert_type(x, FloorDiv)
+
+def typed_dict(x: Data) -> None:
+    if not isinstance(x, FloorDiv):
+        assert_type(x, Data)
+
+# An Any type argument does not make the runtime class uncertain.
+def generic_argument(x: list[Any] | int) -> None:
+    if not isinstance(x, list):
+        assert_type(x, int)
+"#,
+);
+
+testcase!(
     test_is_not_instance_alias,
     r#"
 from typing import TypeAlias, assert_type
@@ -3164,7 +3211,7 @@ class C:
         return True
 
 class D:
-    def guard_missing_self() -> TypeGuard[int]: # E: Type guard functions must accept at least one positional argument
+    def guard_missing_self() -> TypeGuard[int]: # E: Type guard functions must accept at least one positional argument  # E: Instance method `guard_missing_self` must accept the instance as its first positional parameter
         return True
 "#,
 );
@@ -3232,7 +3279,7 @@ class C:
         return True
 
 class D:
-    def guard_missing_self() -> TypeIs[int]: # E: Type guard functions must accept at least one positional argument
+    def guard_missing_self() -> TypeIs[int]: # E: Type guard functions must accept at least one positional argument  # E: Instance method `guard_missing_self` must accept the instance as its first positional parameter
         return True
 "#,
 );
@@ -4755,14 +4802,14 @@ def g(x: A | B | C) -> None:
 testcase!(
     test_class_may_be_falsy,
     r#"
-from typing import assert_type
+from typing import reveal_type
 
 class MyClass:
     name: str
 
 def myfn(x: MyClass | None):
     # `x` could be a falsy instance of a subclass of `MyClass`
-    assert_type(x and x.name, MyClass | str | None)
+    reveal_type(x and x.name)  # E: (MyClass & Falsy) | str | None
     "#,
 );
 
@@ -4783,7 +4830,7 @@ def myfn(x: MyClass | None):
 testcase!(
     test_class_with_bool_may_be_falsy,
     r#"
-from typing import assert_type, final
+from typing import reveal_type, final
 
 @final
 class MyClass:
@@ -4791,7 +4838,7 @@ class MyClass:
     def __bool__(self) -> bool: ...
 
 def myfn(x: MyClass | None):
-    assert_type(x and x.name, MyClass | str | None)
+    reveal_type(x and x.name)  # E: (MyClass & Falsy) | str | None
     "#,
 );
 
@@ -4993,6 +5040,93 @@ def custom[T: Falsy](value: T) -> T:
     if value:
         assert_type(value, Never)  # E: This code is unreachable
     return value
+"#,
+);
+
+// https://github.com/meta/pyrefly/issues/5544
+testcase!(
+    test_narrow_error_any_join,
+    r#"
+import missing_module  # pyrefly: ignore[missing-import]
+from typing import Any, assert_type, reveal_type
+
+def not_none() -> None:
+    value = missing_module.get()
+    if value is not None:
+        pass
+    assert_type(value, Any)
+    reveal_type(value)  # E: revealed type: Unknown
+    value[0]
+
+def is_none() -> None:
+    value = missing_module.get()
+    if value is None:
+        pass
+    assert_type(value, Any)
+    value[0]
+
+def instance() -> None:
+    value = missing_module.get()
+    if isinstance(value, int):
+        pass
+    assert_type(value, Any)
+    value[0]
+
+def alternatives() -> None:
+    value = missing_module.get()
+    if isinstance(value, int) or isinstance(value, str):
+        assert_type(value, int | str)
+    assert_type(value, Any)
+"#,
+);
+
+testcase!(
+    test_narrow_any_join_boundaries,
+    r#"
+import missing_module  # pyrefly: ignore[missing-import]
+from typing import Any, assert_type, reveal_type
+
+def explicit(value: Any) -> None:
+    if value is not None:
+        pass
+    assert_type(value, Any)
+    if isinstance(value, int) or isinstance(value, str):
+        assert_type(value, int | str)
+    assert_type(value, Any)
+
+def implicit(value) -> None:
+    if value is not None:
+        pass
+    assert_type(value, Any)
+    value[0]
+
+def reassigned(flag: bool) -> None:
+    value = missing_module.get()
+    if flag:
+        value = None
+    reveal_type(value)  # E: revealed type: Unknown | None
+    value[0]  # E: `None` is not subscriptable
+
+class Box:
+    value: object
+
+def facet_reassigned(box: Box, flag: bool) -> None:
+    box.value = missing_module.get()
+    if flag:
+        box.value = None
+    reveal_type(box.value)  # E: revealed type: Unknown | None
+    box.value[0]  # E: `None` is not subscriptable
+
+def annotated(value: Any | None) -> None:
+    assert_type(value, Any | None)
+    value[0]  # E: `None` is not subscriptable
+
+def terminated() -> None:
+    value = missing_module.get()
+    if value is not None:
+        return
+    assert_type(value, None)
+    value[0]  # E: `None` is not subscriptable
 "#,
 );
 

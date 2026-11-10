@@ -8,7 +8,6 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::iter;
-use std::sync::Arc;
 
 use itertools::EitherOrBoth;
 use itertools::Itertools;
@@ -26,9 +25,7 @@ use pyrefly_types::literal::Lit;
 use pyrefly_types::read_only::ReadOnlyReason;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
-use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::shaped_array::is_tuple_carrier_shape_middle;
-use pyrefly_types::shaped_array::shape_to_tuple_carrier;
 use pyrefly_types::shaped_array::tuple_carrier_to_shape;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::typed_dict::ANONYMOUS_TYPED_DICT;
@@ -70,14 +67,12 @@ use crate::types::callable::PrefixParam;
 use crate::types::callable::Required;
 use crate::types::callable::params_are_gradual_variadic;
 use crate::types::class::ClassType;
-use crate::types::quantified::Quantified;
 use crate::types::quantified::QuantifiedKind;
 use crate::types::tuple::Tuple;
 use crate::types::type_alias::TypeAliasData;
 use crate::types::type_var::Restriction;
 use crate::types::type_var::Variance;
 use crate::types::types::Forallable;
-use crate::types::types::TArgs;
 use crate::types::types::Type;
 use crate::types::types::Var;
 
@@ -2412,25 +2407,6 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                     )
                 }
             }
-            // Tensor type checking
-            (Type::ShapedArray(got_shaped_array), Type::ShapedArray(want_shaped_array)) => {
-                self.is_subset_shaped_array(got_shaped_array, want_shaped_array)
-            }
-            // Tensor is subtype of its base class
-            (Type::ShapedArray(tensor), Type::ClassType(cls)) => {
-                let got = self.shaped_array_as_carrier_class(tensor)?;
-                self.is_subset_eq(&got.to_type(), &Type::ClassType(cls.clone()))
-            }
-            // NNModule is subtype of its class
-            (Type::NNModule(module), Type::ClassType(cls)) => self.is_subset_eq(
-                &Type::ClassType(module.class.clone()),
-                &Type::ClassType(cls.clone()),
-            ),
-            // NNModule-to-NNModule: delegate to class subtyping
-            (Type::NNModule(got), Type::NNModule(want)) => self.is_subset_eq(
-                &Type::ClassType(got.class.clone()),
-                &Type::ClassType(want.class.clone()),
-            ),
             (Type::DataFrame(got_schema), Type::DataFrame(want_schema)) => {
                 self.is_subset_eq(
                     &got_schema.underlying_type(),
@@ -3141,162 +3117,6 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
 
     fn intvar_targ_for_compare(arg: &Type) -> Result<Type, SubsetError> {
         type_as_intvar_solution(arg).ok_or(SubsetError::Other)
-    }
-
-    fn is_subset_shaped_array(
-        &mut self,
-        got: &ShapedArrayType,
-        want: &ShapedArrayType,
-    ) -> Result<(), SubsetError> {
-        let (shape_param, got_arg) = self.shape_param_and_arg(got)?;
-        let (want_param, want_arg) = self.shape_param_and_arg(want)?;
-        if !shape_param.is_type_var() {
-            return Err(SubsetError::InternalError(
-                "ShapedArrayType registered a non-TypeVar/non-IntVar as its shape parameter"
-                    .to_owned(),
-            ));
-        }
-
-        // Check base class compatibility, but ignore the registered shape
-        // parameter: the shape is tracked and checked separately in
-        // `ShapedArrayType::shape()`.
-        let got_base = self.shape_erased_base_class(got, shape_param)?;
-        let want_base = self.shape_erased_base_class(want, want_param)?;
-        let same_class = got_base.class_object() == want_base.class_object();
-        self.is_subset_eq(&got_base.to_type(), &want_base.to_type())?;
-
-        // We do not (yet) support subtyping for shaped arrays given that
-        // there's no known need and it would complicate the shape param
-        // analysis. We need to catch this explicitly since the ClassType would
-        // be assignable.
-        if !same_class {
-            return Err(SubsetError::ShapedArraySubtyping(
-                got.base_class.class_object().qname().clone(),
-                want.base_class.class_object().qname().clone(),
-            ));
-        }
-        if want_param != shape_param {
-            // Unreachable since class objects match, except maybe during incremental updates.
-            return Err(SubsetError::InternalError(
-                "ShapedArrayTypes from the same class have different registered shape parameters"
-                    .to_owned(),
-            ));
-        }
-
-        // Check the shape compatibility
-        if IntTuple::from_shape_arg_type(got_arg)
-            .or_else(|| tuple_carrier_to_shape(got_arg))
-            .is_none()
-            || IntTuple::from_shape_arg_type(want_arg)
-                .or_else(|| tuple_carrier_to_shape(want_arg))
-                .is_none()
-        {
-            // Closed tuple carriers that cannot project to a valid shape should
-            // not become compatible just because their projected shape is
-            // gradual - do an ordinary subset check in that case.
-            self.is_subset_eq(got_arg, want_arg)
-        } else {
-            // Check dimensions' compatibility.
-            self.bind_tensor_dimensions(&got.shape(), &want.shape())
-        }
-    }
-
-    fn shape_param_and_arg<'b>(
-        &self,
-        shaped_array: &'b ShapedArrayType,
-    ) -> Result<(&'b Quantified, &'b Type), SubsetError> {
-        let base_class = &shaped_array.base_class;
-        let shape_param = self
-            .type_order
-            .shaped_array_shape_for_class_type(base_class)
-            .ok_or_else(|| {
-                // TODO(stroxler): Consider adding a dedicated SubsetError for
-                // inconsistent incremental state. InternalError is the closest
-                // existing non-panicking fit, but it is broader than this case.
-                SubsetError::InternalError(
-                    "ShapedArrayType has no registered shaped-array metadata".to_owned(),
-                )
-            })?;
-        base_class
-            .targs()
-            .iter_paired()
-            .find(|(param, _)| *param == &shape_param)
-            .ok_or_else(|| {
-                SubsetError::InternalError(
-                    "ShapedArrayType class args do not contain the registered shape parameter"
-                        .to_owned(),
-                )
-            })
-    }
-
-    fn shaped_array_as_carrier_class(
-        &self,
-        shaped_array: &ShapedArrayType,
-    ) -> Result<ClassType, SubsetError> {
-        let (shape_param, _) = self.shape_param_and_arg(shaped_array)?;
-        let shape_arg = match shape_param.kind() {
-            QuantifiedKind::TypeVarTuple => shape_to_tuple_carrier(&shaped_array.shape()),
-            QuantifiedKind::TypeVar | QuantifiedKind::IntVar => {
-                shaped_array.shape().to_shape_arg_type()
-            }
-            QuantifiedKind::ParamSpec => {
-                return Err(SubsetError::InternalError(
-                    "ShapedArrayType registered a ParamSpec as its shape parameter".to_owned(),
-                ));
-            }
-        };
-        let targs = shaped_array
-            .base_class
-            .targs()
-            .iter_paired()
-            .map(|(param, arg)| {
-                if param == shape_param {
-                    shape_arg.clone()
-                } else {
-                    arg.clone()
-                }
-            })
-            .collect();
-        Ok(ClassType::new(
-            shaped_array.base_class.class_object().clone(),
-            TArgs::new(Arc::new(shaped_array.base_class.tparams().clone()), targs),
-        ))
-    }
-
-    fn shape_erased_base_class(
-        &self,
-        shaped_array: &ShapedArrayType,
-        shape_param: &Quantified,
-    ) -> Result<ClassType, SubsetError> {
-        let base_class = &shaped_array.base_class;
-        let erased_shape_arg = match shape_param.kind() {
-            QuantifiedKind::TypeVar | QuantifiedKind::IntVar => Type::any_implicit(),
-            QuantifiedKind::TypeVarTuple => {
-                return Err(SubsetError::InternalError(
-                    "ShapedArrayType registered a TypeVarTuple as its shape parameter".to_owned(),
-                ));
-            }
-            QuantifiedKind::ParamSpec => {
-                return Err(SubsetError::InternalError(
-                    "ShapedArrayType registered a ParamSpec as its shape parameter".to_owned(),
-                ));
-            }
-        };
-        let targs = base_class
-            .targs()
-            .iter_paired()
-            .map(|(param, arg)| {
-                if param == shape_param {
-                    erased_shape_arg.clone()
-                } else {
-                    arg.clone()
-                }
-            })
-            .collect();
-        Ok(ClassType::new(
-            base_class.class_object().clone(),
-            TArgs::new(Arc::new(base_class.tparams().clone()), targs),
-        ))
     }
 
     /// Check tensor dimensions for compatibility and create Var bindings.

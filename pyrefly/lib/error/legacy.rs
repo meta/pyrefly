@@ -11,6 +11,7 @@ use std::path::Path;
 
 use pyrefly_config::error_kind::Severity;
 use pyrefly_util::absolutize::Absolutize;
+use pyrefly_util::thread_pool::in_thread_pool;
 use rayon::prelude::*;
 use serde::Deserialize;
 use serde::Serialize;
@@ -178,9 +179,9 @@ impl LegacyErrors {
     }
 
     /// Write the JSON that `serde_json::to_writer_pretty` writes for the `LegacyErrors` built
-    /// from `errors`, without building it. Many errors are converted and serialized in
-    /// parallel, each chunk into its own buffer, and the buffers are written in order. The
-    /// work is done in waves, so only a wave's buffers are held at once.
+    /// from `errors`, without building it. On a thread pool, many errors are converted and
+    /// serialized in parallel, each chunk into its own buffer, and the buffers are written in
+    /// order. The work is done in waves, so only a wave's buffers are held at once.
     pub fn write_json<E: ReportedError>(
         writer: &mut impl Write,
         relative_to: &Path,
@@ -212,7 +213,13 @@ impl LegacyErrors {
         };
         writer.write_all(b"{\n  \"errors\": [\n")?;
         let mut first = true;
-        for wave in errors.chunks(CHUNK * rayon::current_num_threads() * 4) {
+        // Off a thread pool, each wave is a single chunk, serialized on the calling thread.
+        let wave_len = if in_thread_pool() {
+            CHUNK * rayon::current_num_threads() * 4
+        } else {
+            CHUNK
+        };
+        for wave in errors.chunks(wave_len) {
             let buffers: Vec<Vec<u8>> = if wave.len() <= CHUNK {
                 vec![serialize(wave)]
             } else {
@@ -350,6 +357,8 @@ mod tests {
     use pyrefly_python::module::Module;
     use pyrefly_python::module_name::ModuleName;
     use pyrefly_python::module_path::ModulePath;
+    use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
+    use pyrefly_util::thread_pool::ThreadPool;
     use ruff_text_size::TextRange;
     use ruff_text_size::TextSize;
 
@@ -389,8 +398,11 @@ mod tests {
                 &LegacyErrors::from_errors(Path::new("/repo"), errors),
             )
             .unwrap();
+            // Errors are serialized in parallel only on a thread pool.
             let mut written = Vec::new();
-            LegacyErrors::write_json(&mut written, Path::new("/repo"), errors).unwrap();
+            ThreadPool::new(TEST_THREAD_COUNT).install(|| {
+                LegacyErrors::write_json(&mut written, Path::new("/repo"), errors).unwrap()
+            });
             assert_eq!(
                 String::from_utf8(written).unwrap(),
                 String::from_utf8(expected).unwrap()

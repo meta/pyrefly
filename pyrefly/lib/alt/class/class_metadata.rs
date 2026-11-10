@@ -58,7 +58,6 @@ use crate::alt::types::class_metadata::InitDefaults;
 use crate::alt::types::class_metadata::Metaclass;
 use crate::alt::types::class_metadata::NamedTupleMetadata;
 use crate::alt::types::class_metadata::ProtocolMetadata;
-use crate::alt::types::class_metadata::ShapedArrayMetadata as SolvedShapedArrayMetadata;
 use crate::alt::types::class_metadata::SlotsInfo;
 use crate::alt::types::class_metadata::TotalOrderingMetadata;
 use crate::alt::types::class_metadata::TypedDictMetadata;
@@ -75,7 +74,6 @@ use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
 use crate::binding::binding::KeyClassField;
 use crate::binding::binding::KeyDecorator;
-use crate::binding::binding::ShapedArrayMetadata as ShapedArrayDecoratorMetadata;
 use crate::binding::django::DjangoFieldInfo;
 use crate::binding::pydantic::EXTRA;
 use crate::binding::pydantic::PydanticConfigDict;
@@ -195,8 +193,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         pydantic_config_dict: &PydanticConfigDict,
         pydantic_before_validator_fields: &[Name],
         django_field_info: &DjangoFieldInfo,
-        capture_init: Option<&[Name]>,
-        shaped_array_metadata: Option<&ShapedArrayDecoratorMetadata>,
         errors: &ErrorCollector,
     ) -> ClassMetadata {
         // Get class decorators.
@@ -609,8 +605,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .as_ref()
             .map(|m| m.pydantic_model_kind.clone());
 
-        let shaped_array = self.shaped_array_metadata(cls, shaped_array_metadata, errors);
-
         ClassMetadata::new(
             bases,
             calculated_metaclass,
@@ -638,54 +632,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             is_factory_boy_factory,
             is_metaclass,
             explicit_slots,
-            capture_init.map(|names| names.to_vec()),
-            shaped_array,
         )
-    }
-
-    fn shaped_array_metadata(
-        &self,
-        cls: &Class,
-        metadata: Option<&ShapedArrayDecoratorMetadata>,
-        errors: &ErrorCollector,
-    ) -> Option<SolvedShapedArrayMetadata> {
-        let ShapedArrayDecoratorMetadata {
-            shape_name,
-            range,
-            builtin_indexing,
-        } = metadata?;
-        let tparams = self.get_class_tparams(cls);
-        match tparams.and_then(|tparams| tparams.iter().find(|param| param.name() == shape_name)) {
-            Some(param) if param.is_type_var() => Some(SolvedShapedArrayMetadata::new(
-                param.clone(),
-                *builtin_indexing,
-            )),
-            Some(param) => {
-                self.error(
-                    errors,
-                    *range,
-                    ErrorKind::InvalidAnnotation,
-                    format!(
-                        "Shape parameter `{}` must be a `TypeVar` or `IntVar`, got `{}`",
-                        shape_name, param.kind
-                    ),
-                );
-                None
-            }
-            None => {
-                self.error(
-                    errors,
-                    *range,
-                    ErrorKind::InvalidAnnotation,
-                    format!(
-                        "Shape parameter `{}` is not a type parameter of class `{}`",
-                        shape_name,
-                        cls.name()
-                    ),
-                );
-                None
-            }
-        }
     }
 
     fn check_init_subclass_keywords(
@@ -1810,15 +1757,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 match self.untype_opt(ty.clone(), x.range(), &errors) {
                     None => BaseClassParseResult::InvalidType(ty, x.range()),
-                    Some(Type::ShapedArray(array))
-                        if self
-                            .bindings()
-                            .shape_declarations
-                            .commented_bases
-                            .contains_key(&x.range()) =>
-                    {
-                        parse_base_class_type(self.heap.mk_class_type(array.base_class))
-                    }
                     Some(ty) => parse_base_class_type(ty),
                 }
             }

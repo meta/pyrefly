@@ -40,7 +40,6 @@ use crate::param_spec::ParamSpec;
 use crate::quantified::Quantified;
 use crate::sentinel::Sentinel;
 use crate::shaped_array::IntTuple;
-use crate::shaped_array::ShapedArrayType;
 use crate::special_form::SpecialForm;
 use crate::tuple::Tuple;
 use crate::type_alias::TypeAliasData;
@@ -51,7 +50,6 @@ use crate::types::AnyStyle;
 use crate::types::BoundMethod;
 use crate::types::Forall;
 use crate::types::Forallable;
-use crate::types::NNModuleType;
 use crate::types::NeverStyle;
 use crate::types::Overload;
 use crate::types::SuperObj;
@@ -437,19 +435,9 @@ impl TypeHeap {
         Type::Int(symint)
     }
 
-    /// Create a `Type::ShapedArray` from a ShapedArrayType.
-    pub fn mk_shaped_array(&self, shaped_array: ShapedArrayType) -> Type {
-        Type::ShapedArray(Box::new(shaped_array))
-    }
-
     /// Create a `Type::IntTuple` from a IntTuple.
     pub fn mk_int_tuple(&self, int_tuple: IntTuple) -> Type {
         Type::IntTuple(Box::new(int_tuple))
-    }
-
-    /// Create a `Type::NNModule` from an NNModuleType.
-    pub fn mk_nn_module(&self, module: NNModuleType) -> Type {
-        Type::NNModule(Box::new(module))
     }
 }
 

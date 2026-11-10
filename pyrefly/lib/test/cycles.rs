@@ -956,3 +956,21 @@ reveal_type(h("a"))  # E: revealed type: Literal['done']
 reveal_type(k("a"))  # E: revealed type: Literal['done']
 "#,
 );
+
+// A recursive call whose result is returned directly makes the inferred union
+// grow with each iteration until it exceeds the width limit and is replaced
+// with `Unknown`. That `Unknown` then shrinks the union again in the next
+// iteration, so the fixpoint must keep the widened answer to converge.
+testcase!(
+    iterative_widened_return_converges,
+    r#"
+from typing import reveal_type
+
+def f(x: int):
+    if x:
+        return f(x - 1)
+    return [f(x - 1)]
+
+reveal_type(f(1))  # E: revealed type: Unknown
+"#,
+);

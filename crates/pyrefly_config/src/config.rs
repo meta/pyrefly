@@ -78,6 +78,7 @@ use crate::environment::environment::PythonEnvironment;
 use crate::environment::interpreters::Interpreters;
 use crate::error::ErrorConfig;
 use crate::error::ErrorDisplayConfig;
+use crate::error_kind::ErrorKind;
 use crate::error_kind::Severity;
 use crate::finder::ConfigError;
 use crate::migration::run::MigratedFromKind;
@@ -753,9 +754,15 @@ pub struct ConfigFile {
     #[derivative(PartialEq = "ignore")]
     pub target_configs: ArcId<RwLock<SmallMap<ConfigName, Option<Arc<ConfigBase>>>>>,
 
-    /// Minimum severity level for errors to be displayed.
-    /// Errors below this severity will not be shown. Defaults to "error".
+    /// Minimum severity level for errors to be displayed and to cause a nonzero exit code.
+    /// When unset, warnings and errors are displayed, and only errors cause a nonzero exit code.
     pub min_severity: Option<Severity>,
+
+    /// Only report errors of specified kinds, such as `["bad-assignment"]`.
+    /// This is equivalent to `--only` on the command line. If this is set in
+    /// both the CLI and the config value, the CLI value overrides the config value.
+    /// If left unset, it displays all kinds of errors.
+    pub only: Option<Vec<ErrorKind>>,
 
     /// Should we let Pyrefly try to index the project's files? Disabling this
     /// may speed up LSP operations on large projects.
@@ -828,6 +835,7 @@ impl Default for ConfigFile {
             baseline_format: BaselineFormat::default(),
             baseline_auto_update: false,
             min_severity: None,
+            only: None,
             output_format: None,
             skip_lsp_config_indexing: false,
             extra_file_extensions: Vec::new(),
@@ -2143,6 +2151,14 @@ impl ConfigFile {
                 )));
             }
 
+            if let Some(only) = &config.only
+                && only.is_empty()
+            {
+                errors.push(ConfigError::error(anyhow!(
+                    "a config with a value is required for `only`"
+                )));
+            }
+
             if !config.root.extras.0.is_empty() {
                 let extra_keys = config.root.extras.0.keys().join(", ");
                 errors.push(ConfigError::warn(anyhow!(
@@ -2867,6 +2883,7 @@ mod tests {
                 baseline_format: BaselineFormat::Full,
                 baseline_auto_update: false,
                 min_severity: None,
+                only: None,
                 skip_lsp_config_indexing: false,
                 extra_file_extensions: Vec::new(),
                 synthesized_preset_reason: None,
@@ -3209,6 +3226,7 @@ mod tests {
             baseline_format: BaselineFormat::Full,
             baseline_auto_update: false,
             min_severity: None,
+            only: None,
             skip_lsp_config_indexing: false,
             extra_file_extensions: Vec::new(),
             synthesized_preset_reason: None,
@@ -3290,6 +3308,7 @@ mod tests {
             baseline_format: BaselineFormat::Full,
             baseline_auto_update: false,
             min_severity: None,
+            only: None,
             skip_lsp_config_indexing: false,
             extra_file_extensions: Vec::new(),
             synthesized_preset_reason: None,
@@ -3387,6 +3406,40 @@ mod tests {
                  "#;
         let err = ConfigFile::parse_config(config_str).unwrap_err();
         assert!(err.to_string().contains("missing field `matches`"));
+    }
+
+    #[test]
+    fn test_only_config_parsing() {
+        let config_str = r#"
+        only = ["bad-assignment", "bad-return"]
+        "#;
+
+        let config = ConfigFile::parse_config(config_str).unwrap();
+        assert_eq!(
+            config.only,
+            Some(vec![ErrorKind::BadAssignment, ErrorKind::BadReturn])
+        );
+
+        let defaults = ConfigFile::parse_config("").unwrap();
+        assert_eq!(defaults.only, None);
+    }
+
+    #[test]
+    fn test_only_empty_list_is_rejected() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join(ConfigFile::PYREFLY_FILE_NAME);
+        for (content, expect_error) in
+            [("only = []", true), (r#"only = ["bad-assignment"]"#, false)]
+        {
+            fs::write(&path, content).unwrap();
+            let (_, errors) = ConfigFile::from_file(&path);
+            if expect_error {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].severity(), Severity::Error);
+            } else {
+                assert!(errors.is_empty());
+            }
+        }
     }
 
     #[test]

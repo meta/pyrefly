@@ -1,0 +1,15 @@
+# < definition scip-python python snapshot-util 0.1 main/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# Each `hidden` should have a distinct local symbol.
+first = lambda: (hidden := 1)  # noqa: E731, F841
+#^^^^ definition  snapshot-util 0.1 main/first.
+#                ^^^^^^ definition local 0
+second = lambda: (hidden := 2)  # noqa: E731, F841
+#^^^^^ definition  snapshot-util 0.1 main/second.
+#                 ^^^^^^ definition local 1
+

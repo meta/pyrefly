@@ -11,4 +11,5 @@ pub mod debug_info;
 pub mod dependency_graph;
 pub mod glean;
 pub mod pysa;
+pub mod scip;
 pub mod trace;

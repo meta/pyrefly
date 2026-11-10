@@ -545,7 +545,6 @@ class C:
 
 // attrs treats `converter=None` as no converter: https://github.com/facebook/pyrefly/issues/5283
 attrs_testcase!(
-    bug = "A `None`-typed converter makes the `__init__` param `Unknown`",
     test_attrs_field_converter_none_init_param,
     r#"
 from typing import reveal_type
@@ -565,13 +564,12 @@ class C:
     d: int = field()
     e: int = field(converter=to_int)
 
-reveal_type(C.__init__)  # E: revealed type: (self: C, a: Unknown, b: Unknown, c: Unknown, d: int, e: str) -> None
+reveal_type(C.__init__)  # E: revealed type: (self: C, a: int, b: int, c: int, d: int, e: str) -> None
 "#,
 );
 
 // attrs treats `converter=None` as no converter: https://github.com/facebook/pyrefly/issues/5283
 attrs_testcase!(
-    bug = "A `None`-typed converter skips the check of the default against the field type",
     test_attrs_field_converter_none_default_type_check,
     r#"
 import attr
@@ -583,11 +581,11 @@ def make_str() -> str: ...
 
 @define
 class C:
-    a: int = field(default="nope", converter=None)
-    b: int = attr.ib(default="nope", converter=None)
-    c: int = field(default="nope", converter=NO_CONVERTER)
+    a: int = field(default="nope", converter=None)  # E: `Literal['nope']` is not assignable to `int`
+    b: int = attr.ib(default="nope", converter=None)  # E: `Literal['nope']` is not assignable to `int`
+    c: int = field(default="nope", converter=NO_CONVERTER)  # E: `Literal['nope']` is not assignable to `int`
     d: int = field(default="nope")  # E: `Literal['nope']` is not assignable to `int`
-    f: int = field(factory=make_str, converter=None)
+    f: int = field(factory=make_str, converter=None)  # E: `str` is not assignable to `int`
 "#,
 );
 
@@ -612,7 +610,6 @@ reveal_type(C.__init__)  # E: revealed type: (self: C, x: str | Unknown) -> None
 
 // attrs treats `converter=None` as no converter: https://github.com/facebook/pyrefly/issues/5283
 attrs_testcase!(
-    bug = "`converter=None` skips the `@x.default` return check and the `@x.converter` decorator",
     test_attrs_field_converter_none_decorators,
     r#"
 from typing import reveal_type
@@ -621,7 +618,7 @@ from attrs import define, field
 @define
 class C:
     a: int = field(converter=None)
-    b: int = field(converter=None)
+    b: int = field(converter=None)  # E: Return type `str` of the `@b.default` method is not assignable to field `b` of type `int`
 
     @a.converter
     def _a(self, attribute, value: str) -> int:
@@ -631,13 +628,12 @@ class C:
     def _b(self) -> str:
         return "nope"
 
-reveal_type(C.__init__)  # E: revealed type: (self: C, a: Unknown, b: Unknown = ...) -> None
+reveal_type(C.__init__)  # E: revealed type: (self: C, a: str, b: int = ...) -> None
 "#,
 );
 
 // attrs treats `converter=None` as no converter: https://github.com/facebook/pyrefly/issues/5283
 attrs_testcase!(
-    bug = "`converter=None` skips the check of an assignment to the attribute",
     test_attrs_field_converter_none_attribute_assignment,
     r#"
 from attrs import define, field
@@ -646,7 +642,7 @@ from attrs import define, field
 class C:
     a: int = field(converter=None)
 
-C(1).a = "nope"
+C(1).a = "nope"  # E: `Literal['nope']` is not assignable to attribute `a` with type `int`
 "#,
 );
 

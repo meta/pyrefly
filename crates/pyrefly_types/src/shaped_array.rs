@@ -13,7 +13,6 @@ use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
 use pyrefly_util::display::commas_iter;
 
-use crate::class::ClassType;
 use crate::dimension::Int;
 use crate::dimension::ShapeError;
 use crate::dimension::canonicalize;
@@ -28,140 +27,7 @@ use crate::tuple::Tuple;
 use crate::type_level_dsl::TypeShapeDslDomain;
 use crate::types::Type;
 
-// ============================================================================
-// Shaped Array Types
-// ============================================================================
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(Visit, VisitMut, TypeEq)]
-enum ShapedArrayShapeStorage {
-    Inline(IntTuple),
-    TupleCarrier { index: usize },
-}
-
-/// A class instance with shape information.
-/// Example: Tensor[[2, 3]] represents a 2x3 tensor
-/// Example: Tensor (no brackets) represents a shapeless tensor (`IntTuple`)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(Visit, VisitMut, TypeEq)]
-pub struct ShapedArrayType {
-    /// Base shaped-array class (e.g., torch.Tensor)
-    pub base_class: ClassType,
-    shape: ShapedArrayShapeStorage,
-}
-
-impl ShapedArrayType {
-    /// Create a shaped-array type with shape information.
-    pub fn new(base_class: ClassType, shape: IntTuple) -> Self {
-        Self {
-            base_class,
-            shape: ShapedArrayShapeStorage::Inline(shape),
-        }
-    }
-
-    /// Create a shapeless shaped-array type (compatible with any shape).
-    pub fn shapeless(base_class: ClassType) -> Self {
-        Self {
-            base_class,
-            shape: ShapedArrayShapeStorage::Inline(IntTuple::shapeless()),
-        }
-    }
-
-    pub fn with_tuple_carrier_shape_arg(mut self, index: usize) -> Self {
-        self.shape = ShapedArrayShapeStorage::TupleCarrier { index };
-        self
-    }
-
-    pub fn to_type(self) -> Type {
-        Type::ShapedArray(Box::new(self))
-    }
-
-    pub fn tuple_carrier_shape_arg_index(&self) -> Option<usize> {
-        match self.shape {
-            ShapedArrayShapeStorage::Inline(_) => None,
-            ShapedArrayShapeStorage::TupleCarrier { index } => Some(index),
-        }
-    }
-
-    pub fn set_tuple_carrier_shape_arg(&mut self, index: usize) {
-        self.shape = ShapedArrayShapeStorage::TupleCarrier { index };
-    }
-
-    pub fn shape(&self) -> IntTuple {
-        match &self.shape {
-            ShapedArrayShapeStorage::Inline(shape) => shape.clone(),
-            ShapedArrayShapeStorage::TupleCarrier { index } => {
-                let shape_arg = self
-                    .base_class
-                    .targs()
-                    .as_slice()
-                    .get(*index)
-                    .expect("shape argument index should point to a class type argument");
-                IntTuple::from_shape_arg_or_tuple_carrier(shape_arg)
-                    .expect("registered shaped-array shape argument should project to IntTuple")
-            }
-        }
-    }
-
-    pub fn set_shape(&mut self, shape: IntTuple) {
-        match &mut self.shape {
-            ShapedArrayShapeStorage::Inline(stored_shape) => *stored_shape = shape,
-            ShapedArrayShapeStorage::TupleCarrier { index } => {
-                let shape_arg = self
-                    .base_class
-                    .targs_mut()
-                    .as_mut()
-                    .get_mut(*index)
-                    .expect("shape argument index should point to a class type argument");
-                *shape_arg = shape.to_shape_arg_type();
-            }
-        }
-    }
-
-    /// Returns rank if shape is concrete, None for variadic/shapeless
-    pub fn rank(&self) -> Option<usize> {
-        match self.shape().view() {
-            IntTupleView::Concrete(dims) => Some(dims.len()),
-            IntTupleView::Gradual | IntTupleView::Unpacked { .. } => None,
-        }
-    }
-
-    /// Returns true if the shaped array has no shape information.
-    /// (represented as a gradual `IntTuple`)
-    pub fn is_shapeless(&self) -> bool {
-        is_shapeless(&self.shape())
-    }
-
-    /// Materialize gradual dimensions of an inline shape (see `Int::materialize`).
-    /// `TupleCarrier` shapes store their dimensions as `Type` arguments on
-    /// `base_class`, so they are materialized by the generic `Type::materialize`
-    /// traversal instead.
-    pub fn materialize_inline_shape(&mut self) {
-        if let ShapedArrayShapeStorage::Inline(shape) = &mut self.shape {
-            shape.materialize();
-        }
-    }
-}
-
-impl Display for ShapedArrayType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let shape = self.shape();
-        if is_shapeless(&shape) {
-            write!(f, "{}", self.base_class.name())
-        } else if self.tuple_carrier_shape_arg_index().is_some() {
-            write!(
-                f,
-                "{}[{}]",
-                self.base_class.name(),
-                fmt_tuple_carrier(&shape)
-            )
-        } else {
-            write!(f, "{}[{}]", self.base_class.name(), shape)
-        }
-    }
-}
-
-/// Shape of a shaped array.
+/// An integer tuple describing an array shape.
 ///
 /// The storage is deliberately not a `Tuple`: fixed dimensions are always
 /// canonical `Int`s, while variadic middles carry the original tuple/type
@@ -726,32 +592,6 @@ fn fmt_unpacked_middle(middle: &Type) -> String {
         Type::Tuple(Tuple::Unbounded(elt)) if elt.is_any() => "tuple[int, ...]".to_owned(),
         Type::Tuple(Tuple::Unbounded(elt)) if is_gradual_size(elt) => "tuple[int, ...]".to_owned(),
         _ => format!("{middle}"),
-    }
-}
-
-fn fmt_tuple_carrier(shape: &IntTuple) -> String {
-    match shape.view() {
-        IntTupleView::Concrete(dims) => {
-            format!("[{}]", commas_iter(|| dims.iter()))
-        }
-        IntTupleView::Gradual => {
-            // No unbounded shape reaches here: the only caller (`Display`) handles
-            // the shapeless `IntTuple` case before calling this.
-            unreachable!("shapeless IntTuple is handled before fmt_tuple_carrier")
-        }
-        IntTupleView::Unpacked {
-            prefix,
-            middle,
-            suffix,
-        } => {
-            if prefix.is_empty() && suffix.is_empty() && is_tuple_carrier_shape_middle(middle) {
-                return middle.to_string();
-            }
-            let mut parts: Vec<String> = prefix.iter().map(|d| d.to_string()).collect();
-            parts.push(format!("*{}", fmt_unpacked_middle(middle)));
-            parts.extend(suffix.iter().map(|d| d.to_string()));
-            format!("[{}]", parts.join(", "))
-        }
     }
 }
 
@@ -1608,7 +1448,6 @@ mod tests {
     use crate::shaped_array::IntTupleRepr;
     use crate::shaped_array::IntTupleView;
     use crate::shaped_array::MAX_PRODUCT_CANONICAL_TERMS;
-    use crate::shaped_array::ShapedArrayType;
     use crate::shaped_array::broadcast_dim;
     use crate::shaped_array::broadcast_shapes;
     use crate::shaped_array::gradual_shape_middle;
@@ -1625,7 +1464,6 @@ mod tests {
     use crate::type_var_tuple::TypeVarTuple;
     use crate::types::AnyStyle;
     use crate::types::TArgs;
-    use crate::types::TParams;
     use crate::types::Type;
     use crate::types::Var;
 
@@ -1764,37 +1602,6 @@ mod tests {
 
     fn shape_carrier(name: &str) -> Type {
         Type::TypeVar(fake_type_var(name, QuantifiedKind::TypeVar))
-    }
-
-    fn registered_array_shape_arg(shape_arg: Type) -> ShapedArrayType {
-        let shape_param = fake_tparam("Shape", QuantifiedKind::TypeVar);
-        let class = fake_class_type("arrays", "Array").class_object().clone();
-        ShapedArrayType::new(
-            ClassType::new(
-                class,
-                TArgs::new(Arc::new(TParams::new(vec![shape_param])), vec![shape_arg]),
-            ),
-            IntTuple::shapeless(),
-        )
-        .with_tuple_carrier_shape_arg(0)
-    }
-
-    fn registered_array_shape_arg_at(
-        shape_arg_index: usize,
-        shape_args: Vec<Type>,
-    ) -> ShapedArrayType {
-        let tparams = (0..shape_args.len())
-            .map(|i| fake_tparam(&format!("Shape{i}"), QuantifiedKind::TypeVar))
-            .collect();
-        let class = fake_class_type("arrays", "Array").class_object().clone();
-        ShapedArrayType::new(
-            ClassType::new(
-                class,
-                TArgs::new(Arc::new(TParams::new(tparams)), shape_args),
-            ),
-            IntTuple::shapeless(),
-        )
-        .with_tuple_carrier_shape_arg(shape_arg_index)
     }
 
     #[test]
@@ -2348,12 +2155,6 @@ mod tests {
             legacy_type_var("N", Restriction::Bound(gradual_size())),
         ] {
             let shape_arg = concrete_carrier(vec![type_var.clone()]);
-            let array = registered_array_shape_arg(shape_arg.clone());
-            // The tuple-form shape is kept verbatim as the class argument, so
-            // substitution has an `N` left to replace.
-            assert_eq!(array.base_class.targs().as_slice(), vec![shape_arg.clone()]);
-            // Before substitution the dimension is gradual, not symbolic.
-            assert_eq!(array.shape(), IntTuple::from_ints(vec![Int::Int]));
             assert_eq!(
                 tuple_carrier_to_shape(&shape_arg),
                 Some(IntTuple::from_ints(vec![Int::Int]))
@@ -2465,66 +2266,6 @@ mod tests {
         for normalized in [concrete, gradual, unpacked] {
             assert_eq!(normalized.normalize(), normalized);
         }
-    }
-
-    #[test]
-    fn registered_shape_projects_from_first_class_shape_arg() {
-        let projected = IntTuple::from_types(vec![size(2), size(3)]);
-        let tensor = registered_array_shape_arg(projected.to_shape_arg_type());
-
-        assert_eq!(tensor.shape(), projected);
-    }
-
-    #[test]
-    fn registered_shape_projects_from_legacy_tuple_carrier() {
-        let projected = IntTuple::from_types(vec![size(6)]);
-        let tensor = registered_array_shape_arg(concrete_carrier(vec![literal(6)]));
-
-        assert_eq!(tensor.shape(), projected);
-    }
-
-    #[test]
-    fn set_shape_updates_registered_shape_arg() {
-        let old_shape = IntTuple::from_types(vec![size(2)]);
-        let new_shape = IntTuple::from_types(vec![size(4), size(5)]);
-        let mut tensor = registered_array_shape_arg(old_shape.to_shape_arg_type());
-
-        tensor.set_shape(new_shape.clone());
-
-        assert_eq!(tensor.shape(), new_shape.clone());
-        assert_eq!(
-            tensor.base_class.targs().as_slice()[0],
-            new_shape.to_shape_arg_type()
-        );
-    }
-
-    #[test]
-    fn tuple_carrier_shape_arg_index_participates_in_identity() {
-        let shape = IntTuple::from_types(vec![size(2)]);
-        let shape_args = vec![shape.to_shape_arg_type(), shape.to_shape_arg_type()];
-        let first_arg_shape = registered_array_shape_arg_at(0, shape_args.clone());
-        let second_arg_shape = registered_array_shape_arg_at(1, shape_args);
-
-        assert_eq!(first_arg_shape.shape(), second_arg_shape.shape());
-        assert_ne!(first_arg_shape, second_arg_shape);
-    }
-
-    #[test]
-    fn registered_shape_display_uses_projected_shape_arg() {
-        let projected = IntTuple::from_types(vec![size(2), size(3)]);
-        let tensor = registered_array_shape_arg(projected.to_shape_arg_type());
-        assert_eq!(tensor.to_string(), "Array[[2, 3]]");
-
-        let tensor = registered_array_shape_arg(IntTuple::shapeless().to_shape_arg_type());
-        assert_eq!(tensor.to_string(), "Array");
-    }
-
-    #[test]
-    #[should_panic(expected = "registered shaped-array shape argument should project to IntTuple")]
-    fn registered_shape_with_invalid_carrier_panics() {
-        let tensor = registered_array_shape_arg(Type::None);
-
-        let _ = tensor.shape();
     }
 
     #[test]

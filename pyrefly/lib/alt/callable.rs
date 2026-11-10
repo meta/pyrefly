@@ -17,8 +17,6 @@ use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::function::FunctionKind;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::literal::LitStyle;
-use pyrefly_types::meta_shape_dsl::MetaShapeFunction;
-use pyrefly_types::meta_shape_dsl::ShapeTransform;
 use pyrefly_types::simplify::simplify_tuples;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::typed_dict::ExtraItems;
@@ -791,22 +789,6 @@ impl CallArgPreEval<'_> {
                     solver.maybe_error_any_argument_type(&ty, range, arg_errors);
                     return Some(ty);
                 }
-                if matches!(
-                    solver.canonicalize_shape_dsl_type(hint.clone()),
-                    Type::ShapedArray(_)
-                ) {
-                    let ty = solver.reproject_tuple_carrier_shape(
-                        solver.canonicalize_shape_dsl_type(solver.expr_infer(x, arg_errors)),
-                    );
-                    solver.check_type_with_options(
-                        &ty,
-                        hint,
-                        range,
-                        TypeCheckOptions::new(call_errors, tcc).with_call_context(call_context),
-                    );
-                    solver.maybe_error_any_argument_type(&ty, range, arg_errors);
-                    return Some(ty);
-                }
                 let ty = solver
                     .expr_with_argument_cache(
                         x,
@@ -1155,17 +1137,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         call_errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
         call_context: &CallContext<'_>,
-        // If Some, records parameter-name → argument-type bindings (for meta-shape inference).
-        bound_args: &mut Option<HashMap<String, Type>>,
     ) -> ArgMap {
-        let record = |bound: &mut Option<HashMap<String, Type>>, name: &Name, ty: Type| {
-            if let Some(map) = bound.as_mut() {
-                map.insert(
-                    name.to_string(),
-                    self.reproject_tuple_carrier_shape(self.canonicalize_shape_dsl_type(ty)),
-                );
-            }
-        };
         let mut argmap = ArgMap::new();
         // We want to work mostly with references, but some things are taken from elsewhere,
         // so have some owners to capture them.
@@ -1263,8 +1235,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut extra_arg_pos = None;
         let mut unpacked_vararg = None;
         let mut unpacked_vararg_matched_args = Vec::new();
-        let mut variadic_name = None;
-        let mut variadic_collected = Vec::new();
         // Later arguments may provide the bounds needed to contextually type a lambda's parameters,
         // or the inputs of a type-level DSL call in a callback parameter's signature.
         let mut deferred_callbacks = Vec::new();
@@ -1365,18 +1335,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             seen_names.insert(name, (ty, NameOrigin::Param, true));
                         }
                         argmap.insert(argument, ty.clone(), name.cloned());
-                        let unhinted_arg_ty = bound_args
-                            .as_ref()
-                            .map(|_| arg_pre.inferred_type(self, arg_errors));
-                        let arg_ty = if bound_args.is_none()
-                            && match arg_pre {
-                                CallArgPreEval::Expr(Expr::Lambda(_), _, _) => true,
-                                CallArgPreEval::Expr(..) | CallArgPreEval::Type(..) => {
-                                    matches!(ty, Type::Callable(_))
-                                        && ty.any(|ty| matches!(ty, Type::TypeLevelDslCall(_)))
-                                }
-                                _ => false,
-                            } {
+                        if match arg_pre {
+                            CallArgPreEval::Expr(Expr::Lambda(_), _, _) => true,
+                            CallArgPreEval::Expr(..) | CallArgPreEval::Type(..) => {
+                                matches!(ty, Type::Callable(_))
+                                    && ty.any(|ty| matches!(ty, Type::TypeLevelDslCall(_)))
+                            }
+                            _ => false,
+                        } {
                             deferred_callbacks.push((
                                 arg_pre.clone(),
                                 ty,
@@ -1385,7 +1351,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 argument,
                             ));
                             arg_pre.mark_done();
-                            None
                         } else {
                             arg_pre.post_check(
                                 self,
@@ -1399,12 +1364,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 call_errors,
                                 context,
                                 call_context,
-                            )
-                        };
-                        if let Some(name) = name
-                            && let Some(ty) = unhinted_arg_ty.or(arg_ty)
-                        {
-                            record(bound_args, name, ty);
+                            );
                         }
                     }
                     Some(PosParam {
@@ -1425,10 +1385,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         kind: PosParamKind::Variadic,
                     }) => {
                         argmap.insert(argument, ty.clone(), name.cloned());
-                        let unhinted_arg_ty = bound_args
-                            .as_ref()
-                            .map(|_| arg_pre.inferred_type(self, arg_errors));
-                        let arg_ty = arg_pre.post_check(
+                        arg_pre.post_check(
                             self,
                             callable_name,
                             ty,
@@ -1441,14 +1398,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             context,
                             call_context,
                         );
-                        if bound_args.is_some() {
-                            if let Some(name) = name {
-                                variadic_name = Some(name);
-                            }
-                            if let Some(ty) = unhinted_arg_ty.or(arg_ty) {
-                                variadic_collected.push(ty);
-                            }
-                        }
                     }
                     None => {
                         arg_pre.post_infer(self, arg_errors);
@@ -1488,14 +1437,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.add_specialization_errors(errors, arg.range(), call_errors, context);
                 }
             }
-        }
-        // Record collected variadic args as a tuple for meta-shape binding.
-        if let Some(name) = variadic_name {
-            record(
-                bound_args,
-                name,
-                Type::Tuple(Tuple::Concrete(variadic_collected)),
-            );
         }
         let has_matched_unpacked_vararg = unpacked_vararg.is_some();
         if let Some((unpacked_name, unpacked_param_ty)) = unpacked_vararg {
@@ -2026,9 +1967,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         };
                         argmap.insert(argument, (*expected).clone(), name);
                     }
-                    let unhinted_arg_ty = bound_args
-                        .as_ref()
-                        .map(|_| kw.value.infer(self, arg_errors));
                     let tcc: &dyn Fn() -> TypeCheckContext = &|| {
                         TypeCheckContext::of_kind(if has_matching_param {
                             TypeCheckKind::CallArgument(Some(id.id.clone()), callable_name.cloned())
@@ -2103,7 +2041,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     {
                         capture.insert(id.id.clone(), value, true);
                     }
-                    record(bound_args, &id.id, unhinted_arg_ty.unwrap_or(arg_ty));
                 }
             }
         }
@@ -2515,7 +2452,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callable: Callable,
         callable_name: Option<&FunctionKind>,
-        shape_transform: Option<&ShapeTransform>,
         tparams: Option<&TParams>,
         self_obj: Option<Type>,
         args: &[CallArg],
@@ -2545,7 +2481,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.callable_infer_inner(
                     callable,
                     callable_name,
-                    shape_transform,
                     tparams,
                     self_obj,
                     args,
@@ -2567,7 +2502,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callable: Callable,
         callable_name: Option<&FunctionKind>,
-        shape_transform: Option<&ShapeTransform>,
         tparams: Option<&TParams>,
         mut self_obj: Option<Type>,
         mut args: &[CallArg],
@@ -2591,10 +2525,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let call_context = call_boundary
             .context()
             .with_argument_side(ArgumentSide::Got);
-
-        let shape_transform_func = shape_transform.map(|t| t.to_meta_shape_function());
-        let meta_shape_func: Option<&dyn MetaShapeFunction> = shape_transform_func.as_deref();
-        let mut bound_args: Option<HashMap<String, Type>> = meta_shape_func.map(|_| HashMap::new());
 
         let (callable_qs, mut callable, mut shape_extension_vars) = if let Some(tparams) = tparams {
             let instantiate = |callable| {
@@ -2712,7 +2642,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 call_errors,
                 context,
                 &call_context,
-                &mut bound_args,
             ),
             Params::Ellipsis | Params::Materialization => {
                 // Deal with Callable[..., R]
@@ -2740,7 +2669,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         call_errors,
                         context,
                         &call_context,
-                        &mut bound_args,
                     ),
                     // This can happen with a signature like `(f: Callable[P, None], *args: P.args, **kwargs: P.kwargs)`.
                     // Before we match an argument to `f`, we don't know what `P` is, so we don't have an answer for the Var yet.
@@ -2764,7 +2692,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         call_errors,
                         context,
                         &call_context,
-                        &mut bound_args,
                     ),
                     Type::Quantified(q) => {
                         if let Some((args, keywords)) = self.paramspec_forwarding(
@@ -2790,7 +2717,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 call_errors,
                                 context,
                                 &call_context,
-                                &mut bound_args,
                             )
                         } else {
                             ArgMap::new()
@@ -2831,201 +2757,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut errors = finish_result.map_or_else(|e| e.to_vec(), |_| Vec::new());
         errors.extend(restriction_errors);
 
-        // Apply meta-shape inference if bound args were collected
-        let ret = if let Some(meta_shape_func) = meta_shape_func
-            && let Some(mut bound) = bound_args
-        {
-            // For bound method calls, ensure `self` is in bound_args so that
-            // inject_module_attrs can resolve module fields (e.g., start_dim, end_dim).
-            // The self param may not be recorded by callable_infer_params if it's
-            // positional-only without a name.
-            if let Some(ref obj) = self_obj {
-                let obj = self
-                    .reproject_tuple_carrier_shape(self.canonicalize_shape_dsl_type(obj.clone()));
-                bound.entry("self".to_owned()).or_insert(obj);
-            }
-            // Auto-inject module field values for DSL params not in bound_args.
-            // When a DSL function expects params like `start_dim` that aren't method
-            // parameters but are fields on `self`, resolve them from the module instance.
-            self.inject_module_attrs(&mut bound, meta_shape_func, arguments_range);
-
-            self.apply_meta_shape(
-                callable.ret.clone(),
-                meta_shape_func,
-                &bound,
-                arguments_range,
-                arg_errors,
-            )
-        } else {
-            callable.ret.clone()
-        };
-
-        let (ret, type_level_dsl_errors) = self.finish_return(&overload_table, ret);
+        let (ret, type_level_dsl_errors) =
+            self.finish_return(&overload_table, callable.ret.clone());
         let return_type_errors = type_level_dsl_errors
             .into_iter()
             .map(ReturnTypeResolutionError::TypeLevelDsl)
             .collect();
 
         (
-            self.reproject_tuple_carrier_shape(ret),
+            ret,
             errors,
             return_type_errors,
             argmap,
             defaults_used,
             overload_table,
         )
-    }
-
-    /// After a call's return type is resolved, re-project the shape of registered
-    /// shaped arrays from their (now-substituted) base-class shape argument.
-    ///
-    /// Generic returns like `Array[S, float]` are stored shapeless at annotation
-    /// time because the shape argument `S` carries no per-dimension information.
-    /// Once `S` is bound to a concrete shape by call inference, the base-class
-    /// argument projects to a real shape, so we re-read it here.
-    ///
-    /// Scoped to TypeVar-mode shape parameters; TypeVarTuple
-    /// shapes are parsed into the shape field directly and need no reprojection.
-    fn reproject_tuple_carrier_shape(&self, ty: Type) -> Type {
-        ty.transform(&mut |ty| {
-            let shaped_array = match ty {
-                Type::ClassType(cls) => self.try_reproject_class_type_to_shaped_array(cls),
-                Type::ShapedArray(shaped_array) => {
-                    self.try_reproject_class_type_to_shaped_array(&shaped_array.base_class)
-                }
-                _ => return,
-            };
-            if let Some(shaped_array) = shaped_array {
-                *ty = shaped_array.to_type();
-            }
-        })
-    }
-
-    /// Auto-inject module field values into `bound_args` for DSL parameters
-    /// that aren't method parameters but match fields on `self`.
-    ///
-    /// This enables DSL functions for module methods (e.g., `nn.Flatten.forward`)
-    /// to access constructor-captured values (e.g., `start_dim`, `end_dim`) without
-    /// extending the DSL grammar. The DSL function declares them as regular parameters
-    /// with defaults, and this method resolves them from `self`'s class fields.
-    ///
-    /// For fields typed as `Int[T]`, unwraps to `T` so the DSL's `extract_dsl_val`
-    /// can handle them as plain literal ints.
-    fn inject_module_attrs(
-        &self,
-        bound_args: &mut HashMap<String, Type>,
-        meta_shape_func: &dyn MetaShapeFunction,
-        _range: TextRange,
-    ) {
-        // For NNModule instances, inject captured fields directly into bound_args.
-        // The NNModule's fields already contain plain Type values from the constructor,
-        // so no Int[T] unwrapping is needed.
-        if let Some(Type::NNModule(module)) = bound_args.get("self") {
-            let module = module.clone();
-            for param_name in meta_shape_func.param_names() {
-                if param_name == "self" || bound_args.contains_key(param_name) {
-                    continue;
-                }
-                let name = Name::new(param_name);
-                if let Some(ty) = module.fields.get(&name) {
-                    bound_args.insert(param_name.to_owned(), ty.clone());
-                }
-            }
-            return;
-        }
-
-        let cls = match bound_args.get("self") {
-            Some(Type::ClassType(cls)) => cls.clone(),
-            _ => return,
-        };
-
-        for param_name in meta_shape_func.param_names() {
-            if param_name == "self" || bound_args.contains_key(param_name) {
-                continue;
-            }
-
-            // Look up the field directly on the class, avoiding error reporting.
-            let attr_name = Name::new(param_name);
-            let field = match self.get_field_from_current_class_only(cls.class_object(), &attr_name)
-            {
-                Some(f) => f,
-                None => continue,
-            };
-
-            // Substitute type parameters (e.g., _Dim[S] with S=1 → Int[1]).
-            let field_ty = cls.targs().substitution().substitute_into(field.ty());
-
-            // For optional dimension fields, if the dimension is unbound (Any), resolve to None;
-            // the DSL models missing values as None.
-            // TODO(stroxler): It is unresolved whether returning the first `Size` member (rather
-            // than `None` for an unbound/Any dimension) still preserves the old "unbound dimension
-            // resolves to None" semantics, now that an unbound `Dim[Any]` lowers to a gradual `Size`
-            // and a union may hold both a concrete `Size` and `Any`. This feature is corpus-guided,
-            // so there is no data on the intended behavior until a real case surfaces.
-            let unwrapped = match field_ty {
-                Type::Union(ref u) => {
-                    let size = u.members.iter().find_map(|m| match m {
-                        Type::Int(_) => Some(m.clone()),
-                        _ => None,
-                    });
-                    match size {
-                        Some(size) => size,
-                        None if u.members.iter().any(Type::is_any) => Type::None,
-                        None => field_ty,
-                    }
-                }
-                other => other,
-            };
-            bound_args.insert(param_name.to_owned(), unwrapped);
-        }
-    }
-
-    /// Apply a meta-shape function using pre-bound arguments.
-    fn apply_meta_shape(
-        &self,
-        ret_type: Type,
-        meta_shape_func: &dyn MetaShapeFunction,
-        bound_args: &HashMap<String, Type>,
-        range: TextRange,
-        errors: &ErrorCollector,
-    ) -> Type {
-        let ret_type = self.canonicalize_shape_dsl_type(ret_type);
-        match meta_shape_func.evaluate(bound_args, &ret_type) {
-            // The meta-shape evaluator (in `pyrefly_types`, which has no metadata
-            // knowledge) rebuilds the result `ShapedArray` with the computed shape
-            // but leaves the base-class tuple carrier stale. Re-sync each result
-            // carrier to its projected shape so tuple-carrier `.shape` stays
-            // coherent.
-            Some(Ok(ty)) => ty.transform(&mut |ty| {
-                if let Type::ShapedArray(shaped_array) = ty {
-                    *ty = self
-                        .shaped_array_with_shape(shaped_array, shaped_array.shape())
-                        .to_type();
-                }
-            }),
-            Some(Err(shape_error)) => {
-                errors
-                    .error_builder(
-                        range,
-                        ErrorKind::InvalidArgument,
-                        format!("{}", shape_error),
-                    )
-                    .emit();
-                ret_type
-            }
-            None => ret_type,
-        }
-    }
-
-    fn canonicalize_shape_dsl_type(&self, ty: Type) -> Type {
-        ty.transform(&mut |ty| {
-            if let Type::ClassType(cls) = ty
-                && self.shaped_array_shape_for_class_type(cls).is_some()
-            {
-                *ty = self
-                    .shaped_array_classtype_to_shaped_array_type(cls)
-                    .to_type();
-            }
-        })
     }
 }

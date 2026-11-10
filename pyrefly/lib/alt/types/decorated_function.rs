@@ -83,7 +83,6 @@ pub enum SpecialDecorator<'a> {
     EnumNonmember,
     AbstractMethod,
     NoTypeCheck,
-    UsesShapeDsl,
     DefinesAssertShape,
     DisjointBase,
 }

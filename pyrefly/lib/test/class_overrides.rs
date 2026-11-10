@@ -2457,11 +2457,11 @@ testcase!(
     test_override_method_without_self,
     r#"
 class A:
-    def foo() -> int:
+    def foo() -> int:  # E: Instance method `foo` must accept the instance as its first positional parameter
         return 42
 
 class B(A):
-    def foo() -> int:
+    def foo() -> int:  # E: Instance method `foo` must accept the instance as its first positional parameter
         return 100
     "#,
 );
@@ -3313,4 +3313,15 @@ class Parent:
 class Child(Parent):
     features = (untyped(1).attr,)
 "#,
+);
+
+testcase!(
+    test_truthiness_marker_in_parent_attr_type,
+    r#"
+class A: ...
+class Parent:
+    x = A() or 42
+class Child(Parent):
+    x = A()
+    "#,
 );

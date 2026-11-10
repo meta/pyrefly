@@ -32,7 +32,6 @@ use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::read_only::IsFinalVariableInitialized;
-use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::simplify::unions;
 use pyrefly_types::type_var::PreInferenceVariance;
 use pyrefly_types::type_var::Restriction;
@@ -2147,14 +2146,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             || ann.is_final()
                             || ann.has_qualifier(&Qualifier::ReadOnly)
                     });
-                    let value_ty = if annotation_fixes_type
-                        || matches!(value_ty, Type::NNModule(_) | Type::DataFrame(_))
-                    {
-                        // Shape and column inference need NNModule and DataFrame literals kept.
-                        value_ty
-                    } else {
-                        value_ty.promote(self.stdlib)
-                    };
+                    let value_ty =
+                        if annotation_fixes_type || matches!(value_ty, Type::DataFrame(_)) {
+                            // Column inference needs DataFrame literals kept.
+                            value_ty
+                        } else {
+                            value_ty.promote(self.stdlib)
+                        };
                     union_types.push(value_ty);
                     if overall_annotation.is_none() {
                         overall_annotation = annotation;
@@ -2321,20 +2319,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         );
 
         // Determine the final type, promoting literals when appropriate.
-        // Skip literal promotion for NNModule and DataFrame types: their captured
-        // fields/columns must preserve literal types for shape/column inference.
-        let (ty, unpromoted_ty) = if matches!(value_ty, Type::NNModule(_) | Type::DataFrame(_)) {
+        // Skip literal promotion for DataFrame types: their columns must
+        // preserve literal types for column inference.
+        let (ty, unpromoted_ty) = if matches!(value_ty, Type::DataFrame(_)) {
             (value_ty, None)
         } else {
-            let mut has_implicit_literal = value_ty.is_implicit_literal();
-            if !has_implicit_literal
+            let mut has_promotable = value_ty.is_promotable();
+            if !has_promotable
                 && matches!(
                     initialization,
                     ClassFieldInitialization::Method | ClassFieldInitialization::ClassMethod
                 )
             {
                 value_ty.universe(&mut |current_type_node| {
-                    has_implicit_literal |= current_type_node.is_implicit_literal();
+                    has_promotable |= current_type_node.is_promotable();
                 });
             }
             // Save any unpromoted literal types, we need them for enums
@@ -2343,7 +2341,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .and_then(|ann| ann.ty.as_ref())
                 .is_none()
                 && matches!(read_only_reason, None | Some(ReadOnlyReason::NamedTuple))
-                && has_implicit_literal
+                && has_promotable
             {
                 let pre = value_ty.clone();
                 (value_ty.promote(self.stdlib), Some(pre))
@@ -5343,22 +5341,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             &Instance::of_self_type(cls),
                         )
                     })
-            })
-    }
-
-    /// Look up an attribute on a shaped-array instance, substituting Self with the full type.
-    pub fn get_shaped_array_attribute(
-        &self,
-        shaped_array: &ShapedArrayType,
-        name: &Name,
-    ) -> Option<ClassAttribute> {
-        self.get_class_member(shaped_array.base_class.class_object(), name)
-            .map(|field| {
-                self.as_instance_attribute(
-                    name,
-                    field.as_ref(),
-                    &Instance::of_shaped_array(shaped_array),
-                )
             })
     }
 

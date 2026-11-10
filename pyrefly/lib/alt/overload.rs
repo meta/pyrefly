@@ -16,7 +16,6 @@ use pyrefly_types::callable::ParamOverlay;
 use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::display::TypeDisplayContext;
 use pyrefly_types::known_class::KnownClass;
-use pyrefly_types::meta_shape_dsl::ShapeTransform;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::type_output::DisplayOutput;
 use pyrefly_types::type_output::TypeOutput;
@@ -320,7 +319,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         overloads: Vec1<TargetWithTParams<Function>>,
         metadata: &FuncMetadata,
-        shape_transform: Option<&ShapeTransform>,
         self_obj: Option<Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -382,7 +380,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let (mut closest_overload, mut matched) = self.find_closest_overload(
                     &arity_compatible_overloads,
                     metadata,
-                    shape_transform,
                     self_obj.as_ref(),
                     &args,
                     &keywords,
@@ -412,7 +409,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         let (cur_closest, cur_matched) = self.find_closest_overload(
                             &arity_compatible_overloads,
                             metadata,
-                            shape_transform,
                             self_obj.as_ref(),
                             cur_args,
                             cur_keywords,
@@ -872,7 +868,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         overloads: &Vec1<&'c TargetWithTParams<Function>>,
         metadata: &FuncMetadata,
-        shape_transform: Option<&ShapeTransform>,
         self_obj: Option<&Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -892,7 +887,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let mut called_overload = self.call_overload(
                 callable,
                 metadata,
-                shape_transform,
                 self_obj,
                 args,
                 keywords,
@@ -1037,7 +1031,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             let res = self.call_overload(
                                 o.func,
                                 metadata,
-                                shape_transform,
                                 self_obj,
                                 &materialized_args,
                                 &materialized_keywords,
@@ -1070,7 +1063,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let contextual_overload = self.call_overload(
                     overload.func,
                     metadata,
-                    shape_transform,
                     self_obj,
                     args,
                     keywords,
@@ -1167,7 +1159,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callable: &'c TargetWithTParams<Function>,
         metadata: &FuncMetadata,
-        shape_transform: Option<&ShapeTransform>,
         self_obj: Option<&Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -1183,25 +1174,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut overload_ctor_targs = ctor_targs.as_ref().map(|x| (**x).clone());
         let tparams = callable.0.as_deref();
 
-        // `@uses_shape_dsl` may sit on a single overload (e.g. a shape-DSL variant that
-        // follows a plain-TypeVar fast path). The set-wide `shape_transform` only carries
-        // the first overload's decorator, so prefer this overload's own transform and only
-        // fall back to the set-wide one (e.g. an implementation-level decorator).
-        let shape_transform = callable
-            .1
-            .metadata
-            .flags
-            .shape_transform
-            .as_deref()
-            .or(shape_transform);
-
         let arg_errors = self.error_collector();
         let call_errors = self.error_collector();
         let (res, specialization_errors, return_type_errors, argmap, defaults_used, table) = self
             .callable_infer(
                 callable.1.signature.clone(),
                 Some(&metadata.kind),
-                shape_transform,
                 tparams,
                 self_obj.cloned(),
                 args,

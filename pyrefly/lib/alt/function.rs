@@ -5,7 +5,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -24,12 +23,8 @@ use pyrefly_types::class::ClassType;
 use pyrefly_types::dimension::Int;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::function::FuncDefId;
-use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitStyle;
-use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
-use pyrefly_types::meta_shape_dsl::ShapeTransform;
-use pyrefly_types::meta_shape_dsl::validate_shape_dsl_functions;
 use pyrefly_types::quantified::AnchorIndex;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedIdentity;
@@ -538,9 +533,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         decorators: &[Idx<KeyDecorator>],
         legacy_tparams: &[Idx<KeyLegacyTypeParam>],
         parent: &NestingContext,
-        shape_dsl_def: Option<Arc<ShapeDslFunction>>,
         type_shape_dsl_def: Option<Arc<ParsedTypeShapeDslFunction>>,
-        uses_shape_dsl_ir_name: Option<ShortIdentifier>,
         errors: &ErrorCollector,
     ) -> UndecoratedFunction {
         let defining_cls = class_key.and_then(|k| self.get_idx(*k).0.dupe());
@@ -687,23 +680,42 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self_type = None;
         }
 
-        if defining_cls.is_some()
-            && flags.is_classmethod
-            && !flags.is_staticmethod
-            && flags.property_metadata.is_none()
+        // Methods with an implicit receiver need a positional parameter (or `*args`)
+        // for it. Covers classmethods, instance methods, and `__new__` (an implicit
+        // staticmethod that still takes `cls`). Skip `@no_type_check` for ordinary
+        // instance methods, properties/staticmethods other than `__new__`, and
+        // unresolved custom decorators that may reshape the signature.
+        // See https://github.com/facebook/pyrefly/issues/5295 and #5294.
+        let missing_receiver_param = defining_cls.is_some()
             && decorators.is_empty()
             && def.parameters.posonlyargs.is_empty()
             && def.parameters.args.is_empty()
             && def.parameters.vararg.is_none()
-        {
+            && (is_dunder_new
+                || (flags.is_classmethod
+                    && !flags.is_staticmethod
+                    && flags.property_metadata.is_none())
+                || (self_type.is_some()
+                    && !flags.is_classmethod
+                    && !flags.is_staticmethod
+                    && !flags.has_no_type_check));
+        if missing_receiver_param {
+            let message = if flags.is_classmethod || is_dunder_new {
+                format!(
+                    "Class method `{}` must accept the class as its first positional parameter",
+                    def.name
+                )
+            } else {
+                format!(
+                    "Instance method `{}` must accept the instance as its first positional parameter",
+                    def.name
+                )
+            };
             self.error(
                 errors,
                 def.name.range(),
                 ErrorKind::BadFunctionDefinition,
-                format!(
-                    "Class method `{}` must accept the class as its first positional parameter",
-                    def.name
-                ),
+                message,
             );
         }
 
@@ -812,51 +824,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             def_index,
         });
 
-        let kind = if let Some(dsl_fn) = shape_dsl_def {
-            // Build the transitive closure of helper functions this DSL function calls,
-            // then validate cross-function call signatures.
-            let module_dsl_fns = self.bindings().metadata().shape_dsl_functions();
-            let fn_closure = compute_transitive_helpers(&dsl_fn, module_dsl_fns);
-            if let Err(type_errors) = validate_shape_dsl_functions(&fn_closure) {
-                for err in &type_errors {
-                    self.error(
-                        errors,
-                        err.range,
-                        ErrorKind::InvalidArgument,
-                        format!("@shape_dsl_function type error: {}", err.message),
-                    );
-                }
-                // Fall back to a normal function — the DSL evaluator must
-                // never run on a program that failed type checking.
-                FunctionKind::from_definition(func_id)
-            } else {
-                FunctionKind::ShapeDsl(func_id, dsl_fn, IdentityIgnored(fn_closure))
-            }
-        } else {
-            FunctionKind::from_definition(func_id)
-        };
-
-        // Resolve the IR function reference from @uses_shape_dsl(ir_fn) and
-        // populate `flags.shape_transform` with the DSL function it points to.
-        if let Some(ir_identifier) = uses_shape_dsl_ir_name {
-            let ir_type = self.get(&Key::BoundName(ir_identifier)).ty().clone();
-            if let Type::Function(func) = &ir_type
-                && let FunctionKind::ShapeDsl(_, dsl_fn, fn_closure) = &func.metadata.kind
-            {
-                flags.shape_transform = Some(Arc::new(ShapeTransform {
-                    dsl_fn: dsl_fn.clone(),
-                    fn_closure: fn_closure.clone(),
-                }));
-            } else {
-                self.error(
-                    errors,
-                    ir_identifier.range(),
-                    ErrorKind::InvalidArgument,
-                    "`@uses_shape_dsl` argument does not resolve to a `@shape_dsl_function`"
-                        .to_owned(),
-                );
-            }
-        }
+        let kind = FunctionKind::from_definition(func_id);
 
         flags.has_gradual_variadic_params = params_are_gradual_variadic(&params);
         let metadata = FuncMetadata { kind, flags };
@@ -1308,11 +1276,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 Some(SpecialDecorator::DataclassTransformCall(&call.keywords))
             }
-            _ if let Type::KwCall(call) = &decorator.ty
-                && call.has_function_kind(FunctionKind::UsesShapeDsl) =>
-            {
-                Some(SpecialDecorator::UsesShapeDsl)
-            }
             Some(CalleeKind::Function(FunctionKind::DefinesAssertShape)) => {
                 Some(SpecialDecorator::DefinesAssertShape)
             }
@@ -1412,13 +1375,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             SpecialDecorator::NoTypeCheck => {
                 flags.has_no_type_check = true;
-                true
-            }
-            SpecialDecorator::UsesShapeDsl => {
-                // The actual shape_transform flag is populated after the decorator
-                // loop in undecorated_function, where uses_shape_dsl_ir_name is
-                // available. Returning true here just filters the decorator out of
-                // the list so it doesn't go through the generic decorator pipeline.
                 true
             }
             SpecialDecorator::DefinesAssertShape => {
@@ -3224,35 +3180,4 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         }
     }
-}
-
-/// Compute the transitive closure of DSL helper functions called by `root`.
-///
-/// Starting from `root`, follows `call_targets()` through `module_dsl_fns`
-/// to collect every user-defined function reachable from `root`. The result
-/// always includes `root` itself as the first element.
-fn compute_transitive_helpers(
-    root: &Arc<ShapeDslFunction>,
-    module_dsl_fns: &[(Name, Arc<ShapeDslFunction>)],
-) -> Arc<Vec<Arc<ShapeDslFunction>>> {
-    let mut closure: Vec<Arc<ShapeDslFunction>> = vec![Arc::clone(root)];
-    let mut visited: HashSet<String> = HashSet::new();
-    visited.insert(root.name().to_owned());
-
-    let mut queue: Vec<String> = root.call_targets().into_iter().collect();
-    while let Some(name) = queue.pop() {
-        if !visited.insert(name.clone()) {
-            continue;
-        }
-        if let Some((_, dsl_fn)) = module_dsl_fns.iter().find(|(n, _)| n.as_str() == name) {
-            closure.push(Arc::clone(dsl_fn));
-            for target in dsl_fn.call_targets() {
-                if !visited.contains(&target) {
-                    queue.push(target);
-                }
-            }
-        }
-    }
-
-    Arc::new(closure)
 }

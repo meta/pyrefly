@@ -184,7 +184,7 @@ $ echo "x: str = 0" > $TMPDIR/test.py && \
 ```scrut
 $ touch $TMPDIR/pyrefly.toml && \
 > printf "from typing import reveal_type\nreveal_type(1)\n" > $TMPDIR/test.py && \
-> $PYREFLY check $TMPDIR/test.py --min-severity=info --output-format=min-text
+> $PYREFLY check --python-version 3.13.0 $TMPDIR/test.py --min-severity=info --output-format=min-text
  INFO */test.py:2:12-15: revealed type: Literal[1] [reveal-type] (glob)
 [1]
 ```
@@ -228,6 +228,18 @@ $ mkdir -p $TMPDIR/unused && \
 > printf 'def f(x: int) -> int:\n    return 1\n' > $TMPDIR/unused/test.py && \
 > $PYREFLY check $TMPDIR/unused/test.py --output-format=min-text
 ERROR */unused/test.py:1:7-8: Parameter `x` is unused [unused-parameter] (glob)
+[1]
+```
+
+## `only` in config file filters reported errors
+
+```scrut {output_stream: stdout}
+$ mkdir -p $TMPDIR/only_config && \
+> printf 'x: str = 1\ndef f() -> int:\n    return "a"\n' > $TMPDIR/only_config/main.py && \
+> printf 'only = ["bad-assignment"]\n' > $TMPDIR/only_config/pyrefly.toml && \
+> cd $TMPDIR/only_config && \
+> $PYREFLY check main.py --config pyrefly.toml --summary=none --output-format=min-text
+ERROR main.py:1:10-11: * [bad-assignment] (glob)
 [1]
 ```
 

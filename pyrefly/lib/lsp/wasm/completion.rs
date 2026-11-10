@@ -12,6 +12,7 @@ use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::CompletionItemLabelDetails;
 use lsp_types::CompletionItemTag;
+use lsp_types::CompletionItemTextEdit;
 use lsp_types::InsertTextFormat;
 use lsp_types::TextEdit;
 use pyrefly_build::handle::Handle;
@@ -27,13 +28,16 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::display::LspDisplayMode;
 use pyrefly_types::literal::Lit;
+use pyrefly_types::tuple::Tuple;
 use pyrefly_util::thread_pool::ThreadPool;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::ExprContext;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
+use ruff_python_ast::Pattern;
 use ruff_python_ast::StmtImportFrom;
 use ruff_python_ast::name::Name;
+use ruff_python_ast::token::TokenKind;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -43,6 +47,7 @@ use crate::alt::attr::AttrInfo;
 use crate::alt::polars_specials::is_polars_col;
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
+use crate::config::error_kind::ErrorKind;
 use crate::export::exports::Export;
 use crate::export::exports::ExportLocation;
 use crate::lsp::wasm::signature_help::CallInfo;
@@ -1077,6 +1082,170 @@ impl Transaction<'_> {
         None
     }
 
+    /// Suggest unused attributes when the cursor is at a class pattern argument name.
+    fn add_match_class_keyword_completions(
+        &self,
+        handle: &Handle,
+        covering_nodes: &[AnyNodeRef],
+        position: TextSize,
+        completions: &mut Vec<RankedCompletion>,
+    ) {
+        let Some(pattern_class) = covering_nodes.iter().find_map(|node| match node {
+            AnyNodeRef::PatternMatchClass(pattern_class) => Some(pattern_class),
+            _ => None,
+        }) else {
+            return;
+        };
+        let arguments = &pattern_class.arguments;
+        if position <= arguments.range.start() || !arguments.range.contains(position) {
+            return;
+        }
+        let keyword = arguments
+            .keywords
+            .iter()
+            .find(|keyword| keyword.attr.range().contains_inclusive(position));
+        let positional = arguments
+            .patterns
+            .iter()
+            .enumerate()
+            .find_map(|(index, pattern)| {
+                if let Pattern::MatchAs(capture) = pattern
+                    && capture.pattern.is_none()
+                    && let Some(name) = &capture.name
+                    && name.range().contains_inclusive(position)
+                {
+                    Some((index, name.range()))
+                } else {
+                    None
+                }
+            });
+        let replacement_range = if let Some(keyword) = keyword {
+            keyword.attr.range()
+        } else if let Some((_, range)) = positional {
+            range
+        } else {
+            // Only gaps between direct arguments can begin a new keyword name.
+            if arguments
+                .patterns
+                .iter()
+                .any(|pattern| pattern.range().contains_inclusive(position))
+                || arguments
+                    .keywords
+                    .iter()
+                    .any(|keyword| keyword.range().contains_inclusive(position))
+            {
+                return;
+            }
+            let Some(tokens) = self
+                .get_parsed_module(handle)
+                .and_then(|parsed| parsed.tokens())
+            else {
+                return;
+            };
+            let before = &tokens[..tokens.partition_point(|token| token.start() < position)];
+            if before.last().is_some_and(|token| token.end() > position) {
+                return;
+            }
+            let previous = before.iter().rev().find(|token| {
+                !matches!(
+                    token.kind(),
+                    TokenKind::Comment | TokenKind::NonLogicalNewline
+                )
+            });
+            if !previous.is_some_and(|token| {
+                token.start() >= arguments.range.start()
+                    && matches!(token.kind(), TokenKind::Lpar | TokenKind::Comma)
+            }) {
+                return;
+            }
+            TextRange::empty(position)
+        };
+        let Some(module_info) = self.get_module_info(handle) else {
+            return;
+        };
+        let prefix = module_info.code_at(TextRange::new(replacement_range.start(), position));
+        let mut used: SmallSet<Name> = arguments
+            .keywords
+            .iter()
+            .filter(|argument| {
+                Some(argument.attr.range()) != keyword.map(|keyword| keyword.attr.range())
+            })
+            .map(|argument| argument.attr.id.clone())
+            .collect();
+        let Some(class_ty) = self.get_type_trace(handle, pattern_class.cls.range()) else {
+            return;
+        };
+        let Some(items) = self.ad_hoc_solve(handle, "completion_match_class_keywords", |solver| {
+            let instance_ty = match class_ty {
+                Type::ClassDef(cls) => solver.instantiate(&cls),
+                Type::ClassType(cls) => Type::ClassType(cls),
+                Type::Type(inner) => match *inner {
+                    Type::ClassType(cls) => Type::ClassType(cls),
+                    _ => return Vec::new(),
+                },
+                _ => return Vec::new(),
+            };
+            if !arguments.patterns.is_empty()
+                && let Type::Tuple(Tuple::Concrete(match_args)) = solver.type_of_attr_get(
+                    &instance_ty,
+                    &dunder::MATCH_ARGS,
+                    pattern_class.cls.range(),
+                    &solver.error_swallower(),
+                    ErrorKind::MissingAttribute,
+                    None,
+                    "completion_match_class_keywords",
+                )
+            {
+                for (index, _) in arguments.patterns.iter().enumerate() {
+                    if positional.is_some_and(|(current, _)| current == index) {
+                        continue;
+                    }
+                    if let Some(Type::Literal(literal)) = match_args.get(index)
+                        && let Lit::Str(name) = &literal.value
+                    {
+                        used.insert(Name::new(name));
+                    }
+                }
+            }
+            solver
+                .completions(instance_ty, None, true, true)
+                .into_iter()
+                .filter(|attr| {
+                    !used.contains(&attr.name)
+                        && SkimMatcherV2::default()
+                            .smart_case()
+                            .fuzzy_match(attr.name.as_str(), prefix)
+                            .is_some()
+                })
+                .map(|attr| {
+                    let label = format!("{}=", attr.name.as_str());
+                    RankedCompletion::new(CompletionItem {
+                        text_edit: Some(CompletionItemTextEdit::TextEdit(TextEdit {
+                            range: module_info.to_lsp_range(replacement_range),
+                            new_text: if keyword.is_some() {
+                                attr.name.to_string()
+                            } else {
+                                label.clone()
+                            },
+                        })),
+                        label,
+                        detail: attr.ty.map(|ty| ty.to_string()),
+                        kind: Some(CompletionItemKind::Variable),
+                        tags: if attr.is_deprecated {
+                            Some(vec![CompletionItemTag::Deprecated])
+                        } else {
+                            None
+                        },
+                        ..Default::default()
+                    })
+                })
+                .collect::<Vec<_>>()
+        }) else {
+            return;
+        };
+        completions.extend(items);
+    }
+
     /// Core completion implementation returning items and incomplete flag.
     pub(crate) fn completion_sorted_opt_with_incomplete<F>(
         &self,
@@ -1111,6 +1280,9 @@ impl Transaction<'_> {
         let dict_key_claimed = ast.as_ref().is_some_and(|module| {
             self.add_dict_key_completions(handle, module.as_ref(), position, &mut result)
         });
+        if let Some(nodes) = covering_nodes.as_deref() {
+            self.add_match_class_keyword_completions(handle, nodes, position, &mut result);
+        }
         // Because of parser error recovery, `from x impo...` looks like `from x import impo...`
         // If the user might be typing the `import` keyword, add that as an autocomplete option.
         match covering_nodes

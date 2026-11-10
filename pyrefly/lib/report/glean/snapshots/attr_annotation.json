@@ -814,6 +814,184 @@
             "id": 0,
             "key": "attr_annotation.py"
           },
+          "spans": [
+            {
+              "length": 4,
+              "start": 105
+            },
+            {
+              "length": 4,
+              "start": 135
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "attr_annotation.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "attr_annotation.Container.setup.<locals>.self"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "attr_annotation.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 113
+            },
+            {
+              "length": 4,
+              "start": 120
+            },
+            {
+              "length": 4,
+              "start": 152
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "attr_annotation.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "attr_annotation.Node"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "attr_annotation.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 160
+            },
+            {
+              "length": 4,
+              "start": 91
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "None"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "attr_annotation.py"
+          },
+          "spans": [
+            {
+              "length": 6,
+              "start": 5
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "attr_annotation.py"
+          },
+          "spans": [
+            {
+              "length": 8,
+              "start": 143
+            },
+            {
+              "length": 8,
+              "start": 19
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing.Optional"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "attr_annotation.py"
+          },
+          "spans": [
+            {
+              "length": 8,
+              "start": 143
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "attr_annotation.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "attr_annotation.Optional"
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.TargetUses.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "attr_annotation.py"
+          },
           "xrefs": [
             {
               "source": {
@@ -1400,6 +1578,6 @@
     "predicate": "python.Module.4"
   },
   {
-    "schema_id": "f329796272b9314200433ac342cbc15c"
+    "schema_id": "60aea86d7ff049228df605cf3fda4c67"
   }
 ]

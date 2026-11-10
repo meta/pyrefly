@@ -42,7 +42,6 @@ pub mod known_class;
 pub mod lit_int;
 pub mod literal;
 pub mod map_int_tuples;
-pub mod meta_shape_dsl;
 pub mod module;
 pub mod named_ints;
 pub mod param_spec;

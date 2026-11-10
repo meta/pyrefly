@@ -24,7 +24,6 @@ use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::function::Deprecation;
 use pyrefly_types::heap::TypeHeap;
-use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::type_alias::TypeAlias;
 use pyrefly_types::type_alias::TypeAliasIndex;
@@ -137,7 +136,7 @@ assert_words!(BindingAnnotation, 11);
 assert_words!(BindingClass, 11);
 assert_words!(BindingTParams, 9);
 assert_words!(BindingClassBaseType, 3);
-assert_words!(BindingClassMetadata, 14);
+assert_words!(BindingClassMetadata, 11);
 assert_words!(BindingDjangoRelations, 2);
 assert_bytes!(BindingClassMro, 4);
 assert_bytes!(BindingClassChecks, 4);
@@ -151,7 +150,7 @@ assert_words!(BindingYield, 4);
 assert_words!(BindingYieldFrom, 4);
 assert_words!(BindingDecorator, 9);
 assert_bytes!(BindingDecoratedFunction, 24);
-assert_words!(BindingUndecoratedFunction, 18);
+assert_words!(BindingUndecoratedFunction, 16);
 
 #[derive(Clone, Dupe, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AnyIdx {
@@ -2179,15 +2178,8 @@ pub struct BindingUndecoratedFunction {
     pub legacy_tparams: Box<[Idx<KeyLegacyTypeParam>]>,
     pub decorators: Box<[Idx<KeyDecorator>]>,
     pub parent: NestingContext,
-    /// When the function is decorated with `@shape_dsl_function`, this holds the
-    /// parsed DSL IR so the solver can produce `FunctionKind::ShapeDsl`.
-    pub shape_dsl_def: Option<Arc<ShapeDslFunction>>,
     /// Parsed source for a user-defined type-level shape DSL function.
     pub type_shape_dsl_def: Option<Arc<ParsedTypeShapeDslFunction>>,
-    /// Identifier of the IR function passed as the first positional argument to
-    /// `@uses_shape_dsl(ir_fn)`. Extracted at binding time so the solver can
-    /// resolve it to a `FunctionKind::ShapeDsl` type.
-    pub uses_shape_dsl_ir_name: Option<ShortIdentifier>,
 }
 
 impl DisplayWith<Bindings> for BindingUndecoratedFunction {
@@ -2510,8 +2502,14 @@ pub struct ExhaustiveBinding {
 #[derive(Clone, Debug)]
 pub struct SuiteGate {
     pub condition: GateCondition,
-    /// Where this gate's dead region would begin, i.e. the statement following it.
+    /// Where this gate's dead region would begin: the first statement following it that is not a
+    /// `raise` or a failing `assert`.
     pub start: TextSize,
+    /// The expression statement at `start`, if that is what the region begins with. One of type
+    /// `Never` is a divergence marker like a `raise`, the shape `assert_never` takes, and is not
+    /// reported even when the gate is closed. The gate that statement opens covers whatever
+    /// follows it.
+    pub expr_at_start: Option<Idx<Key>>,
 }
 
 /// What must hold for control to pass a [`SuiteGate`].
@@ -3833,14 +3831,6 @@ impl DisplayWith<Bindings> for BindingClassChecks {
     }
 }
 
-/// Information about a class that is marked as using array shapes (for shape typing).
-#[derive(Clone, Debug)]
-pub struct ShapedArrayMetadata {
-    pub shape_name: Name,
-    pub range: TextRange,
-    pub builtin_indexing: bool,
-}
-
 /// Binding for the class's metadata (anything obtained directly from base classes,
 /// except for the MRO which is kept separate to avoid cycles).
 #[derive(Clone, Debug)]
@@ -3862,11 +3852,6 @@ pub struct BindingClassMetadata {
     pub pydantic_before_validator_fields: Box<[Name]>,
     /// Django-specific field information.
     pub django_field_info: Box<DjangoFieldInfo>,
-    /// `__init__` parameter names to capture for shape inference, extracted from
-    /// `@uses_shape_dsl(..., capture_init=[...])` on a `forward` method.
-    pub capture_init: Option<Box<[Name]>>,
-    /// Shape parameter requested by `@shaped_array(shape="...")`.
-    pub shaped_array_metadata: Option<Box<ShapedArrayMetadata>>,
 }
 
 impl DisplayWith<Bindings> for BindingClassMetadata {

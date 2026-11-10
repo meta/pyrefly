@@ -92,6 +92,25 @@ ERROR new.py:2:12-13: * [bad-return] (glob)
 [1]
 ```
 
+## `--update-baseline` respects the `only` filter from the configuration
+
+```scrut {output_stream: stdout}
+$ mkdir -p $TMPDIR/baseline_only_config && \
+> printf 'x: str = 1\ndef f() -> int:\n    return "a"\n' > $TMPDIR/baseline_only_config/main.py && \
+> printf 'only = ["bad-assignment"]\n' > $TMPDIR/baseline_only_config/pyrefly.toml && \
+> cd $TMPDIR/baseline_only_config && \
+> $PYREFLY check main.py \
+>     --config pyrefly.toml \
+>     --baseline baseline.json \
+>     --update-baseline \
+>     --summary=none \
+>     --output-format=omit-errors \
+>     >/dev/null 2>/dev/null; \
+> $JQ -r '.errors[].name' baseline.json
+bad-assignment
+[0]
+```
+
 ## JSON records baseline provenance only when a baseline is configured
 
 ```scrut {output_stream: stdout}

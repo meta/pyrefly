@@ -121,6 +121,11 @@ type LoadCallback = Box<dyn Fn(&Path) -> (ArcId<ConfigFile>, Vec<ConfigError>) +
 type FallbackCallback =
     Box<dyn Fn(ModuleNameWithKind, &ModulePath) -> ArcId<ConfigFile> + Send + Sync>;
 
+/// Function that replaces the config found for a Python file with one for that file alone, such
+/// as a PEP 723 script that runs in its own environment.
+pub type FileCallback =
+    Box<dyn Fn(ArcId<ConfigFile>, &ModulePath) -> ArcId<ConfigFile> + Send + Sync>;
+
 /// A way to find a config file given a directory or Python file.
 /// Uses a lot of caching.
 pub struct ConfigFinder {
@@ -133,6 +138,8 @@ pub struct ConfigFinder {
     before: BeforeCallback,
     /// If there is no config file, or loading it fails, use this fallback.
     fallback: FallbackCallback,
+    /// Applied to every config that [`Self::python_file`] returns.
+    file: FileCallback,
     clear_extra_caches: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -147,12 +154,19 @@ impl ConfigFinder {
             Box::new(|_, _| Ok(None)),
             load,
             fallback,
+            Box::new(|config, _| config),
             clear_extra_caches,
         )
     }
 
     /// Create a new ConfigFinder that always returns the same constant.
     pub fn new_constant(constant: ArcId<ConfigFile>) -> Self {
+        Self::new_constant_with_file(constant, Box::new(|config, _| config))
+    }
+
+    /// Create a new ConfigFinder that returns the same constant, passed through `file` for each
+    /// Python file.
+    pub fn new_constant_with_file(constant: ArcId<ConfigFile>, file: FileCallback) -> Self {
         let c1 = constant.dupe();
         let c2 = constant.dupe();
         let c3 = constant;
@@ -161,6 +175,7 @@ impl ConfigFinder {
             Box::new(move |_, _| Ok(Some(c1.dupe()))),
             Box::new(move |_| (c2.dupe(), Vec::new())),
             Box::new(move |_, _| c3.dupe()),
+            file,
             Box::new(|| {}),
         )
     }
@@ -172,6 +187,7 @@ impl ConfigFinder {
         before: BeforeCallback,
         load: LoadCallback,
         fallback: FallbackCallback,
+        file: FileCallback,
         clear_extra_caches: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
         let errors = Arc::new(Mutex::new(Vec::new()));
@@ -227,6 +243,7 @@ impl ConfigFinder {
             errors,
             before,
             fallback,
+            file,
             clear_extra_caches,
         }
     }
@@ -274,7 +291,7 @@ impl ConfigFinder {
     pub fn python_file(&self, name: ModuleNameWithKind, path: &ModulePath) -> ArcId<ConfigFile> {
         let module_name = name.name();
         match (self.before)(module_name, path) {
-            Ok(Some(x)) => return x,
+            Ok(Some(x)) => return (self.file)(x, path),
             Ok(None) => {}
             Err(e) => {
                 self.errors.lock().push(ConfigError::error(e));
@@ -289,7 +306,7 @@ impl ConfigFinder {
             None => (self.fallback)(name, path),
         };
 
-        match path.details() {
+        let config = match path.details() {
             ModulePathDetails::FileSystem(x) | ModulePathDetails::Memory(x) => {
                 let absolute = x.absolutize();
                 f(absolute.parent())
@@ -298,7 +315,8 @@ impl ConfigFinder {
             ModulePathDetails::BundledTypeshed(_) => f(None),
             ModulePathDetails::BundledTypeshedThirdParty(_) => f(None),
             ModulePathDetails::BundledThirdParty(_) => f(None),
-        }
+        };
+        (self.file)(config, path)
     }
 
     /// If we have an error, print all the errors that the config finder has accumulated. This is used

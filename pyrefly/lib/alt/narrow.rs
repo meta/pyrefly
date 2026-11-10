@@ -605,9 +605,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .is_never()
     }
 
+    /// Outer-level uncertainty makes assignability insufficient evidence for subtraction.
+    /// Type arguments do not affect the runtime class tested by `isinstance`.
+    fn is_toplevel_gradual(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Any(_) => true,
+            Type::ClassType(cls) | Type::SelfType(cls) => self.extends_any(cls.class_object()),
+            _ => false,
+        }
+    }
+
     fn subtract(&self, left: &Type, right: &Type) -> Type {
+        if self.is_toplevel_gradual(right) {
+            return left.clone();
+        }
         self.distribute_over_union(left, |left| {
-            if !left.is_any() && !right.is_any() && left.is_typed_dict() && !right.is_typed_dict() {
+            if self.is_toplevel_gradual(left) {
+                return left.clone();
+            }
+            if left.is_typed_dict() && !right.is_typed_dict() {
                 // Use runtime representation of TypedDict for subtraction w/ non-TypedDicts
                 // Normally, TypedDict is not assignable to dict to avoid unsafe aliasing
                 let runtime_class = self.heap.mk_class_type(self.stdlib.dict(
@@ -619,9 +635,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 } else {
                     left.clone()
                 }
-            } else if !left.is_any() && !right.is_any() && self.is_subset_eq(left, right) {
-                // The is_any checks are because `Any <: int` and `int <: Any` are both true, but
-                // neither `Any - int` nor `int - Any` should produce Never.
+            } else if self.is_subset_eq(left, right) {
                 self.heap.mk_never()
             } else {
                 left.clone()

@@ -15,9 +15,6 @@ use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::LitEnum;
-use pyrefly_types::shaped_array::ShapedArrayType;
-use pyrefly_types::shaped_array::shape_to_tuple_carrier;
-use pyrefly_types::shaped_array::shape_to_tuple_carrier_arg;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::typed_dict::TypedDictInner;
 use pyrefly_types::types::Forallable;
@@ -565,22 +562,6 @@ enum AttributeBase1 {
     /// Bound methods prefer exposing builtin `types.MethodType` attributes but fall back to the
     /// underlying function's attributes when the builtin ones are missing.
     BoundMethod(BoundMethodType),
-    /// Shaped-array instance with shape information preserved for method resolution.
-    ///
-    /// This variant exists to handle `Type::ShapedArray` specially during attribute lookup.
-    /// Unlike `ClassInstance`, which only tracks the class type, `ShapedArrayInstance` preserves
-    /// the full `ShapedArrayType` including shape information.
-    ///
-    /// **Why this is needed:**
-    /// Tensor-like methods often use `Self` in their return type (e.g., `def reshape(self, ...) -> Self`).
-    /// When we look up such a method on `Tensor[N, M]`, we need to substitute `Self` with the
-    /// full shaped-array type so the result type is `Tensor[...]` with proper shape tracking, not
-    /// just the base class.
-    ///
-    /// **Invariant:** The `ShapedArrayType::base_class` is always a valid class type from which
-    /// attributes are looked up. The shape information in the shaped-array type is preserved through
-    /// the substitution of `Self` in attribute types.
-    ShapedArrayInstance(ShapedArrayType),
 }
 
 impl AttributeBase1 {
@@ -1283,7 +1264,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // the class to special-case dataclass converters.
                     let instance_class = match &found_on {
                         AttributeBase1::ClassInstance(cls) => Some(cls),
-                        AttributeBase1::ShapedArrayInstance(tensor) => Some(&tensor.base_class),
                         _ => None,
                     };
                     let class_base = match &found_on {
@@ -1886,33 +1866,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     base,
                 )),
             },
-            AttributeBase1::ShapedArrayInstance(tensor) => {
-                if attr_name.as_str() == "shape" {
-                    if let Some(attr) = self.get_shaped_array_attribute(tensor, attr_name) {
-                        acc.found_class_attribute(attr, base);
-                        return;
-                    }
-                    let shape = if tensor.tuple_carrier_shape_arg_index().is_some() {
-                        shape_to_tuple_carrier_arg(&tensor.shape())
-                    } else {
-                        shape_to_tuple_carrier(&tensor.shape())
-                    };
-                    acc.found_type(shape, base);
-                    return;
-                }
-
-                // For all other attributes, delegate to get_shaped_array_attribute which
-                // handles Self-type substitution via InstanceKind::ShapedArray.
-                let metadata = self.get_metadata_for_class(tensor.base_class.class_object());
-                match self.get_shaped_array_attribute(tensor, attr_name) {
-                    Some(attr) => acc.found_class_attribute(attr, base),
-                    None if metadata.has_base_any() => acc.found_type(Type::any_implicit(), base),
-                    None => acc.not_found(NotFoundOn::ClassInstance(
-                        tensor.base_class.class_object().dupe(),
-                        base,
-                    )),
-                }
-            }
             AttributeBase1::ClassInstance(class) => {
                 // Special handling for nn.ModuleDict with TypedDict type argument
                 if let Some(attr) = self.try_nn_module_dict_attr(class, attr_name) {
@@ -2424,21 +2377,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     base,
                 ))
             }
-            AttributeBase1::ShapedArrayInstance(tensor)
-                if (*dunder_name == dunder::SETATTR
-                    || *dunder_name == dunder::DELATTR
-                    || *dunder_name == dunder::GETATTRIBUTE)
-                    && self.field_is_inherited_from(
-                        tensor.base_class.class_object(),
-                        dunder_name,
-                        KnownClass::Object,
-                    ) =>
-            {
-                acc.not_found(NotFoundOn::ClassInstance(
-                    tensor.base_class.class_object().clone(),
-                    base,
-                ))
-            }
             AttributeBase1::LiteralString
                 if *dunder_name == dunder::SETATTR
                     || *dunder_name == dunder::DELATTR
@@ -2695,49 +2633,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         Some(classes)
     }
 
-    pub(crate) fn try_reproject_class_type_to_shaped_array(
-        &self,
-        cls: &ClassType,
-    ) -> Option<ShapedArrayType> {
-        // Cheap syntactic pre-filter, kept before any metadata lookup to preserve
-        // laziness: a shaped-array class always carries its shape as a tuple
-        // carrier, a first-class `IntTuple`, or an as-yet-unbound shape variable.
-        // Bailing here for any other class (notably scalar returns like `int`)
-        // avoids forcing that class's metadata on every call-return reprojection.
-        if !cls.targs().as_slice().iter().any(|arg| {
-            matches!(
-                arg,
-                Type::Tuple(_) | Type::IntTuple(_) | Type::Quantified(_) | Type::TypeVar(_)
-            )
-        }) {
-            return None;
-        }
-        let shape_param = self.shaped_array_shape_for_class_type(cls)?;
-        if !shape_param.is_type_var() {
-            return None;
-        }
-        // Decline reprojection when the shape argument does not project to a shape.
-        // `shaped_array_classtype_to_shaped_array_type` below shapeless-falls-back
-        // on an unconvertible arg (it is called from already-validated paths), but
-        // here we want to leave the class un-reprojected in that case. The builder
-        // recomputes this projection; that duplicate lookup is bounded by the cheap
-        // syntactic pre-filter above, so it only runs for plausible shaped arrays.
-        let shape_arg = self.shaped_array_shape_arg(cls)?;
-        self.shape_arg_to_int_tuple(&shape_arg)?;
-        Some(self.shaped_array_classtype_to_shaped_array_type(cls))
-    }
-
     fn as_attribute_base1(&self, ty: Type, acc: &mut Vec<AttributeBase1>) {
         match ty {
-            Type::ClassType(class_type) => {
-                if let Some(shaped_array) =
-                    self.try_reproject_class_type_to_shaped_array(&class_type)
-                {
-                    acc.push(AttributeBase1::ShapedArrayInstance(shaped_array))
-                } else {
-                    acc.push(AttributeBase1::ClassInstance(class_type))
-                }
-            }
+            Type::ClassType(class_type) => acc.push(AttributeBase1::ClassInstance(class_type)),
             Type::ClassDef(cls) => acc.push(AttributeBase1::ClassObject(ClassBase::ClassDef(
                 self.as_class_type_unchecked(&cls),
             ))),
@@ -2757,14 +2655,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.heap.mk_class_type(self.stdlib.str().clone()),
                     value_ty,
                 )))
-            }
-            Type::ShapedArray(tensor) => {
-                // Use ShapedArrayInstance to preserve shape information through attribute lookup
-                acc.push(AttributeBase1::ShapedArrayInstance((*tensor).clone()))
-            }
-            Type::NNModule(module) => {
-                // NNModule delegates attribute access to its underlying class
-                acc.push(AttributeBase1::ClassInstance(module.class.clone()))
             }
             Type::DataFrame(schema) => self.as_attribute_base1(schema.underlying_type(), acc),
             Type::Series(schema) => self.as_attribute_base1(schema.underlying_type(), acc),
@@ -3732,9 +3622,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         is_from_object: false,
                     });
                 }
-            }
-            AttributeBase1::ShapedArrayInstance(tensor) => {
-                self.completions_class_type(&tensor.base_class, expected_attribute_name, res)
             }
             AttributeBase1::LiteralString => {
                 self.completions_class_type(self.stdlib.str(), expected_attribute_name, res)

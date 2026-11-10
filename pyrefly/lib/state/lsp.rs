@@ -141,7 +141,7 @@ struct OperatorDunder {
     range: TextRange,
 }
 
-fn callee_kind_from_call(call: &ExprCall) -> CalleeKind {
+pub(crate) fn callee_kind_from_call(call: &ExprCall) -> CalleeKind {
     match call.func.as_ref() {
         Expr::Name(name) => CalleeKind::Function(Ast::expr_name_identifier(name.clone())),
         Expr::Attribute(attr) => CalleeKind::Method(attr.value.range(), attr.attr.clone()),
@@ -608,8 +608,8 @@ pub(crate) struct IdentifierWithContext {
 enum ResolutionKind {
     /// Resolve through a binding key — a reference or a declaration.
     Key(Key),
-    /// Resolve through a binding key in a different module.
-    KeyInModule(Handle, Key),
+    /// Prefer a keyword parameter's declaration type, falling back to the caller's signature.
+    KeywordParameter(Handle, Key),
     /// A directly-constructed type with no binding key. Only module identifiers.
     Type(Type),
     /// The active parameter type at a call argument position.
@@ -1302,7 +1302,7 @@ impl<'a> Transaction<'a> {
             }
         }
         let mut res = None;
-        mod_module.visit(&mut |x| f(x, position, &mut res));
+        Ast::visit_covering_exprs(&mod_module, position, &mut |x| f(x, position, &mut res));
         res
     }
 
@@ -1476,7 +1476,7 @@ impl<'a> Transaction<'a> {
             let definition_handle =
                 handle.for_module(item.module.name(), item.module.path().dupe());
             let id = Identifier::new(Name::new(code_at_range), item.definition_range);
-            Some(ResolutionKind::KeyInModule(
+            Some(ResolutionKind::KeywordParameter(
                 definition_handle,
                 Key::Definition(ShortIdentifier::new(&id)),
             ))
@@ -1527,13 +1527,17 @@ impl<'a> Transaction<'a> {
             ResolutionKind::ActiveCallArgument(position) => {
                 self.get_active_call_argument_type_for_surface(handle, position)
             }
-            ResolutionKind::KeyInModule(handle, key) => {
-                let answers = self.get_answers(&handle)?;
-                let bindings = answers.bindings();
-                if !bindings.is_valid_key(&key) {
-                    return None;
+            ResolutionKind::KeywordParameter(definition_handle, key) => {
+                if let Some(answers) = self.get_answers(&definition_handle) {
+                    let bindings = answers.bindings();
+                    if bindings.is_valid_key(&key)
+                        && let Some(ty) = answers.get_type_at(bindings.key_to_idx(&key))
+                    {
+                        return Some(ty);
+                    }
                 }
-                answers.get_type_at(bindings.key_to_idx(&key))
+                // Dependency answers may be evicted, but the caller can still retain its signature.
+                self.get_active_call_argument_type_for_surface(handle, identifier.range.start())
             }
             ResolutionKind::Key(key) => {
                 let answers = self.get_answers(handle)?;
@@ -1630,7 +1634,7 @@ impl<'a> Transaction<'a> {
             && matches!(
                 &kind,
                 ResolutionKind::Key(_)
-                    | ResolutionKind::KeyInModule(_, _)
+                    | ResolutionKind::KeywordParameter(_, _)
                     | ResolutionKind::Type(_)
                     | ResolutionKind::ActiveCallArgument(_)
             )
@@ -2424,11 +2428,6 @@ impl<'a> Transaction<'a> {
                     .map(Vec1::into_vec)
                     .unwrap_or_default()
             }
-            Type::NNModule(module) => self.find_call_target_definitions(
-                handle,
-                preference,
-                module.class.clone().to_type(),
-            ),
             _ => vec![],
         }
     }
@@ -2953,6 +2952,24 @@ impl<'a> Transaction<'a> {
         callee_kind: &CalleeKind,
         preference: FindPreference,
     ) -> Vec<FindDefinitionItem> {
+        self.find_definition_for_keyword_argument_with_ast(
+            handle,
+            identifier,
+            callee_kind,
+            preference,
+            |module| self.get_ast_or_parse_module(handle, module),
+        )
+    }
+
+    /// Like `find_definition_for_keyword_argument`, but gets the callee module's AST from `get_ast`.
+    pub(crate) fn find_definition_for_keyword_argument_with_ast(
+        &self,
+        handle: &Handle,
+        identifier: &Identifier,
+        callee_kind: &CalleeKind,
+        preference: FindPreference,
+        get_ast: impl Fn(&ModuleInfo) -> Arc<ModModule>,
+    ) -> Vec<FindDefinitionItem> {
         // NOTE(grievejia): There might be a better way to compute this that doesn't require 2 containing node
         // traversal, once we gain access to the callee function def from callee_kind directly.
         let callee_locations = self.get_callee_location(handle, callee_kind, preference);
@@ -2971,7 +2988,7 @@ impl<'a> Transaction<'a> {
 
         let mut results: Vec<FindDefinitionItem> = Vec::with_capacity(location_count);
         for (module_info, ranges) in modules_to_ranges.into_iter() {
-            let ast = self.get_ast_or_parse_module(handle, &module_info);
+            let ast = get_ast(&module_info);
 
             for range in ranges.into_iter() {
                 let (metadata, definition_range) = if let Some((definition_range, metadata)) = self

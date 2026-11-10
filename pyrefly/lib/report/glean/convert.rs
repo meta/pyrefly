@@ -302,7 +302,9 @@ fn stdlib_source_file(root: &str, stub_path: &Path) -> src::File {
     ))
 }
 
-fn gather_nonlocal_variables(body: &[Stmt]) -> (Arc<SmallSet<Name>>, Arc<SmallSet<Name>>) {
+pub(crate) fn gather_nonlocal_variables(
+    body: &[Stmt],
+) -> (Arc<SmallSet<Name>>, Arc<SmallSet<Name>>) {
     let mut globals = SmallSet::new();
     let mut nonlocals = SmallSet::new();
     for stmt in body {
@@ -415,6 +417,9 @@ struct Facts {
     containing_top_level_declarations: Vec<python::ContainingTopLevelDeclaration>,
     xrefs_via_name: Vec<python::XRefViaName>,
     xrefs_via_name_by_target: HashMap<python::Name, Vec<src::ByteSpan>>,
+    /// The spans of this file's references to each target, keyed by the target's
+    /// qualified name and, if it has one, the source file that declares it.
+    target_uses: HashMap<python::Target, Vec<src::ByteSpan>>,
     xrefs: Vec<python_xrefs::XRef>,
     declaration_docstrings: Vec<python::DeclarationDocstring>,
     name_to_sname: Vec<python::NameToSName>,
@@ -476,6 +481,7 @@ impl Facts {
             xrefs_via_name: vec![],
             xrefs: vec![],
             xrefs_via_name_by_target: HashMap::new(),
+            target_uses: HashMap::new(),
             declaration_docstrings: vec![],
             name_to_sname: vec![],
         }
@@ -1173,6 +1179,18 @@ impl GleanState<'_> {
     fn add_xref(&mut self, definition_location: DefinitionLocation, range: TextRange) {
         let source = to_span(range);
         let target_name = python::Name::new(definition_location.name);
+        let use_target = match &definition_location.file {
+            Some(file) => python::Target::local(python::DisambiguatedName::new(
+                target_name.clone(),
+                file.clone(),
+            )),
+            None => python::Target::external(target_name.clone()),
+        };
+        self.facts
+            .target_uses
+            .entry(use_target)
+            .or_default()
+            .push(source.clone());
         let target = python_xrefs::XRefDefinitionLocation {
             name: target_name.clone(),
             file: definition_location.file,
@@ -2132,6 +2150,12 @@ pub fn glean(
         })
         .collect();
 
+    let target_uses: Vec<python::TargetUses> = facts
+        .target_uses
+        .into_iter()
+        .map(|(target, spans)| python::TargetUses::new(target, file_fact.clone(), spans))
+        .collect();
+
     let xrefs_by_file = python_xrefs::XRefsByFile::new(file_fact.clone(), facts.xrefs);
 
     let mut entries = vec![
@@ -2151,6 +2175,7 @@ pub fn glean(
         facts.containing_top_level_declarations.glean_entry(),
         xrefs_via_name_by_file_fact.glean_entry(),
         xrefs_via_name_by_target.glean_entry(),
+        target_uses.glean_entry(),
         xrefs_by_file.glean_entry(),
         facts.declaration_docstrings.glean_entry(),
         facts.name_to_sname.glean_entry(),

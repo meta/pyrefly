@@ -159,3 +159,54 @@ def test_multivariate_normal_keyword_arguments() -> None:
     )
     assert_type(result, np.ndarray[[5, 3], np.dtype[np.float64]])
     assert_shape(result.shape, (5, 3))
+
+
+def check_random_and_standard_cauchy_return_float_without_size() -> None:
+    rng = np.random.default_rng(0)
+    assert_type(rng.random(), float)
+    assert_type(rng.standard_cauchy(), float)
+
+
+def test_random_and_standard_cauchy_int_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.random(5)
+    assert_type(result, np.ndarray[[5], np.dtype[np.float64]])
+    assert_shape(result.shape, (5,))
+    assert_shape(rng.standard_cauchy(5).shape, (5,))
+
+
+def test_random_and_standard_cauchy_tuple_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.standard_cauchy((2, 3))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.random((2, 3)).shape, (2, 3))
+
+
+def test_random_float32() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.random((2, 3), dtype=np.float32)
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float32]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.random(4, np.float32).shape, (4,))
+
+
+def test_random_out() -> None:
+    rng = np.random.default_rng(0)
+    out = np.empty((2, 3))
+    result = rng.random(out=out)
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+
+
+def test_random_list_size() -> None:
+    rng = np.random.default_rng(0)
+    assert_shape(rng.random([2, 3]).shape, IntTuple, runtime=(2, 3))
+
+
+def check_random_and_standard_cauchy_symbolic_size[N: IntVar, M: IntVar](
+    n: Int[N], m: Int[M]
+) -> None:
+    rng = np.random.default_rng(0)
+    assert_type(rng.random(n), np.ndarray[[N], np.dtype[np.float64]])
+    assert_type(rng.standard_cauchy((n, m)), np.ndarray[[N, M], np.dtype[np.float64]])

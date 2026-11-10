@@ -10,6 +10,7 @@ use std::slice;
 use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::CompletionItemTag;
+use lsp_types::CompletionItemTextEdit;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::sys_info::PythonVersion;
@@ -3495,6 +3496,134 @@ def f(a: A | list[A] | Box):
         for name in ["AA", "BB"] {
             let item = completions.iter().find(|item| item.label == name).unwrap();
             assert_eq!(item.sort_text.as_deref(), Some("0"), "case {current}");
+        }
+    }
+}
+
+#[test]
+fn completion_match_class_keyword_dataclass() {
+    let code = r#"
+from dataclasses import dataclass
+
+@dataclass
+class A:
+    a: int
+    b: int
+
+x = object()
+match x:
+    case A(  ): ...
+#           ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let handle = handles.get("main").unwrap();
+    let position = extract_cursors_for_test(code)[0];
+    let txn = state.transaction();
+    let completions = txn.completion(handle, position, ImportFormat::Absolute, true, None);
+    let completion_labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
+
+    for expected in ["a=", "b="] {
+        assert!(
+            completion_labels.contains(&expected),
+            "missing {expected} in completions: {:?}",
+            completion_labels
+        );
+    }
+}
+
+#[test]
+fn completion_match_class_argument_positions() {
+    for (pattern, expected, replacement) in [
+        ("A( | )", vec!["alpha=", "beta=", "gamma="], "A( alpha= )"),
+        ("A(al|)", vec!["alpha="], "A(alpha=)"),
+        ("A(be|, alpha=1)", vec!["beta="], "A(beta=, alpha=1)"),
+        ("A(alpha=1, be|)", vec!["beta="], "A(alpha=1, beta=)"),
+        (
+            "A(alpha=1, | )",
+            vec!["beta=", "gamma="],
+            "A(alpha=1, beta= )",
+        ),
+        ("A(1, | )", vec!["beta=", "gamma="], "A(1, beta= )"),
+        ("A(al|, 2)", vec!["alpha="], "A(alpha=, 2)"),
+        ("A(1, al|pha=2)", vec![], ""),
+        ("A(al|=1, beta=2)", vec!["alpha="], "A(alpha=1, beta=2)"),
+        ("A(al|pha=1, beta=2)", vec!["alpha="], "A(alpha=1, beta=2)"),
+        ("A(alpha| = 1)", vec!["alpha="], "A(alpha = 1)"),
+        ("A(beta|=2, alpha=1)", vec!["beta="], "A(beta=2, alpha=1)"),
+        ("C(1, | )", vec!["alpha=", "gamma="], "C(1, alpha= )"),
+        ("C(1, 2, | )", vec!["gamma="], "C(1, 2, gamma= )"),
+        ("A(alpha= | )", vec![], ""),
+        ("A(alpha=[ | ])", vec![], ""),
+        ("A(alpha={ | })", vec![], ""),
+        ("A(alpha=\" | \")", vec![], ""),
+        ("A(alpha=cap|)", vec![], ""),
+        ("A(alpha=( | ))", vec![], ""),
+        ("A(alpha=[cap|])", vec![], ""),
+        ("A([cap|])", vec![], ""),
+        ("A(alpha={\"key\": cap|})", vec![], ""),
+        ("A(_ as cap|)", vec![], ""),
+        ("A(alpha=B( | ))", vec!["inner="], "A(alpha=B( inner= ))"),
+        ("A(alpha=B(inn|))", vec!["inner="], "A(alpha=B(inner=))"),
+    ] {
+        let code = format!(
+            r#"
+from dataclasses import dataclass
+
+@dataclass
+class A:
+    alpha: object
+    beta: int
+    gamma: int
+
+@dataclass
+class B:
+    inner: int
+
+class Base:
+    __match_args__ = ("beta", "alpha")
+    beta: int
+
+class C(Base):
+    alpha: int
+    gamma: int
+
+match object():
+    case {pattern}: ...
+"#
+        );
+        let position = TextSize::try_from(code.find('|').unwrap()).unwrap();
+        let code = code.replacen('|', "", 1);
+        let (handles, state) = mk_multi_file_state(&[("main", &code)], Require::Exports, false);
+        let handle = &handles["main"];
+        let txn = state.transaction();
+        let completions = txn.completion(handle, position, ImportFormat::Absolute, true, None);
+        let mut labels: Vec<_> = completions
+            .iter()
+            .filter(|item| ["alpha=", "beta=", "gamma=", "inner="].contains(&item.label.as_str()))
+            .map(|item| item.label.as_str())
+            .collect();
+        labels.sort();
+        assert_eq!(labels, expected, "pattern: {pattern}");
+        if let Some(label) = expected.first() {
+            let item = completions
+                .iter()
+                .find(|item| item.label == *label)
+                .unwrap();
+            let Some(CompletionItemTextEdit::TextEdit(edit)) = &item.text_edit else {
+                panic!("Class argument completion must have a replacement edit: {pattern}");
+            };
+            let module = txn.get_module_info(handle).unwrap();
+            let range = module.from_lsp_range(edit.range, None);
+            let mut updated = code.clone();
+            updated.replace_range(
+                range.start().to_usize()..range.end().to_usize(),
+                &edit.new_text,
+            );
+            assert_eq!(
+                updated,
+                code.replace(&pattern.replace('|', ""), replacement),
+                "pattern: {pattern}"
+            );
         }
     }
 }

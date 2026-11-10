@@ -1,0 +1,17 @@
+# < definition scip-python python snapshot-util 0.1 main/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# The declaration of `T` and both annotations should share a defined symbol.
+def identity[T](x: T) -> T:
+#   ^^^^^^^^ definition  snapshot-util 0.1 main/identity().
+#            ^ definition  snapshot-util 0.1 main/identity().[T]
+#               ^ definition  snapshot-util 0.1 main/identity().(x)
+#                  ^ reference  snapshot-util 0.1 main/identity().[T]
+#                        ^ reference  snapshot-util 0.1 main/identity().[T]
+    return x
+#          ^ reference  snapshot-util 0.1 main/identity().(x)
+

@@ -32,6 +32,7 @@ use pyrefly_util::display::number_thousands;
 use pyrefly_util::lined_buffer::DisplayRange;
 use pyrefly_util::lined_buffer::LineNumber;
 use pyrefly_util::lined_buffer::LinedBuffer;
+use pyrefly_util::thread_pool::in_thread_pool;
 use rayon::prelude::*;
 use ruff_annotate_snippets::Annotation;
 use ruff_annotate_snippets::AnnotationKind;
@@ -311,7 +312,7 @@ impl<W: Write> ErrorRenderer<W> {
         if verbose {
             let origin = error.path_string_with_fragment(project_root);
             self.write_header(&metadata)?;
-            self.write_snippet(error.render_snippets(&origin))?;
+            self.write_snippet(error.render_snippets(&origin, severity))?;
             if let Some(details) = &error.msg_details {
                 writeln!(self.writer, "{details}")?;
             }
@@ -321,9 +322,9 @@ impl<W: Write> ErrorRenderer<W> {
         Ok(())
     }
 
-    /// Write every error in `errors`, in order. Many errors are rendered in parallel, each
-    /// chunk into its own buffer, and the buffers are written in order. The work is done in
-    /// waves, so only a wave's buffers are held at once.
+    /// Write every error in `errors`, in order. On a thread pool, many errors are rendered in
+    /// parallel, each chunk into its own buffer, and the buffers are written in order. The work
+    /// is done in waves, so only a wave's buffers are held at once.
     pub fn write_all(
         &mut self,
         errors: &[impl ReportedError],
@@ -331,7 +332,7 @@ impl<W: Write> ErrorRenderer<W> {
         verbose: bool,
     ) -> io::Result<()> {
         const CHUNK: usize = 256;
-        if errors.len() <= CHUNK {
+        if errors.len() <= CHUNK || !in_thread_pool() {
             for error in errors {
                 self.write(error, project_root, verbose)?;
             }
@@ -584,18 +585,21 @@ impl Error {
         snippets
     }
 
-    fn render_snippets<'a>(&'a self, origin: &'a str) -> Group<'a> {
+    /// Render the source snippets of this error as reported at `severity`, which can differ
+    /// from the error's own severity, so that they are drawn like the reported header.
+    fn render_snippets<'a>(&'a self, origin: &'a str, severity: Severity) -> Group<'a> {
         let mut layouts = self.snippet_layouts().into_iter();
-        let mut message = Group::with_level(severity_to_level(self.severity)).element(
+        let mut message = Group::with_level(severity_to_level(severity)).element(
             self.make_snippet(
                 origin,
                 layouts
                     .next()
                     .expect("a diagnostic always has a primary snippet"),
+                severity,
             ),
         );
         for layout in layouts {
-            message = message.element(self.make_snippet(origin, layout));
+            message = message.element(self.make_snippet(origin, layout, severity));
         }
         message
     }
@@ -604,15 +608,15 @@ impl Error {
         &'a self,
         origin: &'a str,
         layout: SnippetLayout<'a>,
+        severity: Severity,
     ) -> Snippet<'a, Annotation<'a>> {
         let data = self.snippet_data(layout);
         let mut snippet = Snippet::source(data.source)
             .line_start(data.line_start)
             .path(origin);
         if let Some(primary) = data.primary {
-            snippet = snippet.annotation(
-                severity_to_annotation_kind(self.severity).span(primary.start..primary.end),
-            );
+            snippet = snippet
+                .annotation(severity_to_annotation_kind(severity).span(primary.start..primary.end));
         }
         for (span, label) in data.secondary {
             snippet = snippet.annotation(
@@ -1009,9 +1013,12 @@ mod tests {
 
     use dupe::Dupe;
     use pyrefly_python::module_name::ModuleName;
+    use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
+    use pyrefly_util::thread_pool::ThreadPool;
     use ruff_text_size::TextSize;
 
     use super::*;
+    use crate::error::collector::CollectedDiagnostic;
     use crate::test::util::TestEnv;
 
     fn render_error(error: &Error, root: &Path, verbose: bool) -> String {
@@ -1072,10 +1079,13 @@ mod tests {
             for error in &errors {
                 renderer.write(error, Path::new("/root"), verbose).unwrap();
             }
+            // Errors are rendered in parallel only on a thread pool.
             let mut all = Vec::new();
-            ErrorRenderer::plain(&mut all)
-                .write_all(&errors, Path::new("/root"), verbose)
-                .unwrap();
+            ThreadPool::new(TEST_THREAD_COUNT).install(|| {
+                ErrorRenderer::plain(&mut all)
+                    .write_all(&errors, Path::new("/root"), verbose)
+                    .unwrap()
+            });
             assert!(
                 all == each,
                 "rendering in parallel should not change the output (verbose: {verbose})"
@@ -1141,6 +1151,37 @@ mod tests {
         assert_eq!(
             render_serializable_error(&error, root.as_path(), true),
             verbose
+        );
+    }
+
+    #[test]
+    fn test_snippet_drawn_at_reported_severity() {
+        let module_info = Module::new(
+            ModuleName::from_str("test"),
+            ModulePath::filesystem(PathBuf::from("test.py")),
+            Arc::new("return\nx = 1".to_owned()),
+        );
+        let error = Error::new(
+            module_info,
+            TextRange::new(TextSize::new(7), TextSize::new(12)),
+            "This code is unreachable".to_owned(),
+            Vec::new(),
+            ErrorKind::Unreachable,
+        )
+        .with_severity(Severity::Hint);
+        let reported = CollectedDiagnostic::new(&error, Severity::Warn);
+        let mut output = Vec::new();
+        ErrorRenderer::plain(&mut output)
+            .write(&reported, Path::new(""), true)
+            .unwrap();
+        assert_eq!(
+            str::from_utf8(&output).unwrap(),
+            r#" WARN This code is unreachable [unreachable]
+ --> test.py:2:1
+  |
+2 | x = 1
+  | ^^^^^
+"#,
         );
     }
 

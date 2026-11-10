@@ -35,7 +35,7 @@ a: Solutions
 b: Answers
 c: Exports
 
-(36 builtin demands hidden)
+(35 builtin demands hidden)
 a -> b::Load(module_exists)
 a -> b::Exports(export_exists)
 a -> b::Exports(is_implicit_reexport)

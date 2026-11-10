@@ -584,11 +584,8 @@ fn test_type_shape_dsl_helper_edit_invalidates_caller() {
     i.set(
         "shape_extensions",
         r#"
-from typing import Callable
-
 class Int: pass
 class IntTuple: pass
-def shaped_array[T](*, shape: str) -> Callable[[type[T]], type[T]]: ...
 def type_shape_dsl_function[F](fn: F) -> F: return fn
 "#,
     );
@@ -606,9 +603,8 @@ def leaf(first: Int, second: Int) -> Int:
         "main",
         r#"
 from helpers import leaf
-from shape_extensions import Int, IntTuple, shaped_array, type_shape_dsl_function
+from shape_extensions import Int, IntTuple, type_shape_dsl_function
 
-@shaped_array(shape="Shape")
 class Tensor[Shape: IntTuple]: ...
 
 @type_shape_dsl_function
@@ -661,7 +657,6 @@ fn test_type_shape_dsl_broadcast_edit_invalidates_importer() {
         "shape_extensions",
         r#"
 class IntTuple: pass
-def shaped_array[T](*, shape: str): ...
 def type_shape_dsl_function[F](fn: F) -> F: return fn
 
 @type_shape_dsl_function
@@ -672,9 +667,8 @@ def broadcast(left: IntTuple, right: IntTuple) -> IntTuple:
     i.set(
         "main",
         r#"
-from shape_extensions import IntTuple, broadcast, shaped_array
+from shape_extensions import IntTuple, broadcast
 
-@shaped_array(shape="Shape")
 class Tensor[Shape: IntTuple]: ...
 
 def chosen() -> Tensor[broadcast(IntTuple[2], IntTuple[3])]: ...
@@ -695,7 +689,6 @@ result: Tensor[[2]] = chosen()
         "shape_extensions",
         r#"
 class IntTuple: pass
-def shaped_array[T](*, shape: str): ...
 def type_shape_dsl_function[F](fn: F) -> F: return fn
 
 @type_shape_dsl_function
@@ -3977,6 +3970,7 @@ g("x")  # E: `str` is not assignable to upper bound `int` of type variable `T`
         }),
         Box::new(move |_| (main_load.dupe(), Vec::new())),
         Box::new(move |_, _| main_fallback.dupe()),
+        Box::new(|config, _| config),
         Box::new(|| {}),
     );
     let state = State::new(finder, TEST_THREAD_COUNT);

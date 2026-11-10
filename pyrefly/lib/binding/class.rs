@@ -240,7 +240,7 @@ impl<'a> BindingsBuilder<'a> {
         if x.name.id.is_empty() {
             self.ensure_and_bind_decorators(
                 mem::take(&mut x.decorator_list),
-                &mut Usage::NonPinningValue(None),
+                &mut Usage::Unchecked,
             );
             return;
         }
@@ -263,12 +263,10 @@ impl<'a> BindingsBuilder<'a> {
         let mut pydantic_config_dict = PydanticConfigDict::default();
         let docstring_range = Docstring::range_from_stmts(x.body.as_slice());
         let body = mem::take(&mut x.body);
-        let field_docstrings = self.extract_field_docstrings(&body);
+        let field_docstrings = Self::extract_field_docstrings(&body);
         let pydantic_before_validator_fields = self.extract_field_validator_fields(&body);
         let mut attrs_decorators = AttrsDecoratorMethods::default();
         collect_attrs_decorator_methods(&body, &mut attrs_decorators);
-        let capture_init = self.extract_capture_init(&body);
-        let shaped_array_metadata = self.extract_shaped_array_metadata(&x.decorator_list);
         // This uses the full statement range; see `ShapeDeclarations::enclosing_class`.
         self.shape_declarations
             .push_class(x.range, class_indices.class_idx);
@@ -291,24 +289,6 @@ impl<'a> BindingsBuilder<'a> {
                 self.type_params_with_owner(tp, owner)
             })
             .unwrap_or_default();
-        let shaped_array_metadata = match shaped_array_metadata {
-            Some(metadata) if x.type_params.is_none() => {
-                // TODO(stroxler): This restriction seems 100% fine with experiments, I see no reason
-                // to support legacy-style class tparams right now. We may eventually need to, at which point
-                // we'd have to move this check to solve time.
-                self.error(
-                    metadata.range,
-                    ErrorKind::InvalidAnnotation,
-                    format!(
-                        "Shape parameter `{}` must be a scoped (PEP-695-style) type parameter of class `{}`",
-                        metadata.shape_name, x.name.id
-                    ),
-                );
-                None
-            }
-            metadata => metadata,
-        };
-
         let mut legacy = LegacyTParamCollector::new(x.type_params.is_some());
         let bases = x.bases().map(|base| {
             let mut base = base.clone();
@@ -696,8 +676,6 @@ impl<'a> BindingsBuilder<'a> {
                 pydantic_before_validator_fields: pydantic_before_validator_fields
                     .into_boxed_slice(),
                 django_field_info: Box::new(django_field_info),
-                capture_init: capture_init.map(|v| v.into_boxed_slice()),
-                shaped_array_metadata,
             },
         );
         self.insert_binding_idx(
@@ -715,8 +693,7 @@ impl<'a> BindingsBuilder<'a> {
     }
 
     /// Extracts docstrings for each field, mapping the field's range to the docstring's range.
-    fn extract_field_docstrings(
-        &self,
+    pub fn extract_field_docstrings(
         body: &[ruff_python_ast::Stmt],
     ) -> SmallMap<TextRange, TextRange> {
         use ruff_python_ast::Expr;
@@ -1039,7 +1016,7 @@ impl<'a> BindingsBuilder<'a> {
     /// source, so anything an unread argument defines — a walrus target, say —
     /// is declared with no binding, and looking it up later panics.
     pub(crate) fn bind_unread_argument(&mut self, x: &mut Expr) {
-        self.ensure_expr(x, &mut Usage::NonPinningValue(None));
+        self.ensure_expr(x, &mut Usage::Unchecked);
     }
 
     /// Like `bind_unread_argument`, for the keyword arguments of a functional
@@ -1207,8 +1184,6 @@ impl<'a> BindingsBuilder<'a> {
                 pydantic_config_dict: PydanticConfigDict::default(),
                 pydantic_before_validator_fields: Box::default(),
                 django_field_info: Box::default(),
-                capture_init: None,
-                shaped_array_metadata: None,
             },
         );
         self.insert_binding_idx(

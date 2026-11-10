@@ -16,13 +16,10 @@ use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::known_class::KnownClass;
-use pyrefly_types::literal::LitStyle;
-use pyrefly_types::meta_shape_dsl::ShapeTransform;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::typed_dict::TypedDictInner;
 use pyrefly_types::types::CalleeKind;
-use pyrefly_types::types::NNModuleType;
 use pyrefly_types::types::TArgs;
 use pyrefly_types::types::TParams;
 use pyrefly_util::prelude::SliceExt;
@@ -821,27 +818,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     None => CallTargetLookup::Error(Type::ClassType(cls), vec![]),
                 }
             }
-            // NNModule instances delegate call dispatch to their underlying class.
-            // instance_as_dunder_call resolves the stubbed `__call__` proxy for nn.Module subclasses.
-            // We patch the BoundMethod's self object to be the NNModule type so
-            // that inject_module_attrs can detect NNModule and inject its fields.
-            Type::NNModule(module) => {
-                let nn_module_ty = Type::NNModule(module.clone());
-                let cls = module.class.clone();
-                let maybe_dunder_call = self.instance_as_dunder_call(&cls);
-                match maybe_dunder_call {
-                    Some(Type::BoundMethod(bm)) => {
-                        let patched = Type::BoundMethod(Box::new(BoundMethod {
-                            obj: nn_module_ty,
-                            ..*bm
-                        }));
-                        self.as_call_target_impl(patched, quantified)
-                    }
-                    Some(ty) => self.as_call_target_impl(ty, quantified),
-                    None => return CallTargetLookup::Error(Type::NNModule(module), vec![]),
-                }
-                .with_error_type(|_| Type::NNModule(module))
-            }
             Type::DataFrame(schema) => self
                 .as_call_target_impl(schema.underlying_type(), quantified)
                 .with_error_type(|_| Type::DataFrame(schema)),
@@ -1291,6 +1267,35 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
     ) -> Type {
+        let enum_lookup = self.prepare_enum_lookup(
+            &cls,
+            &constructor_kind,
+            args,
+            keywords,
+            arg_errors,
+            errors,
+            context,
+        );
+        let enum_args;
+        let enum_keywords;
+        let (args, keywords) = match &enum_lookup {
+            Some(arg) if arg.is_positional => {
+                enum_args = [CallArg::Arg(CallValue::Plain(TypeOrExpr::Type(
+                    &arg.ty, arg.range,
+                )))];
+                (&enum_args[..], keywords)
+            }
+            Some(arg) => {
+                enum_keywords = [CallKeyword {
+                    range: keywords[0].range,
+                    arg: keywords[0].arg,
+                    value: CallValue::Plain(TypeOrExpr::Type(&arg.ty, arg.range)),
+                }];
+                (args, &enum_keywords[..])
+            }
+            None => (args, keywords),
+        };
+
         // Classes that override `__new__` and also define `__init__` check/infer args
         // twice, potentially leading to exponential check costs: `O(2^depth)`.
         let checks_args_twice = |cls: &ClassType, preserve_self| {
@@ -1645,23 +1650,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 errors,
                 specialization_errors,
             }
-        } else if let Type::ClassType(ct) = result {
-            // Check for init capture: if the class has a registered init capture,
-            // extract constructor arg values and wrap in Type::NNModule.
-            ConstructedInstance {
-                ty: self.maybe_wrap_nn_module(
-                    &ct.clone(),
-                    args,
-                    keywords,
-                    &arg_errors,
-                    Type::ClassType(ct),
-                ),
-                matched_hint,
-                arg_errors,
-                return_errors,
-                errors,
-                specialization_errors,
-            }
         } else {
             ConstructedInstance {
                 ty: result,
@@ -1672,57 +1660,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 specialization_errors,
             }
         }
-    }
-
-    /// If the class has a registered init capture, extract constructor arg values
-    /// and wrap the result in `Type::NNModule`. Otherwise return the result as-is.
-    ///
-    /// This enables shape-aware module instance tracking: the NNModule carries
-    /// captured constructor args (e.g., kernel_size, stride) so DSL forward
-    /// functions can access them without requiring type params on the class.
-    fn maybe_wrap_nn_module(
-        &self,
-        ct: &ClassType,
-        args: &[CallArg],
-        keywords: &[CallKeyword],
-        errors: &ErrorCollector,
-        result: Type,
-    ) -> Type {
-        let class_metadata = self.get_metadata_for_class(ct.class_object());
-        let capture_names: &[Name] = if let Some(names) = class_metadata.capture_init() {
-            names
-        } else {
-            return result;
-        };
-
-        let infer_call_value = |value: CallValue, errors: &ErrorCollector| -> Type {
-            let ty = value.infer(self, errors);
-            // NNModule fields carry captured constructor args (e.g., padding=Literal[1]) that DSL
-            // forward functions need as literals to compute output shapes.
-            ty.with_literal_style(LitStyle::Explicit)
-        };
-
-        let mut fields = SmallMap::new();
-        for (i, param_name) in capture_names.iter().enumerate() {
-            // First check keyword args.
-            if let Some(kw) = keywords.iter().find(|k| {
-                k.arg
-                    .is_some_and(|id| id.id.as_str() == param_name.as_str())
-            }) {
-                fields.insert(param_name.clone(), infer_call_value(kw.value, errors));
-            } else if i < args.len() {
-                // Map positional arg by index to the capture param name.
-                if let CallArg::Arg(toe) = &args[i] {
-                    fields.insert(param_name.clone(), infer_call_value(*toe, errors));
-                }
-            }
-            // If neither keyword nor positional, the param uses its default.
-            // We leave it absent from the fields map; the forward DSL function
-            // will use its own default for that parameter.
-        }
-
-        self.heap
-            .mk_nn_module(NNModuleType::new(ct.clone(), fields))
     }
 
     fn construct_typed_dict(
@@ -1971,9 +1908,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if let Some(m) = metadata
                 && (matches!(
                     m.kind,
-                    FunctionKind::Dataclass
-                        | FunctionKind::DataclassTransform
-                        | FunctionKind::UsesShapeDsl
+                    FunctionKind::Dataclass | FunctionKind::DataclassTransform
                 ) || m.kind.is_signature_preserving_decorator()
                     || m.flags.dataclass_transform_metadata.is_some())
             {
@@ -2102,7 +2037,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ) => self.call_infer_inner(
                 signature,
                 Some(&metadata.kind),
-                metadata.flags.shape_transform.as_deref(),
                 tparams.as_deref(),
                 Some(obj),
                 args,
@@ -2117,7 +2051,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ),
             CallTarget::Callable(TargetWithTParams(tparams, callable)) => self.call_infer_inner(
                 callable,
-                None,
                 None,
                 tparams.as_deref(),
                 None,
@@ -2140,7 +2073,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             )) => self.call_infer_inner(
                 callable,
                 Some(&metadata.kind),
-                metadata.flags.shape_transform.as_deref(),
                 tparams.as_deref(),
                 None,
                 args,
@@ -2157,7 +2089,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let (ty, _callable, overload_table) = self.call_overloads(
                     overloads,
                     &metadata,
-                    metadata.flags.shape_transform.as_deref(),
                     None,
                     args,
                     keywords,
@@ -2175,7 +2106,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let (ty, _callable, overload_table) = self.call_overloads(
                     overloads,
                     &meta,
-                    meta.flags.shape_transform.as_deref(),
                     Some(obj),
                     args,
                     keywords,
@@ -2615,7 +2545,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callable: Callable,
         callable_name: Option<&FunctionKind>,
-        shape_transform: Option<&ShapeTransform>,
         tparams: Option<&TParams>,
         self_obj: Option<Type>,
         args: &[CallArg],
@@ -2637,7 +2566,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let res_no_hint = self.callable_infer(
             callable,
             callable_name,
-            shape_transform,
             tparams,
             self_obj,
             args,
@@ -2661,7 +2589,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let res_with_hint = self.callable_infer(
                     callable,
                     callable_name,
-                    shape_transform,
                     tparams,
                     self_obj,
                     args,

@@ -248,7 +248,11 @@ impl<'a> Transaction<'a> {
                         // annotating with the RHS-derived type. The same
                         // applies to receiver-bearing unpacked rebinds.
                         Binding::NameAssign(x) if !x.is_pinned() => (Some(&*x.expr), false),
-                        Binding::Expr(None, e) => (Some(&**e), false),
+                        Binding::Expr(None, e) => {
+                            // Expression-bound names, such as walrus targets, cannot be annotated inline.
+                            insertable = false;
+                            (Some(&**e), false)
+                        }
                         Binding::UnpackedValue(value)
                             if value.annotation.is_none() && value.receiver.is_none() =>
                         {

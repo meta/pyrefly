@@ -94,7 +94,7 @@ $ mkdir $TMPDIR/replace_with_any && \
 > printf 'replace-imports-with-any = ["module"]\n' > $TMPDIR/replace_with_any/pyrefly.toml && \
 > printf 'class Exported: ...\n' > $TMPDIR/replace_with_any/module.py && \
 > printf 'from typing import Any, assert_type\nfrom module import Exported, Missing\n\nassert_type(Exported, Any)\nassert_type(Missing, Any)\n' > $TMPDIR/replace_with_any/main.py && \
-> $PYREFLY check -c $TMPDIR/replace_with_any/pyrefly.toml --output-format=min-text $TMPDIR/replace_with_any/main.py
+> $PYREFLY check -c $TMPDIR/replace_with_any/pyrefly.toml --python-version 3.13.0 --output-format=min-text $TMPDIR/replace_with_any/main.py
  INFO 0 errors
 [0]
 ```
@@ -172,4 +172,17 @@ $ cd $TMPDIR/required_version && $PYREFLY check a.py b.py --output-format=min-te
 ERROR */pyrefly.toml: Pyrefly * does not satisfy `required-version = "<0"` (glob)
 Fatal configuration error
 [4]
+```
+
+## `only` in config file should not be empty
+
+```scrut {output_stream: stderr}
+$ mkdir $TMPDIR/only_cannot_be_empty && \
+> printf 'only = []\n' > $TMPDIR/only_cannot_be_empty/empty_only.toml && \
+> printf 'x: str = 1\ndef f() -> int:\n    return "a"\n' > $TMPDIR/only_cannot_be_empty/main.py && \
+> cd $TMPDIR/only_cannot_be_empty && $PYREFLY check --config empty_only.toml
+ INFO Checking project configured at `*/empty_only.toml` (glob)
+ERROR */empty_only.toml: a config with a value is required for `only` (glob)
+Fatal configuration error
+[1]
 ```

@@ -1775,6 +1775,415 @@
             }
           ],
           "target": {
+            "external": {
+              "id": 0,
+              "key": "argparse._ActionsContainer.add_argument"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 14,
+              "start": 193
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "argparse.ArgumentParser"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 14,
+              "start": 193
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "inherited_members.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "inherited_members.argparse.ArgumentParser"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 3,
+              "start": 120
+            },
+            {
+              "length": 3,
+              "start": 212
+            },
+            {
+              "length": 3,
+              "start": 329
+            },
+            {
+              "length": 3,
+              "start": 52
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "str"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 140
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "inherited_members.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "inherited_members.Child.hello.<locals>.self"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 286
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "inherited_members.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "inherited_members.Later.name"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 90
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "inherited_members.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "inherited_members.Base"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 145
+            },
+            {
+              "length": 5,
+              "start": 268
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "inherited_members.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "inherited_members.Base.greet"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 169
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "inherited_members.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "inherited_members.Child"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 262
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "inherited_members.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "inherited_members.use.<locals>.child"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 278
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "inherited_members.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "inherited_members.Later"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 6,
+              "start": 221
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "inherited_members.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "inherited_members.use.<locals>.parser"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 8,
+              "start": 184
+            },
+            {
+              "length": 8,
+              "start": 7
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "argparse"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 8,
+              "start": 184
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "inherited_members.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "inherited_members.argparse"
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.TargetUses.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "inherited_members.py"
+          },
+          "spans": [
+            {
+              "length": 12,
+              "start": 228
+            }
+          ],
+          "target": {
             "id": 0,
             "key": "argparse._ActionsContainer.add_argument"
           }
@@ -3244,6 +3653,6 @@
     "predicate": "python.Module.4"
   },
   {
-    "schema_id": "f329796272b9314200433ac342cbc15c"
+    "schema_id": "60aea86d7ff049228df605cf3fda4c67"
   }
 ]

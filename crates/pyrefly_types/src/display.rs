@@ -42,7 +42,6 @@ use crate::quantified::QuantifiedIdentity;
 use crate::quantified::QuantifiedKind;
 use crate::shaped_array::IntTuple;
 use crate::shaped_array::IntTupleView;
-use crate::shaped_array::ShapedArrayType;
 use crate::shaped_array::is_tuple_carrier_shape_middle;
 use crate::stdlib::Stdlib;
 use crate::tuple::Tuple;
@@ -205,9 +204,6 @@ impl<'a> TypeDisplayContext<'a> {
 
     pub fn add(&mut self, t: &'a Type) {
         t.universe(&mut |t| {
-            if let Type::ShapedArray(shaped_array) = t {
-                self.add_qname(shaped_array.base_class.qname());
-            }
             if let Type::DataFrame(schema) = t {
                 self.add_qname(schema.underlying.qname());
             }
@@ -448,63 +444,6 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_str(", ")?;
             }
             self.fmt_targ(param, arg, output)?;
-        }
-        output.write_str("]")
-    }
-
-    fn fmt_shaped_array(
-        &self,
-        shaped_array: &ShapedArrayType,
-        output: &mut impl TypeOutput,
-    ) -> fmt::Result {
-        let shape_idx = match shaped_array.tuple_carrier_shape_arg_index() {
-            Some(index) => index,
-            None => {
-                output.write_qname(shaped_array.base_class.qname())?;
-                let shape = shaped_array.shape();
-                if !shape.is_shapeless() {
-                    output.write_str("[")?;
-                    output.write_str(&shape.to_string())?;
-                    output.write_str("]")?;
-                }
-                return Ok(());
-            }
-        };
-        self.fmt_shaped_array_as_class(shaped_array, shape_idx, output)
-    }
-
-    fn fmt_shaped_array_as_class(
-        &self,
-        shaped_array: &ShapedArrayType,
-        shape_idx: usize,
-        output: &mut impl TypeOutput,
-    ) -> fmt::Result {
-        let targs = shaped_array.base_class.targs();
-        let args = targs.as_slice();
-        args.get(shape_idx)
-            .expect("shape argument index should point to a class type argument");
-
-        output.write_qname(shaped_array.base_class.qname())?;
-        let shape = shaped_array.shape();
-        let display_count = targs.display_count().max(if shape.is_shapeless() {
-            0
-        } else {
-            shape_idx + 1
-        });
-        if display_count == 0 {
-            return Ok(());
-        }
-
-        output.write_str("[")?;
-        for (i, (param, arg)) in targs.iter_paired().take(display_count).enumerate() {
-            if i > 0 {
-                output.write_str(", ")?;
-            }
-            if i == shape_idx {
-                self.fmt_shape_as_tuple_carrier(&shape, output)?;
-            } else {
-                self.fmt_targ(param, arg, output)?;
-            }
         }
         output.write_str("]")
     }
@@ -1103,7 +1042,6 @@ impl<'a> TypeDisplayContext<'a> {
                 }
                 output.write_str("]")
             }
-            Type::ShapedArray(shaped_array) => self.fmt_shaped_array(shaped_array, output),
             Type::IntTuple(int_tuple) => {
                 if int_tuple.is_shapeless() {
                     output.write_str("IntTuple")
@@ -1112,10 +1050,6 @@ impl<'a> TypeDisplayContext<'a> {
                     output.write_str(&int_tuple.to_string())?;
                     output.write_str("]")
                 }
-            }
-            Type::NNModule(module) => {
-                // Display as the class name (e.g., MaxPool2d)
-                self.fmt_helper_generic(&Type::ClassType(module.class.clone()), false, output)
             }
             Type::DataFrame(schema) if self.use_annotation_syntax => {
                 self.fmt_helper_generic(&schema.underlying_type(), false, output)
@@ -2045,7 +1979,6 @@ pub mod tests {
     use crate::quantified::QuantifiedKind;
     use crate::quantified::QuantifiedOrigin;
     use crate::shaped_array::IntTuple;
-    use crate::shaped_array::ShapedArrayType;
     use crate::tuple::Tuple;
     use crate::type_alias::TypeAlias;
     use crate::type_alias::TypeAliasData;
@@ -2142,17 +2075,6 @@ pub mod tests {
                 metadata: FuncMetadata::method(&class, Name::new(method_name)),
             }),
         }))
-    }
-
-    #[test]
-    fn test_display_shaped_array_type_uses_base_class_name() {
-        let array = ClassType::new(fake_class("Array", "arrays", 0), TArgs::default());
-        let shaped =
-            ShapedArrayType::new(array.clone(), IntTuple::new(vec![Int::Literal(2)])).to_type();
-        let shapeless = ShapedArrayType::shapeless(array).to_type();
-
-        assert_eq!(shaped.to_string(), "Array[2]");
-        assert_eq!(shapeless.to_string(), "Array");
     }
 
     #[test]
@@ -2440,79 +2362,6 @@ pub mod tests {
             ))
             .to_string(),
             "Int[N * (M * K)]"
-        );
-    }
-
-    #[test]
-    fn test_display_shaped_array_keeps_size_wrapper_out_of_shapes() {
-        let heap = TypeHeap::new();
-        let n = fake_tparam(0, "N", QuantifiedKind::IntVar).to_type(&heap);
-        let m = fake_tparam(1, "M", QuantifiedKind::IntVar).to_type(&heap);
-        let shape = IntTuple::new(vec![
-            Int::Literal(3),
-            Int::Symbolic(Box::new(n.clone())),
-            Int::Mul(
-                Box::new(Int::Symbolic(Box::new(n))),
-                Box::new(Int::Symbolic(Box::new(m))),
-            ),
-        ]);
-        let array = ClassType::new(fake_class("Array", "arrays", 0), TArgs::default());
-
-        assert_eq!(
-            ShapedArrayType::new(array, shape).to_type().to_string(),
-            "Array[3, N, N * M]"
-        );
-    }
-
-    #[test]
-    fn test_display_tuple_carrier_shape_keeps_size_wrapper_out_of_shapes() {
-        let heap = TypeHeap::new();
-        let shape_param = fake_tparams(vec![fake_tparam(0, "Shape", QuantifiedKind::TypeVar)]);
-        let n = fake_tparam(1, "N", QuantifiedKind::IntVar).to_type(&heap);
-        let shape = IntTuple::new(vec![Int::Literal(3), Int::Symbolic(Box::new(n))]);
-        let array = ClassType::new(
-            fake_class("Array", "arrays", 0),
-            TArgs::new(shape_param, vec![shape.to_shape_arg_type()]),
-        );
-
-        assert_eq!(
-            ShapedArrayType::new(array, shape)
-                .with_tuple_carrier_shape_arg(0)
-                .to_type()
-                .to_string(),
-            "Array[[3, N]]"
-        );
-    }
-
-    #[test]
-    fn test_display_unpacked_shape_strips_top_level_parens() {
-        let heap = TypeHeap::new();
-        let shape_param = fake_tparams(vec![fake_tparam(0, "Shape", QuantifiedKind::TypeVar)]);
-        let n = fake_tparam(1, "N", QuantifiedKind::IntVar).to_type(&heap);
-        let m = fake_tparam(2, "M", QuantifiedKind::IntVar).to_type(&heap);
-        let shape = IntTuple::unpacked(
-            vec![Int::Add(
-                Box::new(Int::Symbolic(Box::new(n))),
-                Box::new(Int::Literal(1)),
-            )],
-            Type::IntTuple(Box::new(IntTuple::shapeless())),
-            vec![Int::Mul(
-                Box::new(Int::Literal(2)),
-                Box::new(Int::Symbolic(Box::new(m))),
-            )],
-        );
-        let array = ClassType::new(
-            fake_class("Array", "arrays", 0),
-            TArgs::new(shape_param, vec![shape.to_shape_arg_type()]),
-        );
-        let shaped = ShapedArrayType::new(array, shape).with_tuple_carrier_shape_arg(0);
-        assert_eq!(
-            shaped.to_string(),
-            "Array[[N + 1, *tuple[int, ...], 2 * M]]"
-        );
-        assert_eq!(
-            shaped.to_type().to_string(),
-            "Array[[N + 1, *tuple[int, ...], 2 * M]]"
         );
     }
 

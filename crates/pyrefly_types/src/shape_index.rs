@@ -7,8 +7,7 @@
 
 //! Shape algebra for indexing shaped arrays.
 //!
-//! `lower_index_type` supports the annotation-driven stub path. The legacy shaped-array path
-//! continues to classify index expressions separately for compatibility with older stubs.
+//! `lower_index_type` interprets the index types retained by annotation-driven stubs.
 
 use crate::dimension::Int;
 use crate::dimension::ShapeError;
@@ -39,8 +38,6 @@ pub enum IndexOp {
         /// Step/stride for the slice. `None` means step=1 (default).
         step: Option<Int>,
     },
-    /// Shaped-array advanced operand; all advanced shapes broadcast globally and emit once.
-    ShapedArrayIndex(Vec<Int>),
     /// Tuple/list advanced operand; all advanced shapes broadcast globally and emit once.
     Fancy(Int),
     /// None/np.newaxis index: inserts a new dimension of size 1.
@@ -678,36 +675,6 @@ pub fn index_shape_slice(
     }
 }
 
-/// Apply tensor-as-index — replaces first dim with index tensor's dims.
-/// E.g. `Tensor[B, D1, D2][Tensor[T]]` -> `Tensor[T, D1, D2]`
-pub fn index_shape_tensor(shape: &IntTuple, idx_dims: &[Int]) -> Result<IntTuple, ShapeError> {
-    match shape.view() {
-        IntTupleView::Concrete(dims) => {
-            if dims.is_empty() {
-                return Err(ShapeError::ScalarIndex);
-            }
-            let mut new_dims = idx_dims.to_vec();
-            new_dims.extend_from_slice(&dims[1..]);
-            Ok(IntTuple::new(new_dims))
-        }
-        IntTupleView::Unpacked {
-            prefix,
-            middle,
-            suffix,
-        } if !prefix.is_empty() => {
-            let mut new_prefix = idx_dims.to_vec();
-            new_prefix.extend_from_slice(&prefix[1..]);
-            Ok(IntTuple::unpacked_from_parts(
-                new_prefix,
-                middle.clone(),
-                suffix.to_vec(),
-            ))
-        }
-        // First dim is in variadic middle; can't determine result
-        IntTupleView::Gradual | IntTupleView::Unpacked { .. } => Ok(shapeless_shape()),
-    }
-}
-
 /// Count how many shape dimensions a sequence of ops consumes.
 /// `NewAxis` ops don't consume a dimension; all others consume one.
 fn ops_dims_consumed(ops: &[IndexOp]) -> usize {
@@ -767,14 +734,13 @@ impl AdvancedIndexPlan {
             }
             let operand_shape = match op {
                 IndexOp::Fancy(dim) => Some(IntTuple::from_ints(vec![dim.clone()])),
-                IndexOp::ShapedArrayIndex(dims) => Some(IntTuple::from_ints(dims.clone())),
                 IndexOp::Slice { .. } | IndexOp::NewAxis => {
                     if first_advanced.is_some() {
                         separator_since_advanced = true;
                     }
                     None
                 }
-                // Pyrefly's shared shaped-array kernel treats scalar Int as basic.
+                // Scalar integer indices are basic.
                 IndexOp::Int => None,
             };
             if let Some(operand_shape) = operand_shape {
@@ -1027,7 +993,7 @@ fn apply_index_op(op: &IndexOp, dim: &Int) -> Option<Int> {
             let range_dim = sub_dim(stop, start);
             Some(apply_step(range_dim, step.clone()))
         }
-        IndexOp::ShapedArrayIndex(_) | IndexOp::Fancy(_) => {
+        IndexOp::Fancy(_) => {
             unreachable!(
                 "advanced-index dispatch invariant violated: apply_ops_to_dims must consume advanced operations"
             )
@@ -1054,7 +1020,7 @@ fn apply_ops_to_dims(
             IndexOp::NewAxis => {
                 new_dims.push(Int::Literal(1));
             }
-            IndexOp::ShapedArrayIndex(_) | IndexOp::Fancy(_) => {
+            IndexOp::Fancy(_) => {
                 dims.get(dim_idx)
                     .expect("rank checks must provide one dimension per consuming index operation");
                 if advanced_plan.emits_at(group, op_index) {
@@ -1330,178 +1296,71 @@ mod tests {
     }
 
     #[test]
-    fn grouped_tensor_indices_use_multi_index_dispatch() {
-        let index_shape = vec![dim(2), dim(3)];
-        let ops = [
-            IndexOp::ShapedArrayIndex(index_shape.clone()),
-            IndexOp::ShapedArrayIndex(index_shape),
-        ];
-        let middle = gradual_shape_middle();
-        for (source_kind, shape, expected) in [
-            (
-                "concrete",
-                IntTuple::from_types(vec![size(10), size(20), size(30)]),
-                IntTuple::from_types(vec![size(2), size(3), size(30)]),
-            ),
-            ("gradual", IntTuple::shapeless(), IntTuple::shapeless()),
-            (
-                "unpacked",
-                IntTuple::unpacked(vec![dim(10), dim(20)], middle.clone(), vec![dim(30)]),
-                IntTuple::unpacked(vec![dim(2), dim(3)], middle.clone(), vec![dim(30)]),
-            ),
-        ] {
-            assert_eq!(
-                index_shape_multi(&shape, &ops, &[], false)
-                    .unwrap_or_else(|e| panic!("{source_kind} source shape: {e:?}")),
-                expected,
-                "{source_kind} source shape",
-            );
-        }
-    }
-
-    #[test]
-    fn advanced_indices_broadcast_once_across_all_operands() {
-        let source = IntTuple::new(vec![dim(10), dim(20), dim(30), dim(40)]);
-        assert_eq!(
-            index_shape_multi(
-                &source,
-                &[
-                    IndexOp::ShapedArrayIndex(vec![dim(3)]),
-                    IndexOp::ShapedArrayIndex(vec![dim(2), dim(1)]),
-                ],
-                &[],
-                false,
-            )
-            .unwrap(),
-            IntTuple::new(vec![dim(2), dim(3), dim(30), dim(40)])
-        );
-
-        let symbolic = scalar_symbol("N");
-        assert_eq!(
-            index_shape_multi(
-                &source,
-                &[
-                    IndexOp::ShapedArrayIndex(vec![symbolic.clone(), dim(1)]),
-                    IndexOp::ShapedArrayIndex(vec![dim(1), dim(3)]),
-                    IndexOp::ShapedArrayIndex(vec![symbolic.clone(), dim(3)]),
-                ],
-                &[],
-                false,
-            )
-            .unwrap(),
-            IntTuple::new(vec![symbolic, dim(3), dim(40)])
-        );
-
-        assert_eq!(
-            index_shape_multi(
-                &source,
-                &[
-                    IndexOp::Fancy(dim(3)),
-                    IndexOp::ShapedArrayIndex(vec![dim(2), dim(1)]),
-                ],
-                &[],
-                false,
-            )
-            .unwrap(),
-            IntTuple::new(vec![dim(2), dim(3), dim(30), dim(40)])
-        );
-        assert_eq!(
-            index_shape_multi(
-                &source,
-                &[
-                    IndexOp::Fancy(Int::Int),
-                    IndexOp::ShapedArrayIndex(vec![dim(2), dim(1)]),
-                ],
-                &[],
-                false,
-            )
-            .unwrap(),
-            IntTuple::new(vec![dim(2), Int::Int, dim(30), dim(40)])
-        );
-        assert_eq!(
-            index_shape_multi(
-                &source,
-                &[IndexOp::Fancy(dim(2)), IndexOp::Fancy(dim(1))],
-                &[],
-                false,
-            )
-            .unwrap(),
-            IntTuple::new(vec![dim(2), dim(30), dim(40)])
-        );
-
-        assert_eq!(
-            index_shape_multi(
-                &source,
-                &[
-                    IndexOp::ShapedArrayIndex(vec![]),
-                    IndexOp::ShapedArrayIndex(vec![]),
-                ],
-                &[],
-                false,
-            )
-            .unwrap(),
-            IntTuple::new(vec![dim(30), dim(40)])
-        );
-    }
-
-    #[test]
-    fn advanced_index_placement_uses_global_separators() {
+    fn fancy_groups_broadcast_and_preserve_placement() {
         let full_slice = || IndexOp::Slice {
             start: None,
             stop: None,
             step: None,
         };
-        for (case, source, pre_ops, post_ops, has_ellipsis, expected) in [
+        for (case, rank, pre_ops, post_ops, has_ellipsis, expected) in [
+            (
+                "adjacent",
+                4,
+                vec![full_slice(), IndexOp::Fancy(dim(3)), IndexOp::Fancy(dim(1))],
+                vec![],
+                false,
+                vec![10, 3, 40],
+            ),
             (
                 "slice separator",
-                IntTuple::new(vec![dim(10), dim(20), dim(30), dim(40), dim(50)]),
+                5,
                 vec![
                     full_slice(),
                     IndexOp::Fancy(dim(3)),
                     full_slice(),
-                    IndexOp::ShapedArrayIndex(vec![dim(2), dim(1)]),
+                    IndexOp::Fancy(dim(1)),
                 ],
                 vec![],
                 false,
-                IntTuple::new(vec![dim(2), dim(3), dim(10), dim(30), dim(50)]),
+                vec![3, 10, 30, 50],
             ),
             (
                 "new-axis separator",
-                IntTuple::new(vec![dim(10), dim(20), dim(30), dim(40)]),
+                4,
                 vec![
                     full_slice(),
                     IndexOp::Fancy(dim(3)),
                     IndexOp::NewAxis,
-                    IndexOp::ShapedArrayIndex(vec![dim(2), dim(1)]),
+                    IndexOp::Fancy(dim(1)),
                 ],
                 vec![],
                 false,
-                IntTuple::new(vec![dim(2), dim(3), dim(10), dim(1), dim(40)]),
+                vec![3, 10, 1, 40],
             ),
             (
-                "integer is transparent between advanced operands",
-                IntTuple::new(vec![dim(10), dim(20), dim(30), dim(40), dim(50)]),
+                "transparent integer",
+                5,
                 vec![
                     full_slice(),
                     IndexOp::Fancy(dim(3)),
                     IndexOp::Int,
-                    IndexOp::ShapedArrayIndex(vec![dim(2), dim(1)]),
+                    IndexOp::Fancy(dim(1)),
                 ],
                 vec![],
                 false,
-                IntTuple::new(vec![dim(10), dim(2), dim(3), dim(50)]),
+                vec![10, 3, 50],
             ),
             (
-                "leading integer before slice and advanced operand",
-                IntTuple::new(vec![dim(10), dim(20), dim(30), dim(40)]),
+                "leading integer",
+                4,
                 vec![IndexOp::Int, full_slice(), IndexOp::Fancy(dim(3))],
                 vec![],
                 false,
-                IntTuple::new(vec![dim(20), dim(3), dim(40)]),
+                vec![20, 3, 40],
             ),
             (
-                "trailing integer does not extend the advanced subspace",
-                IntTuple::new(vec![dim(10), dim(20), dim(30), dim(40)]),
+                "trailing integer",
+                4,
                 vec![
                     full_slice(),
                     IndexOp::Fancy(dim(3)),
@@ -1510,169 +1369,70 @@ mod tests {
                 ],
                 vec![],
                 false,
-                IntTuple::new(vec![dim(10), dim(3), dim(30)]),
+                vec![10, 3, 30],
             ),
             (
-                "integer-only indexing stays basic",
-                IntTuple::new(vec![dim(10), dim(20)]),
+                "basic integer",
+                2,
                 vec![IndexOp::Int],
                 vec![],
                 false,
-                IntTuple::new(vec![dim(20)]),
+                vec![20],
             ),
             (
-                "zero-width ellipsis separator",
-                IntTuple::new(vec![dim(10), dim(20), dim(30)]),
+                "zero-width ellipsis",
+                3,
                 vec![full_slice(), IndexOp::Fancy(dim(3))],
-                vec![IndexOp::ShapedArrayIndex(vec![dim(2), dim(1)])],
+                vec![IndexOp::Fancy(dim(1))],
                 true,
-                IntTuple::new(vec![dim(2), dim(3), dim(10)]),
+                vec![3, 10],
             ),
             (
-                "positive-width ellipsis separator",
-                IntTuple::new(vec![dim(10), dim(20), dim(30), dim(40), dim(50)]),
+                "positive-width ellipsis",
+                5,
                 vec![full_slice(), IndexOp::Fancy(dim(3))],
-                vec![IndexOp::ShapedArrayIndex(vec![dim(2), dim(1)])],
+                vec![IndexOp::Fancy(dim(1))],
                 true,
-                IntTuple::new(vec![dim(2), dim(3), dim(10), dim(30), dim(40)]),
+                vec![3, 10, 30, 40],
             ),
         ] {
+            let source = IntTuple::new((1..=rank).map(|i| dim(i * 10)).collect());
             assert_eq!(
                 index_shape_multi(&source, &pre_ops, &post_ops, has_ellipsis).unwrap(),
-                expected,
+                IntTuple::new(expected.into_iter().map(dim).collect()),
                 "{case}",
             );
         }
     }
 
     #[test]
-    fn advanced_index_errors_precede_gradual_fallback_but_not_rank_errors() {
-        let incompatible = [
-            IndexOp::Fancy(dim(2)),
-            IndexOp::ShapedArrayIndex(vec![dim(3)]),
-        ];
-        assert!(matches!(
-            index_shape_multi(
-                &IntTuple::new(vec![dim(10), dim(20)]),
-                &incompatible,
-                &[],
-                false,
-            ),
-            Err(ShapeError::ShapeComputation { .. })
-        ));
-        match index_shape_multi(&IntTuple::new(vec![dim(10)]), &incompatible, &[], false) {
-            Err(ShapeError::TooManyIndices { got, max }) => assert_eq!((got, max), (2, 1)),
-            result => panic!("expected rank error before broadcast, got {result:?}"),
-        }
-        match index_shape_multi(&IntTuple::new(vec![]), &incompatible, &[], false) {
-            Err(ShapeError::TooManyIndices { got, max }) => assert_eq!((got, max), (2, 0)),
-            result => panic!("expected scalar rank error before broadcast, got {result:?}"),
-        }
-        assert!(matches!(
-            index_shape_tensor(&IntTuple::new(vec![]), &[dim(2)]),
-            Err(ShapeError::ScalarIndex)
-        ));
-
-        for source in [
-            IntTuple::shapeless(),
-            IntTuple::unpacked_from_parts(
-                vec![],
-                Type::Quantified(Box::new(fake_tparam("Ts", QuantifiedKind::TypeVarTuple))),
-                vec![],
-            ),
-        ] {
-            assert!(matches!(
-                index_shape_multi(&source, &incompatible, &[], false),
-                Err(ShapeError::ShapeComputation { .. })
-            ));
-        }
-    }
-
-    #[test]
-    fn advanced_indices_preserve_known_unpacked_ends() {
+    fn fancy_groups_keep_symbolic_shapes_and_error_precedence() {
         let middle = Type::Quantified(Box::new(fake_tparam("Ts", QuantifiedKind::TypeVarTuple)));
         let source = IntTuple::unpacked_from_parts(
             vec![dim(10), dim(20)],
             middle.clone(),
             vec![dim(30), dim(40)],
         );
+        let symbol = scalar_symbol("N");
         assert_eq!(
             index_shape_multi(
                 &source,
-                &[IndexOp::ShapedArrayIndex(vec![dim(2)])],
+                &[IndexOp::Fancy(symbol.clone()), IndexOp::Fancy(dim(1))],
                 &[],
-                false,
+                false
             )
             .unwrap(),
-            IntTuple::unpacked_from_parts(
-                vec![dim(2), dim(20)],
-                middle.clone(),
-                vec![dim(30), dim(40)],
-            )
+            IntTuple::unpacked_from_parts(vec![symbol], middle, vec![dim(30), dim(40)]),
         );
-        assert_eq!(
-            index_shape_multi(
-                &source,
-                &[
-                    IndexOp::ShapedArrayIndex(vec![dim(2), dim(1)]),
-                    IndexOp::Int,
-                ],
-                &[IndexOp::ShapedArrayIndex(vec![dim(3)])],
-                true,
-            )
-            .unwrap(),
-            IntTuple::unpacked_from_parts(vec![dim(2), dim(3)], middle.clone(), vec![dim(30)],)
-        );
-        assert_eq!(
-            index_shape_multi(
-                &source,
-                &[
-                    IndexOp::Slice {
-                        start: None,
-                        stop: None,
-                        step: None,
-                    },
-                    IndexOp::Fancy(dim(3)),
-                ],
-                &[IndexOp::ShapedArrayIndex(vec![dim(2), dim(1)])],
-                true,
-            )
-            .unwrap(),
-            IntTuple::unpacked_from_parts(
-                vec![dim(2), dim(3), dim(10)],
-                middle.clone(),
-                vec![dim(30)],
-            )
-        );
-        assert_eq!(
-            index_shape_multi(
-                &source,
-                &[],
-                &[IndexOp::ShapedArrayIndex(vec![dim(3)])],
-                true,
-            )
-            .unwrap(),
-            IntTuple::unpacked_from_parts(
-                vec![dim(10), dim(20)],
-                middle.clone(),
-                vec![dim(30), dim(3)],
-            )
-        );
-
-        assert_eq!(
-            index_shape_multi(
-                &source,
-                &[
-                    IndexOp::ShapedArrayIndex(vec![dim(2)]),
-                    IndexOp::ShapedArrayIndex(vec![dim(2)]),
-                    IndexOp::ShapedArrayIndex(vec![dim(2)]),
-                ],
-                &[],
-                false,
-            )
-            .unwrap(),
-            IntTuple::shapeless()
-        );
+        let incompatible = [IndexOp::Fancy(dim(2)), IndexOp::Fancy(dim(3))];
+        assert!(matches!(
+            index_shape_multi(&IntTuple::shapeless(), &incompatible, &[], false),
+            Err(ShapeError::ShapeComputation { .. }),
+        ));
+        assert!(matches!(
+            index_shape_multi(&IntTuple::new(vec![dim(10)]), &incompatible, &[], false),
+            Err(ShapeError::TooManyIndices { got: 2, max: 1 }),
+        ));
     }
 
     #[test]
@@ -1687,39 +1447,6 @@ mod tests {
                 expected
             );
         }
-    }
-
-    #[test]
-    fn tensor_indexing_is_native_across_shape_kinds() {
-        let symbolic = Int::Symbolic(Box::new(Type::Var(Var::ZERO)));
-        let index_dims = vec![
-            Int::Add(Box::new(dim(1)), Box::new(dim(1))),
-            Int::Add(Box::new(symbolic.clone()), Box::new(dim(0))),
-        ];
-        let expected_index_dims = vec![dim(2), symbolic];
-
-        let concrete = IntTuple::new(vec![dim(10), dim(20)]);
-        let mut concrete_expected = expected_index_dims.clone();
-        concrete_expected.push(dim(20));
-        assert_eq!(
-            index_shape_tensor(&concrete, &index_dims).unwrap(),
-            IntTuple::new(concrete_expected)
-        );
-
-        assert_eq!(
-            index_shape_tensor(&IntTuple::shapeless(), &index_dims).unwrap(),
-            IntTuple::shapeless()
-        );
-
-        let middle = Type::Quantified(Box::new(fake_tparam("Ts", QuantifiedKind::TypeVarTuple)));
-        let unpacked =
-            IntTuple::unpacked_from_parts(vec![dim(10), dim(20)], middle.clone(), vec![dim(30)]);
-        let mut unpacked_prefix = expected_index_dims;
-        unpacked_prefix.push(dim(20));
-        assert_eq!(
-            index_shape_tensor(&unpacked, &index_dims).unwrap(),
-            IntTuple::unpacked_from_parts(unpacked_prefix, middle, vec![dim(30)])
-        );
     }
 
     #[test]

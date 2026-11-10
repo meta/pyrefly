@@ -105,10 +105,6 @@ impl<'solver, Ans: LookupAnswer> TypeOrder<'solver, Ans> {
         self.0.as_class_type_unchecked(class)
     }
 
-    pub fn shaped_array_shape_for_class_type(self, cls: &ClassType) -> Option<Quantified> {
-        self.0.shaped_array_shape_for_class_type(cls)
-    }
-
     pub fn has_metaclass(self, cls: &Class, metaclass: &ClassType) -> bool {
         let metadata = self.0.get_metadata_for_class(cls);
         self.0

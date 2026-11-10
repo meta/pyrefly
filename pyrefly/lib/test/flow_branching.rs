@@ -3495,7 +3495,8 @@ def f(x: int | str):
         raises()
     else:
         raises()
-    assert_type(x, Never)  # E: This code is unreachable
+    assert_type(x, Never)
+    print(1)  # E: This code is unreachable
 "#,
 );
 
@@ -6066,14 +6067,13 @@ def mixed_with_return() -> None:
 "#,
 );
 
-// Two kinds of path the compound gate never reports. A branch the environment pruned decides the
-// statement under this configuration only. An exhaustive chain is dead only by narrowing, which
-// `assert_never` deliberately relies on, so reporting it would condemn the idiom.
+// A branch the environment pruned decides the statement under this configuration only, and a
+// suite dead under one configuration is live under another, so the compound gate never reports it.
 testcase!(
-    test_no_compound_gate_for_environment_or_exhaustiveness,
+    test_no_compound_gate_for_environment,
     r#"
 import sys
-from typing import Never, NoReturn, assert_never
+from typing import NoReturn
 
 def never() -> NoReturn: ...
 
@@ -6083,16 +6083,192 @@ def environment_decided() -> None:
     else:
         never()
     print(1)
+"#,
+);
+
+// A `match` that narrowing proves exhaustive, and whose every case diverges, cannot be passed
+// either. The proof is the one that already reports a dead `case` and types the function's
+// implicit return as `Never`, so the code after it is dead by the same token.
+testcase!(
+    test_unreachable_after_type_exhaustive_match,
+    r#"
+from typing import NoReturn
+
+def never() -> NoReturn: ...
 
 class Dog: pass
 class Cat: pass
 
+def exhaustive_match(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            raise ValueError()
+        case Cat():
+            never()
+    print(1)  # E: This code is unreachable
+
+# One case returns normally, so the statement is passed.
+def one_case_falls_through(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            raise ValueError()
+        case Cat():
+            pass
+    print(2)
+
+# A value escapes every case, so the statement is passed.
+def not_exhaustive(pet: Dog | Cat | None) -> None:
+    match pet:
+        case Dog():
+            raise ValueError()
+        case Cat():
+            raise ValueError()
+    print(3)
+
+# An `if` chain's fall-through is dead code only when its test settles it. Its narrowing is not
+# trusted here, since a test can be settled by a value the check deliberately ignores.
 def exhaustive_chain(pet: Dog | Cat) -> None:
     if isinstance(pet, Dog):
         return
     if isinstance(pet, Cat):
         return
+    print(4)
+"#,
+);
+
+// `assert_never` relies on exactly that deadness: it sits where narrowing proves nothing runs, so
+// the checker confirms the proof and the runtime enforces it. It is exempt as a statement, not as
+// a mechanism. A divergence marker, a `raise`, a failing `assert` or an expression of type
+// `Never`, is never where a dead region begins, and the code after the marker is still reported.
+testcase!(
+    test_divergence_marker_after_exhaustive_match_is_not_reported,
+    r#"
+from typing import Never, NoReturn, assert_never, assert_type
+
+class Dog: pass
+class Cat: pass
+
+def never() -> NoReturn: ...
+
+def idiom(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
     assert_never(pet)
+
+def idiom_in_case(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+        case _:
+            assert_never(pet)
+
+def idiom_in_chain(pet: Dog | Cat) -> None:
+    if isinstance(pet, Dog):
+        return
+    if isinstance(pet, Cat):
+        return
+    assert_never(pet)
+
+# The `Never` came in through the argument rather than from the call, and the statement still
+# says that nothing continues.
+def type_assertion(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    assert_type(pet, Never)
+
+def custom_helper(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            raise ValueError()
+        case Cat():
+            raise ValueError()
+    never()
+
+def defensive_raise(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    raise AssertionError("unreachable")
+
+def defensive_assert(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    assert False, "unreachable"
+
+def after_the_marker(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    assert_never(pet)
+    print(1)  # E: This code is unreachable
+
+def after_the_raise(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    raise AssertionError("unreachable")
+    print(2)  # E: This code is unreachable
+
+def after_the_type_assertion(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    assert_type(pet, Never)
+    print(3)  # E: This code is unreachable
+
+# A call that returns is not a marker, so the region begins there.
+def returning_call_is_not_a_marker(pet: Dog | Cat) -> None:
+    match pet:
+        case Dog():
+            return
+        case Cat():
+            return
+    print(4)  # E: This code is unreachable
+    print(5)
+"#,
+);
+
+// The exemption is about the statement, not about where the deadness came from, so a defensive
+// marker after a call that never returns is not reported either. The code after it still is.
+testcase!(
+    test_divergence_marker_after_a_diverging_call,
+    r#"
+from typing import NoReturn
+
+def never() -> NoReturn: ...
+
+def defensive_raise() -> None:
+    never()
+    raise AssertionError("unreachable")
+
+def two_calls() -> None:
+    never()
+    never()
+    print(1)  # E: This code is unreachable
+
+def after_defensive_raise() -> None:
+    never()
+    raise AssertionError("unreachable")
+    print(2)  # E: This code is unreachable
 "#,
 );
 
