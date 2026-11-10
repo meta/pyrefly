@@ -53,7 +53,7 @@ crossbeam-channel = "0.5.17"
 dashmap = { version = "6.2.1", features = ["rayon", "serde"] }
 dupe = "0.9.1"
 enum-iterator = "2.3.0"
-faster-hex = "0.10.1"
+faster-hex = "1.0.0"
 fuzzy-matcher = "0.3.7"
 fxhash = "0.2.1"
 glob = "0.3.4"
