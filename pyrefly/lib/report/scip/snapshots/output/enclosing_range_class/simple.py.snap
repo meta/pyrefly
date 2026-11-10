@@ -1,0 +1,14 @@
+# < definition scip-python python snapshot-util 0.1 simple/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# format-options: showRanges
+# < start enclosing_range scip-python python snapshot-util 0.1 simple/Test#
+class Test:
+#     ^^^^ definition  snapshot-util 0.1 simple/Test#
+    pass
+# < end enclosing_range scip-python python snapshot-util 0.1 simple/Test#
+

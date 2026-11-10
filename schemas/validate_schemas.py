@@ -130,6 +130,10 @@ NEGATIVE_TEST_CASES: list[tuple[str, str]] = [
         "errors_as_string",
         'errors = "all"',
     ),
+    (
+        "invalid_type_for_only",
+        'only = "bad-assignment"',
+    ),
     # --- Invalid enum values ---
     (
         "untyped_def_behavior_invalid",
@@ -195,6 +199,10 @@ NEGATIVE_TEST_CASES: list[tuple[str, str]] = [
     (
         "build_system_command_empty_array",
         '[build-system]\ntype = "custom"\ncommand = []',
+    ),
+    (
+        "only_empty_array",
+        "only = []",
     ),
     # --- Wrong item types within arrays ---
     (

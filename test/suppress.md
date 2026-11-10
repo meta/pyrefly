@@ -102,3 +102,23 @@ $ mkdir $TMPDIR/suppress_unused_type_ignore && \
 x = 1  # type: ignore
 [0]
 ```
+
+## `--suppress-errors` respects the `only` filter from the configuration
+
+```scrut
+$ mkdir -p $TMPDIR/suppress_only_config && \
+> printf 'x: str = 1\ndef f() -> int:\n    return "a"\n' > $TMPDIR/suppress_only_config/main.py && \
+> printf 'only = ["bad-assignment"]\n' > $TMPDIR/suppress_only_config/pyrefly.toml && \
+> cd $TMPDIR/suppress_only_config && \
+> $PYREFLY check main.py \
+>     --config pyrefly.toml \
+>     --suppress-errors \
+>     --summary=none \
+>     >/dev/null 2>/dev/null; \
+> cat main.py
+# pyrefly: ignore[bad-assignment]
+x: str = 1
+def f() -> int:
+    return "a"
+[0]
+```

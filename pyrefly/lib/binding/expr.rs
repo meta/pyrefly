@@ -107,9 +107,11 @@ pub enum Usage {
     /// Normal usage context that may pin partial types.
     /// The idx is the current binding being computed.
     CurrentIdx(Idx<Key>),
-    /// Value context that should not pin partial types.
-    /// The idx (if present) is used for secondary-read detection.
-    NonPinningValue(Option<Idx<Key>>),
+    /// Like `CurrentIdx`, but for a condition, such as an `if` test, whose names are narrowed
+    /// afterward and so should not pin partial types.
+    Condition(Idx<Key>),
+    /// A name lookup that no binding owns, such as when a narrowing looks up the name it narrows.
+    Inspection,
     /// Static type context that should not pin partial types.
     /// When `is_annotation` is true, implicit alias validation is applied.
     StaticTypeInformation { is_annotation: bool },
@@ -118,24 +120,30 @@ pub enum Usage {
     /// alias bindings should produce Binding::TypeAliasRef instead of
     /// Binding::Forward.
     TypeAliasRhs,
+    /// An expression that no binding type-checks, such as an invalid assignment target.
+    Unchecked,
 }
 
 impl Usage {
-    /// Create a non-pinning value usage from another usage context.
-    pub fn non_pinning_value_from(other: &Self) -> Self {
-        match other {
-            Self::CurrentIdx(idx) => Self::NonPinningValue(Some(*idx)),
-            Self::NonPinningValue(idx) => Self::NonPinningValue(*idx),
-            Self::StaticTypeInformation { .. } | Self::TypeAliasRhs => Self::NonPinningValue(None),
+    /// The usage for a condition within an expression that has this usage.
+    pub fn as_condition(&self) -> Self {
+        match self {
+            Self::CurrentIdx(idx) | Self::Condition(idx) => Self::Condition(*idx),
+            Self::Inspection
+            | Self::StaticTypeInformation { .. }
+            | Self::TypeAliasRhs
+            | Self::Unchecked => self.clone(),
         }
     }
 
     /// Get the current binding idx, if any.
     pub fn current_idx(&self) -> Option<Idx<Key>> {
         match self {
-            Usage::CurrentIdx(idx) => Some(*idx),
-            Usage::NonPinningValue(idx) => *idx,
-            Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs => None,
+            Usage::CurrentIdx(idx) | Usage::Condition(idx) => Some(*idx),
+            Usage::Inspection
+            | Usage::StaticTypeInformation { .. }
+            | Usage::TypeAliasRhs
+            | Usage::Unchecked => None,
         }
     }
 
@@ -150,6 +158,10 @@ impl Usage {
             self,
             Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs
         )
+    }
+
+    pub fn checks_initialization(&self) -> bool {
+        !self.is_static() && !matches!(self, Usage::Unchecked)
     }
 }
 
@@ -415,9 +427,9 @@ impl<'a> BindingsBuilder<'a> {
                         Binding::OuterClassTypeParameter(lookup_result_idx, name.range),
                     );
                 }
-                // Uninitialized local errors are only reported when we are neither in a stub
-                // nor a static type context.
-                if !usage.is_static() && !self.module_info.path().is_interface() {
+                // Uninitialized local errors are only reported in usage contexts that check
+                // initialization, and never in stubs.
+                if usage.checks_initialization() && !self.module_info.path().is_interface() {
                     if let Some(unset_nodes) =
                         is_initialized.deferred_unset_nodes().map(|s| s.to_vec())
                     {
@@ -548,9 +560,9 @@ impl<'a> BindingsBuilder<'a> {
                 Binding::Forward(iterable_value_idx)
             });
             for x in comp.ifs.iter_mut() {
-                self.ensure_expr(x, &mut Usage::non_pinning_value_from(usage));
+                self.ensure_expr(x, &mut usage.as_condition());
                 let narrow_ops = NarrowOps::from_expr(self, Some(x));
-                self.bind_narrow_ops(&narrow_ops, NarrowUseLocation::Span(comp.range), usage);
+                self.bind_narrow_ops(&narrow_ops, NarrowUseLocation::Span(comp.range));
             }
         }
     }
@@ -701,11 +713,11 @@ impl<'a> BindingsBuilder<'a> {
     /// expression that runs only when the narrows hold. A missing expression from
     /// parse-error recovery reads no names, so it needs no narrows, and two of them can
     /// share one empty range, which would give their narrows the same key.
-    fn bind_narrow_ops_for_branch(&mut self, narrow_ops: &NarrowOps, branch: &Expr, usage: &Usage) {
+    fn bind_narrow_ops_for_branch(&mut self, narrow_ops: &NarrowOps, branch: &Expr) {
         if matches!(branch, Expr::Name(name) if Ast::is_synthesized_empty_name(name)) {
             return;
         }
-        self.bind_narrow_ops(narrow_ops, NarrowUseLocation::Span(branch.range()), usage);
+        self.bind_narrow_ops(narrow_ops, NarrowUseLocation::Span(branch.range()));
     }
 
     fn record_yield(&mut self, mut x: ExprYield) {
@@ -858,7 +870,7 @@ impl<'a> BindingsBuilder<'a> {
                 // Ternary operation. We treat it like an if/else statement.
                 // Process the test before forking so walrus-defined names are
                 // in the base flow and visible to both branches.
-                self.ensure_expr(&mut x.test, &mut Usage::non_pinning_value_from(usage));
+                self.ensure_expr(&mut x.test, &mut usage.as_condition());
                 let static_test = self.sys_info.evaluate_bool_with_sys_info(&x.test);
                 let narrow_ops = NarrowOps::from_expr(self, Some(&x.test));
                 self.start_fork_and_branch(x.range);
@@ -873,7 +885,7 @@ impl<'a> BindingsBuilder<'a> {
                         if Ast::expr_contains_yield(&x.orelse) {
                             self.scopes.mark_has_yield_in_dead_code();
                         }
-                        self.bind_narrow_ops_for_branch(&narrow_ops, &x.body, usage);
+                        self.bind_narrow_ops_for_branch(&narrow_ops, &x.body);
                         self.ensure_expr(&mut x.body, usage);
                         self.finish_branch();
                     }
@@ -883,17 +895,17 @@ impl<'a> BindingsBuilder<'a> {
                         }
                         self.abandon_branch();
                         self.start_branch();
-                        self.bind_narrow_ops_for_branch(&narrow_ops.negate(), &x.orelse, usage);
+                        self.bind_narrow_ops_for_branch(&narrow_ops.negate(), &x.orelse);
                         self.ensure_expr(&mut x.orelse, usage);
                         self.finish_branch();
                     }
                     None => {
-                        self.bind_narrow_ops_for_branch(&narrow_ops, &x.body, usage);
+                        self.bind_narrow_ops_for_branch(&narrow_ops, &x.body);
                         self.ensure_expr(&mut x.body, usage);
                         // Negate the narrow ops for the `orelse`, then merge the Flows.
                         // TODO(stroxler): We eventually want to drop all narrows but merge values.
                         self.next_branch();
-                        self.bind_narrow_ops_for_branch(&narrow_ops.negate(), &x.orelse, usage);
+                        self.bind_narrow_ops_for_branch(&narrow_ops.negate(), &x.orelse);
                         self.ensure_expr(&mut x.orelse, usage);
                         self.finish_branch();
                     }
@@ -923,7 +935,7 @@ impl<'a> BindingsBuilder<'a> {
                 if let Some(value) = values.next() {
                     // The first operation runs unconditionally, so any walrus-defined
                     // names will be added to the base flow.
-                    self.ensure_expr(value, &mut Usage::non_pinning_value_from(usage));
+                    self.ensure_expr(value, &mut usage.as_condition());
                     self.start_fork_and_branch(*range);
                     let mut narrow_ops = get_narrow_ops(self, value, *op);
 
@@ -935,8 +947,8 @@ impl<'a> BindingsBuilder<'a> {
                         self.scopes.set_definitely_unreachable(true);
                     }
                     for value in values {
-                        self.bind_narrow_ops_for_branch(&narrow_ops, value, usage);
-                        self.ensure_expr(value, &mut Usage::non_pinning_value_from(usage));
+                        self.bind_narrow_ops_for_branch(&narrow_ops, value);
+                        self.ensure_expr(value, &mut usage.as_condition());
                         let new_narrow_ops = get_narrow_ops(self, value, *op);
                         narrow_ops.and_all(new_narrow_ops);
                         if self.sys_info.evaluate_bool(value) == short_circuit_trigger {
@@ -947,11 +959,7 @@ impl<'a> BindingsBuilder<'a> {
                     // TODO(stroxler): We eventually want to drop all narrows but merge values.
                     // Once we have a way to do that, the negation will be unnecessary.
                     self.next_branch();
-                    self.bind_narrow_ops(
-                        &narrow_ops.negate(),
-                        NarrowUseLocation::End(*range),
-                        usage,
-                    );
+                    self.bind_narrow_ops(&narrow_ops.negate(), NarrowUseLocation::End(*range));
                     self.finish_branch();
                     self.finish_bool_op_fork();
                 }
@@ -1108,7 +1116,7 @@ impl<'a> BindingsBuilder<'a> {
                         // `reveal_type` observes its first positional argument.
                         // Extra arguments are analyzed normally.
                         if matches!(first_arg, Expr::Name(_)) {
-                            self.ensure_expr(first_arg, &mut Usage::non_pinning_value_from(usage));
+                            self.ensure_expr(first_arg, &mut Usage::Inspection);
                         } else {
                             self.ensure_expr(first_arg, usage);
                         }
@@ -1130,12 +1138,12 @@ impl<'a> BindingsBuilder<'a> {
                 {
                     self.ensure_expr(&mut call.func, usage);
                     for arg in call.arguments.args.iter_mut() {
-                        self.ensure_expr(arg, &mut Usage::non_pinning_value_from(usage));
+                        self.ensure_expr(arg, &mut usage.as_condition());
                     }
                     for kw in call.arguments.keywords.iter_mut() {
                         self.ensure_expr(&mut kw.value, usage);
                     }
-                    self.bind_narrow_ops(&narrow_op, NarrowUseLocation::Span(call_range), usage);
+                    self.bind_narrow_ops(&narrow_op, NarrowUseLocation::Span(call_range));
                     return;
                 }
                 if matches!(
@@ -1552,9 +1560,11 @@ impl<'a> BindingsBuilder<'a> {
                 // implicit alias validation. We clear `is_annotation` to prevent
                 // `ImplicitAliasCheck` from being inserted for the value name.
                 let mut attr_value_usage = match *usage {
-                    Usage::StaticTypeInformation { .. } => Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
+                    Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs => {
+                        Usage::StaticTypeInformation {
+                            is_annotation: false,
+                        }
+                    }
                     ref u => u.clone(),
                 };
                 self.ensure_simple_attr(
@@ -1580,9 +1590,11 @@ impl<'a> BindingsBuilder<'a> {
                     .and_then(|tb| self.try_intercept_lookup(tb, &id));
                 // Same as above: args/kwargs attribute values are not type references.
                 let mut attr_value_usage = match *usage {
-                    Usage::StaticTypeInformation { .. } => Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
+                    Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs => {
+                        Usage::StaticTypeInformation {
+                            is_annotation: false,
+                        }
+                    }
                     ref u => u.clone(),
                 };
                 self.ensure_name(&name, &mut attr_value_usage, resolved.and(tparams_builder));

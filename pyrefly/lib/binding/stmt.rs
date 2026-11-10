@@ -289,7 +289,7 @@ impl<'a> BindingsBuilder<'a> {
     /// condition, and solving it solves the check. Pass it to `insert_bool_condition`.
     pub(crate) fn bind_bool_condition(&mut self, test: &mut Expr) -> CurrentIdx {
         let link = self.declare_current_idx(Key::UsageLink(test.range()));
-        self.ensure_expr(test, &mut Usage::NonPinningValue(Some(link.idx())));
+        self.ensure_expr(test, &mut Usage::Condition(link.idx()));
         link
     }
 
@@ -311,7 +311,6 @@ impl<'a> BindingsBuilder<'a> {
             self.bind_narrow_ops(
                 &negated_narrow_ops,
                 NarrowUseLocation::Span(msg_expr.range()),
-                &Usage::NonPinningValue(None),
             );
             let mut msg = self.declare_current_idx(Key::UsageLink(msg_expr.range()));
             self.ensure_expr(&mut msg_expr, msg.usage());
@@ -322,11 +321,7 @@ impl<'a> BindingsBuilder<'a> {
             self.insert_binding_current(msg, Binding::UsageLink(LinkedKey::Expect(idx)));
             self.scopes.swap_current_flow_with(&mut base);
         };
-        self.bind_narrow_ops(
-            &narrow_ops,
-            NarrowUseLocation::Span(assert_range),
-            &Usage::NonPinningValue(None),
-        );
+        self.bind_narrow_ops(&narrow_ops, NarrowUseLocation::Span(assert_range));
         if let Some(false) = static_test {
             self.scopes
                 .mark_flow_termination(TerminationKind::StaticTest);
@@ -1303,12 +1298,7 @@ impl<'a> BindingsBuilder<'a> {
                             })
                         }
                         _ => {
-                            self.ensure_expr(
-                                &mut attr.value,
-                                &mut Usage::StaticTypeInformation {
-                                    is_annotation: false,
-                                },
-                            );
+                            self.ensure_expr(&mut attr.value, &mut Usage::Unchecked);
                             ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))
                         }
                     };
@@ -1401,20 +1391,10 @@ impl<'a> BindingsBuilder<'a> {
                         //
                         // We don't track first-usage in this context, since we won't analyze the usage anyway.
                         let mut e = illegal_target.clone();
-                        self.ensure_expr(
-                            &mut e,
-                            &mut Usage::StaticTypeInformation {
-                                is_annotation: false,
-                            },
-                        );
+                        self.ensure_expr(&mut e, &mut Usage::Unchecked);
                         // Even though the assignment target is invalid, we still need to analyze the RHS so errors
                         // (like invalid walrus targets) are reported.
-                        self.ensure_expr(
-                            &mut x.value,
-                            &mut Usage::StaticTypeInformation {
-                                is_annotation: false,
-                            },
-                        );
+                        self.ensure_expr(&mut x.value, &mut Usage::Unchecked);
                     }
                 }
             }
@@ -1539,11 +1519,7 @@ impl<'a> BindingsBuilder<'a> {
                     }
                     self.scopes.restore_termination(termination);
                 } else {
-                    self.bind_narrow_ops(
-                        &narrow_ops,
-                        NarrowUseLocation::Span(x.range),
-                        &Usage::NonPinningValue(None),
-                    );
+                    self.bind_narrow_ops(&narrow_ops, NarrowUseLocation::Span(x.range));
                     self.stmts(x.body, parent);
                 }
                 // For while True: loops, the loop body definitely runs at least once
@@ -1578,7 +1554,7 @@ impl<'a> BindingsBuilder<'a> {
                 let reachability_idx =
                     self.idx_for_promise(KeyExpect::BranchSuiteReachability(if_range));
                 let tests_link = self.declare_current_idx(Key::UsageLink(if_range));
-                let tests_usage = Usage::NonPinningValue(Some(tests_link.idx()));
+                let tests_usage = Usage::Condition(tests_link.idx());
                 self.ensure_expr(&mut x.test, &mut tests_usage.clone());
                 self.start_fork(if_range);
                 // Type narrowing operations that are carried over from one branch to the next. For example, in:
@@ -1604,11 +1580,7 @@ impl<'a> BindingsBuilder<'a> {
                 let mut branches = Ast::if_branches_owned(x);
                 while let Some((range, mut test, body)) = branches.next() {
                     self.start_branch();
-                    self.bind_narrow_ops(
-                        &negated_prev_ops,
-                        NarrowUseLocation::Start(range),
-                        &Usage::NonPinningValue(None),
-                    );
+                    self.bind_narrow_ops(&negated_prev_ops, NarrowUseLocation::Start(range));
                     // If there is no test, it's an `else` clause and `this_branch_chosen` will be true.
                     let this_branch_chosen = match &test {
                         None => {
@@ -1694,11 +1666,7 @@ impl<'a> BindingsBuilder<'a> {
                         .map(|test| (test, true))
                         .or(previous_test.map(|test| (test, false)));
                     previous_test = this_test.or(previous_test);
-                    self.bind_narrow_ops(
-                        &new_narrow_ops,
-                        NarrowUseLocation::Span(range),
-                        &Usage::NonPinningValue(None),
-                    );
+                    self.bind_narrow_ops(&new_narrow_ops, NarrowUseLocation::Span(range));
                     negated_prev_ops.and_all(new_narrow_ops.negate());
                     let outer_environment_suite = self.environment_suite;
                     if after_environment_test {
@@ -2417,11 +2385,7 @@ impl<'a> BindingsBuilder<'a> {
                             range,
                         ),
                     );
-                    self.bind_narrow_ops(
-                        &narrow_ops,
-                        NarrowUseLocation::Span(range),
-                        &Usage::NonPinningValue(None),
-                    );
+                    self.bind_narrow_ops(&narrow_ops, NarrowUseLocation::Span(range));
                 }
             }
             Stmt::Pass(_) => { /* no-op */ }

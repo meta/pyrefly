@@ -184,12 +184,22 @@ impl TypeInfo {
                     .into_iter()
                     .map(|TypeInfo { ty, facets }| (ty, facets.map(|x| *x)))
                     .unzip();
-                let ty = join_types(
-                    tys,
-                    union_types,
-                    is_subset_eq,
-                    join_style.map(|base_type_info| base_type_info.ty.clone()),
-                );
+                // Whole-name NarrowOf excludes reassignment; facet NarrowOf may not.
+                // Keep error-Any absorption here so assigned facet types stay in the join.
+                let ty = match &join_style {
+                    JoinStyle::NarrowOf(base)
+                        if matches!(base.ty, Type::Any(AnyStyle::Error))
+                            && tys.iter().any(|ty| ty == &base.ty) =>
+                    {
+                        base.ty.clone()
+                    }
+                    _ => join_types(
+                        tys,
+                        union_types,
+                        is_subset_eq,
+                        join_style.map(|base_type_info| base_type_info.ty.clone()),
+                    ),
+                };
                 let branches = facets_branches.into_iter().flatten().collect::<Vec<_>>();
                 let facets = if branches.len() == n {
                     NarrowedFacets::join(
@@ -944,8 +954,8 @@ fn join_types(
 /// the join.
 /// - If the base type is `Any`, and `Any` is still present in the join, just use `Any`.
 ///   This avoids creating union types like `Any | int` on gradual code that assigns or
-///   narrows a gradually-typed variable. We only do this for explicit and implicit any,
-///   not for `Any` that resulted from a type error.
+///   narrows a gradually-typed variable. We only do this for explicit and implicit any;
+///   `TypeInfo::join` handles unchanged error-derived Any in whole-name narrow-only joins.
 /// - If the merge involves only narrows of base *and* the base type is a subset
 ///   of the resulting union, simplify the union. This would not be needed if we
 ///   had general union simplification, but it is useful today because:

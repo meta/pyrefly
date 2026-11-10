@@ -279,6 +279,41 @@ def attribute_any(h: Holder) -> None:
 "#,
 );
 
+// Regression test for https://github.com/meta/pyrefly/issues/5549.
+testcase!(
+    test_match_case_gradual_base,
+    r#"
+from typing import Any, assert_type
+
+def make_base() -> Any:
+    return object
+
+class Mul: ...
+class FloorDiv(make_base()): ...
+
+def f(x: Any) -> str:
+    match x:
+        case Mul():
+            assert_type(x, Mul)
+            return "mul"
+        case FloorDiv():
+            assert_type(x, FloorDiv)
+            return "floordiv"
+        case str():
+            assert_type(x, str)
+            return "str"
+    assert_type(x, Any)
+    return "other"
+
+def gradual_predecessor(x: Any) -> None:
+    match x:
+        case FloorDiv():
+            assert_type(x, FloorDiv)
+        case str():
+            assert_type(x, str)
+"#,
+);
+
 testcase!(
     test_pattern_dict_key_enum,
     r#"

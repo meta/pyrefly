@@ -258,6 +258,7 @@ pub struct TestEnv {
     site_package_path: Vec<PathBuf>,
     implicitly_defined_attribute_error: bool,
     inactive_code_error: bool,
+    invalid_format_spec_error: bool,
     uninitialized_instance_variable_error: bool,
     possibly_uninitialized_attribute_error: bool,
     explicit_any_error: bool,
@@ -338,6 +339,7 @@ impl TestEnv {
             site_package_path: Vec::new(),
             implicitly_defined_attribute_error: false,
             inactive_code_error: false,
+            invalid_format_spec_error: false,
             uninitialized_instance_variable_error: false,
             possibly_uninitialized_attribute_error: false,
             explicit_any_error: false,
@@ -513,6 +515,11 @@ impl TestEnv {
 
     pub fn enable_explicit_any_error(mut self) -> Self {
         self.explicit_any_error = true;
+        self
+    }
+
+    pub fn enable_invalid_format_spec_error(mut self) -> Self {
+        self.invalid_format_spec_error = true;
         self
     }
 
@@ -926,6 +933,9 @@ impl TestEnv {
         }
         if self.possibly_uninitialized_attribute_error {
             errors.set_error_severity(ErrorKind::PossiblyUninitializedAttribute, Severity::Error);
+        }
+        if self.invalid_format_spec_error {
+            errors.set_error_severity(ErrorKind::InvalidFormatSpec, Severity::Error);
         }
         if self.explicit_any_error {
             errors.set_error_severity(ErrorKind::ExplicitAny, Severity::Error);

@@ -1276,6 +1276,22 @@ def bad_type_aliases(
 );
 
 testcase!(
+    test_bad_implicit_type_alias_in_alias_value,
+    r#"
+from typing import TypeAlias, TypeAliasType
+BadTypeAlias = int if 1 < 3 else str
+A: TypeAlias = BadTypeAlias  # E: `BadTypeAlias` is not a valid type alias: If expression cannot be used in annotations
+type B = list[BadTypeAlias]  # E: `BadTypeAlias` is not a valid type alias: If expression cannot be used in annotations
+C = TypeAliasType("C", BadTypeAlias)  # E: `BadTypeAlias` is not a valid type alias: If expression cannot be used in annotations
+
+class Outer:
+    Inner = int
+BadOuter = Outer if 1 < 3 else Outer
+D: TypeAlias = BadOuter.Inner
+"#,
+);
+
+testcase!(
     test_implicit_alias_exempt_class_constructors,
     r#"
 from typing import NamedTuple

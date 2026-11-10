@@ -13,6 +13,7 @@ POLARS_TEST_PATH = { value = "pyrefly/lib/test/polars/third-party", relative = t
 NARWHALS_TEST_PATH = { value = "pyrefly/lib/test/narwhals/third-party", relative = true }
 SQLALCHEMY_TEST_PATH = { value = "pyrefly/lib/test/sqlalchemy/third-party", relative = true }
 GLEAN_SNAPSHOTS_PATH = { value = "pyrefly/lib/report/glean/snapshots", relative = true }
+SCIP_SNAPSHOTS_PATH = { value = "pyrefly/lib/report/scip/snapshots", relative = true }
 COVERAGE_TEST_PATH = { value = "pyrefly/lib/test/coverage/test_files", relative = true }
 STUBGEN_TEST_PATH = { value = "pyrefly/lib/test/stubgen", relative = true }
 SHAPE_EXTENSIONS_TEST_PATH = { value = "tensor-shapes/pyrefly-shape-extensions", relative = true }

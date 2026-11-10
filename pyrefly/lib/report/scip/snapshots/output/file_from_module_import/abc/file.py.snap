@@ -1,0 +1,16 @@
+# < definition scip-python python snapshot-util 0.1 `abc.file`/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+from xyz import nested_file
+#    ^^^ reference  snapshot-util 0.1 xyz/__init__:
+#               ^^^^^^^^^^^ reference  snapshot-util 0.1 `xyz.nested_file`/__init__:
+
+print(nested_file.X)
+#^^^^ reference  python-stdlib 3.13 builtins/print().
+#     ^^^^^^^^^^^ reference  snapshot-util 0.1 `xyz.nested_file`/__init__:
+#                 ^ reference  snapshot-util 0.1 `xyz.nested_file`/X.
+

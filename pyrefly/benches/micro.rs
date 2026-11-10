@@ -1068,6 +1068,10 @@ fn nested_scopes(depth: usize, per_scope: usize, missing: usize) -> String {
         let pad = "    ".repeat(level);
         if level % 4 == 3 && level + 1 < depth {
             let _ = writeln!(source, "{pad}class C{level}:");
+        } else if level > 0 && (level - 1) % 4 == 3 {
+            // Directly under a class inserted above: take `self` so the
+            // missing-receiver check does not inflate the expected error count.
+            let _ = writeln!(source, "{pad}def f{level}(self):");
         } else {
             let _ = writeln!(source, "{pad}def f{level}():");
         }

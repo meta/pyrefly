@@ -59,6 +59,9 @@ baseline-matching-mode = "concise-description"
 baseline-format = "minimal"
 baseline-auto-update = true
 
+# Diagnostics filtering
+only = ["bad-assignment", "bad-return"]
+
 # Error configuration
 [tool.pyrefly.errors]
 bad-assignment = false

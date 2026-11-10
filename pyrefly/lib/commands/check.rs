@@ -156,7 +156,7 @@ pub struct FullCheckArgs {
 
     /// Watch for file changes and re-check them.
     /// (Warning: This mode is highly experimental!)
-    #[arg(long, conflicts_with = "check_all")]
+    #[arg(long, conflicts_with_all = ["check_all", "report_scip"])]
     watch: bool,
 
     /// Type checking arguments and configuration
@@ -346,6 +346,26 @@ struct OutputArgs {
     /// stdlib then record those source files instead of stub paths. Affects Glean output only.
     #[arg(long, value_name = "DIR", requires = "report_glean")]
     glean_stdlib_root: Option<String>,
+    /// Generate a SCIP index for the project
+    #[arg(
+        long,
+        value_name = "OUTPUT_FILE",
+        conflicts_with_all = [
+            "report_glean",
+            "report_pysa",
+            "report_trace",
+            "report_demand_tree",
+            "debug_info",
+            "report_binding_memory",
+        ]
+    )]
+    report_scip: Option<PathBuf>,
+    /// Package name for the project's symbols in the SCIP index. Defaults to the name in `pyproject.toml`.
+    #[arg(long, requires = "report_scip")]
+    report_scip_project_name: Option<String>,
+    /// Package version for the project's symbols in the SCIP index. Defaults to the version in `pyproject.toml`.
+    #[arg(long, requires = "report_scip")]
+    report_scip_project_version: Option<String>,
     /// Generate a Pysa-compatible JSON file for each module. Pysa treats every type error
     /// as a failure, so this defaults `--min-severity` to `error`.
     #[arg(long, value_name = "OUTPUT_FILE")]
@@ -358,7 +378,12 @@ struct OutputArgs {
     #[arg(long, value_name = "OUTPUT_FILE")]
     report_demand_tree: Option<PathBuf>,
     /// Generate a CinderX-format type report (experimental, internal-only).
-    #[arg(long, value_name = "OUTPUT_DIR", hide = true)]
+    #[arg(
+        long,
+        value_name = "OUTPUT_DIR",
+        hide = true,
+        conflicts_with = "report_scip"
+    )]
     report_cinderx: Option<PathBuf>,
     /// Also write human-readable .txt files alongside the CinderX JSON report.
     /// Each .txt file inlines type-table indices so types are fully readable without
@@ -451,8 +476,8 @@ struct OutputArgs {
     #[arg(long, group = "baseline_action")]
     error_stale_baseline: bool,
 
-    /// Minimum severity level for errors to be displayed.
-    /// Errors below this severity will not be shown. Defaults to "error".
+    /// Minimum severity level for errors to be displayed and to cause a nonzero exit code.
+    /// When unset, warnings and errors are displayed, and only errors cause a nonzero exit code.
     #[arg(long, value_enum)]
     min_severity: Option<Severity>,
 }
@@ -518,6 +543,9 @@ impl OutputArgs {
             report_glean_ownership,
             glean_module_names,
             glean_stdlib_root,
+            report_scip,
+            report_scip_project_name,
+            report_scip_project_version,
             report_pysa,
             report_pysa_format,
             report_demand_tree,
@@ -564,6 +592,9 @@ impl OutputArgs {
             || *report_glean_ownership
             || glean_module_names.is_some()
             || glean_stdlib_root.is_some()
+            || report_scip.is_some()
+            || report_scip_project_name.is_some()
+            || report_scip_project_version.is_some()
             || report_pysa.is_some()
             || !matches!(report_pysa_format, report::pysa::PysaFormat::Capnp)
             || report_demand_tree.is_some()
@@ -641,6 +672,10 @@ impl OutputArgs {
             // With no threshold set, warnings are printed but only errors make the exit
             // code nonzero.
             show_severity: min_severity.unwrap_or(Severity::Warn),
+            only: self
+                .only
+                .clone()
+                .or_else(|| config.and_then(|config| config.only.clone())),
         }
     }
 
@@ -671,6 +706,9 @@ struct OutputDefaults {
     /// Diagnostics at or above this severity are printed. It is never above
     /// `min_severity`.
     show_severity: Severity,
+    /// Diagnostics matching the specific kinds are reported.
+    /// If `None`, no filtering is applied and all error kinds are processed.
+    only: Option<Vec<ErrorKind>>,
 }
 
 #[derive(Clone, Debug, ValueEnum, Default, PartialEq, Eq)]
@@ -1678,7 +1716,7 @@ impl IncrementalCheckCommand {
             )
         });
         let defaults = args.output.resolve(config.as_deref());
-        let run = args.prepare_cli_run(timings, transaction, handles, &defaults)?;
+        let run = args.prepare_cli_run(timings, transaction, version, handles, &defaults)?;
         check.run(|transaction, handles, sourcedb_errors| {
             let result = args.finish_cli_run(
                 run,
@@ -1726,6 +1764,7 @@ struct PreparedCliRun {
     memory_trace: MemoryUsageTrace,
     demand_tree_subscriber: Option<TestSubscriber>,
     type_check_start: Instant,
+    scip: Option<Arc<report::scip::ScipWriter<BufWriter<File>>>>,
 }
 
 impl CheckArgs {
@@ -1902,7 +1941,8 @@ impl CheckArgs {
             || self.output.report_trace.is_some()
             || self.output.report_glean.is_some();
         RequireLevels {
-            specified: if retain {
+            // The SCIP hook needs the AST and type traces until each document is written.
+            specified: if retain || self.output.report_scip.is_some() {
                 Require::Everything
             } else {
                 Require::Errors
@@ -1932,7 +1972,7 @@ impl CheckArgs {
         upsell: UpsellDecision,
         inspect: impl FnOnce(&[CollectedDiagnostic<'_>], &Path) -> R,
     ) -> anyhow::Result<(CommandExitStatus, R)> {
-        let run = self.prepare_cli_run(timings, transaction, handles, defaults)?;
+        let run = self.prepare_cli_run(timings, transaction, version, handles, defaults)?;
         transaction.run(handles, require, None);
         self.finish_cli_run(
             run,
@@ -1950,6 +1990,7 @@ impl CheckArgs {
         &self,
         timings: Timings,
         transaction: &mut Transaction,
+        version: &str,
         handles: &[Handle],
         defaults: &OutputDefaults,
     ) -> anyhow::Result<PreparedCliRun> {
@@ -2010,6 +2051,33 @@ impl CheckArgs {
             transaction.set_cinderx_reporter(Some(cinderx_reporter));
         }
 
+        // Each indexed file is written as soon as it is solved, while its answers are still in
+        // memory, so they don't have to be kept for the whole run.
+        let scip = match &self.output.report_scip {
+            Some(path) => {
+                let relative_to = match &self.output.relative_to {
+                    Some(path) => PathBuf::from(path),
+                    None => std::env::current_dir()
+                        .context("while determining the SCIP project root")?,
+                };
+                let project = report::scip::Package::project(
+                    &relative_to,
+                    self.output.report_scip_project_name.clone(),
+                    self.output.report_scip_project_version.clone(),
+                )?;
+                let scip = report::scip::ScipWriter::new(
+                    BufWriter::new(File::create(path)?),
+                    handles,
+                    &relative_to,
+                    project,
+                    version,
+                )?
+                .start(transaction);
+                Some(scip)
+            }
+            None => None,
+        };
+
         let type_check_start = Instant::now();
         let demand_tree_subscriber = if self.output.report_demand_tree.is_some() {
             transaction.set_demand_collector(Some(DemandCollector::new()));
@@ -2026,6 +2094,7 @@ impl CheckArgs {
             memory_trace,
             demand_tree_subscriber,
             type_check_start,
+            scip,
         })
     }
 
@@ -2047,6 +2116,7 @@ impl CheckArgs {
             mut memory_trace,
             demand_tree_subscriber,
             type_check_start,
+            scip,
         } = run;
         transaction.set_subscriber(None);
 
@@ -2098,8 +2168,7 @@ impl CheckArgs {
 
         let (baseline_status, unused_baseline_entries, retained_baseline_entries) =
             baseline_apply_result.resolve(self.output.update_baseline)?;
-        let only_filter = self
-            .output
+        let only_filter = defaults
             .only
             .as_ref()
             .map(|only| only.iter().collect::<SmallSet<&ErrorKind>>());
@@ -2447,6 +2516,13 @@ impl CheckArgs {
                 )?;
             }
         }
+        if let Some(scip) = scip
+            && let Some(path) = &self.output.report_scip
+        {
+            scip.finish(transaction)
+                .and_then(|mut writer| Ok(writer.flush()?))
+                .with_context(|| format!("while writing SCIP index to `{}`", path.display()))?;
+        }
         if let Some(pysa_reporter) = transaction.take_pysa_reporter() {
             report::pysa::write_project_file(&pysa_reporter, transaction, handles, &output_errors)?;
         }
@@ -2500,6 +2576,8 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use clap::error::ErrorKind as ClapErrorKind;
+    use protobuf::Message as _;
     use pyrefly_config::config::ConfigScope;
     use pyrefly_python::module::Module;
     use pyrefly_python::module_name::ModuleName;
@@ -2761,6 +2839,84 @@ def go(w: Widget) -> int:
         let facts = fs::read_to_string(&glean_files[0]).unwrap();
         assert!(facts.contains("public.api.Widget"));
         assert!(!facts.contains("main.Widget"));
+    }
+
+    #[test]
+    fn scip_rejects_incompatible_options() {
+        assert!(FullCheckArgs::try_parse_from(["check", "--report-scip", "index.scip"]).is_ok());
+        for options in [
+            &["--watch"][..],
+            &["--debug-info", "debug.json"][..],
+            &["--report-binding-memory", "memory.csv"][..],
+        ] {
+            assert!(
+                FullCheckArgs::try_parse_from(["check"].into_iter().chain(options.iter().copied()))
+                    .is_ok(),
+                "standalone options should remain valid: {options:?}"
+            );
+            let error = FullCheckArgs::try_parse_from(
+                ["check", "--report-scip", "index.scip"]
+                    .into_iter()
+                    .chain(options.iter().copied()),
+            )
+            .expect_err("SCIP must reject options requiring retained state");
+            assert_eq!(error.kind(), ClapErrorKind::ArgumentConflict);
+            let message = error.to_string();
+            assert!(message.contains("--report-scip"), "{message}");
+            assert!(message.contains(options[0]), "{message}");
+        }
+    }
+
+    #[test]
+    fn check_writes_scip_report() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let module = root.join("main.py");
+        fs::write(&module, "x = 1\n").unwrap();
+        let scip_path = temp.path().join("index.scip");
+
+        let args = CheckArgs::parse_from([
+            "check",
+            "--report-scip",
+            scip_path.to_str().unwrap(),
+            "--report-scip-project-name",
+            "demo",
+            "--relative-to",
+            root.to_str().unwrap(),
+        ]);
+        let (status, check_result) = args
+            .run_once(
+                "test",
+                Box::new(TestIncludes {
+                    root: root.clone(),
+                    initial_files: vec![module],
+                }),
+                test_config_finder(&root),
+                UpsellDecision::Skip,
+                ThreadCount::Inline,
+            )
+            .unwrap();
+        let errors = &check_result.legacy_errors;
+        assert!(errors.is_empty(), "unexpected type errors: {errors:#?}");
+        assert!(matches!(status, CommandExitStatus::Success));
+
+        let index = scip::types::Index::parse_from_bytes(&fs::read(&scip_path).unwrap()).unwrap();
+        assert_eq!(index.documents.len(), 1);
+        assert_eq!(index.documents[0].relative_path, "main.py");
+        assert_eq!(
+            index.documents[0].occurrences[0].symbol,
+            "scip-python python demo . main/__init__:"
+        );
+        let metadata = index.metadata.unwrap();
+        assert_eq!(metadata.tool_info.name, "scip-pyrefly");
+        assert_eq!(metadata.tool_info.version, "test");
+        assert!(
+            metadata.project_root.starts_with("file://")
+                && metadata.project_root.ends_with("/project/"),
+            "unexpected project root: {}",
+            metadata.project_root
+        );
     }
 
     #[test]
@@ -3443,6 +3599,31 @@ def go(w: Widget) -> int:
         assert_eq!(
             overridden.resolve(Some(&warn)).baseline_error_level,
             Severity::Error
+        );
+    }
+
+    #[test]
+    fn only_cli_and_config_precedence() {
+        let inherited = OutputArgs::parse_from(["pyrefly-check"]);
+        assert_eq!(inherited.resolve(None).only, None);
+        let config = ConfigFile {
+            only: Some(vec![ErrorKind::BadClassDefinition]),
+            ..Default::default()
+        };
+        assert_eq!(
+            inherited.resolve(Some(&config)).only,
+            Some(vec![ErrorKind::BadClassDefinition])
+        );
+
+        let overridden = OutputArgs::parse_from(["pyrefly-check", "--only", "bad-return"]);
+        assert_eq!(
+            overridden.resolve(None).only,
+            Some(vec![ErrorKind::BadReturn])
+        );
+
+        assert_eq!(
+            overridden.resolve(Some(&config)).only,
+            Some(vec![ErrorKind::BadReturn])
         );
     }
 

@@ -2442,8 +2442,7 @@ impl<'a> BindingsBuilder<'a> {
         let inner_fn_range = self.scopes.current_scope_range();
         for name in captures.into_iter() {
             let hashed_name = Hashed::new(&name);
-            let name_read_info =
-                self.look_up_name_for_read(hashed_name, &Usage::NonPinningValue(None));
+            let name_read_info = self.look_up_name_for_read(hashed_name, &Usage::Inspection);
             // We only seed captures that resolve to an enclosing static entry (`Anywhere`), which
             // includes already-materialized builtins. A not-yet-materialized builtin
             // (`ImplicitBuiltin`), a flow value, or a missing name are resolved when the inner
@@ -2501,7 +2500,7 @@ impl<'a> BindingsBuilder<'a> {
                 self.scopes.mark_parameter_used(name.key());
                 self.scopes.mark_import_used(name.key());
                 self.scopes.mark_variable_used(name.key(), value_idx);
-                if !usage.is_static()
+                if usage.checks_initialization()
                     && matches!(
                         initialized,
                         InitializedInFlow::No
@@ -2541,7 +2540,7 @@ impl<'a> BindingsBuilder<'a> {
                     self.insert_implicit_builtin_binding(idx, module, name.key());
                 }
                 // NameReadInfo::Anywhere can only be InitializedInFlow::Yes or InitializedInFlow::No
-                if !usage.is_static() && matches!(initialized, InitializedInFlow::No) {
+                if usage.checks_initialization() && matches!(initialized, InitializedInFlow::No) {
                     // When we use a variable, we mark it as initialized
                     // If the variable was uninitialized before, this will
                     // prevent us from emitting errors for every subsequent usage
@@ -2590,7 +2589,7 @@ impl<'a> BindingsBuilder<'a> {
             let idx = if let Some(idx) = self.scopes.current_fork_base_idx(name) {
                 idx
             } else if let NameLookupResult::Found { idx, .. } =
-                self.lookup_name(Hashed::new(name), &mut Usage::NonPinningValue(None))
+                self.lookup_name(Hashed::new(name), &mut Usage::Inspection)
             {
                 idx
             } else {
@@ -2733,7 +2732,7 @@ impl<'a> BindingsBuilder<'a> {
             deferred.usage,
             Usage::StaticTypeInformation {
                 is_annotation: true
-            }
+            } | Usage::TypeAliasRhs
         ) {
             let range = self.idx_to_key(deferred.bound_name_idx).range();
             self.maybe_insert_implicit_alias_check(range, deferred.lookup_result_idx);
@@ -3186,19 +3185,13 @@ impl<'a> BindingsBuilder<'a> {
         names
     }
 
-    pub fn bind_narrow_ops(
-        &mut self,
-        narrow_ops: &NarrowOps,
-        use_location: NarrowUseLocation,
-        usage: &Usage,
-    ) {
+    pub fn bind_narrow_ops(&mut self, narrow_ops: &NarrowOps, use_location: NarrowUseLocation) {
         let implied = self.scopes.implied_none_narrows(narrow_ops);
         for (name, (op, op_range)) in narrow_ops.0.iter_hashed().chain(implied.0.iter_hashed()) {
             // Narrowing operations should not pin partial types, but they also
             // should not permanently block pinning. Leave the first-use state
             // as Undetermined so a subsequent non-narrowing read can still pin.
-            let mut narrowing_usage = Usage::non_pinning_value_from(usage);
-            if let Some(initial_idx) = self.lookup_name(name, &mut narrowing_usage).found() {
+            if let Some(initial_idx) = self.lookup_name(name, &mut Usage::Inspection).found() {
                 let narrowed_idx = self.insert_binding(
                     Key::Narrow(Box::new((name.into_key().clone(), *op_range, use_location))),
                     Binding::Narrow(initial_idx, Box::new(op.clone()), use_location),
@@ -3212,9 +3205,9 @@ impl<'a> BindingsBuilder<'a> {
         let id = LambdaParamId(self.next_lambda_param_id);
         self.next_lambda_param_id += 1;
         let binding = match kind {
-            // Every value context provides a current binding, except decorators of a definition
-            // dropped by parse-error recovery. The remaining contexts are static type information
-            // and expressions derived from it, which are not type-checked.
+            // Every value context and condition provides a current binding. The remaining
+            // contexts, such as static type information and unchecked expressions, are not
+            // type-checked.
             LambdaKind::Ordinary => match usage.current_idx() {
                 Some(owner) => {
                     self.owned_lambda_params.entry(owner).or_default().push(id);

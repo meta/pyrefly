@@ -1,0 +1,15 @@
+# < definition scip-python python snapshot-util 0.1 goofy/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+import requests
+#      ^^^^^^^^ reference  requests 2.0.0 requests/__init__:
+
+print(requests.get("https://sourcegraph.com"))
+#^^^^ reference  python-stdlib 3.13 builtins/print().
+#     ^^^^^^^^ reference  requests 2.0.0 requests/__init__:
+#              ^^^ reference  requests 2.0.0 `requests.api`/get().
+

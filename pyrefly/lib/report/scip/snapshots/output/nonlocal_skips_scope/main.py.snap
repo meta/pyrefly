@@ -1,0 +1,30 @@
+# < definition scip-python python snapshot-util 0.1 main/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+# All occurrences of `x` should share the same symbol, skipping `middle`.
+def outer():
+#   ^^^^^ definition  snapshot-util 0.1 main/outer().
+    x = 0
+#   ^ definition local 0
+
+    def middle():
+#       ^^^^^^ definition  snapshot-util 0.1 main/outer().middle().
+        def inner():
+#           ^^^^^ definition  snapshot-util 0.1 main/outer().middle().inner().
+            nonlocal x
+            x = 1
+#           ^ reference local 0
+            return x
+#                  ^ reference local 0
+
+        return inner
+#              ^^^^^ reference  snapshot-util 0.1 main/outer().middle().inner().
+
+    return x, middle
+#          ^ reference local 0
+#             ^^^^^^ reference  snapshot-util 0.1 main/outer().middle().
+

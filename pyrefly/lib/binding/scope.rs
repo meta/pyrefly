@@ -3181,7 +3181,7 @@ impl Scopes {
             // `name` is absent from lexical scope, so it may resolve to an implicit builtin.
             match self.look_up_name_for_read(
                 Hashed::new(name),
-                &Usage::NonPinningValue(None),
+                &Usage::Inspection,
                 lookup,
                 current_module,
             ) {
@@ -5376,11 +5376,7 @@ impl<'a> BindingsBuilder<'a> {
         self.merge_flow(finished_loop.base, other_exits, range, merge_style);
         // When control falls off the end of a loop (either the `while` test fails or the loop
         // finishes), we're at the loopback flow but the test (if there is one) is negated.
-        self.bind_narrow_ops(
-            &narrow_ops.negate(),
-            NarrowUseLocation::Span(other_range),
-            &Usage::NonPinningValue(None),
-        );
+        self.bind_narrow_ops(&narrow_ops.negate(), NarrowUseLocation::Span(other_range));
         self.stmts(orelse, parent);
         // Exiting from a break skips past any `else`, so we merge them after, and the
         // test is not negated in flows coming from breaks.
@@ -5489,7 +5485,6 @@ impl<'a> BindingsBuilder<'a> {
                 negated_prev_ops,
                 // Generate a range that is distinct from other use_ranges of the same narrow.
                 NarrowUseLocation::End(fork.range),
-                &Usage::NonPinningValue(None),
             );
             if let Some(key) = base_termination_key {
                 self.scopes.current_mut().flow.last_stmt_expr = Some(key);

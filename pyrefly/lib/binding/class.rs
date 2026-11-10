@@ -240,7 +240,7 @@ impl<'a> BindingsBuilder<'a> {
         if x.name.id.is_empty() {
             self.ensure_and_bind_decorators(
                 mem::take(&mut x.decorator_list),
-                &mut Usage::NonPinningValue(None),
+                &mut Usage::Unchecked,
             );
             return;
         }
@@ -263,7 +263,7 @@ impl<'a> BindingsBuilder<'a> {
         let mut pydantic_config_dict = PydanticConfigDict::default();
         let docstring_range = Docstring::range_from_stmts(x.body.as_slice());
         let body = mem::take(&mut x.body);
-        let field_docstrings = self.extract_field_docstrings(&body);
+        let field_docstrings = Self::extract_field_docstrings(&body);
         let pydantic_before_validator_fields = self.extract_field_validator_fields(&body);
         let mut attrs_decorators = AttrsDecoratorMethods::default();
         collect_attrs_decorator_methods(&body, &mut attrs_decorators);
@@ -693,8 +693,7 @@ impl<'a> BindingsBuilder<'a> {
     }
 
     /// Extracts docstrings for each field, mapping the field's range to the docstring's range.
-    fn extract_field_docstrings(
-        &self,
+    pub fn extract_field_docstrings(
         body: &[ruff_python_ast::Stmt],
     ) -> SmallMap<TextRange, TextRange> {
         use ruff_python_ast::Expr;
@@ -1017,7 +1016,7 @@ impl<'a> BindingsBuilder<'a> {
     /// source, so anything an unread argument defines — a walrus target, say —
     /// is declared with no binding, and looking it up later panics.
     pub(crate) fn bind_unread_argument(&mut self, x: &mut Expr) {
-        self.ensure_expr(x, &mut Usage::NonPinningValue(None));
+        self.ensure_expr(x, &mut Usage::Unchecked);
     }
 
     /// Like `bind_unread_argument`, for the keyword arguments of a functional

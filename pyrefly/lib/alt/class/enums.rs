@@ -16,17 +16,24 @@ use pyrefly_types::read_only::ReadOnlyReason;
 use ruff_python_ast::helpers::is_dunder;
 use ruff_python_ast::helpers::is_sunder;
 use ruff_python_ast::name::Name;
+use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
+use crate::alt::call::ConstructorKind;
+use crate::alt::callable::CallArg;
+use crate::alt::callable::CallKeyword;
 use crate::alt::class::class_field::ClassAttribute;
 use crate::alt::class::django::transform_django_enum_value;
 use crate::alt::types::class_metadata::ClassMetadata;
 use crate::alt::types::class_metadata::EnumMetadata;
 use crate::binding::binding::ClassFieldDefinition;
 use crate::error::collector::ErrorCollector;
+use crate::error::context::ErrorContext;
+use crate::error::context::TypeCheckContext;
+use crate::error::context::TypeCheckKind;
 use crate::types::class::Class;
 use crate::types::literal::Lit;
 use crate::types::types::Type;
@@ -39,6 +46,13 @@ pub const VALUE: Name = Name::new_static("_value_");
 pub const VALUE_PROP: Name = Name::new_static("value");
 
 pub const GENERATE_NEXT_VALUE: Name = Name::new_static("_generate_next_value_");
+
+#[derive(Debug)]
+pub(crate) struct EnumLookupArg {
+    pub ty: Type,
+    pub range: TextRange,
+    pub is_positional: bool,
+}
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Suggest an enum member when a raw literal matches exactly one expected enum value.
@@ -281,6 +295,180 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             value_ty
         }
+    }
+
+    /// Prepare an enum value lookup argument for checking.
+    /// Returns `Some(EnumLookupArg)` if the call is eligible for stock enum value lookup,
+    /// having checked the argument and reported any diagnostic.
+    pub(crate) fn prepare_enum_lookup<'b>(
+        &self,
+        cls: &ClassType,
+        constructor_kind: &ConstructorKind,
+        args: &[CallArg<'b>],
+        keywords: &[CallKeyword<'b>],
+        arg_errors: &ErrorCollector,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+    ) -> Option<EnumLookupArg> {
+        if *constructor_kind == ConstructorKind::TypeOfSelf {
+            return None;
+        }
+        let (value_arg, range, is_positional) = match (args, keywords) {
+            ([CallArg::Arg(arg)], []) => (arg, arg.range(), true),
+            ([], [kw]) if kw.arg.as_ref().is_some_and(|id| id.as_str() == "value") => {
+                (&kw.value, kw.value.range(), false)
+            }
+            _ => return None,
+        };
+        let want = self.enum_value_lookup_target(cls)?;
+        let ty = value_arg.infer(self, arg_errors);
+        self.check_enum_lookup_arg(&ty, &want, range, errors, context);
+        Some(EnumLookupArg {
+            ty,
+            range,
+            is_positional,
+        })
+    }
+
+    /// Restrict lookup only when primitive creation values also describe member values.
+    /// Mixins and custom construction can change that relationship, so leave them unchecked.
+    fn enum_value_lookup_target(&self, cls: &ClassType) -> Option<Type> {
+        let metadata = self.get_metadata_for_class(cls.class_object());
+        let enum_metadata = metadata.enum_metadata()?;
+
+        if let Some(custom_metaclass) = metadata.custom_metaclass()
+            && custom_metaclass.class_object() != self.stdlib.enum_meta().class_object()
+        {
+            return None;
+        }
+        if self
+            .get_base_types_for_class(cls.class_object())
+            .iter()
+            .any(|base| {
+                !self.has_superclass(base.class_object(), self.stdlib.enum_class().class_object())
+            })
+        {
+            return None;
+        }
+        for method in [&Name::new_static("_missing_"), &dunder::NEW, &dunder::INIT] {
+            if let Some(field) =
+                self.get_class_member_with_defining_class(cls.class_object(), method)
+                && !field.defining_class.is(KnownClass::Enum)
+                && !field.defining_class.is(KnownClass::Object)
+            {
+                return None;
+            }
+        }
+
+        let members = self.get_enum_members(cls.class_object());
+        if members.is_empty() {
+            return None;
+        }
+        let mut domains = members
+            .into_iter()
+            .map(|lit| {
+                let Lit::Enum(lit_enum) = lit else {
+                    unreachable!("enum members must be represented as enum literals");
+                };
+                let value = self.enum_literal_to_value_type(*lit_enum, enum_metadata.is_django);
+                self.primitive_enum_lookup_domain(&value)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        domains.push(self.heap.mk_class_type(cls.clone()));
+        Some(self.unions(domains))
+    }
+
+    /// Known primitive equality domains, widening explicit literals only for lookup.
+    /// An unknown value alternative makes the entire member domain unreliable.
+    fn primitive_enum_lookup_domain(&self, ty: &Type) -> Option<Type> {
+        let domains = ty
+            .clone()
+            .into_unions()
+            .into_iter()
+            .map(|value| {
+                let cls = match &value {
+                    Type::Literal(lit) => lit.value.general_class_type(self.stdlib),
+                    Type::LiteralString(_) => self.stdlib.str(),
+                    Type::ClassType(cls) => cls,
+                    _ => return None,
+                };
+                let promoted = self.heap.mk_class_type(cls.clone());
+                if cls.is(KnownClass::Int)
+                    || cls.is(KnownClass::Float)
+                    || cls.is(KnownClass::Complex)
+                    || cls.is(KnownClass::Bool)
+                {
+                    Some(self.unions(vec![
+                        promoted,
+                        self.heap.mk_class_type(self.stdlib.int().clone()),
+                        self.heap.mk_class_type(self.stdlib.float().clone()),
+                        self.heap.mk_class_type(self.stdlib.complex().clone()),
+                    ]))
+                } else if cls.is(KnownClass::Str) {
+                    Some(promoted)
+                } else if cls.is(KnownClass::Bytes) {
+                    Some(self.unions(vec![
+                        promoted,
+                        self.heap.mk_class_type(self.stdlib.bytearray().clone()),
+                    ]))
+                } else {
+                    None
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(self.unions(domains))
+    }
+
+    /// Report only known mismatches: validation inputs may have a compatible union branch,
+    /// and unmodeled types may compare equal through custom equality. Intersection narrowings
+    /// still retain each concrete restriction rather than accepting a broad TypeVar bound alone.
+    fn is_enum_lookup_compatible(&self, got: &Type, want: &Type) -> bool {
+        if self.is_subset_eq(got, want) {
+            return true;
+        }
+        match got {
+            Type::Quantified(q) if q.is_type_var() => {
+                let bound = q.upper_bound(self.stdlib, self.heap);
+                self.is_enum_lookup_compatible(&bound, want)
+            }
+            Type::TypeVar(tv) => {
+                let bound = tv.upper_bound(self.stdlib, self.heap);
+                self.is_enum_lookup_compatible(&bound, want)
+            }
+            Type::Union(u) => u
+                .members
+                .iter()
+                .any(|t| self.is_enum_lookup_compatible(t, want)),
+            Type::Intersect(inner) => {
+                let (tys, _) = inner.as_ref();
+                tys.iter().all(|t| self.is_enum_lookup_compatible(t, want))
+            }
+            Type::None => false,
+            _ => self.primitive_enum_lookup_domain(got).is_none(),
+        }
+    }
+
+    fn check_enum_lookup_arg(
+        &self,
+        got: &Type,
+        want: &Type,
+        range: TextRange,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+    ) {
+        if self.is_enum_lookup_compatible(got, want) {
+            return;
+        }
+        self.check_type_as_call_argument(got, want, range, errors, &|| {
+            let mut tcc = TypeCheckContext::of_kind(TypeCheckKind::CallArgument(
+                Some(Name::new_static("value")),
+                None,
+            ));
+            if let Some(ctx) = context {
+                tcc = tcc.with_context(Some(ctx()));
+            }
+            tcc
+        });
     }
 
     /// Look up the `_value_` attribute for an enum type (not a specific member).
