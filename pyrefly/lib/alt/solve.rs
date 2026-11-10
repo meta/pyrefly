@@ -738,15 +738,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     // permits e.g. an override `x: object`): we avoid blaming the
                     // override for repeating an `Any` the base signature dictates,
                     // so the `explicit-any` reported where it is written is dropped.
-                    // The inherited lookup runs only when such an error is actually
-                    // present in the local collector.
-                    let dictated = matches!(&ann.ty, Some(Type::Any(AnyStyle::Explicit)))
-                        && ann_errors.has_error_kind(ErrorKind::ExplicitAny)
-                        && override_func
-                            .as_ref()
-                            .is_some_and(|func| self.override_base_dictates_any(*func, target));
+                    // The inherited lookup runs at most once, when filtering an
+                    // `explicit-any` diagnostic for a whole-annotation `Any`.
+                    let mut dictated = None;
                     errors.extend_filtered(ann_errors, |error| {
-                        !(dictated && error.error_kind() == ErrorKind::ExplicitAny)
+                        error.error_kind() != ErrorKind::ExplicitAny
+                            || !*dictated.get_or_insert_with(|| {
+                                matches!(&ann.ty, Some(Type::Any(AnyStyle::Explicit)))
+                                    && override_func.as_ref().is_some_and(|func| {
+                                        self.override_base_dictates_any(*func, target)
+                                    })
+                            })
                     });
                 }
                 AnnotationWithTarget {
