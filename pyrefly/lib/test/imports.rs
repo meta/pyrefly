@@ -2337,7 +2337,7 @@ testcase!(
     test_malformed_def_from_star,
     r#"
 def # E: Parse error: Expected an identifier
-from *a # E: Parse error: Expected `)`, found `from` # E: Parse error: Expected a module name # E: Parse error: Star import must be the only import # E: Parse error: Expected `,`, found name
+from *a # E: Parse error: Expected `)`, found `from` # E: Parse error: Expected a module name # E: Parse error: Star import must be the only import # E: Parse error: Expected `,`, found identifier
 "#,
 );
 
@@ -2346,7 +2346,7 @@ testcase!(
     test_malformed_class_from_star,
     r#"
 class # E: Parse error: Expected an identifier
-from *a # E: Parse error: Expected an indented block after `class` definition # E: Parse error: Expected a module name # E: Parse error: Star import must be the only import # E: Parse error: Expected `,`, found name # E: Cannot find module `main`
+from *a # E: Parse error: Expected an indented block after `class` definition # E: Parse error: Expected a module name # E: Parse error: Star import must be the only import # E: Parse error: Expected `,`, found identifier # E: Cannot find module `main`
 "#,
 );
 
