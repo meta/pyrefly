@@ -12203,7 +12203,6 @@ def shadowed(left: IntTuple, right: IntTuple) -> IntTuple:
 );
 
 testcase!(
-    bug = "Gradual products erase guarded target shapes",
     test_type_shape_dsl_gradual_product_guards,
     shape_extensions_env_with_torch(),
     r#"
@@ -12232,8 +12231,8 @@ def unguarded[S: IntTuple](x: Tensor[S]) -> Tensor[unguarded_target(S, IntTuple[
 
 def test(concrete: Tensor[[2, 3]], gradual: Tensor, partial: Tensor[[2, int]], bad: Tensor[[2, 4]]) -> None:
     assert_type(guarded(concrete), Tensor[[2, 3]])
-    assert_type(guarded(gradual), Tensor[IntTuple])
-    assert_type(guarded(partial), Tensor[IntTuple])
+    assert_type(guarded(gradual), Tensor[[2, 3]])
+    assert_type(guarded(partial), Tensor[[2, 3]])
     assert_type(unguarded(gradual), Tensor[IntTuple])
     guarded(bad)  # E: element counts must match
 "#,

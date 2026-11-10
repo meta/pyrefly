@@ -116,6 +116,6 @@ if TYPE_CHECKING:
     def check_gradual(
         tensor: Tensor[IntTuple], target: tuple[int, ...], other: Tensor[IntTuple]
     ) -> None:
-        assert_type(tensor.reshape((2, 3)), Tensor)
+        assert_type(tensor.reshape((2, 3)), Tensor[[2, 3]])
         assert_type(tensor.view(target), Tensor)
         assert_type(tensor.reshape_as(other), Tensor[IntTuple])

@@ -574,9 +574,10 @@ def reshape[NewShape: _Shape, Shape: _Shape = []](
 ) -> _Array[lax_reshape_shape(Shape, NewShape, None)]: ...
 
 # Dynamic size sequences do not provide a statically known output shape.
+# Capturing Shape avoids Any erasing literal targets from earlier overloads.
 @overload
-def reshape(
-    operand: _ArrayLike[Any],
+def reshape[Shape: _Shape = []](
+    operand: _ArrayLike[Shape],
     new_sizes: Sequence[int],
     dimensions: Sequence[int] | None = None,
     *,

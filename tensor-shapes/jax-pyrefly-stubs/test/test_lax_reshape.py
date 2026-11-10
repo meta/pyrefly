@@ -50,9 +50,7 @@ def check_symbolic_reshape[N: IntVar, M: IntVar, K: IntVar](
 
 def test_reshape_unshaped_operand() -> None:
     x: Array = jnp.arange(6)
-    # TODO(stroxler): A guard on a gradual input product erases the known target shape.
-    # Keep this tradeoff explicit rather than disabling validation for concrete inputs.
-    assert_shape(lax.reshape(x, (2, 3)).shape, IntTuple, runtime=(2, 3))
+    assert_shape(lax.reshape(x, (2, 3)).shape, (2, 3))
 
 
 def check_variable_permutation(x: Array[[2, 3]], perm: tuple[int, int]) -> None:
