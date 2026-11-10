@@ -263,6 +263,7 @@ use pyrefly_util::thread_pool::ThreadCount;
 use pyrefly_util::thread_pool::ThreadPool;
 use pyrefly_util::watch_pattern::WatchPattern;
 use ruff_python_ast::name::Name;
+use ruff_source_file::OneIndexed;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -369,6 +370,7 @@ use crate::lsp::wasm::provide_type::ProvideTypeResponse;
 use crate::lsp::wasm::provide_type::provide_type;
 use crate::module::bundled::BundledStub;
 use crate::state::errors::BaselineApplyResult;
+use crate::state::ide::prepare_import_insertion_in_range;
 use crate::state::load::Load;
 use crate::state::load::LspFile;
 use crate::state::lsp::FindDefinitionItemWithDocstring;
@@ -5300,38 +5302,56 @@ impl Server {
                     // into a single workspace edit
                     // so the whole fix applies in one action.
                     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-                    for (info, range, insert_text) in edits {
+                    for (info, range, mut insert_text) in edits {
                         let lsp_location = self.to_lsp_location(&TextRangeWithModule {
                             module: info.clone(),
                             range,
                         })?;
                         let mut edit_uri = lsp_location.uri;
                         let mut edit_range = lsp_location.range;
-                        // Import insertions in notebooks go into the active cell.
-                        // Replacements must retain their target cell and range.
+                        // Whole import insertions go into the active notebook cell.
+                        // Merge suffixes and other edits retain their original target.
                         if range.is_empty()
+                            && (insert_text.trim_start().starts_with("from ")
+                                || insert_text.trim_start().starts_with("import "))
                             && let Some(current_cell_idx) = triggered_cell_index
                         {
                             let edit_cell_idx = info.to_cell_for_lsp(range.start());
                             if edit_cell_idx != Some(current_cell_idx) {
-                                // Redirect to the current cell, inserting at line 0.
+                                // Plan the import after the destination cell's own header.
                                 let notebook_path =
                                     self.open_notebook_cells.read().get(uri).cloned();
-                                let cell_url = notebook_path
+                                let target_cell = notebook_path
                                     .and_then(|path| self.open_files.get(&path))
                                     .and_then(|file| match &*file {
                                         LspFile::Notebook(notebook) => {
-                                            notebook.get_code_cell_url(current_cell_idx).cloned()
+                                            let cell_url =
+                                                notebook.get_code_cell_url(current_cell_idx)?;
+                                            let cell_range = notebook.ruff_notebook().cell_range(
+                                                OneIndexed::from_zero_indexed(current_cell_idx),
+                                            )?;
+                                            // Exclude Ruff's synthetic newline after the cell.
+                                            let cell_range = TextRange::new(
+                                                cell_range.start(),
+                                                cell_range.end() - TextSize::new(1),
+                                            );
+                                            Some((cell_url.clone(), cell_range))
                                         }
                                         _ => None,
                                     });
-                                if let Some(cell_url) = cell_url {
-                                    let top_of_cell = lsp_types::Range {
-                                        start: lsp_types::Position::new(0, 0),
-                                        end: lsp_types::Position::new(0, 0),
-                                    };
+                                if let Some((cell_url, cell_range)) = target_cell {
+                                    let ast = transaction
+                                        .get_ast(&handle)
+                                        .expect("quickfix generation requires a parsed AST");
+                                    let (offset, text) = prepare_import_insertion_in_range(
+                                        &ast,
+                                        cell_range,
+                                        insert_text,
+                                    );
+                                    let position = module_info.to_lsp_position(offset);
                                     edit_uri = cell_url;
-                                    edit_range = top_of_cell;
+                                    edit_range = Range::new(position, position);
+                                    insert_text = text;
                                 }
                             }
                         };

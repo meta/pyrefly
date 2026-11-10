@@ -197,11 +197,10 @@ fn test_notebook_code_action_import_cell_header() {
                         let Some(edits) = changes.get(&cell_uri) else {
                             return false;
                         };
-                        // Known bug: redirected imports are inserted before the cell header.
+                        let import_position = Position::new(reference_line, 0);
                         changes.len() == 1
                             && edits.len() == 1
-                            && edits[0].range
-                                == Range::new(Position::new(0, 0), Position::new(0, 0))
+                            && edits[0].range == Range::new(import_position, import_position)
                             && edits[0].new_text == "from typing import TypedDict\n"
                     })
                 })
@@ -229,9 +228,9 @@ fn test_notebook_code_action_import_merge_target() {
             "from __future__ import annotations\nTypedDict\n",
         ],
     );
-    // Known bug: a merge suffix is redirected away from its existing import.
-    let target_uri = interaction.cell_uri("merge.ipynb", "cell2");
-    let position = Position::new(0, 0);
+    // A merge suffix modifies the existing import, not the requesting cell.
+    let target_uri = interaction.cell_uri("merge.ipynb", "cell1");
+    let position = Position::new(0, 29);
     interaction
         .code_action_cell("merge.ipynb", "cell2", 1, 0, 1, 9)
         .expect_response_with(|response| {
