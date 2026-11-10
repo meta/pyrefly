@@ -12,8 +12,13 @@ import { SANDBOX_FILE_NAME } from '../../pages/sandbox';
 /**
  * Mock editor model interface
  */
+interface MockUri {
+    scheme: string;
+    path: string;
+}
+
 interface MockEditorModel {
-    uri: { path: string };
+    uri: MockUri;
     getValue: () => string;
     setValue: (value: string) => void;
     updateOptions: (options: any) => void;
@@ -25,28 +30,32 @@ interface MockEditorModel {
  * Monaco editor mock
  */
 const mockModels = new Map<string, MockEditorModel>();
+const uriKey = (uri: MockUri) => `${uri.scheme}:${uri.path}`;
 
 const monaco = {
     editor: {
         onDidCreateModel: jest.fn(),
         setModelMarkers: jest.fn(),
         getModels: (): MockEditorModel[] => Array.from(mockModels.values()),
-        createModel: (content: string, language: string, uri?: any): MockEditorModel => {
-            const path = uri?.path || '/mock-file.py';
+        getModel: (uri: MockUri): MockEditorModel | null =>
+            mockModels.get(uriKey(uri)) ?? null,
+        createModel: (content: string, language: string, uri?: MockUri): MockEditorModel => {
+            const modelUri = uri ?? { scheme: 'file', path: '/mock-file.py' };
             const model: MockEditorModel = {
-                uri: { path },
+                uri: modelUri,
                 getValue: () => content,
                 setValue: jest.fn((value: string) => { content = value; }),
                 updateOptions: jest.fn(),
                 dispose: jest.fn(),
                 onDidChangeContent: jest.fn(() => ({ dispose: jest.fn() })),
             };
-            mockModels.set(path, model);
+            mockModels.set(uriKey(modelUri), model);
             return model;
         },
     },
     Uri: {
-        file: (path: string) => ({ path }),
+        file: (path: string): MockUri => ({ scheme: 'file', path }),
+        from: (components: MockUri): MockUri => components,
     },
     languages: {
         register: jest.fn(),

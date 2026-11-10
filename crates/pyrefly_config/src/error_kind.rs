@@ -70,6 +70,26 @@ impl Severity {
     pub fn is_enabled(self) -> bool {
         self != Severity::Ignore
     }
+
+    /// The severity a diagnostic is shown with, or `None` for `Ignore`, which is never shown.
+    pub fn shown(self) -> Option<ShownSeverity> {
+        match self {
+            Severity::Ignore => None,
+            Severity::Hint => Some(ShownSeverity::Hint),
+            Severity::Info => Some(ShownSeverity::Info),
+            Severity::Warn => Some(ShownSeverity::Warn),
+            Severity::Error => Some(ShownSeverity::Error),
+        }
+    }
+}
+
+/// The severity of a diagnostic that is shown to the user: every `Severity` except `Ignore`.
+#[derive(Debug, Clone, Copy, Dupe, PartialEq, Eq)]
+pub enum ShownSeverity {
+    Hint,
+    Info,
+    Warn,
+    Error,
 }
 
 /// ErrorKind categorizes an error by the part of the spec the error is related to.
@@ -234,6 +254,9 @@ pub enum ErrorKind {
     /// do not recognize as always executing (we recognize constructors and some test setup
     /// methods).
     ImplicitlyDefinedAttribute,
+    /// A block of code that is unreachable in the current type-checking configuration - for
+    /// example, the `else` block following an `if TYPE_CHECKING: ...` block.
+    InactiveCode,
     /// Equality or inequality comparison between incompatible types.
     IncompatibleComparison,
     /// Pruning an overloaded argument's branches left none that accept what the call solved one
@@ -250,6 +273,8 @@ pub enum ErrorKind {
     /// An inconsistency between a function parameter's type in an overload signature and its
     /// default value in the implementation.
     InconsistentOverloadDefault,
+    /// Cannot assign to a class-body-declared instance variable via the class (e.g. `C.instance_var = ...`).
+    InstanceVarAssign,
     /// Internal Pyrefly error.
     InternalError,
     /// An `@abstractmethod` is defined in a class that is not abstract.
@@ -268,6 +293,9 @@ pub enum ErrorKind {
     /// is reported under `BadClassDefinition` or `BadFunctionDefinition`
     /// instead, both of which default to `error`.
     InvalidDecorator,
+    /// An f-string format specification is incompatible with the value's static type
+    /// or the known builtin formatting rules.
+    InvalidFormatSpec,
     /// An error caused by incorrect inheritance in a class or type definition.
     /// e.g. a metaclass that is not a subclass of `type`.
     InvalidInheritance,
@@ -377,7 +405,7 @@ pub enum ErrorKind {
     /// A value whose type is not itself `Any` but contains an implicit `Any`,
     /// such as `list[Unknown]` or `Unknown | None`.
     PartiallyUnknownType,
-    /// A class-body attribute may be uninitialized on some control-flow paths.
+    /// An attribute may be uninitialized on some control-flow paths.
     PossiblyUninitializedAttribute,
     /// A potential conflict between an explicit keyword argument and a NotRequired
     /// TypedDict field. The field may be absent at runtime, so the conflict is not
@@ -442,6 +470,8 @@ pub enum ErrorKind {
     UnboundName,
     /// An error caused by a keyword argument used in the wrong place.
     UnexpectedKeyword,
+    /// A function diverges without an explicit exit, contrary to its return annotation.
+    UnexpectedNever,
     /// An error caused by passing a positional argument for a keyword-only parameter.
     UnexpectedPositionalArgument,
     /// Attempting to use a type checker directive without importing it from `typing`.
@@ -637,10 +667,13 @@ impl ErrorKind {
             ErrorKind::ImplicitImport => Severity::Warn,
             ErrorKind::ImplicitReexport => Severity::Ignore,
             ErrorKind::ImplicitlyDefinedAttribute => Severity::Ignore,
+            ErrorKind::InactiveCode => Severity::Hint,
             ErrorKind::IncompatibleComparison => Severity::Ignore,
+            ErrorKind::InstanceVarAssign => Severity::Ignore,
             ErrorKind::InvalidAbstractMethod => Severity::Ignore,
             ErrorKind::InvalidCast => Severity::Ignore,
             ErrorKind::InvalidDecorator => Severity::Warn,
+            ErrorKind::InvalidFormatSpec => Severity::Ignore,
             ErrorKind::MethodAssign => Severity::Ignore,
             ErrorKind::MisplacedIgnore => Severity::Warn,
             ErrorKind::MissingAttributePatchTarget => Severity::Warn,
@@ -672,6 +705,7 @@ impl ErrorKind {
             ErrorKind::UnannotatedAttribute => Severity::Ignore,
             ErrorKind::UnannotatedParameter => Severity::Ignore,
             ErrorKind::UnannotatedReturn => Severity::Ignore,
+            ErrorKind::UnexpectedNever => Severity::Warn,
             ErrorKind::UninitializedInstanceVariable => Severity::Ignore,
             ErrorKind::UnknownArgumentType => Severity::Ignore,
             ErrorKind::ImplicitAnyLambda => Severity::Ignore,
@@ -684,7 +718,7 @@ impl ErrorKind {
             ErrorKind::PartiallyUnknownType => Severity::Ignore,
             ErrorKind::UnnecessaryComparison => Severity::Warn,
             ErrorKind::UnnecessaryTypeConversion => Severity::Warn,
-            ErrorKind::Unreachable => Severity::Warn,
+            ErrorKind::Unreachable => Severity::Hint,
             ErrorKind::UnreachableExceptClause => Severity::Warn,
             ErrorKind::UnreachableMatchCase => Severity::Warn,
             ErrorKind::UnresolvableDunderAll => Severity::Warn,

@@ -43,7 +43,13 @@ fn flatten_and_dedup(xs: Vec<Type>, heap: &TypeHeap) -> Vec<Type> {
     // `Never`s (by replacing absorbed intersection types), so dropping them in place here
     // suffices and we don't need a second flatten pass.
     flattened.retain(|x| !x.is_never());
-    flattened.sort();
+    // A member marked with its truthiness sorts as the unmarked type, so the marker changes neither
+    // the display order of the union nor the order in which its members are solved.
+    flattened.sort_by(|x, y| {
+        x.ignoring_truthiness_marker()
+            .cmp(y.ignoring_truthiness_marker())
+            .then_with(|| x.cmp(y))
+    });
     flattened.dedup();
     // Keep only the strongest `Any` style, matching `AnyStyle::merge`.
     if let Some(strongest) = flattened
@@ -142,7 +148,11 @@ pub fn unions_with_literals(
 }
 
 pub fn intersect(ts: Vec<Type>, fallback: Type, heap: &TypeHeap) -> Type {
-    let has_non_object = ts.iter().any(|t| !t.is_object());
+    // A truthiness marker appears only as a member of an intersection, so `object & Falsy` must keep
+    // `object`.
+    let has_non_object = ts
+        .iter()
+        .any(|t| !t.is_object() && !t.is_truthiness_marker());
     let mut flattened = Vec::new();
     for t in ts {
         match t {
@@ -264,9 +274,8 @@ fn collapse_literals(
     let enums_to_delete: SmallSet<ClassType> = enums
         .into_iter()
         .filter(|(k, n)| {
-            // `enum_members` returns a count only for classes it classifies as enums, and
-            // `None` otherwise. That `None` case is reachable, so when we can't get a count
-            // we leave the literals alone rather than promoting.
+            // `enum_members` returns a count only for enums eligible for literal expansion.
+            // Leave non-expandable enums, including Flag-derived classes, as literals.
             let Some(num_members) = enum_members(k.class_object()) else {
                 return false;
             };

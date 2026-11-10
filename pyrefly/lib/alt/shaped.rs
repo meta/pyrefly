@@ -34,6 +34,7 @@ use std::slice;
 
 use pyrefly_python::ast::Ast;
 use pyrefly_types::dimension::Int;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
 use pyrefly_types::shaped_array::tuple_carrier_to_shape;
@@ -171,11 +172,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) -> Type {
         let base_errors = self.error_collector();
-        let ty = self.expr_untype_without_shape_comment(
-            base,
-            TypeFormContext::type_argument(),
-            &base_errors,
-        );
+        let written_context = if matches!(context, TypeFormContext::BaseClassList) {
+            context
+        } else {
+            TypeFormContext::type_argument()
+        };
+        let ty = self.expr_untype_without_shape_comment(base, written_context, &base_errors);
+        if matches!(context, TypeFormContext::BaseClassList) && matches!(ty, Type::Tuple(_)) {
+            errors.extend(base_errors);
+            self.error(
+                errors,
+                comment.range,
+                ErrorKind::InvalidAnnotation,
+                "A shape comment on a tuple base must refine its type arguments instead of replacing the tuple carrier".to_owned(),
+            );
+            return ty;
+        }
         self.shaped_type(
             ShapedAnnotation {
                 base_expr: base,
@@ -204,10 +216,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             base_errors,
             mode,
         } = annotation;
-        let base = match base {
-            Type::ShapedArray(array) => Type::ClassType(array.base_class),
-            other => other,
-        };
         if mode == ShapeCommentMode::Replace && carrier_int_tuple(&base).is_none() {
             errors.extend_filtered(base_errors, |error| {
                 error.error_kind() != ErrorKind::ImplicitAnyTypeArgument
@@ -215,7 +223,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return self.expr_untype(shape_expr, type_form_context, errors);
         }
         match &base {
-            Type::ClassType(cls) if cls.is_builtin("int") => {
+            Type::ClassType(cls) if cls.is(KnownClass::Int) => {
                 errors.extend(base_errors);
                 // `Shaped[int, "N"]` is `Int[N]`.
                 return match self.parse_int_type(
@@ -240,15 +248,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     _ => slice::from_ref(shape_expr),
                 };
                 let class = self.expr_infer(class_expr, errors);
-                if let Type::ClassDef(cls) = &class
-                    && !self.is_shaped_array_class(cls)
-                {
+                if let Type::ClassDef(cls) = &class {
                     let args = explicit_args.iter().chain(shape_args);
                     let targs = self.parse_class_type_args(cls, args, type_form_context, errors);
                     return self.specialize(cls, targs, range, errors);
                 }
-                // Other subscriptable bases, such as type aliases and registered
-                // shaped arrays, use their own specialization rules.
+                // Other subscriptable bases, such as type aliases, use their own
+                // specialization rules.
                 let args = Expr::Tuple(ExprTuple {
                     node_index: AtomicNodeIndex::default(),
                     range,

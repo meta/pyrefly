@@ -6,11 +6,14 @@
  */
 
 use std::collections::HashSet;
+use std::env;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use anyhow::Context as _;
 use clap::Parser;
+use dupe::Dupe as _;
 use pyrefly_python::ignore::Tool;
 use pyrefly_python::ignore::TypeIgnoreUnknownTagBehavior;
 use pyrefly_python::sys_info::PythonPlatform;
@@ -30,6 +33,8 @@ use crate::error::ErrorDisplayConfig;
 use crate::error_kind::ErrorKind;
 use crate::error_kind::Severity;
 use crate::finder::ConfigError;
+use crate::module_names::ModuleNames;
+use crate::module_names::ModuleNamesSourceDatabase;
 use crate::module_wildcard::ModuleWildcard;
 use crate::util::ConfigOrigin;
 
@@ -128,6 +133,17 @@ pub struct EnvironmentArgs {
     /// Override the bundled typeshed with a custom path.
     #[arg(long, value_parser = absolute_path_parser)]
     pub(crate) typeshed_path: Option<PathBuf>,
+
+    /// JSON object mapping source file paths, relative to the working directory, to module
+    /// names, for files that a build system imports under a name their path doesn't give.
+    /// Pyrefly checks the listed files under these names, finds them by these names when no
+    /// other import lookup finds a module, and reports such as `--report-glean` use them.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) module_names: Option<PathBuf>,
+
+    /// The contents of `module_names`, read once by `validate` and shared by every config.
+    #[arg(skip)]
+    pub(crate) loaded_module_names: OnceLock<ArcId<ModuleNames>>,
 }
 
 impl EnvironmentArgs {
@@ -146,6 +162,8 @@ impl EnvironmentArgs {
             fallback_python_interpreter_name,
             skip_interpreter_query,
             typeshed_path,
+            module_names,
+            loaded_module_names: _,
         } = self;
 
         preset.is_some()
@@ -161,6 +179,7 @@ impl EnvironmentArgs {
             || fallback_python_interpreter_name.is_some()
             || *skip_interpreter_query
             || typeshed_path.is_some()
+            || module_names.is_some()
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -174,7 +193,18 @@ impl EnvironmentArgs {
         }
         validate_arg("--site-packages-path", self.site_package_path.as_deref())?;
         validate_arg("--search-path", self.search_path.as_deref())?;
+        if let Some(path) = &self.module_names
+            && self.loaded_module_names.get().is_none()
+        {
+            let names = ModuleNames::load(path, &env::current_dir()?)?;
+            let _ = self.loaded_module_names.set(ArcId::new(names));
+        }
         Ok(())
+    }
+
+    /// The module names given with `--module-names`, once `validate` has read them.
+    pub fn module_names(&self) -> Option<&ArcId<ModuleNames>> {
+        self.loaded_module_names.get()
     }
 
     pub fn preset(&self) -> Option<Preset> {
@@ -202,6 +232,9 @@ impl EnvironmentArgs {
         }
         if let Some(x) = &self.search_path {
             config.search_path_from_args = x.clone();
+        }
+        if let Some(x) = self.module_names() {
+            config.module_names = Some(x.dupe());
         }
         if let Some(x) = &self.disable_search_path_heuristics {
             config.disable_search_path_heuristics = *x;
@@ -418,6 +451,22 @@ pub struct ConfigOverrideArgs {
         num_args = 0..=1
     )]
     treat_all_caps_as_final: Option<bool>,
+    /// Use the parameter types declared in docstrings for unannotated parameters.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        require_equals = true,
+        num_args = 0..=1
+    )]
+    infer_param_types_from_docstring: Option<bool>,
+    /// Display fully qualified names in `reveal_type` output.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        require_equals = true,
+        num_args = 0..=1
+    )]
+    reveal_type_qualified_names: Option<bool>,
 }
 
 impl ConfigOverrideArgs {
@@ -450,6 +499,8 @@ impl ConfigOverrideArgs {
             spec_compliant_overloads,
             legacy_overload_expansion,
             treat_all_caps_as_final,
+            infer_param_types_from_docstring,
+            reveal_type_qualified_names,
         } = self;
 
         environment.has_overrides()
@@ -478,6 +529,8 @@ impl ConfigOverrideArgs {
             || spec_compliant_overloads.is_some()
             || legacy_overload_expansion.is_some()
             || treat_all_caps_as_final.is_some()
+            || infer_param_types_from_docstring.is_some()
+            || reveal_type_qualified_names.is_some()
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -653,6 +706,12 @@ impl ConfigOverrideArgs {
         if let Some(x) = &self.treat_all_caps_as_final {
             config.root.treat_all_caps_as_final = Some(*x);
         }
+        if let Some(x) = &self.infer_param_types_from_docstring {
+            config.root.infer_param_types_from_docstring = Some(*x);
+        }
+        if let Some(x) = &self.reveal_type_qualified_names {
+            config.reveal_type_qualified_names = *x;
+        }
         let apply_error_settings = |error_config: &mut ErrorDisplayConfig| {
             for error_kind in &self.error {
                 error_config.set_error_severity(*error_kind, Severity::Error);
@@ -674,6 +733,10 @@ impl ConfigOverrideArgs {
             apply_error_settings(sub_config_errors);
         }
         let mut errors = config.configure_at(project_root);
+        if let Some(names) = self.environment.module_names() {
+            let source_db = ModuleNamesSourceDatabase::new(names.dupe(), config.get_sys_info());
+            config.fallback_source_db = Some(ArcId::new(Box::new(source_db)));
+        }
         if self.tensor_shapes.is_some() {
             errors.push(ConfigError::warn(anyhow::anyhow!(
                 "`--tensor-shapes` is deprecated and has no effect. Tensor shape support is enabled when `shape_extensions` is resolvable."

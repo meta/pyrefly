@@ -1,0 +1,13 @@
+# < definition scip-python python snapshot-util 0.1 `foo.bar`/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+
+class InitClass:
+#     ^^^^^^^^^ definition  snapshot-util 0.1 `foo.bar`/InitClass#
+    init_item = 10
+#   ^^^^^^^^^ definition  snapshot-util 0.1 `foo.bar`/InitClass#init_item.
+

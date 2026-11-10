@@ -11,11 +11,13 @@ $ mkdir -p $TMPDIR/baseline_levels && \
 [0]
 ```
 
-The configured warning is hidden by the default error threshold.
+With no threshold set, the configured warning is shown, marked as baselined,
+and pyrefly exits with code 0.
 
 ```scrut {output_stream: stdout}
 $ cd $TMPDIR/baseline_levels && \
 > $PYREFLY check matched.py --summary=none --output-format=min-text
+ WARN matched.py:1:10-11: `Literal[1]` is not assignable to `str` [bad-assignment] [baselined]
 [0]
 ```
 
@@ -88,6 +90,25 @@ $ cd $TMPDIR/baseline_levels && \
 > $PYREFLY check --baseline-error-level=error --only=bad-return --summary=none --output-format=min-text
 ERROR new.py:2:12-13: * [bad-return] (glob)
 [1]
+```
+
+## `--update-baseline` respects the `only` filter from the configuration
+
+```scrut {output_stream: stdout}
+$ mkdir -p $TMPDIR/baseline_only_config && \
+> printf 'x: str = 1\ndef f() -> int:\n    return "a"\n' > $TMPDIR/baseline_only_config/main.py && \
+> printf 'only = ["bad-assignment"]\n' > $TMPDIR/baseline_only_config/pyrefly.toml && \
+> cd $TMPDIR/baseline_only_config && \
+> $PYREFLY check main.py \
+>     --config pyrefly.toml \
+>     --baseline baseline.json \
+>     --update-baseline \
+>     --summary=none \
+>     --output-format=omit-errors \
+>     >/dev/null 2>/dev/null; \
+> $JQ -r '.errors[].name' baseline.json
+bad-assignment
+[0]
 ```
 
 ## JSON records baseline provenance only when a baseline is configured

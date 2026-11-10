@@ -48,7 +48,7 @@ pub(crate) fn format_annotation(
     }
     let mut display = TypeDisplayContext::new(&[ty]);
     display.render_self_type_as_self();
-    display.strip_library_schemas();
+    display.use_annotation_syntax();
     let annotation = display.display(ty).to_string();
     if annotation.contains('@') || annotation.contains("Unknown") {
         *uses_incomplete = true;

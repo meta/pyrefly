@@ -487,3 +487,105 @@ v: Outer = 1
 w: B = C()
     "#,
 );
+
+testcase!(
+    test_redefinition_equivalent_recursive_aliases,
+    r#"
+type A = int | list[A]
+type B = int | list[B]
+class C:
+    def __init__(self) -> None:
+        self.x: A = 0
+    def reset(self) -> None:
+        self.x: B = 0
+    "#,
+);
+
+testcase!(
+    test_redefinition_equivalent_imported_recursive_aliases,
+    {
+        let mut env = TestEnv::one("a", "type A = int | list[A]");
+        env.add("b", "type B = int | list[B]");
+        env
+    },
+    r#"
+from a import A
+from b import B
+class C:
+    def __init__(self) -> None:
+        self.x: A = 0
+    def reset(self) -> None:
+        self.x: B = 0
+    "#,
+);
+
+testcase!(
+    test_redefinition_unequal_recursive_aliases,
+    r#"
+type A = int | list[A]
+type B = int | set[B]
+class C:
+    def __init__(self) -> None:
+        self.x: A = 0
+    def reset(self) -> None:
+        self.x: B = 0  # E: cannot be annotated
+    "#,
+);
+
+testcase!(
+    test_redefinition_recursive_alias_nominal_identity,
+    r#"
+class Left: ...
+class Right: ...
+type A = Left | list[A]
+type B = Right | list[B]
+class C:
+    def __init__(self) -> None:
+        self.x: A
+    def reset(self) -> None:
+        self.x: B  # E: cannot be annotated
+    "#,
+);
+
+testcase!(
+    test_redefinition_method_typevar_identity,
+    r#"
+type Recursive[T] = T | list[Recursive[T]]
+class C:
+    def __init__[T](self) -> None:
+        self.x: T  # E: Attribute `x` cannot depend on type variable `T`
+        self.y: Recursive[T]  # E: Attribute `y` cannot depend on type variable `T`
+    def reset[T](self) -> None:
+        self.x: T  # E: cannot be annotated
+        self.y: Recursive[T]  # E: cannot be annotated
+    "#,
+);
+
+testcase!(
+    test_redefinition_recursive_alias_semantic_union,
+    r#"
+type A = int | list[A]
+class C:
+    def __init__(self) -> None:
+        self.x: A = 0
+    def reset(self) -> None:
+        self.x: A | bool = 0
+    "#,
+);
+
+testcase!(
+    test_redefinition_nonrecursive_annotations,
+    r#"
+from typing import Any
+type AliasInt = int
+class C:
+    def __init__(self) -> None:
+        self.x: AliasInt = 0
+        self.y: int | bool = 0
+        self.z: Any = 0
+    def reset(self) -> None:
+        self.x: int = 1
+        self.y: int = 1  # E: cannot be annotated
+        self.z: int = 1  # E: cannot be annotated
+    "#,
+);

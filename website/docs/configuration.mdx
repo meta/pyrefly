@@ -210,7 +210,8 @@ or remove `project-excludes`.
 - Default: `["**/node_modules", "**/__pycache__", "**/venv/**", "**/.[!/.]*/**"]` +
   anything in your `site-packages-path` (even from the interpreter) unless it would
   exclude items in your [`search-path`](#search-path).
-- Flag equivalent: `--project-excludes`
+- Flag equivalent: `--project-excludes`, which replaces `project-excludes`.
+  `--extend-project-excludes` adds patterns to `project-excludes` instead.
 - Equivalent configs: `exclude` in Pyright and mypy
 - Notes:
     - While not explicitly part of `project-excludes`, there are several patterns that are
@@ -267,7 +268,8 @@ project setting when unset.
 - Type: table with `includes` and `excludes` keys, each a list of
   [filesystem glob patterns](#filesystem-globbing)
 - Default: `project-includes` / `project-excludes`
-- Flag equivalent: none, though `--project-excludes` takes precedence over `coverage.excludes`
+- Flag equivalent: none, though `--project-excludes` takes precedence over `coverage.excludes`,
+  and `--extend-project-excludes` adds to `coverage.excludes`
 - Notes:
     - Like the project globs, these are not consulted when passing in `FILES...`.
     - `coverage.excludes` gets the same default excludes appended as `project-excludes` does,
@@ -351,7 +353,9 @@ See more on [how Pyrefly does import resolution](import-resolution.mdx).
 
 When enabled, Pyrefly resolves an otherwise-unresolved import by searching each
 directory from the importing file up to the directory that contains your
-config, using the first match it finds. This is a best-effort way to make
+config, using the first match it finds. Directories that belong to a regular
+package (that is, contain an `__init__.py` or `__init__.pyi`) are skipped, since
+they cannot be import roots without truncating the package's module names. This is a best-effort way to make
 imports resolve when a module is importable relative to one of its parent
 directories but that directory isn't listed in [`search-path`](#search-path).
 
@@ -360,6 +364,8 @@ directories but that directory isn't listed in [`search-path`](#search-path).
 - Flag equivalent: `--enable-fallback-search-path`
 - Equivalent configs: none
 - Notes:
+    - The fallback is only consulted after the search path, typeshed, and the site
+      package path all fail to find the module, including as a namespace package.
     - Has no effect when [`disable-search-path-heuristics`](#disable-search-path-heuristics)
       is `true` — that flag suppresses all fallback-path consumption.
     - The search is bounded by the config root, so it cannot escape the project.
@@ -718,10 +724,17 @@ below this threshold are hidden from output. Diagnostics at or above the thresho
 displayed and cause a nonzero exit code — for example, `--min-severity warn` makes
 warnings cause a nonzero exit.
 
+When `min-severity` is not set, `pyrefly check` displays warnings and errors, and only
+errors cause a nonzero exit code. Warnings are also left out of `--suppress-errors`,
+baseline updates and the `junit-xml` report, which lists only diagnostics that cause a
+nonzero exit code.
+
 The lowest threshold, `"hint"`, also shows hint-level diagnostics such as
 [`unused-parameter`](../error-kinds#unused-parameter),
-[`unused-variable`](../error-kinds#unused-variable), and
-[`unused-import`](../error-kinds#unused-import). These are hidden by default, and
+[`unused-variable`](../error-kinds#unused-variable),
+[`unused-import`](../error-kinds#unused-import),
+[`unreachable`](../error-kinds#unreachable), and
+[`inactive-code`](../error-kinds#inactive-code). These are hidden by default, and
 showing them makes them count toward the exit code like any other displayed
 diagnostic.
 
@@ -737,7 +750,7 @@ min-severity = "warn"
 ```
 
 - Type: `"ignore"` | `"hint"` | `"info"` | `"warn"` | `"error"`
-- Default: `"error"`
+- Default: not set (warnings are displayed, and only errors cause a nonzero exit)
 - Flag equivalent: `--min-severity`
 - Notes:
     - `min-severity` is a **project-level setting** and cannot be overridden in
@@ -748,6 +761,30 @@ min-severity = "warn"
       are currently open in the editor, regardless of this setting.
     - Directives such as [`reveal_type`](../error-kinds#reveal-type) are always
       shown regardless of this threshold.
+
+### `only`
+
+An array of error kinds that restricts which diagnostics Pyrefly processes.
+With `only` set, `pyrefly check` processes only the listed kinds: it displays
+them in the output, allows them to affect the exit code, inserts ignore comments
+for them during suppression (`--suppress-errors`) and records them when
+updating baselines (`--update-baseline`).
+
+```toml
+# pyrefly.toml
+only = ["bad-assignment", "bad-return"]
+```
+
+- Type: Array of error kinds (see [error-kinds](../error-kinds))
+- Default: Not set (no filtering by error kind)
+- Flag equivalent: `--only`
+- Notes:
+    - `only` is a **project-level setting** and cannot be overridden
+      in [`sub-config`](#sub-configs) sections.
+    - The `--only` command-line flag completely overrides this
+      configuration value.
+    - `only = []` is rejected as a configuration error to prevent
+      accidentally hiding all diagnostics.
 
 ### `output-format`
 
@@ -831,7 +868,8 @@ A minimal-checking preset used when automatic configuration selection finds no m
 - Sets [`check-unannotated-defs`](#check-unannotated-defs) `= false`, [`infer-return-types`](#infer-return-types) `= "never"`, [`infer-with-first-use`](#infer-with-first-use) `= false`, [`permissive-ignores`](#permissive-ignores) `= true`
 - Enables (as errors): [`bad-class-definition`](./error-kinds.mdx#bad-class-definition), [`bad-instantiation`](./error-kinds.mdx#bad-instantiation), [`bad-keyword-argument`](./error-kinds.mdx#bad-keyword-argument), [`bad-raise`](./error-kinds.mdx#bad-raise), [`bad-unpacking`](./error-kinds.mdx#bad-unpacking), [`division-by-zero`](./error-kinds.mdx#division-by-zero), [`invalid-annotation`](./error-kinds.mdx#invalid-annotation), [`invalid-literal`](./error-kinds.mdx#invalid-literal), [`invalid-super-call`](./error-kinds.mdx#invalid-super-call), [`invalid-syntax`](./error-kinds.mdx#invalid-syntax), [`missing-import`](./error-kinds.mdx#missing-import), [`not-async`](./error-kinds.mdx#not-async), [`parse-error`](./error-kinds.mdx#parse-error), [`unexpected-keyword`](./error-kinds.mdx#unexpected-keyword), [`unexpected-positional-argument`](./error-kinds.mdx#unexpected-positional-argument), [`unknown-name`](./error-kinds.mdx#unknown-name), [`unused-coroutine`](./error-kinds.mdx#unused-coroutine)
 - Enables (as warnings): [`fallback-search-path-relative-import`](./error-kinds.mdx#fallback-search-path-relative-import)
-- Keeps as hints: [`unused-import`](./error-kinds.mdx#unused-import), [`unused-parameter`](./error-kinds.mdx#unused-parameter), [`unused-variable`](./error-kinds.mdx#unused-variable)
+- Keeps as hints: [`inactive-code`](./error-kinds.mdx#inactive-code), [`unused-import`](./error-kinds.mdx#unused-import), [`unused-parameter`](./error-kinds.mdx#unused-parameter), [`unused-variable`](./error-kinds.mdx#unused-variable)
+- Keeps as info: [`reveal-type`](./error-kinds.mdx#reveal-type)
 - All other error kinds are silenced.
 
 #### Preset: `legacy`
@@ -840,7 +878,7 @@ A looser, less-strict preset intended for codebases migrating from mypy. This is
 
 - Sets [`check-unannotated-defs`](#check-unannotated-defs) `= false`, [`infer-return-types`](#infer-return-types) `= "never"`, [`legacy-overload-expansion`](#legacy-overload-expansion) `= true`, [`replace-untyped-imports-with-any`](#replace-untyped-imports-with-any) `= ["*"]`
 - Sets [`type-ignore-unknown-tag-behavior`](#type-ignore-unknown-tag-behavior) `= "suppress"` so existing mypy-coded ignores retain their legacy blanket-suppression behavior.
-- Disables: [`bad-override-mutable-attribute`](./error-kinds.mdx#bad-override-mutable-attribute), [`bad-override-param-name`](./error-kinds.mdx#bad-override-param-name), [`unbound-name`](./error-kinds.mdx#unbound-name)
+- Disables: [`bad-override-mutable-attribute`](./error-kinds.mdx#bad-override-mutable-attribute), [`bad-override-param-name`](./error-kinds.mdx#bad-override-param-name), [`unbound-name`](./error-kinds.mdx#unbound-name). When both the parent and child members are plain read-write attributes, widening or incompatible types report plain `bad-override`, which this preset leaves enabled. Some overrides involving properties, including incompatible property getters, still report `bad-override-mutable-attribute` and are suppressed by this preset.
 
 #### Preset: `default`
 
@@ -853,7 +891,7 @@ The default Pyrefly configuration. Equivalent to having no preset at all.
 Enables additional error codes on top of the default for stricter checking.
 
 - Sets [`strict-callable-subtyping`](#strict-callable-subtyping) `= true`
-- Enables (as errors): [`direct-abstract-base-instantiation`](./error-kinds.mdx#direct-abstract-base-instantiation), [`implicit-any`](./error-kinds.mdx#implicit-any) (covers every implicit-`Any` sub-kind), [`method-assign`](./error-kinds.mdx#method-assign), [`missing-override-decorator`](./error-kinds.mdx#missing-override-decorator), [`open-unpacking`](./error-kinds.mdx#open-unpacking), [`possibly-uninitialized-attribute`](./error-kinds.mdx#possibly-uninitialized-attribute), [`potential-bad-keyword-argument`](./error-kinds.mdx#potential-bad-keyword-argument), [`unused-ignore`](./error-kinds.mdx#unused-ignore)
+- Enables (as errors): [`direct-abstract-base-instantiation`](./error-kinds.mdx#direct-abstract-base-instantiation), [`implicit-any`](./error-kinds.mdx#implicit-any) (covers every implicit-`Any` sub-kind), [`instance-var-assign`](./error-kinds.mdx#instance-var-assign), [`method-assign`](./error-kinds.mdx#method-assign), [`missing-override-decorator`](./error-kinds.mdx#missing-override-decorator), [`open-unpacking`](./error-kinds.mdx#open-unpacking), [`possibly-uninitialized-attribute`](./error-kinds.mdx#possibly-uninitialized-attribute), [`potential-bad-keyword-argument`](./error-kinds.mdx#potential-bad-keyword-argument), [`unused-ignore`](./error-kinds.mdx#unused-ignore)
 
 #### Preset: `all`
 
@@ -862,7 +900,7 @@ For most users, we recommend using the `strict` preset and enabling individual a
 for more stability and an opt-in experience for new errors.
 :::
 
-Enables every error kind at `error` severity. Directives like `reveal-type` remain informational, and kinds that default to `hint`, like `unused-parameter`, remain hints.
+Enables every error kind at `error` severity. Directives like `reveal-type` remain informational, and hints about inactive and unused code remain hints.
 
 - Sets [`strict-callable-subtyping`](#strict-callable-subtyping) `= true`
 - Enables every error kind at `error` severity
@@ -875,7 +913,7 @@ Configure the severity for each kind of error that Pyrefly emits: `error`, `warn
 Want full type-check squiggles in your editor? Run `pyrefly init` to create a `pyrefly.toml` (or update `pyproject.toml`).
 :::
 
-- Type: Table of [error code](./error-kinds.mdx) to boolean representing enabled status
+- Type: Table of [error code](./error-kinds.mdx) to a severity (`"error"`, `"warn"`, `"info"`, `"hint"`, or `"ignore"`) or a boolean
 - Default: `errors = {}`/`[errors]`
 - Flag equivalent: `--error`, `--warn`, `--ignore`
 - Equivalent configs:
@@ -886,6 +924,8 @@ Want full type-check squiggles in your editor? Run `pyrefly init` to create a `p
   [`disable_error_code`](https://mypy.readthedocs.io/en/stable/config_file.html#confval-disable_error_code)
   in mypy
 - Notes:
+    - Setting `<error-code> = "<severity>"` (for example, `bad-return = "warn"`) sets the
+      diagnostic's severity.
     - Setting `<error-code> = true` means the error will be shown at default
       severity (or severity `ERROR` if the error is off by default). Setting
       `<error-code> = false` will disable the error for type checking.
@@ -1072,6 +1112,34 @@ set `infer-return-types` to `"never"` in your config or pass it as a flag.
 - Type: one of `"never"`, `"annotated"`, `"checked"`
 - Default: `"checked"`
 - Flag equivalent: `--infer-return-types`
+
+### `infer-param-types-from-docstring`
+
+Whether to use the parameter types that a Sphinx style docstring declares for parameters
+that have no annotation.
+
+```python
+def f(x, y=None):
+    """
+    :param int x: The x.
+    :type y: str
+    """
+```
+
+Here `x` is an `int` and `y` is a `str | None`. A parameter that defaults to `None` is
+treated as optional even when the docstring does not say so. For `__init__`, the docstring
+of the class is used as well, because that is where the constructor parameters are usually
+documented. The docstring of the method itself takes priority.
+
+A type from a docstring is only a hint for callers and for the body of the function. It is
+never used instead of an annotation, it does not make assignments to the parameter an
+error, and it is not checked against the default value. A type that Pyrefly cannot make
+sense of, such as `list of str` written as prose, an unknown name, or a type that is not
+valid for a parameter, is ignored without an error.
+
+- Type: `bool`
+- Default: `false`
+- Flag equivalent: `--infer-param-types-from-docstring`
 
 ### `strict-callable-subtyping`
 

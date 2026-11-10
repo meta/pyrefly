@@ -7,6 +7,9 @@
 
 use std::fmt::Write;
 
+use ruff_text_size::Ranged;
+
+use crate::config::error_kind::ErrorKind;
 use crate::test::util::TestEnv;
 use crate::test::util::testcase_for_macro;
 use crate::testcase;
@@ -702,8 +705,7 @@ def f(cond: bool):
 
 // Verify that mutually recursive inferred returns stabilize under iterative
 // fixpoint solving. Each function's return answer depends on the other's, so
-// solving either answer enters the same SCC. The `Unknown` in the revealed
-// fixpoint witnesses the placeholder used to break the recursive backedge.
+// solving either answer enters the same SCC.
 testcase!(
     iterative_warm_start_mutual_recursion,
     r#"
@@ -717,15 +719,37 @@ def f(x: int):
 def g(x: int):
     return f(x)
 
-reveal_type(f(1))  # E: revealed type: Literal['done'] | Unknown
-reveal_type(g(1))  # E: revealed type: Literal['done'] | Unknown
+reveal_type(f(1))  # E: revealed type: Literal['done']
+reveal_type(g(1))  # E: revealed type: Literal['done']
+"#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/804.
+testcase!(
+    mutual_recursion_infers_all_concrete_returns,
+    r#"
+from typing import reveal_type
+
+def test1(x: bool):
+    if x:
+        return test2(x)
+    else:
+        return 1
+
+def test2(x: bool):
+    if x:
+        return test1(x)
+    else:
+        return 2
+
+reveal_type(test1(True))  # E: revealed type: Literal[1, 2]
+reveal_type(test2(True))  # E: revealed type: Literal[1, 2]
 "#,
 );
 
 // Diagnostics produced from cold-start placeholders must not leak after
-// mutually recursive inferred returns stabilize. The inner reveal sees
-// `Unknown` during cold start and `int | Unknown` during warm iterations, so
-// its expectation only passes when the cold diagnostic is discarded.
+// mutually recursive inferred returns stabilize. The cold diagnostic differs
+// from the final `int` result and must be discarded.
 testcase!(
     iterative_error_suppression_no_spurious_errors,
     r#"
@@ -734,19 +758,19 @@ from typing import reveal_type
 def f(x: int):
     if x <= 0:
         return 0
-    return reveal_type(g(x - 1)) + 1  # E: revealed type: int | Unknown
+    return reveal_type(g(x - 1)) + 1  # E: revealed type: int
 
 def g(x: int):
     return f(x)
 
-reveal_type(f(1))  # E: revealed type: int | Unknown
-reveal_type(g(1))  # E: revealed type: int | Unknown
+reveal_type(f(1))  # E: revealed type: int
+reveal_type(g(1))  # E: revealed type: int
 "#,
 );
 
 // Real errors discovered after mutually recursive inferred returns stabilize
-// must still be reported. Both answers contain `Literal['done'] | Unknown`,
-// making the inner call to `f` an invalid argument to the outer call.
+// must still be reported. Both answers are `Literal['done']`, making the inner
+// call to `f` an invalid argument to the outer call.
 testcase!(
     iterative_error_suppression_real_errors_reported,
     r#"
@@ -758,10 +782,10 @@ def f(x: int):
     return g(x - 1)
 
 def g(x: int):
-    return f(f(x))  # E: Argument `Literal['done'] | Unknown` is not assignable to parameter `x` with type `int` in function `f`
+    return f(f(x))  # E: Argument `Literal['done']` is not assignable to parameter `x` with type `int` in function `f`
 
-reveal_type(f(1))  # E: revealed type: Literal['done'] | Unknown
-reveal_type(g(1))  # E: revealed type: Literal['done'] | Unknown
+reveal_type(f(1))  # E: revealed type: Literal['done']
+reveal_type(g(1))  # E: revealed type: Literal['done']
 "#,
 );
 
@@ -805,6 +829,102 @@ reveal_type(g(1))  # E: revealed type: Literal[0] | Unknown
 "#,
 );
 
+#[test]
+fn nonconvergent_cross_module_diagnostics_are_owned_by_their_module() {
+    let mut env = TestEnv::new();
+    env.add(
+        "a",
+        r#"
+from b import D, E
+
+class C:
+    type X = int | list[D.Y]
+
+class Padding1:
+    type Value = int
+
+class Padding2:
+    type Value = int
+
+class F:
+    type Z = int | list[E.W]
+"#,
+    );
+    env.add(
+        "b",
+        r#"
+from a import C, F
+
+class D:
+    type Y = str | list[C.X]
+
+class E:
+    type W = str | list[F.Z]
+"#,
+    );
+    env.add(
+        "main",
+        r#"
+from a import C, F
+from b import D, E
+x: C.X
+y: D.Y
+z: F.Z
+w: E.W
+"#,
+    );
+    let (state, handle) = env.to_state();
+    let transaction = state.transaction();
+    for name in ["a", "b"] {
+        let module_handle = handle(name);
+        let errors = transaction
+            .get_errors([&module_handle])
+            .collect_errors()
+            .ordinary;
+        let mut count = 0;
+        for error in errors
+            .iter()
+            .filter(|error| error.error_kind() == ErrorKind::NonConvergentRecursion)
+        {
+            count += 1;
+            assert_eq!(
+                error.module().name(),
+                module_handle.module(),
+                "diagnostic for {} was stored in {name}'s snapshot",
+                error.module().name(),
+            );
+            assert_eq!(
+                error.module().path(),
+                module_handle.path(),
+                "diagnostic for {} had the wrong path",
+                error.module().name(),
+            );
+            assert!(
+                error.range().start() < error.range().end(),
+                "nonconvergence diagnostic should point at its member binding",
+            );
+        }
+        assert!(
+            count > 0,
+            "{name} should contain a nonconvergence diagnostic"
+        );
+    }
+
+    let main_handle = handle("main");
+    let main_errors = transaction
+        .get_errors([&main_handle])
+        .collect_errors()
+        .ordinary;
+    assert_eq!(
+        main_errors
+            .iter()
+            .filter(|error| error.error_kind() == ErrorKind::NonConvergentRecursion)
+            .count(),
+        0,
+        "the driver module should not contain nonconvergence diagnostics",
+    );
+}
+
 // Verify that two disjoint inferred-return SCCs solve independently. Each
 // pair has its own concrete base case and no dependencies on the other pair.
 testcase!(
@@ -830,9 +950,27 @@ def h(x: str):
 def k(x: str):
     return h(x)
 
-reveal_type(f(1))  # E: revealed type: Literal[0] | Unknown
-reveal_type(g(1))  # E: revealed type: Literal[0] | Unknown
-reveal_type(h("a"))  # E: revealed type: Literal['done'] | Unknown
-reveal_type(k("a"))  # E: revealed type: Literal['done'] | Unknown
+reveal_type(f(1))  # E: revealed type: Literal[0]
+reveal_type(g(1))  # E: revealed type: Literal[0]
+reveal_type(h("a"))  # E: revealed type: Literal['done']
+reveal_type(k("a"))  # E: revealed type: Literal['done']
+"#,
+);
+
+// A recursive call whose result is returned directly makes the inferred union
+// grow with each iteration until it exceeds the width limit and is replaced
+// with `Unknown`. That `Unknown` then shrinks the union again in the next
+// iteration, so the fixpoint must keep the widened answer to converge.
+testcase!(
+    iterative_widened_return_converges,
+    r#"
+from typing import reveal_type
+
+def f(x: int):
+    if x:
+        return f(x - 1)
+    return [f(x - 1)]
+
+reveal_type(f(1))  # E: revealed type: Unknown
 "#,
 );

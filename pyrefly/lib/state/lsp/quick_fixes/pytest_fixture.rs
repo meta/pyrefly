@@ -10,10 +10,6 @@ use std::collections::HashSet;
 
 use dupe::Dupe;
 use pyrefly_build::handle::Handle;
-use pyrefly_python::module_name::ModuleName;
-use pyrefly_python::module_name::ModuleNameWithKind;
-use pyrefly_python::module_path::ModulePath;
-use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::display::LspDisplayMode;
 use pyrefly_types::types::Type;
@@ -30,8 +26,10 @@ use ruff_text_size::TextSize;
 
 use crate::binding::binding::Key;
 use crate::state::ide::insert_import_edit;
+use crate::state::lsp::FindPreference;
 use crate::state::lsp::ImportFormat;
 use crate::state::lsp::LocalRefactorCodeAction;
+use crate::state::lsp::pytest::pytest_conftest_handles;
 use crate::state::state::Transaction;
 
 #[derive(Debug, Default)]
@@ -184,7 +182,7 @@ fn fixture_return_type(
     }
     let stdlib = transaction.get_stdlib(handle);
     Some(
-        ty.promote_implicit_literals(&stdlib)
+        ty.promote(&stdlib)
             .explicit_any()
             .clean_var()
             .strip_library_schemas(),
@@ -213,48 +211,6 @@ fn fixture_types_for_module(transaction: &Transaction<'_>, handle: &Handle) -> H
         fixtures.entry(func.name.id.clone()).or_insert(ty);
     }
     fixtures
-}
-
-fn conftest_handles(transaction: &Transaction<'_>, handle: &Handle) -> Vec<Handle> {
-    let module_path = handle.path();
-    let Some(mut dir) = module_path.as_path().parent() else {
-        return Vec::new();
-    };
-    let root = module_path
-        .root_of(handle.module())
-        .unwrap_or_else(|| dir.to_path_buf());
-    let is_memory = matches!(module_path.details(), ModulePathDetails::Memory(_));
-    let mut conftest_paths = Vec::new();
-    loop {
-        let conftest_pyi = dir.join("conftest.pyi");
-        let conftest_py = dir.join("conftest.py");
-        if is_memory {
-            conftest_paths.push(ModulePath::memory(conftest_pyi.clone()));
-            conftest_paths.push(ModulePath::memory(conftest_py.clone()));
-        } else {
-            if conftest_pyi.exists() {
-                conftest_paths.push(ModulePath::filesystem(conftest_pyi));
-            }
-            if conftest_py.exists() {
-                conftest_paths.push(ModulePath::filesystem(conftest_py));
-            }
-        }
-        if dir == root {
-            break;
-        }
-        let Some(parent) = dir.parent() else {
-            break;
-        };
-        dir = parent;
-    }
-    let mut handles = Vec::new();
-    for path in conftest_paths {
-        let config = transaction
-            .config_finder()
-            .python_file(ModuleNameWithKind::guaranteed(ModuleName::unknown()), &path);
-        handles.push(config.handle_from_module_path(path));
-    }
-    handles
 }
 
 fn import_edits_for_type(
@@ -292,16 +248,17 @@ fn import_edits_for_type(
         );
         let position = import_edit.range.start();
         let insert_text = import_edit.insert_text;
-        // Only dedup against full import lines: merge edits have `new_text` like
+        // Only dedup against full import lines: merge edits have `insert_text` like
         // `, X`, and a substring check for that would spuriously match unrelated
         // code (function args, type annotations). Merge edits are already
-        // deduplicated inside `merge_range_for_import`.
-        if (insert_text.starts_with("from ") || insert_text.starts_with("import "))
-            && module_contents.contains(&insert_text)
+        // deduplicated inside `find_import_merge_edit`.
+        if insert_text.is_empty()
+            || ((insert_text.starts_with("from ") || insert_text.starts_with("import "))
+                && module_contents.contains(&insert_text))
         {
             return;
         }
-        if seen_imports.insert(insert_text.clone()) {
+        if seen_imports.insert((position, insert_text.clone())) {
             import_edits.push((position, insert_text));
         }
     });
@@ -399,7 +356,7 @@ pub(crate) fn pytest_fixture_type_annotation_code_actions(
                 candidate.insert_text.clone(),
             ));
             for (position, text) in &candidate.import_edits {
-                if seen_imports.insert(text.clone()) {
+                if seen_imports.insert((*position, text.clone())) {
                     edits.push((
                         module.dupe(),
                         TextRange::at(*position, TextSize::new(0)),
@@ -416,7 +373,7 @@ pub(crate) fn pytest_fixture_type_annotation_code_actions(
     }
 
     let mut fixture_types = fixture_types_for_module(transaction, handle);
-    for conftest_handle in conftest_handles(transaction, handle) {
+    for conftest_handle in pytest_conftest_handles(transaction, handle, FindPreference::default()) {
         let conftest_types = fixture_types_for_module(transaction, &conftest_handle);
         for (name, ty) in conftest_types {
             fixture_types.entry(name).or_insert(ty);
@@ -524,7 +481,7 @@ pub(crate) fn pytest_fixture_type_annotation_code_actions(
                     import_format,
                     &ty,
                 ) {
-                    if seen_imports.insert(text.clone()) {
+                    if seen_imports.insert((position, text.clone())) {
                         edits.push((
                             module.dupe(),
                             TextRange::at(position, TextSize::new(0)),

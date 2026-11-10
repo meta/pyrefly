@@ -2,6 +2,15 @@ name: "CI: Extension test"
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      wheels:
+        description: 'Test the packages made from the `dist` artifact of the calling run'
+        type: boolean
+        default: false
+    outputs:
+      prerelease_flag:
+        description: '"--pre-release" if dev version, empty string otherwise'
+        value: ${{ jobs.build_extension.outputs.prerelease_flag }}
   push:
     branches: [ main ]
     paths:
@@ -23,6 +32,8 @@ on:
 jobs:
   build_extension:
     uses: ./.github/workflows/ci_extension_build.yml
+    with:
+      wheels: ${{ inputs.wheels || false }}
 
   test_extension:
     needs: build_extension
@@ -34,7 +45,7 @@ jobs:
           - os: windows-latest
             platform: win32
             arch: x64
-          - os: windows-latest
+          - os: windows-11-arm
             platform: win32
             arch: arm64
           - os: ubuntu-latest
@@ -43,7 +54,9 @@ jobs:
           - os: ubuntu-24.04-arm
             platform: linux
             arch: arm64
-          - os: ubuntu-24.04-arm
+          # GitHub's ARM64 runners cannot run 32-bit ARM code, so the ARMv7
+          # executable runs through QEMU instead.
+          - os: ubuntu-latest
             platform: linux
             arch: armhf
           - os: ubuntu-latest
@@ -55,7 +68,7 @@ jobs:
           - os: macos-15-intel
             platform: darwin
             arch: x64
-          - os: macos-14
+          - os: macos-15
             platform: darwin
             arch: arm64
     runs-on: ${{ matrix.os }}
@@ -84,6 +97,12 @@ jobs:
         run: |
           mkdir -p lsp/bin && mv extracted/extension/bin/* lsp/bin/
         shell: bash
+      - name: Set up QEMU for the ARMv7 executable
+        if: ${{ matrix.arch == 'armhf' }}
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install --yes --no-install-recommends qemu-user-binfmt libc6-armhf-cross libgcc-s1-armhf-cross
+          echo "QEMU_LD_PREFIX=/usr/arm-linux-gnueabihf" >> "$GITHUB_ENV"
       # Now run the test
       - uses: actions/setup-node@v6
         with:

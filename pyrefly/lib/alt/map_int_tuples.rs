@@ -15,6 +15,7 @@
 use pyrefly_types::callable::Param;
 use pyrefly_types::equality::TypeEq;
 use pyrefly_types::equality::TypeEqCtx;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::map_int_tuples::MapIntTuplesInterpretation;
 use pyrefly_types::map_int_tuples::TypeLambda;
 use pyrefly_types::map_int_tuples::map_int_tuples_mapper_binder;
@@ -109,7 +110,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Whether this class is the experimental `shape_extensions.MapIntTuples` operation.
     pub(crate) fn is_map_int_tuples_class(&self, cls: &Class) -> bool {
-        cls.has_toplevel_qname("shape_extensions", "MapIntTuples")
+        cls.is(KnownClass::ShapeExtensionsMapIntTuples)
     }
 
     /// Whether this type is the unsubscripted runtime shim for experimental `MapIntTuples`.
@@ -674,7 +675,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         members
                             .iter()
                             .cloned()
-                            .map(|ty| ty.promote_implicit_literals(self.stdlib))
+                            .map(|ty| ty.promote(self.stdlib))
                             .collect(),
                     );
                     (

@@ -17,7 +17,7 @@ use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
 use pyrefly_python::dunder;
 use pyrefly_types::function::Deprecation;
-use pyrefly_types::quantified::Quantified;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::typed_dict::ExtraItems;
 use pyrefly_util::display::commas_iter;
 use pyrefly_util::visit::Visit as VisitTrait;
@@ -37,6 +37,7 @@ use crate::error::collector::ErrorCollector;
 use crate::types::class::Class;
 use crate::types::class::ClassType;
 use crate::types::display::ClassDisplayContext;
+use crate::types::keywords::DataclassFieldKeywords;
 use crate::types::keywords::DataclassKeywords;
 use crate::types::keywords::DataclassTransformMetadata;
 use crate::types::stdlib::Stdlib;
@@ -48,30 +49,6 @@ use crate::types::types::Type;
 #[derive(Clone, Debug, TypeEq, PartialEq, Eq)]
 pub struct SlotsInfo {
     pub names: SmallSet<Name>,
-}
-
-/// Metadata for a class registered with `@shaped_array`.
-#[derive(Clone, Debug, TypeEq, PartialEq, Eq)]
-pub struct ShapedArrayMetadata {
-    shape: Quantified,
-    builtin_indexing: bool,
-}
-
-impl ShapedArrayMetadata {
-    pub fn new(shape: Quantified, builtin_indexing: bool) -> Self {
-        Self {
-            shape,
-            builtin_indexing,
-        }
-    }
-
-    pub fn shape(&self) -> &Quantified {
-        &self.shape
-    }
-
-    pub fn uses_builtin_indexing(&self) -> bool {
-        self.builtin_indexing
-    }
 }
 
 impl SlotsInfo {
@@ -147,10 +124,6 @@ pub struct ClassMetadata {
     /// Whether this class is a metaclass (i.e., a subclass of `type`).
     is_metaclass: bool,
     explicit_slots: ExplicitSlots,
-    /// `__init__` parameter names to capture for shape inference, extracted from
-    /// `@uses_shape_dsl(..., capture_init=[...])` on a `forward` method.
-    capture_init: Option<Vec<Name>>,
-    shaped_array: Option<ShapedArrayMetadata>,
 }
 
 impl VisitMut<Type> for ClassMetadata {
@@ -174,9 +147,6 @@ impl VisitMut<Type> for ClassMetadata {
         if let Some(dataclass_transform_metadata) = &mut self.dataclass_transform_metadata {
             dataclass_transform_metadata.visit_mut(f);
         }
-        if let Some(shaped_array) = &mut self.shaped_array {
-            shaped_array.shape.visit_mut(f);
-        }
     }
 }
 
@@ -198,9 +168,6 @@ impl VisitTrait<Type> for ClassMetadata {
         }
         if let Some(dataclass_transform_metadata) = &self.dataclass_transform_metadata {
             dataclass_transform_metadata.visit(f);
-        }
-        if let Some(shaped_array) = &self.shaped_array {
-            shaped_array.shape.visit(f);
         }
     }
 }
@@ -242,8 +209,6 @@ static RECURSIVE_CLASS_METADATA: ClassMetadata = ClassMetadata {
     django_rest_framework_serializer_kind: None,
     is_metaclass: false,
     explicit_slots: ExplicitSlots::Absent,
-    capture_init: None,
-    shaped_array: None,
 };
 
 impl ClassMetadata {
@@ -274,8 +239,6 @@ impl ClassMetadata {
         is_factory_boy_factory: bool,
         is_metaclass: bool,
         explicit_slots: ExplicitSlots,
-        capture_init: Option<Vec<Name>>,
-        shaped_array: Option<ShapedArrayMetadata>,
     ) -> ClassMetadata {
         ClassMetadata {
             metaclass,
@@ -304,8 +267,6 @@ impl ClassMetadata {
             is_factory_boy_factory,
             is_metaclass,
             explicit_slots,
-            capture_init,
-            shaped_array,
         }
     }
 
@@ -381,7 +342,7 @@ impl ClassMetadata {
 
     pub fn is_explicitly_abstract(&self) -> bool {
         for base in self.base_class_objects() {
-            if base.has_toplevel_qname("abc", "ABC") {
+            if base.is(KnownClass::Abc) {
                 return true;
             }
         }
@@ -464,6 +425,20 @@ impl ClassMetadata {
         self.dataclass_metadata.as_ref()
     }
 
+    /// Whether annotation-only fields need no assignment in the class body or a method.
+    /// Dataclasses and named tuples initialize them in a synthesized `__init__`, except for a
+    /// plain `@dataclass(init=False)`, and protocol members are declarations. attrs and pydantic
+    /// manage initialization in ways we do not model, so they are included too.
+    pub fn initializes_annotated_fields(&self) -> bool {
+        (self.dataclass_metadata.is_some()
+            || self.named_tuple_metadata.is_some()
+            || self.is_protocol())
+            && self
+                .dataclass_metadata
+                .as_ref()
+                .is_none_or(|dc| !matches!(dc.kind, DataclassKind::Dataclass { .. }) || dc.kws.init)
+    }
+
     pub fn slots_info(&self) -> Option<&SlotsInfo> {
         self.explicit_slots.slots_info()
     }
@@ -474,24 +449,6 @@ impl ClassMetadata {
 
     pub fn django_model_metadata(&self) -> Option<&DjangoModelMetadata> {
         self.django_model_metadata.as_ref()
-    }
-
-    pub fn capture_init(&self) -> Option<&[Name]> {
-        self.capture_init.as_deref()
-    }
-
-    pub fn is_shaped_array(&self) -> bool {
-        self.shaped_array.is_some()
-    }
-
-    pub fn shaped_array_shape(&self) -> Option<&Quantified> {
-        self.shaped_array.as_ref().map(ShapedArrayMetadata::shape)
-    }
-
-    pub fn uses_builtin_shaped_array_indexing(&self) -> bool {
-        self.shaped_array
-            .as_ref()
-            .is_some_and(ShapedArrayMetadata::uses_builtin_indexing)
     }
 }
 
@@ -754,6 +711,14 @@ impl DataclassMetadata {
     pub fn is_instance_field(&self, name: &Name) -> bool {
         self.fields.contains_key(name) && !self.pseudo_field_names.contains(name)
     }
+
+    /// Whether Pydantic lax mode converts the `__init__` input for this field.
+    pub fn is_pydantic_lax_field(&self, name: &Name, keywords: &DataclassFieldKeywords) -> bool {
+        !keywords.strict.unwrap_or(self.kws.strict)
+            && keywords.converter_param.is_none()
+            && !keywords.pydantic_has_custom_schema
+            && !self.pydantic_before_validator_fields.contains(name)
+    }
 }
 
 #[derive(Clone, Debug, TypeEq, PartialEq, Eq)]
@@ -881,8 +846,9 @@ impl ClassMro {
         cls: &Class,
         bases_with_mro: Vec<(&ClassType, &ClassMro)>,
         errors: &ErrorCollector,
+        targs_consistent: &dyn Fn(&ClassType, &ClassType) -> bool,
     ) -> Self {
-        match Linearization::new(cls, bases_with_mro, errors) {
+        match Linearization::new(cls, bases_with_mro, errors, targs_consistent) {
             Linearization::Cyclic => Self::Cyclic,
             Linearization::Resolved {
                 ancestor_chains,
@@ -1016,6 +982,7 @@ impl Linearization {
         cls: &Class,
         bases_with_mro: Vec<(&ClassType, &ClassMro)>,
         errors: &ErrorCollector,
+        targs_consistent: &dyn Fn(&ClassType, &ClassType) -> bool,
     ) -> Linearization {
         let bases = match Vec1::try_from_vec(
             bases_with_mro
@@ -1045,35 +1012,34 @@ impl Linearization {
                         .rev()
                         .collect::<Vec<_>>();
                     let mut check_conflicting_targs = |ctype: &ClassType| -> bool {
-                        if let Some(prev) = seen_ancestors.get(ctype.class_object())
-                            && (prev.targs().len() != ctype.targs().len()
-                                || prev
-                                    .targs()
-                                    .as_slice()
-                                    .iter()
-                                    .zip(ctype.targs().as_slice())
-                                    .any(|(ta, tb)| ta != tb && !ta.is_any() && !tb.is_any()))
-                        {
-                            let ctx = ClassDisplayContext::new(&[cls, ctype.class_object()]);
-                            // TODO: Extend this error message to say where in the class bases the mismatch comes from
-                            // we will need to wire additional information for this.
-                            errors
-                                .error_builder(
-                                    cls.range(),
-                                    ErrorKind::InvalidInheritance,
-                                    format!(
-                                        "Class `{}` has inconsistent type arguments for base class `{}`: `{}` and `{}`",
-                                        ctx.display(cls),
-                                        ctx.display(ctype.class_object()),
-                                        Type::ClassType(prev.clone()),
-                                        Type::ClassType(ctype.clone()),
-                                    ),
-                                )
-                                .emit();
-                            true
-                        } else {
-                            seen_ancestors.insert(ctype.class_object().dupe(), ctype.clone());
-                            false
+                        match seen_ancestors.get(ctype.class_object()) {
+                            // The first specialization seen in walk order is the one the
+                            // MRO keeps, so every later one is checked against it and the
+                            // recorded specialization never changes.
+                            Some(prev) if !targs_consistent(prev, ctype) => {
+                                let ctx = ClassDisplayContext::new(&[cls, ctype.class_object()]);
+                                // TODO: Extend this error message to say where in the class bases the mismatch comes from
+                                // we will need to wire additional information for this.
+                                errors
+                                    .error_builder(
+                                        cls.range(),
+                                        ErrorKind::InvalidInheritance,
+                                        format!(
+                                            "Class `{}` has inconsistent type arguments for base class `{}`: `{}` and `{}`",
+                                            ctx.display(cls),
+                                            ctx.display(ctype.class_object()),
+                                            Type::ClassType(prev.clone()),
+                                            Type::ClassType(ctype.clone()),
+                                        ),
+                                    )
+                                    .emit();
+                                true
+                            }
+                            Some(_) => false,
+                            None => {
+                                seen_ancestors.insert(ctype.class_object().dupe(), ctype.clone());
+                                false
+                            }
                         }
                     };
 

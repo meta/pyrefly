@@ -82,13 +82,20 @@ pub(crate) fn write_escaped_string(
             '\x0b' => Some("\\v"),
             _ => None,
         };
-        if let Some(escape) = escape {
-            if start < i {
-                f.write_str(&s[start..i])?;
-            }
-            f.write_str(escape)?;
-            start = i + c.len_utf8();
+        if escape.is_none() && !c.is_control() {
+            continue;
         }
+        if start < i {
+            f.write_str(&s[start..i])?;
+        }
+        match escape {
+            Some(escape) => f.write_str(escape)?,
+            // Like Python's `repr`, write every other control character as a hex escape, so
+            // that no control character in a string literal reaches the terminal or editor
+            // that displays the type. Control characters are all below U+0100.
+            None => write!(f, "\\x{:02x}", u32::from(c))?,
+        }
+        start = i + c.len_utf8();
     }
     if start < s.len() {
         f.write_str(&s[start..])?;
@@ -105,7 +112,7 @@ pub struct LitEnum {
     /// Raw type assigned to name in class def.
     /// We store the raw type so we can return it when the value or _value_ attribute is accessed.
     /// NOTE: Intentionally excluded from VisitMut so that type transformations like
-    /// `promote_implicit_literals` don't mutate this metadata field, which must remain
+    /// `promote` don't mutate this metadata field, which must remain
     /// stable for `.value` resolution.
     pub ty: Type,
 }

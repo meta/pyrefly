@@ -31,9 +31,11 @@ use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
 
+use crate::env::TypeEnv;
 use crate::equality::TypeEq;
 use crate::equality::TypeEqCtx;
 use crate::function::Deprecation;
+use crate::known_class::KnownClass;
 use crate::types::Substitution;
 use crate::types::TArgs;
 use crate::types::TParams;
@@ -41,7 +43,7 @@ use crate::types::Type;
 
 /// The name of a nominal type, e.g. `str`
 #[derive(Debug, Clone, Display, Dupe)]
-pub struct Class(Arc<ClassInner>);
+pub struct Class(Arc<ClassDef>);
 
 impl Hash for Class {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -110,6 +112,8 @@ pub struct ClassFieldProperties {
     // The field is defined in the class body (not in a method via self.x = ...)
     is_defined_in_class_body: bool,
     attrs_field_specifier: Option<AttrsFieldSpecifier>,
+    /// An explicit Django method-copy policy set in the class body.
+    django_queryset_only: Option<bool>,
     range: TextRange,
     // The range of the docstring following this field, if present
     docstring_range: Option<TextRange>,
@@ -134,6 +138,7 @@ impl ClassFieldProperties {
             is_initialized_on_class: has_default_value,
             is_defined_in_class_body,
             attrs_field_specifier,
+            django_queryset_only: None,
             range,
             docstring_range,
         }
@@ -143,6 +148,11 @@ impl ClassFieldProperties {
         self.is_initialized_on_class
     }
 
+    /// Attach the method-copy policy found during binding.
+    pub fn with_django_queryset_only(mut self, value: Option<bool>) -> Self {
+        self.django_queryset_only = value;
+        self
+    }
     pub fn is_defined_in_class_body(&self) -> bool {
         self.is_defined_in_class_body
     }
@@ -203,6 +213,11 @@ impl ClassFields {
 
     pub fn is_field_annotated(&self, name: &Name) -> bool {
         self.0.get(name).is_some_and(|prop| prop.is_annotated)
+    }
+
+    /// Return the explicit Django method-copy policy, if present.
+    pub fn django_queryset_only(&self, name: &Name) -> Option<bool> {
+        self.0.get(name).and_then(|prop| prop.django_queryset_only)
     }
 
     pub fn is_attrs_field_specifier(&self, name: &Name) -> bool {
@@ -275,24 +290,28 @@ pub enum PrecomputedTParams {
     Precomputed(Arc<TParams>),
 }
 
-/// Align to a cache line to prevent false sharing. `ClassInner` is stored
+/// The data of a class definition.
+///
+/// Align to a cache line to prevent false sharing. `ClassDef` is stored
 /// behind `Arc` and accessed concurrently from multiple threads during
-/// type checking. Without alignment, multiple `Arc<ClassInner>` allocations
+/// type checking. Without alignment, multiple `Arc<ClassDef>` allocations
 /// can land on the same cache line, causing cross-thread invalidation
 /// traffic when any of them are accessed (even read-only, due to the Arc
 /// refcount on adjacent allocations).
 #[repr(align(64))]
-struct ClassInner {
+pub struct ClassDef {
     def_index: ClassDefIndex,
+    /// Only set for top-level classes.
+    known: Option<KnownClass>,
     qname: QName,
     is_protocol: bool,
     deprecation: Option<Deprecation>,
     precomputed_tparams: PrecomputedTParams,
 }
 
-impl Debug for ClassInner {
+impl Debug for ClassDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ClassInner")
+        f.debug_struct("ClassDef")
             .field("index", &self.def_index)
             .field("qname", &self.qname)
             .field("is_protocol", &self.is_protocol)
@@ -317,30 +336,34 @@ pub enum ClassKind {
 }
 
 impl ClassKind {
-    fn from_qname(qname: &QName) -> Self {
-        let name = qname.id();
-        match (qname.module_name().as_str(), name.as_str()) {
-            ("builtins", "staticmethod") => Self::StaticMethod(name.clone()),
-            ("abc", "abstractstaticmethod") => Self::StaticMethod(name.clone()),
-            ("builtins", "classmethod") => Self::ClassMethod(name.clone()),
-            ("abc", "abstractclassmethod") => Self::ClassMethod(name.clone()),
-            ("builtins", "property") => Self::Property(name.clone()),
-            ("abc", "abstractproperty") => Self::Property(name.clone()),
-            ("functools", "cached_property") => Self::CachedProperty(name.clone()),
-            ("cached_property", "threaded_cached_property") => Self::CachedProperty(name.clone()),
-            ("cached_property", "cached_property") => Self::CachedProperty(name.clone()),
-            ("cinder", "cached_property") => Self::CachedProperty(name.clone()),
-            ("cinder", "async_cached_property") => Self::CachedProperty(name.clone()),
-            ("enum", "property") => Self::Property(name.clone()),
-            ("enum", "member") => Self::EnumMember,
-            ("enum", "nonmember") => Self::EnumNonmember,
-            ("dataclasses", "Field") => Self::DataclassField,
+    /// `name` is the class's own name, which the descriptor kinds carry.
+    fn new(known: Option<KnownClass>, name: &Name) -> Self {
+        match known {
+            Some(KnownClass::StaticMethod | KnownClass::AbcAbstractStaticMethod) => {
+                Self::StaticMethod(name.clone())
+            }
+            Some(KnownClass::ClassMethod | KnownClass::AbcAbstractClassMethod) => {
+                Self::ClassMethod(name.clone())
+            }
+            Some(
+                KnownClass::Property | KnownClass::AbcAbstractProperty | KnownClass::EnumProperty,
+            ) => Self::Property(name.clone()),
+            Some(
+                KnownClass::FunctoolsCachedProperty
+                | KnownClass::CachedPropertyThreadedCachedProperty
+                | KnownClass::CachedProperty
+                | KnownClass::CinderCachedProperty
+                | KnownClass::CinderAsyncCachedProperty,
+            ) => Self::CachedProperty(name.clone()),
+            Some(KnownClass::EnumMember) => Self::EnumMember,
+            Some(KnownClass::EnumNonmember) => Self::EnumNonmember,
+            Some(KnownClass::DataclassesField) => Self::DataclassField,
             _ => Self::Class,
         }
     }
 }
 
-impl Display for ClassInner {
+impl Display for ClassDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "class {}", self.qname.id())?;
         writeln!(f, ": ...")
@@ -364,8 +387,14 @@ impl Class {
         is_protocol: bool,
         deprecation: Option<Deprecation>,
     ) -> Self {
-        Self(Arc::new(ClassInner {
+        let known = if parent.is_toplevel() {
+            KnownClass::lookup(module.name(), name.id.as_str())
+        } else {
+            None
+        };
+        Self(Arc::new(ClassDef {
             def_index,
+            known,
             qname: QName::new(name, parent, module),
             is_protocol,
             deprecation,
@@ -386,7 +415,7 @@ impl Class {
     }
 
     pub fn kind(&self) -> ClassKind {
-        ClassKind::from_qname(self.qname())
+        ClassKind::new(self.known(), self.name())
     }
 
     pub fn is_protocol(&self) -> bool {
@@ -417,18 +446,59 @@ impl Class {
         self.0.qname.module()
     }
 
-    pub fn has_qname(&self, module: &str, parent: &NestingContext, name: &str) -> bool {
-        self.0.qname.module_name().as_str() == module
-            && self.0.qname.parent() == parent
-            && self.0.qname.id() == name
+    /// The known class this is, if it is one. Only top-level classes can be known classes.
+    pub fn known(&self) -> Option<KnownClass> {
+        self.0.known
     }
 
-    pub fn has_toplevel_qname(&self, module: &str, name: &str) -> bool {
-        self.has_qname(module, &NestingContext::toplevel(), name)
+    pub fn is(&self, known: KnownClass) -> bool {
+        self.0.known == Some(known)
     }
 
-    pub fn is_builtin(&self, name: &str) -> bool {
-        self.has_toplevel_qname("builtins", name)
+    /// The definition data stored in this `Class`, which `TypeEnv::class_def` returns by default.
+    pub(crate) fn inline_def(&self) -> &ClassDef {
+        &self.0
+    }
+
+    pub fn def_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a ClassDef {
+        env.class_def(self)
+    }
+
+    pub fn name_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a Name {
+        self.def_in(env).qname.id()
+    }
+
+    pub fn qname_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a QName {
+        &self.def_in(env).qname
+    }
+
+    pub fn range_in<E: TypeEnv + ?Sized>(&self, env: &E) -> TextRange {
+        self.def_in(env).qname.range()
+    }
+
+    /// The module that defines this class.
+    pub fn module_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a Module {
+        self.def_in(env).qname.module()
+    }
+
+    pub fn is_protocol_in<E: TypeEnv + ?Sized>(&self, env: &E) -> bool {
+        self.def_in(env).is_protocol
+    }
+
+    pub fn deprecation_in<'a, E: TypeEnv + ?Sized>(
+        &'a self,
+        env: &'a E,
+    ) -> Option<&'a Deprecation> {
+        self.def_in(env).deprecation.as_ref()
+    }
+
+    pub fn kind_in<E: TypeEnv + ?Sized>(&self, env: &E) -> ClassKind {
+        ClassKind::new(self.known(), self.name_in(env))
+    }
+
+    /// The type parameters of this class, which are empty if it is not generic.
+    pub fn tparams_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a TParams {
+        env.class_tparams(self)
     }
 
     /// Key to use for equality purposes. If we have the same module and index,
@@ -450,7 +520,66 @@ impl Class {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[derive(Visit, VisitMut, TypeEq)]
-pub struct ClassType(Class, TArgs);
+pub struct ClassType(Class, TArgs, Option<Arc<DjangoClassMetadata>>);
+
+/// Construction-time Django specializations on nominal class instances.
+///
+/// The manager resolves generated members against its queryset. A specialized class uses
+/// its effective base for inherited members and nominal upcasts. Type traversal and substitution
+/// include this data, and instance binding preserves it when replacing `Self`. Explicit method
+/// return types stand alone: neither their model nor their row is rebound to the manager's model.
+/// Fields retain construction-specific accessor and override contracts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(TypeEq)]
+pub enum DjangoClassMetadata {
+    Manager {
+        queryset: ClassType,
+    },
+    SpecializedBase {
+        base: ClassType,
+    },
+    Field {
+        get_type: Type,
+        set_type: Type,
+        override_type: Type,
+    },
+}
+
+impl Visit<Type> for Arc<DjangoClassMetadata> {
+    fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
+        match self.as_ref() {
+            DjangoClassMetadata::Manager { queryset } => queryset.visit(f),
+            DjangoClassMetadata::SpecializedBase { base } => base.visit(f),
+            DjangoClassMetadata::Field {
+                get_type,
+                set_type,
+                override_type,
+            } => {
+                f(get_type);
+                f(set_type);
+                f(override_type);
+            }
+        }
+    }
+}
+
+impl VisitMut<Type> for Arc<DjangoClassMetadata> {
+    fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
+        match Arc::make_mut(self) {
+            DjangoClassMetadata::Manager { queryset } => queryset.visit_mut(f),
+            DjangoClassMetadata::SpecializedBase { base } => base.visit_mut(f),
+            DjangoClassMetadata::Field {
+                get_type,
+                set_type,
+                override_type,
+            } => {
+                f(get_type);
+                f(set_type);
+                f(override_type);
+            }
+        }
+    }
+}
 
 impl Display for ClassType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -462,7 +591,7 @@ impl ClassType {
     /// Create a class type.
     /// The `targs` must match the `tparams`, if this fails we will panic.
     pub fn new(class: Class, targs: TArgs) -> Self {
-        Self(class, targs)
+        Self(class, targs, None)
     }
 
     pub fn class_object(&self) -> &Class {
@@ -490,7 +619,23 @@ impl ClassType {
     /// This is used to propagate instantiation of base class type parameters when computing
     /// the MRO.
     pub fn substitute_with(&self, substitution: &Substitution) -> Self {
-        Self(self.0.dupe(), self.1.substitute_with(substitution))
+        let mut result = self.clone();
+        result.1 = self.1.substitute_with(substitution);
+        if let Some(metadata) = &mut result.2 {
+            metadata.recurse_mut(&mut |ty| substitution.substitute_into_mut(ty));
+        }
+        result
+    }
+
+    /// Attach a Django specialization to this nominal class instance.
+    pub fn with_django_metadata(mut self, metadata: DjangoClassMetadata) -> Self {
+        self.2 = Some(Arc::new(metadata));
+        self
+    }
+
+    /// Return the construction-time Django specialization, if present.
+    pub fn django_metadata(&self) -> Option<&DjangoClassMetadata> {
+        self.2.as_deref()
     }
 
     pub fn substitution(&self) -> Substitution<'_> {
@@ -509,11 +654,51 @@ impl ClassType {
         Type::ClassType(self)
     }
 
-    pub fn has_qname(&self, module: &str, name: &str) -> bool {
-        self.0.has_toplevel_qname(module, name)
+    pub fn known(&self) -> Option<KnownClass> {
+        self.0.known()
     }
 
-    pub fn is_builtin(&self, name: &str) -> bool {
-        self.0.is_builtin(name)
+    pub fn is(&self, known: KnownClass) -> bool {
+        self.0.is(known)
+    }
+
+    pub fn def_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a ClassDef {
+        self.0.def_in(env)
+    }
+
+    pub fn name_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a Name {
+        self.0.name_in(env)
+    }
+
+    pub fn qname_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a QName {
+        self.0.qname_in(env)
+    }
+
+    pub fn range_in<E: TypeEnv + ?Sized>(&self, env: &E) -> TextRange {
+        self.0.range_in(env)
+    }
+
+    pub fn module_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a Module {
+        self.0.module_in(env)
+    }
+
+    pub fn is_protocol_in<E: TypeEnv + ?Sized>(&self, env: &E) -> bool {
+        self.0.is_protocol_in(env)
+    }
+
+    pub fn deprecation_in<'a, E: TypeEnv + ?Sized>(
+        &'a self,
+        env: &'a E,
+    ) -> Option<&'a Deprecation> {
+        self.0.deprecation_in(env)
+    }
+
+    pub fn kind_in<E: TypeEnv + ?Sized>(&self, env: &E) -> ClassKind {
+        self.0.kind_in(env)
+    }
+
+    /// The type parameters of the class, which are empty if it is not generic.
+    pub fn tparams_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a TParams {
+        self.0.tparams_in(env)
     }
 }

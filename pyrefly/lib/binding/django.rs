@@ -6,6 +6,7 @@
  */
 
 use ruff_python_ast::Expr;
+use ruff_python_ast::Stmt;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
@@ -13,12 +14,33 @@ use starlark_map::small_map::SmallMap;
 use crate::binding::binding::ClassFieldDefinition;
 use crate::binding::binding::ExprOrBinding;
 use crate::binding::bindings::BindingsBuilder;
+use crate::binding::bindings::InitializedInClass;
 
 const PRIMARY_KEY: Name = Name::new_static("primary_key");
 const FOREIGN_KEY: Name = Name::new_static("ForeignKey");
 const ONE_TO_ONE_FIELD: Name = Name::new_static("OneToOneField");
 const MANY_TO_MANY_FIELD: Name = Name::new_static("ManyToManyField");
 const CHOICES: Name = Name::new_static("choices");
+
+/// Read explicit method-copy flags once, before class statements are consumed.
+pub fn collect_django_queryset_only(body: &[Stmt]) -> SmallMap<Name, bool> {
+    let mut flags = SmallMap::new();
+    for stmt in body {
+        if let Stmt::Assign(assign) = stmt
+            && let Expr::BooleanLiteral(value) = assign.value.as_ref()
+        {
+            for target in &assign.targets {
+                if let Expr::Attribute(attr) = target
+                    && attr.attr.as_str() == "queryset_only"
+                    && let Expr::Name(method) = attr.value.as_ref()
+                {
+                    flags.insert(method.id.clone(), value.value);
+                }
+            }
+        }
+    }
+    flags
+}
 
 /// Django-specific field information detected during binding phase.
 #[derive(Clone, Debug, Default)]
@@ -39,13 +61,13 @@ impl<'a> BindingsBuilder<'a> {
     /// (primary_key, ForeignKey, choices).
     pub fn extract_django_fields_from_class_body(
         &self,
-        field_definitions: &SmallMap<Name, (ClassFieldDefinition, TextRange)>,
+        field_definitions: &SmallMap<Name, (ClassFieldDefinition, TextRange, InitializedInClass)>,
     ) -> DjangoFieldInfo {
         let mut primary_key_field = None;
         let mut foreign_key_like_fields = Vec::new();
         let mut relation_fields = Vec::new();
         let mut fields_with_choices = Vec::new();
-        for (name, (definition, _range)) in field_definitions.iter() {
+        for (name, (definition, _range, _initialized)) in field_definitions.iter() {
             if let ClassFieldDefinition::AssignedInBody { value, .. } = definition
                 && let ExprOrBinding::Expr(e) = value.as_ref()
                 && let Some(call) = e.as_call_expr()

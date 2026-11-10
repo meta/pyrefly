@@ -233,6 +233,14 @@ pub(crate) fn type_to_structured(
             let inner_idx = type_to_structured(inner, table, pending_class_traits);
             insert_wrapper_other_form("typing.Type", inner_idx, table)
         }
+        Type::SpecializedClassDef(class_type) => {
+            let inner_idx = type_to_structured(
+                &Type::ClassType(class_type.clone()),
+                table,
+                pending_class_traits,
+            );
+            insert_wrapper_other_form("typing.Type", inner_idx, table)
+        }
         Type::TypedDict(td) | Type::PartialTypedDict(td) => {
             let (qname, trait_name) = match (ty, td) {
                 (Type::PartialTypedDict(_), TypedDict::TypedDict(inner)) => {
@@ -424,6 +432,8 @@ pub(crate) fn type_to_structured(
         // typing.Any in the report. This is fine for the initial version but may
         // hide unsupported types; tighten this as CinderX coverage expands.
         Type::Materialization
+        | Type::Falsy
+        | Type::Truthy
         | Type::Var(_)
         | Type::Intersect(_)
         | Type::SpecialForm(_)
@@ -439,10 +449,8 @@ pub(crate) fn type_to_structured(
         | Type::TypeForm(_)
         | Type::Sentinel(_)
         | Type::ElementOfTypeVarTuple(_)
-        | Type::ShapedArray(_)
         | Type::IntTuple(_)
         | Type::NamedInts(_)
-        | Type::NNModule(_)
         | Type::DataFrame(_)
         | Type::Series(_)
         | Type::Int(_)

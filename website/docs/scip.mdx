@@ -1,0 +1,58 @@
+---
+title: SCIP Indexing
+description: Generate a SCIP code-navigation index with Pyrefly.
+---
+
+{/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */}
+
+# SCIP Indexing
+
+Pyrefly can generate a [SCIP](https://github.com/scip-code/scip) index for code-navigation
+tools that consume this format. The index records definitions, references, hover documentation,
+and implementation relationships.
+
+From the project root, run:
+
+```sh
+pyrefly check --report-scip index.scip
+```
+
+Pyrefly uses its normal configuration and import resolution. Install the project's dependencies
+in the Python environment you use for indexing so that references to external packages can be
+resolved. The index contains documents for the files being checked, with paths relative to the
+current directory. Use `--relative-to path/to/project` to select a different project root.
+In either case, only files under the project root become documents.
+
+## Package identity
+
+The project's symbols use the package name and version from `[project]` in the root's
+`pyproject.toml`, falling back to `[tool.poetry]`. Override either value explicitly:
+
+```sh
+pyrefly check --report-scip index.scip \
+  --report-scip-project-name my-package \
+  --report-scip-project-version 1.0.0
+```
+
+A missing name or version is represented as `.` in SCIP symbols. External package identities
+come from installed distribution metadata; bundled standard-library stubs use the Python version
+configured for the project.
+
+## Compatibility
+
+The output is a binary SCIP index, not JSON. It uses the `scip-python` symbol scheme for
+compatibility with existing consumers, but its output is not identical to Sourcegraph's
+[scip-python](https://github.com/sourcegraph/scip-python) indexer.
+
+Type errors are still reported normally and can make the command return a nonzero exit status
+even when it writes an index.
+
+SCIP reporting supports one-shot checks, not `--watch`: incremental checks do not rewrite
+unchanged documents. It also conflicts with `--debug-info`, `--report-binding-memory`,
+`--report-glean`, `--report-pysa`, `--report-trace`, `--report-demand-tree`, and `--report-cinderx`:
+those reports need state that streaming SCIP releases.

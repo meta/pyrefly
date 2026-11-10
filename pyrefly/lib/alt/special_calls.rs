@@ -12,6 +12,8 @@
  */
 
 use pyrefly_python::dunder;
+use pyrefly_types::display::TypeDisplayContext;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
 use pyrefly_types::shaped_array::is_tuple_carrier_shape_middle;
@@ -27,6 +29,7 @@ use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
+use crate::alt::callable::CallValue;
 use crate::alt::expr::ExprOptions;
 use crate::alt::shape_extension::is_int_tuple_bound;
 use crate::alt::solve::TypeFormContext;
@@ -41,6 +44,7 @@ use crate::types::callable::Params;
 use crate::types::callable::unexpected_keyword;
 use crate::types::class::Class;
 use crate::types::function::FunctionKind;
+use crate::types::literal::Lit;
 use crate::types::tuple::Tuple;
 use crate::types::types::Forallable;
 use crate::types::types::Type;
@@ -193,6 +197,60 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         default
     }
 
+    /// Refine a literal-name `getattr` call when attribute lookup succeeds without errors.
+    pub fn call_getattr(
+        &self,
+        obj_arg: CallValue,
+        attr_name: &Name,
+        attr_range: TextRange,
+        default_arg: Option<CallValue>,
+        callee_ty: Type,
+        func_range: TextRange,
+        arguments_range: TextRange,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+    ) -> Type {
+        // Infer each argument once and reuse its type for validation and lookup.
+        // The receiver parameter is `object`, while the default contributes to
+        // the result and needs the call's contextual hint.
+        let obj_ty = obj_arg.infer(self, errors);
+        let default = default_arg.map(|arg| (arg.infer_with_hint(self, hint, errors), arg.range()));
+        let name_ty = Lit::Str(attr_name.as_str().into()).to_implicit_type();
+        let mut args = vec![
+            CallArg::ty(&obj_ty, obj_arg.range()),
+            CallArg::ty(&name_ty, attr_range),
+        ];
+        if let Some((ty, range)) = &default {
+            args.push(CallArg::ty(ty, *range));
+        }
+        let fallback = self
+            .freeform_call_infer(
+                callee_ty,
+                &args,
+                &[],
+                func_range,
+                arguments_range,
+                hint,
+                errors,
+            )
+            .ty;
+        if !matches!(obj_ty, Type::ClassType(_)) {
+            return fallback;
+        }
+        // Hook or descriptor errors make refinement unavailable, but do not invalidate the call.
+        let lookup_errors = self.error_collector();
+        let attr_ty =
+            self.attr_infer_for_type(&obj_ty, attr_name, attr_range, &lookup_errors, None);
+        if !lookup_errors.is_empty() || attr_ty.is_error() {
+            return fallback;
+        }
+        if let Some((default_ty, _)) = default {
+            self.unions(vec![attr_ty, default_ty])
+        } else {
+            attr_ty
+        }
+    }
+
     pub fn call_reveal_type(
         &self,
         args: &[Expr],
@@ -207,11 +265,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             type_info.visit_mut(&mut |ty| {
                 *ty = self.for_display(ty.clone());
             });
+            let mut types = Vec::new();
+            type_info.visit(&mut |ty| types.push(ty));
+            let mut ctx = TypeDisplayContext::new(&types);
+            if self.solver().config.reveal_type_qualified_names {
+                ctx.always_display_module_name_except_builtins();
+            }
             self.error(
                 errors,
                 range,
                 ErrorKind::RevealType,
-                format!("revealed type: {type_info}"),
+                format!("revealed type: {}", type_info.display_with(&ctx)),
             );
             ret
         } else {
@@ -284,10 +348,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let actual = self
                 .solver()
                 .force(self.expr_infer_with_hint(&args[0], hint, errors));
-            let (actual_shape, return_actual) = match &actual {
-                Type::ShapedArray(array) => (Some(array.shape()), true),
-                _ if actual.is_any() => (Some(IntTuple::shapeless()), false),
-                _ => (self.assert_shape_input_to_int_tuple(&actual), false),
+            let actual_shape = if actual.is_any() {
+                Some(IntTuple::shapeless())
+            } else {
+                self.assert_shape_input_to_int_tuple(&actual)
             };
             if let Some(actual_shape) = actual_shape {
                 if let Some(shape) = self.parse_assert_shape_expr(&args[1], errors) {
@@ -320,7 +384,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             ),
                         );
                     }
-                    if return_actual { actual } else { expected }
+                    expected
                 } else {
                     self.heap.mk_any_error()
                 }
@@ -559,7 +623,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Decompose class_info, which could be a union or tuple
         for class_info_ty in self.as_class_info(class_info) {
             if let Type::ClassDef(class_info_cls) = &class_info_ty {
-                if class_info_cls.has_toplevel_qname("typing", "Any") {
+                if class_info_cls.is(KnownClass::TypingAny) {
                     self.error(
                         errors,
                         range,
@@ -672,7 +736,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                 }
             } else if contains_subscript
-                && matches!(&class_info_ty, Type::Type(f) if matches!(&**f, Type::ClassType(cls) if !cls.targs().is_empty()))
+                && (matches!(&class_info_ty, Type::SpecializedClassDef(_))
+                    || matches!(&class_info_ty, Type::Type(f) if matches!(&**f, Type::ClassType(cls) if !cls.targs().is_empty())))
             {
                 // If the raw expression contains something that structurally looks like `A[T]` and
                 // part of the expression resolves to a parameterized class type, then we likely have a

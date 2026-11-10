@@ -833,6 +833,7 @@ c = f"{arr['foo']}"  # E: Cannot index into `list[int]`
 
 testcase!(
     test_checked_fstrings,
+    TestEnv::new().enable_invalid_format_spec_error(),
     r#"
 from datetime import date
 
@@ -865,6 +866,7 @@ f"{CustomFormat():whatever}"
 
 testcase!(
     test_checked_fstrings_custom_builtin_subclasses,
+    TestEnv::new().enable_invalid_format_spec_error(),
     r#"
 class CustomInt(int):
     def __format__(self, format_spec: str) -> str:
@@ -909,6 +911,7 @@ f"{CustomBytes():>10}"
 
 testcase!(
     test_checked_fstrings_builtin_options,
+    TestEnv::new().enable_invalid_format_spec_error(),
     r#"
 s = "s"
 f"{b'xy':>10}"  # E: doesn't support format specifiers
@@ -965,6 +968,7 @@ f"{1j:x>010}"
 
 testcase!(
     test_checked_fstrings_unknown_inheritance,
+    TestEnv::new().enable_invalid_format_spec_error(),
     r#"
 from typing import Any
 
@@ -996,6 +1000,39 @@ class D(C):
 
 f"{C():>10}"
 f"{D():>10}"
+"#,
+);
+
+testcase!(
+    test_checked_fstrings_default_policy,
+    TestEnv::one_with_path("third_party", "third_party.pyi", "class Scalar: ..."),
+    r#"
+from third_party import Scalar
+from typing import SupportsIndex
+
+def display(value: object, scalar: Scalar, index: SupportsIndex) -> None:
+    f"{value:>10}"
+    f"{scalar:.2f}"
+    f"{index:05d}"
+
+f"{None:>10}"
+f"{'x':.2f}"
+f"{1:r}"
+f"{1:.2d}"
+f"{len(False):d}"  # E: Protocol `Sized` requires attribute `__len__`
+"#,
+);
+
+testcase!(
+    test_checked_fstrings_rule_suppression,
+    TestEnv::new()
+        .enable_invalid_format_spec_error()
+        .enable_unused_ignore_errors(),
+    r#"
+f"{None:>10}"  # pyrefly: ignore[invalid-format-spec]
+f"{'x':.2f}"  # pyrefly: ignore[invalid-format-spec]
+f"{1:r}"  # pyrefly: ignore[invalid-format-spec]
+f"{1:.2d}"  # pyrefly: ignore[invalid-format-spec]
 "#,
 );
 
@@ -1337,13 +1374,32 @@ for a in A:  # E: Type `type[A]` is not iterable
 );
 
 testcase!(
-    bug = "Although A[int] is a generic alias and can be iterated over, type[A[int]] is a type and cannot be iterated over.",
+    test_specialized_class_def_union_display,
+    r#"
+from abc import ABC, abstractmethod
+from typing import reveal_type
+
+class C[T]: ...
+class D[T]: ...
+reveal_type([C[int], D[int]])  # E: revealed type: list[type[C[int]] | type[D[int]]]
+reveal_type([C, D])  # E: revealed type: list[type[C] | type[D]]
+
+class Shape[T](ABC):
+    @abstractmethod
+    def area(self) -> T: ...
+
+for constructor in [Shape[int], Shape[str]]:
+    constructor()  # E: Cannot instantiate `Shape`
+"#,
+);
+
+testcase!(
     test_getitem_cannot_iterate_generic_class,
     r#"
 class A[T]:
     def __getitem__(self, i: int) -> int: ...
 def f(x: type[A[int]]):
-    for a in x:  # Expect an error here
+    for a in x:  # E: Type `type[A[int]]` is not iterable
         pass
     "#,
 );
@@ -2940,6 +2996,26 @@ Z = Annotated[0, 'not a type']  # E: Expected a type form, got instance of `Lite
     "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/5429
+testcase!(
+    test_qualifier_subscript_as_runtime_value,
+    r#"
+from typing import Any, ClassVar, Final, assert_type
+from typing_extensions import NotRequired, ReadOnly, Required
+def mark_optional(hints: dict[str, Any]) -> dict[str, Any]:
+    return {key: NotRequired[hint] for key, hint in hints.items()}
+def f(hint: Any) -> None:
+    assert_type(NotRequired[hint], object)
+    assert_type(Required[int], object)
+    assert_type(ReadOnly[int], object)
+    assert_type(ClassVar[int], object)
+    assert_type(Final[int], object)
+    NotRequired[undefined]  # E: Could not find name `undefined`
+X = NotRequired[int]
+def g(x: X) -> None: ...  # E: Expected a type form, got instance of `object`
+    "#,
+);
+
 testcase!(
     test_typing_annotated_alias,
     r#"
@@ -3148,4 +3224,23 @@ def main(a: DataFrame) -> None:
     for i, s in enumerate(reversed(a)):
         func(s)
     "#,
+);
+
+testcase!(
+    test_reveal_type_qualified_names,
+    TestEnv::one("foo", "class Box[T]:\n    attr: object").enable_reveal_type_qualified_names(),
+    r#"
+from typing import reveal_type
+import datetime
+from foo import Box
+
+class Local: ...
+
+def f(b: Box[datetime.date], local: Local, xs: list[int]) -> None:
+    reveal_type(b)  # E: revealed type: foo.Box[datetime.date]
+    reveal_type(local)  # E: revealed type: main.Local
+    reveal_type(xs)  # E: revealed type: list[int]
+    if isinstance(b.attr, datetime.date):
+        reveal_type(b)  # E: revealed type: foo.Box[datetime.date] (_.attr: datetime.date)
+"#,
 );

@@ -69,6 +69,23 @@ def f(x: str) -> None:
 [0]
 ```
 
+## `--suppress-errors` should not suppress a warning when `--min-severity` is not set
+
+```scrut
+$ mkdir $TMPDIR/suppress_default_warning && \
+> echo 'x: str = 0' > $TMPDIR/suppress_default_warning/main.py && \
+> : > $TMPDIR/suppress_default_warning/pyrefly.toml && \
+> $PYREFLY check $TMPDIR/suppress_default_warning/main.py \
+>     --config $TMPDIR/suppress_default_warning/pyrefly.toml \
+>     --warn=bad-assignment \
+>     --suppress-errors \
+>     --summary=none \
+>     >/dev/null 2>/dev/null && \
+> cat $TMPDIR/suppress_default_warning/main.py
+x: str = 0
+[0]
+```
+
 ## `--suppress-errors` should not suppress an unused `# type: ignore`
 
 ```scrut
@@ -83,5 +100,25 @@ $ mkdir $TMPDIR/suppress_unused_type_ignore && \
 >     >/dev/null 2>/dev/null; \
 > cat $TMPDIR/suppress_unused_type_ignore/main.py
 x = 1  # type: ignore
+[0]
+```
+
+## `--suppress-errors` respects the `only` filter from the configuration
+
+```scrut
+$ mkdir -p $TMPDIR/suppress_only_config && \
+> printf 'x: str = 1\ndef f() -> int:\n    return "a"\n' > $TMPDIR/suppress_only_config/main.py && \
+> printf 'only = ["bad-assignment"]\n' > $TMPDIR/suppress_only_config/pyrefly.toml && \
+> cd $TMPDIR/suppress_only_config && \
+> $PYREFLY check main.py \
+>     --config pyrefly.toml \
+>     --suppress-errors \
+>     --summary=none \
+>     >/dev/null 2>/dev/null; \
+> cat main.py
+# pyrefly: ignore[bad-assignment]
+x: str = 1
+def f() -> int:
+    return "a"
 [0]
 ```

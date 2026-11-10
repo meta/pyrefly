@@ -28,6 +28,7 @@ use crate::binding::binding::ExhaustiveBinding;
 use crate::binding::binding::ExhaustivenessKind;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyExpect;
+use crate::binding::binding::MatchCaseNegations;
 use crate::binding::binding::NarrowUseLocation;
 use crate::binding::binding::SizeExpectation;
 use crate::binding::binding::UnpackedPosition;
@@ -289,7 +290,7 @@ impl<'a> BindingsBuilder<'a> {
     ) -> PatternNarrowOps {
         // In typical code, match patterns are more like static types than normal values, so
         // we ignore match patterns for first-usage tracking.
-        let narrowing_usage = &mut Usage::NonPinningValue(None);
+        let narrowing_usage = &mut Usage::Inspection;
         match pattern {
             Pattern::MatchValue(mut p) => {
                 self.ensure_expr(&mut p.value, narrowing_usage);
@@ -926,58 +927,57 @@ impl<'a> BindingsBuilder<'a> {
             if case_always_matches {
                 exhaustive = true;
             }
-            self.bind_narrow_ops(
-                &negated_prev_ops,
-                NarrowUseLocation::Start(case_range),
-                &Usage::NonPinningValue(None),
-            );
+            self.bind_narrow_ops(&negated_prev_ops, NarrowUseLocation::Start(case_range));
             // First try to project previous narrows directly onto the already-evaluated
             // match subject. This is required for cases like `match self.a`, where the
             // carried narrow is stored as a facet on `self` but the branch-local subject
             // is already the projected `self.a` expression.
-            let case_subject_idx = if let Some(narrowing_subject) = match_subject.as_single()
+            // The negations passed to the reachability check are unprojected, to match the
+            // coordinates of `narrow_ops_for_case`.
+            let prev_narrow = if let Some(narrowing_subject) = match_subject.as_single()
                 && let Some((narrow_op, op_range)) =
                     negated_prev_ops.0.get(narrowing_subject.name())
                 && let Some(projected_narrow_op) = narrow_op.rebase_onto_subject(narrowing_subject)
             {
-                self.insert_binding(
-                    Key::PatternNarrow(case_range),
-                    Binding::Narrow(
-                        subject_idx,
-                        Box::new(projected_narrow_op),
-                        NarrowUseLocation::Start(*op_range),
-                    ),
-                )
-            } else if let Some((narrow_op, op_range)) = &negated_prev_subject {
-                self.insert_binding(
-                    Key::PatternNarrow(case_range),
-                    Binding::Narrow(
-                        subject_idx,
-                        Box::new(narrow_op.clone()),
-                        NarrowUseLocation::Start(*op_range),
-                    ),
-                )
-            } else if match_subject.as_single().is_some() && !negated_prev_ops.0.is_empty() {
-                self.insert_binding(
-                    Key::PatternNarrow(case_range),
-                    Binding::Expr(None, Box::new(*subject_expr.clone())),
-                )
+                Some((projected_narrow_op, (narrow_op.clone(), *op_range)))
             } else {
-                subject_idx
+                negated_prev_subject
+                    .as_ref()
+                    .map(|negations| (negations.0.clone(), negations.clone()))
+            };
+            let (case_subject_idx, prev_case_negations) = match prev_narrow {
+                Some((binding_op, negations)) => (
+                    self.insert_binding(
+                        Key::PatternNarrow(case_range),
+                        Binding::Narrow(
+                            subject_idx,
+                            Box::new(binding_op),
+                            NarrowUseLocation::Start(negations.1),
+                        ),
+                    ),
+                    Some(Box::new(MatchCaseNegations {
+                        op: negations.0,
+                        range: negations.1,
+                        declared_subject_idx: subject_idx,
+                    })),
+                ),
+                None if match_subject.as_single().is_some() && !negated_prev_ops.0.is_empty() => (
+                    self.insert_binding(
+                        Key::PatternNarrow(case_range),
+                        Binding::Expr(None, Box::new(*subject_expr.clone())),
+                    ),
+                    None,
+                ),
+                None => (subject_idx, None),
             };
             let mut new_narrow_ops =
                 self.bind_pattern(match_subject.clone(), pattern, case_subject_idx);
-            self.bind_narrow_ops(
-                &new_narrow_ops.scope,
-                NarrowUseLocation::Span(case_range),
-                &Usage::NonPinningValue(None),
-            );
+            self.bind_narrow_ops(&new_narrow_ops.scope, NarrowUseLocation::Span(case_range));
             // Body-only narrows (e.g. sub-pattern facet narrows) apply positively to the
             // case body but are excluded from the negation accumulated below.
             self.bind_narrow_ops(
                 &new_narrow_ops.body_only,
                 NarrowUseLocation::Span(case_range),
-                &Usage::NonPinningValue(None),
             );
             // Reachability is checked before the guard is bound (below). This is
             // intentional: if the pattern itself can never match the subject type,
@@ -1000,7 +1000,8 @@ impl<'a> BindingsBuilder<'a> {
                     BindingExpect::MatchCaseReachability {
                         subject_idx: case_subject_idx,
                         narrowing_subject,
-                        narrow_ops_for_case: (Box::new(op), range),
+                        narrow_ops_for_case: Box::new((op, range)),
+                        prev_case_negations,
                         case_range,
                     },
                 );
@@ -1009,11 +1010,7 @@ impl<'a> BindingsBuilder<'a> {
             if let Some(mut guard) = guard {
                 let guard_link = self.bind_bool_condition(&mut guard);
                 let guard_narrow_ops = NarrowOps::from_expr(self, Some(guard.as_ref()));
-                self.bind_narrow_ops(
-                    &guard_narrow_ops,
-                    NarrowUseLocation::Span(guard.range()),
-                    &Usage::NonPinningValue(None),
-                );
+                self.bind_narrow_ops(&guard_narrow_ops, NarrowUseLocation::Span(guard.range()));
                 // Route the guard through `BindingExpect::Bool` (like `if`/`while`) so it
                 // receives the same condition checks, e.g. `implicit-bool`.
                 self.insert_bool_condition(guard_link, *guard);
@@ -1086,7 +1083,7 @@ impl<'a> BindingsBuilder<'a> {
                     BindingExpect::MatchExhaustiveness {
                         subject_idx,
                         narrowing_subject,
-                        narrow_ops_for_fall_through: (Box::new(op), range),
+                        narrow_ops_for_fall_through: Box::new((op, range)),
                         subject_range: match_subject.subject_range(x.subject.range()),
                         show_subject_expr: match_subject.is_synthetic(),
                     },

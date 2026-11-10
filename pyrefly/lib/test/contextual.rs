@@ -237,45 +237,91 @@ assert_type(keep([]), list[Any])
 );
 
 testcase!(
+    test_any_bounded_typevar_preserves_structure,
+    r#"
+from typing import Any, assert_type, overload
+
+class Array[S, D]: ...
+
+@overload
+def stack[S: tuple[int, int, *tuple[Any, ...]], D](
+    xs: list[Array[S, D]],
+) -> Array[S, D]: ...
+@overload
+def stack[D](xs: list[Array[tuple[int], D]]) -> Array[tuple[int, int], D]: ...
+def stack(xs):
+    return Array()
+
+a: Array[tuple[int], int] = Array()
+assert_type(stack([a, a]), Array[tuple[int, int], int])
+b: Array[tuple[int, int, int], str] = Array()
+assert_type(stack([b, b]), Array[tuple[int, int, int], str])
+
+def keep[T: dict[float, Any]](x: T) -> T: ...
+assert_type(keep({0: "a"}), dict[float, str])
+    "#,
+);
+
+testcase!(
+    test_any_bounded_typevar_preserves_subclass,
+    r#"
+from typing import Any, assert_type
+
+class Scalar[T]:
+    def item(self) -> T: ...
+class Float32(Scalar[float]): ...
+class Array[S, D]:
+    def scalar(self) -> D: ...
+
+def stack[T: Scalar[Any]](
+    xs: list[T | Array[tuple[int], T]],
+) -> Array[tuple[int, int], T]: ...
+
+a: Array[tuple[int], Float32] = Array()
+assert_type(stack([a, a]), Array[tuple[int, int], Float32])
+    "#,
+);
+
+// The `Any` in the element bound supplies no hint for a nested empty literal.
+testcase!(
     test_any_bounded_typevar_nested_empty_literal,
     r#"
 from typing import Any, reveal_type
 
 def keep[T: list[Any]](x: T) -> T: ...
 
-reveal_type(keep([[]]))  # E: revealed type: list[list[Any]]
-reveal_type(keep([[], [1]]))  # E: revealed type: list[list[int] | list[Any]]
-reveal_type(keep([[] for _ in [0]]))  # E: revealed type: list[list[Any]]
-reveal_type(keep([set()]))  # E: revealed type: list[set[Any]]
-reveal_type(keep([list()]))  # E: revealed type: list[list[Any]]
-reveal_type(keep([{}]))  # E: revealed type: list[dict[Any, Any]]
+reveal_type(keep([[]]))  # E: revealed type: list[list[@_]]
+reveal_type(keep([[], [1]]))  # E: revealed type: list[list[int] | list[@_]]
+reveal_type(keep([[] for _ in [0]]))  # E: revealed type: list[list[@_]]
+reveal_type(keep([set()]))  # E: revealed type: list[set[@_]]
+reveal_type(keep([list()]))  # E: revealed type: list[list[@_]]
+reveal_type(keep([{}]))  # E: revealed type: list[dict[@_, @_]]
     "#,
 );
 
 // https://github.com/facebook/pyrefly/issues/3265
 // Any in a bound should preserve the concrete element types asserted below.
 testcase!(
-    bug = "Any bounds erase inferred container element types",
     test_any_bounded_typevar_container_hints,
     r#"
 from typing import Any, Iterator, Protocol, assert_type
 
 def keep_set[T: set[Any]](x: T) -> T: ...
 def keep_dict[T: dict[Any, Any]](x: T) -> T: ...
-assert_type(keep_set({0}), set[int])  # E: assert_type(set[Any], set[int]) failed
-assert_type(keep_set({x for x in [0]}), set[int])  # E: assert_type(set[Any], set[int]) failed
-assert_type(keep_dict({0: "a"}), dict[int, str])  # E: assert_type(dict[Any, Any], dict[int, str]) failed
-assert_type(keep_dict({x: str(x) for x in [0]}), dict[int, str])  # E: assert_type(dict[Any, Any], dict[int, str]) failed
+assert_type(keep_set({0}), set[int])
+assert_type(keep_set({x for x in [0]}), set[int])
+assert_type(keep_dict({0: "a"}), dict[int, str])
+assert_type(keep_dict({x: str(x) for x in [0]}), dict[int, str])
 assert_type(keep_dict({}), dict[Any, Any])
-assert_type(keep_dict({0: []}), dict[int, list[Any]])  # E: assert_type(dict[Any, Any], dict[int, list[Any]]) failed
+assert_type(keep_dict({0: []}), dict[int, list[Any]])
 
 class ReturnsIterator[T](Protocol):
     def __iter__(self) -> T: ...
 
 def iterator[I: Iterator[Any]](x: ReturnsIterator[I]) -> I: ...
 assert_type(iterator([0]), Iterator[int])
-assert_type(iterator({0}), Iterator[int])  # E: assert_type(Iterator[Any], Iterator[int]) failed
-assert_type(iterator({0: "a"}), Iterator[int])  # E: assert_type(Iterator[Any], Iterator[int]) failed
+assert_type(iterator({0}), Iterator[int])
+assert_type(iterator({0: "a"}), Iterator[int])
 
 # Concrete bounds and explicit Any annotations still supply contextual types.
 def floats[T: list[float]](x: T) -> T: ...
@@ -288,7 +334,6 @@ assert_type(explicit([0]), list[Any])
 // An unconstrained generic return should not narrow permanently from its first mutation.
 // Both appends should succeed, and xs should retain type list[Any].
 testcase!(
-    bug = "Repeated append over-narrows an empty generic list return",
     test_any_bounded_typevar_empty_list_repeated_append,
     r#"
 from typing import Any, assert_type
@@ -298,8 +343,8 @@ def keep[T: list[Any]](x: T) -> T: ...
 def f():
     xs = keep([])
     xs.append(1)
-    xs.append(2)  # E: Argument `Literal[2]` is not assignable to parameter `object` with type `Literal[1]` in function `list.append`
-    assert_type(xs, list[Any])  # E: assert_type(list[Literal[1]] | list[Any], list[Any]) failed
+    xs.append(2)
+    assert_type(xs, list[Any])
     "#,
 );
 
@@ -413,7 +458,7 @@ x2: list[A] = True and [B()]
 testcase!(
     test_context_boolop_soft,
     r#"
-from typing import TypedDict, assert_type
+from typing import TypedDict, assert_type, reveal_type
 class A: ...
 class B(A): ...
 class C: ...
@@ -422,9 +467,9 @@ class TD(TypedDict):
     x: int
 def test(x: list[A] | None, y: list[C] | None, z: TD | None) -> None:
     assert_type(x or [B()], list[A])
-    assert_type(x or [0], list[A] | list[int])
-    assert_type(x or y or [B()], list[A] | list[C])
-    assert_type(x or y or [D()], list[A] | list[C])
+    reveal_type(x or [0])  # E: (list[A] & Truthy) | list[int]
+    reveal_type(x or y or [B()])  # E: list[A] | (list[C] & Truthy)
+    reveal_type(x or y or [D()])  # E: (list[A] & Truthy) | list[C]
     assert_type(z or {"x": 0}, TD)
     assert_type(z or {"x": ""}, TD | dict[str, str])
 "#,
@@ -1069,4 +1114,43 @@ class C:
 def f(xs: list[C]) -> C | None:
     return max(xs, key=lambda x: x.missing, default=None)  # E: Object of class `C` has no attribute `missing`
 "#,
+);
+
+testcase!(
+    test_literal_dict_or,
+    r#"
+from typing import Literal
+
+five: Literal[5] = 5
+six: Literal[6] = 6
+
+dict_annotated: dict[int, float] = {five: 1.0} | {six: 2.0}
+    "#,
+);
+
+testcase!(
+    test_literal_three_list_add,
+    r#"
+from typing import Literal
+
+five: Literal[5] = 5
+six: Literal[6] = 6
+seven: Literal[7] = 7
+
+list_annotated: list[int] = [five] + [six] + [seven]
+    "#,
+);
+
+testcase!(
+    test_literal_set,
+    r#"
+from typing import Literal
+
+five: Literal[5] = 5
+six: Literal[6] = 6
+
+set1: set[int] = {five} | {six}
+set2: set[int] = {five} - {six}
+set3: set[int] = {five} ^ {six}
+    "#,
 );

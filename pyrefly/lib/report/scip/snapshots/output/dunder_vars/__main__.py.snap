@@ -1,0 +1,12 @@
+# < definition scip-python python snapshot-util 0.1 __main__/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+if __name__ == "__main__":
+#  ^^^^^^^^ reference  python-stdlib 3.13 builtins/__name__#
+    print("main")
+#   ^^^^^ reference  python-stdlib 3.13 builtins/print().
+

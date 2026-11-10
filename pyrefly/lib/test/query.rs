@@ -447,6 +447,57 @@ fn test_type_table_anonymous_typed_dict_is_dict() {
 }
 
 #[test]
+fn test_type_table_hides_truthiness_markers() {
+    let tdir = TempDir::new().unwrap();
+    let file_path = tdir.path().join("main.py");
+    let code = r#"class Config: ...
+class Settings: ...
+
+def f(override: Config | None, default: Settings, other: Config | None) -> None:
+    either = override or default
+    both = other and default
+"#;
+    fs_anyhow::write(&file_path, code).unwrap();
+
+    let query = create_query();
+    let module_name = ModuleName::from_str("main");
+    let path = ModulePath::filesystem(file_path.clone());
+
+    let errors = query.add_files(vec![(module_name, path.clone())]);
+    assert!(errors.is_empty(), "Unexpected errors: {:?}", errors);
+
+    let response = query
+        .get_type_table_in_file_with_timing(module_name, path)
+        .unwrap()
+        .0;
+    let table = indexed_shape_values(&response.type_table);
+
+    assert!(
+        !table
+            .iter()
+            .any(|shape| is_named_shape(shape, "Intersection")
+                || is_named_shape(shape, "Truthy")
+                || is_named_shape(shape, "Falsy")),
+        "truthiness markers should not reach the type table:\n{table:#?}",
+    );
+    let config_index = table
+        .iter()
+        .position(|shape| is_indexed_named_shape(shape, "main.Config", &[]))
+        .expect("expected main.Config leaf");
+    let settings_index = table
+        .iter()
+        .position(|shape| is_indexed_named_shape(shape, "main.Settings", &[]))
+        .expect("expected main.Settings leaf");
+    assert!(
+        table.iter().any(|shape| {
+            is_indexed_named_shape(shape, "typing.Union", &[config_index, settings_index])
+                || is_indexed_named_shape(shape, "typing.Union", &[settings_index, config_index])
+        }),
+        "expected `Config | Settings` for `override or default`:\n{table:#?}",
+    );
+}
+
+#[test]
 fn test_callees_annotated_type() {
     let tdir = TempDir::new().unwrap();
     let file_path = tdir.path().join("main.py");
@@ -490,6 +541,44 @@ def f() -> None:
     assert!(
         callees.is_empty(),
         "Annotated is not callable, expected no callees"
+    );
+}
+
+#[test]
+fn test_callees_specialized_class_def_metaclass() {
+    let directory = TempDir::new().unwrap();
+    let file = directory.path().join("main.py");
+    fs_anyhow::write(
+        &file,
+        r#"
+class C[T]:
+    def __init__(self) -> None: ...
+def ty[T](x: T) -> type[T]: ...
+
+C[int]()
+factory = ty(C[int])
+factory(C, (str,))
+"#,
+    )
+    .unwrap();
+    let query = create_query();
+    let module = ModuleName::from_str("main");
+    let path = ModulePath::filesystem(file);
+    let errors = query.add_files(vec![(module, path.clone())]);
+    assert!(errors.is_empty(), "{errors:?}");
+    let callees = query.get_callees_with_location(module, path, None).unwrap();
+    assert_eq!(
+        callees
+            .iter()
+            .filter(|(_, callee)| callee.target == "main.C.__init__")
+            .count(),
+        1
+    );
+    assert!(
+        callees
+            .iter()
+            .any(|(_, callee)| callee.target == "types.GenericAlias.__new__"),
+        "{callees:?}"
     );
 }
 

@@ -896,6 +896,7 @@ def avg_pool1d[
     """1D average pooling. Shape inference via meta-shape: torch.nn.functional.avg_pool1d"""
     ...
 
+@overload
 def avg_pool2d[
     Shape: IntTuple,
     Kernel: Flag[builtins.int | tuple[builtins.int, builtins.int]],
@@ -914,6 +915,49 @@ def avg_pool2d[
     """2D average pooling. Shape inference via meta-shape: torch.nn.functional.avg_pool2d"""
     ...
 
+# Mutable controls cannot carry fixed values into the DSL. Preserve the leading
+# dimensions with the same rank-preserving fallback used by adaptive pooling.
+@overload
+def avg_pool2d[Shape: IntTuple](
+    self: Tensor[Shape],
+    kernel_size: list[int],
+    stride: int | tuple[int, int] | list[int] | None = None,
+    padding: int | tuple[int, int] | list[int] = 0,
+    ceil_mode: bool = False,
+    count_include_pad: bool = True,
+    divisor_override: int | None = None,
+) -> Tensor[adaptive_pool_gradual_shape(Shape, 2)]: ...
+@overload
+def avg_pool2d[Shape: IntTuple](
+    self: Tensor[Shape],
+    kernel_size: int | tuple[int, int],
+    stride: list[int],
+    padding: int | tuple[int, int] | list[int] = 0,
+    ceil_mode: bool = False,
+    count_include_pad: bool = True,
+    divisor_override: int | None = None,
+) -> Tensor[adaptive_pool_gradual_shape(Shape, 2)]: ...
+@overload
+def avg_pool2d[Shape: IntTuple](
+    self: Tensor[Shape],
+    kernel_size: int | tuple[int, int],
+    stride: int | tuple[int, int] | None = None,
+    *,
+    padding: list[int],
+    ceil_mode: bool = False,
+    count_include_pad: bool = True,
+    divisor_override: int | None = None,
+) -> Tensor[adaptive_pool_gradual_shape(Shape, 2)]: ...
+@overload
+def avg_pool2d[Shape: IntTuple](
+    self: Tensor[Shape],
+    kernel_size: int | tuple[int, int],
+    stride: int | tuple[int, int] | None,
+    padding: list[int],
+    ceil_mode: bool = False,
+    count_include_pad: bool = True,
+    divisor_override: int | None = None,
+) -> Tensor[adaptive_pool_gradual_shape(Shape, 2)]: ...
 def avg_pool3d[
     Shape: IntTuple,
     Kernel: Flag[builtins.int | tuple[builtins.int, builtins.int, builtins.int]],

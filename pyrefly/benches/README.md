@@ -135,31 +135,89 @@ lands at the fbsource repo root `target/criterion/`. It is throwaway — do not
 commit it, and do not add repo-root ignore entries (it is already gitignored
 appropriately).
 
-## TSP benchmark
+## Attribute initialization
 
-`benches/tsp/` -- buck `tsp_bench`, cargo bench `tsp`, Criterion id
-`tsp/get_computed_type_unopened_cached`. Durable regression coverage for the
-solve-reuse behavior added behind D118537886 (committing the solve behind a
-`typeServer/getComputedType` query on a file the client never opened, so
-later requests on the same snapshot share that work instead of re-solving
-from scratch).
-
-Drives a real TSP server (indexing disabled) over the plain in-process main
-connection against one never-opened, unreferenced module deliberately
-expensive to solve (a deep nested-generic-constructor chain, the same shape
-`benches/micro.rs`'s `nested_generic_constructor_soft_error` uses). Server
-spawn, fixture generation, and the first (necessarily cold) request all
-happen outside Criterion's timing; each measured iteration is exactly one
-repeat of the identical request on the same stable snapshot, so the
-benchmark is exactly the steady-state behavior the fix changes. Portable
-(no platform-specific transport). Unlike the PyTorch benchmarks there is no
-checkout to pin (the fixture is one file generated at runtime), so it is not
-`manual`-labeled and runs in well under a second.
+The `attribute_initialization` group in `micro` measures the cost of tracking
+instance attribute initialization. It varies the number of attributes and branch
+joins, loop joins, or early returns independently. Each iteration checks an
+in-memory module with the standard library already loaded. It does not require a
+PyTorch checkout.
 
 ```bash
-buck2 run @fbcode//mode/opt fbcode//pyrefly/pyrefly:tsp_bench -- --bench
+cargo bench -p pyrefly --bench micro -- attribute_initialization --noplot
+```
+
+Use Criterion's `--save-baseline before` on the original version and
+`--baseline before` on the changed version to compare results. Synthetic
+results isolate this code path. They do not establish whole-project performance.
+
+## TSP benchmarks
+
+`benches/tsp/` -- buck `tsp_bench`, cargo bench `tsp`. One module per bench,
+aggregated by `tsp/main.rs`; select one with a Criterion name filter.
+
+- `tsp/get_computed_type_unopened_cached.rs` -- Criterion id
+  `tsp/get_computed_type_unopened_cached`. Durable regression coverage for the
+  solve-reuse behavior added behind D118537886 (committing the solve behind a
+  `typeServer/getComputedType` query on a file the client never opened, so
+  later requests on the same snapshot share that work instead of re-solving
+  from scratch). Drives a real TSP server (indexing disabled) over the plain
+  in-process main connection against one never-opened, unreferenced module
+  deliberately expensive to solve (a deep nested-generic-constructor chain, the
+  same shape `benches/micro.rs`'s `nested_generic_constructor_soft_error`
+  uses). Server spawn, fixture generation, and the first (necessarily cold)
+  request all happen outside Criterion's timing; each measured iteration is
+  exactly one repeat of the identical request on the same stable snapshot. The
+  fixture is generated at runtime and the bench runs in well under a second.
+- `tsp/pytorch.rs` -- TSP vs. LSP latency for the same IDE feature on
+  `torch/_inductor/ir.py`, one of the slowest PyTorch modules to solve, in the
+  pinned checkout (the same resource and harness as the PyTorch benchmarks).
+  Each sample serves one feature. The `lsp` bench sends
+  the LSP request to the language server. The `tsp` bench replays, against the
+  type server, the TSP requests that a real Pylance sent for the same feature,
+  recorded in `tsp/traces/` (see below). The warm samples start with an edit
+  because Pylance caches types until the snapshot changes, so a repeated hover
+  or completion without an edit sends no TSP requests. Criterion ids:
+  - `tsp/pytorch_cold_start/{lsp,tsp}` -- a fresh server per sample:
+    initialize, open `ir.py`, and report its diagnostics. LSP:
+    `textDocument/diagnostic`. TSP: the ~17.5k requests Pylance sends after
+    opening the file until it goes quiet (its background checker's sweep of the
+    file, plus ~1.1k `resolveImport`).
+  - `tsp/pytorch_hover/{lsp,tsp}` -- hover on `guard_or_false` in
+    `V.graph.sizevars.guard_or_false(...)`. TSP: about 30 requests
+    (`getSnapshot`, a `resolveImport` per import, `getComputedType`).
+  - `tsp/pytorch_completion/{lsp,tsp}` -- completion after
+    `V.graph.sizevars.`. TSP: about 80 requests.
+  - `tsp/pytorch_recheck/{lsp,tsp}` -- the diagnostics of the file. LSP:
+    `textDocument/diagnostic`. TSP: the ~16k requests (about one
+    `getComputedType` per expression) that the Pylance background checker
+    sends to re-check the file.
+
+  In Pylance the background checker runs at the same time as hover and
+  completion and shares the server's request queue with them; the benchmarks
+  measure each request stream alone.
+
+```bash
+buck2 run @fbcode//mode/opt fbcode//pyrefly/pyrefly:tsp_bench -- --bench --noplot
+buck2 run @fbcode//mode/opt fbcode//pyrefly/pyrefly:tsp_bench -- --bench --noplot pytorch_
 cargo bench --bench tsp
 ```
+
+### Pylance traces
+
+`tsp/traces/` holds the TSP requests that a real Pylance sends to pyrefly for
+`torch/_inductor/ir.py` in the pinned PyTorch checkout, one file per feature:
+when it opens the file (`cold_start.json`), and after an edit for a hover
+(`hover.json`), a completion (`completion.json`), and its background checker's
+re-check of the file (`recheck.json`). URIs start with `${ROOT}`, `${TYPESHED}`,
+or `${THIRD_PARTY}`. `getComputedType` of a node and `resolveImport` are stored
+as compact arrays; `encode` in `tsp/record/extract.py` describes them.
+
+`tsp/record/record.sh <pyrefly> <pytorch checkout>` re-records the traces: it
+runs the latest VS Code and Pylance headless with pyrefly as the type server,
+opens `ir.py` and drives the three features, and writes `tsp/traces/`. It needs node and internet access (on a devserver,
+set `HTTPS_PROXY` to fwdproxy). Re-record after a pin bump or when Pylance
+changes how it uses TSP.
 
 ## Updating the pin
 
@@ -174,4 +232,7 @@ sha256), and uploads the tarball to Manifold. **After a bump, re-check
 `PARAM_LINE` / `PARAM_COL` in `pytorch/cold_start.rs`** — they encode the
 position of `Parameter` in `_backward.py` — and **`INDEXED_SYMBOL` /
 `INDEXED_SYMBOL_FILE` in `pytorch/workspace_symbol.rs`** — the indexed symbol
-name and file path depend on the pinned revision.
+name and file path depend on the pinned revision — **and `LINE` / `METHOD` in
+`tsp/pytorch.rs`** (and the same position in `tsp/record/runner/index.js`), which
+encode a position in `ir.py`; then re-record the Pylance traces with
+`tsp/record/record.sh`.

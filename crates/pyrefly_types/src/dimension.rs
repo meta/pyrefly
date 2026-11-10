@@ -18,6 +18,7 @@ use std::fmt;
 use std::fmt::Display;
 
 use crate::equality::TypeEq;
+use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::quantified::QuantifiedKind;
 use crate::type_level_dsl::TypeShapeDslDomain;
@@ -600,7 +601,7 @@ fn int_is_gradual(dim: &Int) -> bool {
 /// `canonicalize` short-circuits gradual (`Any`) and nested `Size` leaves.
 fn symbolic_is_gradual(ty: &Type) -> bool {
     match ty {
-        Type::ClassType(cls) if cls.is_builtin("int") => true,
+        Type::ClassType(cls) if cls.is(KnownClass::Int) => true,
         _ => type_is_gradual_fast(ty),
     }
 }
@@ -637,7 +638,7 @@ fn canonicalize_symbolic(ty: Type) -> DimensionResult<Type> {
             Ok(n.map(|n| Type::Int(Int::Literal(n)))
                 .unwrap_or_else(|| Type::Int(Int::Symbolic(Box::new(Type::Literal(lit))))))
         }
-        Type::ClassType(cls) if cls.is_builtin("int") => Ok(gradual_size()),
+        Type::ClassType(cls) if cls.is(KnownClass::Int) => Ok(gradual_size()),
         other => Ok(Type::Int(Int::Symbolic(Box::new(other)))),
     }
 }

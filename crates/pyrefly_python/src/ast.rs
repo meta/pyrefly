@@ -46,6 +46,7 @@ use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::visitor::source_order::SourceOrderVisitor;
 use ruff_python_ast::visitor::source_order::TraversalSignal;
 use ruff_python_ast::visitor::source_order::walk_node;
+use ruff_python_ast::visitor::source_order::walk_stmt;
 use ruff_python_parser::ParseError;
 use ruff_python_parser::ParseOptions;
 use ruff_python_parser::Parsed;
@@ -471,6 +472,32 @@ impl Ast {
         )
     }
 
+    /// Like `module.visit`, but only calls `f` on expressions that contain `position`, and
+    /// skips statements that don't contain it.
+    pub fn visit_covering_exprs<'a>(
+        module: &'a ModModule,
+        position: TextSize,
+        f: &mut dyn FnMut(&'a Expr),
+    ) {
+        struct X<'a, 'f> {
+            position: TextSize,
+            f: &'f mut dyn FnMut(&'a Expr),
+        }
+        impl<'a> SourceOrderVisitor<'a> for X<'a, '_> {
+            fn visit_stmt(&mut self, x: &'a Stmt) {
+                if x.range().contains_inclusive(self.position) {
+                    walk_stmt(self, x);
+                }
+            }
+            fn visit_expr(&mut self, x: &'a Expr) {
+                if x.range().contains_inclusive(self.position) {
+                    (self.f)(x);
+                }
+            }
+        }
+        X { position, f }.visit_body(&module.body);
+    }
+
     /// Given a module and a position, find all AST nodes that "cover" the position.
     /// Return a vector of AST nodes sorted by the node's range, where the "innermost" node that covers the
     /// position comes first, and parent nodes of that covering node come later.
@@ -616,8 +643,25 @@ impl Ast {
         name == "__tracebackhide__"
     }
 
-    pub fn is_list_literal_or_comprehension(expr: &Expr) -> bool {
-        matches!(expr, Expr::List(_) | Expr::ListComp(_))
+    fn is_container_display(x: &Expr) -> bool {
+        matches!(
+            x,
+            Expr::List(_)
+                | Expr::ListComp(_)
+                | Expr::Set(_)
+                | Expr::SetComp(_)
+                | Expr::Dict(_)
+                | Expr::DictComp(_)
+        )
+    }
+
+    pub fn contains_only_container_displays(x: &Expr) -> bool {
+        if let Expr::BinOp(x) = x {
+            Ast::contains_only_container_displays(&x.left)
+                && Ast::contains_only_container_displays(&x.right)
+        } else {
+            Ast::is_container_display(x)
+        }
     }
 
     /// Returns a description of the syntax problem if `x` is not valid

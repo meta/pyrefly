@@ -7,6 +7,7 @@
 
 use num_traits::ToPrimitive;
 use pyrefly_python::dunder;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::lit_int::LitInt;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::shaped_array::IntTuple;
@@ -200,7 +201,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// `ClassType`, returning `None` for any other type.
     pub(crate) fn slice_type_args(slice_ty: &Type) -> Option<&[Type; 3]> {
         match slice_ty {
-            Type::ClassType(cls) if cls.is_builtin("slice") => Some(
+            Type::ClassType(cls) if cls.is(KnownClass::Slice) => Some(
                 cls.targs()
                     .as_slice()
                     .try_into()

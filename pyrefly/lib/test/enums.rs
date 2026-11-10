@@ -449,7 +449,163 @@ def f(test: bool, e1: E1, e2: E2):
     x: Literal[E1.X, E1.Y] = e1
     y: Literal[E1.X, E1.Y, 1] = e1
     z: Literal[E2.X, E2.Y] = e2  # E: `E2` is not assignable to `Literal[E2.X, E2.Y]`
+    single: Literal[E2.X] = e2  # E: `E2` is not assignable to `Literal[E2.X]`
     "#,
+);
+
+testcase!(
+    test_enum_literal_union_member_compatibility,
+    r#"
+from enum import Enum
+from typing import Literal
+
+class Unset(Enum):
+    _UNSET = "UNSET"
+
+def takes_member(x: Literal["a", "b", Unset._UNSET] | None) -> None: ...
+def takes_class(x: Literal["a", "b"] | Unset | None) -> None: ...
+
+def f(x: Literal["a"] | Literal[Unset._UNSET] | None) -> None:
+    takes_member(x)
+    takes_class(x)
+"#,
+);
+
+testcase!(
+    test_single_member_flag_not_assignable_to_literal,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal
+
+class SingleFlag(Flag):
+    X = 1
+
+class SingleIntFlag(IntFlag):
+    X = 1
+
+def check(flag: SingleFlag, int_flag: SingleIntFlag) -> None:
+    x: Literal[SingleFlag.X] = flag  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X]`
+    y: Literal[SingleIntFlag.X] = int_flag  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X]`
+"#,
+);
+
+testcase!(
+    test_single_member_enum_literal_compatibility,
+    r#"
+from enum import Enum, IntEnum, StrEnum, nonmember
+from typing import Literal
+
+class Base(Enum):
+    pass
+
+class Single(Base):
+    X = 1
+    ALIAS = X
+    extra = nonmember(2)
+
+    def method(self) -> None: ...
+
+class SingleInt(IntEnum):
+    X = 1
+
+class SingleStr(StrEnum):
+    X = "x"
+
+class Other(Enum):
+    X = 1
+
+def check(single: Single, int_enum: SingleInt, str_enum: SingleStr, other: Other) -> None:
+    member: Literal[Single.X] = single
+    alias: Literal[Single.ALIAS] = single
+    int_member: Literal[SingleInt.X] = int_enum
+    str_member: Literal[SingleStr.X] = str_enum
+    wrong: Literal[Single.X] = other  # E: `Other` is not assignable to `Literal[Single.X]`
+"#,
+);
+
+testcase!(
+    test_indirect_single_member_flag_not_assignable_to_literal,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal
+
+class BaseFlag(Flag):
+    pass
+
+class BaseIntFlag(IntFlag):
+    pass
+
+class SingleFlag(BaseFlag):
+    X = 1
+
+class SingleIntFlag(BaseIntFlag):
+    X = 1
+
+def check(flag: SingleFlag, int_flag: SingleIntFlag) -> None:
+    x: Literal[SingleFlag.X] = flag  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X]`
+    y: Literal[SingleIntFlag.X] = int_flag  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X]`
+"#,
+);
+
+testcase!(
+    test_flag_literal_union_normalization,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal, assert_type
+
+class SingleFlag(Flag):
+    X = 1
+
+class SingleIntFlag(IntFlag):
+    X = 1
+
+class MultiFlag(Flag):
+    X = 1
+    Y = 2
+
+class MultiIntFlag(IntFlag):
+    X = 1
+    Y = 2
+
+def check(single: SingleFlag, single_int: SingleIntFlag, multi: MultiFlag, multi_int: MultiIntFlag, condition: bool) -> None:
+    optional: Literal[SingleFlag.X] | None = single  # E: `SingleFlag` is not assignable to `Literal[SingleFlag.X] | None`
+    optional_int: Literal[SingleIntFlag.X] | None = single_int  # E: `SingleIntFlag` is not assignable to `Literal[SingleIntFlag.X] | None`
+    complete: Literal[MultiFlag.X, MultiFlag.Y] = multi  # E: `MultiFlag` is not assignable to `Literal[MultiFlag.X, MultiFlag.Y]`
+    complete_int: Literal[MultiIntFlag.X, MultiIntFlag.Y] = multi_int  # E: `MultiIntFlag` is not assignable to `Literal[MultiIntFlag.X, MultiIntFlag.Y]`
+
+    assert_type(SingleFlag.X if condition else None, Literal[SingleFlag.X] | None)
+    assert_type(SingleIntFlag.X if condition else None, Literal[SingleIntFlag.X] | None)
+    assert_type(MultiFlag.X if condition else MultiFlag.Y, Literal[MultiFlag.X, MultiFlag.Y])
+    assert_type(MultiIntFlag.X if condition else MultiIntFlag.Y, Literal[MultiIntFlag.X, MultiIntFlag.Y])
+"#,
+);
+
+testcase!(
+    test_flag_literals_in_typed_dict_values,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal, TypedDict, assert_type
+
+class Bits(Flag):
+    A = 1
+    B = 2
+
+class IntBits(IntFlag):
+    A = 1
+    B = 2
+
+class Values(TypedDict, closed=True):
+    a: Literal[Bits.A]
+    b: Literal[Bits.B]
+
+class IntValues(TypedDict, closed=True):
+    a: Literal[IntBits.A]
+    b: Literal[IntBits.B]
+
+def check(values: Values, int_values: IntValues) -> None:
+    assert_type(next(iter(values.values())), Literal[Bits.A, Bits.B])
+    assert_type(next(iter(int_values.values())), Literal[IntBits.A, IntBits.B])
+"#,
 );
 
 testcase!(
@@ -1410,5 +1566,420 @@ class Format(Enum):
     def render(self, value: int, /) -> str:
         formatter: Callable[[int], str] = self.value
         return formatter(value)
+"#,
+);
+
+testcase!(
+    test_enum_call_rejects_none_for_int_members,
+    r#"
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+
+Color(1)
+Color(value=2)
+Color(Color.RED)
+Color(None)  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+Color(value=None)  # E: Argument `None` is not assignable to parameter `value` with type `Color | complex | float | int`
+    "#,
+);
+
+testcase!(
+    test_enum_call_cross_numeric_equality,
+    r#"
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+
+# Numeric values and equality domains succeed at runtime.
+Color(1.0)
+Color(True)
+
+class B(Enum):
+    YES = True
+
+B(1)
+B(1.0)
+B(1 + 0j)
+B(None)  # E: Argument `None` is not assignable to parameter `value` with type `B | bool | complex | float | int`
+    "#,
+);
+
+testcase!(
+    test_enum_call_unmodeled_equality_domains,
+    r#"
+from decimal import Decimal
+from enum import Enum
+from fractions import Fraction
+from typing import NamedTuple
+
+class DecimalEnum(Enum):
+    ONE = Decimal("1")
+
+DecimalEnum(1)
+
+class FractionEnum(Enum):
+    ONE = Fraction(1)
+
+FractionEnum(1.0)
+
+class IntEnum(Enum):
+    ONE = 1
+
+IntEnum(Decimal("1"))
+IntEnum(Fraction(1))
+
+class FloatEnum(Enum):
+    ONE = 1.0
+
+FloatEnum(Decimal("1"))
+FloatEnum(Fraction(1))
+
+class StrColorEnum(Enum):
+    A = "a"
+
+StrColorEnum(Decimal("1"))
+StrColorEnum(Fraction(1))
+
+class BytesEnum(Enum):
+    A = b"a"
+
+BytesEnum(bytearray(b"a"))
+BytesEnum(None)  # E: Argument `None` is not assignable to parameter `value` with type `BytesEnum | bytearray | bytes`
+
+class Pair(NamedTuple):
+    x: int
+    y: int
+
+class NamedTupleEnum(Enum):
+    A = Pair(1, 2)
+
+NamedTupleEnum((1, 2))
+
+class TupleEnum(Enum):
+    PAIR = (1, 2)
+
+TupleEnum((1.0, 2.0))
+
+class ListEnum(Enum):
+    ITEMS = [1, 2]
+
+ListEnum([1.0, 2.0])
+    "#,
+);
+
+testcase!(
+    test_enum_call_custom_metaclass_contextual_inference,
+    r#"
+from enum import Enum, EnumMeta
+from typing import Any
+
+class M(EnumMeta):
+    def __call__(cls, value: tuple[list[object]]) -> Any:
+        return None
+
+class E(Enum, metaclass=M):
+    A = 1
+
+E(([1],))
+    "#,
+);
+
+testcase!(
+    test_enum_call_explicit_literal_promotion,
+    r#"
+from enum import Enum
+from typing import Literal
+
+raw: Literal["a"] = "a"
+class E(Enum):
+    A = raw
+
+def lookup(value: str) -> E:
+    return E(value)
+    "#,
+);
+
+testcase!(
+    test_enum_call_type_variables,
+    r#"
+from enum import Enum
+
+class Category(Enum):
+    A = 1
+    B = 2
+
+def test_type_vars[T, B: int, S: str](
+    unbounded: T,
+    bounded_int: B,
+    bounded_str: S,
+) -> None:
+    Category(unbounded)
+    Category(bounded_int)
+    Category(bounded_str)  # E: Argument `S` is not assignable to parameter `value` with type `Category | complex | float | int`
+    if isinstance(unbounded, str):
+        Category(unbounded)  # E: Argument `str & T` is not assignable to parameter `value` with type `Category | complex | float | int`
+    if isinstance(unbounded, int):
+        Category(unbounded)
+    "#,
+);
+
+testcase!(
+    test_enum_call_dataclass_transform_not_runtime_dataclass,
+    r#"
+from enum import Enum
+from typing import dataclass_transform
+
+@dataclass_transform()
+class MethodMixin:
+    def helper(self) -> int:
+        return 1
+
+class E(MethodMixin, Enum):
+    A = 1
+
+E(1)
+E(None)
+    "#,
+);
+
+testcase!(
+    test_enum_call_custom_metaclass_and_missing,
+    r#"
+from enum import Enum, EnumMeta
+from typing import Any, Self
+
+class LenientMeta(EnumMeta):
+    def __call__(cls, value: Any, *args: Any, **kwargs: Any) -> Any:
+        return super().__call__(value, *args, **kwargs)
+
+class WithMeta(Enum, metaclass=LenientMeta):
+    A = 1
+
+WithMeta(None)
+WithMeta("a")
+
+class WithMissing(Enum):
+    A = 1
+
+    @classmethod
+    def _missing_(cls, value: object) -> Self:
+        return cls.A
+
+WithMissing(None)
+WithMissing("a")
+    "#,
+);
+
+testcase!(
+    test_enum_call_deeply_nested,
+    r#"
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+
+Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(Color(1)))))))))))))))))))))
+    "#,
+);
+
+testcase!(
+    test_enum_call_deeply_nested_error_linear_time,
+    r#"
+from enum import Enum
+
+class E(Enum):
+    A = 1
+
+def identity[T](x: T) -> T:
+    return x
+
+identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(identity(E(1 + "x"))))))))))))))))))))))))))))))))))))))))  # E: `+` is not supported between `Literal[1]` and `Literal['x']`
+    "#,
+);
+
+testcase!(
+    test_enum_call_extensible_base_self_type,
+    r#"
+from enum import Enum
+from typing import Self
+
+class Base(str, Enum):
+    @classmethod
+    def parse(cls, raw: object) -> Self:
+        return cls(raw)
+
+class Color(Base):
+    RED = "red"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "Color":
+        return cls.RED
+
+assert Color.parse(None) is Color.RED
+    "#,
+);
+
+fn env_enum_stub_ellipsis() -> TestEnv {
+    let mut env = TestEnv::new();
+    env.add_with_path(
+        "res",
+        "res.pyi",
+        r#"
+from enum import Enum
+
+class Resolution(Enum):
+    RESO_NS = ...
+    RESO_US = ...
+"#,
+    );
+    env
+}
+
+testcase!(
+    test_enum_lookup_stub_ellipsis_values_unchecked,
+    env_enum_stub_ellipsis(),
+    r#"
+import res
+res.Resolution(7)
+"#,
+);
+
+testcase!(
+    test_enum_call_object_and_union_arguments,
+    r#"
+from enum import Enum
+from typing import Any
+
+class IntColor(Enum):
+    RED = 1
+    GREEN = 2
+
+class StrColor(Enum):
+    HOSTED = "hosted"
+    LOCAL = "local"
+
+def test_object_and_any(
+    obj: object,
+    any_val: Any,
+    opt_obj: object | None,
+    opt_str: str | None,
+    zulip_union: bool | int | str,
+    meson_union: bool | int | list[str] | str,
+) -> None:
+    IntColor(obj)
+    IntColor(any_val)
+    StrColor(obj)
+    StrColor(any_val)
+
+    IntColor(opt_obj)
+    StrColor(opt_obj)
+    StrColor(opt_str)
+
+    IntColor(zulip_union)
+    StrColor(meson_union)
+
+    IntColor("1")  # E: Argument `Literal['1']` is not assignable to parameter `value` with type `IntColor | complex | float | int`
+"#,
+);
+
+// CPython converts scalar creation arguments into dataclass data-mixin values.
+testcase!(
+    test_enum_lookup_scalar_dataclass_mixin,
+    r#"
+from dataclasses import dataclass
+from enum import Enum
+
+@dataclass
+class Data:
+    n: int
+
+class E(Data, Enum):
+    A = 1
+
+assert E(Data(1)) is E.A
+assert E(value=Data(1)) is E.A
+"#,
+);
+
+// Unhashable lookups compare against the value rewritten by the initializer.
+testcase!(
+    test_enum_lookup_initializer_rewrites_value,
+    r#"
+from enum import Enum
+
+class Base(Enum):
+    def __init__(self, raw: str) -> None:
+        self._value_ = raw.encode()
+
+class E(Base):
+    A = "a"
+
+assert E(bytearray(b"a")) is E.A
+assert E(value=bytearray(b"a")) is E.A
+"#,
+);
+
+testcase!(
+    test_enum_lookup_partial_union_validation,
+    r#"
+from enum import Enum
+
+class E(Enum):
+    A = "a"
+
+def validate(value: str | None) -> E | None:
+    try:
+        return E(value)
+    except ValueError:
+        return None
+
+def bounded[T: str | None](value: T) -> E | None:
+    try:
+        return E(value)
+    except ValueError:
+        return None
+
+assert validate("a") is E.A
+assert validate(None) is None
+"#,
+);
+
+testcase!(
+    test_enum_lookup_unmodeled_argument_equality,
+    r#"
+from enum import Enum
+
+class E(Enum):
+    A = 1
+
+class EqualToOne:
+    def __eq__(self, other: object) -> bool:
+        return other == 1
+
+assert E(EqualToOne()) is E.A
+"#,
+);
+
+testcase!(
+    test_enum_lookup_disjoint_primitive_arguments,
+    r#"
+from enum import Enum
+from typing import Literal, assert_type
+
+raw: Literal["a"] = "a"
+class E(Enum):
+    A = raw
+
+assert_type(E.A.value, Literal["a"])
+
+def incompatible(value: int | None) -> E:
+    return E(value)  # E: Argument `int | None` is not assignable to parameter `value` with type `E | str`
+
+E(False)  # E: Argument `Literal[False]` is not assignable to parameter `value` with type `E | str`
 "#,
 );

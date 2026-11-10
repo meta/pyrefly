@@ -16,9 +16,21 @@ import StylexPlugin from '@stylexjs/webpack-plugin';
 import PyodidePlugin from '@pyodide/webpack-plugin';
 import path from "path";
 import fs from "fs";
+import { execSync } from "child_process";
 import remarkSandboxPlugin from "./src/sandbox/remarkSandboxPlugin";
 
 const BasePath = 'en/docs';
+
+// The commit is only known in a git checkout of the GitHub repository. Elsewhere, such as in
+// fbsource, there is no matching GitHub commit, so it stays empty.
+let pyreflyCommit = '';
+try {
+    pyreflyCommit = execSync('git rev-parse HEAD', {
+        cwd: __dirname,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+} catch {}
 
 const baseUrl = process.env.DOCUSAURUS_BASE_URL || '/';
 
@@ -290,6 +302,7 @@ const config: Config = {
                             new webpack.EnvironmentPlugin({
                                 INTERNAL_STATIC_DOCS:
                                     process.env.INTERNAL_STATIC_DOCS === '1' || false,
+                                PYREFLY_COMMIT: pyreflyCommit,
                             }),
                         ],
                     };

@@ -23,6 +23,7 @@ use ruff_text_size::TextRange;
 
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
 use crate::error::style::ErrorStyle;
 use crate::module::bundled::BundledStub;
 use crate::module::third_party::get_bundled_third_party;
@@ -80,10 +81,11 @@ impl LspFile {
     }
 }
 
-/// The result of loading a module, including its `Module` and `ErrorCollector`.
+/// The result of loading a module, including its module data and immutable load diagnostics.
 #[derive(Debug)]
 pub struct Load {
-    pub errors: ErrorCollector,
+    pub load_errors: ModuleDiagnostics,
+    pub error_style: ErrorStyle,
     pub module_info: Module,
 }
 
@@ -171,9 +173,9 @@ impl Load {
                 Module::new_notebook(name, path, Arc::clone(&notebook))
             }
         };
-        let errors = ErrorCollector::new(module_info.dupe(), error_style);
+        let load_errors = ErrorCollector::new(module_info.dupe(), error_style);
         if let Some(err) = self_error {
-            errors
+            load_errors
                 .error_builder(
                     TextRange::default(),
                     ErrorKind::MissingImport,
@@ -184,8 +186,10 @@ impl Load {
                 )
                 .emit();
         }
+        let load_errors = load_errors.finish();
         Self {
-            errors,
+            load_errors,
+            error_style,
             module_info,
         }
     }

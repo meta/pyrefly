@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
@@ -321,6 +322,239 @@ testcase!(
 def f() -> int:
     while True:
         return 1
+"#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/1132
+testcase!(
+    test_return_infinite_loop_without_return,
+    r#"
+from typing import Never, TypeAlias
+
+NeverAlias: TypeAlias = Never
+
+def f() -> int:  # E: Function declared to return `int` but can never return
+    while True:
+        pass
+
+def returns_never() -> Never:
+    while True:
+        pass
+
+def returns_never_alias() -> NeverAlias:
+    while True:
+        pass
+
+def event_loop() -> None:
+    while True:
+        pass
+
+def unreachable_return() -> int:
+    while True:
+        continue
+        return 1  # E: This code is unreachable
+
+def falls_through(b: bool) -> int:  # E: Function declared to return `int` but is missing an explicit `return`
+    if b:
+        while True:
+            pass
+"#,
+);
+
+testcase!(
+    test_unexpected_never_return,
+    r#"
+from abc import ABC, abstractmethod
+from typing import Any, AsyncIterator, Iterator, Never, NoReturn, Protocol, assert_type, overload, override
+
+def fatal() -> Never:
+    raise RuntimeError
+
+def calls_fatal() -> int:
+    fatal()
+
+def returns_fatal() -> str:
+    return fatal()
+
+def raises() -> int:
+    raise ValueError
+
+def raises_with_docstring() -> int:
+    """This operation is unsupported."""
+    raise ValueError
+
+def raises_after_work() -> int:
+    print("starting")
+    raise ValueError
+
+def raises_none() -> None:
+    raise ValueError
+
+async def async_fatal() -> int:
+    return fatal()
+
+def finally_fatal() -> int:
+    try:
+        pass
+    finally:
+        fatal()
+
+def branches(flag: bool) -> int:
+    if flag:
+        return fatal()
+    else:
+        raise ValueError
+
+def returns_normally(flag: bool) -> int:
+    if flag:
+        fatal()
+    return 1
+
+def gradual() -> Any:
+    fatal()
+
+def placeholder() -> int:
+    """Implementation belongs in a subclass."""
+    raise NotImplementedError("not implemented")
+
+def placeholder_with_checks(x: int) -> int:
+    assert_type(x, int)
+    raise NotImplementedError
+
+def stub() -> int: ...
+
+def intentional() -> NoReturn:
+    fatal()
+
+def generator() -> Iterator[int]:
+    yield 1
+    fatal()
+
+async def async_generator() -> AsyncIterator[int]:
+    yield 1
+    fatal()
+
+@overload
+def overloaded(x: int) -> int: ...
+@overload
+def overloaded(x: str) -> str: ...
+def overloaded(x: int | str) -> int | str:
+    fatal()
+
+class Base(ABC):
+    @abstractmethod
+    def abstract(self) -> int:
+        fatal()
+
+    def implemented(self) -> int:
+        return 1
+
+class Child(Base):
+    def abstract(self) -> int:
+        fatal()
+
+    @override
+    def implemented(self) -> int:
+        fatal()
+
+    def raising_none(self) -> None:
+        """This operation is unsupported."""
+        raise ValueError
+
+    def calls_fatal(self) -> int:
+        fatal()
+
+class Interface(Protocol):
+    def stub(self) -> int: ...
+
+# The published type must still follow the annotation.
+assert_type(calls_fatal(), int)
+"#,
+);
+
+testcase!(
+    test_return_diverges_without_exit,
+    r#"
+import sys
+
+def branches_loop(flag: bool) -> int:  # E: Function declared to return `int` but can never return
+    if flag:
+        while True:
+            pass
+    else:
+        while True:
+            pass
+
+def branch_raises(flag: bool) -> int:
+    if flag:
+        while True:
+            pass
+    else:
+        raise RuntimeError
+
+def finally_loops() -> int:  # E: Function declared to return `int` but can never return
+    try:
+        pass
+    finally:
+        while True:
+            pass
+
+def match_loops(flag: bool) -> int:  # E: Function declared to return `int` but can never return
+    match flag:
+        case True:
+            while True:
+                pass
+        case _:
+            while True:
+                pass
+
+def version_gated_loop() -> int:
+    while sys.version_info >= (3, 0):
+        pass
+
+def version_gated_branch() -> int:
+    if sys.version_info >= (3, 0):
+        while True:
+            pass
+    else:
+        raise RuntimeError
+
+def raises_in_loop() -> int:  # E: Function declared to return `int` but can never return
+    while True:
+        raise RuntimeError
+
+def nested_break() -> int:  # E: Function declared to return `int` but can never return
+    while True:
+        while True:
+            break
+
+def inferred_never():
+    raise RuntimeError
+
+def calls_inferred_never() -> int:
+    inferred_never()
+
+def failing_assert() -> int:
+    assert False
+"#,
+);
+
+testcase!(
+    test_unexpected_never_in_stub_file,
+    {
+        let mut env = TestEnv::new();
+        env.add_with_path(
+            "stub",
+            "stub.pyi",
+            "def f() -> int:\n    raise RuntimeError\n",
+        );
+        env
+    },
+    r#"
+from typing import assert_type
+from stub import f
+
+assert_type(f(), int)
 "#,
 );
 

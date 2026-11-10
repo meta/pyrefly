@@ -17,6 +17,13 @@ def test_float_dtype_alias() -> None:
     assert_shape(torch.ones((2, 3), dtype=torch.float).shape, (2, 3))
 
 
+def test_unsigned_dtype() -> None:
+    dtype = torch.uint16
+    tensor = torch.ones((2, 3)).to(dtype)
+    assert tensor.dtype == dtype
+    assert_shape(tensor.shape, (2, 3))
+
+
 def test_half_dtype_alias() -> None:
     assert torch.half is torch.float16
     assert_shape(torch.ones((2, 3), dtype=torch.half).shape, (2, 3))

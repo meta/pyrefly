@@ -46,22 +46,20 @@ fn add_shape_extensions(e: &mut TestEnv) {
         r#"
 from typing import Any
 
-shaped_array: Any
 class IntTuple:
     def __class_getitem__(cls, params: Any) -> Any: ...
 "#,
     );
 }
 
-fn shaped_array_env_with_lint() -> TestEnv {
+fn shape_generic_array_env_with_lint() -> TestEnv {
     let mut e = TestEnv::new().enable_pytorch_efficiency_lint_error();
     add_shape_extensions(&mut e);
     e.add(
         "arrays",
         r#"
-from shape_extensions import IntTuple, shaped_array
+from shape_extensions import IntTuple
 
-@shaped_array(shape="Shape")
 class Array[Shape: IntTuple]:
     def item(self) -> int | float: ...
     def cuda(self) -> "Array[Shape]": ...
@@ -71,17 +69,16 @@ class Array[Shape: IntTuple]:
     e
 }
 
-fn decorated_torch_env_with_lint() -> TestEnv {
+fn shape_generic_torch_env_with_lint() -> TestEnv {
     let mut e = TestEnv::new().enable_pytorch_efficiency_lint_error();
     add_shape_extensions(&mut e);
     e.add(
         "torch",
         r#"
-from shape_extensions import IntTuple, shaped_array
+from shape_extensions import IntTuple
 
 class device: ...
 
-@shaped_array(shape="Shape")
 class Tensor[Shape: IntTuple]:
     def item(self) -> int | float: ...
     def to(self, device: device) -> "Tensor[Shape]": ...
@@ -227,8 +224,8 @@ def f(x: torch.Tensor) -> None:
 );
 
 testcase!(
-    test_non_torch_shaped_array_lints_ok,
-    shaped_array_env_with_lint(),
+    test_non_torch_shape_generic_array_lints_ok,
+    shape_generic_array_env_with_lint(),
     r#"
 from arrays import Array
 
@@ -277,7 +274,7 @@ def f(x: torch.Tensor, device: torch.device) -> None:
 
 testcase!(
     test_decorated_torch_tensor_lints,
-    decorated_torch_env_with_lint(),
+    shape_generic_torch_env_with_lint(),
     r#"
 import torch
 

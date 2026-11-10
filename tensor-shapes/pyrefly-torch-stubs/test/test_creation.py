@@ -85,19 +85,75 @@ def test_generator_and_tensor_factories() -> None:
     assert_shape(torch.randint(0, 10, (3,), generator=generator).shape, (3,))
 
     tensor = torch.zeros((2, 3))
-    # These compatibility factories accept dynamic Python and NumPy inputs, so their
-    # stubs intentionally guarantee only an open shape.
+    # Dynamic tuple concatenation stays gradual, unlike literal tuple sizes.
     assert_shape(
         tensor.new_zeros(tensor.shape + (4,)).shape,
         IntTuple,
         runtime=(2, 3, 4),
     )
-    assert_shape(tensor.new_ones((4, 5)).shape, IntTuple, runtime=(4, 5))
+    assert_shape(tensor.new_ones((4, 5)).shape, (4, 5))
     assert_shape(torch.as_tensor([1.0, 2.0]).shape, IntTuple, runtime=(2,))
     assert_shape(torch.from_numpy(tensor.numpy()).shape, (2, 3))
 
     # `randperm` preserves rank, but its value-dependent extent is gradual.
     assert_shape(torch.randperm(5, generator=generator).shape, IntTuple, runtime=(5,))
+
+
+def test_new_factories_accept_list_sizes() -> None:
+    tensor = torch.zeros((2, 3))
+    zeros = tensor.new_zeros([4, 5])
+    ones = tensor.new_ones([4, 5])
+    empty = tensor.new_empty([4, 5])
+    full = tensor.new_full([4, 5], 1.0)
+    assert_shape(zeros.shape, IntTuple, runtime=(4, 5))
+    assert_shape(ones.shape, IntTuple, runtime=(4, 5))
+    assert_shape(empty.shape, IntTuple, runtime=(4, 5))
+    assert_shape(full.shape, IntTuple, runtime=(4, 5))
+
+
+def test_tuple_factory_shapes() -> None:
+    tensor = torch.zeros((2, 3))
+    assert_shape(tensor.new_zeros((2, 3, 4)).shape, (2, 3, 4))
+    assert_shape(tensor.new_ones((0, 3)).shape, (0, 3))
+    assert_shape(tensor.new_empty(()).shape, ())
+    assert_shape(tensor.new_full((2, 3), 1.0).shape, (2, 3))
+
+
+def test_full_like_options() -> None:
+    tensor = torch.zeros((2, 3))
+    typed = torch.full_like(tensor, 1.0, dtype=torch.float64)
+    assert_shape(typed.shape, (2, 3))
+    assert typed.dtype == torch.float64
+    configured = torch.full_like(
+        tensor,
+        2.0,
+        device="cpu",
+        layout=torch.strided,
+        requires_grad=True,
+        memory_format=torch.preserve_format,
+    )
+    assert_shape(configured.shape, (2, 3))
+    assert configured.requires_grad
+
+
+def test_triangular_indices_options() -> None:
+    lower = torch.tril_indices(
+        3,
+        4,
+        dtype=torch.int64,
+        device="cpu",
+        layout=torch.strided,
+    )
+    upper = torch.triu_indices(
+        3,
+        4,
+        1,
+        dtype=torch.int64,
+        device="cpu",
+        layout=torch.strided,
+    )
+    assert_shape(lower.shape, (2, int), runtime=(2, 6))
+    assert_shape(upper.shape, (2, int), runtime=(2, 6))
 
 
 def test_arange() -> None:
@@ -142,6 +198,20 @@ def test_spaced_ranges() -> None:
     with assert_raises(RuntimeError):
         # E: Cannot evaluate type-level shape DSL call: extent must be non-negative
         torch.logspace(0, 1, -1)
+
+
+def test_linspace_factory_kwargs() -> None:
+    out = torch.empty(5)
+    grad = torch.linspace(0, 1, 5, requires_grad=True)
+    strided = torch.linspace(0, 1, 5, layout=torch.strided)
+    pinned = torch.linspace(0, 1, 5, pin_memory=False)
+    written = torch.linspace(0, 1, 5, out=out)
+    assert_shape(grad.shape, (5,))
+    assert_shape(strided.shape, (5,))
+    assert_shape(pinned.shape, (5,))
+    assert_shape(written.shape, (5,))
+    assert grad.requires_grad
+    assert written is out
 
 
 def test_eye() -> None:

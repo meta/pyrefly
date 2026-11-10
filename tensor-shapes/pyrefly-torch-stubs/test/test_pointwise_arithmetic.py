@@ -59,6 +59,17 @@ def test_lerp_tensor_weight_shapes() -> None:
     assert_shape(start.lerp(end, weight).shape, (3, 2))
 
 
+def test_nan_to_num_preserves_shape() -> None:
+    values = torch.tensor([[torch.nan, torch.inf, -torch.inf], [1.0, -2.0, 0.0]])
+    replaced = torch.nan_to_num(values, nan=3.0, posinf=4.0, neginf=-5.0)
+    assert_shape(replaced.shape, (2, 3))
+    assert torch.equal(replaced, torch.tensor([[3.0, 4.0, -5.0], [1.0, -2.0, 0.0]]))
+    out = torch.empty_like(values)
+    assert_shape(torch.nan_to_num(values, out=out).shape, (2, 3))
+    assert torch.nan_to_num(values, out=out) is out
+    assert_shape(torch.nan_to_num(torch.tensor(torch.nan)).shape, ())
+
+
 def test_arithmetic_operator_shapes() -> None:
     left = torch.ones((2, 1))
     right = torch.ones((1, 3))

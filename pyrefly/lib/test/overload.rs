@@ -11,6 +11,24 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_overload_expansion_keeps_lambda_context,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable, overload, assert_type
+
+@overload
+def f(callback: Callable[[int], None], value: int) -> int: ...
+@overload
+def f(callback: Callable[[str], None], value: str) -> str: ...
+def f(callback, value) -> int | str: ...
+
+def g(value: int | str) -> None:
+    assert_type(f(lambda arg: None, value), int | str)
+    assert_type(f(value=value, callback=lambda arg: None), int | str)
+"#,
+);
+
+testcase!(
     test_py,
     r#"
 from typing import overload, assert_type
@@ -1037,6 +1055,115 @@ def f[T](x: T) -> T:
 );
 
 testcase!(
+    test_overloaded_async_iterator_impl,
+    r#"
+from collections.abc import AsyncIterator
+from typing import Literal, assert_type, overload
+
+class Patch:
+    pass
+
+class FullState(Patch):
+    pass
+
+@overload
+def astream(*, diff: Literal[True] = ...) -> AsyncIterator[Patch]: ...
+@overload
+def astream(*, diff: Literal[False]) -> AsyncIterator[FullState]: ...
+async def astream(*, diff: bool = True) -> AsyncIterator[Patch] | AsyncIterator[FullState]:
+    if diff:
+        yield Patch()
+    else:
+        yield FullState()
+
+assert_type(astream(), AsyncIterator[Patch])
+assert_type(astream(diff=True), AsyncIterator[Patch])
+assert_type(astream(diff=False), AsyncIterator[FullState])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_coroutine_factory,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, assert_type, overload
+
+async def stream[T](value: T) -> AsyncIterator[T]:
+    yield value
+
+async def make_stream[T](value: T) -> AsyncIterator[T]:
+    return stream(value)
+
+@overload
+async def factory(value: int) -> AsyncIterator[int]: ...
+@overload
+async def factory(value: str) -> AsyncIterator[str]: ...
+def factory(value: int | str) -> Any:
+    return make_stream(value)
+
+async def check() -> None:
+    result = assert_type(factory(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await factory("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_explicit_coroutine,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, assert_type, overload
+
+async def stream[T](value: T) -> AsyncIterator[T]:
+    yield value
+
+async def make_stream[T](value: T) -> AsyncIterator[T]:
+    return stream(value)
+
+@overload
+def factory(value: int) -> Coroutine[Any, Any, AsyncIterator[int]]: ...
+@overload
+def factory(value: str) -> Coroutine[Any, Any, AsyncIterator[str]]: ...
+def factory(value: int | str) -> Any:
+    return make_stream(value)
+
+async def check() -> None:
+    result = assert_type(factory(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await factory("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
+    test_overloaded_async_iterator_inconsistent_impl,
+    r#"
+from collections.abc import AsyncIterator, Coroutine
+from typing import Any, Protocol, assert_type, overload
+
+class StreamFactory(Protocol):
+    @overload
+    async def stream(self, value: int) -> AsyncIterator[int]: ...
+    @overload
+    async def stream(self, value: str) -> AsyncIterator[str]: ...
+
+@overload
+async def stream(value: int) -> AsyncIterator[int]: ...  # E: is not assignable to implementation return type
+@overload
+async def stream(value: str) -> AsyncIterator[str]: ...  # E: is not assignable to implementation return type
+async def stream(value: int | str) -> AsyncIterator[int | str]:
+    yield value
+
+async def check(factory: StreamFactory) -> None:
+    result = assert_type(stream(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result, AsyncIterator[int])
+    assert_type(await stream("value"), AsyncIterator[str])
+    result_from_protocol = assert_type(factory.stream(1), Coroutine[Any, Any, AsyncIterator[int]])
+    assert_type(await result_from_protocol, AsyncIterator[int])
+    assert_type(await factory.stream("value"), AsyncIterator[str])
+    "#,
+);
+
+testcase!(
     test_param_consistency,
     r#"
 from typing import overload
@@ -1257,6 +1384,47 @@ def f(x: E) -> str:
 def g(x: E):
     assert_type(f(x), Literal['X', 'Y'])
     "#,
+);
+
+testcase!(
+    test_do_not_expand_flag_arguments,
+    r#"
+from enum import Flag, IntFlag
+from typing import Literal, assert_type, overload
+
+class BaseFlag(Flag):
+    pass
+
+class Bits(BaseFlag):
+    A = 1
+    B = 2
+
+class IntBits(IntFlag):
+    A = 1
+    B = 2
+
+@overload
+def choose(value: Literal[Bits.A]) -> Literal["A"]: ...
+@overload
+def choose(value: Literal[Bits.B]) -> Literal["B"]: ...
+def choose(value: Bits) -> str:
+    return value.name or ""
+
+@overload
+def choose_int(value: Literal[IntBits.A]) -> Literal["A"]: ...
+@overload
+def choose_int(value: Literal[IntBits.B]) -> Literal["B"]: ...
+def choose_int(value: IntBits) -> str:
+    return value.name or ""
+
+def check(value: Bits, int_value: IntBits) -> None:
+    choose(value)  # E: No matching overload found for function `choose`
+    choose_int(int_value)  # E: No matching overload found for function `choose_int`
+
+def check_members(value: Literal[Bits.A, Bits.B], int_value: Literal[IntBits.A, IntBits.B]) -> None:
+    assert_type(choose(value), Literal["A", "B"])
+    assert_type(choose_int(int_value), Literal["A", "B"])
+"#,
 );
 
 testcase!(
@@ -1727,6 +1895,33 @@ def g(x, y): return x
 
 g(1, "hello")  # E: No matching overload found for function `g` called with arguments: (Literal[1], Literal['hello'])
 g(x=1, y="hello")  # E: No matching overload found for function `g` called with arguments: (x=Literal[1], y=Literal['hello'])
+    "#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/5074
+testcase!(
+    bug = "Lambda arguments are shown with Unknown parameters in the first line",
+    test_overload_error_shows_lambda_argument_types,
+    r#"
+from typing import Callable, overload
+
+class Key:
+    # Returning `object` keeps `Key` from satisfying `SupportsRichComparison`.
+    def __lt__(self, other: object) -> object:
+        return object()
+
+def sort_values(values: list[Key]) -> None:
+    values.sort(key=lambda value: value)  # E: No matching overload found for function `list.sort` called with arguments: (key=(value: Unknown) -> Unknown)
+
+class C:
+    @overload
+    def m(self, callback: Callable[[int], int], y: int) -> None: ...
+    @overload
+    def m(self, callback: Callable[[str], str], y: str) -> None: ...
+    def m(self, callback, y): ...
+
+# The lambda returns `None`, so like the one above it fails its check against the closest overload.
+C().m(lambda v: None, 1.5)  # E: No matching overload found for function `C.m` called with arguments: ((v: Unknown) -> None, float)
     "#,
 );
 

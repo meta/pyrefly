@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use pyrefly_lsp_test::Request;
 use pyrefly_lsp_test::object_model::InitializeSettings;
 use pyrefly_lsp_test::object_model::LspInteraction;
 use pyrefly_lsp_test::object_model::LspInteractionArgs;
+use pyrefly_lsp_test::object_model::TestTelemetry;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -30,6 +32,7 @@ use crate::test::lsp::lsp_interaction::util::bundled_typeshed_path;
 use crate::test::lsp::lsp_interaction::util::expect_definition_points_to_symbol;
 use crate::test::lsp::lsp_interaction::util::get_test_files_root;
 use crate::test::lsp::lsp_interaction::util::line_at_location;
+use crate::test::lsp::lsp_interaction::util::wait_for_disk_invalidation;
 
 fn test_go_to_def(
     root: PathBuf,
@@ -143,6 +146,358 @@ fn test_go_to_def_basic(root: &TempDir, workspace_folders: Option<Vec<(String, U
         .definition(file, 9, 7)
         .expect_definition_response_from_root("bar.py", 6, 6, 6, 9)
         .unwrap();
+}
+
+#[test]
+fn goto_definition_refreshes_closed_destination() {
+    let root = TempDir::with_prefix("pyrefly_goto_def_stale_disk").unwrap();
+    fs::write(
+        root.path().join("foo.py"),
+        "from bar import target\n\nvalue = target\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("bar.py"), "target = 1\n").unwrap();
+
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.client.did_open("foo.py");
+
+    interaction
+        .client
+        .definition("foo.py", 2, 10)
+        .expect_definition_response_from_root("bar.py", 0, 0, 0, 6)
+        .unwrap();
+
+    fs::write(root.path().join("bar.py"), "# moved\ntarget = 1\n").unwrap();
+
+    // No watcher notification is sent. Repeated requests must use the new location.
+    for _ in 0..2 {
+        interaction
+            .client
+            .definition("foo.py", 2, 10)
+            .expect_definition_response_from_root("bar.py", 1, 0, 1, 6)
+            .unwrap();
+    }
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn goto_definition_preserves_unsaved_source() {
+    let root = TempDir::with_prefix("pyrefly_goto_def_unsaved").unwrap();
+    fs::write(
+        root.path().join("foo.py"),
+        "from bar import first, second\nfrom other import unrelated\nvalue = first\nvalue = second\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("bar.py"), "first = 1\nsecond = 2\n").unwrap();
+    fs::write(root.path().join("other.py"), "unrelated: int = 1\n").unwrap();
+
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("foo.py");
+    interaction
+        .client
+        .hover("foo.py", 1, 20)
+        .expect_hover_response_with_markup(|markup| markup.is_some_and(|text| text.contains("int")))
+        .unwrap();
+    fs::write(root.path().join("other.py"), "unrelated: str = 'changed'\n").unwrap();
+    interaction.client.did_change(
+        "foo.py",
+        "from bar import first, second\nfrom other import unrelated\n# unsaved\nvalue = first\nvalue = missing\n",
+    );
+
+    // This position refers to `second` on disk, but to `first` in the buffer.
+    for _ in 0..2 {
+        interaction
+            .client
+            .definition("foo.py", 3, 10)
+            .expect_definition_response_from_root("bar.py", 0, 0, 0, 5)
+            .unwrap();
+    }
+    interaction
+        .client
+        .definition("foo.py", 4, 10)
+        .expect_response(json!(null))
+        .unwrap();
+
+    // A failed lookup must not replace the buffer with the disk contents.
+    interaction
+        .client
+        .definition("foo.py", 3, 10)
+        .expect_definition_response_from_root("bar.py", 0, 0, 0, 5)
+        .unwrap();
+
+    // Unsaved source edits must not cause unrelated disk modules to reload.
+    interaction
+        .client
+        .hover("foo.py", 1, 20)
+        .expect_hover_response_with_markup(|markup| markup.is_some_and(|text| text.contains("int")))
+        .unwrap();
+
+    // Refreshing the destination must still resolve the symbol from the buffer.
+    fs::write(
+        root.path().join("bar.py"),
+        "# moved\nfirst = 1\nsecond = 2\n",
+    )
+    .unwrap();
+    interaction
+        .client
+        .definition("foo.py", 3, 10)
+        .expect_definition_response_from_root("bar.py", 1, 0, 1, 5)
+        .unwrap();
+    interaction
+        .client
+        .definition("foo.py", 4, 10)
+        .expect_response(json!(null))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn goto_definition_does_not_use_disk_for_unknown_buffer_symbol() {
+    let root = TempDir::with_prefix("pyrefly_goto_def_missing").unwrap();
+    fs::write(
+        root.path().join("foo.py"),
+        "from bar import target\nvalue = target\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("bar.py"), "target = 1\n").unwrap();
+
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("foo.py");
+    interaction
+        .client
+        .did_change("foo.py", "from bar import target\nvalue = missing\n");
+    interaction
+        .client
+        .definition("foo.py", 1, 10)
+        .expect_response(json!(null))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn goto_definition_preserves_unsaved_destination() {
+    let root = TempDir::with_prefix("pyrefly_goto_def_open_destination").unwrap();
+    fs::write(
+        root.path().join("foo.py"),
+        "from bar import target\nvalue = target\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("bar.py"), "target = 1\n").unwrap();
+
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("foo.py");
+    interaction.client.did_open("bar.py");
+    interaction
+        .client
+        .did_change("bar.py", "# unsaved\ntarget = 1\n");
+    interaction
+        .client
+        .definition("bar.py", 1, 2)
+        .expect_definition_response_from_root("bar.py", 1, 0, 1, 6)
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn goto_definition_refreshes_disk_copy_of_open_destination() {
+    let root = TempDir::with_prefix("pyrefly_goto_def_open_disk").unwrap();
+    fs::write(
+        root.path().join("foo.py"),
+        "from bar import target\nvalue = target\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("bar.py"), "target = 1\n").unwrap();
+
+    let telemetry = TestTelemetry::new();
+    let telemetry_events = telemetry.subscribe();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        telemetry: Box::new(telemetry),
+        ..Default::default()
+    });
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("foo.py");
+    interaction.client.did_open("bar.py");
+    interaction
+        .client
+        .definition("foo.py", 1, 10)
+        .expect_definition_response_from_root("bar.py", 0, 0, 0, 6)
+        .unwrap();
+
+    // An external edit updates the buffer through didChange, without didSave or a watcher event.
+    let disk_contents = "# disk\ntarget = 1\n";
+    fs::write(root.path().join("bar.py"), disk_contents).unwrap();
+    interaction.client.did_change("bar.py", disk_contents);
+    interaction
+        .client
+        .definition("foo.py", 1, 10)
+        .expect_definition_response_from_root("bar.py", 1, 0, 1, 6)
+        .unwrap();
+    interaction
+        .client
+        .definition("bar.py", 1, 2)
+        .expect_definition_response_from_root("bar.py", 1, 0, 1, 6)
+        .unwrap();
+
+    // Let the background invalidation queued by the first refresh commit. A `didChange` that
+    // arrives while it is in flight saves a non-committable transaction, and the next request
+    // can then resolve against stale state.
+    wait_for_disk_invalidation(&telemetry_events);
+
+    // Disk imports and the unsaved destination buffer have independent contents.
+    interaction
+        .client
+        .did_change("bar.py", "# unsaved\n# buffer\n# extra\ntarget = 1\n");
+    fs::write(
+        root.path().join("bar.py"),
+        "# disk\n# moved again\ntarget = 1\n",
+    )
+    .unwrap();
+    interaction
+        .client
+        .definition("foo.py", 1, 10)
+        .expect_definition_response_from_root("bar.py", 2, 0, 2, 6)
+        .unwrap();
+    interaction
+        .client
+        .definition("bar.py", 3, 2)
+        .expect_definition_response_from_root("bar.py", 3, 0, 3, 6)
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn goto_definition_disk_refresh_survives_source_edits() {
+    let root = TempDir::with_prefix("pyrefly_goto_def_persistent_disk").unwrap();
+    let source = "from bar import target\nvalue = target\n";
+    fs::write(root.path().join("foo.py"), source).unwrap();
+    fs::write(root.path().join("bar.py"), "target: int = 1\n").unwrap();
+
+    let telemetry = TestTelemetry::new();
+    let telemetry_events = telemetry.subscribe();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        telemetry: Box::new(telemetry),
+        ..Default::default()
+    });
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("foo.py");
+    interaction
+        .client
+        .definition("foo.py", 1, 10)
+        .expect_definition_response_from_root("bar.py", 0, 0, 0, 6)
+        .unwrap();
+
+    fs::write(
+        root.path().join("bar.py"),
+        "# changed\ntarget: str = 'changed'\n",
+    )
+    .unwrap();
+    interaction
+        .client
+        .definition("foo.py", 1, 10)
+        .expect_definition_response_from_root("bar.py", 1, 0, 1, 6)
+        .unwrap();
+    interaction
+        .client
+        .hover("foo.py", 1, 10)
+        .expect_hover_response_with_markup(|markup| markup.is_some_and(|text| text.contains("str")))
+        .unwrap();
+
+    // Wait for the disk update to commit before testing a fresh editor transaction.
+    wait_for_disk_invalidation(&telemetry_events);
+    interaction
+        .client
+        .did_change("foo.py", &format!("{source}# unsaved\n"));
+    interaction
+        .client
+        .hover("foo.py", 1, 10)
+        .expect_hover_response_with_markup(|markup| markup.is_some_and(|text| text.contains("str")))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+// https://github.com/meta/pyrefly/issues/5485
+#[test]
+fn goto_definition_of_class_member_after_defining_file_shifts() {
+    let root = TempDir::with_prefix("pyrefly_goto_def_class_member_shift").unwrap();
+    let lib = r#"from typing import TypedDict
+class Tools:
+    @staticmethod
+    def helper():
+        return 1
+class Movie(TypedDict):
+    name: str
+"#;
+    fs::write(root.path().join("lib.py"), lib).unwrap();
+    fs::write(
+        root.path().join("user.py"),
+        r#"from lib import Tools, Movie
+
+Tools.helper()
+m: Movie = {"name": ""}
+m["name"]
+"#,
+    )
+    .unwrap();
+
+    let telemetry = TestTelemetry::new();
+    let telemetry_events = telemetry.subscribe();
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        telemetry: Box::new(telemetry),
+        ..Default::default()
+    });
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("lib.py");
+    interaction.client.did_open("user.py");
+    interaction
+        .client
+        .definition("user.py", 2, 7)
+        .expect_definition_response_from_root("lib.py", 3, 8, 3, 14)
+        .unwrap();
+    interaction
+        .client
+        .definition("user.py", 4, 4)
+        .expect_definition_response_from_root("lib.py", 6, 4, 6, 8)
+        .unwrap();
+
+    // `user.py` imports the disk copy of `lib.py`, so save the edit as an editor does.
+    let shifted_lib = lib.replacen("\n", "\n\n", 1);
+    fs::write(root.path().join("lib.py"), &shifted_lib).unwrap();
+    interaction.client.did_change("lib.py", &shifted_lib);
+    interaction.client.did_save("lib.py");
+    wait_for_disk_invalidation(&telemetry_events);
+    interaction
+        .client
+        .definition("user.py", 2, 7)
+        .expect_definition_response_from_root("lib.py", 4, 8, 4, 14)
+        .unwrap();
+    interaction
+        .client
+        .definition("user.py", 4, 4)
+        .expect_definition_response_from_root("lib.py", 7, 4, 7, 8)
+        .unwrap();
+
+    interaction.shutdown().unwrap();
 }
 
 #[test]

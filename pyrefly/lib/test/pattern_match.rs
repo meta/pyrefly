@@ -131,6 +131,87 @@ def ok_class_pattern(x: int) -> None:
 );
 
 testcase!(
+    test_match_case_unreachable_exhausted_expression_subject,
+    r#"
+class A:
+    x: int
+
+class B:
+    y: int
+
+def make_a() -> A:
+    return A()
+
+def make_union(flag: bool) -> A | B:
+    return A() if flag else B()
+
+def constructor_subject() -> None:
+    match A():
+        case A():
+            pass
+        case A(x=1):  # E: Case pattern can never match subject of type `A`
+            pass
+
+def factory_subject() -> None:
+    match make_a():
+        case A():
+            pass
+        case A(x=1):  # E: Case pattern can never match subject of type `A`
+            pass
+
+def exhausted_or_subject(flag: bool) -> None:
+    match make_union(flag):
+        case A() | B():
+            pass
+        case A(x=1) | B(y=2):  # E: Case pattern can never match subject of type `A | B`
+            pass
+"#,
+);
+
+testcase!(
+    test_match_case_reachable_expression_subject_partial_patterns,
+    r#"
+class A:
+    x: int
+
+class B:
+    y: int
+
+def make_a() -> A:
+    return A()
+
+def make_union(flag: bool) -> A | B:
+    return A() if flag else B()
+
+def partial_alone() -> None:
+    match make_a():
+        case A(x=1):
+            pass
+
+def guarded_predecessor(flag: bool) -> None:
+    match make_a():
+        case A() if flag:
+            pass
+        case A(x=1):
+            pass
+
+def partial_predecessor() -> None:
+    match make_a():
+        case A(x=1):
+            pass
+        case A(x=2):
+            pass
+
+def live_or_subject(flag: bool) -> None:
+    match make_union(flag):
+        case A():
+            pass
+        case A(x=1) | B():
+            pass
+"#,
+);
+
+testcase!(
     test_match_case_unreachable_after_prior_case_exhausts_type,
     r#"
 from typing import assert_type
@@ -194,6 +275,123 @@ def no_cascade_after_wildcard(x: int) -> None:
             pass
         case int():
             pass
+"#,
+);
+
+// Reachability is not checked on `object` subjects, because structural patterns can narrow
+// `object` to `Never` incorrectly.
+testcase!(
+    bug = "`case bool()` after `case int()` on an `object` subject is not reported",
+    test_match_case_unreachable_subsumed_object,
+    r#"
+def f(x: object) -> None:
+    match x:
+        case int():
+            pass
+        case bool():
+            pass
+"#,
+);
+
+testcase!(
+    test_match_case_unreachable_subsumed_by_sibling_pattern,
+    r#"
+from typing import Any
+
+def shadowed_after_parent_any(x: Any) -> None:
+    match x:
+        case int():
+            pass
+        case bool():  # E: Case pattern can never match subject of type
+            pass
+
+def ok_subclass_first_any(x: Any) -> None:
+    match x:
+        case bool():
+            pass
+        case int():
+            pass
+
+def ok_guarded_predecessor_any(x: Any, flag: bool) -> None:
+    match x:
+        case int() if flag:
+            pass
+        case bool():
+            pass
+
+class A:
+    x: int
+
+class B(A):
+    pass
+
+# A partial class pattern does not subsume its subclass pattern.
+def ok_partial_class_predecessor_any(x: Any) -> None:
+    match x:
+        case A(x=1):
+            pass
+        case B():
+            pass
+
+def duplicate_literal_any(x: Any) -> None:
+    match x:
+        case 1:
+            pass
+        case 1:  # E: Case pattern can never match subject of type
+            pass
+
+def or_pattern_any(x: Any) -> None:
+    match x:
+        case int() | str():
+            pass
+        case bool():  # E: Case pattern can never match subject of type
+            pass
+
+class Holder:
+    a: Any
+
+def attribute_any(h: Holder) -> None:
+    match h.a:
+        case int():
+            pass
+        case bool():  # E: Case pattern can never match subject of type
+            pass
+
+"#,
+);
+
+// Regression test for https://github.com/meta/pyrefly/issues/5549.
+testcase!(
+    test_match_case_gradual_base,
+    r#"
+from typing import Any, assert_type
+
+def make_base() -> Any:
+    return object
+
+class Mul: ...
+class FloorDiv(make_base()): ...
+
+def f(x: Any) -> str:
+    match x:
+        case Mul():
+            assert_type(x, Mul)
+            return "mul"
+        case FloorDiv():
+            assert_type(x, FloorDiv)
+            return "floordiv"
+        case str():
+            assert_type(x, str)
+            return "str"
+    assert_type(x, Any)
+    return "other"
+
+def gradual_predecessor(x: Any) -> None:
+    match x:
+        case FloorDiv():
+            assert_type(x, FloorDiv)
+        case str():
+            assert_type(x, str)
 "#,
 );
 
@@ -2154,4 +2352,97 @@ def f(item: tuple[str, int | None]) -> None:
             case (_, b):
                 assert_type(b, int | None)
     "#,
+);
+
+testcase!(
+    test_nested_exhaustive_match_in_match_arm_binds_sibling_name,
+    r#"
+from dataclasses import dataclass
+from typing import final
+
+@final
+@dataclass
+class Ok[T]:
+    value: T
+
+@final
+@dataclass
+class Err[E]:
+    error: E
+
+class NotFoundError(Exception): ...
+
+def get() -> Ok[int] | Err[NotFoundError]: ...
+
+def g() -> int:
+    match get():
+        case Ok(value):
+            pass
+        case Err(err):
+            match err:
+                case NotFoundError():
+                    raise ValueError("should not happen")
+    return value
+"#,
+);
+
+// A full class pattern subsumes a later partial pattern of the same class;
+// mypy's `--warn-unreachable` and pyright's strict mode both report the second case.
+testcase!(
+    test_match_case_unreachable_full_class_before_partial,
+    r#"
+class A:
+    x: int
+
+def full_before_partial(a: A) -> None:
+    match a:
+        case A():
+            pass
+        case A(x=1):  # E: Case pattern can never match subject of type `A`
+            pass
+"#,
+);
+
+// A partial class pattern alone stays reachable, and so does a subclass pattern
+// after it: an `A` instance with a different `x` still matches only the second case.
+testcase!(
+    test_match_case_reachable_partial_class_patterns,
+    r#"
+class A:
+    x: int
+
+class B(A):
+    pass
+
+def partial_alone(a: A) -> None:
+    match a:
+        case A(x=1):
+            pass
+
+def partial_before_subclass(b: B) -> None:
+    match b:
+        case A(x=1):
+            pass
+        case B():
+            pass
+"#,
+);
+
+// A repeated partial class pattern is still not reported: its negation cannot
+// subtract the class, because `ClassCoverageGate` only subtracts when every
+// sub-pattern exhausts its slot. Tracked in https://github.com/facebook/pyrefly/issues/5516.
+testcase!(
+    bug = "duplicate partial class pattern is not reported",
+    test_match_case_reachable_duplicate_partial_class_pattern,
+    r#"
+class A:
+    x: int
+
+def duplicate_partial(a: A) -> None:
+    match a:
+        case A(x=1):
+            pass
+        case A(x=1):
+            pass
+"#,
 );

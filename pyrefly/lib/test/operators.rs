@@ -417,6 +417,138 @@ def f(x: int, y: str | Literal[False]):
 "#,
 );
 
+// `x and y` returns `x` only when `x` is falsy, so a truthy result is always `y`.
+testcase!(
+    test_boolean_and_result_truthy_narrow,
+    r#"
+from typing import assert_type, reveal_type
+
+class Genre: ...
+
+class Author:
+    genre: Genre | None
+
+def assigned(author: Author | None) -> None:
+    genre = author and author.genre
+    if genre:
+        assert_type(genre, Genre)
+
+def walrus(author: Author | None) -> None:
+    if genre := (author and author.genre):
+        assert_type(genre, Genre)
+
+def container(d: dict[str, int] | None) -> None:
+    value = d and d["a"]
+    if value:
+        assert_type(value, int)
+
+# A subclass can define a falsy `__bool__`, so a falsy `Author` stays in the result.
+def not_none(author: Author | None) -> None:
+    genre = author and author.genre
+    reveal_type(genre)  # E: revealed type: (Author & Falsy) | Genre | None
+    if genre is not None:
+        reveal_type(genre)  # E: revealed type: (Author & Falsy) | Genre
+"#,
+);
+
+// `object & Falsy` keeps `object`, so the `__bool__` lookup on the result has a class to search.
+testcase!(
+    test_boolean_and_object_operand,
+    r#"
+from typing import reveal_type
+
+def f(flag: bool, value: object | None, other: bool) -> None:
+    if flag or (value and other):
+        pass
+    reveal_type(value and other)  # E: revealed type: bool | (object & Falsy) | None
+"#,
+);
+
+// `x or y` returns `x` only when `x` is truthy, so a falsy result is always `y`.
+testcase!(
+    test_boolean_or_result_falsy_narrow,
+    r#"
+from typing import assert_type, reveal_type
+
+class Config: ...
+
+class Settings: ...
+
+def assigned(override: Config | None, default: Settings) -> None:
+    config = override or default
+    if not config:
+        assert_type(config, Settings)
+
+def walrus(override: Config | None, default: Settings) -> None:
+    if not (config := override or default):
+        assert_type(config, Settings)
+
+def container(items: list[int], default: Settings) -> None:
+    value = items or default
+    if not value:
+        assert_type(value, Settings)
+
+def revealed(override: Config | None, default: Settings) -> None:
+    reveal_type(override or default)  # E: revealed type: (Config & Truthy) | Settings
+"#,
+);
+
+// `str` is not marked, so the literal default `""` collapses into it.
+testcase!(
+    test_boolean_or_literal_default,
+    r#"
+from typing import reveal_type
+
+def f(name: str | None) -> None:
+    reveal_type(name or "")  # E: revealed type: str
+"#,
+);
+
+// The inferred type of an attribute or a container element does not keep a truthiness marker, so
+// it accepts every value of the operand's type.
+testcase!(
+    test_boolean_or_inferred_attribute_type,
+    r#"
+from typing import Any, assert_type
+
+class Base: ...
+class Sub(Base): ...
+
+class C:
+    def __init__(self, base: Base | None) -> None:
+        self.base = base or Sub()
+
+    def reset(self, base: Base) -> None:
+        self.base = base
+
+def scores(x: float | None) -> None:
+    d = {"a": x or 0}
+    d["b"] = 1.5
+
+def first_use(a: list[Any], b: list[bytes]) -> None:
+    out = []
+    out.extend(a or b)
+    assert_type(out, list[bytes])
+"#,
+);
+
+// A unary operator on a marked operand looks up the dunder method of the unmarked type.
+testcase!(
+    test_boolean_or_unary_operator,
+    r#"
+from enum import Flag
+from typing import assert_type
+
+class C(Flag):
+    NONE = 0
+    A = 1
+
+def f(x: C | None, y: C, z: C) -> None:
+    assert_type(~(x or y), C)
+    assert_type(~(y and z), C)
+"#,
+);
+
 // Regression test: generic function calls in `and` expressions should not
 // have the narrowed type from earlier branches used as a hint for type variable
 // inference. The narrowing of `bool` to `Literal[False]` is for the result of
@@ -706,6 +838,678 @@ assert_type(a, A)
     "#,
 );
 
+#[cfg(feature = "third-party-stubs")]
+testcase!(
+    test_bundled_sympy_operators,
+    r#"
+from types import NotImplementedType
+from typing import TYPE_CHECKING, assert_type
+
+if TYPE_CHECKING:
+    from sympy.polys.matrices.domainmatrix import DomainMatrix
+    from sympy.polys.rings import PolyElement
+
+def matrices(left: DomainMatrix, right: DomainMatrix) -> None:
+    assert_type(left + right, DomainMatrix)
+    assert_type(left - right, DomainMatrix)
+    assert_type(left / 2, DomainMatrix)
+    assert_type(left.__add__(right), DomainMatrix | NotImplementedType)
+    assert_type(left.__sub__(right), DomainMatrix | NotImplementedType)
+    assert_type(left.__truediv__(2), DomainMatrix | NotImplementedType)
+
+def polynomials(left: PolyElement, right: PolyElement) -> None:
+    assert_type(left * right, PolyElement)
+    assert_type(left * 2, PolyElement)
+    assert_type(2 * left, PolyElement)
+    assert_type(2 - left, PolyElement)
+    assert_type(divmod(2, left), tuple[PolyElement, PolyElement] | NotImplementedType)
+    assert_type(2 % left, PolyElement)
+    assert_type(0 / left, PolyElement)
+    assert_type(left.__mul__(right), PolyElement | NotImplementedType)
+    assert_type(left.__rmul__(2), PolyElement | NotImplementedType)
+    assert_type(left.__rsub__(2), PolyElement | NotImplementedType)
+    assert_type(left.__rdivmod__(2), tuple[PolyElement, PolyElement] | NotImplementedType)
+    assert_type(left.__rmod__(2), PolyElement | NotImplementedType)
+    assert_type(left.__rtruediv__(0), PolyElement | NotImplementedType)
+"#,
+);
+
+testcase!(
+    test_not_implemented_same_class_arithmetic,
+    r#"
+from types import NotImplementedType
+from typing import assert_type
+
+class Same:
+    def __add__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+Same() + Same()  # E: Cannot find `__add__`
+
+def inplace() -> None:
+    value = Same()
+    value += Same()  # E: Cannot find `__iadd__` or `__add__`
+
+class SameInplace(Same):
+    def __iadd__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+def declined_inplace() -> None:
+    value = SameInplace()
+    value += SameInplace()  # E: Cannot find `__iadd__` or `__add__`
+
+class Partial:
+    def __add__(self, other: object) -> int | NotImplementedType:
+        return NotImplemented
+
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+assert_type(Partial() + Partial(), int)
+
+def partial_inplace() -> None:
+    value = Partial()
+    value += Partial()
+    assert_type(value, int)
+
+class ReflectedOnly:
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+ReflectedOnly() + ReflectedOnly()  # E: Cannot find `__add__`
+"#,
+);
+
+testcase!(
+    test_inplace_reflected_subclass_priority,
+    r#"
+from types import NotImplementedType
+from typing import Never, assert_type
+
+class Base:
+    def __add__(self, other: object) -> int:
+        return 1
+
+class Child(Base):
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+def absent_inplace() -> None:
+    value = Base()
+    value += Child()
+    assert_type(value, str)
+
+class BadSignature(Base):
+    def __iadd__(self, other: Never) -> bytes:
+        return b""
+
+class BadSignatureChild(BadSignature):
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+def signature_recovery() -> None:
+    value = BadSignature()
+    value += BadSignatureChild()
+    assert_type(value, str)
+
+class Declining(Base):
+    def __iadd__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+class DecliningChild(Declining):
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+def declined_inplace() -> None:
+    value = Declining()
+    value += DecliningChild()
+    assert_type(value, str)
+
+class Partial(Base):
+    def __iadd__(self, other: object) -> bytes | NotImplementedType:
+        return NotImplemented
+
+class PartialChild(Partial):
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+def partial_inplace() -> None:
+    value = Partial()
+    value += PartialChild()
+    assert_type(value, bytes | str)
+
+class Successful(Base):
+    def __iadd__(self, other: object) -> float:
+        return 1.0
+
+class SuccessfulChild(Successful):
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+def successful_inplace() -> None:
+    value = Successful()
+    value += SuccessfulChild()
+    assert_type(value, float)
+"#,
+);
+
+testcase!(
+    test_reflected_subclass_method_identity,
+    r#"
+from types import NotImplementedType
+from typing import assert_type
+
+class Base:
+    def __add__(self, other: object) -> int:
+        return 1
+
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+class Inherited(Base):
+    pass
+
+class Aliased(Base):
+    __radd__ = Base.__radd__
+
+class Overridden(Base):
+    def __radd__(self, other: object) -> str:
+        return "overridden"
+
+assert_type(Base() + Inherited(), int)
+assert_type(Base() + Aliased(), int)
+assert_type(Base() + Overridden(), str)
+
+def inherited_inplace() -> None:
+    value = Base()
+    value += Inherited()
+    assert_type(value, int)
+
+def aliased_inplace() -> None:
+    value = Base()
+    value += Aliased()
+    assert_type(value, int)
+
+def overridden_inplace() -> None:
+    value = Base()
+    value += Overridden()
+    assert_type(value, str)
+
+class Inplace(Base):
+    def __iadd__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+class InplaceChild(Inplace):
+    pass
+
+def declined_inplace() -> None:
+    value = Inplace()
+    value += InplaceChild()
+    assert_type(value, int)
+
+class PartialInplace(Base):
+    def __iadd__(self, other: object) -> bytes | NotImplementedType:
+        return NotImplemented
+
+class PartialInplaceChild(PartialInplace):
+    pass
+
+def partial_inplace() -> None:
+    value = PartialInplace()
+    value += PartialInplaceChild()
+    assert_type(value, bytes | int)
+
+class Partial:
+    def __add__(self, other: object) -> int | NotImplementedType:
+        return NotImplemented
+
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+class PartialChild(Partial):
+    pass
+
+assert_type(Partial() + PartialChild(), int | str)
+
+class Generic[T]:
+    def __add__(self, other: object) -> int:
+        return 1
+
+    def __radd__(self, other: object) -> str:
+        return "reflected"
+
+class GenericChild(Generic[str]):
+    pass
+
+assert_type(Generic[int]() + GenericChild(), int)
+
+class Static:
+    def __add__(self, other: object) -> int:
+        return 1
+
+    @staticmethod
+    def __radd__(other: object) -> str:
+        return "staticmethod"
+
+class StaticChild(Static):
+    pass
+
+class StaticAlias(Static):
+    __radd__ = staticmethod(Static.__radd__)
+
+assert_type(Static() + StaticChild(), int)
+assert_type(Static() + StaticAlias(), int)
+"#,
+);
+
+testcase!(
+    test_reflected_subclass_dynamic_methods,
+    r#"
+from typing import assert_type
+
+def reflected():
+    def method(self: object, other: object) -> str:
+        return "factory"
+    return method
+
+class FactoryBase:
+    def __add__(self, other: object) -> int:
+        return 1
+
+    __radd__ = reflected()
+
+class FactoryChild(FactoryBase):
+    __radd__ = reflected()
+
+assert_type(FactoryBase() + FactoryChild(), str)
+
+def factory_inplace() -> None:
+    value = FactoryBase()
+    value += FactoryChild()
+    assert_type(value, str)
+
+class ClassMethodBase:
+    def __add__(self, other: object) -> int:
+        return 1
+
+    @classmethod
+    def __radd__(cls, other: object) -> str:
+        return "classmethod"
+
+class ClassMethodChild(ClassMethodBase):
+    pass
+
+assert_type(ClassMethodBase() + ClassMethodChild(), str)
+
+def classmethod_inplace() -> None:
+    value = ClassMethodBase()
+    value += ClassMethodChild()
+    assert_type(value, str)
+"#,
+);
+
+testcase!(
+    test_reflected_protocol_operands,
+    r#"
+from typing import Protocol, assert_type
+
+class Reflected(Protocol):
+    def __radd__(self, other: object) -> int: ...
+
+def same_protocol(left: Reflected, right: Reflected) -> None:
+    assert_type(left + right, int)
+    value = left
+    value += right
+    assert_type(value, int)
+
+class GenericReflected[T](Protocol):
+    def __radd__(self, other: object) -> T: ...
+
+def generic_protocol(left: GenericReflected[int], right: GenericReflected[str]) -> None:
+    assert_type(left + right, str)
+    value = left
+    value += right
+    assert_type(value, str)
+
+class ForwardAndReflected(Protocol):
+    def __add__(self, other: object) -> bytes: ...
+    def __radd__(self, other: object) -> int: ...
+
+def forward_still_first(left: ForwardAndReflected, right: ForwardAndReflected) -> None:
+    assert_type(left + right, bytes)
+    value = left
+    value += right
+    assert_type(value, bytes)
+
+class Related(ForwardAndReflected, Protocol):
+    pass
+
+def related_protocols(left: ForwardAndReflected, right: Related) -> None:
+    assert_type(left + right, int)
+    value = left
+    value += right
+    assert_type(value, int)
+
+class Concrete:
+    def __radd__(self, other: object) -> int:
+        return 1
+
+Concrete() + Concrete()  # E: Cannot find `__add__`
+"#,
+);
+
+testcase!(
+    test_not_implemented_binary_returns,
+    r#"
+from types import NotImplementedType
+from typing import Never, NoReturn, assert_type
+
+class Declines:
+    def __add__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+class Partial:
+    def __add__(self, other: object) -> int | NotImplementedType:
+        return NotImplemented
+
+class Right:
+    def __radd__(self, other: object) -> str:
+        return ""
+
+class Raises:
+    def __add__(self, other: object) -> Never:
+        raise RuntimeError
+
+class LegacyRaises:
+    def __add__(self, other: object) -> NoReturn:
+        raise RuntimeError
+
+assert_type(Declines() + Right(), str)
+assert_type(Partial() + Right(), int | str)
+assert_type(Partial() + object(), int)
+Declines() + object()  # E: Cannot find `__add__` or `__radd__`
+
+class BadSignature:
+    def __add__(self, other: Never) -> bytes:
+        return b""
+
+assert_type(BadSignature() + Right(), str)
+BadSignature() + Declines()  # E: `Declines` is not assignable to parameter `other` with type `Never`
+
+def never_with_reflected() -> None:
+    assert_type(Raises() + Right(), Never)
+
+def never_without_reflected() -> None:
+    assert_type(Raises() + object(), Never)
+
+def no_return() -> None:
+    assert_type(LegacyRaises() + Right(), Never)
+    "#,
+);
+
+testcase!(
+    test_not_implemented_operand_unions,
+    r#"
+from types import NotImplementedType
+from typing import assert_type, overload
+
+class Accepted:
+    def __radd__(self, other: object) -> bytes:
+        return b""
+
+class Rejected:
+    def __radd__(self, other: object) -> str:
+        return ""
+
+class Left:
+    @overload
+    def __add__(self, other: Accepted) -> int: ...
+    @overload
+    def __add__(self, other: Rejected) -> NotImplementedType: ...
+    def __add__(self, other: Accepted | Rejected) -> int | NotImplementedType:
+        return 1 if isinstance(other, Accepted) else NotImplemented
+
+def right_union(other: Accepted | Rejected) -> None:
+    assert_type(Left() + other, int | str)
+
+class DecliningLeft:
+    def __add__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+def left_union(left: Left | DecliningLeft, right: Accepted | Rejected) -> None:
+    assert_type(left + right, int | bytes | str)
+
+class SuccessfulLeft:
+    def __add__(self, other: object) -> int:
+        return 1
+
+class SelectiveRight:
+    @overload
+    def __radd__(self, other: SuccessfulLeft) -> bytes: ...
+    @overload
+    def __radd__(self, other: DecliningLeft) -> str: ...
+    def __radd__(self, other: SuccessfulLeft | DecliningLeft) -> bytes | str:
+        return ""
+
+def only_declining_left(left: SuccessfulLeft | DecliningLeft) -> None:
+    assert_type(left + SelectiveRight(), int | str)
+    "#,
+);
+
+testcase!(
+    test_not_implemented_inferred_wrappers,
+    r#"
+from types import NotImplementedType
+from typing import Any, Self, assert_type, overload
+
+class Base:
+    def apply(self, other: object):
+        return NotImplemented
+
+    def __add__(self, other: object):
+        return self.apply(other)
+
+    def add_self(self, other: object) -> None:
+        assert_type(self + other, Any)
+
+    def add_explicit_self(self: Self, other: object) -> None:
+        assert_type(self + other, Any)
+
+class Day(Base):
+    def apply(self, other: object):
+        return Day()
+
+assert_type(Day() + Day(), Any)
+
+def bounded[T: Base](value: T) -> None:
+    assert_type(value + object(), Any)
+
+class Direct:
+    def __add__(self, other: object):
+        return NotImplemented
+
+class DirectChild(Direct):
+    pass
+
+DirectChild() + object()  # E: Cannot find `__add__` or `__radd__`
+
+class Declared(Base):
+    def __add__(self, other: object) -> NotImplementedType:
+        return self.apply(other)
+
+Declared() + object()  # E: Cannot find `__add__` or `__radd__`
+
+class Overloaded:
+    def apply(self, other: object):
+        return NotImplemented
+
+    @overload
+    def __add__(self, other: int) -> int: ...
+    @overload
+    def __add__(self, other: str) -> NotImplementedType: ...
+    def __add__(self, other: int | str):
+        return self.apply(other)
+
+class OverloadedChild(Overloaded):
+    pass
+
+assert_type(OverloadedChild() + 1, int)
+OverloadedChild() + "x"  # E: Cannot find `__add__` or `__radd__`
+
+class Value:
+    pass
+
+class Guarded:
+    def __add__(self, other: object):
+        if isinstance(other, Value):
+            return Value()
+        return NotImplemented
+
+class Reflected:
+    def __radd__(self, other: object) -> str:
+        return ""
+
+assert_type(Guarded() + Reflected(), Value | str)
+    "#,
+);
+
+testcase!(
+    test_not_implemented_comparison_completion,
+    r#"
+from types import NotImplementedType
+from typing import Literal, Never, assert_type
+
+class Declines:
+    def __eq__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+    def __ne__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+    def __lt__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+    def __gt__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+class Partial:
+    def __eq__(self, other: object) -> Literal[True] | NotImplementedType:
+        return NotImplemented
+
+    def __ne__(self, other: object) -> Literal[False] | NotImplementedType:
+        return NotImplemented
+
+class Accepts:
+    def __eq__(self, other: object) -> Literal[True]:
+        return True
+
+    def __ne__(self, other: object) -> Literal[False]:
+        return False
+
+def compare(left: Declines, right: Declines, partial: Partial, accepts: Accepts) -> None:
+    assert_type(left == right, bool)
+    assert_type(left != right, bool)
+    left < right  # E: Cannot find `__lt__` or `__gt__`
+    assert_type(partial == partial, bool)
+    assert_type(partial != partial, bool)
+    assert_type(left == accepts, Literal[True])
+    assert_type(left != accepts, Literal[False])
+    assert_type(partial == accepts, Literal[True])
+    assert_type(partial != accepts, Literal[False])
+
+class Raises:
+    def __eq__(self, other: object) -> Never:
+        raise RuntimeError
+
+def no_identity_after_never(left: Raises, right: Raises) -> None:
+    assert_type(left == right, Never)
+    "#,
+);
+
+testcase!(
+    test_not_implemented_inplace_stages,
+    r#"
+from types import NotImplementedType
+from typing import Never, assert_type
+
+class Right:
+    def __radd__(self, other: object) -> str:
+        return ""
+
+class Left:
+    def __iadd__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+    def __add__(self, other: object) -> int:
+        return 1
+
+def ordinary_success() -> None:
+    left = Left()
+    left += Right()
+    assert_type(left, int)
+
+class PartialLeft(Left):
+    def __iadd__(self, other: object) -> bytes | NotImplementedType:
+        return NotImplemented
+
+def partial_inplace() -> None:
+    left = PartialLeft()
+    left += Right()
+    assert_type(left, bytes | int)
+
+class DecliningLeft(Left):
+    def __add__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+def reflected_success() -> None:
+    left = DecliningLeft()
+    left += Right()
+    assert_type(left, str)
+
+class Raises:
+    def __iadd__(self, other: object) -> Never:
+        raise RuntimeError
+
+def nonreturning() -> None:
+    left = Raises()
+    left += Right()
+    assert_type(left, Never)
+
+class BadSignature(Left):
+    def __iadd__(self, other: Never) -> NotImplementedType:  # E: Class member `BadSignature.__iadd__` overrides parent class `Left` in an inconsistent manner
+        return NotImplemented
+
+def signature_recovery() -> None:
+    left = BadSignature()
+    left += Right()
+    assert_type(left, int)
+    "#,
+);
+
+testcase!(
+    test_not_implemented_deprecation,
+    r#"
+from types import NotImplementedType
+from typing import assert_type
+from warnings import deprecated
+
+class Left:
+    @deprecated("Deprecated forward method")
+    def __add__(self, other: object) -> NotImplementedType:
+        return NotImplemented
+
+class Right:
+    @deprecated("Deprecated reflected method")
+    def __radd__(self, other: object) -> int:
+        return 1
+
+assert_type(Left() + Right(), int)  # E: `Left.__add__` is deprecated  # E: `Right.__radd__` is deprecated
+    "#,
+);
+
 // We try __iadd__ and some fallback dunders. When all fail, the least confusing option is to use __iadd__.
 testcase!(
     test_iadd_error,
@@ -771,7 +1575,7 @@ class C:
 testcase!(
     test_dunder_bool_short_circuit_and_discard,
     r#"
-from typing import assert_type, Literal
+from typing import assert_type, reveal_type, Literal
 class Falsey:
     def __bool__(self) -> Literal[False]:
         return False
@@ -793,7 +1597,7 @@ assert_type(int() if Falsey() else str(), str)
 #
 # The runtime only uses truthiness in short-circuiting here, so it is actually
 # legal to use a non-boolable value as the rightmost entry of a bool op.
-assert_type(NotBoolable() or int(), int | NotBoolable)  # E: Expected `__bool__` to be a callable, got `int`
+reveal_type(NotBoolable() or int())  # E: revealed type: (NotBoolable & Truthy) | int  # E: Expected `__bool__` to be a callable, got `int`
 assert_type(int() or NotBoolable(), int | NotBoolable)
 "#,
 );

@@ -13,7 +13,7 @@ Submodules re-exported to support original import patterns:
   pyd.transforms.Transform, pyd.constraints.real, etc.
 """
 
-from typing import Any
+from typing import Any, overload
 
 from shape_extensions import broadcast, IntTuple, IntVar
 from torch import Tensor
@@ -110,7 +110,43 @@ class Normal[EventShape: IntTuple](Distribution[EventShape]):
 
     loc: Tensor[EventShape]
     scale: Tensor[EventShape]
-    def __init__(self, loc: Tensor[EventShape], scale: Tensor[EventShape]) -> None: ...
+    @overload
+    def __new__(
+        cls,
+        loc: float,
+        scale: float,
+        validate_args: bool | None = None,
+    ) -> Normal[[]]: ...
+    @overload
+    def __new__[LocShape: IntTuple, ScaleShape: IntTuple](
+        cls,
+        loc: Tensor[LocShape],
+        scale: Tensor[ScaleShape],
+        validate_args: bool | None = None,
+    ) -> Normal[broadcast(LocShape, ScaleShape)]: ...
+    @overload
+    def __new__[Shape: IntTuple](
+        cls,
+        loc: Tensor[Shape],
+        scale: float,
+        validate_args: bool | None = None,
+    ) -> Normal[Shape]: ...
+    @overload
+    def __new__[Shape: IntTuple](
+        cls,
+        loc: float,
+        scale: Tensor[Shape],
+        validate_args: bool | None = None,
+    ) -> Normal[Shape]: ...
+    def __init__(
+        self,
+        loc: Tensor | float,
+        scale: Tensor | float,
+        validate_args: bool | None = None,
+    ) -> None: ...
+    def cdf[ValueShape: IntTuple](
+        self, value: Tensor[ValueShape]
+    ) -> Tensor[broadcast(ValueShape, EventShape)]: ...
 
 class Categorical[BatchShape: IntTuple, Categories: IntVar](Distribution[BatchShape]):
     """Categorical distribution."""

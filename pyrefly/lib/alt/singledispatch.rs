@@ -10,6 +10,7 @@
 
 use pyrefly_types::class::Class;
 use pyrefly_types::class::ClassType;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::types::BoundMethodType;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::Expr;
@@ -47,8 +48,8 @@ pub(crate) struct DispatcherDef<'a> {
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Whether `ct` is a `@singledispatch` dispatcher class (`_SingleDispatchCallable`)
     fn is_singledispatch_class(ct: &ClassType) -> bool {
-        ct.has_qname("functools", "_SingleDispatchCallable")
-            || ct.has_qname("singledispatch", "_SingleDispatchCallable")
+        ct.is(KnownClass::FunctoolsSingleDispatchCallable)
+            || ct.is(KnownClass::SingleDispatchCallable)
     }
 
     /// Whether `ty` is a `@singledispatch` dispatcher, as either the raw `_SingleDispatchCallable`
@@ -258,10 +259,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             && let Type::Function(f) = base
             && let FunctionKind::CallbackProtocol(cls) = &f.metadata.kind
             && matches!(
-                cls.qname().module_name().as_str(),
-                "functools" | "singledispatch"
+                cls.known(),
+                Some(
+                    KnownClass::FunctoolsSingleDispatchCallable
+                        | KnownClass::SingleDispatchCallable
+                )
             )
-            && cls.name().as_str() == "_SingleDispatchCallable"
             && let Some(first) = Self::first_positional_param_type(&f.signature)
             && let Some(m) = ty.toplevel_func_metadata_mut()
         {

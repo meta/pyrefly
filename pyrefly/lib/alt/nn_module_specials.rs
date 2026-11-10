@@ -19,6 +19,7 @@
 
 use pyrefly_python::dunder;
 use pyrefly_types::callable::Params;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::types::Type;
@@ -45,13 +46,11 @@ use crate::types::class::Class;
 use crate::types::class::ClassType;
 
 pub fn is_nn_module_dict(cls: &ClassType) -> bool {
-    cls.class_object()
-        .has_toplevel_qname("torch.nn", "ModuleDict")
+    cls.class_object().is(KnownClass::TorchModuleDict)
 }
 
 pub fn is_nn_sequential(cls: &ClassType) -> bool {
-    cls.class_object()
-        .has_toplevel_qname("torch.nn", "Sequential")
+    cls.class_object().is(KnownClass::TorchSequential)
 }
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
@@ -104,8 +103,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .iter()
                 .any(|base| {
                     let base = base.class_object();
-                    base.has_toplevel_qname("torch.nn", "Module")
-                        || base.has_toplevel_qname("torch.nn.modules.module", "Module")
+                    base.is(KnownClass::TorchModule) || base.is(KnownClass::TorchModulesModule)
                 })
         {
             return None;

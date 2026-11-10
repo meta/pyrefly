@@ -1,0 +1,17 @@
+# < definition scip-python python snapshot-util 0.1 long_importer/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+import foo.bar.baz.mod
+#      ^^^^^^^^^^^^^^^ reference  snapshot-util 0.1 `foo.bar.baz.mod`/__init__:
+
+print(foo.bar.baz.mod.SuchNestedMuchWow)
+#^^^^ reference  python-stdlib 3.13 builtins/print().
+#     ^^^ reference  snapshot-util 0.1 foo/__init__:
+#         ^^^ reference  snapshot-util 0.1 `foo.bar`/__init__:
+#                 ^^^ reference  snapshot-util 0.1 `foo.bar.baz.mod`/__init__:
+#                     ^^^^^^^^^^^^^^^^^ reference  snapshot-util 0.1 `foo.bar.baz.mod`/SuchNestedMuchWow#
+

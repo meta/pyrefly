@@ -2,7 +2,7 @@
 
 [package]
 name = "pyrefly"
-version = "1.4.0"
+version = "1.5.0-dev.1"
 authors = ["Meta"]
 edition = "2024"
 repository = "https://github.com/facebook/pyrefly"
@@ -41,10 +41,10 @@ name = "tsp"
 harness = false
 
 [dependencies]
-anstream = "0.6.11"
+anstream = "1.0.0"
 anyhow = "1.0.104"
 append-only-vec = "0.1.10"
-arc-swap = { version = "1.9.3", features = ["weak"] }
+arc-swap = { version = "1.9.4", features = ["weak"] }
 blake3 = { version = "=1.8.6", features = ["mmap", "rayon", "traits-preview"] }
 capnp = "0.25.6"
 clap = { version = "4.6.2", features = ["cargo", "derive", "env", "string", "unicode", "wrap_help"] }
@@ -53,7 +53,7 @@ crossbeam-channel = "0.5.17"
 dashmap = { version = "6.2.1", features = ["rayon", "serde"] }
 dupe = "0.9.1"
 enum-iterator = "2.3.0"
-faster-hex = "0.6.1"
+faster-hex = "1.0.0"
 fuzzy-matcher = "0.3.7"
 fxhash = "0.2.1"
 glob = "0.3.4"
@@ -62,10 +62,11 @@ itertools = "0.15.0"
 lsp-server = "0.10.0"
 lsp_types = { package = "gen-lsp-types", version = "0.11.0", features = ["url"] }
 num-traits = { version = "0.2.19", default-features = false }
-parking_lot = { version = "0.12.1", features = ["arc_lock", "send_guard"] }
+parking_lot = { version = "0.13.0", features = ["arc_lock", "send_guard", "serde"] }
 parse-display = "0.8.2"
 paste = "1.0.14"
 percent-encoding = "2.1"
+protobuf = "3.7.2"
 pyrefly_build = { path = "../crates/pyrefly_build" }
 pyrefly_bundled = { path = "../crates/pyrefly_bundled", default-features = false }
 pyrefly_config = { path = "../crates/pyrefly_config" }
@@ -77,12 +78,13 @@ pyrefly_types = { path = "../crates/pyrefly_types" }
 pyrefly_util = { path = "../crates/pyrefly_util" }
 rayon = "1.11.0"
 regex = "1.13.1"
-ruff_annotate_snippets = { package = "ruff_annotate_snippets", version = "0.0.14" }
-ruff_notebook = "0.0.14"
-ruff_python_ast = { version = "0.0.14", features = ["serde"] }
-ruff_python_parser = "0.0.14"
-ruff_source_file = "0.0.14"
-ruff_text_size = "0.0.14"
+ruff_annotate_snippets = { package = "ruff_annotate_snippets", version = "0.0.21" }
+ruff_notebook = "0.0.21"
+ruff_python_ast = { version = "0.0.21", features = ["serde"] }
+ruff_python_parser = { version = "0.0.21", features = ["stacker"] }
+ruff_source_file = "0.0.21"
+ruff_text_size = "0.0.21"
+scip = "0.10"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.154", features = ["alloc", "float_roundtrip", "raw_value", "unbounded_depth"] }
 serde_repr = "0.1.21"
@@ -92,11 +94,11 @@ static_assertions = "1.1.0"
 tempfile = "3.27.0"
 thin-vec = "0.2.21"
 thiserror = "2.0.21"
-tokio = { version = "1.53.2", features = ["macros", "rt"] }
-toml = { version = "1.1.8", features = ["preserve_order"] }
+tokio = { version = "1.54.1", features = ["macros", "rt"] }
+toml = { version = "1.2.1", features = ["preserve_order"] }
 tracing = { version = "0.1.41", features = ["attributes", "valuable"] }
 tsp_types = { path = "../crates/tsp_types" }
-uuid = { version = "1.28.0", features = ["js", "rng-getrandom", "v4"] }
+uuid = { version = "1.29.1", features = ["rng-getrandom", "v4"] }
 vec1 = { version = "1.12.1", features = ["serde"] }
 web-time = "1.1.0"
 xxhash-rust = { version = "0.8.19", features = ["xxh64"] }

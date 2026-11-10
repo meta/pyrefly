@@ -162,7 +162,7 @@ impl<'a> BindingsBuilder<'a> {
         narrowed_idx: Idx<Key>,
     ) {
         let name = Hashed::new(&identifier.id);
-        let usage = Usage::NonPinningValue(None);
+        let usage = Usage::Inspection;
         let name_is_defined = match self.look_up_name_for_read(name, &usage) {
             NameReadInfo::Flow { .. }
             | NameReadInfo::Anywhere { .. }
@@ -209,7 +209,18 @@ impl<'a> BindingsBuilder<'a> {
                     method.recognized_attribute_defining_method
                         && matches!(method.instance_or_class, MethodSelfKind::Instance)
                 });
+        // Updating a function's docstring does not retain its instance-callable view.
+        // Only the direct store base is exempt; assignment RHS captures still count.
+        let metadata_write = self.track_classmethod_uses
+            && attr.attr.id.as_str() == "__doc__"
+            && matches!(attr.value.as_ref(), Expr::Name(_));
+        if metadata_write {
+            self.track_classmethod_uses = false;
+        }
         self.ensure_expr(&mut attr.value, user.usage());
+        if metadata_write {
+            self.track_classmethod_uses = true;
+        }
         if ensure_assigned && let Some(assigned) = &mut assigned {
             self.ensure_expr(assigned, user.usage());
         }
@@ -345,7 +356,8 @@ impl<'a> BindingsBuilder<'a> {
                 );
                 // If this is a self-assignment, record it because we may use it to infer
                 // the existence of an instance-only attribute.
-                self.scopes.record_self_attr_assign(x, attr_value, None);
+                self.scopes
+                    .record_self_attr_assign(x, attr_value, None, true);
                 self.scopes.record_new_instance_attr_assign(x);
             }
             Expr::Subscript(x) => {
@@ -384,12 +396,7 @@ impl<'a> BindingsBuilder<'a> {
                 //
                 // We ignore such names for first-usage-tracking purposes, since
                 // we are not going to analyze the code at all.
-                self.ensure_expr(
-                    illegal_target,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
-                );
+                self.ensure_expr(illegal_target, &mut Usage::Unchecked);
                 // Make sure the RHS is properly bound, so that we can report errors there.
                 // `ensure_expr` may itself create a `Key::Anon` for this range (for example,
                 // functional NamedTuple syntax recovered as an invalid `for` target).
@@ -554,12 +561,7 @@ impl<'a> BindingsBuilder<'a> {
             // Parser error recovery can synthesize empty identifiers. Skip creating a definition
             // binding, but still analyze any assigned value so we surface downstream errors.
             if ensure_assigned && let Some(assigned) = &mut assigned {
-                self.ensure_expr(
-                    assigned,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
-                );
+                self.ensure_expr(assigned, &mut Usage::Unchecked);
             }
             return;
         }

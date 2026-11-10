@@ -27,6 +27,7 @@ mod empty_response_reason;
 mod file_watcher;
 mod folding_range;
 mod hover;
+mod implement_abstract_members;
 mod implementation;
 mod inlay_hint;
 mod io;
@@ -49,6 +50,7 @@ mod notebook_sync;
 mod notebook_tokens;
 mod notebook_type_definition;
 mod notebook_type_error_display_status;
+#[cfg(not(fbcode_build))]
 mod open_file_benchmark;
 mod progress;
 mod provide_type;

@@ -10,22 +10,28 @@ use std::slice;
 use std::sync::Arc;
 
 use itertools::Itertools as _;
+use lsp_types::Contents;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::module::TextRangeWithModule;
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::module_name::ModuleNameWithKind;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_util::arc_id::ArcId;
+use pyrefly_util::demand_tree::DemandCollector;
 use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 use tempfile::TempDir;
+use tempfile::tempdir;
 
 use crate::config::config::ConfigFile;
 use crate::config::finder::ConfigFinder;
+use crate::lsp::wasm::hover::get_hover;
 use crate::state::load::FileContents;
 use crate::state::lsp::FindPreference;
+use crate::state::lsp::ReferenceOptions;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
@@ -432,6 +438,722 @@ Definition Result:
 "#
         .trim(),
         report.trim(),
+    );
+}
+
+#[test]
+fn pytest_fixture_parameter_goes_to_conftest_fixture_definition() {
+    let temp = tempdir().unwrap();
+    let conftest_path = temp.path().join("conftest.py");
+    let conftest = r#"
+import pytest  # type: ignore
+
+@pytest.fixture
+def answer():
+    return 42
+"#;
+    fs::write(&conftest_path, conftest).unwrap();
+    let conftest_stub_path = temp.path().join("conftest.pyi");
+    fs::write(
+        &conftest_stub_path,
+        r#"
+import pytest  # type: ignore
+
+@pytest.fixture
+def answer(): ...
+"#,
+    )
+    .unwrap();
+    let code = r#"
+def test_thing(answer):
+#              ^
+    assert answer == 42
+"#;
+    let main_path = temp.path().join("test_main.py");
+    let (state, handle_for_name) =
+        TestEnv::one_with_path("test_main", main_path.to_str().unwrap(), code).to_state();
+    let handle = handle_for_name("test_main");
+    let conftest_module_path = ModulePath::filesystem(conftest_path.clone());
+    let conftest_config = state.config_finder().python_file(
+        ModuleNameWithKind::guaranteed(ModuleName::unknown()),
+        &conftest_module_path,
+    );
+    let conftest_handle = conftest_config.handle_from_module_path(conftest_module_path);
+    let mut transaction = state.new_committable_transaction(Require::Indexing, None);
+    transaction
+        .as_mut()
+        .run(slice::from_ref(&conftest_handle), Require::Indexing, None);
+    state.commit_transaction(transaction, None);
+    let transaction = state.transaction();
+    assert!(transaction.get_ast(&conftest_handle).is_none());
+
+    let position = extract_cursors_for_test(code).into_iter().next().unwrap();
+    let definitions = transaction.goto_definition(&handle, position).unwrap();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].module.path().as_path(), conftest_path);
+    let declarations = transaction.goto_declaration(&handle, position).unwrap();
+    assert_eq!(declarations.len(), 1);
+    assert_eq!(declarations[0].module.path().as_path(), conftest_stub_path);
+    assert_eq!(
+        r#"
+5 | def answer():
+        ^^^^^^
+"#
+        .trim(),
+        code_frame_of_source_at_range(definitions[0].module.contents(), definitions[0].range)
+            .trim(),
+    );
+}
+
+/// Open a test module with an explicit nested search path and unopened fixture modules.
+fn state_with_conftest(files: &[(&str, &str)], code: &str) -> (TempDir, State, Handle) {
+    let root = tempdir().unwrap();
+    for (name, contents) in files {
+        let path = root.path().join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+    let tests = root.path().join("tests");
+    fs::create_dir_all(&tests).unwrap();
+    let config_path = root.path().join("pyrefly.toml");
+    fs::write(&config_path, "search-path = ['tests', '.']\n").unwrap();
+    let (mut config, errors) = ConfigFile::from_file(&config_path);
+    assert!(errors.is_empty());
+    config.interpreters.skip_interpreter_query = true;
+    config.configure();
+    let path = tests.join("test_main.py");
+    let handle = Handle::new(
+        ModuleName::from_str("test_main"),
+        ModulePath::memory(path.clone()),
+        config.get_sys_info(),
+    );
+    let state = State::new(
+        ConfigFinder::new_constant(ArcId::new(config)),
+        TEST_THREAD_COUNT,
+    );
+    let mut transaction = state.new_committable_transaction(Require::Exports, None);
+    transaction.as_mut().set_memory(vec![(
+        path,
+        Some(Arc::new(FileContents::from_source(code.to_owned()))),
+    )]);
+    transaction
+        .as_mut()
+        .run(slice::from_ref(&handle), Require::Everything, None);
+    state.commit_transaction(transaction, None);
+    (root, state, handle)
+}
+
+#[test]
+fn pytest_conftest_preserves_parameter_rename_references_and_highlights() {
+    let fixture = "import pytest\n@pytest.fixture\ndef answer(): return 42\n";
+    let code = "def test_thing(answer):\n    assert answer == 42\n";
+    for with_stub in [false, true] {
+        let mut files = vec![("tests/conftest.py", fixture)];
+        if with_stub {
+            files.push(("tests/conftest.pyi", fixture));
+        }
+        let (_root, state, handle) = state_with_conftest(&files, code);
+        let mut transaction = state.transaction();
+        let expected: Vec<_> = code
+            .match_indices("answer")
+            .map(|(start, name)| {
+                TextRange::at(TextSize::try_from(start).unwrap(), TextSize::of(name))
+            })
+            .collect();
+        for range in &expected {
+            let mut highlights = transaction.find_local_occurrences(&handle, range.start());
+            highlights.sort_by_key(|range| range.start());
+            assert_eq!(highlights, expected);
+            let mut references = transaction.find_local_references(
+                &handle,
+                range.start(),
+                ReferenceOptions::textual_only(true),
+            );
+            references.sort_by_key(|range| range.start());
+            assert_eq!(references, expected);
+            let definitions = transaction
+                .find_definition(&handle, range.start(), FindPreference::default())
+                .unwrap();
+            let definition = definitions.first();
+            assert_eq!(definition.module.path(), handle.path());
+            let edits = transaction
+                .find_global_references_from_definition(
+                    *handle.sys_info(),
+                    definition.metadata.clone(),
+                    TextRangeWithModule::new(
+                        definition.module.clone(),
+                        definition.definition_range,
+                    ),
+                    ReferenceOptions::textual_only(true),
+                )
+                .unwrap();
+            assert_eq!(edits.len(), 1);
+            let (module, mut ranges) = edits.into_iter().next().unwrap();
+            assert_eq!(module.path(), handle.path());
+            ranges.sort_by_key(|range| range.start());
+            assert_eq!(ranges, expected);
+        }
+    }
+}
+
+#[test]
+fn pytest_conftest_parametrize_respects_direct_and_indirect_arguments() {
+    let fixture = "import pytest\n@pytest.fixture\ndef answer(): return 42\n";
+    for (arguments, indirect) in [
+        ("\"answer\", [42]", false),
+        ("argnames=\"answer\", argvalues=[42]", false),
+        ("[\"answer\"], [42], indirect=False", false),
+        ("\"answer\", [42], indirect=True", true),
+        ("\"answer\", [42], indirect=[\"answer\"]", true),
+        ("\"answer, other\", [(42, 0)], indirect=[\"other\"]", false),
+    ] {
+        let code = format!(
+            "import pytest\n@pytest.mark.parametrize({arguments})\ndef test_value(answer, other=None):\n    assert answer == 42\n"
+        );
+        let (root, state, handle) = state_with_conftest(&[("tests/conftest.py", fixture)], &code);
+        let position = TextSize::try_from(code.find("answer, other=None").unwrap()).unwrap();
+        let definitions = state
+            .transaction()
+            .goto_definition(&handle, position)
+            .unwrap();
+        assert_eq!(definitions.len(), 1);
+        let expected = if indirect {
+            root.path().join("tests/conftest.py")
+        } else {
+            handle.path().as_path().to_path_buf()
+        };
+        assert_eq!(
+            definitions[0].module.path().as_path(),
+            expected,
+            "{arguments}"
+        );
+    }
+}
+
+#[test]
+fn pytest_conftest_named_fixture_overrides_ancestor() {
+    let code = "def test_value(answer, child_answer): pass\n";
+    let (root, state, handle) = state_with_conftest(
+        &[
+            (
+                "conftest.py",
+                "import pytest\n@pytest.fixture\ndef answer(): return 1\n",
+            ),
+            (
+                "tests/conftest.py",
+                "import pytest as pt\n@pt.fixture(name='answer')\ndef child_answer(): return 42\n",
+            ),
+        ],
+        code,
+    );
+    let transaction = state.transaction();
+    for name in ["answer", "child_answer"] {
+        let position = TextSize::try_from(code.find(name).unwrap()).unwrap();
+        let definitions = transaction.goto_definition(&handle, position).unwrap();
+        assert_eq!(definitions.len(), 1);
+        let definition = &definitions[0];
+        if name == "answer" {
+            assert_eq!(
+                definition.module.path().as_path(),
+                root.path().join("tests/conftest.py")
+            );
+            assert_eq!(definition.module.code_at(definition.range), "child_answer");
+        } else {
+            assert_eq!(definition.module.path(), handle.path());
+        }
+    }
+}
+
+#[test]
+fn pytest_conftest_imported_fixture_overrides_ancestor() {
+    let code = "def test_value(answer): pass\n";
+    let (root, state, handle) = state_with_conftest(
+        &[
+            (
+                "conftest.py",
+                "import pytest\n@pytest.fixture\ndef answer(): return 1\n",
+            ),
+            ("tests/conftest.py", "from fixture_exports import answer\n"),
+            ("fixture_exports.py", "from shared_fixtures import answer\n"),
+            (
+                "shared_fixtures.py",
+                "from pytest import fixture\n@fixture\ndef answer(): return 42\n",
+            ),
+        ],
+        code,
+    );
+    let position = TextSize::try_from(code.find("answer").unwrap()).unwrap();
+    let definitions = state
+        .transaction()
+        .goto_definition(&handle, position)
+        .unwrap();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(
+        definitions[0].module.path().as_path(),
+        root.path().join("shared_fixtures.py")
+    );
+}
+
+#[test]
+fn pytest_conftest_parent_above_search_path() {
+    let code = "def test_value(answer): pass\n";
+    let (root, state, handle) = state_with_conftest(
+        &[(
+            "conftest.py",
+            "import pytest\n@pytest.fixture\ndef answer(): return 42\n",
+        )],
+        code,
+    );
+    let position = TextSize::try_from(code.find("answer").unwrap()).unwrap();
+    let definitions = state
+        .transaction()
+        .goto_definition(&handle, position)
+        .unwrap();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(
+        definitions[0].module.path().as_path(),
+        root.path().join("conftest.py")
+    );
+}
+
+#[test]
+fn pytest_conftest_missing_fixture_does_not_resolve_wildcard_dependencies() {
+    let code = "def test_value(tmp_path): pass\n";
+    for with_support in [false, true] {
+        let mut files = vec![("tests/conftest.py", "from support import *\n")];
+        if with_support {
+            files.push(("support.py", "answer = 42\n"));
+        }
+        let (root, state, handle) = state_with_conftest(&files, code);
+        let mut transaction = state.transaction();
+        transaction.set_demand_collector(Some(DemandCollector::new()));
+        let position = TextSize::try_from(code.find("tmp_path").unwrap()).unwrap();
+        for _ in 0..3 {
+            let definitions = transaction.goto_definition(&handle, position).unwrap();
+            assert_eq!(definitions[0].module.path(), handle.path());
+            assert!(transaction.take_demand_roots().is_empty());
+            assert!(
+                !transaction
+                    .handles()
+                    .iter()
+                    .any(|handle| handle.module() == ModuleName::from_str("support"))
+            );
+        }
+        let conftest_handle = transaction
+            .handles()
+            .into_iter()
+            .find(|handle| handle.path().as_path() == root.path().join("tests/conftest.py"))
+            .unwrap();
+        let exports = transaction.get_exports_data(&conftest_handle);
+        assert!(exports.pytest_fixtures().is_empty());
+        assert!(Arc::ptr_eq(
+            &exports,
+            &transaction.get_exports_data(&conftest_handle),
+        ));
+    }
+}
+
+#[test]
+fn pytest_conftest_hover_uses_fixture_documentation() {
+    let code = "def test_value(answer): pass\n";
+    let (_root, state, handle) = state_with_conftest(
+        &[(
+            "tests/conftest.py",
+            "import pytest\n@pytest.fixture\ndef answer():\n    \"\"\"The fixture documentation.\"\"\"\n    return 42\n",
+        )],
+        code,
+    );
+    let position = TextSize::try_from(code.find("answer").unwrap()).unwrap();
+    let hover = get_hover(&state.transaction(), &handle, position, false).unwrap();
+    let Contents::MarkupContent(contents) = hover.contents else {
+        panic!("hover must contain markup");
+    };
+    assert!(contents.value.contains("The fixture documentation."));
+}
+
+#[test]
+fn pytest_conftest_import_cycle_keeps_parameter_definition() {
+    let code = "def test_value(answer): pass\n";
+    let (_root, state, handle) = state_with_conftest(
+        &[
+            ("tests/conftest.py", "from first import answer\n"),
+            ("first.py", "from second import answer\n"),
+            ("second.py", "from first import answer\n"),
+        ],
+        code,
+    );
+    let position = TextSize::try_from(code.find("answer").unwrap()).unwrap();
+    let definitions = state
+        .transaction()
+        .goto_definition(&handle, position)
+        .unwrap();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].module.path(), handle.path());
+}
+
+#[test]
+fn pytest_conftest_class_parametrize_keeps_parameter_definition() {
+    let code = "from pytest import mark as m\n@m.parametrize('answer', [42])\nclass TestValues:\n    def test_value(self, answer): pass\n";
+    let (_root, state, handle) = state_with_conftest(
+        &[(
+            "tests/conftest.py",
+            "import pytest\n@pytest.fixture\ndef answer(): return 42\n",
+        )],
+        code,
+    );
+    let position = TextSize::try_from(code.rfind("answer").unwrap()).unwrap();
+    let definitions = state
+        .transaction()
+        .goto_definition(&handle, position)
+        .unwrap();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(definitions[0].module.path(), handle.path());
+}
+
+#[test]
+fn pytest_conftest_defaulted_parameters_keep_parameter_definition() {
+    for parameters in ["answer=0", "*, answer=None"] {
+        let code = format!("def test_value({parameters}): pass\n");
+        let (_root, state, handle) = state_with_conftest(
+            &[(
+                "tests/conftest.py",
+                "import pytest\n@pytest.fixture\ndef answer(): return 42\n",
+            )],
+            &code,
+        );
+        let position = TextSize::try_from(code.find("answer").unwrap()).unwrap();
+        let definitions = state
+            .transaction()
+            .goto_definition(&handle, position)
+            .unwrap();
+        assert_eq!(definitions[0].module.path(), handle.path());
+    }
+}
+
+#[test]
+fn pytest_conftest_positional_indirect_arguments() {
+    for (indirect, is_indirect) in [("True", true), ("['answer']", true), ("False", false)] {
+        let code = format!(
+            "import pytest\n@pytest.mark.parametrize('answer', [42], {indirect})\ndef test_value(answer): pass\n"
+        );
+        let (root, state, handle) = state_with_conftest(
+            &[(
+                "tests/conftest.py",
+                "import pytest\n@pytest.fixture\ndef answer(request): return request.param\n",
+            )],
+            &code,
+        );
+        let position = TextSize::try_from(code.rfind("answer").unwrap()).unwrap();
+        let definitions = state
+            .transaction()
+            .goto_definition(&handle, position)
+            .unwrap();
+        let expected = if is_indirect {
+            root.path().join("tests/conftest.py")
+        } else {
+            handle.path().as_path().to_path_buf()
+        };
+        assert_eq!(definitions[0].module.path().as_path(), expected);
+    }
+}
+
+#[test]
+fn pytest_conftest_local_named_fixture_overrides_conftest() {
+    let code = "import pytest\n@pytest.fixture(name='answer')\ndef local_answer(): return 42\ndef test_value(answer): pass\n";
+    let (_root, state, handle) = state_with_conftest(
+        &[(
+            "tests/conftest.py",
+            "import pytest\n@pytest.fixture\ndef answer(): return 1\n",
+        )],
+        code,
+    );
+    let position = TextSize::try_from(code.rfind("answer").unwrap()).unwrap();
+    let transaction = state.transaction();
+    for definitions in [
+        transaction.goto_definition(&handle, position).unwrap(),
+        transaction.goto_declaration(&handle, position).unwrap(),
+    ] {
+        assert_eq!(definitions[0].module.path(), handle.path());
+        assert_eq!(
+            definitions[0].module.code_at(definitions[0].range),
+            "local_answer",
+        );
+    }
+    let reference_definition = transaction
+        .find_definition(&handle, position, FindPreference::default())
+        .unwrap();
+    assert_eq!(reference_definition[0].module.path(), handle.path());
+    assert_eq!(reference_definition[0].definition_range.start(), position);
+}
+
+#[test]
+fn pytest_fixture_override_requests_parent_definition() {
+    for (decorator, function_name) in [
+        ("@pytest.fixture(name='answer')", "local_answer"),
+        ("@pytest.fixture", "answer"),
+    ] {
+        let code = format!(
+            "import pytest\n{decorator}\ndef {function_name}(answer): return answer + 1\ndef test_value(answer): pass\n"
+        );
+        let (root, state, handle) = state_with_conftest(
+            &[(
+                "tests/conftest.py",
+                "import pytest\n@pytest.fixture\ndef answer(): return 41\n",
+            )],
+            &code,
+        );
+        let position = TextSize::try_from(
+            code.find(&format!("{function_name}(answer)")).unwrap() + function_name.len() + 1,
+        )
+        .unwrap();
+        let body_position = TextSize::try_from(code.find("return answer").unwrap() + 7).unwrap();
+        let transaction = state.transaction();
+        if function_name == "local_answer" {
+            let reference_definition = transaction
+                .find_definition(&handle, position, FindPreference::default())
+                .unwrap();
+            assert_eq!(reference_definition[0].definition_range.start(), position);
+            let mut highlights = transaction.find_local_occurrences(&handle, position);
+            highlights.sort_by_key(|range| range.start());
+            assert_eq!(
+                highlights,
+                vec![
+                    TextRange::at(position, TextSize::of("answer")),
+                    TextRange::at(body_position, TextSize::of("answer")),
+                ],
+            );
+        }
+        for definitions in [
+            transaction.goto_definition(&handle, position).unwrap(),
+            transaction.goto_declaration(&handle, position).unwrap(),
+        ] {
+            assert_eq!(
+                definitions[0].module.path().as_path(),
+                root.path().join("tests/conftest.py"),
+            );
+            assert_eq!(
+                definitions[0].module.code_at(definitions[0].range),
+                "answer"
+            );
+        }
+        let consumer_position =
+            TextSize::try_from(code.find("test_value(answer)").unwrap() + "test_value(".len())
+                .unwrap();
+        let consumer_definition = transaction
+            .goto_definition(&handle, consumer_position)
+            .unwrap();
+        assert_eq!(consumer_definition[0].module.path(), handle.path());
+        assert_eq!(
+            consumer_definition[0]
+                .module
+                .code_at(consumer_definition[0].range),
+            function_name,
+        );
+    }
+}
+
+#[test]
+fn pytest_fixture_class_override_requests_module_definition() {
+    let code = "import pytest\n@pytest.fixture\ndef answer(): return 41\nclass TestValues:\n    @pytest.fixture\n    def answer(self, answer): return answer + 1\n    def test_value(self, answer): pass\n";
+    let (_root, state, handle) = state_with_conftest(&[], code);
+    let position =
+        TextSize::try_from(code.find("answer(self, answer)").unwrap() + "answer(self, ".len())
+            .unwrap();
+    let class_fixture_position =
+        TextSize::try_from(code.rfind("def answer").unwrap() + "def ".len()).unwrap();
+    let transaction = state.transaction();
+    let definition = transaction.goto_definition(&handle, position).unwrap();
+    let module_fixture_position =
+        TextSize::try_from(code.find("def answer").unwrap() + "def ".len()).unwrap();
+    assert_eq!(definition[0].range.start(), module_fixture_position);
+    let consumer_position = TextSize::try_from(
+        code.find("test_value(self, answer)").unwrap() + "test_value(self, ".len(),
+    )
+    .unwrap();
+    let consumer_definition = transaction
+        .goto_definition(&handle, consumer_position)
+        .unwrap();
+    assert_eq!(consumer_definition[0].range.start(), class_fixture_position);
+}
+
+#[test]
+fn pytest_conftest_override_requests_parent_definition() {
+    for (decorator, function_name) in [
+        ("@pytest.fixture(name='answer')", "local_answer"),
+        ("@pytest.fixture", "answer"),
+    ] {
+        let code =
+            format!("import pytest\n{decorator}\ndef {function_name}(answer): return answer + 1\n");
+        let (root, state, _) = state_with_conftest(
+            &[
+                (
+                    "conftest.py",
+                    "import pytest\n@pytest.fixture\ndef answer(): return 41\n",
+                ),
+                ("tests/conftest.py", &code),
+            ],
+            "def test_value(): pass\n",
+        );
+        let module_path = ModulePath::filesystem(root.path().join("tests/conftest.py"));
+        let config = state.config_finder().python_file(
+            ModuleNameWithKind::guaranteed(ModuleName::unknown()),
+            &module_path,
+        );
+        let handle = config.handle_from_module_path(module_path);
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction
+            .as_mut()
+            .run(slice::from_ref(&handle), Require::Everything, None);
+        state.commit_transaction(transaction, None);
+        let position = TextSize::try_from(
+            code.find(&format!("{function_name}(answer)")).unwrap() + function_name.len() + 1,
+        )
+        .unwrap();
+        let transaction = state.transaction();
+        for definitions in [
+            transaction.goto_definition(&handle, position).unwrap(),
+            transaction.goto_declaration(&handle, position).unwrap(),
+        ] {
+            assert_eq!(
+                definitions[0].module.path().as_path(),
+                root.path().join("conftest.py"),
+            );
+            assert_eq!(
+                definitions[0].module.code_at(definitions[0].range),
+                "answer"
+            );
+        }
+    }
+}
+
+#[test]
+fn pytest_conftest_override_requests_parent_with_companion_stub() {
+    let source = "import pytest\n@pytest.fixture(name='answer')\ndef local_answer(answer): return answer + 1\n";
+    let stub = "# The companion has different declaration offsets.\nimport pytest\n@pytest.fixture(name='answer')\ndef local_answer(answer): ...\n";
+    for extension in ["py", "pyi"] {
+        let code = if extension == "py" { source } else { stub };
+        let test_code = "def test_value(answer): pass\n";
+        let (root, state, test_handle) = state_with_conftest(
+            &[
+                (
+                    "conftest.py",
+                    "import pytest\n@pytest.fixture\ndef answer(): return 41\n",
+                ),
+                (
+                    "conftest.pyi",
+                    "import pytest\n@pytest.fixture\ndef answer(): ...\n",
+                ),
+                ("tests/conftest.py", source),
+                ("tests/conftest.pyi", stub),
+            ],
+            test_code,
+        );
+        let module_path =
+            ModulePath::filesystem(root.path().join(format!("tests/conftest.{extension}")));
+        let config = state.config_finder().python_file(
+            ModuleNameWithKind::guaranteed(ModuleName::unknown()),
+            &module_path,
+        );
+        let handle = config.handle_from_module_path(module_path);
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction
+            .as_mut()
+            .run(slice::from_ref(&handle), Require::Everything, None);
+        state.commit_transaction(transaction, None);
+        let position =
+            TextSize::try_from(code.find("local_answer(answer)").unwrap() + "local_answer(".len())
+                .unwrap();
+        let transaction = state.transaction();
+        for (definitions, expected) in [
+            (
+                transaction.goto_definition(&handle, position).unwrap(),
+                "conftest.py",
+            ),
+            (
+                transaction.goto_declaration(&handle, position).unwrap(),
+                "conftest.pyi",
+            ),
+        ] {
+            assert_eq!(
+                definitions[0].module.path().as_path(),
+                root.path().join(expected),
+            );
+            assert_eq!(
+                definitions[0].module.code_at(definitions[0].range),
+                "answer"
+            );
+        }
+        let consumer_position = TextSize::try_from(test_code.find("answer").unwrap()).unwrap();
+        for (definitions, expected) in [
+            (
+                transaction
+                    .goto_definition(&test_handle, consumer_position)
+                    .unwrap(),
+                "tests/conftest.py",
+            ),
+            (
+                transaction
+                    .goto_declaration(&test_handle, consumer_position)
+                    .unwrap(),
+                "tests/conftest.pyi",
+            ),
+        ] {
+            assert_eq!(
+                definitions[0].module.path().as_path(),
+                root.path().join(expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn pytest_fixture_defaulted_parameter_references() {
+    let code = "import pytest\n@pytest.fixture\ndef answer(): return 42\ndef test_value(answer=0): assert answer == 0\n";
+    let (_root, state, handle) = state_with_conftest(&[], code);
+    let ranges: Vec<_> = code
+        .match_indices("answer")
+        .map(|(start, name)| TextRange::at(TextSize::try_from(start).unwrap(), TextSize::of(name)))
+        .collect();
+    let transaction = state.transaction();
+    let mut references = transaction.find_local_occurrences(&handle, ranges[0].start());
+    references.sort_by_key(|range| range.start());
+    assert_eq!(references, ranges[..1]);
+    for range in &ranges[1..] {
+        let mut references = transaction.find_local_occurrences(&handle, range.start());
+        references.sort_by_key(|range| range.start());
+        assert_eq!(references, ranges[1..]);
+    }
+}
+
+#[test]
+fn pytest_conftest_imported_named_fixture_uses_ancestor() {
+    let code = "def test_value(answer): pass\n";
+    let (root, state, handle) = state_with_conftest(
+        &[
+            (
+                "conftest.py",
+                "import pytest\n@pytest.fixture\ndef answer(): return 1\n",
+            ),
+            (
+                "tests/conftest.py",
+                "from shared_fixtures import child_answer\n",
+            ),
+            (
+                "shared_fixtures.py",
+                "import pytest\n@pytest.fixture(name='answer')\ndef child_answer(): return 42\n",
+            ),
+        ],
+        code,
+    );
+    let position = TextSize::try_from(code.find("answer").unwrap()).unwrap();
+    let definitions = state
+        .transaction()
+        .goto_definition(&handle, position)
+        .unwrap();
+    // BUG: pytest selects shared_fixtures.child_answer by its literal name; we select the ancestor.
+    assert_eq!(
+        definitions[0].module.path().as_path(),
+        root.path().join("conftest.py"),
     );
 }
 
@@ -4435,5 +5157,142 @@ object.__setattr__
     assert!(
         report.contains("def __setattr__"),
         "missing definition of `object.__setattr__`:\n{report}"
+    );
+}
+
+#[test]
+fn goto_def_inside_quoted_annotation() {
+    // Each identifier inside a forward-reference string resolves like the unquoted form.
+    let lib = "class Helper: ...\n";
+    let code = r#"
+from typing import TYPE_CHECKING
+import lib
+
+if TYPE_CHECKING:
+    from lib import Helper
+
+class Model: ...
+
+a: "Model"
+#   ^
+b: "list[Helper]"
+#         ^
+c: "dict[str, list[Model]]"
+#                   ^
+d: list["Model"]
+#        ^
+e: "lib.Helper"
+#   ^   ^
+"#;
+    let report =
+        get_batched_lsp_operations_report(&[("main", code), ("lib", lib)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+10 | a: "Model"
+         ^
+Definition Result:
+8 | class Model: ...
+          ^^^^^
+
+12 | b: "list[Helper]"
+               ^
+Definition Result:
+1 | class Helper: ...
+          ^^^^^^
+
+14 | c: "dict[str, list[Model]]"
+                         ^
+Definition Result:
+8 | class Model: ...
+          ^^^^^
+
+16 | d: list["Model"]
+              ^
+Definition Result:
+8 | class Model: ...
+          ^^^^^
+
+18 | e: "lib.Helper"
+         ^
+Definition Result:
+1 | class Helper: ...
+    ^
+
+18 | e: "lib.Helper"
+             ^
+Definition Result:
+1 | class Helper: ...
+          ^^^^^^
+
+
+# lib.py
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn goto_def_ignores_strings_that_are_not_type_expressions() {
+    // Only strings the checker parsed as type expressions resolve: ordinary strings,
+    // `Literal` values, and malformed annotations stay plain text.
+    let code = r#"
+from typing import Literal
+
+class Model: ...
+
+x = "Model"
+#    ^
+y: Literal["Model"]
+#           ^
+z: "list[Model"
+#          ^
+"#;
+    let report = get_batched_lsp_operations_report_allow_error(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+6 | x = "Model"
+         ^
+Definition Result: None
+
+8 | y: Literal["Model"]
+                ^
+Definition Result: None
+
+10 | z: "list[Model"
+                ^
+Definition Result: None
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn goto_def_ignores_quoted_annotations_with_escapes() {
+    // Escapes shift the ranges of the names parsed from a string, so it stays plain text.
+    let code = r#"
+class Model: ...
+class Other: ...
+
+a: "\x4dodel | Other"
+#            ^ ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+5 | a: "\x4dodel | Other"
+                 ^
+Definition Result: None
+
+5 | a: "\x4dodel | Other"
+                   ^
+Definition Result: None
+"#
+        .trim(),
+        report.trim(),
     );
 }

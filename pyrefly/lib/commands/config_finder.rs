@@ -336,6 +336,7 @@ pub fn standard_config_finder(
                 }
             }
         }),
+        Box::new(|config, _| config),
         clear_extra_caches,
     )
 }

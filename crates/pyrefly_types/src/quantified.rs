@@ -24,6 +24,7 @@ use ruff_text_size::TextRange;
 
 use crate::class::ClassType;
 use crate::dimension::gradual_size;
+use crate::env::TypeEnv;
 use crate::heap::TypeHeap;
 use crate::stdlib::Stdlib;
 use crate::type_var::PreInferenceVariance;
@@ -44,6 +45,8 @@ pub enum QuantifiedOrigin {
         /// Is this a Self quantified synthesized for `__new__` on a class?
         is_self: bool,
     },
+    /// An inferred receiver shared by an instance method and a classmethod wrapper.
+    MethodReceiver,
     /// Synthetic binder for the parameter of an `IntTuples` mapper.
     MapIntTuplesParameter,
     /// De Bruijn sentinel used only while comparing `MapIntTuples` lambdas.
@@ -419,6 +422,34 @@ impl Quantified {
 
     pub fn variance(&self) -> PreInferenceVariance {
         self.variance
+    }
+
+    pub fn name_in<'a, E: TypeEnv + ?Sized>(&'a self, _env: &'a E) -> &'a Name {
+        &self.name
+    }
+
+    pub fn restriction_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> &'a Restriction {
+        env.type_var_restriction(self)
+    }
+
+    pub fn default_in<'a, E: TypeEnv + ?Sized>(&'a self, env: &'a E) -> Option<&'a Type> {
+        env.type_var_default(self)
+    }
+
+    pub fn variance_in<E: TypeEnv + ?Sized>(&self, _env: &E) -> PreInferenceVariance {
+        self.variance
+    }
+
+    /// The restriction stored in this `Quantified`, which `TypeEnv::type_var_restriction`
+    /// returns by default.
+    pub(crate) fn inline_restriction(&self) -> &Restriction {
+        &self.restriction
+    }
+
+    /// The default stored in this `Quantified`, which `TypeEnv::type_var_default` returns by
+    /// default.
+    pub(crate) fn inline_default(&self) -> Option<&Type> {
+        self.default.as_ref()
     }
 
     pub fn is_type_var(&self) -> bool {

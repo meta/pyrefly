@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+pub mod annotation_renderer;
 pub mod dirty;
 pub mod epoch;
 pub mod errors;
@@ -24,3 +25,4 @@ pub mod state;
 mod step_slot;
 pub mod steps;
 pub mod subscriber;
+pub mod transaction_manager;

@@ -401,6 +401,10 @@ fn ownership_test() {
 #[test]
 fn module_names_only_change_reported_names() {
     use std::collections::HashMap;
+    use std::path::Path;
+
+    use pyrefly_config::module_names::ModuleNames;
+    use pyrefly_util::arc_id::ArcId;
 
     use crate::state::require::Require;
     use crate::test::util::mk_multi_file_state_assert_no_errors;
@@ -430,10 +434,13 @@ fn module_names_only_change_reported_names() {
         .unwrap()["facts"][0]["key"]["file"]["key"]
         .as_str()
         .unwrap();
-    let naming = GleanNaming {
-        module_names: HashMap::from([(file.to_owned(), "public.api".to_owned())]),
-        stdlib_root: None,
-    };
+    let naming = GleanNaming::new(
+        Some(ArcId::new(ModuleNames::new(
+            HashMap::from([(file.to_owned(), "public.api".to_owned())]),
+            Path::new(""),
+        ))),
+        None,
+    );
     let renamed = glean(&transaction, original, false, &naming);
     assert!(renamed.contains("public.api.Widget"));
     assert!(!renamed.contains("original.Widget"));

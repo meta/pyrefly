@@ -36,10 +36,6 @@ The default severity for diagnostics is `error` unless otherwise noted. Diagnost
 By default, `pyrefly check` only displays diagnostics with severity `error` or higher.
 Use the [`min-severity`](../configuration#min-severity) config option or `--min-severity` CLI flag to also show lower-severity diagnostics (e.g. `--min-severity warn`).
 
-By default, only `error`-level diagnostics cause a nonzero exit code in the CLI. When [`min-severity`](../configuration#min-severity) is set, any diagnostic at or above that threshold causes a nonzero exit.
-
-In the IDE, diagnostics below `error` severity are only shown for files that are currently open in the editor.
-
 ## abstract-method-call
 
 This error is raised when code attempts to invoke a method decorated with
@@ -134,7 +130,7 @@ type.
 ```python
 def example(x: int) -> None:
   ...
-example("one")  # Argument `Literal['two']` is not assignable to parameter `x` with type `int` in function `example` [bad-argument-type]
+example("one")  # Argument `Literal['one']` is not assignable to parameter `x` with type `int` in function `example` [bad-argument-type]
 ```
 
 This can also happen with `*args` and `**kwargs`:
@@ -150,7 +146,7 @@ bad_args(1, "two")  # Argument `Literal['two']` is not assignable to parameter w
 def bad_kwargs(**kwargs: int) -> None:
   ...
 
-bad_args(x=1, y="two")  # Keyword argument `y` with type `Literal['two']` is not assignable to kwargs type `int` in function `bad_kwargs` [bad-argument-type]
+bad_kwargs(x=1, y="two")  # Keyword argument `y` with type `Literal['two']` is not assignable to kwargs type `int` in function `bad_kwargs` [bad-argument-type]
 ```
 
 ## bad-assignment
@@ -196,10 +192,6 @@ Ex = Enum("Ex", [("Red", 1), ("Blue", 2), ("Red", 3)])  # Duplicate field `Red` 
 
 However, it is best practice to use the class syntax if possible, which doesn't treat duplicate names as an error.
 
-It also covers decorators applied to a class kind they cannot be applied to,
-such as `@dataclass` on a `Protocol`, `@disjoint_base` on a `TypedDict` or
-`Protocol`, or `@runtime_checkable` on a non-`Protocol` class.
-
 ## bad-context-manager
 
 This error occurs when a type that cannot be used as a context manager appears in a `with` statement.
@@ -215,9 +207,8 @@ with A(): ...  # `A` is missing an `__exit__` method!
 A dataclass field is typed as a descriptor whose read-back type does not match what the
 synthesized `__init__` writes.
 
-A **data descriptor** defines `__set__` and/or `__delete__`. It always takes priority over the
-instance dictionary, so when one is used as a dataclass field the class-level descriptor acts as
-the field's default. If it also defines `__get__`, reading the field yields the `__get__` return
+A **data descriptor** defines `__set__` and/or `__delete__`.
+If it also defines `__get__`, reading the field yields the `__get__` return
 type while writing it goes through `__set__`, so the two must agree:
 
 ```python
@@ -248,9 +239,6 @@ class C:
     x: Desc = Desc()  # instance attribute shadows the descriptor [bad-dataclass-descriptor]
 ```
 
-A non-data descriptor whose `__get__` returns `Self` or its own class is exempt, since the
-shadowing value then has the same type as the read-back value.
-
 ## bad-dunder-all
 
 This error occurs when `__all__` is explicitly defined for a module but contains an entry that cannot be found in the module's definitions, wildcard imports, or submodules (for `__init__.py` files).
@@ -272,9 +260,6 @@ y = 10  # Now `y` is defined
 
 Like `bad-class-definition`, this error kind is uncommon because other error kinds are used for more specific issues.
 For example, argument order is enforced by the parser, so `def f(x: int = 1, y: str)` is a `parse-error`.
-
-It also covers decorators applied to a function when the typing spec only
-allows them on classes, such as `@disjoint_base` on a function.
 
 ## bad-index
 
@@ -376,11 +361,11 @@ That means everywhere that we call `Base.f` can safely call `Sub.f`.
 
 The opposite case, where `Base.f` takes `float` and `Sub.f` takes `int`, is an error because `Sub.f` cannot accept every `float` value.
 
-Note that bad overrides caused by inconsistent parameter names are separately reported as [bad-override-param-name](#bad-override-param-name), and bad overrides caused by mutable attribute type changes are separately reported as [bad-override-mutable-attribute](#bad-override-mutable-attribute).
+Note that bad overrides caused by inconsistent parameter names are separately reported as [bad-override-param-name](#bad-override-param-name), and some overrides involving mutable attributes are reported as [bad-override-mutable-attribute](#bad-override-mutable-attribute).
 
 ## bad-override-mutable-attribute
 
-Arises when a subclass overrides a mutable (read-write) attribute of a parent class with an incompatible type.
+Arises when a subclass narrows the type of a mutable (read-write) attribute inherited from a parent class.
 Mutable attributes require invariant types — the child's type must be exactly compatible with the parent's — because the attribute can be both read and written through a reference to the parent class.
 
 ```python
@@ -650,11 +635,7 @@ Default severity: `ignore`
 
 A value's type is an explicit `Any`, which allows arbitrary operations on it without any checking. The `Any` usually comes from an annotation, either here or in a library: a parameter annotated `Any`, or a function like `json.loads` that returns `Any`.
 
-Uses are reported at the same kinds of places as the unknown-type checks: variables, arguments, attribute accesses, class attributes, and values returned from functions without a return annotation and from lambdas. Like basedpyright's `reportAny`, every such place is reported, including each attribute in a chain.
-
-A loop, unpacking, `with` or comprehension target is reported at its name, like [unknown-variable-type](#unknown-variable-type). [unknown-from-error](#unknown-from-error) reports such targets at the value instead, because it is reported only where the unknown type arises.
-
-The annotation itself is reported as [explicit-any](#explicit-any). Returning an explicit `Any` from a function whose return annotation is concrete is reported as [no-any-return-explicit](#no-any-return-explicit). A return annotation of `Any` is not reported, because it already tells the reader that the value is unchecked, and neither is `object`, which forces the caller to narrow before use. A union with an `Any` member, such as `int | Any`, is not reported as [no-any-return-explicit](#no-any-return-explicit), following mypy. Its other members still go unchecked, so the returned value is reported here, as in a function without a return annotation.
+The annotation itself is reported as [explicit-any](#explicit-any).
 
 ```python
 import json
@@ -911,15 +892,29 @@ class C:
         self.y = 0  # error, `y` may be undefined if `f` does not execute
 ```
 
+## inactive-code
+
+Default severity: `hint`
+
+A block of code that is inactive in the current type-checking configuration. Pyrefly does not check
+inactive code, and the IDE greys it out.
+
+```python
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+else:
+    Sequence = list  # inactive-code: This code is inactive for the current type-checking configuration
+```
+
 ## incompatible-comparison
 
 Default severity: `ignore`
 
 This error is raised when Pyrefly can prove that an equality (`==`) or inequality
 (`!=`) comparison is made between incompatible built-in types (for example, `int`
-versus `str`). This check is currently limited to a small allowlist: numeric
-types (including `decimal.Decimal`), bytes-like types, set-like types, and `str`.
-It does not analyze unions, `None`, or user-defined classes.
+versus `str`).
 
 ```python
 x: int = 1
@@ -999,6 +994,24 @@ def f(x: bool = False) -> int | None:
     return 0 if x else None
 ```
 
+## instance-var-assign
+
+Default severity: `ignore`
+
+Assigning to an instance variable via the class object — e.g. `C.instance_var = ...`
+where the class body declares `instance_var: int` without `ClassVar` — misuses the
+declaration: instance variables should be assigned on instances. Pyrefly flags such
+assignments when this kind is enabled (it is on in strict mode).
+
+```python
+class C:
+    instance_var: int
+C.instance_var = 3  # Cannot set instance variable `instance_var` from the class [instance-var-assign]
+```
+
+Unannotated assignments and `ClassVar` declarations are class variables and may be
+assigned via the class.
+
 ## internal-error
 
 Ideally you'll never see this one. If you do, please consider [filing a bug](https://github.com/facebook/pyrefly/issues).
@@ -1007,7 +1020,7 @@ Ideally you'll never see this one. If you do, please consider [filing a bug](htt
 
 Default severity: `ignore`
 
-Pyrefly emits this error when a class that is not abstract (does not inherit from `abc.ABC`, use `abc.ABCMeta`, have any transitive abstract base, or define a `Protocol` or `NewType`) defines a method decorated with `@abstractmethod`. Such a class is directly instantiable at runtime, yet contains an unimplemented method — a likely programming mistake.
+Pyrefly emits this error when a class that is not abstract defines a method decorated with `@abstractmethod`. Such a class is directly instantiable at runtime, yet contains an unimplemented method — a likely programming mistake.
 
 ```python
 from abc import abstractmethod
@@ -1060,17 +1073,11 @@ if isinstance(1, UserId):
 Default severity: `ignore`
 
 This warning is raised when `typing.cast` or `typing_extensions.cast` converts
-between types that Pyrefly can prove have disjoint runtime classes. The check
-applies to class instances and objects, literals, `None`, tuples, `TypedDict`,
-and unions containing only supported types. Literals and structural containers
-are compared using their nominal runtime classes. This means that a
-`TypedDict` overlaps with `dict`, and tuple element types do not by themselves
-make two tuples disjoint. Generic arguments similarly do not make two class
-instances disjoint, so casting `list[int]` to `list[str]` does not produce this
-warning. Type variables, protocols, `Never`, callables, and other types without
-a sufficiently precise nominal runtime class are not reported. Two open nominal
-classes are not considered disjoint unless their disjoint-base representatives
-conflict, because a multiple-inheritance subclass could satisfy both.
+between types that Pyrefly can prove have disjoint runtime classes. Generic
+arguments do not make two class instances disjoint, so casting `list[int]` to
+`list[str]` does not produce this warning. Two open nominal classes are not
+considered disjoint unless their disjoint-base representatives conflict, because
+a multiple-inheritance subclass could satisfy both.
 
 ```python
 from typing import cast
@@ -1097,6 +1104,21 @@ Decorator misuse that violates the typing spec — for example, `@dataclass` on 
 `@runtime_checkable` on a non-`Protocol` class, or `@disjoint_base` on a
 function — is reported under `bad-class-definition` or
 `bad-function-definition` instead, both of which default to `error`.
+
+## invalid-format-spec
+
+Default severity: `ignore`
+
+An f-string format specification is incompatible with the value's static type or
+with the known builtin formatting rules. This optional check validates literal,
+nonempty specifications, including unsupported formatting, incompatible presentation
+types, invalid flags, and unrecognized specifications.
+
+```python
+f"{None:>10}"  # invalid-format-spec, if enabled
+f"{'text':.2f}"  # invalid-format-spec, if enabled
+f"{1:.2d}"  # invalid-format-spec, if enabled
+```
 
 ## invalid-inheritance
 
@@ -1449,28 +1471,11 @@ A method overrides a parent class method but does not have the `@override` decor
 This error supports strict override enforcement as specified in the [typing spec](https://typing.python.org/en/latest/spec/class-compat.html#strict-enforcement-per-project). When enabled, it requires all overriding methods to be explicitly marked with `@typing.override`.
 
 ```python
-from typing import override
-
 class Base:
     def foo(self) -> None: ...
-    def __len__(self) -> int: ...
 
 class Derived(Base):
     def foo(self) -> None: ...  # missing-override-decorator
-
-    def __len__(self) -> int: ...  # missing-override-decorator (inherited from Base, not object)
-
-    def __repr__(self) -> str: ...  # OK (inherited from object)
-
-    @override
-    def foo(self) -> None: ...  # OK
-```
-
-To enable strict override enforcement, set the severity to `error` in your configuration:
-
-```toml
-[tool.pyrefly]
-errors = { missing-override-decorator = "error" }
 ```
 
 ## missing-source
@@ -1480,15 +1485,9 @@ Default severity: `ignore`
 Pyrefly was able to find a stubs package but no corresponding source package. For example, this can
 happen if you install the `types-requests` package but forget to install `requests`.
 
-This error is not reported for imports that never run: imports in stub files (`.pyi`) and imports
-inside `if TYPE_CHECKING:` blocks.
-
 ## missing-source-for-stubs
 
 Pyrefly has bundled stubs for a package, but no corresponding source package was found.
-
-Like `missing-source`, this error is not reported for imports in stub files (`.pyi`) or inside
-`if TYPE_CHECKING:` blocks.
 
 ## missing-super-call
 
@@ -1504,13 +1503,6 @@ class Base:
 class Child(Base):
     def __init__(self) -> None:  # missing-super-call
         pass
-```
-
-To enable this check, set the severity to `error` in your configuration:
-
-```toml
-[tool.pyrefly]
-errors = { missing-super-call = "error" }
 ```
 
 ## name-mismatch
@@ -1627,36 +1619,14 @@ def f(): return g()
 def g(): return [f()]
 ```
 Here, return-type inference for `f` depends on the return type of `g`, and vice versa
-so we get a cycle. Similarly, in
-```
-x = 1
-while some_condition():
-  x = [x]
-```
-the type of `x` at the end of the loop body depends on the type of `x` at the beginning,
-and this forms a cycle (and in this case the type doesn't converge to any closed form;
-the true type is a recursive type but Pyrefly will not infer an anonymous recursive type).
+so we get a cycle.
 
-Many more cycles are possible, sometimes involving harder-to-visualize problems like
-classes whose type parameters have constraints that are recursive, or class fields
-whose inferred types depend on one another.
-
-Pyrefly will attempt to resolve all such recursion using a *fixpoint*, where we
-repeatedly analyze the related entities in type inference. But because the results
-do not always converge (like `x = [x]` above), we have to limit the number of
-iterations, which means sometimes we cannot ensure that the inferred result
-is correct.
-
-In these cases, Pyrefly will produce a `non-convergent-recursion` error that
-warns you our fixpoint did not converge, and tells you the result we inferred
-based on the last iteration. In some cases, the error message will recommend
-that by adding more annotations you may be able to help Pyrefly determine the
-correct type.
-
-If you're filing a bug report for this error, set the environment variable
-`PYREFLY_FIXPOINT_DETAILS=1` when running Pyrefly and include additional
-diagnostic information in the issue that will help the Pyrefly team root cause
-the non-convergence.
+Pyrefly resolves such cycles by repeatedly analyzing the entities involved, up to a
+limited number of iterations. If the inferred types still have not converged, Pyrefly
+reports a `non-convergent-recursion` error and uses the result of the last iteration.
+Adding annotations can break the cycle. If you're filing a bug report for this error,
+set the environment variable `PYREFLY_FIXPOINT_DETAILS=1` and include the extra
+diagnostic information in the issue.
 
 ## non-exhaustive-match
 
@@ -1728,9 +1698,7 @@ function `async` or finding an existing `async` function to use instead.
 
 ## not-callable
 
-A straightforward error: something that is not a function was used as if it were a function.
-
-One interesting place this error may occur is with decorators:
+A value that is not callable is called or used as a decorator.
 
 ```python
 x = 1
@@ -1828,14 +1796,10 @@ definition is valid Python, but mixed comparisons between parent and subclass in
 `TypeError` at runtime because the generated ordering methods only compare instances of the exact
 same class.
 
-The warning is also reported when the ordering methods are inherited through intermediate classes,
-such as a plain subclass or a dataclass without `order=True`, and the message names the dataclass
-that generates them. It is not reported when every mixed comparison reaches a user-defined
+It is not reported when every mixed comparison reaches a user-defined
 `__lt__`, `__le__`, `__gt__`, or `__ge__` instead, for example when the subclass, or a mixin listed
 before the dataclass, defines all four. Overriding only some of them is not enough, because the
-remaining generated methods still reject instances of the other class. The warning is also not
-reported if a class created through some other `dataclass_transform` library generates ordering
-methods first, because Pyrefly does not know how those methods compare instances.
+remaining generated methods still reject instances of the other class.
 
 ```python
 from dataclasses import dataclass
@@ -1873,31 +1837,23 @@ Default severity: `ignore`
 
 The `strict` preset enables this check as an error.
 
-Pyrefly checks whether each value assigned in a class body exists when that body
-completes. Every completing path must assign the attribute. A path that raises or
-ends in a `Never` or `NoReturn` call does not require an assignment.
+Pyrefly reports an attribute that the class body or an initialization method assigns on some paths but not others, so an instance may be created without it.
 
 ```python
 class C:
     if enabled():
-        value = 1  # possibly-uninitialized-attribute
+        flag = True  # possibly-uninitialized-attribute
+
+    def __init__(self, value: int | None) -> None:
+        if value is not None:
+            self.value = value  # possibly-uninitialized-attribute
 ```
 
-Pyrefly reports the error at the definition, even if the attribute is never read.
-A later `hasattr` guard does not suppress it. An assignment in `__init__` does not
-initialize a class attribute. Inherited attributes, conditional method definitions,
-and stub (`.pyi`) files are exempt.
+Every path that completes normally must assign the attribute, including one that ends in an early `return`.
+A path that raises, or ends in a call to a `Never` or `NoReturn` function, does not need to.
 
-To disable this check while retaining other strict checks, use:
-
-```toml
-preset = "strict"
-
-[errors]
-possibly-uninitialized-attribute = "ignore"
-```
-
-This setting does not disable [`missing-attribute`](#missing-attribute).
+A bare class-body annotation is checked against the methods that assign it.
+If no initialization method assigns it, [`uninitialized-instance-variable`](#uninitialized-instance-variable) reports it instead.
 
 ## potential-bad-keyword-argument
 
@@ -1932,10 +1888,7 @@ class Service:
 Service()._reset()  # protected-access
 ```
 
-Protected member access is allowed within the defining class and its subclasses, including nested
-class and function scopes. Members defined in stub files and the public underscore-prefixed
-NamedTuple APIs are exempt. Double-underscore private attributes are checked separately under
-[`no-access`](#no-access).
+Double-underscore private attributes are checked separately under [`no-access`](#no-access).
 
 ## protocol-implicitly-defined-attribute
 
@@ -1973,7 +1926,7 @@ def f(x: torch.Tensor) -> None:
 
 Default severity: `ignore`
 
-Calling `.item()` on a `torch.Tensor` forces GPU-to-CPU synchronization, blocking the training loop until all pending GPU operations complete. This can reduce GPU utilization from over 90% to under 50%. Prefer `tensor[0]` for scalar tensors, accumulate values on the GPU with `torch.sum()`, or defer `.item()` to outside the training loop.
+Calling `.item()` on a `torch.Tensor` forces GPU-to-CPU synchronization, blocking the training loop until all pending GPU operations complete. Prefer `tensor[0]` for scalar tensors, accumulate values on the GPU with `torch.sum()`, or defer `.item()` to outside the training loop.
 
 This is a sub-kind of [pytorch-efficiency-lints](#pytorch-efficiency-lints): enabling `pytorch-efficiency-lints` also enables this error.
 
@@ -2072,8 +2025,6 @@ obj: object = "hello"
 s = typing.cast(str, obj)  # No warning - this is a valid cast
 ```
 
-The redundant cast warning helps identify unnecessary type casts that don't provide any additional type safety benefits.
-
 ## redundant-condition
 
 Default severity: `warn`
@@ -2109,6 +2060,16 @@ Default severity: `info`
 Pyrefly uses this diagnostic to communicate the output of the [`reveal_type`](https://typing.python.org/en/latest/spec/directives.html#reveal-type) function.
 
 `reveal_type` is a *directive* — it is always shown in CLI output regardless of the [`min-severity`](../configuration#min-severity) threshold, and is never subject to suppression or baseline exclusion. To hide it, set `reveal-type = "ignore"` in the [`errors`](../configuration#errors) table.
+
+Pass `--reveal-type-qualified-names` to display revealed types with their fully qualified names. Builtins are not qualified.
+
+```python
+import numpy as np
+
+reveal_type(np.timedelta64(1, "D"))
+# default:  timedelta64[timedelta]
+# with --reveal-type-qualified-names:  numpy.timedelta64[datetime.timedelta]
+```
 
 ## string-as-iterable
 
@@ -2193,6 +2154,19 @@ def two_args(a: int, b: int) -> int:
 two_args(a=1, b=2, c=3)
 ```
 
+## unexpected-never
+
+Default severity: `warn`
+
+Pyrefly emits this warning when a function can never return, contrary to its
+annotation.
+
+```python
+def f() -> int:  # Function declared to return `int` but can never return [unexpected-never]
+    while True:
+        pass
+```
+
 ## unexpected-positional-argument
 
 A positional argument was passed for a keyword-only parameter.
@@ -2217,7 +2191,7 @@ assert_type(1, int)  # error
 
 Default severity: `ignore`
 
-An instance attribute is declared with a type annotation in the class body but is never assigned a value there or in a recognized method such as `__init__`, so reading it raises `AttributeError` at runtime. Enable this check to require that annotated instance attributes are initialized. This mirrors pyright's `reportUninitializedInstanceVariable`. `ClassVar` and `Final` members, `NamedTuple` and `Protocol` classes, and dataclasses whose synthesized `__init__` initializes their fields are not reported. A plain `@dataclass(init=False)` synthesizes no `__init__`, so its annotation-only fields are reported — a case pyright misses.
+An instance attribute is declared with a type annotation in the class body but is never assigned a value there or in a recognized method such as `__init__`, so reading it raises `AttributeError` at runtime. Enable this check to require that annotated instance attributes are initialized. This mirrors pyright's `reportUninitializedInstanceVariable`.
 
 ```python
 class C:
@@ -2246,7 +2220,7 @@ f(untyped(1))  # the argument's type is unknown [unknown-argument-type]
 
 Default severity: `ignore`
 
-An attribute is accessed whose type is an implicit `Any` (unknown), so uses of the result are not checked. This mirrors pyright's `reportUnknownMemberType` for member accesses. Every such access is reported, including accesses on a value that is itself unknown, so a chain like `obj.a.b` on an unannotated parameter reports both `a` and `b`. Accesses on an explicit `Any` are treated as intentional and are not reported.
+An attribute is accessed whose type is an implicit `Any` (unknown), so uses of the result are not checked. This mirrors pyright's `reportUnknownMemberType` for member accesses. Accesses on an explicit `Any` are treated as intentional and are not reported.
 
 Compare this with [unknown-attribute-type](#unknown-attribute-type), which is reported where an unannotated attribute is assigned a value of unknown type.
 
@@ -2267,7 +2241,7 @@ def use(c: C, obj) -> None:
 
 Default severity: `ignore`
 
-An unannotated attribute is assigned a value whose type is unknown, so the attribute is inferred as `Any`. This includes class attributes bound in the class body by unpacking, a `for` loop, or `with ... as`. Add an explicit attribute annotation or fix the right-hand side so Pyrefly can infer a concrete type.
+An unannotated attribute is assigned a value whose type is unknown, so the attribute is inferred as `Any`. Add an explicit attribute annotation or fix the right-hand side so Pyrefly can infer a concrete type.
 
 This is not a sub-kind of [implicit-any](#implicit-any): suppressing `implicit-any` does not suppress this error.
 
@@ -2289,14 +2263,7 @@ A class whose base class has an implicit `Any` (unknown) type, for example from 
 annotation. Pyrefly can't check attribute accesses on such a class. A bare `type`
 annotation counts as unknown, because it means `type[Any]` with an implicit `Any`.
 
-An explicit `Any` base, such as `class Foo(Any)`, is not reported. Neither is a base
-that comes from an unresolved import or an undefined name, since that error is already
-reported elsewhere. This also applies to modules listed in `ignore-missing-imports` or
-`replace-imports-with-any`.
-
-However, an explicit `Any` becomes an implicit `Any` when it is read. A base that comes
-from a variable annotated as `Any`, or from a function that returns `Any`, is therefore
-still reported. To mark a base as intentionally dynamic, annotate it as `type[Any]`
+To mark a base as intentionally dynamic, annotate it as `type[Any]`
 instead.
 
 ```py
@@ -2305,10 +2272,6 @@ from typing import Any
 def fn(cls: type):
     class Foo(cls):  # Type of base class is Unknown [unknown-base-class]
         ...
-
-Base: Any = object
-class Bar(Base):  # Type of base class is Unknown [unknown-base-class]
-    ...
 
 DynamicBase: type[Any] = object
 class Baz(DynamicBase):  # OK
@@ -2325,10 +2288,6 @@ Accessing a DataFrame column that does not exist in the inferred schema.
 Default severity: `ignore`
 
 A value's type is unknown because it comes from an error, such as an unresolved import or an annotation that refers to a name that does not exist. That error is reported once where it happens, and if it is suppressed, for example for a dependency with missing types, nothing else shows that the value is unknown. This kind reports such values at the same kinds of places as the other unknown-type checks: variables, arguments, attribute accesses, class attributes, returned values, and lambdas.
-
-It is not repeated through an expression that only passes the unknown value along. An attribute access on a value that is already unknown, or an access that fails, is not reported; a failed access is skipped even when its own error, such as [missing-attribute](#missing-attribute), is disabled. An expression is also not reported when another error that is shown or suppressed lies within it, because that error is usually the cause or a more precise report of the same unknown value: `takes(undefined_name)` reports only `unknown-name`, and `takes(Config().timeout)` reports only the access to `timeout`. Only errors that can cause an error `Any` are considered: errors whose kind is disabled are not, and neither are soft diagnostics, such as [unknown-argument-type](#unknown-argument-type) and the other kinds ignored by default, or [deprecated](#deprecated). Like the other unknown-type checks and Pyright, each use of a variable whose type is unknown is still reported, such as passing it as an argument or returning it.
-
-For a loop, comprehension, `with`, unpacking or match capture target, the report is placed on the expression the value comes from, so that a root error in that expression explains it. Unpacking into several targets, such as `a, b = untyped_dependency.pair()`, therefore gives one report per target on the same expression.
 
 ```python
 import untyped_dependency  # pyrefly: ignore[missing-import]
@@ -2360,7 +2319,7 @@ def where() -> None:
 
 Default severity: `ignore`
 
-A function without a return annotation, or a lambda, returns a value of unknown type. For a function, or a lambda without an expected type, this makes the inferred return type unknown, so callers get an implicit `Any`. A lambda checked against an expected `Callable` type keeps that type, but the unknown value inside it is unchecked. Annotating the function's parameters or its return type fixes this. A function with a return annotation is covered by [no-any-return-implicit](#no-any-return-implicit) instead, except that a return annotation that is a union with an explicit `Any` member, such as `int | Any`, is reported here.
+A function without a return annotation, or a lambda, returns a value of unknown type. For a function, or a lambda without an expected type, this makes the inferred return type unknown, so callers get an implicit `Any`. Annotating the function's parameters or its return type fixes this. A function with a return annotation is covered by [no-any-return-implicit](#no-any-return-implicit) instead.
 
 ```python
 def get(obj):  # `obj` is unannotated, so `obj.value` is unknown
@@ -2378,8 +2337,6 @@ def get(obj: Config) -> int:
 Default severity: `ignore`
 
 A variable assigned a value of unknown type without an explicit annotation is inferred as `Any`, which hides type errors wherever it is used. Adding an annotation gives the variable a concrete type.
-
-This covers plain assignments as well as `for` loop targets, unpacking targets, `with ... as` targets, and comprehension targets. Loop, unpacking, and `with ... as` targets in a class body define class attributes, so they are reported as [unknown-attribute-type](#unknown-attribute-type) instead.
 
 ```python
 def untyped(x):  # unannotated: returns an implicit `Any`
@@ -2433,110 +2390,33 @@ def f(x: str) -> None:
 
 ## unreachable
 
-Default severity: `warn`
+Default severity: `hint`
 
-This error is raised when code can never execute because it comes after a statement that
-always exits the current flow, such as `return`, `raise`, `break`, or `continue`. One
-diagnostic is reported per block, covering everything from the first dead statement to the
-end of the block.
+This diagnostic is reported when code can never execute because it comes after a statement that
+always exits the current flow, such as `return`, `raise`, `break`, or `continue`.
+
+The [`all`](../configuration#preset-all) preset
+reports it as an error.
 
 ```python
 def example():
     return 1
     print("dead")  # This code is unreachable [unreachable]
     print("also dead, but covered by the same diagnostic")
-
-def loop_example():
-    while True:
-        break
-        return 1  # This code is unreachable [unreachable]
 ```
 
-A dead region consisting only of `yield`s is not reported. That is how a generator
-is written: the `yield` is what makes the function a generator. A dead
-`yield` alongside any other dead statement is ordinary dead code and is still reported.
-
-```python
-def empty_generator():
-    return
-    yield  # Not reported: this is what makes the function a generator
-
-def mixed():
-    return
-    yield  # Not reported: this might be used to make the function a generator
-    print("hello!")  # This code is unreachable [unreachable]
-```
+Code after a call that never returns, such as `sys.exit()` or a function annotated `NoReturn`,
+is reported too, as is code after an `if` or `match` whose every branch ends that way.
 
 It is also raised for the body of an `if` or `while` whose condition is statically known,
-and for the branches that a chosen branch makes dead:
-
-```python
-if False:
-    print("dead")  # This code is unreachable [unreachable]
-
-if True:
-    pass
-else:
-    print("dead")  # This code is unreachable [unreachable]
-```
-
-The same applies when a declaration fixes the condition's value, such as an annotation, a
-return type, or a `__bool__` method. A value that is only inferred is not enough: a variable
-assigned `False` may be reassigned in ways the analysis does not follow, and narrowing
-describes what the annotations promise rather than what callers pass. Likewise, an attribute
-counts only if it is annotated, or is read through a property or descriptor whose getter has an
-annotated return type. A call counts only if the function it calls has an annotated return
-type, and a `__bool__` method only if its own return type is annotated. A constructor call, or
-a call to a generic function, counts through the type the call is inferred to return.
-
-```python
-from typing import Literal
-
-def example(flag: Literal[False], other: bool) -> None:
-    if flag:
-        print("dead")  # This code is unreachable [unreachable]
-    DEBUG = False
-    if DEBUG:
-        print("not reported")  # the value is only inferred
-    if other:
-        return
-    if other:
-        print("not reported")  # dead only by narrowing
-```
+and for the branches that a chosen branch makes dead.
 
 A condition that consults the runtime environment — `sys.version_info`, `sys.platform`,
 `os.name`, or `TYPE_CHECKING` — is **not** reported. Such a branch is dead only under the
 configuration being checked and is live under another, so flagging it would be a false
-positive on code that deliberately supports several environments:
+positive on code that deliberately supports several environments.
 
-```python
-import sys
-
-if sys.version_info < (3, 10):
-    print("not reported")   # live on older interpreters
-
-if sys.platform == "win32":
-    print("not reported")   # live on Windows
-```
-
-A dead `if` branch is skipped entirely, so nothing inside it is analysed. A `while` body is
-still bound and type-checked as ordinary code, so real problems inside it are reported. An `if`
-branch that declarations make dead is also analysed, but it does not contribute to the types
-of names after the `if` statement, with three exceptions: a name assigned only in the dead
-branch keeps the type assigned there, and values that leave the branch through `break` or
-`continue`, or that reach an `except` handler, are still counted.
-
-Unreachable regions are grayed out in the editor. Blocks disabled by the environment (e.g.
-`sys.platform == "linux"`) are grayed out, but do not receive an error.
-
-Note that `yield` statements can follow other `yield` statements without error, since generators
-can produce multiple values:
-
-```python
-def valid_generator():
-    yield 1
-    yield 2  # This is valid
-```
+Unreachable regions are grayed out in the editor.
 
 ## unreachable-except-clause
 
@@ -2556,32 +2436,6 @@ except Exception:  # This `except` clause is unreachable, because an earlier cla
     pass
 ```
 
-The same applies to `except*`, and to a bare `except`, which catches `BaseException`.
-Note that a bare `except` after `except Exception` is *not* flagged: it still catches
-the `BaseException`s that `Exception` does not, such as `KeyboardInterrupt`.
-
-A clause that lists several classes is still reachable as long as one of them can match.
-The classes that cannot are reported individually, judged against both the earlier
-clauses and their own earlier siblings:
-
-```python
-try:
-    pass
-except ValueError:
-    pass
-except (ValueError, TypeError):  # `ValueError` is already caught earlier in this `try` statement, so it never matches here [unreachable-except-clause]
-    pass
-
-try:
-    pass
-except (Exception, ValueError):  # `ValueError` is already caught earlier in this `try` statement, so it never matches here [unreachable-except-clause]
-    pass
-```
-
-Nothing is reported unless every class in the clause is understood. A class whose type is
-unknown, or that does not derive from `BaseException` (already reported as
-`invalid-inheritance`), is ignored rather than assumed to catch everything.
-
 ## unreachable-match-case
 
 Default severity: `warn`
@@ -2595,9 +2449,6 @@ def example(x: list[int]) -> None:
         case 1:  # Case pattern can never match subject of type `list[int]` [unreachable-match-case]
             pass
 ```
-
-This check currently covers value patterns (literals, `None`) and class patterns
-on attributes, but does not flag top-level class patterns like `case SomeClass()`.
 
 ## unresolvable-dunder-all
 
@@ -2621,7 +2472,7 @@ __all__ = generate_all()
 
 ## unsafe-overlap
 
-Protocols decorated with `@runtime_checkable` may be used in `isinstance` and `issubclass` checks, but the runtime will only checks that all the required attributes are present, without looking at their types.
+Protocols decorated with `@runtime_checkable` may be used in `isinstance` and `issubclass` checks, but the runtime will only check that all the required attributes are present, without looking at their types.
 
 This error occurs when the object you're checking against the protocol has all the required attributes, but their types are not compatible.
 
@@ -2680,7 +2531,7 @@ x = 1 + "oops"  # `+` is not supported between `int` and `str` [unsupported-oper
 
 Default severity: `ignore`
 
-A class decorator may modify the class in unexpected ways, either because the decorator's own type is `Any` or because it returns an unknown type. This mirrors pyright's `reportUntypedClassDecorator`, except that fully unannotated decorators are also reported, as with [untyped-function-decorator](#untyped-function-decorator). A decorator annotated to return an explicit `Any` is treated as intentional and is not reported.
+A class decorator may modify the class in unexpected ways, either because the decorator's own type is `Any` or because it returns an unknown type. This mirrors pyright's `reportUntypedClassDecorator`, except that fully unannotated decorators are also reported. A decorator annotated to return an explicit `Any` is treated as intentional and is not reported.
 
 ```python
 from typing import Any
@@ -2701,7 +2552,7 @@ class B: ...
 
 Default severity: `ignore`
 
-A function or method decorator obscures the decorated function's type, either because the decorator's own type is `Any` or because applying it produces an unknown type. This mirrors pyright's `reportUntypedFunctionDecorator`, except that fully unannotated decorators are also reported: pyright keeps the undecorated type for them, while Pyrefly does not. A decorator annotated to return an explicit `Any` is treated as intentional and is not reported.
+A function or method decorator obscures the decorated function's type, either because the decorator's own type is `Any` or because applying it produces an unknown type. This mirrors pyright's `reportUntypedFunctionDecorator`, except that fully unannotated decorators are also reported. A decorator annotated to return an explicit `Any` is treated as intentional and is not reported.
 
 ```python
 from typing import Any
@@ -2726,7 +2577,9 @@ Default severity: `warn`
 
 Type information for some third-party libraries is shipped in a stubs package separate from the
 library's source code. This error is emitted when we detect that a library is being used without
-the recommended stubs package being installed.
+the recommended stubs package being installed. It only applies to libraries found on the site package
+path that do not ship a `py.typed` file; modules found on the search path, such as local stubs in a
+`typings/` directory or your own code, are never reported.
 
 ## untyped-namedtuple
 
@@ -2750,8 +2603,7 @@ class Point(NamedTuple):
 
 Default severity: `ignore`
 
-This rule is disabled by default and must be explicitly enabled. Once enabled, it reports when the
-result of a call expression is discarded and the result type is informative (not `None`, `Any`, or
+This rule reports when the result of a call expression is discarded and the result type is informative (not `None`, `Any`, or
 `Never`). This is often a sign of a mistake, such as forgetting to use the return value.
 
 ```python
@@ -2804,7 +2656,7 @@ import os  # unused-import: Import `os` may be unused
 
 Default severity: `hint`
 
-A function parameter that is never used in the function body. The IDE greys it out. Parameters whose names start with `_`, `self`, `cls`, `*args` and `**kwargs` are not reported, and neither are the parameters of overloads, abstract methods, `@override` methods, or functions whose body is only a placeholder such as `pass`, `...` or `raise NotImplementedError`. Functions without annotations get no parameter hints when [`check-unannotated-defs`](../configuration#check-unannotated-defs) is off, as in the `basic` preset.
+A function parameter that is never used in the function body. The IDE greys it out. Parameters whose names start with `_`, `self`, `cls`, `*args` and `**kwargs` are not reported.
 
 ```python
 def handler(request: str, context: str) -> str:  # unused-parameter: Parameter `context` is unused
@@ -2821,7 +2673,7 @@ This error is raised when a `# type: ignore` comment is not used to suppress any
 
 Default severity: `hint`
 
-A local variable that is assigned but never used. The IDE greys it out. Variables with a leading underscore, such as `_` or `_unused`, are not reported. Functions without annotations get no variable hints when [`check-unannotated-defs`](../configuration#check-unannotated-defs) is off, as in the `basic` preset.
+A local variable that is assigned but never used. The IDE greys it out. Variables with a leading underscore, such as `_` or `_unused`, are not reported.
 
 ```python
 def f() -> None:
@@ -2848,7 +2700,16 @@ def parse(x: int) -> int:
 
 Default severity: `warn`
 
-The inferred variance of a type variable does not match its declared variance. This warning is raised for protocols where the way a type variable is used implies a different variance than what was declared. For example, if a protocol only uses `T` in covariant positions but `T` is declared as invariant, this warning suggests declaring `T` as covariant.
+This warning suggests covariance or contravariance for an invariant protocol
+`TypeVar` when its structural usage permits it. For example, if a protocol
+only returns `T`, the warning suggests declaring `T` as covariant. Incorrect usage
+of an explicitly covariant or contravariant `TypeVar` is reported as
+[`invalid-variance`](#invalid-variance) instead.
+
+Constrained `TypeVar`s, such as `TypeVar("T", str, bytes)`, are exempt from this
+warning. Constraints commonly describe a fixed set of unrelated alternatives, so
+invariance is often sufficient and narrower-variance suggestions are noisy.
+Bounded `TypeVar`s, such as `TypeVar("T", bound=float)`, are still checked.
 
 ```python
 from typing import Protocol, TypeVar

@@ -433,6 +433,16 @@ impl Globs {
         self.0.len()
     }
 
+    /// Splits off the patterns without wildcards that name existing directories. Returns those
+    /// patterns and the remaining ones.
+    pub fn partition_explicit_dirs(self) -> (Vec<Glob>, Globs) {
+        let (dirs, rest) = self
+            .0
+            .into_iter()
+            .partition(|pattern| pattern.has_no_wildcards() && pattern.as_path().is_dir());
+        (dirs, Globs(rest))
+    }
+
     pub fn append(&mut self, patterns: &[Glob]) {
         self.0.extend_from_slice(patterns);
     }
@@ -753,7 +763,8 @@ impl Globs {
         Ok(result.into_inner())
     }
 
-    fn no_matched_files_error(&self) -> anyhow::Error {
+    /// The error for globs that match no Python files.
+    pub fn no_matched_files_error(&self) -> anyhow::Error {
         if self.0.is_empty() {
             return anyhow::anyhow!("There are no patterns to match Python files.");
         }
@@ -785,26 +796,7 @@ impl Globs {
         if limit == Some(0) {
             return Ok(Box::new(std::iter::empty()));
         }
-        let mut active_patterns = Vec::new();
-        let mut explicit_files = Vec::new();
-        for pattern in &self.0 {
-            active_patterns.push(pattern);
-            // An explicit concrete file is included directly, bypassing the
-            // extension filter that wildcard matches must satisfy.
-            if pattern.is_explicit_file_pattern()
-                && Glob::should_include_file(pattern.as_path(), true)
-                && !filter.is_excluded(pattern.as_path())
-            {
-                explicit_files.push(pattern.as_path().to_path_buf());
-            }
-        }
-
-        let roots = Self::sorted_walk_roots(&active_patterns);
-        let walked_files = if let Some(limit) = limit {
-            self.walk_files_sorted(&roots, filter, limit)?
-        } else {
-            self.walk_files_parallel(&roots, filter)?
-        };
+        let (explicit_files, walked_files) = self.matched_files(filter, limit)?;
         if explicit_files.is_empty() && walked_files.is_empty() {
             let was_filtered = (!filter.excludes.is_empty() || !filter.ignore_paths.is_empty())
                 && self
@@ -829,6 +821,36 @@ impl Globs {
         Ok(Box::new(
             Self::merged_files_iter(explicit_files, walked_files).take(limit.unwrap_or(usize::MAX)),
         ))
+    }
+
+    /// The explicit files and the walked files that these globs match after `filter`. Both are
+    /// empty if nothing matches.
+    fn matched_files(
+        &self,
+        filter: &GlobFilter,
+        limit: Option<usize>,
+    ) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+        let mut active_patterns = Vec::new();
+        let mut explicit_files = Vec::new();
+        for pattern in &self.0 {
+            active_patterns.push(pattern);
+            // An explicit concrete file is included directly, bypassing the
+            // extension filter that wildcard matches must satisfy.
+            if pattern.is_explicit_file_pattern()
+                && Glob::should_include_file(pattern.as_path(), true)
+                && !filter.is_excluded(pattern.as_path())
+            {
+                explicit_files.push(pattern.as_path().to_path_buf());
+            }
+        }
+
+        let roots = Self::sorted_walk_roots(&active_patterns);
+        let walked_files = if let Some(limit) = limit {
+            self.walk_files_sorted(&roots, filter, limit)?
+        } else {
+            self.walk_files_parallel(&roots, filter)?
+        };
+        Ok((explicit_files, walked_files))
     }
 
     pub fn files_iter(&self) -> anyhow::Result<Box<dyn Iterator<Item = PathBuf>>> {
@@ -1070,6 +1092,27 @@ impl FilteredGlobs {
             includes,
             filter: GlobFilter::new(excludes, ignorefile_search_start, hidden_dir_filter),
         }
+    }
+
+    /// Adds `excludes` to the excludes of this [`FilteredGlobs`].
+    pub fn add_excludes(&mut self, excludes: &[Glob]) {
+        self.filter.excludes.append(excludes);
+    }
+
+    /// The files that these globs include, sorted. Unlike [`Includes::files_iter`], returns no
+    /// files instead of an error when nothing matches.
+    pub fn matched_files(&self) -> anyhow::Result<Vec<PathBuf>> {
+        let (explicit_files, walked_files) = self.includes.matched_files(&self.filter, None)?;
+        Ok(Globs::merged_files_iter(explicit_files, walked_files).collect())
+    }
+
+    /// The files under `dirs` that these globs include, sorted. Only `dirs` are walked, so an
+    /// include outside of them is never walked. Returns no files when nothing matches.
+    pub fn matched_files_under(&self, dirs: &Globs) -> anyhow::Result<Vec<PathBuf>> {
+        let (explicit_files, walked_files) = dirs.matched_files(&self.filter, None)?;
+        Ok(Globs::merged_files_iter(explicit_files, walked_files)
+            .filter(|path| self.includes.covers(path))
+            .collect())
     }
 }
 

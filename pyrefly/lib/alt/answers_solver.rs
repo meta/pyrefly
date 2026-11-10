@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::btree_map::Entry as BTreeEntry;
 use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -35,6 +36,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::type_alias::TypeAlias;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_util::arc_id::ArcId;
@@ -99,10 +101,12 @@ use crate::solver::solver::VarRecurser;
 use crate::solver::type_order::TypeOrder;
 use crate::types::class::Class;
 use crate::types::class::ClassFields;
+use crate::types::env::TypeEnv;
 use crate::types::equality::TypeEq;
 use crate::types::equality::TypeEqCtx;
 use crate::types::stdlib::Stdlib;
 use crate::types::type_info::TypeInfo;
+use crate::types::types::TParams;
 use crate::types::types::Type;
 use crate::types::types::Var;
 
@@ -232,6 +236,7 @@ impl CalcId {
             Solver::new(Default::default()),
             false,
             false,
+            ErrorStyle::Never,
         ));
         // Create a fake Key index - the actual key doesn't matter for test purposes,
         // only that different idx values produce different CalcIds
@@ -891,7 +896,7 @@ impl CalcStack {
         answer_scope: &'answer AnswerScope,
         current: &CalcId,
         answer: AnyAnswer,
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
     ) -> &'answer AnyAnswer {
         let canonical = {
@@ -1221,7 +1226,7 @@ impl CalcStack {
         answer_scope: &'answer AnswerScope,
         target: &CalcId,
         answer: AnyAnswer,
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
     ) -> &'answer AnyAnswer {
         let (needs_completion_check, answer) = {
@@ -1265,6 +1270,36 @@ impl CalcStack {
             .last_mut()
             .expect("mark_iteration_changed: no iterating SCC on the stack");
         top_scc.iterative.has_changed = true;
+    }
+
+    /// Whether the inferred return type being calculated should be widened to
+    /// `Any`, given whether it exceeds the union width limit in this iteration.
+    ///
+    /// Within a warm iteration of an SCC, a member that was widened once stays
+    /// widened until the SCC restarts cold, so the widening is monotonic.
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "CalcId's Hash impl doesn't depend on mutable parts"
+    )]
+    pub fn widen_inferred_return(&self, exceeds_limit: bool) -> bool {
+        let mut scc_stack = self.scc_stack.borrow_mut();
+        let Some(top_scc) = scc_stack.last_mut() else {
+            return exceeds_limit;
+        };
+        let stack = self.stack.borrow();
+        let Some(current) = stack.last() else {
+            return exceeds_limit;
+        };
+        if top_scc.iterative.iteration < 2 || !top_scc.node_state.contains_key(current) {
+            return exceeds_limit;
+        }
+        let widened = &mut top_scc.iterative.widened_returns;
+        if exceeds_limit {
+            widened.insert(current.dupe());
+            true
+        } else {
+            widened.contains(current)
+        }
     }
 
     /// Record `target` as a recursion break point in the top SCC's iteration state.
@@ -1385,7 +1420,7 @@ impl CalcStack {
 ///
 /// The variants are ordered by "advancement" (Fresh < InProgress < HasPlaceholder < Done).
 /// The `advancement_rank()` method encodes this ordering for use during SCC merge.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum SccNodeState {
     /// Node is queued for the iterative driver and has no live calculation.
     Fresh,
@@ -1402,7 +1437,7 @@ pub enum SccNodeState {
     /// completes, at which point answers are published to their result slots.
     Done {
         /// Errors collected during solving. None during Phase 0 (cold start).
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         /// Trace side effects collected during solving. None during Phase 0.
         traces: Option<TraceSideEffects>,
     },
@@ -1443,15 +1478,6 @@ enum BindingAction<'answer> {
     NeedsColdPlaceholder,
 }
 
-/// A rendered non-convergence error, owned independently of the SCC answers it
-/// was built from, so it can be emitted after those answers are gone.
-struct NonConvergentDiagnostic {
-    calc_id: CalcId,
-    range: TextRange,
-    message: String,
-    details: Option<Vec<String>>,
-}
-
 /// Per-SCC iteration state for iterative fixpoint solving.
 ///
 /// This tracks the current iteration number, current and warm-start answer
@@ -1475,6 +1501,12 @@ pub struct SccIterationState {
     /// break points; other non-converging members are downstream consequences.
     /// Used to limit non-convergence error reporting to only the break points.
     pub recursion_breaks: BTreeSet<CalcId>,
+    /// Members whose inferred return type exceeded the union width limit and
+    /// was widened to `Any` during a warm iteration. They stay widened until
+    /// the next cold start. Otherwise the widened answer could narrow the union
+    /// again in the next iteration, so the answers would alternate and never
+    /// converge.
+    pub widened_returns: BTreeSet<CalcId>,
 }
 
 // `SccNodeState` is used by both Phase 0 discovery and iterative fixpoint solving.
@@ -1626,6 +1658,7 @@ impl Scc {
                 answers: SccAnswers::new(),
                 has_changed: false,
                 recursion_breaks: BTreeSet::new(),
+                widened_returns: BTreeSet::new(),
             },
         }
     }
@@ -1646,7 +1679,7 @@ impl Scc {
         &'a mut self,
         current: &CalcId,
         answer: AnyAnswer,
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
     ) -> GenerationAnswer<'a> {
         let state = self
@@ -1708,14 +1741,17 @@ impl Scc {
     fn merge(mut self, other: Scc) -> Self {
         // Union node_state maps (keep the more advanced state)
         for (k, v) in other.node_state {
-            self.node_state
-                .entry(k)
-                .and_modify(|existing| {
+            match self.node_state.entry(k) {
+                BTreeEntry::Occupied(mut entry) => {
+                    let existing = entry.get_mut();
                     if v.advancement_rank() > existing.advancement_rank() {
-                        *existing = v.clone();
+                        *existing = v;
                     }
-                })
-                .or_insert(v);
+                }
+                BTreeEntry::Vacant(entry) => {
+                    entry.insert(v);
+                }
+            }
         }
         // Keep the smallest detected_at for consistency/determinism
         self.detected_at = self.detected_at.min(other.detected_at);
@@ -1737,6 +1773,7 @@ impl Scc {
             answers,
             has_changed: false,
             recursion_breaks: BTreeSet::new(),
+            widened_returns: BTreeSet::new(),
         };
 
         self
@@ -1789,7 +1826,7 @@ impl Scc {
         Item = (
             CalcId,
             AnyAnswer,
-            Option<Arc<ErrorCollector>>,
+            Option<ErrorCollector>,
             Option<TraceSideEffects>,
         ),
     > {
@@ -1849,6 +1886,7 @@ impl Scc {
             answers: SccAnswers::new(),
             has_changed: false,
             recursion_breaks: BTreeSet::new(),
+            widened_returns: BTreeSet::new(),
         };
         debug_assert!(
             self.node_state
@@ -2022,6 +2060,32 @@ impl ThreadState {
         result
     }
 
+    /// Captures expression traces and also retains them in the current calculation.
+    pub(crate) fn capture_traces<T>(&self, f: impl FnOnce() -> T) -> (T, Option<TraceSideEffects>) {
+        if self.trace_sink.borrow().is_none() {
+            return (f(), None);
+        }
+        self.install_trace_sink();
+        let result = f();
+        let traces = self.take_trace_sink();
+        if let Some(traces) = &traces {
+            self.replay_traces(traces);
+        }
+        (result, traces)
+    }
+
+    /// Replays cached expression traces into the current calculation.
+    pub(crate) fn replay_traces(&self, traces: &TraceSideEffects) {
+        if let Some(sink) = self.trace_sink.borrow_mut().as_mut() {
+            sink.types.extend(traces.types.clone());
+            sink.overloaded_callees
+                .extend(traces.overloaded_callees.clone());
+            sink.invoked_properties
+                .extend(traces.invoked_properties.clone());
+            sink.expected_types.extend(traces.expected_types.clone());
+        }
+    }
+
     /// Append a type trace to the active sink. No-op if no sink is installed.
     pub(crate) fn record_type_trace(&self, loc: TextRange, ty: Arc<Type>) {
         if let Some(sink) = self.trace_sink.borrow_mut().as_mut() {
@@ -2116,6 +2180,19 @@ pub struct AnswersSolver<'ctx, 'answer, Ans: LookupAnswer> {
     pub heap: &'ctx TypeHeap,
 }
 
+impl<Ans: LookupAnswer> TypeEnv for AnswersSolver<'_, '_, Ans> {
+    fn stdlib(&self) -> &Stdlib {
+        self.stdlib
+    }
+
+    /// May solve the class's `KeyTParams` on demand, so no variable lock may be held across
+    /// this call.
+    fn class_tparams<'a>(&'a self, cls: &'a Class) -> &'a TParams {
+        self.get_class_tparams(cls)
+            .map_or(TParams::empty_ref(), |tparams| &**tparams)
+    }
+}
+
 /// Proof that this SCC owns the pending result slot for this calculation.
 /// Dropping the proof rolls back the reservation if it is still pending.
 pub struct ReservedSlot<'a, 'ctx, 'answer, Ans: LookupAnswer> {
@@ -2125,7 +2202,7 @@ pub struct ReservedSlot<'a, 'ctx, 'answer, Ans: LookupAnswer> {
     /// evicts them. Drop must still reach the pending slot to roll it back;
     /// otherwise another thread waiting for publication could deadlock.
     cross_module_answers: Option<Arc<Answers>>,
-    errors: Option<Arc<ErrorCollector>>,
+    errors: Option<ErrorCollector>,
     traces: Option<TraceSideEffects>,
 }
 
@@ -2136,11 +2213,11 @@ impl<Ans: LookupAnswer> ReservedSlot<'_, '_, '_, Ans> {
 
     pub(crate) fn take_side_effects(
         &mut self,
-    ) -> (Option<Arc<ErrorCollector>>, Option<TraceSideEffects>) {
+    ) -> (Option<ErrorCollector>, Option<TraceSideEffects>) {
         (self.errors.take(), self.traces.take())
     }
 
-    fn publish(&mut self) -> bool {
+    fn publish(&mut self) {
         self.solver.publish_reserved_single(self)
     }
 }
@@ -2825,25 +2902,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // the result slot. No recursive placeholder can exist because
             // placeholders are stored only in SCC-local SccNodeState::HasPlaceholder.
             K::before_record(self, idx);
-            let (answer, did_write) = match solve_result {
+            match solve_result {
                 SolveResult::Answer(raw_answer) => {
                     self.sanitize_answer_vars::<K>(&raw_answer, range, &local_errors);
                     let raw_answer = self.force_exported_answer::<K>(raw_answer);
-                    self.current().record(idx, AnswerBox::new(raw_answer))
+                    self.current().record(
+                        idx,
+                        AnswerBox::new(raw_answer),
+                        self.retain_annotated_metadata_errors(range, local_errors),
+                        trace_side_effects,
+                    )
                 }
                 // The target was sanitized and forced when it was recorded, so
                 // sharing its answer needs neither step repeated.
-                SolveResult::Alias(target) => self.current().record_alias(idx, target),
-            };
-            if did_write {
-                self.base_errors
-                    .extend(self.retain_annotated_metadata_errors(range, local_errors));
-                // Publish trace side effects alongside errors.
-                if let Some(traces) = trace_side_effects {
-                    self.current().merge_trace_side_effects(traces);
-                }
+                SolveResult::Alias(target) => self.current().record_alias(
+                    idx,
+                    target,
+                    self.retain_annotated_metadata_errors(range, local_errors),
+                    trace_side_effects,
+                ),
             }
-            answer
         }
     }
 
@@ -3057,9 +3135,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let errors = if self.stack().is_cold_iteration() {
             None
         } else {
-            Some(Arc::new(
-                self.retain_annotated_metadata_errors(range, local_errors),
-            ))
+            Some(self.retain_annotated_metadata_errors(range, local_errors))
         };
         let answer_erased = self.stack().set_iteration_node_done(
             self.answer_scope,
@@ -3085,7 +3161,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         calc_id: CalcId,
         answer: AnyAnswer,
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
     ) -> Option<ReservedSlot<'_, 'ctx, 'answer, Ans>> {
         let CalcId(_, ref any_idx) = calc_id;
@@ -3119,16 +3195,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Publish a result slot previously reserved by this SCC.
-    fn publish_reserved_single(&self, reserved: &mut ReservedSlot<'_, '_, '_, Ans>) -> bool {
+    fn publish_reserved_single(&self, reserved: &mut ReservedSlot<'_, '_, '_, Ans>) {
         let calc_id = reserved.calc_id().dupe();
         let CalcId(_, ref any_idx) = calc_id;
         if self.is_same_module(&calc_id) {
             let (errors, traces) = reserved.take_side_effects();
             // SAFETY: `reserved` proves that this SCC owns the pending slot.
-            unsafe {
-                dispatch_anyidx!(any_idx, self, publish_reserved_same_module, errors, traces)
-            };
-            true
+            unsafe { dispatch_anyidx!(any_idx, self, publish_reserved_same_module, errors, traces) }
         } else {
             self.answers.publish_reserved_in_module(reserved)
         }
@@ -3141,24 +3214,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     unsafe fn publish_reserved_same_module<K: Solve<Ans>>(
         &self,
         idx: Idx<K>,
-        errors: Option<Arc<ErrorCollector>>,
+        errors: Option<ErrorCollector>,
         traces: Option<TraceSideEffects>,
     ) where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
     {
-        if let Some(errors) = errors {
-            let errors = Arc::try_unwrap(errors)
-                .expect("SCC errors Arc has unexpected extra references; errors would be lost");
-            self.base_errors.extend(errors);
-        }
-        if let Some(traces) = traces {
-            self.current().merge_trace_side_effects(traces);
-        }
         // SAFETY: The caller derives `idx` from its exclusive `&mut ReservedSlot`,
         // which proves ownership of the reservation.
-        unsafe { self.current().publish_reserved(idx) }
+        unsafe { self.current().publish_reserved(idx, errors, traces) }
     }
 
     /// Roll back a reservation if it is still pending.
@@ -3219,7 +3284,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Called after the fixpoint iteration converges (or max iterations are
     /// reached).
     #[allow(clippy::mutable_key_type)]
-    fn commit_final_answers(&self, scc: Scc) -> bool {
+    fn commit_final_answers(&self, scc: Scc) {
         let members = scc.into_final_answers();
 
         let member_count = members.len();
@@ -3242,13 +3307,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Commit each winning member's side effects immediately before publishing
         // its result. Reverse order keeps the lowest successfully reserved slot
         // pending until every other result in this batch is visible.
-        let mut did_publish = false;
         guard.committing = true;
         while let Some(reserved) = guard.reserved.last_mut() {
-            did_publish |= reserved.publish();
+            reserved.publish();
             guard.reserved.pop();
         }
-        did_publish
     }
 
     /// Drive a single iteration member by calling `get_idx` for its typed index.
@@ -3392,16 +3455,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 continue;
             }
 
+            // Convergence check: if this is iteration >= 2 and no answers
+            // changed, the fixpoint has converged.
+            if scc.iteration() >= 2 && !has_changed {
+                break;
+            }
+
             // Max iterations check: must happen after pop (so nodes are still
             // Done) but before advance (which resets nodes to Fresh).
             if scc.iteration() >= MAX_ITERATIONS {
                 exceeded_max_iterations = true;
-                break;
-            }
-
-            // Convergence check: if this is iteration >= 2 and no answers
-            // changed, the fixpoint has converged.
-            if scc.iteration() >= 2 && !has_changed {
                 break;
             }
 
@@ -3413,54 +3476,36 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // the cycle was broken by returning a previous-iteration answer. Other
         // non-converging members are downstream consequences and would produce
         // noisy duplicate errors.
-        // Rendering the diagnostics before committing keeps every read of the
-        // answers in one place, so only owned values cross into the reporting
-        // loop, which cannot run until `commit_final_answers` reports whether
-        // the answers were committed at all.
-        let non_convergent_diagnostics = if exceeded_max_iterations {
-            scc.node_state
-                .iter()
-                .filter_map(|(calc_id, node_state)| match node_state {
-                    SccNodeState::Done { .. }
-                        if scc.iterative.recursion_breaks.contains(calc_id) =>
-                    {
-                        let current = scc
-                            .iterative
-                            .answers
-                            .get_current(calc_id)
-                            .expect("Done SCC node must have a current answer");
-                        let previous = scc.iterative.answers.get_previous(calc_id);
-                        dispatch_anyidx!(
-                            &calc_id.1,
-                            self,
-                            make_non_convergent_diagnostic,
-                            current,
-                            previous,
-                            &calc_id.0
-                        )
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-
-        let did_commit = self.commit_final_answers(scc);
-        if did_commit {
-            for diagnostic in non_convergent_diagnostics {
-                if self.is_same_module(&diagnostic.calc_id) {
-                    Self::emit_non_convergent_diagnostic(diagnostic, self.base_errors);
-                } else {
-                    let cross_errors = ErrorCollector::new(
-                        diagnostic.calc_id.bindings().module().dupe(),
-                        ErrorStyle::Delayed,
-                    );
-                    Self::emit_non_convergent_diagnostic(diagnostic, &cross_errors);
-                    self.base_errors.extend(cross_errors);
+        if exceeded_max_iterations {
+            for (calc_id, node_state) in &mut scc.node_state {
+                if !scc.iterative.recursion_breaks.contains(calc_id) {
+                    continue;
                 }
+                // Only a member that finished the final iteration has an answer to report.
+                let SccNodeState::Done { errors, .. } = node_state else {
+                    continue;
+                };
+                let errors = errors
+                    .as_ref()
+                    .expect("a final non-convergent SCC member must have collected errors");
+                let current = scc
+                    .iterative
+                    .answers
+                    .get_current(calc_id)
+                    .expect("Done SCC node must have a current answer");
+                let previous = scc.iterative.answers.get_previous(calc_id);
+                dispatch_anyidx!(
+                    &calc_id.1,
+                    self,
+                    report_non_convergent_member,
+                    current,
+                    previous,
+                    &calc_id.0,
+                    errors
+                );
             }
         }
+        self.commit_final_answers(scc);
     }
 
     /// Finalize a recursive answer. This takes the raw value produced by `K::solve` and calls
@@ -3844,7 +3889,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if got.is_error() || got.is_any() || want.is_any() {
             return;
         }
-        let is_str = matches!(got, Type::ClassType(cls) if cls.is_builtin("str"));
+        let is_str = matches!(got, Type::ClassType(cls) if cls.is(KnownClass::Str));
         if !is_str && !got.is_literal_string() {
             return;
         }
@@ -3860,7 +3905,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 matches!(
                     cls.targs().as_slice(),
-                    [elem] if matches!(elem, Type::ClassType(elem_cls) if elem_cls.is_builtin("str"))
+                    [elem] if matches!(elem, Type::ClassType(elem_cls) if elem_cls.is(KnownClass::Str))
                 )
             }
             _ => false,
@@ -4204,14 +4249,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// If `PYREFLY_FIXPOINT_DETAILS` is set (to any non-empty value besides `0`),
     /// append internal debug details for bug reports (key/binding and both
     /// previous/current answers in Debug format).
-    fn make_non_convergent_diagnostic<K: Solve<Ans>>(
+    fn report_non_convergent_member<K: Solve<Ans>>(
         &self,
         idx: Idx<K>,
         current: &AnyAnswer,
         previous: Option<&AnyAnswer>,
         member_answers: &Arc<Answers>,
-    ) -> Option<NonConvergentDiagnostic>
-    where
+        errors: &ErrorCollector,
+    ) where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
         K::Answer: Debug,
@@ -4223,11 +4268,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if let Some(prev) = previous
             && self.answers_equal_typed::<K>(idx, prev, current)
         {
-            return None;
+            return;
         }
         let typed_answer = current
             .downcast_ref::<K::Answer>()
-            .expect("make_non_convergent_diagnostic: type mismatch");
+            .expect("report_non_convergent_member: type mismatch");
         // TypeInfo answers represent inferred types; other answer kinds are
         // internal results (class fields, metadata, etc.).
         let noun = if current.downcast_ref::<TypeInfo>().is_some() {
@@ -4235,24 +4280,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             "result"
         };
-        let message = format!(
-            "Fixpoint iteration did not converge. \
+        let mut builder = errors.error_builder(
+            K::range_with(idx, member_bindings),
+            ErrorKind::NonConvergentRecursion,
+            format!(
+                "Fixpoint iteration did not converge. \
                  Inferred {} `{}`. Adding annotations may help.",
-            noun, typed_answer,
+                noun, typed_answer,
+            ),
         );
         // If PYREFLY_FIXPOINT_DETAILS=1 is set, we output much more detailed information useful
         // for explaining or debugging nonconvergence in terms of Pyrefly internals.
-        let details = if Self::fixpoint_details_enabled() {
+        if Self::fixpoint_details_enabled() {
             let binding = member_bindings.get(idx);
             let previous_debug = previous
                 .map(|prev| {
                     let prev_typed = prev
                         .downcast_ref::<K::Answer>()
-                        .expect("make_non_convergent_diagnostic: previous answer type mismatch");
+                        .expect("report_non_convergent_member: previous answer type mismatch");
                     format!("{prev_typed:?}")
                 })
                 .unwrap_or_else(|| "<none>".to_owned());
-            Some(vec![
+            builder = builder.with_details(vec![
                 format!(
                     "[PYREFLY_FIXPOINT_DETAILS] key={:?} key_idx={idx:?}",
                     K::to_anyidx(idx),
@@ -4269,29 +4318,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ),
                 format!("[PYREFLY_FIXPOINT_DETAILS] previous={previous_debug}"),
                 format!("[PYREFLY_FIXPOINT_DETAILS] current={typed_answer:?}"),
-            ])
-        } else {
-            None
-        };
-        Some(NonConvergentDiagnostic {
-            calc_id: CalcId(member_answers.dupe(), K::to_anyidx(idx)),
-            range: K::range_with(idx, member_bindings),
-            message,
-            details,
-        })
-    }
-
-    fn emit_non_convergent_diagnostic(
-        diagnostic: NonConvergentDiagnostic,
-        errors: &ErrorCollector,
-    ) {
-        let mut builder = errors.error_builder(
-            diagnostic.range,
-            ErrorKind::NonConvergentRecursion,
-            diagnostic.message,
-        );
-        if let Some(details) = diagnostic.details {
-            builder = builder.with_details(details);
+            ]);
         }
         builder.emit();
     }
@@ -4351,6 +4378,7 @@ mod scc_tests {
                 answers,
                 has_changed: false,
                 recursion_breaks: BTreeSet::new(),
+                widened_returns: BTreeSet::new(),
             },
         }
     }
@@ -5014,6 +5042,7 @@ mod scc_tests {
                     answers: SccAnswers::new(),
                     has_changed: false,
                     recursion_breaks: BTreeSet::new(),
+                    widened_returns: BTreeSet::new(),
                 },
             }
         };
@@ -5033,6 +5062,7 @@ mod scc_tests {
                     answers: SccAnswers::new(),
                     has_changed: false,
                     recursion_breaks: BTreeSet::new(),
+                    widened_returns: BTreeSet::new(),
                 },
             }
         };

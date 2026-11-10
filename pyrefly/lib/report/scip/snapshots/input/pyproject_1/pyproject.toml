@@ -1,0 +1,5 @@
+[project]
+name = "abc"
+
+[tool.poetry]
+version = "16.05"

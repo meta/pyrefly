@@ -32,6 +32,8 @@ use crate::export::special::SpecialExport;
 use crate::export::symbols::FlatSymbols;
 use crate::module::module_info::ModuleInfo;
 use crate::state::loader::FindingOrError;
+use crate::state::pytest::PytestFixtureDefinition;
+use crate::state::pytest::collect_pytest_fixture_definitions;
 use crate::state::state::ModuleChanges;
 
 /// Find the exports of a given module. Beware: these APIs record dependencies between modules during lookups. Using the
@@ -46,6 +48,10 @@ pub trait LookupExport {
 
     /// Get the wildcard exports for a module. Records a dependency on `module` regardless of if it exists.
     fn get_wildcard(&self, module: ModuleName) -> Option<Arc<SmallSet<Name>>>;
+
+    /// Get `Exports::environment_wildcard` for a module. Records a dependency on `module`
+    /// regardless of if it exists.
+    fn get_environment_wildcard(&self, module: ModuleName) -> Option<Arc<SmallSet<Name>>>;
 
     /// Get all export names for a module. Records no dependencies.
     fn get_every_export_untracked(&self, module: ModuleName) -> Option<SmallSet<Name>>;
@@ -80,6 +86,15 @@ pub struct ExportOrigin {
     /// The module and name where the export is ultimately defined.
     pub origin: (ModuleName, Name),
     pub is_final: bool,
+    /// Whether the export is `Final` with a declared type rather than an inferred one.
+    pub final_has_declared_type: bool,
+    /// Whether some module on the way to the export defines or imports the name inside an `if`
+    /// whose tests depend on the environment, so another configuration may export another value.
+    pub defined_under_environment: bool,
+    /// Whether the chain ends at a definition, rather than at an imported module, a submodule,
+    /// or nothing. Only a definition can hold a value that another module chose, such as a
+    /// module.
+    pub ends_at_definition: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +132,8 @@ pub struct Exports {
     explicit_dunder_all_names: Option<SmallSet<Name>>,
     /// Names that are available via `from <this_module> import *`
     wildcard: Calculation<Arc<SmallSet<Name>>>,
+    /// See `Exports::environment_wildcard`.
+    environment_wildcard: Calculation<Arc<SmallSet<Name>>>,
     /// Names that are available via `from <this_module> import <name>` along with their locations
     exports: Calculation<Arc<SmallMap<Name, ExportLocation>>>,
     // The fields below are derived from the AST but are not exports. They live
@@ -130,6 +147,8 @@ pub struct Exports {
     /// as methods, backing IDE symbol features. Built only while indexing a
     /// first-party module; `None` everywhere else.
     symbols: Option<FlatSymbols>,
+    /// Fixture metadata remains available after the module AST is evicted.
+    pytest_fixtures: Vec<PytestFixtureDefinition>,
 }
 
 impl Display for Exports {
@@ -186,9 +205,28 @@ impl Exports {
             partially_known_dunder_all,
             explicit_dunder_all_names,
             wildcard: Calculation::new(),
+            environment_wildcard: Calculation::new(),
             exports: Calculation::new(),
             docstring_range: Docstring::range_from_stmts(x),
             symbols,
+            pytest_fixtures: collect_pytest_fixture_definitions(x),
+        }
+    }
+
+    pub(crate) fn pytest_fixtures(&self) -> &[PytestFixtureDefinition] {
+        &self.pytest_fixtures
+    }
+
+    /// Look up a fixture import by its Python name without resolving unrelated imports.
+    /// An explicit fixture name on a differently named imported function is not discoverable
+    /// from this module's metadata; discovering it would require inspecting other imports.
+    pub(crate) fn pytest_fixture_import(&self, name: &Name) -> Option<(ModuleName, Name)> {
+        match &self.definitions.definitions.get(name)?.style {
+            DefinitionStyle::ImportAs(module, original) => Some((*module, original.clone())),
+            DefinitionStyle::ImportAsEq(module) | DefinitionStyle::Import(module) => {
+                Some((*module, name.clone()))
+            }
+            _ => None,
         }
     }
 
@@ -244,14 +282,13 @@ impl Exports {
 
     /// Diff two Exports and merge changes into `changed`.
     ///
-    /// Checks three kinds of changes in a single pass over definitions:
+    /// Checks three kinds of changes:
     /// - Name existence: name added or removed from the module's definitions.
     ///   Recorded as a default NameDep (both flags false) — presence in the
     ///   names map denotes an existence change, which overlaps with any dep
     ///   on that name.
-    /// - Metadata: is_import status, import style, final_names,
-    ///   implicitly_imported_submodules, deprecation, or special_exports changed
-    ///   for a name that exists in both. Sets the metadata flag.
+    /// - Metadata: something recorded about a name, other than its type, changed.
+    ///   Sets the metadata flag.
     /// - Wildcard set: the set of names exported via `from M import *` changed.
     ///   Sets the wildcard flag. Only checked if the old wildcard was previously
     ///   forced (meaning some rdep depends on it); if not, no rdep can be
@@ -309,6 +346,20 @@ impl Exports {
             }
         }
 
+        // A name that enters or leaves the environment wildcard changes whether the environment
+        // chooses it, whether this module or a module it star-imports binds it. Only compare if
+        // the old set was forced, since otherwise no rdep read it.
+        if let Some(old) = self.environment_wildcard.get() {
+            let new = other.environment_wildcard(lookup);
+            for name in old
+                .iter()
+                .filter(|name| !new.contains(*name))
+                .chain(new.iter().filter(|name| !old.contains(*name)))
+            {
+                changed.0.names.entry(name.clone()).or_default().metadata = true;
+            }
+        }
+
         // Check wildcard set changes. Only compare if the old wildcard was
         // forced (some rdep called get_wildcard and depends on the set).
         if let Some(old_wildcard) = self.wildcard.get() {
@@ -337,6 +388,46 @@ impl Exports {
                 }
                 _ => None,
             })
+    }
+
+    /// Whether `name` is defined in this module as a `Final` whose type is declared rather than
+    /// inferred, as `FinalName::has_declared_type` describes.
+    pub fn final_has_declared_type(&self, name: &Name) -> bool {
+        self.definitions
+            .final_names
+            .get(name)
+            .is_some_and(|final_name| final_name.has_declared_type)
+    }
+
+    /// Whether `name` is bound to a module by `import x`. An `import x as name` is recorded the
+    /// same way as `from x import x as name`, so it is followed like any other import.
+    pub fn imports_module(&self, name: &Name) -> bool {
+        self.definitions
+            .definitions
+            .get(name)
+            .is_some_and(|definition| matches!(definition.style, DefinitionStyle::ImportModule(_)))
+    }
+
+    /// The names that this module, or a star import of it, may bind differently under another
+    /// configuration: those it defines, imports or star-imports inside an `if` whose tests depend
+    /// on the environment, including in a suite this configuration rules out, and those that the
+    /// modules it star-imports may bind differently.
+    pub fn environment_wildcard(&self, lookup: &dyn LookupExport) -> Arc<SmallSet<Name>> {
+        let f = || {
+            let mut names = self.definitions.environment_names.clone();
+            for module in &self.definitions.environment_import_all {
+                if let Some(wildcard) = lookup.get_wildcard(*module) {
+                    names.extend(wildcard.iter().cloned());
+                }
+            }
+            for module in self.definitions.import_all.keys() {
+                if let Some(wildcard) = lookup.get_environment_wildcard(*module) {
+                    names.extend(wildcard.iter().cloned());
+                }
+            }
+            Arc::new(names)
+        };
+        self.environment_wildcard.calculate(f).unwrap_or_default()
     }
 
     pub fn is_submodule_imported_implicitly(&self, name: &Name) -> bool {
@@ -552,14 +643,18 @@ impl Exports {
         {
             return false;
         }
-        self.definitions.definitions.get(name).is_some_and(|def| {
-            matches!(
-                def.style,
-                DefinitionStyle::Import(_)
-                    | DefinitionStyle::ImportModule(_)
-                    | DefinitionStyle::ImportAs(..)
-            )
-        })
+        self.definitions
+            .definitions
+            .get(name)
+            .is_some_and(|def| match &def.style {
+                // `from . import x` in a package's `__init__` binds the submodule `x`, with or
+                // without an alias.
+                DefinitionStyle::Import(from) | DefinitionStyle::ImportAs(from, _) => {
+                    !(self.is_init && *from == self.module_name)
+                }
+                DefinitionStyle::ImportModule(_) => true,
+                _ => false,
+            })
     }
 
     /// Returns the range of the unresolvable `__all__` RHS, if applicable.
@@ -595,6 +690,10 @@ mod tests {
 
         fn get_wildcard(&self, module: ModuleName) -> Option<Arc<SmallSet<Name>>> {
             self.get(&module).map(|x| x.wildcard(self))
+        }
+
+        fn get_environment_wildcard(&self, module: ModuleName) -> Option<Arc<SmallSet<Name>>> {
+            self.get(&module).map(|x| x.environment_wildcard(self))
         }
 
         fn get_every_export_untracked(&self, module: ModuleName) -> Option<SmallSet<Name>> {
@@ -637,6 +736,9 @@ mod tests {
             ExportOrigin {
                 origin: (module, name.clone()),
                 is_final: false,
+                final_has_declared_type: false,
+                defined_under_environment: false,
+                ends_at_definition: false,
             }
         }
     }

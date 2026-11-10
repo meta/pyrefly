@@ -3,13 +3,23 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import overload
+from typing import Literal, overload
+
+from numpy._shapes import (
+    multivariate_normal_scalar_size_shape,
+    multivariate_normal_shape,
+)
+from numpy._typing import _ArrayLikeInt_co, _ShapeLike, ArrayLike
+from numpy.random._generator import (
+    _ArrayF32,
+    _ArrayF64,
+    _DTypeLikeF32,
+    _DTypeLikeF64,
+    _DTypeLikeFloat,
+    Generator as _NumpyGenerator,
+)
 
 # Preserve NumPy's canonical re-exports before local shape-aware declarations.
-from numpy.random._generator import (
-    default_rng as default_rng,
-    Generator as Generator,
-)
 from numpy.random._mt19937 import (
     MT19937 as MT19937,
 )
@@ -79,11 +89,135 @@ from numpy.random.mtrand import (
     weibull as weibull,
     zipf as zipf,
 )
-from shape_extensions import IntTuple
+from shape_extensions import Int, IntTuple, IntVar
 
-from .. import dtype, float64, ndarray
+from .. import dtype, float32, float64, ndarray
 
 @overload
 def randn() -> float: ...
 @overload
 def randn[Shape: IntTuple](*dims: *Shape) -> ndarray[Shape, dtype[float64]]: ...
+
+# Subclasses NumPy's `Generator` so that only the overridden methods change and
+# every other method keeps NumPy's own annotation.
+class Generator(_NumpyGenerator):
+    @overload
+    def random(
+        self, size: None = None, dtype: _DTypeLikeFloat = ..., out: None = None
+    ) -> float: ...
+    @overload
+    def random[N: IntVar](
+        self, size: Int[N], dtype: _DTypeLikeF64 = ..., out: None = None
+    ) -> ndarray[[N], dtype[float64]]: ...
+    @overload
+    def random[Shape: IntTuple](
+        self, size: Shape, dtype: _DTypeLikeF64 = ..., out: None = None
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    @overload
+    def random[N: IntVar](
+        self, size: Int[N], dtype: _DTypeLikeF32, out: None = None
+    ) -> ndarray[[N], dtype[float32]]: ...
+    @overload
+    def random[Shape: IntTuple](
+        self, size: Shape, dtype: _DTypeLikeF32, out: None = None
+    ) -> ndarray[Shape, dtype[float32]]: ...
+    @overload
+    def random(
+        self, size: _ShapeLike, dtype: _DTypeLikeF64 = ..., out: None = None
+    ) -> _ArrayF64: ...
+    @overload
+    def random(
+        self, size: _ShapeLike, dtype: _DTypeLikeF32, out: None = None
+    ) -> _ArrayF32: ...
+    @overload
+    def random[ArrayT: _ArrayF64](
+        self, size: _ShapeLike | None = None, dtype: _DTypeLikeF64 = ..., *, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def random[ArrayT: _ArrayF32](
+        self, size: _ShapeLike | None = None, *, dtype: _DTypeLikeF32, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def random[ArrayT: _ArrayF64](
+        self, size: _ShapeLike | None, dtype: _DTypeLikeF64, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def random[ArrayT: _ArrayF32](
+        self, size: _ShapeLike | None, dtype: _DTypeLikeF32, out: ArrayT
+    ) -> ArrayT: ...
+    @overload
+    def standard_cauchy(self, size: None = None) -> float: ...
+    @overload
+    def standard_cauchy[N: IntVar](
+        self, size: Int[N]
+    ) -> ndarray[[N], dtype[float64]]: ...
+    @overload
+    def standard_cauchy[Shape: IntTuple](
+        self, size: Shape
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    @overload
+    def standard_cauchy(self, size: _ShapeLike) -> _ArrayF64: ...
+    @overload
+    def multivariate_normal[MeanShape: IntTuple, CovShape: IntTuple](
+        self,
+        /,
+        mean: ndarray[MeanShape],
+        cov: ndarray[CovShape],
+        size: None = None,
+        check_valid: Literal["warn", "raise", "ignore"] = "warn",
+        tol: float = 1e-8,
+        *,
+        method: Literal["svd", "eigh", "cholesky"] = "svd",
+    ) -> ndarray[
+        multivariate_normal_scalar_size_shape(MeanShape, CovShape, None), dtype[float64]
+    ]: ...
+    @overload
+    def multivariate_normal[MeanShape: IntTuple, CovShape: IntTuple, N: IntVar](
+        self,
+        /,
+        mean: ndarray[MeanShape],
+        cov: ndarray[CovShape],
+        size: Int[N],
+        check_valid: Literal["warn", "raise", "ignore"] = "warn",
+        tol: float = 1e-8,
+        *,
+        method: Literal["svd", "eigh", "cholesky"] = "svd",
+    ) -> ndarray[
+        multivariate_normal_scalar_size_shape(MeanShape, CovShape, Int[N]),
+        dtype[float64],
+    ]: ...
+    @overload
+    def multivariate_normal[MeanShape: IntTuple, CovShape: IntTuple, Size: IntTuple](
+        self,
+        /,
+        mean: ndarray[MeanShape],
+        cov: ndarray[CovShape],
+        size: Size,
+        check_valid: Literal["warn", "raise", "ignore"] = "warn",
+        tol: float = 1e-8,
+        *,
+        method: Literal["svd", "eigh", "cholesky"] = "svd",
+    ) -> ndarray[
+        multivariate_normal_shape(MeanShape, CovShape, Size), dtype[float64]
+    ]: ...
+    @overload
+    def multivariate_normal(
+        self,
+        /,
+        mean: ArrayLike,
+        cov: ArrayLike,
+        size: _ShapeLike | None = None,
+        check_valid: Literal["warn", "raise", "ignore"] = "warn",
+        tol: float = 1e-8,
+        *,
+        method: Literal["svd", "eigh", "cholesky"] = "svd",
+    ) -> ndarray[IntTuple, dtype[float64]]: ...
+
+def default_rng(
+    seed: _ArrayLikeInt_co
+    | SeedSequence
+    | BitGenerator
+    | _NumpyGenerator
+    | RandomState
+    | None = None,
+) -> Generator: ...
