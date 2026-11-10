@@ -130,9 +130,10 @@ impl Usage {
         match other {
             Self::CurrentIdx(idx) => Self::NonPinningValue(Some(*idx)),
             Self::NonPinningValue(idx) => Self::NonPinningValue(*idx),
-            Self::Inspection => Self::Inspection,
-            Self::StaticTypeInformation { .. } | Self::TypeAliasRhs => Self::NonPinningValue(None),
-            Self::Unchecked => Self::Unchecked,
+            Self::Inspection
+            | Self::StaticTypeInformation { .. }
+            | Self::TypeAliasRhs
+            | Self::Unchecked => other.clone(),
         }
     }
 
