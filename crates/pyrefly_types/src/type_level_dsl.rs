@@ -126,6 +126,41 @@ impl TypeShapeDslInputDomain {
                 && narrowing.proves_not_none())
     }
 
+    /// Which integer domain a parameter in this domain belongs to after `narrowing`, if any.
+    fn integer_domain(self, narrowing: TypeShapeDslParameterNarrowing) -> Option<DslIntegerDomain> {
+        if self.can_use_as(TypeShapeDslDomain::Int, narrowing) {
+            return Some(DslIntegerDomain::Dimension);
+        }
+        let Self::Flag(domain) = self else {
+            return None;
+        };
+        let is_flag_int = if narrowing == TypeShapeDslParameterNarrowing::Integer {
+            let narrowable = FlagDomain::of(FlagMember::Int)
+                .join(FlagDomain::of(FlagMember::IntTuple))
+                .join(FlagDomain::of(FlagMember::NoneType));
+            domain.is_subset_of(narrowable)
+        } else {
+            narrowing != TypeShapeDslParameterNarrowing::IsNone
+                && domain == FlagDomain::of(FlagMember::Int)
+        };
+        is_flag_int.then_some(DslIntegerDomain::Flag)
+    }
+
+    fn shared_integer_domain(
+        parameter_domains: &[Self],
+        uses: &[TypeShapeDslParameterUse],
+    ) -> Option<DslIntegerDomain> {
+        let [first, rest @ ..] = uses else {
+            return None;
+        };
+        let domain = parameter_domains[first.parameter].integer_domain(first.narrowing)?;
+        rest.iter()
+            .all(|use_| {
+                parameter_domains[use_.parameter].integer_domain(use_.narrowing) == Some(domain)
+            })
+            .then_some(domain)
+    }
+
     /// Whether a value from this domain can be passed to a helper parameter in `expected`.
     fn can_forward_to(self, expected: Self) -> bool {
         match (self, expected) {
@@ -1701,6 +1736,25 @@ impl DslStaticKind {
             Self::ValueSet { sources, .. } => sources.parameter_indices(),
             Self::IntTuple { parameter_origins } | Self::IntTuples { parameter_origins } => {
                 parameter_origins.clone()
+            }
+            _ => None,
+        }
+    }
+
+    /// Parameter uses for a bare or narrowed parameter value that can join with a dimension or
+    /// `Flag[int]` integer expression once parameter annotations are checked.
+    fn integer_parameter_uses(&self) -> Option<Box<[TypeShapeDslParameterUse]>> {
+        match self {
+            Self::UnknownParameters(parameters) => Some(parameter_uses(
+                parameters,
+                TypeShapeDslParameterNarrowing::Unnarrowed,
+            )),
+            Self::ValueSet { sources, kinds }
+                if !sources.has_non_parameter_values()
+                    && kinds & FLAG_NONE == 0
+                    && kinds & FLAG_INT != 0 =>
+            {
+                sources.parameter_uses()
             }
             _ => None,
         }
@@ -3832,8 +3886,12 @@ impl<'a, F: Fn(&Expr) -> Option<TypeShapeDslIntrinsic>> DslValidator<'a, F> {
         let args = &call.arguments.args;
         let parameter_origins = self.validate_int_tuple_expression(&args[0], flow)?;
         let axis = self.slot(&args[1], flow)?;
+        if let DslStaticKind::DeferredInteger(index) = flow.kinds[axis] {
+            self.resolve_deferred_integer(index, DslIntegerDomain::Flag)?;
+        }
         let axis_parameters = match &flow.kinds[axis] {
             kind if kind.unnarrowed_parameter_origins().is_some() => kind.parameter_uses(),
+            DslStaticKind::DeferredInteger(_) => None,
             DslStaticKind::ValueSet { kinds, .. }
                 if *kinds & !(FLAG_INT | FLAG_SEQUENCE | FLAG_NONE) == 0 =>
             {
@@ -4108,7 +4166,7 @@ impl<'a, F: Fn(&Expr) -> Option<TypeShapeDslIntrinsic>> DslValidator<'a, F> {
             let (when_true, when_false) = self.validate_condition(&if_expr.test, flow)?;
             let when_true = self.validate_assignment_value(&if_expr.body, &when_true)?;
             let when_false = self.validate_assignment_value(&if_expr.orelse, &when_false)?;
-            let Some(kind) = when_true.join(when_false) else {
+            let Some(kind) = self.join_value_kinds(when_true, when_false)? else {
                 return Err(TypeShapeDslDefinitionError {
                     range: if_expr.range,
                     message: "conditional expression branches must have the same value domain",
@@ -4545,8 +4603,9 @@ impl<'a, F: Fn(&Expr) -> Option<TypeShapeDslIntrinsic>> DslValidator<'a, F> {
                         DslStaticKind::ValueSet {
                             sources,
                             kinds: FLAG_INT,
-                        } if sources.all_prove(TypeShapeDslParameterNarrowing::Integer)
-                            && sources.non_parameter_values_are(FLAG_INT) =>
+                        } if sources.non_parameter_values_are(FLAG_INT)
+                            && (sources.all_prove(TypeShapeDslParameterNarrowing::Integer)
+                                || sources.has_non_parameter_values()) =>
                         {
                             Some(DeferredIntegerClassification {
                                 default_domain: DslIntegerDomain::Flag,
@@ -4555,8 +4614,11 @@ impl<'a, F: Fn(&Expr) -> Option<TypeShapeDslIntrinsic>> DslValidator<'a, F> {
                         }
                         DslStaticKind::ValueSet { sources, kinds }
                             if kinds & FLAG_NONE == 0
-                                && sources.all_prove(TypeShapeDslParameterNarrowing::NonNone)
-                                && sources.non_parameter_values_are(FLAG_INT) =>
+                                && ((sources
+                                    .all_prove(TypeShapeDslParameterNarrowing::NonNone)
+                                    && sources.non_parameter_values_are(FLAG_INT))
+                                    || (!sources.has_non_parameter_values()
+                                        && kinds & FLAG_INT != 0)) =>
                         {
                             Some(DeferredIntegerClassification {
                                 default_domain: DslIntegerDomain::Dimension,
@@ -5494,6 +5556,87 @@ impl<'a, F: Fn(&Expr) -> Option<TypeShapeDslIntrinsic>> DslValidator<'a, F> {
         Ok(())
     }
 
+    fn join_value_kinds(
+        &mut self,
+        left: DslStaticKind,
+        right: DslStaticKind,
+    ) -> Result<Option<DslStaticKind>, TypeShapeDslDefinitionError> {
+        Ok(match (left, right) {
+            (DslStaticKind::DeferredInteger(left), DslStaticKind::DeferredInteger(right)) => Some(
+                DslStaticKind::DeferredInteger(self.merge_deferred_integers(left, right)?),
+            ),
+            (DslStaticKind::DeferredInteger(index), DslStaticKind::Dimension)
+            | (DslStaticKind::Dimension, DslStaticKind::DeferredInteger(index)) => {
+                self.resolve_deferred_integer(index, DslIntegerDomain::Dimension)?;
+                Some(DslStaticKind::Dimension)
+            }
+            (DslStaticKind::Dimension, other) | (other, DslStaticKind::Dimension)
+                if let Some(uses) = other.integer_parameter_uses() =>
+            {
+                // Syntax validation runs with `parameter_domains == None` before annotations are
+                // resolved; revalidation with `Some(domains)` checks that the parameter actually
+                // belongs to the dimension domain.
+                self.parameter_domains
+                    .is_none_or(|domains| {
+                        TypeShapeDslInputDomain::shared_integer_domain(domains, &uses)
+                            == Some(DslIntegerDomain::Dimension)
+                    })
+                    .then_some(DslStaticKind::Dimension)
+            }
+            (DslStaticKind::DeferredInteger(index), other)
+            | (other, DslStaticKind::DeferredInteger(index))
+                if let Some(uses) = other.integer_parameter_uses() =>
+            {
+                let kind_for_domain = |domain, uses| match domain {
+                    DslIntegerDomain::Dimension => DslStaticKind::Dimension,
+                    // Retain `parameter_uses` alongside `non_parameter_kinds: FLAG_INT` so the
+                    // merged Flag local stays input-only and cannot be used as a literal dimension.
+                    DslIntegerDomain::Flag => DslStaticKind::ValueSet {
+                        sources: DslValueSources {
+                            parameter_uses: uses,
+                            non_parameter_kinds: FLAG_INT,
+                        },
+                        kinds: FLAG_INT,
+                    },
+                };
+                // `previous` is `Some` when an earlier use already locked the deferred integer's
+                // domain before this branch merge.
+                let (root, previous) = self.deferred_integer_domain(index);
+                match self.parameter_domains {
+                    None => Some(match previous {
+                        None => DslStaticKind::DeferredInteger(root),
+                        Some(domain) => kind_for_domain(domain, uses),
+                    }),
+                    Some(domains) => {
+                        match TypeShapeDslInputDomain::shared_integer_domain(domains, &uses) {
+                            Some(domain) if previous.is_none_or(|prev| prev == domain) => {
+                                self.resolve_deferred_integer(index, domain)?;
+                                Some(kind_for_domain(domain, uses))
+                            }
+                            _ => None,
+                        }
+                    }
+                }
+            }
+            (
+                DslStaticKind::DeferredInteger(index),
+                flag @ DslStaticKind::ValueSet {
+                    kinds: FLAG_INT, ..
+                },
+            )
+            | (
+                flag @ DslStaticKind::ValueSet {
+                    kinds: FLAG_INT, ..
+                },
+                DslStaticKind::DeferredInteger(index),
+            ) => {
+                self.resolve_deferred_integer(index, DslIntegerDomain::Flag)?;
+                Some(flag)
+            }
+            (left, right) => left.join(right),
+        })
+    }
+
     fn merge_flows(
         &mut self,
         flows: Vec<DslValidationFlow>,
@@ -5512,38 +5655,12 @@ impl<'a, F: Fn(&Expr) -> Option<TypeShapeDslIntrinsic>> DslValidator<'a, F> {
                 if result.assigned[slot] {
                     let left = result.kinds[slot].clone();
                     let right = flow.kinds[slot].clone();
-                    let kind = match (left, right) {
-                        (
-                            DslStaticKind::DeferredInteger(left),
-                            DslStaticKind::DeferredInteger(right),
-                        ) => DslStaticKind::DeferredInteger(
-                            self.merge_deferred_integers(left, right)?,
-                        ),
-                        (DslStaticKind::DeferredInteger(index), DslStaticKind::Dimension)
-                        | (DslStaticKind::Dimension, DslStaticKind::DeferredInteger(index)) => {
-                            self.resolve_deferred_integer(index, DslIntegerDomain::Dimension)?;
-                            DslStaticKind::Dimension
-                        }
-                        (
-                            DslStaticKind::DeferredInteger(index),
-                            flag @ DslStaticKind::ValueSet {
-                                kinds: FLAG_INT, ..
-                            },
-                        )
-                        | (
-                            flag @ DslStaticKind::ValueSet {
-                                kinds: FLAG_INT, ..
-                            },
-                            DslStaticKind::DeferredInteger(index),
-                        ) => {
-                            self.resolve_deferred_integer(index, DslIntegerDomain::Flag)?;
-                            flag
-                        }
-                        (left, right) => left.join(right).ok_or(TypeShapeDslDefinitionError {
+                    let kind = self.join_value_kinds(left, right)?.ok_or(
+                        TypeShapeDslDefinitionError {
                             range,
                             message: "all continuing branch assignments to a local must have the same value domain",
-                        })?,
-                    };
+                        },
+                    )?;
                     result.kinds[slot] = kind;
                 }
             }

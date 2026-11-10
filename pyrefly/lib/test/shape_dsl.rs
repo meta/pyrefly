@@ -16298,3 +16298,336 @@ def g(x):
         pass
 "#,
 );
+
+testcase!(
+    test_type_shape_dsl_integer_branch_and_conditional_joins,
+    shape_extensions_env(),
+    r#"
+from typing import assert_type
+import shape_extensions.dsl as dsl
+from shape_extensions import Elements, Flag, Int, IntTuple, IntVar, type_shape_dsl_function
+
+class Array[Shape: IntTuple]: ...
+class DimBox[D: Int]: ...
+
+@type_shape_dsl_function
+def flag_slice_helper(shape: IntTuple, axis: int) -> IntTuple:
+    return shape[:axis]
+
+@type_shape_dsl_function
+def optional_flag_helper(shape: IntTuple, axis: int | None) -> IntTuple:
+    if dsl.is_int_value(axis):
+        return shape[:axis]
+    return shape
+
+@type_shape_dsl_function
+def int_helper(d: Int) -> Int:
+    return d + 1
+
+@type_shape_dsl_function
+def optional_int_helper(d: Int | None, fallback: Int) -> Int:
+    if d is None:
+        return fallback
+    return d + 1
+
+@type_shape_dsl_function
+def expand_dims_if_else(shape: IntTuple, axis: int) -> IntTuple:
+    output_rank = len(shape) + 1
+    if axis < 0 - output_rank or axis >= output_rank:
+        return dsl.Invalid("expand_dims axis out of bounds")
+    if axis < 0:
+        norm_axis = axis + output_rank
+    else:
+        norm_axis = axis
+    return dsl.IntTuple(
+        (
+            1
+            if index == norm_axis
+            else shape[index if index < norm_axis else index - 1]
+            for index in range(output_rank)
+        )
+    )
+
+@type_shape_dsl_function
+def expand_dims_conditional(shape: IntTuple, axis: int | tuple[int, ...] | None) -> IntTuple:
+    if dsl.is_int_value(axis):
+        output_rank = len(shape) + 1
+        norm_axis = axis + output_rank if axis < 0 else axis
+        if norm_axis < 0 or norm_axis >= output_rank:
+            return dsl.Invalid("expand_dims axis out of bounds")
+        return dsl.concat(dsl.concat(shape[:norm_axis], dsl.IntTuple((1,))), shape[norm_axis:])
+    return dsl.IntTuple.gradual()
+
+@type_shape_dsl_function
+def reduce_normalized_axis(shape: IntTuple, axis: int) -> IntTuple:
+    rank = len(shape)
+    norm_axis = axis if axis >= 0 else axis + rank
+    if norm_axis < 0 or norm_axis >= rank:
+        return dsl.Invalid("axis out of bounds")
+    return dsl.axis_reduce(shape, norm_axis, False, False, False, False)
+
+@type_shape_dsl_function
+def forward_normalized_flag(shape: IntTuple, axis: int, use_optional: bool) -> IntTuple:
+    if axis < 0:
+        norm_axis = axis + len(shape)
+    else:
+        norm_axis = axis
+    if use_optional:
+        return optional_flag_helper(shape, norm_axis)
+    return flag_slice_helper(shape, norm_axis)
+
+@type_shape_dsl_function
+def choose_flag_arithmetic_or_literal(shape: IntTuple, axis: int) -> IntTuple:
+    norm_axis = axis + len(shape) if axis < 0 else 0
+    return shape[norm_axis:]
+
+@type_shape_dsl_function
+def offset_after_normalize(shape: IntTuple, axis: int, via_helper: bool) -> Int:
+    norm_axis = axis + len(shape) if axis < 0 else axis
+    out = norm_axis + 1
+    if via_helper:
+        return int_helper(out)
+    return out
+
+@type_shape_dsl_function
+def pad_or_keep(d: Int, shape: IntTuple, mode: int) -> Int:
+    if mode == 0:
+        out = shape[0]
+    elif mode == 1:
+        out = d
+    else:
+        out = d + 2
+    return out
+
+@type_shape_dsl_function
+def pad_or_keep_conditional(d: Int, pad: bool) -> Int:
+    out = d + 2 if pad else d
+    return out
+
+@type_shape_dsl_function
+def forward_merged_dim(d: Int, pad: bool, use_optional: bool) -> Int:
+    if pad:
+        out = d + 2
+    else:
+        out = d
+    if use_optional:
+        return optional_int_helper(out, d)
+    return int_helper(out)
+
+@type_shape_dsl_function
+def optional_extent(shape: IntTuple, n: Int | None) -> Int:
+    extent = 2 * (shape[-1] - 1) if n is None else n
+    return extent
+
+@type_shape_dsl_function
+def concrete_branch_dimension(d: Int, n: Int | None) -> IntTuple:
+    if dsl.is_concrete_int(d):
+        first = d
+    else:
+        first = d + 1
+    if dsl.is_concrete_int(n):
+        second = n
+    else:
+        second = d + 2
+    return dsl.IntTuple((first, second))
+
+@type_shape_dsl_function
+def conditional_both_deferred(a: Int, b: Int, choose: bool) -> Int:
+    out = (a + 1) if choose else (b + 2)
+    return out
+
+def apply_expand_if_else[S: IntTuple, A: Flag[int]](x: Array[S], axis: A) -> Array[expand_dims_if_else(S, A)]: ...
+def apply_expand_conditional[S: IntTuple, A: Flag[int | tuple[int, ...] | None]](x: Array[S], axis: A = None) -> Array[expand_dims_conditional(S, A)]: ...
+def apply_reduce[S: IntTuple, A: Flag[int]](x: Array[S], axis: A) -> Array[reduce_normalized_axis(S, A)]: ...
+def apply_forward_flag[S: IntTuple, A: Flag[int], Opt: Flag[bool]](x: Array[S], axis: A, use_optional: Opt) -> Array[forward_normalized_flag(S, A, Opt)]: ...
+def apply_flag_or_literal[S: IntTuple, A: Flag[int]](x: Array[S], axis: A) -> Array[choose_flag_arithmetic_or_literal(S, A)]: ...
+def apply_offset_after_norm[S: IntTuple, A: Flag[int], H: Flag[bool]](x: Array[S], axis: A, via_helper: H) -> DimBox[offset_after_normalize(S, A, H)]: ...
+def apply_pad_or_keep[D: Int, S: IntTuple, M: Flag[int]](d: DimBox[D], x: Array[S], mode: M) -> DimBox[pad_or_keep(D, S, M)]: ...
+def apply_pad_conditional[D: Int, P: Flag[bool]](d: DimBox[D], pad: P) -> DimBox[pad_or_keep_conditional(D, P)]: ...
+def apply_forward_dim[D: Int, P: Flag[bool], Opt: Flag[bool]](d: DimBox[D], pad: P, use_optional: Opt) -> DimBox[forward_merged_dim(D, P, Opt)]: ...
+def apply_optional_extent[S: IntTuple, N: Int | None = None](x: Array[S], n: N = None) -> DimBox[optional_extent(S, N)]: ...
+def apply_optional_symbolic[S: IntTuple, N: IntVar](x: Array[S], n: DimBox[Int[N]]) -> DimBox[optional_extent(S, Int[N])]: ...
+def apply_concrete_branch[D: Int, N: Int | None = None](d: DimBox[D], n: N = None) -> Array[concrete_branch_dimension(D, N)]: ...
+def apply_both_deferred[A: Int, B: Int, C: Flag[bool]](a: DimBox[A], b: DimBox[B], choose: C) -> DimBox[conditional_both_deferred(A, B, C)]: ...
+
+def check[N: IntVar, M: IntVar, Mid: IntTuple](
+    x: Array[IntTuple[3, 5]],
+    sym_x: Array[IntTuple[N, *Elements[Mid], 5]],
+    d4: DimBox[Int[4]],
+    dn: DimBox[Int[N]],
+    dm: DimBox[Int[M]],
+    d_gradual: DimBox[Int],
+    broad_axis: int,
+    broad_bool: bool,
+) -> None:
+    assert_type(apply_expand_if_else(x, 1), Array[IntTuple[3, 1, 5]])
+    assert_type(apply_expand_if_else(x, -1), Array[IntTuple[3, 5, 1]])
+    assert_type(apply_expand_if_else(x, broad_axis), Array[IntTuple])
+    apply_expand_if_else(x, 3)  # E: expand_dims axis out of bounds
+
+    assert_type(apply_expand_conditional(x, 1), Array[IntTuple[3, 1, 5]])
+    assert_type(apply_expand_conditional(x, -1), Array[IntTuple[3, 5, 1]])
+    assert_type(apply_expand_conditional(x, (0, 1)), Array[IntTuple])
+    assert_type(apply_expand_conditional(x), Array[IntTuple])
+
+    assert_type(apply_reduce(x, 0), Array[IntTuple[5]])
+    assert_type(apply_reduce(x, -1), Array[IntTuple[3]])
+    apply_reduce(x, 2)  # E: axis out of bounds
+
+    assert_type(apply_forward_flag(x, -1, False), Array[IntTuple[3]])
+    assert_type(apply_forward_flag(x, 1, True), Array[IntTuple[3]])
+    assert_type(apply_flag_or_literal(x, -1), Array[IntTuple[5]])
+    assert_type(apply_flag_or_literal(x, 1), Array[IntTuple[3, 5]])
+    assert_type(apply_offset_after_norm(x, -1, False), DimBox[Int[2]])
+    assert_type(apply_offset_after_norm(x, 0, True), DimBox[Int[2]])
+
+    assert_type(apply_pad_or_keep(dn, x, 0), DimBox[Int[3]])
+    assert_type(apply_pad_or_keep(d4, x, 1), DimBox[Int[4]])
+    assert_type(apply_pad_or_keep(dn, x, 1), DimBox[Int[N]])
+    assert_type(apply_pad_or_keep(dn, x, 2), DimBox[Int[N + 2]])
+    assert_type(apply_pad_or_keep(d_gradual, x, 1), DimBox[Int])
+
+    assert_type(apply_pad_conditional(dn, True), DimBox[Int[N + 2]])
+    assert_type(apply_pad_conditional(dn, False), DimBox[Int[N]])
+    assert_type(apply_pad_conditional(dn, broad_bool), DimBox[Int])
+
+    assert_type(apply_forward_dim(d4, True, False), DimBox[Int[7]])
+    assert_type(apply_forward_dim(dn, False, True), DimBox[Int[N + 1]])
+
+    assert_type(apply_optional_extent(x), DimBox[Int[8]])
+    assert_type(apply_optional_extent(sym_x), DimBox[Int[8]])
+    assert_type(apply_optional_extent(x, 9), DimBox[Int[9]])
+    assert_type(apply_optional_symbolic(x, dn), DimBox[Int[N]])
+
+    assert_type(apply_concrete_branch(d4, 7), Array[IntTuple[4, 7]])
+    assert_type(apply_concrete_branch(dn, None), Array[IntTuple[N + 1, N + 2]])
+
+    assert_type(apply_both_deferred(dn, dm, True), DimBox[Int[N + 1]])
+    assert_type(apply_both_deferred(dn, dm, False), DimBox[Int[M + 2]])
+"#,
+);
+
+testcase!(
+    test_type_shape_dsl_invalid_integer_branch_and_conditional_joins,
+    shape_extensions_env(),
+    r#"
+import shape_extensions.dsl as dsl
+from shape_extensions import Int, IntTuple, type_shape_dsl_function
+
+@type_shape_dsl_function
+def int_helper(d: Int) -> Int:
+    return d
+
+@type_shape_dsl_function
+def flag_helper(shape: IntTuple, axis: int) -> IntTuple:
+    return shape[:axis]
+
+@type_shape_dsl_function
+def unused_dimension_and_flag(shape: IntTuple, axis: int, choose: bool) -> IntTuple:
+    if choose:  # E: all continuing branch assignments to a local must have the same value domain
+        mixed = shape[0]
+    else:
+        mixed = axis
+    return shape
+
+@type_shape_dsl_function
+def conditional_dimension_and_flag(shape: IntTuple, axis: int, choose: bool) -> IntTuple:
+    mixed = shape[0] if choose else axis  # E: conditional expression branches must have the same value domain
+    return shape
+
+@type_shape_dsl_function
+def unused_deferred_dim_and_flag(d: Int, axis: int, choose: bool) -> Int:
+    if choose:
+        mixed = d + 1  # E: Flag operation requires a compatible Flag parameter
+    else:
+        mixed = axis
+    return d
+
+@type_shape_dsl_function
+def mixed_parameter_alias_then_deferred(d: Int, axis: int, c1: bool, c2: bool) -> Int:
+    picked = d if c1 else axis
+    out = (d + 1) if c2 else picked  # E: conditional expression branches must have the same value domain
+    return d
+
+@type_shape_dsl_function
+def preresolved_dimension_and_flag(shape: IntTuple, axis: int, choose: bool) -> IntTuple:
+    rank = len(shape)
+    _ = dsl.IntTuple((rank,))
+    if choose:  # E: all continuing branch assignments to a local must have the same value domain
+        mixed = rank
+    else:
+        mixed = axis
+    return shape
+
+@type_shape_dsl_function
+def preresolved_flag_and_dimension(shape: IntTuple, d: Int, choose: bool) -> IntTuple:
+    rank = len(shape)
+    _ = shape[rank]
+    if choose:  # E: all continuing branch assignments to a local must have the same value domain
+        mixed = rank
+    else:
+        mixed = d
+    return shape
+
+@type_shape_dsl_function
+def return_merged_flag_local(axis: int, choose: bool) -> Int:
+    if choose:
+        norm = axis + 1
+    else:
+        norm = axis
+    return norm  # E: Flag values are input-only and cannot be returned
+
+@type_shape_dsl_function
+def tuple_element_merged_flag_local(axis: int, choose: bool) -> IntTuple:
+    if choose:
+        norm = axis + 1
+    else:
+        norm = axis
+    return dsl.IntTuple((norm,))  # E: IntTuple elements must be annotated as `Int`
+
+@type_shape_dsl_function
+def forward_merged_flag_to_int_helper(axis: int, choose: bool) -> Int:
+    if choose:
+        norm = axis + 1
+    else:
+        norm = axis
+    return int_helper(norm)  # E: DSL helper argument domains are incompatible
+
+@type_shape_dsl_function
+def axis_reduce_with_merged_dimension(shape: IntTuple, d: Int, choose: bool) -> IntTuple:
+    if choose:
+        extent = d + 1
+    else:
+        extent = d
+    return dsl.axis_reduce(shape, extent, False, False, False, False)  # E: `dsl.axis_reduce` axis must be a Flag integer, tuple, or None
+
+@type_shape_dsl_function
+def forward_merged_dimension_to_flag_helper(shape: IntTuple, d: Int, choose: bool) -> IntTuple:
+    if choose:
+        extent = d + 1
+    else:
+        extent = d
+    return flag_helper(shape, extent)  # E: DSL helper argument domains are incompatible
+
+@type_shape_dsl_function
+def unnarrowed_optional_int_branch(d: Int, n: Int | None, choose: bool) -> Int:
+    if choose:  # E: all continuing branch assignments to a local must have the same value domain
+        out = d + 1
+    else:
+        out = n
+    return d
+
+@type_shape_dsl_function
+def unnarrowed_optional_flag_conditional(axis: int, opt: int | None, choose: bool) -> IntTuple:
+    out = axis + 1 if choose else opt  # E: conditional expression branches must have the same value domain
+    return dsl.IntTuple(())
+
+@type_shape_dsl_function
+def non_integer_flag_branch(d: Int, label: str, choose: bool) -> Int:
+    if choose:  # E: all continuing branch assignments to a local must have the same value domain
+        out = d + 1
+    else:
+        out = label
+    return d
+"#,
+);
