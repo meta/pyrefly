@@ -1167,8 +1167,6 @@ foo(x=1, y="hello")
     );
 }
 
-// Known bug: resolving a keyword's declaration prevents the call-signature fallback when
-// the dependency's answers are unavailable.
 #[test]
 fn hover_imported_keywords_without_dependency_answers() {
     let library = r#"
@@ -1235,7 +1233,25 @@ Record(value='text')
         );
         for (offset, _) in caller.match_indices("value=") {
             let position = TextSize::try_from(offset).unwrap();
-            let expected = (retention == Require::Everything).then(|| "str".to_owned());
+            let call_type = transaction
+                .get_expected_type_at(&main, position)
+                .map(|ty| ty.to_string());
+            // Signature help cannot currently recover this generic call's parameter type.
+            if caller[..offset]
+                .lines()
+                .last()
+                .unwrap()
+                .starts_with("generic(")
+            {
+                assert!(call_type.is_none());
+            } else {
+                assert_eq!(call_type, Some("str".to_owned()));
+            }
+            let expected = if retention == Require::Everything {
+                Some("str".to_owned())
+            } else {
+                call_type
+            };
             assert_eq!(
                 transaction
                     .get_type_at(&main, position)
@@ -1258,10 +1274,15 @@ Record(value='text')
                     .map(|ty| ty.to_string()),
                 expected,
             );
-            assert_eq!(
-                get_hover(&transaction, &main, position, false).is_some(),
-                retention == Require::Everything
-            );
+            let hover = get_hover(&transaction, &main, position, false);
+            if expected.is_some() {
+                let Contents::MarkupContent(markup) = hover.unwrap().contents else {
+                    panic!("expected markdown hover");
+                };
+                assert!(markup.value.contains("value: str"), "{}", markup.value);
+            } else {
+                assert!(hover.is_none());
+            }
             let definitions = transaction
                 .find_definition(&main, position, FindPreference::default())
                 .unwrap();

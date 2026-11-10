@@ -246,7 +246,6 @@ impl<W: Write + Send> ScipWriter<W> {
             external_symbols.into_inner().into_iter().collect();
         // Most external symbols are documented at their first use. When that hover has no
         // documentation, retain the defining module's answers to document the symbol there.
-        // Keyword arguments, for example, need the type of the defining parameter.
         let dependencies: Vec<Handle> = first_uses
             .iter()
             .filter(|(_, first_use)| first_use.documentation.is_empty())
@@ -1114,9 +1113,8 @@ mod tests {
         }
     }
 
-    // Known bug: keyword documentation requires re-solving the dependency with retained answers.
     #[test]
-    fn keyword_documentation_requires_dependency_answers() {
+    fn keyword_documentation_does_not_retain_dependency_answers() {
         let root = std::env::current_dir()
             .unwrap()
             .join("scip-keyword-project");
@@ -1170,10 +1168,10 @@ mod tests {
                     .then(|| (symbol.clone(), !first_use.documentation.is_empty()))
             })
             .expect("the keyword refers to the external parameter");
-        assert!(!documented_at_use);
+        assert!(documented_at_use);
         let index = Index::parse_from_bytes(&scip.finish(&mut transaction).unwrap()).unwrap();
         assert_eq!(index.documents.len(), 1);
-        assert!(transaction.get_answers(&lib).is_some());
+        assert!(transaction.get_answers(&lib).is_none());
         let parameter = index
             .external_symbols
             .iter()
