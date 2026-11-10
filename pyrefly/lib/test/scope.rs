@@ -2025,3 +2025,22 @@ def f():
         y: int
 "#,
 );
+
+testcase!(
+    bug = "Error is not caught",
+    test_circular_ref_is_illegal,
+    r#"
+class A:
+    str: "str" = ""  # should be an error
+    "#,
+);
+
+testcase!(
+    bug = "Forward reference `int` is resolved incorrectly",
+    test_forward_reference_to_shadowing_method,
+    r#"
+class A:
+    x: "int"  # should be an error
+    def int(self) -> None: ...
+    "#,
+);
