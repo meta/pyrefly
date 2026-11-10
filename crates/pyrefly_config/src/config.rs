@@ -753,8 +753,8 @@ pub struct ConfigFile {
     #[derivative(PartialEq = "ignore")]
     pub target_configs: ArcId<RwLock<SmallMap<ConfigName, Option<Arc<ConfigBase>>>>>,
 
-    /// Minimum severity level for errors to be displayed.
-    /// Errors below this severity will not be shown. Defaults to "error".
+    /// Minimum severity level for errors to be displayed and to cause a nonzero exit code.
+    /// When unset, warnings and errors are displayed, and only errors cause a nonzero exit code.
     pub min_severity: Option<Severity>,
 
     /// Should we let Pyrefly try to index the project's files? Disabling this

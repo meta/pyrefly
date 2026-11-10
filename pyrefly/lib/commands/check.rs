@@ -451,8 +451,8 @@ struct OutputArgs {
     #[arg(long, group = "baseline_action")]
     error_stale_baseline: bool,
 
-    /// Minimum severity level for errors to be displayed.
-    /// Errors below this severity will not be shown. Defaults to "error".
+    /// Minimum severity level for errors to be displayed and to cause a nonzero exit code.
+    /// When unset, warnings and errors are displayed, and only errors cause a nonzero exit code.
     #[arg(long, value_enum)]
     min_severity: Option<Severity>,
 }
