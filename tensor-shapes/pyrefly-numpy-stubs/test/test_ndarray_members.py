@@ -422,9 +422,10 @@ def test_view_with_positional_array_subclass() -> None:
     values = np.ones((2, 3))
 
     keyword = values.view(type=_ViewSubclass)
-    positional = values.view(_ViewSubclass)  # E: No matching overload
+    positional = values.view(_ViewSubclass)
     reinterpreted = values.view(np.int64)
     assert_type(keyword, _ViewSubclass)
+    assert_type(positional, _ViewSubclass)
     assert_type(reinterpreted, np.ndarray[IntTuple, np.dtype[np.int64]])
     assert_shape(values.shape, (2, 3))
     assert type(keyword) is _ViewSubclass
