@@ -996,6 +996,8 @@ fn module_symbol(package: &Package, module: ModuleName) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use pyrefly_python::module_path::ModulePath;
     use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
 
@@ -1110,6 +1112,79 @@ mod tests {
                 output_path.display()
             );
         }
+    }
+
+    // Known bug: keyword documentation requires re-solving the dependency with retained answers.
+    #[test]
+    fn keyword_documentation_requires_dependency_answers() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("scip-keyword-project");
+        let main_path = root.join("main.py");
+        let lib_path = root.parent().unwrap().join("scip-keyword-lib.py");
+        let library = "def target(value: str) -> None: ...\n";
+        let mut env = TestEnv::new();
+        env.add_with_path(
+            "main",
+            main_path.to_str().unwrap(),
+            "from lib import target\ntarget(value='text')\n",
+        );
+        env.add_with_path("lib", lib_path.to_str().unwrap(), library);
+        let main = Handle::new(
+            ModuleName::from_str("main"),
+            ModulePath::memory(main_path),
+            env.sys_info(),
+        );
+        let lib = Handle::new(
+            ModuleName::from_str("lib"),
+            ModulePath::memory(lib_path),
+            env.sys_info(),
+        );
+        let state = State::new(env.config_finder(), TEST_THREAD_COUNT);
+        let mut transaction = state.new_transaction(Require::Exports, None);
+        transaction.set_memory(env.get_memory());
+        let scip = ScipWriter::new(
+            Vec::new(),
+            slice::from_ref(&main),
+            &root,
+            Package {
+                name: "demo".to_owned(),
+                version: "1".to_owned(),
+            },
+            "test",
+        )
+        .unwrap()
+        .start(&mut transaction);
+        transaction.run(slice::from_ref(&lib), Require::Errors, None);
+        transaction.run(slice::from_ref(&main), Require::Everything, None);
+        assert!(transaction.get_answers(&main).is_none());
+        assert!(transaction.get_answers(&lib).is_none());
+        let parameter_position = TextSize::try_from(library.find("value").unwrap()).unwrap();
+        let (symbol, documented_at_use) = scip
+            .external_symbols
+            .lock()
+            .iter()
+            .find_map(|(symbol, first_use)| {
+                let (handle, position) = first_use.definition.as_ref()?;
+                (handle == &lib && *position == parameter_position)
+                    .then(|| (symbol.clone(), !first_use.documentation.is_empty()))
+            })
+            .expect("the keyword refers to the external parameter");
+        assert!(!documented_at_use);
+        let index = Index::parse_from_bytes(&scip.finish(&mut transaction).unwrap()).unwrap();
+        assert_eq!(index.documents.len(), 1);
+        assert!(transaction.get_answers(&lib).is_some());
+        let parameter = index
+            .external_symbols
+            .iter()
+            .find(|info| info.symbol == symbol)
+            .unwrap();
+        assert!(
+            parameter
+                .documentation
+                .iter()
+                .any(|doc| doc.contains("value: str"))
+        );
     }
 
     #[test]

@@ -17,11 +17,14 @@ use pyrefly_build::handle::Handle;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::sys_info::PythonVersion;
+use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
+use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
 use crate::lsp::wasm::hover::HoverOptions;
 use crate::lsp::wasm::hover::get_hover;
 use crate::lsp::wasm::hover::get_hover_with_verbosity;
+use crate::state::lsp::FindPreference;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
@@ -1162,6 +1165,116 @@ foo(x=1, y="hello")
         report.contains("y: str"),
         "Expected keyword argument hover to show imported parameter type, got: {report}"
     );
+}
+
+// Known bug: resolving a keyword's declaration prevents the call-signature fallback when
+// the dependency's answers are unavailable.
+#[test]
+fn hover_imported_keywords_without_dependency_answers() {
+    let library = r#"
+from dataclasses import dataclass
+from typing import overload
+
+def function(value: str) -> None: ...
+
+@overload
+def overloaded(first: int, *, value: str) -> int: ...
+@overload
+def overloaded(first: str, *, value: str) -> str: ...
+def overloaded(first: int | str, *, value: str) -> int | str: return first
+
+def generic[T](first: T, *, value: str) -> T: return first
+
+class Widget:
+    def __init__(self, value: str) -> None: ...
+    def method(self, value: str) -> None: ...
+
+@dataclass
+class Record:
+    value: str
+"#;
+    let caller = r#"
+from lib import function, overloaded, generic, Widget, Record
+function(value='text')
+overloaded('first', value='text')
+generic(1, value='text')
+widget = Widget(value='text')
+widget.method(value='text')
+Record(value='text')
+"#;
+    for retention in [Require::Exports, Require::Everything] {
+        let mut env = TestEnv::new();
+        env.add_with_path("main", "main.py", caller);
+        env.add_with_path("lib", "lib.py", library);
+        let handle = |name: &str| {
+            Handle::new(
+                ModuleName::from_str(name),
+                ModulePath::memory(PathBuf::from(format!("{name}.py"))),
+                env.sys_info(),
+            )
+        };
+        let main = handle("main");
+        let lib = handle("lib");
+        let state = State::new(env.config_finder(), TEST_THREAD_COUNT);
+        let mut transaction = state.new_transaction(retention, None);
+        transaction.set_memory(env.get_memory());
+        // Complete the dependency before checking the caller, so the low-retention case
+        // really has evicted answers rather than an unfinished lazy solve.
+        transaction.run(slice::from_ref(&lib), retention.max(Require::Errors), None);
+        transaction.run(slice::from_ref(&main), Require::Everything, None);
+        assert!(
+            transaction
+                .get_errors([&main, &lib])
+                .collect_errors()
+                .ordinary
+                .is_empty()
+        );
+        assert_eq!(
+            transaction.get_answers(&lib).is_some(),
+            retention == Require::Everything
+        );
+        for (offset, _) in caller.match_indices("value=") {
+            let position = TextSize::try_from(offset).unwrap();
+            let expected = (retention == Require::Everything).then(|| "str".to_owned());
+            assert_eq!(
+                transaction
+                    .get_type_at(&main, position)
+                    .map(|ty| ty.to_string()),
+                expected,
+                "retention {retention:?}; position {position:?}",
+            );
+            assert_eq!(
+                transaction
+                    .get_type_at_preserving_declaration(&main, position)
+                    .map(|ty| ty.to_string()),
+                expected,
+            );
+            assert_eq!(
+                transaction
+                    .get_computed_type_at_range(
+                        &main,
+                        TextRange::new(position, position + TextSize::from(5))
+                    )
+                    .map(|ty| ty.to_string()),
+                expected,
+            );
+            assert_eq!(
+                get_hover(&transaction, &main, position, false).is_some(),
+                retention == Require::Everything
+            );
+            let definitions = transaction
+                .find_definition(&main, position, FindPreference::default())
+                .unwrap();
+            assert!(definitions.iter().any(|definition| {
+                definition.module.name() == ModuleName::from_str("lib")
+                    && definition.module.code_at(definition.definition_range) == "value"
+            }));
+            assert_eq!(
+                transaction.get_answers(&lib).is_some(),
+                retention == Require::Everything
+            );
+        }
+    }
 }
 
 #[test]
