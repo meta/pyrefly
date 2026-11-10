@@ -16,17 +16,24 @@ use pyrefly_types::read_only::ReadOnlyReason;
 use ruff_python_ast::helpers::is_dunder;
 use ruff_python_ast::helpers::is_sunder;
 use ruff_python_ast::name::Name;
+use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
+use crate::alt::call::ConstructorKind;
+use crate::alt::callable::CallArg;
+use crate::alt::callable::CallKeyword;
 use crate::alt::class::class_field::ClassAttribute;
 use crate::alt::class::django::transform_django_enum_value;
 use crate::alt::types::class_metadata::ClassMetadata;
 use crate::alt::types::class_metadata::EnumMetadata;
 use crate::binding::binding::ClassFieldDefinition;
 use crate::error::collector::ErrorCollector;
+use crate::error::context::ErrorContext;
+use crate::error::context::TypeCheckContext;
+use crate::error::context::TypeCheckKind;
 use crate::types::class::Class;
 use crate::types::literal::Lit;
 use crate::types::types::Type;
@@ -39,6 +46,13 @@ pub const VALUE: Name = Name::new_static("_value_");
 pub const VALUE_PROP: Name = Name::new_static("value");
 
 pub const GENERATE_NEXT_VALUE: Name = Name::new_static("_generate_next_value_");
+
+#[derive(Debug)]
+pub(crate) struct EnumLookupArg {
+    pub ty: Type,
+    pub range: TextRange,
+    pub is_positional: bool,
+}
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Suggest an enum member when a raw literal matches exactly one expected enum value.
@@ -281,6 +295,264 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             value_ty
         }
+    }
+
+    /// Prepare an enum value lookup argument for checking.
+    /// Returns `Some(EnumLookupArg)` if the call is eligible for stock enum value lookup,
+    /// having checked the argument and reported any diagnostic.
+    pub(crate) fn prepare_enum_lookup<'b>(
+        &self,
+        cls: &ClassType,
+        constructor_kind: &ConstructorKind,
+        args: &[CallArg<'b>],
+        keywords: &[CallKeyword<'b>],
+        arg_errors: &ErrorCollector,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+    ) -> Option<EnumLookupArg> {
+        if *constructor_kind == ConstructorKind::TypeOfSelf {
+            return None;
+        }
+        let (value_arg, range, is_positional) = match (args, keywords) {
+            ([CallArg::Arg(arg)], []) => (arg, arg.range(), true),
+            ([], [kw]) if kw.arg.as_ref().is_some_and(|id| id.as_str() == "value") => {
+                (&kw.value, kw.value.range(), false)
+            }
+            _ => return None,
+        };
+        let want = self.enum_value_lookup_target(cls)?;
+        let ty = value_arg.infer(self, arg_errors);
+        self.check_enum_lookup_arg(&ty, &want, range, errors, context);
+        Some(EnumLookupArg {
+            ty,
+            range,
+            is_positional,
+        })
+    }
+
+    /// Determine the expected argument type for stock enum value lookup.
+    /// Returns `None` if the enum is not eligible (custom metaclass, dynamic _missing_,
+    /// custom __new__, memberless extensible base) or if member values are outside
+    /// supported primitive equality domains (e.g. Decimal, Fraction, NamedTuple, containers).
+    fn enum_value_lookup_target(&self, cls: &ClassType) -> Option<Type> {
+        let metadata = self.get_metadata_for_class(cls.class_object());
+        let enum_metadata = metadata.enum_metadata()?;
+
+        if let Some(custom_metaclass) = metadata.custom_metaclass() {
+            let meta_obj = custom_metaclass.class_object();
+            if meta_obj != self.stdlib.enum_meta().class_object() {
+                return None;
+            }
+        }
+
+        if let Some(missing) = self.get_class_member_with_defining_class(
+            cls.class_object(),
+            &Name::new_static("_missing_"),
+        ) && !missing.defining_class.is(KnownClass::Enum)
+        {
+            return None;
+        }
+
+        if let Some(new) =
+            self.get_class_member_with_defining_class(cls.class_object(), &dunder::NEW)
+            && !new.defining_class.is(KnownClass::Enum)
+            && !new.defining_class.is(KnownClass::Object)
+        {
+            return None;
+        }
+
+        let members = self.get_enum_members(cls.class_object());
+        if members.is_empty() {
+            return None;
+        }
+
+        let mixed_in = self.mixed_in_enum_data_type(cls.class_object());
+        let mut has_numeric = false;
+        let mut has_text = false;
+        let mut has_bytes = false;
+
+        if let Some(ref mixed_in) = mixed_in
+            && !self.classify_primitive_domain(
+                mixed_in,
+                &mut has_numeric,
+                &mut has_text,
+                &mut has_bytes,
+            )
+        {
+            return None;
+        }
+
+        let mut member_types = Vec::new();
+        for lit in members {
+            let Lit::Enum(lit_enum) = lit else {
+                return None;
+            };
+            let val_ty = self.enum_literal_to_value_type(*lit_enum, enum_metadata.is_django);
+            let promoted = self.promote_literals_for_lookup(&val_ty);
+            let member_ty = if let Some(ref mixed_in) = mixed_in {
+                if &promoted == mixed_in {
+                    promoted
+                } else {
+                    mixed_in.clone()
+                }
+            } else {
+                promoted
+            };
+            if !self.classify_primitive_domain(
+                &member_ty,
+                &mut has_numeric,
+                &mut has_text,
+                &mut has_bytes,
+            ) {
+                return None;
+            }
+            member_types.push(member_ty);
+        }
+
+        let mut options = member_types;
+        if has_numeric {
+            options.push(self.heap.mk_class_type(self.stdlib.int().clone()));
+            options.push(self.heap.mk_class_type(self.stdlib.float().clone()));
+            options.push(self.heap.mk_class_type(self.stdlib.complex().clone()));
+        }
+        if has_text {
+            options.push(self.heap.mk_class_type(self.stdlib.str().clone()));
+        }
+        if has_bytes {
+            options.push(self.heap.mk_class_type(self.stdlib.bytes().clone()));
+            options.push(self.heap.mk_class_type(self.stdlib.bytearray().clone()));
+        }
+        options.push(self.heap.mk_class_type(cls.clone()));
+
+        Some(self.unions(options))
+    }
+
+    fn classify_primitive_domain(
+        &self,
+        ty: &Type,
+        has_numeric: &mut bool,
+        has_text: &mut bool,
+        has_bytes: &mut bool,
+    ) -> bool {
+        match ty {
+            Type::Union(u) => u
+                .members
+                .iter()
+                .all(|m| self.classify_primitive_domain(m, has_numeric, has_text, has_bytes)),
+            Type::ClassType(c) => {
+                let obj = c.class_object();
+                if obj == self.stdlib.int().class_object()
+                    || obj == self.stdlib.float().class_object()
+                    || obj == self.stdlib.complex().class_object()
+                    || obj == self.stdlib.bool().class_object()
+                {
+                    *has_numeric = true;
+                    true
+                } else if obj == self.stdlib.str().class_object() {
+                    *has_text = true;
+                    true
+                } else if obj == self.stdlib.bytes().class_object() {
+                    *has_bytes = true;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Promote all literals (implicit and explicit) to their base types for enum lookup checking.
+    pub(crate) fn promote_literals_for_lookup(&self, ty: &Type) -> Type {
+        ty.clone().transform(&mut |t| match &*t {
+            Type::Literal(lit) => {
+                *t = lit.value.general_class_type(self.stdlib).clone().to_type();
+            }
+            Type::LiteralString(_) => {
+                *t = self.stdlib.str().clone().to_type();
+            }
+            _ => {}
+        })
+    }
+
+    fn class_or_ancestor_is(&self, cls: &ClassType, known: KnownClass) -> bool {
+        if cls.is(known) {
+            return true;
+        }
+        self.get_mro_for_class(cls.class_object())
+            .ancestors_no_object()
+            .iter()
+            .any(|a| a.is(known))
+    }
+
+    pub(crate) fn is_enum_lookup_compatible(&self, got: &Type, want: &Type) -> bool {
+        if self.is_subset_eq(got, want) {
+            return true;
+        }
+        if got.is_object() || got.is_any() {
+            return true;
+        }
+        match got {
+            Type::Quantified(q) if q.is_type_var() => {
+                let bound = q.upper_bound(self.stdlib, self.heap);
+                self.is_enum_lookup_compatible(&bound, want)
+            }
+            Type::TypeVar(tv) => {
+                let bound = tv.upper_bound(self.stdlib, self.heap);
+                self.is_enum_lookup_compatible(&bound, want)
+            }
+            Type::Union(u) => u
+                .members
+                .iter()
+                .all(|t| self.is_enum_lookup_compatible(t, want)),
+            Type::Intersect(inner) => {
+                let (tys, _) = inner.as_ref();
+                tys.iter().all(|t| self.is_enum_lookup_compatible(t, want))
+            }
+            Type::ClassType(cls) => {
+                if (self.class_or_ancestor_is(cls, KnownClass::Decimal)
+                    || self.class_or_ancestor_is(cls, KnownClass::FractionsFraction))
+                    && self.is_subset_eq(&self.stdlib.int().clone().to_type(), want)
+                {
+                    return true;
+                }
+                if self.class_or_ancestor_is(cls, KnownClass::MemoryView)
+                    && self.is_subset_eq(&self.stdlib.bytes().clone().to_type(), want)
+                {
+                    return true;
+                }
+                if self.class_or_ancestor_is(cls, KnownClass::CollectionsUserString)
+                    && self.is_subset_eq(&self.stdlib.str().clone().to_type(), want)
+                {
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn check_enum_lookup_arg(
+        &self,
+        got: &Type,
+        want: &Type,
+        range: TextRange,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+    ) {
+        if self.is_enum_lookup_compatible(got, want) {
+            return;
+        }
+        self.check_type_as_call_argument(got, want, range, errors, &|| {
+            let mut tcc = TypeCheckContext::of_kind(TypeCheckKind::CallArgument(
+                Some(Name::new_static("value")),
+                None,
+            ));
+            if let Some(ctx) = context {
+                tcc = tcc.with_context(Some(ctx()));
+            }
+            tcc
+        });
     }
 
     /// Look up the `_value_` attribute for an enum type (not a specific member).
