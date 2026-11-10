@@ -100,8 +100,7 @@ fn walrus_hint_insertability() {
                 .collect::<String>(),
             ": int"
         );
-        // Known bug: this would insert invalid `assigned: int := make()` syntax.
-        assert_eq!(assigned_hint.edits.as_ref().unwrap().annotation, ": int");
+        assert!(assigned_hint.edits.is_none());
 
         let regular_position =
             TextSize::try_from(code.find("regular").unwrap() + "regular".len()).unwrap();
