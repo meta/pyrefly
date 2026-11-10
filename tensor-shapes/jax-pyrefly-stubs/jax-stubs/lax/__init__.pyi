@@ -22,6 +22,7 @@ from jax._shapes import (
     lax_dynamic_slice_shape,
     lax_fft_shape,
     lax_reduce_shape,
+    lax_reshape_shape,
     lax_scan_shape,
     lax_scan_slice_shape,
     lax_scan_stacked_shape,
@@ -541,13 +542,42 @@ def padtype_to_pads(
     window_strides: Sequence[int],
     padding: str,
 ) -> list[tuple[int, int]]: ...
+@overload
 def reshape[NewShape: _Shape, Shape: _Shape = []](
     operand: _ArrayLike[Shape],
     new_sizes: NewShape,
+    dimensions: None = None,
+    *,
+    out_sharding: _NamedSharding | _PartitionSpec | None = None,
+) -> _Array[lax_reshape_shape(Shape, NewShape, None)]: ...
+@overload
+def reshape[NewShape: _Shape, Dimensions: Flag[_Axis], Shape: _Shape = []](
+    operand: _ArrayLike[Shape],
+    new_sizes: NewShape,
+    dimensions: Dimensions,
+    *,
+    out_sharding: _NamedSharding | _PartitionSpec | None = None,
+) -> _Array[lax_reshape_shape(Shape, NewShape, Dimensions)]: ...
+
+# Dynamic permutations do not affect the output shape, but are validated at runtime.
+@overload
+def reshape[NewShape: _Shape, Shape: _Shape = []](
+    operand: _ArrayLike[Shape],
+    new_sizes: NewShape,
+    dimensions: Sequence[int],
+    *,
+    out_sharding: _NamedSharding | _PartitionSpec | None = None,
+) -> _Array[lax_reshape_shape(Shape, NewShape, None)]: ...
+
+# Dynamic size sequences do not provide a statically known output shape.
+@overload
+def reshape(
+    operand: _ArrayLike[Any],
+    new_sizes: Sequence[int],
     dimensions: Sequence[int] | None = None,
     *,
     out_sharding: _NamedSharding | _PartitionSpec | None = None,
-) -> _Array[NewShape]: ...
+) -> _Array[IntTuple]: ...
 def rev[Shape: _Shape = []](
     operand: _ArrayLike[Shape],
     dimensions: Sequence[int],

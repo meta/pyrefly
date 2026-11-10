@@ -319,6 +319,29 @@ def svd_vt_shape(shape: IntTuple, full_matrices: bool) -> IntTuple:
     return dsl.concat(batch, dsl.IntTuple((dsl.Int.gradual(), n)))
 
 @type_shape_dsl_function
+def lax_reshape_shape(
+    shape: IntTuple,
+    new_sizes: IntTuple,
+    dimensions: int | tuple[int, ...] | None,
+) -> IntTuple:
+    if any(dsl.is_concrete_int(size) and size < 0 for size in new_sizes):
+        return dsl.Invalid("lax.reshape sizes must be non-negative")
+    total = dsl.prod(shape)
+    target = dsl.prod(new_sizes)
+    if dsl.is_concrete_int(total) and dsl.is_concrete_int(target) and total != target:
+        return dsl.Invalid("reshape target element count does not match the input")
+    if dimensions is not None:
+        if dsl.is_int_value(dimensions):
+            return dsl.Invalid("reshape dimensions must be a permutation")
+        if len(dimensions) != len(shape):
+            return dsl.Invalid("reshape dimensions must cover every input axis")
+        if any(axis < 0 or axis >= len(shape) for axis in dimensions):
+            return dsl.Invalid("reshape dimension out of bounds")
+        if any(dimensions.count(axis) > 1 for axis in dimensions):
+            return dsl.Invalid("duplicate reshape dimension")
+    return new_sizes
+
+@type_shape_dsl_function
 def reshape_shape(shape: IntTuple, newshape: int | tuple[int, ...] | None) -> IntTuple:
     # `None` is not a legal argument to `reshape`. The arm exists because an
     # `int | tuple[int, ...]` parameter cannot be iterated after narrowing with
