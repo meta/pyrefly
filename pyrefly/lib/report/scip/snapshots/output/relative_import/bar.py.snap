@@ -1,0 +1,20 @@
+# < definition scip-python python snapshot-util 0.1 bar/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+from .foo import exported_function, this_class
+#    ^^^^ reference  snapshot-util 0.1 foo/__init__:
+#                ^^^^^^^^^^^^^^^^^ reference  snapshot-util 0.1 foo/exported_function().
+#                                   ^^^^^^^^^^ reference  snapshot-util 0.1 foo/this_class.
+
+if True:
+    exported_function()
+#   ^^^^^^^^^^^^^^^^^ reference  snapshot-util 0.1 foo/exported_function().
+
+    this_class.exported_function()
+#   ^^^^^^^^^^ reference  snapshot-util 0.1 foo/this_class.
+#              ^^^^^^^^^^^^^^^^^ reference  snapshot-util 0.1 foo/MyClass#exported_function().
+

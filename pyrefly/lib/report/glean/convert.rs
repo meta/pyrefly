@@ -302,7 +302,9 @@ fn stdlib_source_file(root: &str, stub_path: &Path) -> src::File {
     ))
 }
 
-fn gather_nonlocal_variables(body: &[Stmt]) -> (Arc<SmallSet<Name>>, Arc<SmallSet<Name>>) {
+pub(crate) fn gather_nonlocal_variables(
+    body: &[Stmt],
+) -> (Arc<SmallSet<Name>>, Arc<SmallSet<Name>>) {
     let mut globals = SmallSet::new();
     let mut nonlocals = SmallSet::new();
     for stmt in body {

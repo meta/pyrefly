@@ -718,6 +718,9 @@ pub(crate) struct TransactionData<'a> {
     cinderx_reporter: Option<Box<crate::report::cinderx::CinderxReporter>>,
     /// When set, called per solved module while its answers are still live (before eviction).
     solutions_hook: Option<Box<dyn Fn(&Handle, &Transaction) + Send + Sync + 'a>>,
+    /// For `--report-scip` only: evict each module's answers once the solutions hook has seen
+    /// it, whatever its require level. See `set_evict_answers_after_scip_hook`.
+    evict_answers_after_scip_hook: bool,
 }
 
 impl<'a> TransactionData<'a> {
@@ -868,6 +871,15 @@ impl<'a> Transaction<'a> {
         hook: Option<Box<dyn Fn(&Handle, &Transaction) + Send + Sync + 'a>>,
     ) {
         self.data.solutions_hook = hook;
+    }
+
+    /// For `--report-scip` only. Evict each module's answers once the solutions hook has seen
+    /// it, so the SCIP writer, which needs them at `Require::Everything` while it writes the
+    /// module's document and never again, doesn't keep them for the rest of the run. Answers
+    /// evicted this way are gone for every other consumer of the transaction, so nothing else
+    /// may rely on them, which is why `--report-scip` conflicts with the other reports.
+    pub fn set_evict_answers_after_scip_hook(&mut self, evict: bool) {
+        self.data.evict_answers_after_scip_hook = evict;
     }
 
     /// Take the pysa reporter out of the transaction, consuming ownership.
@@ -1746,7 +1758,7 @@ impl<'a> Transaction<'a> {
                 if let Some(hook) = &self.data.solutions_hook {
                     hook(&module_data.handle, self);
                 }
-                if !require.keep_answers() {
+                if !require.keep_answers() || self.data.evict_answers_after_scip_hook {
                     // From now on we can use the solutions directly, so evict the answers.
                     post.evict_answers();
                 }
@@ -3750,6 +3762,7 @@ impl State {
                 pysa_reporter: None,
                 cinderx_reporter: None,
                 solutions_hook: None,
+                evict_answers_after_scip_hook: false,
             },
         }
     }
@@ -3854,6 +3867,7 @@ impl State {
                             pysa_reporter: _,
                             cinderx_reporter: _,
                             solutions_hook: _,
+                            evict_answers_after_scip_hook: _,
                         },
                 },
             committing_transaction_guard,

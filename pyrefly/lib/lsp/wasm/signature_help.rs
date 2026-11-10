@@ -18,6 +18,7 @@ use lsp_types::ParameterInformationLabel;
 use lsp_types::SignatureHelp;
 use lsp_types::SignatureInformation;
 use pyrefly_build::handle::Handle;
+use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::docstring::parse_parameter_documentation;
 use pyrefly_python::module::Module;
@@ -199,7 +200,9 @@ impl Transaction<'_> {
         let parsed_module = self.get_parsed_module(handle)?;
         let mod_module = parsed_module.module();
         let mut res = None;
-        mod_module.visit(&mut |x| Self::visit_finding_signature_range(x, position, &mut res));
+        Ast::visit_covering_exprs(&mod_module, position, &mut |x| {
+            Self::visit_finding_signature_range(x, position, &mut res)
+        });
         let (call, mut active_argument, provided_arg_ranges) = res?;
         let callee_range = call.func.range();
         let call_args_range = call.arguments.range;

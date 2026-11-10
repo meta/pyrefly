@@ -1296,6 +1296,30 @@ widget.box
 }
 
 #[test]
+fn hover_shows_field_docstring_at_definition() {
+    let code = r#"
+class Widget:
+    name: str
+#   ^
+    """Name of the widget."""
+"#;
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let position = extract_cursors_for_test(code)[0];
+    let hover = get_hover(&state.transaction(), &handle, position, false).unwrap();
+    let Contents::MarkupContent(markup) = hover.contents else {
+        panic!("expected markdown hover");
+    };
+    assert!(
+        markup.value.contains("Name of the widget."),
+        "got: {}",
+        markup.value
+    );
+}
+
+#[test]
 fn hover_parameter_doc_with_complex_types() {
     let code = r#"
 from typing import Optional, List, Dict

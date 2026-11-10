@@ -1,1 +1,2 @@
 *.mdx text eol=lf
+pyrefly/lib/report/scip/snapshots/** text eol=lf

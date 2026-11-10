@@ -1,0 +1,16 @@
+# < definition scip-python python abc 16.05 main/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+
+def main():
+#   ^^^^ definition  abc 16.05 main/main().
+    pass
+
+
+main()
+#^^^ reference  abc 16.05 main/main().
+
