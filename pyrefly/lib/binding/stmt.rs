@@ -289,7 +289,7 @@ impl<'a> BindingsBuilder<'a> {
     /// condition, and solving it solves the check. Pass it to `insert_bool_condition`.
     pub(crate) fn bind_bool_condition(&mut self, test: &mut Expr) -> CurrentIdx {
         let link = self.declare_current_idx(Key::UsageLink(test.range()));
-        self.ensure_expr(test, &mut Usage::NonPinningValue(Some(link.idx())));
+        self.ensure_expr(test, &mut Usage::Condition(link.idx()));
         link
     }
 
@@ -1554,7 +1554,7 @@ impl<'a> BindingsBuilder<'a> {
                 let reachability_idx =
                     self.idx_for_promise(KeyExpect::BranchSuiteReachability(if_range));
                 let tests_link = self.declare_current_idx(Key::UsageLink(if_range));
-                let tests_usage = Usage::NonPinningValue(Some(tests_link.idx()));
+                let tests_usage = Usage::Condition(tests_link.idx());
                 self.ensure_expr(&mut x.test, &mut tests_usage.clone());
                 self.start_fork(if_range);
                 // Type narrowing operations that are carried over from one branch to the next. For example, in:

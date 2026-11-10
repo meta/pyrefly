@@ -3205,9 +3205,9 @@ impl<'a> BindingsBuilder<'a> {
         let id = LambdaParamId(self.next_lambda_param_id);
         self.next_lambda_param_id += 1;
         let binding = match kind {
-            // Every value context provides a current binding, except decorators of a definition
-            // dropped by parse-error recovery. The remaining contexts are static type information
-            // and expressions derived from it, which are not type-checked.
+            // Every value context and condition provides a current binding. The remaining
+            // contexts, such as static type information and unchecked expressions, are not
+            // type-checked.
             LambdaKind::Ordinary => match usage.current_idx() {
                 Some(owner) => {
                     self.owned_lambda_params.entry(owner).or_default().push(id);

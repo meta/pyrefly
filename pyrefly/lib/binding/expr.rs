@@ -107,9 +107,9 @@ pub enum Usage {
     /// Normal usage context that may pin partial types.
     /// The idx is the current binding being computed.
     CurrentIdx(Idx<Key>),
-    /// Value context that should not pin partial types.
-    /// The idx (if present) is used for secondary-read detection.
-    NonPinningValue(Option<Idx<Key>>),
+    /// Like `CurrentIdx`, but for a condition, such as an `if` test, whose names are narrowed
+    /// afterward and so should not pin partial types.
+    Condition(Idx<Key>),
     /// A name lookup that no binding owns, such as when a narrowing looks up the name it narrows.
     Inspection,
     /// Static type context that should not pin partial types.
@@ -125,23 +125,21 @@ pub enum Usage {
 }
 
 impl Usage {
-    /// Create a non-pinning value usage from another usage context.
-    pub fn non_pinning_value_from(other: &Self) -> Self {
-        match other {
-            Self::CurrentIdx(idx) => Self::NonPinningValue(Some(*idx)),
-            Self::NonPinningValue(idx) => Self::NonPinningValue(*idx),
+    /// The usage for a condition within an expression that has this usage.
+    pub fn as_condition(&self) -> Self {
+        match self {
+            Self::CurrentIdx(idx) | Self::Condition(idx) => Self::Condition(*idx),
             Self::Inspection
             | Self::StaticTypeInformation { .. }
             | Self::TypeAliasRhs
-            | Self::Unchecked => other.clone(),
+            | Self::Unchecked => self.clone(),
         }
     }
 
     /// Get the current binding idx, if any.
     pub fn current_idx(&self) -> Option<Idx<Key>> {
         match self {
-            Usage::CurrentIdx(idx) => Some(*idx),
-            Usage::NonPinningValue(idx) => *idx,
+            Usage::CurrentIdx(idx) | Usage::Condition(idx) => Some(*idx),
             Usage::Inspection
             | Usage::StaticTypeInformation { .. }
             | Usage::TypeAliasRhs
@@ -562,7 +560,7 @@ impl<'a> BindingsBuilder<'a> {
                 Binding::Forward(iterable_value_idx)
             });
             for x in comp.ifs.iter_mut() {
-                self.ensure_expr(x, &mut Usage::non_pinning_value_from(usage));
+                self.ensure_expr(x, &mut usage.as_condition());
                 let narrow_ops = NarrowOps::from_expr(self, Some(x));
                 self.bind_narrow_ops(&narrow_ops, NarrowUseLocation::Span(comp.range));
             }
@@ -872,7 +870,7 @@ impl<'a> BindingsBuilder<'a> {
                 // Ternary operation. We treat it like an if/else statement.
                 // Process the test before forking so walrus-defined names are
                 // in the base flow and visible to both branches.
-                self.ensure_expr(&mut x.test, &mut Usage::non_pinning_value_from(usage));
+                self.ensure_expr(&mut x.test, &mut usage.as_condition());
                 let static_test = self.sys_info.evaluate_bool_with_sys_info(&x.test);
                 let narrow_ops = NarrowOps::from_expr(self, Some(&x.test));
                 self.start_fork_and_branch(x.range);
@@ -937,7 +935,7 @@ impl<'a> BindingsBuilder<'a> {
                 if let Some(value) = values.next() {
                     // The first operation runs unconditionally, so any walrus-defined
                     // names will be added to the base flow.
-                    self.ensure_expr(value, &mut Usage::non_pinning_value_from(usage));
+                    self.ensure_expr(value, &mut usage.as_condition());
                     self.start_fork_and_branch(*range);
                     let mut narrow_ops = get_narrow_ops(self, value, *op);
 
@@ -950,7 +948,7 @@ impl<'a> BindingsBuilder<'a> {
                     }
                     for value in values {
                         self.bind_narrow_ops_for_branch(&narrow_ops, value);
-                        self.ensure_expr(value, &mut Usage::non_pinning_value_from(usage));
+                        self.ensure_expr(value, &mut usage.as_condition());
                         let new_narrow_ops = get_narrow_ops(self, value, *op);
                         narrow_ops.and_all(new_narrow_ops);
                         if self.sys_info.evaluate_bool(value) == short_circuit_trigger {
@@ -1140,7 +1138,7 @@ impl<'a> BindingsBuilder<'a> {
                 {
                     self.ensure_expr(&mut call.func, usage);
                     for arg in call.arguments.args.iter_mut() {
-                        self.ensure_expr(arg, &mut Usage::non_pinning_value_from(usage));
+                        self.ensure_expr(arg, &mut usage.as_condition());
                     }
                     for kw in call.arguments.keywords.iter_mut() {
                         self.ensure_expr(&mut kw.value, usage);
