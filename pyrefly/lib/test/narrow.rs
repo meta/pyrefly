@@ -5045,38 +5045,38 @@ def custom[T: Falsy](value: T) -> T:
 
 // https://github.com/meta/pyrefly/issues/5544
 testcase!(
-    bug = "Narrow-only joins add concrete types to error-derived Any",
     test_narrow_error_any_join,
     r#"
 import missing_module  # pyrefly: ignore[missing-import]
-from typing import reveal_type
+from typing import Any, assert_type, reveal_type
 
 def not_none() -> None:
     value = missing_module.get()
     if value is not None:
         pass
-    reveal_type(value)  # E: revealed type: Unknown | None
-    value[0]  # E: `None` is not subscriptable
+    assert_type(value, Any)
+    reveal_type(value)  # E: revealed type: Unknown
+    value[0]
 
 def is_none() -> None:
     value = missing_module.get()
     if value is None:
         pass
-    reveal_type(value)  # E: revealed type: Unknown | None
-    value[0]  # E: `None` is not subscriptable
+    assert_type(value, Any)
+    value[0]
 
 def instance() -> None:
     value = missing_module.get()
     if isinstance(value, int):
         pass
-    reveal_type(value)  # E: revealed type: int | Unknown
-    value[0]  # E: Cannot index into `int`
+    assert_type(value, Any)
+    value[0]
 
 def alternatives() -> None:
     value = missing_module.get()
     if isinstance(value, int) or isinstance(value, str):
-        reveal_type(value)  # E: revealed type: int | str | Unknown
-    reveal_type(value)  # E: revealed type: int | str | Unknown
+        assert_type(value, int | str)
+    assert_type(value, Any)
 "#,
 );
 
