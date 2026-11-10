@@ -687,6 +687,8 @@ type _IntegerTensorLike[Shape: _Shape] = Tensor[Shape] | _IntegerScalar
 type _BasicIndex = builtins.int | slice | list[builtins.int] | None | EllipsisType
 type _TensorScalar = builtins.bool | builtins.int | builtins.float | builtins.complex
 type _LegacyTensorScalar = builtins.bool | builtins.int | builtins.float
+# `Tensor` declares a `dtype` attribute, which shadows the class inside its body.
+type _DType = dtype
 
 # Dtype and memory-format constants
 qint8: Any
@@ -979,13 +981,17 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
 
     @overload
     def view[Shape: IntTuple, NewShape: IntTuple](
-        self: Tensor[Shape], shape: NewShape
+        self: Tensor[Shape], size: NewShape
     ) -> Tensor[reshape_shape(Shape, NewShape)]:
         """View tensor. Shape inference via type-level DSL."""
         ...
 
     @overload
-    def view(self, shape: Sequence[builtins.int]) -> Tensor: ...
+    def view(self, size: Sequence[builtins.int]) -> Tensor: ...
+    # Reinterpreting the bytes as another dtype can change the last dimension by the
+    # ratio of the byte widths, which this overlay does not track.
+    @overload
+    def view(self, dtype: _DType) -> Tensor: ...
     def flatten[
         Shape: IntTuple,
         StartDim: Flag[builtins.int],
