@@ -1017,7 +1017,9 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     @overload
     def permute(self, *dims: builtins.int) -> Tensor: ...
     @overload
-    def permute(self, dims: tuple[builtins.int, ...]) -> Tensor: ...
+    def permute(
+        self, dims: tuple[builtins.int, ...] | list[builtins.int]
+    ) -> Tensor: ...
     def squeeze[
         Shape: IntTuple,
         Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
@@ -2773,13 +2775,15 @@ def segment_reduce(
 
 @overload
 def permute[Shape: IntTuple, Dims: Flag[tuple[builtins.int, ...]]](
-    self: Tensor[Shape], dims: Dims
+    input: Tensor[Shape], dims: Dims
 ) -> Tensor[permute_shape(Shape, Dims)]:
     """Permute dimensions. Shape inference via type-level DSL."""
     ...
 
 @overload
-def permute(self: Tensor, dims: tuple[builtins.int, ...]) -> Tensor: ...
+def permute(
+    input: Tensor, dims: tuple[builtins.int, ...] | list[builtins.int]
+) -> Tensor: ...
 def sum[
     Shape: IntTuple,
     Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
