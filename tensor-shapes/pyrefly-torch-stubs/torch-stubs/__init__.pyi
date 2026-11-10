@@ -587,6 +587,7 @@ from torch._C._VariableFunctions import (
 )
 from torch._higher_order_ops import cond as cond
 from torch._lobpcg import lobpcg as lobpcg
+from torch._prims_common import DeviceLikeType
 from torch._shapes import (
     arange_extent,
     arange_step_extent,
@@ -3541,18 +3542,28 @@ def ones_like[Shape: IntTuple](
 
 def full_like[Shape: IntTuple](
     input: Tensor[Shape],
-    fill_value: builtins.float,
+    fill_value: builtins.float | builtins.complex,
     *,
-    dtype: Any = None,
-    layout: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
-    memory_format: Any = None,
+    memory_format: memory_format | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create tensor with same shape filled with value. Shape inference via generic fixture signature."""
     ...
 
-def empty_like[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]:
+def empty_like[Shape: IntTuple](
+    input: Tensor[Shape],
+    *,
+    memory_format: memory_format | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
+) -> Tensor[Shape]:
     """Create uninitialized tensor with same shape. Shape inference via generic fixture signature."""
     ...
 
@@ -3560,7 +3571,17 @@ def rand_like[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]:
     """Create random tensor [0,1) with same shape. Shape inference via generic fixture signature."""
     ...
 
-def randn_like[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]:
+def randn_like[Shape: IntTuple](
+    input: Tensor[Shape],
+    *,
+    generator: Generator | None = None,
+    memory_format: memory_format | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
+) -> Tensor[Shape]:
     """Create random normal tensor with same shape. Shape inference via generic fixture signature."""
     ...
 
