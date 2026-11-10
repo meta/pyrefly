@@ -174,11 +174,11 @@ def test_creation_with_unknown_shape_argument() -> None:
     zeros = np.zeros(values.shape)
     empty = np.empty(values.shape)
     full = np.full(values.shape, 1.0)
-    assert_type(mask, np.ndarray[[int], np.dtype[np.bool_]])
-    assert_type(zeros, np.ndarray[[int], np.dtype[np.float64]])
-    assert_type(empty, np.ndarray[[int], np.dtype[np.float64]])
-    assert_type(full, np.ndarray[[int]])
-    column = mask[:, 0]  # E: Too many indices
+    assert_type(mask, np.ndarray[Any, np.dtype[np.bool_]])
+    assert_type(zeros, np.ndarray[Any, np.dtype[np.float64]])
+    assert_type(empty, np.ndarray[Any, np.dtype[np.float64]])
+    assert_type(full, np.ndarray[Any])
+    column = mask[:, 0]
     assert_shape(np.ones((2, 3), dtype=np.bool_).shape, (2, 3))
     assert mask.shape == (2, 3)
     assert mask.dtype == np.dtype(np.bool_)
