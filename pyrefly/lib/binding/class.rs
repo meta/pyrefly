@@ -240,7 +240,7 @@ impl<'a> BindingsBuilder<'a> {
         if x.name.id.is_empty() {
             self.ensure_and_bind_decorators(
                 mem::take(&mut x.decorator_list),
-                &mut Usage::NonPinningValue(None),
+                &mut Usage::Unchecked,
             );
             return;
         }
@@ -1016,7 +1016,7 @@ impl<'a> BindingsBuilder<'a> {
     /// source, so anything an unread argument defines — a walrus target, say —
     /// is declared with no binding, and looking it up later panics.
     pub(crate) fn bind_unread_argument(&mut self, x: &mut Expr) {
-        self.ensure_expr(x, &mut Usage::NonPinningValue(None));
+        self.ensure_expr(x, &mut Usage::Unchecked);
     }
 
     /// Like `bind_unread_argument`, for the keyword arguments of a functional
