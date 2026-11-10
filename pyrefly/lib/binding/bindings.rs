@@ -3431,11 +3431,14 @@ impl<'a> BindingsBuilder<'a> {
         &mut self,
         legacy_tparams: &mut LegacyTParamCollector,
         id: LegacyTParamId,
+        usage: &mut Usage,
     ) -> NameLookupResult {
         let result = legacy_tparams
             .legacy_tparams
             .entry(id.tvar_name())
-            .or_insert_with(|| self.lookup_legacy_tparam(id, legacy_tparams.has_scoped_tparams));
+            .or_insert_with(|| {
+                self.lookup_legacy_tparam(id, usage, legacy_tparams.has_scoped_tparams)
+            });
         result.as_name_lookup_result()
     }
 
@@ -3471,12 +3474,11 @@ impl<'a> BindingsBuilder<'a> {
     fn lookup_legacy_tparam(
         &mut self,
         id: LegacyTParamId,
+        usage: &mut Usage,
         has_scoped_type_params: bool,
     ) -> TParamLookupResult {
         let name = id.as_identifier();
-        // Legacy type parameter lookups are in static type contexts
-        let mut usage = Usage::Static(StaticUsage::Value);
-        match self.lookup_name(Hashed::new(&name.id), &mut usage) {
+        match self.lookup_name(Hashed::new(&name.id), usage) {
             NameLookupResult::Found {
                 idx: original_idx,
                 initialized,

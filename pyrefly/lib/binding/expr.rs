@@ -411,7 +411,7 @@ impl<'a> BindingsBuilder<'a> {
         let lookup_result = if usage.is_static()
             && let Some((tparams_collector, tparam_id)) = tparams_lookup
         {
-            self.intercept_lookup(tparams_collector, tparam_id)
+            self.intercept_lookup(tparams_collector, tparam_id, usage)
         } else {
             self.lookup_name(Hashed::new(&name.id), usage)
         };
