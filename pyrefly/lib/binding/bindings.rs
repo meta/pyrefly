@@ -103,6 +103,8 @@ use crate::binding::binding::TypeAliasParams;
 use crate::binding::binding::TypeAliasRefBinding;
 use crate::binding::binding::TypeLevelLambdaParameter;
 use crate::binding::binding::TypeParameter;
+use crate::binding::expr::StaticUsage;
+use crate::binding::expr::TypeExpressionContext;
 use crate::binding::expr::Usage;
 use crate::binding::function::LastPathExpr;
 use crate::binding::function::function_last_expressions;
@@ -2663,14 +2665,18 @@ impl<'a> BindingsBuilder<'a> {
 
     /// Finalize a single deferred BoundName binding.
     fn finalize_bound_name(&mut self, deferred: DeferredBoundName) {
-        // For TypeAliasRhs usage, check if the name resolves to a type
+        // For a type alias value, check if the name resolves to a type
         // alias and produce a TypeAliasRef binding. This covers both
         // self-references and cross-references to other aliases in the
         // same module. The expansion step in wrap_type_alias inlines
         // non-recursive Refs at solve time.
-        if matches!(deferred.usage, Usage::TypeAliasRhs)
-            && let Some((name, key_type_alias, tparams)) =
-                self.follow_to_type_alias(deferred.lookup_result_idx)
+        if matches!(
+            deferred.usage,
+            Usage::Static(StaticUsage::TypeExpression(
+                TypeExpressionContext::TypeAliasValue
+            ))
+        ) && let Some((name, key_type_alias, tparams)) =
+            self.follow_to_type_alias(deferred.lookup_result_idx)
         {
             self.insert_binding_idx(
                 deferred.bound_name_idx,
@@ -2730,9 +2736,7 @@ impl<'a> BindingsBuilder<'a> {
 
         if matches!(
             deferred.usage,
-            Usage::StaticTypeInformation {
-                is_annotation: true
-            } | Usage::TypeAliasRhs
+            Usage::Static(StaticUsage::TypeExpression(_))
         ) {
             let range = self.idx_to_key(deferred.bound_name_idx).range();
             self.maybe_insert_implicit_alias_check(range, deferred.lookup_result_idx);
@@ -3094,9 +3098,7 @@ impl<'a> BindingsBuilder<'a> {
             let mut default = None;
             let mut bound = None;
             let mut constraints = None;
-            let mut usage = Usage::StaticTypeInformation {
-                is_annotation: false,
-            };
+            let mut usage = Usage::Static(StaticUsage::Value);
             let kind = match x {
                 TypeParam::TypeVar(tv) => {
                     let mut kind = QuantifiedKind::TypeVar;
@@ -3473,9 +3475,7 @@ impl<'a> BindingsBuilder<'a> {
     ) -> TParamLookupResult {
         let name = id.as_identifier();
         // Legacy type parameter lookups are in static type contexts
-        let mut usage = Usage::StaticTypeInformation {
-            is_annotation: false,
-        };
+        let mut usage = Usage::Static(StaticUsage::Value);
         match self.lookup_name(Hashed::new(&name.id), &mut usage) {
             NameLookupResult::Found {
                 idx: original_idx,

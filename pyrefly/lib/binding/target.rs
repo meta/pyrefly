@@ -41,6 +41,8 @@ use crate::binding::binding::UnpackedPosition;
 use crate::binding::binding::UnpackedValue;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::LegacyTParamCollector;
+use crate::binding::expr::StaticUsage;
+use crate::binding::expr::TypeExpressionContext;
 use crate::binding::expr::Usage;
 use crate::binding::narrow::identifier_and_chain_prefix_for_expr;
 use crate::binding::scope::FlowStyle;
@@ -727,16 +729,16 @@ impl<'a> BindingsBuilder<'a> {
                 self.ensure_type_with_usage(
                     &mut value,
                     Some(&mut legacy),
-                    &mut Usage::TypeAliasRhs,
+                    &mut Usage::Static(StaticUsage::TypeExpression(
+                        TypeExpressionContext::TypeAliasValue,
+                    )),
                 );
                 tparams = Some(legacy.lookup_keys().into_boxed_slice());
             } else if has_typeform_annotation && value.is_string_literal_expr() {
                 self.ensure_type_with_usage(
                     &mut value,
                     None,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
+                    &mut Usage::Static(StaticUsage::Value),
                 );
             } else {
                 self.ensure_expr(&mut value, current.usage());

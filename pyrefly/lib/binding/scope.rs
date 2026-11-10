@@ -4195,7 +4195,7 @@ impl Scopes {
     /// in the current scope stack.
     ///
     /// The `usage` parameter determines lookup behavior:
-    /// - For `Usage::StaticTypeInformation`: Skips class-scope overload definitions so that
+    /// - For `Usage::Static`: Skips class-scope overload definitions so that
     ///   annotations in overload signatures are not accidentally resolved to other overloads.
     ///   That is, in:
     ///   ```python

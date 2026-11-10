@@ -112,16 +112,30 @@ pub enum Usage {
     Condition(Idx<Key>),
     /// A name lookup that no binding owns, such as when a narrowing looks up the name it narrows.
     Inspection,
-    /// Static type context that should not pin partial types.
-    /// When `is_annotation` is true, implicit alias validation is applied.
-    StaticTypeInformation { is_annotation: bool },
-    /// Type alias RHS context. Like StaticTypeInformation, does not pin
-    /// partial types. Additionally signals that names resolving to type
-    /// alias bindings should produce Binding::TypeAliasRef instead of
-    /// Binding::Forward.
-    TypeAliasRhs,
+    /// Static type context that does not pin partial types.
+    Static(StaticUsage),
     /// An expression that no binding type-checks, such as an invalid assignment target.
     Unchecked,
+}
+
+/// The kind of static context a name is looked up in.
+#[derive(Debug, Clone, Copy)]
+pub enum StaticUsage {
+    /// A type expression.
+    TypeExpression(TypeExpressionContext),
+    /// A value expression within a static context, such as the contents of `Literal[...]`.
+    Value,
+}
+
+/// Where a type expression appears, for the positions that need special handling.
+#[derive(Debug, Clone, Copy)]
+pub enum TypeExpressionContext {
+    /// The value of a type alias. Names that resolve to type aliases produce
+    /// `Binding::TypeAliasRef` instead of `Binding::Forward`.
+    TypeAliasValue,
+    /// Any other type expression, such as an annotation, a `cast` argument, or a legacy `TypeVar`
+    /// argument.
+    Other,
 }
 
 impl Usage {
@@ -129,10 +143,7 @@ impl Usage {
     pub fn as_condition(&self) -> Self {
         match self {
             Self::CurrentIdx(idx) | Self::Condition(idx) => Self::Condition(*idx),
-            Self::Inspection
-            | Self::StaticTypeInformation { .. }
-            | Self::TypeAliasRhs
-            | Self::Unchecked => self.clone(),
+            Self::Inspection | Self::Static(_) | Self::Unchecked => self.clone(),
         }
     }
 
@@ -140,10 +151,7 @@ impl Usage {
     pub fn current_idx(&self) -> Option<Idx<Key>> {
         match self {
             Usage::CurrentIdx(idx) | Usage::Condition(idx) => Some(*idx),
-            Usage::Inspection
-            | Usage::StaticTypeInformation { .. }
-            | Usage::TypeAliasRhs
-            | Usage::Unchecked => None,
+            Usage::Inspection | Usage::Static(_) | Usage::Unchecked => None,
         }
     }
 
@@ -154,10 +162,7 @@ impl Usage {
 
     /// Whether this usage is in a static type.
     pub fn is_static(&self) -> bool {
-        matches!(
-            self,
-            Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs
-        )
+        matches!(self, Usage::Static(_))
     }
 
     pub fn checks_initialization(&self) -> bool {
@@ -450,9 +455,7 @@ impl<'a> BindingsBuilder<'a> {
                 if is_runtime_evaluated_annotation
                     && matches!(
                         usage,
-                        Usage::StaticTypeInformation {
-                            is_annotation: true
-                        }
+                        Usage::Static(StaticUsage::TypeExpression(TypeExpressionContext::Other))
                     )
                     && self.module_info.path().style() == ModuleStyle::Executable
                     && !self.annotations_are_postponed()
@@ -754,12 +757,7 @@ impl<'a> BindingsBuilder<'a> {
     /// them only report name resolution errors.
     fn bind_annotated_metadata(&mut self, metadata: &mut [Expr]) {
         for e in metadata {
-            self.ensure_expr(
-                e,
-                &mut Usage::StaticTypeInformation {
-                    is_annotation: false,
-                },
-            );
+            self.ensure_expr(e, &mut Usage::Static(StaticUsage::Value));
             self.annotated_metadata_ranges.push(e.range());
         }
     }
@@ -801,17 +799,13 @@ impl<'a> BindingsBuilder<'a> {
                         &mut *slice,
                         None,
                         false,
-                        &mut Usage::StaticTypeInformation {
-                            is_annotation: false,
-                        },
+                        &mut Usage::Static(StaticUsage::Value),
                     );
                 } else if let Some(special_export) = special_export
                     && special_export.is_static_type_subscript()
                 {
                     self.ensure_expr(&mut *value, usage);
-                    let mut type_usage = Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    };
+                    let mut type_usage = Usage::Static(StaticUsage::Value);
                     if matches!(
                         special_export,
                         SpecialExport::Annotated | SpecialExport::Shaped
@@ -856,9 +850,7 @@ impl<'a> BindingsBuilder<'a> {
                         None,
                         false,
                         false,
-                        &mut Usage::StaticTypeInformation {
-                            is_annotation: false,
-                        },
+                        &mut Usage::Static(StaticUsage::Value),
                         false,
                     );
                 } else {
@@ -1279,14 +1271,12 @@ impl<'a> BindingsBuilder<'a> {
         self.ensure_type_with_usage(
             x,
             tparams_builder,
-            &mut Usage::StaticTypeInformation {
-                is_annotation: true,
-            },
+            &mut Usage::Static(StaticUsage::TypeExpression(TypeExpressionContext::Other)),
         );
     }
 
     /// Like `ensure_type`, but with a specific usage context. Used by type alias
-    /// construction sites to pass `Usage::TypeAliasRhs`.
+    /// construction sites to pass `TypeExpressionContext::TypeAliasValue`.
     pub fn ensure_type_with_usage(
         &mut self,
         x: &mut Expr,
@@ -1326,7 +1316,12 @@ impl<'a> BindingsBuilder<'a> {
         }
         let expr_range = x.range();
         let invalid_proxy_method_use = !allow_proxy_method
-            && matches!(usage, Usage::TypeAliasRhs)
+            && matches!(
+                usage,
+                Usage::Static(StaticUsage::TypeExpression(
+                    TypeExpressionContext::TypeAliasValue
+                ))
+            )
             && self.type_expr_is_proxy_method_node(x);
         let allow_proxy_method = allow_proxy_method || invalid_proxy_method_use;
         if invalid_proxy_method_use {
@@ -1351,12 +1346,7 @@ impl<'a> BindingsBuilder<'a> {
                 if self.as_special_export(value) == Some(SpecialExport::Literal) =>
             {
                 // Don't go inside a literal, since you might find strings which are really strings, not string-types
-                self.ensure_expr(
-                    x,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
-                );
+                self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value));
             }
             Expr::Subscript(ExprSubscript { value, slice, .. })
                 if self.as_special_export(value) == Some(SpecialExport::ProxyMethod) =>
@@ -1369,12 +1359,7 @@ impl<'a> BindingsBuilder<'a> {
                     usage,
                     true,
                 );
-                self.ensure_expr(
-                    &mut *slice,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
-                );
+                self.ensure_expr(&mut *slice, &mut Usage::Static(StaticUsage::Value));
             }
             Expr::Subscript(ExprSubscript {
                 value,
@@ -1476,21 +1461,11 @@ impl<'a> BindingsBuilder<'a> {
                 }
             }
             // Bind the lambda so we don't crash on undefined parameter names.
-            Expr::Lambda(_) => self.ensure_expr(
-                x,
-                &mut Usage::StaticTypeInformation {
-                    is_annotation: false,
-                },
-            ),
+            Expr::Lambda(_) => self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value)),
             // Bind the call so we generate all expected bindings. See
             // test::class_super::test_super_in_base_classes for an example of a SuperInstance
             // binding that we crash looking for if we don't do this.
-            Expr::Call(_) => self.ensure_expr(
-                x,
-                &mut Usage::StaticTypeInformation {
-                    is_annotation: false,
-                },
-            ),
+            Expr::Call(_) => self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value)),
             // Bind walrus so we don't crash when looking up the assigned name later.
             // Named expressions are not allowed inside type aliases (PEP 695).
             Expr::Named(named) => {
@@ -1501,29 +1476,14 @@ impl<'a> BindingsBuilder<'a> {
                         "Named expression cannot be used within a type alias".to_owned(),
                     );
                 }
-                self.ensure_expr(
-                    x,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
-                );
+                self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value));
             }
             // Bind yield and yield from so we don't crash when checking return type later.
             Expr::Yield(_) => {
-                self.ensure_expr(
-                    x,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
-                );
+                self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value));
             }
             Expr::YieldFrom(_) => {
-                self.ensure_expr(
-                    x,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
-                );
+                self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value));
             }
             Expr::Attribute(..)
                 if let Some((base, attrs)) = chase_static_attr_chain(x)
@@ -1537,14 +1497,10 @@ impl<'a> BindingsBuilder<'a> {
                 // The value part of an attribute access is a module/object reference,
                 // not a type annotation. For example, in `x: pd.DataFrame`, `pd` is a
                 // module access — not a type reference — so it should not trigger
-                // implicit alias validation. We clear `is_annotation` to prevent
+                // implicit alias validation. We use `StaticUsage::Value` to prevent
                 // `ImplicitAliasCheck` from being inserted for the value name.
                 let mut attr_value_usage = match *usage {
-                    Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs => {
-                        Usage::StaticTypeInformation {
-                            is_annotation: false,
-                        }
-                    }
+                    Usage::Static(_) => Usage::Static(StaticUsage::Value),
                     ref u => u.clone(),
                 };
                 self.ensure_simple_attr(
@@ -1570,11 +1526,7 @@ impl<'a> BindingsBuilder<'a> {
                     .and_then(|tb| self.try_intercept_lookup(tb, &id));
                 // Same as above: args/kwargs attribute values are not type references.
                 let mut attr_value_usage = match *usage {
-                    Usage::StaticTypeInformation { .. } | Usage::TypeAliasRhs => {
-                        Usage::StaticTypeInformation {
-                            is_annotation: false,
-                        }
-                    }
+                    Usage::Static(_) => Usage::Static(StaticUsage::Value),
                     ref u => u.clone(),
                 };
                 self.ensure_name(&name, &mut attr_value_usage, resolved.and(tparams_builder));

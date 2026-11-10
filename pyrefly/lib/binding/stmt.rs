@@ -71,6 +71,8 @@ use crate::binding::binding::TypeAliasParams;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::LegacyTParamCollector;
+use crate::binding::expr::StaticUsage;
+use crate::binding::expr::TypeExpressionContext;
 use crate::binding::expr::Usage;
 use crate::binding::narrow::AtomicNarrowOp;
 use crate::binding::narrow::ExcludedNonePair;
@@ -491,9 +493,7 @@ impl<'a> BindingsBuilder<'a> {
 
     fn assign_type_var(&mut self, name: &ExprName, call: &mut ExprCall, kind: QuantifiedKind) {
         // Type var declarations are static types only; skip them for first-usage type inference.
-        let static_type_usage = &mut Usage::StaticTypeInformation {
-            is_annotation: false,
-        };
+        let static_type_usage = &mut Usage::Static(StaticUsage::Value);
         self.ensure_expr(&mut call.func, static_type_usage);
         let mut iargs = call.arguments.args.iter_mut();
         if let Some(expr) = iargs.next() {
@@ -544,9 +544,7 @@ impl<'a> BindingsBuilder<'a> {
 
     fn ensure_type_var_tuple_and_param_spec_args(&mut self, call: &mut ExprCall) {
         // Type var declarations are static types only; skip them for first-usage type inference.
-        let static_type_usage = &mut Usage::StaticTypeInformation {
-            is_annotation: false,
-        };
+        let static_type_usage = &mut Usage::Static(StaticUsage::Value);
         self.ensure_expr(&mut call.func, static_type_usage);
         for arg in call.arguments.args.iter_mut() {
             self.ensure_expr(arg, static_type_usage);
@@ -586,9 +584,7 @@ impl<'a> BindingsBuilder<'a> {
 
     fn assign_sentinel(&mut self, name: &ExprName, call: &mut ExprCall) {
         // Sentinels are static types only; skip them for first-usage type inference.
-        let static_type_usage = &mut Usage::StaticTypeInformation {
-            is_annotation: false,
-        };
+        let static_type_usage = &mut Usage::Static(StaticUsage::Value);
         self.ensure_expr(&mut call.func, static_type_usage);
         for expr in call.arguments.args.iter_mut() {
             self.ensure_expr(expr, static_type_usage);
@@ -616,9 +612,7 @@ impl<'a> BindingsBuilder<'a> {
         tparams_builder: &mut LegacyTParamCollector,
     ) {
         // Type var declarations are static types only; skip them for first-usage type inference.
-        let static_type_usage = &mut Usage::StaticTypeInformation {
-            is_annotation: false,
-        };
+        let static_type_usage = &mut Usage::Static(StaticUsage::Value);
         self.ensure_expr(&mut call.func, static_type_usage);
         let mut iargs = call.arguments.args.iter_mut();
         // The first argument is the name
@@ -627,7 +621,13 @@ impl<'a> BindingsBuilder<'a> {
         }
         // The second argument is the type
         if let Some(expr) = iargs.next() {
-            self.ensure_type_with_usage(expr, Some(tparams_builder), &mut Usage::TypeAliasRhs);
+            self.ensure_type_with_usage(
+                expr,
+                Some(tparams_builder),
+                &mut Usage::Static(StaticUsage::TypeExpression(
+                    TypeExpressionContext::TypeAliasValue,
+                )),
+            );
         }
         // There shouldn't be any other positional arguments
         for arg in iargs {
@@ -647,7 +647,9 @@ impl<'a> BindingsBuilder<'a> {
                 self.ensure_type_with_usage(
                     &mut kw.value,
                     Some(tparams_builder),
-                    &mut Usage::TypeAliasRhs,
+                    &mut Usage::Static(StaticUsage::TypeExpression(
+                        TypeExpressionContext::TypeAliasValue,
+                    )),
                 );
             } else {
                 self.ensure_expr(&mut kw.value, static_type_usage);
@@ -1408,7 +1410,13 @@ impl<'a> BindingsBuilder<'a> {
                     if let Some(params) = &mut x.type_params {
                         self.type_params(params);
                     }
-                    self.ensure_type_with_usage(&mut x.value, None, &mut Usage::TypeAliasRhs);
+                    self.ensure_type_with_usage(
+                        &mut x.value,
+                        None,
+                        &mut Usage::Static(StaticUsage::TypeExpression(
+                            TypeExpressionContext::TypeAliasValue,
+                        )),
+                    );
                     // Pop the type alias scope before binding the definition
                     self.scopes.pop();
                     let range = x.value.range();

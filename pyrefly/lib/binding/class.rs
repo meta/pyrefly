@@ -79,6 +79,7 @@ use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::InitializedInClass;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::django::collect_django_queryset_only;
+use crate::binding::expr::StaticUsage;
 use crate::binding::expr::Usage;
 use crate::binding::pydantic::PydanticConfigDict;
 use crate::binding::scope::ClassIndices;
@@ -363,13 +364,7 @@ impl<'a> BindingsBuilder<'a> {
                 }
                 _ => None,
             };
-            self.ensure_type_with_usage(
-                &mut base,
-                legacy,
-                &mut Usage::StaticTypeInformation {
-                    is_annotation: false,
-                },
-            );
+            self.ensure_type_with_usage(&mut base, legacy, &mut Usage::Static(StaticUsage::Value));
 
             if let Some(comment_range) = base_comment_range {
                 self.shape_declarations

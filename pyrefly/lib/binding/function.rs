@@ -76,6 +76,8 @@ use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::InitializationStatus;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::classmethod::FunctionDecorators;
+use crate::binding::expr::StaticUsage;
+use crate::binding::expr::TypeExpressionContext;
 use crate::binding::expr::Usage;
 use crate::binding::pattern::match_case_always_matches;
 use crate::binding::scope::FlowStyle;
@@ -433,9 +435,8 @@ impl<'a> BindingsBuilder<'a> {
                     continue;
                 };
                 let mut names = Vec::new();
-                let usage = Usage::StaticTypeInformation {
-                    is_annotation: true,
-                };
+                let usage =
+                    Usage::Static(StaticUsage::TypeExpression(TypeExpressionContext::Other));
                 if !is_simple_type_expr(&expr, &mut names)
                     || names.into_iter().any(|x| {
                         matches!(
