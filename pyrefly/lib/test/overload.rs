@@ -11,6 +11,115 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    bug = "A missing backend shadows the available overload",
+    test_signature_unresolved_import_overload,
+    r#"
+from typing import Any, assert_type, overload
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+@overload
+def transform(x: Array[int]) -> Array[str]: ...
+@overload
+def transform(x: int) -> str: ...
+def transform(x: Any) -> Any: ...
+
+assert_type(transform(1), Any)
+"#,
+);
+
+testcase!(
+    bug = "An unresolved return type shadows the available overload",
+    test_signature_unresolved_import_return_only,
+    r#"
+from typing import Any, assert_type, overload
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+@overload
+def transform(x: int) -> Array: ...
+@overload
+def transform(x: int) -> str: ...
+def transform(x: Any) -> Any: ...
+
+assert_type(transform(1), Any)
+"#,
+);
+
+testcase!(
+    bug = "Calling a signature with unresolved imports does not warn",
+    test_signature_unresolved_import_call,
+    r#"
+from typing import Any, assert_type
+from missing_backend import Array, Other  # E: Cannot find module `missing_backend`
+import another_missing_backend as backend  # E: Cannot find module `another_missing_backend`
+
+def transform(x: Array, y: Other) -> backend.Array[int]:
+    return x
+
+assert_type(transform(1, 2), Any)
+"#,
+);
+
+testcase!(
+    bug = "Nested unresolved imports do not warn at the signature boundary",
+    test_signature_unresolved_import_nested,
+    r#"
+from typing import Any, Callable, assert_type
+from missing_backend import Array, Other  # E: Cannot find module `missing_backend`
+
+def transform(
+    x: list[Array], callback: Callable[[Other], Array]
+) -> list[Array]:
+    return x
+
+assert_type(transform([], lambda x: x), list[Any])
+"#,
+);
+
+testcase!(
+    bug = "Aliased unresolved imports do not warn at the signature boundary",
+    test_signature_unresolved_import_alias,
+    r#"
+from typing import Any, assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+Alias = Array[int]
+def transform(x: Alias) -> Alias:
+    return x
+
+assert_type(transform(1), Any)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_controls,
+    r#"
+from typing import Any, assert_type, overload
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+@overload
+def explicit_any(x: Any) -> Any: ...
+@overload
+def explicit_any(x: int) -> str: ...
+def explicit_any(x: Any) -> Any: ...
+assert_type(explicit_any(1), Any)
+
+def other_error(x: Undefined) -> Undefined:  # E: Could not find name `Undefined`  # E: Could not find name `Undefined`
+    return x
+assert_type(other_error(1), Any)
+
+# A missing argument is not a missing type in the declared signature.
+def identity[T](x: T) -> T:
+    return x
+assert_type(identity(Array()), Any)
+
+# Missing-import recovery remains gradual for ordinary assignments.
+x: Array = 1
+s: str = x
+x = s
+"#,
+);
+
+testcase!(
     test_overload_expansion_keeps_lambda_context,
     TestEnv::new().enable_implicit_any_lambda_error(),
     r#"
