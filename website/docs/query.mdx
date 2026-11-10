@@ -66,8 +66,8 @@ Use `--config` to select a configuration explicitly:
 pyrefly query find-references src/payments/core.py 128 5 --config pyrefly.toml
 ```
 
-An explicit configuration applies to all candidate files. Queries also accept the standard
-configuration overrides before the query name, such as `pyrefly query --python-version 3.13 hover ...`.
+An explicit configuration applies to all candidate files. Standard configuration overrides
+can appear before or after the query name, such as `pyrefly query hover ... --python-version 3.13`.
 Build-system configurations use their source database for import resolution.
 Configure project includes to cover potential callers. A source database alone does not enumerate all reverse dependencies.
 

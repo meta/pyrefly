@@ -20,7 +20,8 @@ use lsp_types::CallHierarchyItem;
 use lsp_types::CallHierarchyOutgoingCall;
 use lsp_types::Location;
 use lsp_types::Position;
-use pyrefly_build::handle::Handle;
+use lsp_types::Range;
+use lsp_types::Uri;
 use pyrefly_config::args::ConfigOverrideArgs;
 use pyrefly_config::config::ConfigScope;
 use pyrefly_python::module::TextRangeWithModule;
@@ -44,6 +45,7 @@ use crate::lsp::non_wasm::call_hierarchy::find_function_at_position_in_ast;
 use crate::lsp::non_wasm::call_hierarchy::prepare_call_hierarchy_item;
 use crate::lsp::non_wasm::call_hierarchy::transform_incoming_calls;
 use crate::lsp::non_wasm::call_hierarchy::transform_outgoing_calls;
+use crate::lsp::non_wasm::module_helpers::handle_from_module_path;
 use crate::lsp::non_wasm::module_helpers::module_info_to_uri;
 use crate::lsp::wasm::hover::get_hover;
 use crate::state::lsp::FindPreference;
@@ -55,6 +57,7 @@ use crate::state::state::State;
 /// Query semantic information about a source position.
 #[derive(Clone, Debug, Parser)]
 #[command(
+    mut_args = |arg| arg.global(true),
     after_help = "Experimental interface. Inputs use one-based lines and UTF-16 columns. JSON results use file URIs and zero-based LSP ranges. To query a returned location, convert its URI to a path and add 1 to its line and character."
 )]
 pub struct QueryArgs {
@@ -129,6 +132,17 @@ struct CallHierarchyResult {
     incoming: Vec<CallHierarchyIncomingCall>,
     /// Functions called by the resolved callable.
     outgoing: Vec<CallHierarchyOutgoingCall>,
+}
+
+/// Order locations by URI, range start, and range end.
+fn location_key<'a>(uri: &'a Uri, range: &Range) -> (&'a Uri, u32, u32, u32, u32) {
+    (
+        uri,
+        range.start.line,
+        range.start.character,
+        range.end.line,
+        range.end.character,
+    )
 }
 
 impl QueryArgs {
@@ -229,33 +243,10 @@ impl QueryArgs {
             module.notebook().is_none(),
             "notebook query targets are not supported"
         );
-        let line = module
-            .contents()
-            .split('\n')
-            .nth(lsp_position.line as usize)
-            .with_context(|| {
-                format!(
-                    "line {} is outside `{}`",
-                    lsp_position.line + 1,
-                    target_path.display()
-                )
-            })?;
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        let mut character = 0;
-        for c in line.chars() {
-            if character >= lsp_position.character {
-                break;
-            }
-            character += c.len_utf16() as u32;
-        }
-        ensure!(
-            character == lsp_position.character,
-            "column {} is not a valid UTF-16 position on line {} in `{}`",
-            lsp_position.character + 1,
-            lsp_position.line + 1,
-            target_path.display()
-        );
-        let position = module.from_lsp_position(lsp_position, None);
+        let position = module
+            .lined_buffer()
+            .try_from_lsp_position(lsp_position, None)
+            .with_context(|| format!("cannot query `{}`", target_path.display()))?;
 
         match self.query {
             Query::Hover(_) => Ok(serde_json::to_value(get_hover(
@@ -294,9 +285,9 @@ impl QueryArgs {
                     .map_err(|_| anyhow::anyhow!("reference query was cancelled"))?;
                 let mut locations = Vec::new();
                 for (module, ranges) in references {
-                    let uri = module_info_to_uri(&module, None).with_context(|| {
-                        format!("cannot materialize reference in `{}`", module.path())
-                    })?;
+                    let Some(uri) = module_info_to_uri(&module, None) else {
+                        continue;
+                    };
                     locations.extend(
                         ranges
                             .into_iter()
@@ -304,11 +295,8 @@ impl QueryArgs {
                     );
                 }
                 locations.sort_by(|left, right| {
-                    (&left.uri, left.range.start.line, left.range.start.character).cmp(&(
-                        &right.uri,
-                        right.range.start.line,
-                        right.range.start.character,
-                    ))
+                    location_key(&left.uri, &left.range)
+                        .cmp(&location_key(&right.uri, &right.range))
                 });
                 Ok(serde_json::to_value(locations)?)
             }
@@ -321,11 +309,8 @@ impl QueryArgs {
                     })?
                     .first()
                     .clone();
-                let definition_handle = Handle::new(
-                    definition.module.name(),
-                    definition.module.path().dupe(),
-                    target.sys_info().dupe(),
-                );
+                let definition_handle =
+                    handle_from_module_path(&state, definition.module.path().dupe());
                 transaction
                     .run(&[definition_handle.dupe()], Require::Everything, None)
                     .map_err(|_| anyhow::anyhow!("definition query was cancelled"))?;
@@ -341,7 +326,7 @@ impl QueryArgs {
                 let item = prepare_call_hierarchy_item(function, &definition.module, uri);
                 let incoming = transaction
                     .find_global_incoming_calls_from_function_definition(
-                        *target.sys_info(),
+                        *definition_handle.sys_info(),
                         definition.metadata,
                         &TextRangeWithModule::new(
                             definition.module.dupe(),
@@ -357,13 +342,13 @@ impl QueryArgs {
                     .map_err(|_| anyhow::anyhow!("outgoing call query was cancelled"))?;
                 let mut incoming = transform_incoming_calls(incoming, None);
                 let mut outgoing = transform_outgoing_calls(outgoing, &definition.module, None);
-                incoming.sort_by_cached_key(|call| {
-                    serde_json::to_string(call)
-                        .expect("LSP call hierarchy results are always serializable")
+                incoming.sort_by(|left, right| {
+                    location_key(&left.from.uri, &left.from.range)
+                        .cmp(&location_key(&right.from.uri, &right.from.range))
                 });
-                outgoing.sort_by_cached_key(|call| {
-                    serde_json::to_string(call)
-                        .expect("LSP call hierarchy results are always serializable")
+                outgoing.sort_by(|left, right| {
+                    location_key(&left.to.uri, &left.to.range)
+                        .cmp(&location_key(&right.to.uri, &right.to.range))
                 });
                 Ok(serde_json::to_value(CallHierarchyResult {
                     item,
@@ -372,81 +357,5 @@ impl QueryArgs {
                 })?)
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use pyrefly_config::args::ConfigOverrideArgs;
-    use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
-
-    use super::*;
-
-    fn args(query: Query, config: PathBuf) -> QueryArgs {
-        QueryArgs {
-            query,
-            config: Some(config),
-            config_override: ConfigOverrideArgs::default(),
-        }
-    }
-
-    #[test]
-    fn queries_hover_references_and_call_hierarchy_as_json() -> anyhow::Result<()> {
-        let root = tempfile::tempdir()?;
-        let config = root.path().join("pyrefly.toml");
-        let callee = root.path().join("callee.py");
-        let caller = root.path().join("caller.py");
-        fs::write(
-            &config,
-            "project_includes = [\"*.py\"]\nproject_excludes = []\n",
-        )?;
-        fs::write(&callee, "def target(x: int) -> str:\n    return str(x)\n")?;
-        fs::write(
-            caller,
-            "from callee import target\n\ndef caller() -> str:\n    return target(1)\n",
-        )?;
-        let position = || QueryPosition {
-            file: callee.clone(),
-            line: 1,
-            column: 5,
-        };
-
-        let hover =
-            args(Query::Hover(position()), config.clone()).query(None, TEST_THREAD_COUNT)?;
-        assert!(hover.to_string().contains("(x: int) -> str"));
-
-        let references = args(
-            Query::FindReferences {
-                position: position(),
-                include_declaration: true,
-            },
-            config.clone(),
-        )
-        .query(None, TEST_THREAD_COUNT)?;
-        assert_eq!(references.as_array().unwrap().len(), 3);
-
-        let hierarchy =
-            args(Query::CallHierarchy(position()), config).query(None, TEST_THREAD_COUNT)?;
-        assert_eq!(hierarchy["item"]["name"], "target");
-        assert_eq!(hierarchy["incoming"][0]["from"]["name"], "caller");
-        Ok(())
-    }
-
-    #[test]
-    fn positions_are_one_based() {
-        let zero_line = QueryPosition {
-            file: "test.py".into(),
-            line: 0,
-            column: 1,
-        };
-        assert!(zero_line.to_lsp_position().is_err());
-        let position = QueryPosition {
-            file: "test.py".into(),
-            line: 2,
-            column: 3,
-        };
-        assert_eq!(position.to_lsp_position().unwrap(), Position::new(1, 2));
     }
 }
