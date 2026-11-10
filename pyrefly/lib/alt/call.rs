@@ -1533,10 +1533,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 } else if self.is_compatible_constructor_return(&ret, cls.class_object()) {
                     dunder_new_ret = Some(ret);
                 } else if !matches!(ret, Type::Any(AnyStyle::Error | AnyStyle::Implicit)) {
-                    // Got something other than an instance of the class under construction.
-                    // According to the spec, the actual type (as opposed to the class under construction)
-                    // should take priority. However, if the actual type comes from a type error or an implicit
-                    // Any, using the class under construction is still more useful.
+                    // The constructor spec makes an explicitly declared `Any` a foreign return:
+                    // use that result and skip `__init__`, just as for another returned class.
+                    // The error/implicit-Any exception above is our recovery policy, not a spec rule:
+                    // an unavailable or inferred return annotation should not erase the known
+                    // constructed class. Those cases continue to `__init__` below.
                     self.solver()
                         .finish_class_targs(cls.targs_mut(), self.uniques);
                     let specialization_errors = self
