@@ -39,6 +39,61 @@ def check_randn_no_args_returns_float() -> None:
     assert_type(np.random.randn(), float)
 
 
+def check_standard_normal_and_standard_exponential_return_float_without_size() -> None:
+    rng = np.random.default_rng(0)
+    assert_type(rng.standard_normal(), float)
+    assert_type(rng.standard_exponential(), float)
+
+
+def test_standard_normal_and_standard_exponential_int_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.standard_normal(5)
+    assert_type(result, np.ndarray[[5], np.dtype[np.float64]])
+    assert_shape(result.shape, (5,))
+    assert_shape(rng.standard_exponential(5).shape, (5,))
+
+
+def test_standard_normal_and_standard_exponential_tuple_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.standard_exponential((2, 3))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.standard_normal((2, 3)).shape, (2, 3))
+
+
+def test_standard_normal_and_standard_exponential_float32() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.standard_normal((2, 3), dtype=np.float32)
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float32]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.standard_exponential((2, 3), np.float32).shape, (2, 3))
+
+
+def test_standard_normal_and_standard_exponential_out() -> None:
+    rng = np.random.default_rng(0)
+    out = np.empty((2, 3))
+    result = rng.standard_normal(out=out)
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.standard_exponential(out=out).shape, (2, 3))
+
+
+def test_standard_normal_and_standard_exponential_list_size() -> None:
+    rng = np.random.default_rng(0)
+    assert_shape(rng.standard_normal([2, 3]).shape, IntTuple, runtime=(2, 3))
+    assert_shape(rng.standard_exponential([2, 3]).shape, IntTuple, runtime=(2, 3))
+
+
+def check_standard_normal_and_standard_exponential_symbolic_size[N: IntVar, M: IntVar](
+    n: Int[N], m: Int[M]
+) -> None:
+    rng = np.random.default_rng(0)
+    assert_type(rng.standard_normal(n), np.ndarray[[N], np.dtype[np.float64]])
+    assert_type(
+        rng.standard_exponential((n, m)), np.ndarray[[N, M], np.dtype[np.float64]]
+    )
+
+
 def test_multivariate_normal_without_size() -> None:
     rng = np.random.default_rng(0)
     result = rng.multivariate_normal(np.zeros(3), np.eye(3))
