@@ -17,11 +17,13 @@ use std::sync::Arc;
 use dupe::Dupe;
 use num_traits::ToPrimitive;
 use pyrefly_build::handle::Handle;
+use pyrefly_config::module_names::ModuleNames;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePathDetails;
+use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::visit::Visit;
 use regex::RegexBuilder;
 use ruff_python_ast::Alias;
@@ -179,24 +181,17 @@ fn file_fact(module_info: &ModuleInfo) -> src::File {
 /// report records.
 #[derive(Default)]
 pub struct GleanNaming {
-    /// Module names by repository-relative file path (`--glean-module-names`).
-    module_names: HashMap<String, String>,
-    /// The values of `module_names`.
-    mapped_modules: HashSet<ModuleName>,
+    /// Module names of repository files, from `--module-names`.
+    module_names: Option<ArcId<ModuleNames>>,
     /// Repository-relative directory holding the stdlib sources that Pyrefly's bundled typeshed
     /// stdlib stubs describe (`--glean-stdlib-root`), e.g. `third-party/python/3.12/Lib`.
     stdlib_root: Option<String>,
 }
 
 impl GleanNaming {
-    pub fn new(module_names: HashMap<String, String>, stdlib_root: Option<String>) -> Self {
-        let mapped_modules = module_names
-            .values()
-            .map(|name| ModuleName::from_str(name))
-            .collect();
+    pub fn new(module_names: Option<ArcId<ModuleNames>>, stdlib_root: Option<String>) -> Self {
         Self {
             module_names,
-            mapped_modules,
             stdlib_root,
         }
     }
@@ -215,14 +210,15 @@ impl GleanNaming {
         let Some(file) = file else {
             return resolved;
         };
-        if let Some(name) = self.module_names.get(file.key.as_str()) {
-            return ModuleName::from_str(name);
+        let module_names = self.module_names.as_deref();
+        if let Some(name) = module_names.and_then(|names| names.module_of_file(&file.key)) {
+            return name;
         }
         let is_stdlib_source = self
             .stdlib_root
             .as_ref()
             .is_some_and(|root| Path::new(&*file.key).starts_with(root));
-        let is_taken = self.mapped_modules.contains(&resolved)
+        let is_taken = module_names.is_some_and(|names| names.contains_module(resolved))
             || typeshed().is_ok_and(|stdlib| stdlib.has_module(resolved));
         if is_taken && !is_stdlib_source {
             path_module_name(&file.key)
@@ -2359,7 +2355,10 @@ mod tests {
     #[test]
     fn test_emitted_module_name() {
         let naming = GleanNaming::new(
-            HashMap::from([("fbcode/base/foo.py".to_owned(), "foo".to_owned())]),
+            Some(ArcId::new(ModuleNames::new(
+                HashMap::from([("fbcode/base/foo.py".to_owned(), "foo".to_owned())]),
+                Path::new(""),
+            ))),
             Some("third-party/python/3.12/Lib".to_owned()),
         );
         let emitted = |path: Option<&str>, resolved: &str| {

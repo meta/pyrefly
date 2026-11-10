@@ -789,6 +789,11 @@ pub(crate) fn find_import_with_mode(
         )
     {
         path
+    } else if let Some(fallback_source_db) = config.fallback_source_db.as_ref()
+        && let Some(path) = fallback_source_db.lookup(module, origin_path, style_filter)
+    {
+        // Before namespace packages and the directory-relative fallback, which only guess.
+        FindingOrError::new_finding(path)
     } else if style_filter.is_none()
         && config.replace_untyped_imports_with_any(origin, module)
         && !namespaces_found.is_empty()

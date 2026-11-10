@@ -337,10 +337,6 @@ struct OutputArgs {
     #[arg(long, requires = "report_glean")]
     report_glean_ownership: bool,
 
-    /// JSON object mapping Glean file paths (relative to the working directory) to
-    /// module names. Affects Glean output only, without changing import resolution.
-    #[arg(long, value_name = "FILE", requires = "report_glean")]
-    glean_module_names: Option<PathBuf>,
     /// Directory, relative to the working directory, holding the stdlib sources that the
     /// typeshed stdlib stubs bundled with Pyrefly describe. Glean cross-references into the
     /// stdlib then record those source files instead of stub paths. Affects Glean output only.
@@ -541,7 +537,6 @@ impl OutputArgs {
             report_timings,
             report_glean,
             report_glean_ownership,
-            glean_module_names,
             glean_stdlib_root,
             report_scip,
             report_scip_project_name,
@@ -590,7 +585,6 @@ impl OutputArgs {
             || report_timings.is_some()
             || report_glean.is_some()
             || *report_glean_ownership
-            || glean_module_names.is_some()
             || glean_stdlib_root.is_some()
             || report_scip.is_some()
             || report_scip_project_name.is_some()
@@ -2494,15 +2488,14 @@ impl CheckArgs {
             )?;
         }
         if let Some(glean) = &self.output.report_glean {
-            let naming = report::glean::GleanNaming::new(
-                match &self.output.glean_module_names {
-                    Some(path) => serde_json::from_str(&fs_anyhow::read_to_string(path)?)?,
-                    None => Default::default(),
-                },
-                self.output.glean_stdlib_root.clone(),
-            );
             fs_anyhow::create_dir_all(glean)?;
             for handle in handles {
+                let naming = report::glean::GleanNaming::new(
+                    transaction
+                        .get_config(handle)
+                        .and_then(|config| config.module_names.dupe()),
+                    self.output.glean_stdlib_root.clone(),
+                );
                 // Generate a safe filename using hash to avoid OS filename length limits
                 let module_hash = blake3::hash(handle.path().to_string().as_bytes());
                 fs_anyhow::write(
@@ -2579,6 +2572,8 @@ mod tests {
     use clap::error::ErrorKind as ClapErrorKind;
     use protobuf::Message as _;
     use pyrefly_config::config::ConfigScope;
+    use pyrefly_config::module_names::ModuleNames;
+    use pyrefly_config::module_names::ModuleNamesSourceDatabase;
     use pyrefly_python::module::Module;
     use pyrefly_python::module_name::ModuleName;
     use pyrefly_python::module_path::ModulePath;
@@ -2622,13 +2617,30 @@ mod tests {
     /// A config finder that resolves everything under `root` without querying an
     /// interpreter, so tests do not depend on the machine's Python environment.
     fn test_config_finder(root: &Path) -> ConfigFinder {
+        ConfigFinder::new_constant(ArcId::new(test_config(root)))
+    }
+
+    /// A config like `test_config_finder`'s, as `--module-names` sets it up.
+    fn test_config_finder_with_module_names(
+        root: &Path,
+        module_names: ModuleNames,
+    ) -> ConfigFinder {
+        let mut config = test_config(root);
+        let module_names = ArcId::new(module_names);
+        let source_db = ModuleNamesSourceDatabase::new(module_names.dupe(), config.get_sys_info());
+        config.fallback_source_db = Some(ArcId::new(Box::new(source_db)));
+        config.module_names = Some(module_names);
+        ConfigFinder::new_constant(ArcId::new(config))
+    }
+
+    fn test_config(root: &Path) -> ConfigFile {
         let mut config = ConfigFile::default();
         config.python_environment.set_empty_to_default();
         config.interpreters.skip_interpreter_query = true;
         config.search_path_from_file = vec![root.to_path_buf()];
         config.disable_search_path_heuristics = true;
         config.configure();
-        ConfigFinder::new_constant(ArcId::new(config))
+        config
     }
 
     fn incremental_checker(root: &Path, initial_files: Vec<PathBuf>) -> IncrementalChecker {
@@ -2760,6 +2772,74 @@ mod tests {
     /// See https://github.com/facebook/pyrefly/issues/4683: the CinderX report
     /// dropped the ASTs that the Glean report reads once the check is done, so
     /// the run died partway through writing its output.
+    /// A module that a build system imports under a name its path doesn't give is found through
+    /// `--module-names`. The type of a value from it is then known, so a method call on a
+    /// parameter annotated with its class refers to that method.
+    #[test]
+    fn module_names_resolve_imports() {
+        let temp = TempDir::new().unwrap();
+        // Canonical, so that the listed path and the checked file's path agree.
+        let root = fs::canonicalize(temp.path()).unwrap().join("project");
+        fs::create_dir_all(root.join("lib").join("src")).unwrap();
+        fs::create_dir_all(root.join("app")).unwrap();
+        let platform = root.join("lib").join("src").join("platform.py");
+        fs::write(
+            &platform,
+            "class Platform:\n    def chat(self) -> None: ...\n",
+        )
+        .unwrap();
+        let main = root.join("app").join("main.py");
+        fs::write(
+            &main,
+            r#"from platform_api.platform import Platform
+
+
+def go(p: Platform) -> None:
+    p.chat()
+"#,
+        )
+        .unwrap();
+        let glean_dir = temp.path().join("glean");
+
+        let cwd = fs::canonicalize(env::current_dir().unwrap()).unwrap();
+        let listed = platform
+            .strip_prefix(&cwd)
+            .unwrap_or(&platform)
+            .to_str()
+            .unwrap()
+            .replace('\\', "/");
+        let module_names = ModuleNames::new(
+            HashMap::from([(listed, "platform_api.platform".to_owned())]),
+            &cwd,
+        );
+        let args = CheckArgs::parse_from(["check", "--report-glean", glean_dir.to_str().unwrap()]);
+        let (_, check_result) = args
+            .run_once(
+                "test",
+                Box::new(TestIncludes {
+                    root: root.clone(),
+                    initial_files: vec![platform, main],
+                }),
+                test_config_finder_with_module_names(&root, module_names),
+                UpsellDecision::Skip,
+                ThreadCount::Inline,
+            )
+            .unwrap();
+        let errors = &check_result.legacy_errors;
+        assert!(errors.is_empty(), "the import should resolve: {errors:#?}");
+
+        let facts: String = fs::read_dir(&glean_dir)
+            .unwrap()
+            .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert!(
+            facts.contains("\"platform_api.platform.Platform.chat\""),
+            "the declaration and the method call should both name the method after the given module"
+        );
+        assert!(!facts.contains("<locals>.p.chat"));
+        assert!(!facts.contains("lib.src.platform"));
+    }
+
     #[test]
     fn check_writes_cinderx_and_glean_reports_together() {
         let temp = TempDir::new().unwrap();
@@ -2781,30 +2861,12 @@ def go(w: Widget) -> int:
         let cinderx_dir = temp.path().join("cinderx");
         let glean_dir = temp.path().join("glean");
 
-        // Glean file keys resolve symlinks, are relative to the working directory when
-        // possible, and use forward slashes rather than native path separators.
-        let module_path = fs::canonicalize(&module).unwrap();
-        let cwd = fs::canonicalize(env::current_dir().unwrap()).unwrap();
-        let module_key = module_path
-            .strip_prefix(&cwd)
-            .unwrap_or(&module_path)
-            .to_str()
-            .unwrap()
-            .replace('\\', "/");
-        let names_path = temp.path().join("module_names.json");
-        fs::write(
-            &names_path,
-            serde_json::to_string(&HashMap::from([(module_key, "public.api")])).unwrap(),
-        )
-        .unwrap();
         let args = CheckArgs::parse_from([
             "check",
             "--report-cinderx",
             cinderx_dir.to_str().unwrap(),
             "--report-glean",
             glean_dir.to_str().unwrap(),
-            "--glean-module-names",
-            names_path.to_str().unwrap(),
         ]);
         let (status, check_result) = args
             .run_once(
@@ -2837,8 +2899,7 @@ def go(w: Widget) -> int:
             .collect();
         assert_eq!(glean_files.len(), 1, "expected one Glean file per module");
         let facts = fs::read_to_string(&glean_files[0]).unwrap();
-        assert!(facts.contains("public.api.Widget"));
-        assert!(!facts.contains("main.Widget"));
+        assert!(facts.contains("main.Widget"));
     }
 
     #[test]

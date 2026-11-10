@@ -82,6 +82,7 @@ use crate::error_kind::ErrorKind;
 use crate::error_kind::Severity;
 use crate::finder::ConfigError;
 use crate::migration::run::MigratedFromKind;
+use crate::module_names::ModuleNames;
 use crate::module_wildcard::Match;
 use crate::module_wildcard::ModuleWildcard;
 use crate::pyproject::PyProject;
@@ -745,6 +746,19 @@ pub struct ConfigFile {
     #[derivative(PartialEq = "ignore")]
     pub source_db: Option<ArcId<Box<dyn SourceDatabase>>>,
 
+    /// A source database asked after the search path, the stdlib and site packages, for the
+    /// modules that none of them has, and for the module names of files that `source_db`
+    /// doesn't name. Unlike `source_db`, it can't shadow a stdlib or installed module.
+    #[serde(skip)]
+    #[derivative(PartialEq = "ignore")]
+    pub fallback_source_db: Option<ArcId<Box<dyn SourceDatabase>>>,
+
+    /// Module names of listed files, from `--module-names`, for reports. Imports and the names of
+    /// checked files use them through `fallback_source_db`.
+    #[serde(skip)]
+    #[derivative(PartialEq = "ignore")]
+    pub module_names: Option<ArcId<ModuleNames>>,
+
     /// Config overrides from `source_db`, deserialized on first use. Every
     /// per-file setting lookup consults the owning target's config, so the raw
     /// JSON must not be re-parsed each time. `None` records a config that failed
@@ -826,6 +840,8 @@ impl Default for ConfigFile {
             coverage: Default::default(),
             build_system: Default::default(),
             source_db: Default::default(),
+            fallback_source_db: Default::default(),
+            module_names: None,
             target_configs: ArcId::new(RwLock::new(SmallMap::new())),
             use_ignore_files: true,
             typeshed_path: None,
@@ -1489,11 +1505,11 @@ impl ConfigFile {
     /// Create a `Handle` for the given path, deriving its module name from the search paths,
     /// falling back to `self.fallback_search_path` and finally `__unknown__`.
     pub fn handle_from_module_path(&self, module_path: ModulePath) -> Handle {
-        match &self
-            .source_db
-            .as_ref()
-            .and_then(|db| db.handle_from_module_path(&module_path))
-        {
+        let named_by = |db: &Option<ArcId<Box<dyn SourceDatabase>>>| {
+            db.as_ref()
+                .and_then(|db| db.handle_from_module_path(&module_path))
+        };
+        match &named_by(&self.source_db).or_else(|| named_by(&self.fallback_source_db)) {
             Some(handle) => handle.dupe(),
             None => {
                 // Order: explicit search paths (user intent) > custom typeshed
@@ -2837,6 +2853,8 @@ mod tests {
                     infer_param_types_from_docstring: None,
                 },
                 source_db: Default::default(),
+                fallback_source_db: Default::default(),
+                module_names: None,
                 target_configs: Default::default(),
                 sub_configs: vec![SubConfig {
                     matches: Glob::new("sub/project/**".to_owned()).unwrap(),
@@ -3208,6 +3226,8 @@ mod tests {
             },
             root: Default::default(),
             source_db: Default::default(),
+            fallback_source_db: Default::default(),
+            module_names: None,
             target_configs: Default::default(),
             build_system: Default::default(),
             sub_configs: vec![SubConfig {
@@ -3291,6 +3311,8 @@ mod tests {
             root: Default::default(),
             build_system: Default::default(),
             source_db: Default::default(),
+            fallback_source_db: Default::default(),
+            module_names: None,
             target_configs: Default::default(),
             sub_configs: vec![SubConfig {
                 matches: sub_config_matches,
