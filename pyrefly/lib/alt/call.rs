@@ -1241,6 +1241,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         hint: Option<HintRef>,
         construct: impl Fn(&[CallArg], &[CallKeyword], Option<&Type>) -> ConstructedInstance,
     ) -> ConstructedInstance {
+        let budget = self.enter_constructor_budget();
         let select = |args: &[CallArg], keywords: &[CallKeyword]| {
             if let Some(hint) = hint
                 && let hints = hint.types()
@@ -1248,6 +1249,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 let mut ret_no_match_hint = None;
                 for member_hint in hints.iter() {
+                    budget.spend();
                     let ret = construct(args, keywords, Some(member_hint));
                     if ret.errors.has_hard() {
                         continue;
@@ -1267,6 +1269,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             // If the hint is too wide or always produces non-specialization errors, don't use it.
+            budget.spend();
             construct(args, keywords, None)
         };
         let unexpanded = select(args, keywords);
@@ -1279,14 +1282,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut expander = ArgsExpander::new(args.to_vec(), keywords.to_vec(), self);
         let owner = Owner::new();
         let expansion_errors = self.error_collector();
-        while let Some(arg_lists) = expander.expand(&expansion_errors, &owner) {
-            if expansion_errors.has_hard() {
+        while !budget.exhausted()
+            && let Some(arg_lists) = expander.expand(&expansion_errors, &owner)
+        {
+            if budget.exhausted() || expansion_errors.has_hard() {
                 break;
             }
             // Every expansion must match some hint. A rejected batch publishes nothing.
             let Some(outcomes) = arg_lists
                 .into_iter()
                 .map(|(args, keywords)| {
+                    if budget.exhausted() {
+                        return None;
+                    }
                     let outcome = select(&args, &keywords);
                     outcome.is_match().then_some(outcome)
                 })
@@ -1294,6 +1302,33 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             else {
                 continue;
             };
+            let diagnostics = outcomes
+                .iter()
+                .map(|outcome| {
+                    [
+                        outcome.errors.take(),
+                        outcome.arg_errors.take(),
+                        outcome.return_errors.take(),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            // A cast is redundant only if it is redundant in every accepted context.
+            // Other diagnostics, such as deprecation, still apply if any branch reports them.
+            let common_casts = diagnostics
+                .iter()
+                .map(|diagnostics| {
+                    diagnostics
+                        .iter()
+                        .flat_map(|diagnostics| diagnostics.iter())
+                        .filter(|error| error.error_kind() == ErrorKind::RedundantCast)
+                        .map(|error| error.range())
+                        .collect::<SmallSet<_>>()
+                })
+                .reduce(|mut common, casts| {
+                    common.retain(|range| casts.contains(range));
+                    common
+                })
+                .expect("An accepted batch contains at least one outcome");
             let mut outcomes = outcomes.into_iter();
             let mut result = outcomes
                 .next()
@@ -1301,9 +1336,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let mut types = vec![result.ty.clone()];
             for outcome in outcomes {
                 types.push(outcome.ty);
-                result.errors.extend(outcome.errors);
-                result.arg_errors.extend(outcome.arg_errors);
-                result.return_errors.extend(outcome.return_errors);
+            }
+            for diagnostics in diagnostics {
+                for (diagnostics, errors) in diagnostics.iter().zip([
+                    &result.errors,
+                    &result.arg_errors,
+                    &result.return_errors,
+                ]) {
+                    diagnostics.replay_filtered(errors, |error| {
+                        error.error_kind() != ErrorKind::RedundantCast
+                            || common_casts.contains(&error.range())
+                    });
+                }
             }
             result.ty = self.unions(types);
             result.arg_errors.extend(expansion_errors);

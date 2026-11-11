@@ -351,15 +351,23 @@ result: Base[object] = {expression}
 }
 
 /// Repeated contextual attempts check each child against the same union hint.
-fn nested_init_only_constructor_hints(depth: usize, value_type: &str) -> String {
-    let mut expression = "Node(value)".to_owned();
+fn nested_init_only_constructor_hints(depth: usize, value_type: &str, callbacks: bool) -> String {
+    let callback = if callbacks { "lambda arg: None, " } else { "" };
+    let callback_parameter = if callbacks {
+        "cb: Callable[[T], None], "
+    } else {
+        ""
+    };
+    let mut expression = format!("Node({callback}value)");
     for _ in 1..depth {
-        expression = format!("Node(value, {expression})");
+        expression = format!("Node({callback}value, {expression})");
     }
     format!(
         r#"
+from typing import Callable
+
 class Node[T]:
-    def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+    def __init__(self, {callback_parameter}value: T, child: Node[int] | Node[str] | None = None) -> None: ...
 
 def f(value: {value_type}) -> None:
     root: Node[int] | Node[str] = {expression}
@@ -621,7 +629,7 @@ fn nested_generic_constructor(c: &mut Criterion) {
         measure(
             c,
             &format!("nested_init_only_constructor_hints_{depth}"),
-            nested_init_only_constructor_hints(depth, "str"),
+            nested_init_only_constructor_hints(depth, "str", false),
             0,
         );
     }
@@ -629,7 +637,7 @@ fn nested_generic_constructor(c: &mut Criterion) {
         measure(
             c,
             &format!("nested_init_only_constructor_union_distribution_{depth}"),
-            nested_init_only_constructor_hints(depth, "int | str"),
+            nested_init_only_constructor_hints(depth, "int | str", false),
             0,
         );
     }

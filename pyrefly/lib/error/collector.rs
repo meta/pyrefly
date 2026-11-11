@@ -53,10 +53,19 @@ impl ModuleDiagnostics {
 
     /// Replay finalized diagnostics into an inference attempt while retaining the snapshot.
     pub(crate) fn replay(&self, errors: &ErrorCollector) {
+        self.replay_filtered(errors, |_| true);
+    }
+
+    /// Replay diagnostics that remain valid in the receiving context.
+    pub(crate) fn replay_filtered(
+        &self,
+        errors: &ErrorCollector,
+        mut keep: impl FnMut(&Error) -> bool,
+    ) {
         if errors.is_active() {
             let replayed = ModuleErrors {
                 clean: true,
-                items: self.0.to_vec(),
+                items: self.0.iter().filter(|error| keep(error)).cloned().collect(),
             };
             errors.errors.lock().extend(replayed);
         }

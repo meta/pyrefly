@@ -155,6 +155,67 @@ def f(value: int | str) -> None:
 );
 
 testcase!(
+    test_constructor_union_distribution_conditional_lambda,
+    r#"
+from typing import Callable
+
+class A[T]:
+    def __init__(self, cb: Callable[[T], None] | None, value: T) -> None: ...
+
+def f(value: int | str, condition: bool) -> None:
+    valid: A[int] | A[str] = A((lambda arg: None) if condition else None, value)
+    invalid: A[int] | A[str] = A((lambda arg: arg.upper()) if condition else None, value)  # E: is not assignable
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_contextual_cast,
+    TestEnv::new().enable_deprecated_error(),
+    r#"
+from typing import Callable, cast
+from typing_extensions import deprecated
+
+class A[T]:
+    def __init__(self, callback: Callable[[T], int], value: T) -> None: ...
+
+@deprecated("old callback")
+def old() -> int: ...
+
+def f(value: int | str, fixed: int) -> None:
+    necessary: A[int] | A[str] = A(lambda arg: cast(int, arg), value)
+    keyword: A[int] | A[str] = A(value=value, callback=lambda arg: cast(int, arg))
+    redundant: A[int] | A[str] = A(lambda arg: cast(int, fixed), value)  # E: Redundant cast
+    deprecated: A[int] | A[str] = A(lambda arg: cast(int, arg) + old(), value)  # E: `old` is deprecated
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_contextual_nested,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable
+
+class Node[T]:
+    def __init__(self, cb: Callable[[T], None], value: T,
+                 child: Node[int] | Node[str] | None = None) -> None: ...
+
+def f(value: int | str) -> None:
+    result: Node[int] | Node[str] = Node(lambda arg: None, value, Node(lambda arg: None, value, Node(lambda arg: None, value)))
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_rejected_nested,
+    r#"
+class Node[T]:
+    def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+
+def f(value: int | str | bytes) -> None:
+    result: Node[int] | Node[str] = Node(value, Node(value, Node(value)))  # E: is not assignable # E: is not assignable # E: is not assignable
+"#,
+);
+
+testcase!(
     test_constructor_union_distribution_new_and_init,
     r#"
 from typing import Self
