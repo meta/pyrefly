@@ -3109,22 +3109,31 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.normalize_class_constructor_tparams(constructor, class_tparams)
     }
 
-    /// Convert `type[Self]` to a callable. As in a `type[Self]` call, a constructor that returns
-    /// an instance of the class returns `Self` instead. A type variable bound to the class is
-    /// converted the same way, with the type variable as `self_type`.
-    pub fn constructor_to_callable_for_self_type(&self, cls: &ClassType, self_type: &Type) -> Type {
-        let return_self = |mut ty: Type| {
-            ty.transform_toplevel_callable_signatures(|callable: &mut Callable, _| {
-                if self.is_compatible_constructor_return(&callable.ret, cls.class_object()) {
-                    callable.ret = self_type.clone();
-                }
-            });
-            ty
+    /// Convert `type[inner]` to a callable when `inner` is a class, `Self`, or a type variable
+    /// bounded by a class.
+    pub fn constructor_to_callable_for_type_of(&self, inner: &Type) -> Option<Type> {
+        let cls = match inner {
+            Type::ClassType(cls) => return Some(self.constructor_to_callable(cls)),
+            Type::SelfType(cls) => cls,
+            Type::Quantified(q)
+                if let Restriction::Bound(Type::ClassType(cls)) = q.restriction() =>
+            {
+                cls
+            }
+            _ => return None,
         };
-        match self.constructor_to_callable(cls) {
-            Type::Union(union) => self.unions(union.members.into_iter().map(return_self).collect()),
-            ty => return_self(ty),
-        }
+        Some(
+            self.distribute_over_union(&self.constructor_to_callable(cls), |ty| {
+                let mut ty = ty.clone();
+                ty.transform_toplevel_callable_signatures(|callable: &mut Callable, _| {
+                    if self.is_compatible_constructor_return(&callable.ret, cls.class_object()) {
+                        // Rewrite the return type to match a direct call through `type[inner]`.
+                        callable.ret = inner.clone();
+                    }
+                });
+                ty
+            }),
+        )
     }
 
     /// Normalize class type parameters for each callable branch in `ty`.

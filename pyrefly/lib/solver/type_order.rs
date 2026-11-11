@@ -215,8 +215,8 @@ impl<'solver, Ans: LookupAnswer> TypeOrder<'solver, Ans> {
         self.0.constructor_to_callable_for_class_def(cls)
     }
 
-    pub fn constructor_to_callable_for_self_type(self, cls: &ClassType, self_type: &Type) -> Type {
-        self.0.constructor_to_callable_for_self_type(cls, self_type)
+    pub fn constructor_to_callable_for_type_of(self, inner: &Type) -> Option<Type> {
+        self.0.constructor_to_callable_for_type_of(inner)
     }
 
     pub fn instantiate_fresh_forall(self, forall: Forall<Forallable>) -> (QuantifiedHandle, Type) {
