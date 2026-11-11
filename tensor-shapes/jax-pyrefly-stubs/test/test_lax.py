@@ -11,6 +11,7 @@ import jax
 import jax.lax as lax
 import jax.numpy as jnp
 import numpy as np
+from jax.extend.core import Primitive
 from shape_extensions import assert_raises, assert_shape, IntTuple, IntVar
 
 
@@ -1393,6 +1394,8 @@ def test_compiler_and_misc() -> None:
         x, x, default=lambda a, b: a + b, cpu=lambda a, b: a - b
     )
     assert_shape(pd2.shape, (2, 3))
+    assert_type(lax.abs_p, Primitive)
+    assert isinstance(lax.abs_p, Primitive)
 
 
 def test_lax_linalg_arraylike() -> None:
