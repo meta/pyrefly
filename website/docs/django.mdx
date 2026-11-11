@@ -195,8 +195,8 @@ The manager provides methods like `.add()`, `.remove()`, `.clear()`, and `.all()
 
 ### Reverse Relationships
 
-Pyrefly infers reverse `ForeignKey`, `OneToOneField`, and `ManyToManyField` relationships. When
-both models are declared in the same module, no configuration is needed:
+Pyrefly infers reverse `ForeignKey`, `OneToOneField`, and `ManyToManyField` relationships within
+a module without configuration:
 
 ```python
 from django.db import models
@@ -213,8 +213,7 @@ reporter = Reporter()
 assert_type(reporter.article_set, RelatedManager[Article])
 ```
 
-For models declared in different modules, list the modules that contain model definitions in
-`pyrefly.toml`:
+For models in different modules, configure their module names in `pyrefly.toml`:
 
 ```toml
 django-model-modules = [
@@ -223,9 +222,11 @@ django-model-modules = [
 ]
 ```
 
-In `pyproject.toml`, put the option under `[tool.pyrefly]`. Each entry is an importable module name,
-not a filesystem path or glob. Listing the modules lets Pyrefly load them lazily and reliably
-invalidate reverse relationships as code changes without scanning the entire project.
+In `pyproject.toml`, use `[tool.pyrefly]`. Entries are importable module names, not paths or globs.
+
+Pyrefly matches relationship fields by name and does not recognize subclasses. String references
+resolve only to models defined or imported in the source module. Pyrefly does not use app labels
+to locate models.
 
 ---
 

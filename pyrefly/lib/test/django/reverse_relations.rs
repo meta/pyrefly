@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,9 +14,13 @@ use pyrefly_build::handle::Handle;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_util::arc_id::ArcId;
+use pyrefly_util::events::CategorizedEvents;
 use pyrefly_util::thread_pool::ThreadCount;
+use tempfile::TempDir;
 
 use crate::binding::binding::KeyClassSynthesizedFields;
+use crate::config::config::ConfigFile;
+use crate::config::config::ConfigSource;
 use crate::config::error_kind::ErrorKind;
 use crate::config::error_kind::Severity;
 use crate::config::finder::ConfigFinder;
@@ -164,6 +169,117 @@ class Book(models.Model):
 }
 
 #[test]
+fn test_reverse_relations_config_list_invalidation() {
+    let root = TempDir::new().unwrap();
+    let config_path = root.path().join(ConfigFile::PYREFLY_FILE_NAME);
+    let main_path = root.path().join("main.py");
+    fs::write(&main_path, "from author import Author\nAuthor().book_set\n").unwrap();
+    fs::write(
+        root.path().join("author.py"),
+        "from django.db.models import Model\nclass Author(Model): pass\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("book.py"),
+        r#"
+from django.db import models
+from author import Author
+
+class Book(models.Model):
+    author = models.ForeignKey(Author, on_delete=models.CASCADE)
+"#,
+    )
+    .unwrap();
+
+    let env = django_env();
+    let mut config = ConfigFile {
+        python_environment: env.config().python_environment.clone(),
+        search_path_from_file: vec![root.path().to_path_buf()],
+        ..Default::default()
+    };
+    config.interpreters.skip_interpreter_query = true;
+    let main = Handle::new(
+        ModuleName::from_str("main"),
+        ModulePath::filesystem(main_path),
+        env.sys_info(),
+    );
+    // Keep the Django stubs in the test environment, independent of repository configs.
+    let stub_config = env.config();
+    let fallback = stub_config.dupe();
+    let project_root = root.path().to_path_buf();
+    let finder = ConfigFinder::new_custom(
+        Box::new(move |_, path| {
+            Ok((!path.as_path().starts_with(&project_root)).then(|| stub_config.dupe()))
+        }),
+        Box::new(|path| {
+            let (mut config, mut errors) = ConfigFile::from_file(path);
+            errors.extend(config.configure());
+            (ArcId::new(config), errors)
+        }),
+        Box::new(move |_, _| fallback.dupe()),
+        Box::new(|config, _| config),
+        Box::new(|| {}),
+    );
+    let state = State::new(finder, ThreadCount::Inline);
+    for (iteration, enabled) in [false, true, false, true].into_iter().enumerate() {
+        config.django_model_modules = if enabled {
+            vec![ModuleName::from_str("book")]
+        } else {
+            Vec::new()
+        };
+        fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        let (_, errors) = ConfigFile::from_file(&config_path);
+        assert!(
+            errors.is_empty(),
+            "{:?}",
+            errors
+                .iter()
+                .map(|error| error.get_message())
+                .collect::<Vec<_>>()
+        );
+        let mut transaction = state.new_committable_transaction(Require::Exports, None);
+        if iteration != 0 {
+            transaction.as_mut().invalidate_events(&CategorizedEvents {
+                modified: vec![config_path.clone()],
+                ..Default::default()
+            });
+        }
+        // The Python files do not change, and only the consumer is checked eagerly.
+        transaction
+            .as_mut()
+            .run(&[main.dupe()], Require::Everything, None);
+        let applied = transaction.as_ref().get_config(&main).unwrap();
+        assert_eq!(applied.source, ConfigSource::File(config_path.clone()));
+        assert_eq!(applied.django_model_modules, config.django_model_modules);
+        assert_eq!(
+            applied
+                .errors(main.path())
+                .severity(ErrorKind::MissingAttribute),
+            Severity::Error
+        );
+        let errors = transaction
+            .as_ref()
+            .get_errors([&main])
+            .collect_display_errors();
+        assert_eq!(errors.len(), usize::from(!enabled), "{errors:?}");
+        if let Some(error) = errors.first() {
+            assert_eq!(error.error_kind(), ErrorKind::MissingAttribute);
+            assert!(error.msg().contains("has no attribute `book_set`"));
+        }
+        let config_errors = transaction.as_ref().get_config_errors();
+        assert!(
+            config_errors.is_empty(),
+            "{:?}",
+            config_errors
+                .iter()
+                .map(|error| error.get_message())
+                .collect::<Vec<_>>()
+        );
+        state.commit_transaction(transaction, None);
+    }
+}
+
+#[test]
 fn test_reverse_relations_per_module_config() {
     let mut env = django_env_with_separate_models().with_django_model_modules(&["books"]);
     env.add(
@@ -219,6 +335,7 @@ assert_type(Other().magazine_set, RelatedManager[Magazine])
         }),
         Box::new(|_| unreachable!("all modules have an explicit test config")),
         Box::new(move |_, _| fallback.dupe()),
+        Box::new(|config, _| config),
         Box::new(|| {}),
     );
     let main = Handle::new(

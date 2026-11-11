@@ -4409,15 +4409,36 @@ output-format = "omit-errors"
 
     #[test]
     fn test_django_model_modules_deserialization() {
-        let config: ConfigFile =
-            toml::from_str(r#"django-model-modules = ["authors.models", "books.models"]"#).unwrap();
-        assert_eq!(
-            config.django_model_modules,
-            vec![
-                ModuleName::from_str("authors.models"),
-                ModuleName::from_str("books.models"),
-            ]
-        );
+        let root = TempDir::new().unwrap();
+        for (filename, prefix) in [
+            (ConfigFile::PYREFLY_FILE_NAME, ""),
+            (ConfigFile::PYPROJECT_FILE_NAME, "[tool.pyrefly]\n"),
+        ] {
+            let path = root.path().join(filename);
+            fs::write(
+                &path,
+                format!(
+                    "{prefix}django-model-modules = [\"authors.models\", \"app.books.models\"]"
+                ),
+            )
+            .unwrap();
+            let (config, errors) = ConfigFile::from_file(&path);
+            assert!(
+                errors.is_empty(),
+                "{filename}: {:?}",
+                errors
+                    .iter()
+                    .map(ConfigError::get_message)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                config.django_model_modules,
+                vec![
+                    ModuleName::from_str("authors.models"),
+                    ModuleName::from_str("app.books.models"),
+                ]
+            );
+        }
     }
 
     #[test]
