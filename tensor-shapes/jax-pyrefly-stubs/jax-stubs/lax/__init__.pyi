@@ -1112,12 +1112,20 @@ def argmin[Axis: Flag[int], Shape: _Shape = []](
     axis: Axis,
     index_dtype: DTypeLike = ...,
 ) -> _Array[lax_axis_reduce_shape(Shape, Axis)]: ...
+@overload
 def associative_scan[Shape: _Shape = [], Axis: Flag[int] = 0](
     fn: Callable[[Any, Any], Any],
     elems: _ArrayLike[Shape],
     reverse: bool = False,
     axis: Axis = 0,
 ) -> _Array[lax_associative_scan_shape(Shape, Axis)]: ...
+@overload
+def associative_scan[Shapes: IntTuples, Axis: Flag[int] = 0](
+    fn: Callable[[Any, Any], Any],
+    elems: MapIntTuples[lambda S: _Array[S], Shapes],
+    reverse: bool = False,
+    axis: Axis = 0,
+) -> MapIntTuples[lambda S: _Array[lax_associative_scan_shape(S, Axis)], Shapes]: ...
 def cumlogsumexp[Shape: _Shape = [], Axis: Flag[int] = 0](
     operand: _ArrayLike[Shape],
     axis: Axis = 0,
@@ -1143,6 +1151,7 @@ def cumsum[Shape: _Shape = [], Axis: Flag[int] = 0](
     axis: Axis = 0,
     reverse: bool = False,
 ) -> _Array[lax_scan_shape(Shape, Axis)]: ...
+@overload
 def reduce[Dims: Flag[tuple[int, ...]], Shape: _Shape = []](
     operands: _ArrayLike[Shape],
     init_values: Any,
@@ -1150,6 +1159,14 @@ def reduce[Dims: Flag[tuple[int, ...]], Shape: _Shape = []](
     dimensions: Dims,
     out_sharding: _NamedSharding | _PartitionSpec | None = None,
 ) -> _Array[lax_reduce_shape(Shape, Dims)]: ...
+@overload
+def reduce[Dims: Flag[tuple[int, ...]], Shapes: IntTuples](
+    operands: MapIntTuples[lambda S: _Array[S], Shapes],
+    init_values: Any,
+    computation: Callable[[Any, Any], Any],
+    dimensions: Dims,
+    out_sharding: _NamedSharding | _PartitionSpec | None = None,
+) -> MapIntTuples[lambda S: _Array[lax_reduce_shape(S, Dims)], Shapes]: ...
 def reduce_and[Axes: Flag[tuple[int, ...]], Shape: _Shape = []](
     operand: _ArrayLike[Shape],
     axes: Axes,
@@ -1313,10 +1330,20 @@ def cond[*InVals, OutVal](
     false_fun: Callable[[*InVals], OutVal],
     *operands: *InVals,
 ) -> OutVal: ...
+@overload
 def fori_loop[T](
     lower: _ArrayLike[[]],
     upper: _ArrayLike[[]],
-    body_fun: Callable[[int | _Array[[]], T], T],
+    body_fun: Callable[[_Array[[]], T], T],
+    init_val: T,
+    *,
+    unroll: int | bool | None = None,
+) -> T: ...
+@overload
+def fori_loop[T](
+    lower: _ArrayLike[[]],
+    upper: _ArrayLike[[]],
+    body_fun: Callable[[int, T], T],
     init_val: T,
     *,
     unroll: int | bool | None = None,

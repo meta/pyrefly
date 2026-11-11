@@ -504,6 +504,20 @@ def reject_lax_associative_scan_negative_out_of_bounds(
     lax.associative_scan(lax.add, x, axis=-4)
 
 
+def reject_lax_associative_scan_tuple_out_of_bounds(
+    x: jax.Array[[2, 3, 4]], y: jax.Array[[2, 3, 5]]
+) -> None:
+    # E: Cannot evaluate type-level shape DSL call: axis out of bounds
+    lax.associative_scan(lambda a, b: a, (x, y), axis=3)
+
+
+def reject_lax_reduce_tuple_out_of_bounds(
+    x: jax.Array[[2, 3, 4]], y: jax.Array[[2, 3, 4]]
+) -> None:
+    # E: Cannot evaluate type-level shape DSL call: axis out of bounds
+    lax.reduce((x, y), (0.0, 0.0), lambda a, b: a, (3,))
+
+
 def reject_lax_reduce_sum_out_of_bounds(x: jax.Array[[2, 3, 4]]) -> None:
     # E: Cannot evaluate type-level shape DSL call: axis out of bounds
     lax.reduce_sum(x, (3,))
@@ -606,6 +620,14 @@ def test_lax_scans() -> None:
     assert_shape(lax.associative_scan(lax.add, x, axis=-1).shape, (2, 3, 4))
     assert_shape(lax.associative_scan(lax.add, x).shape, (2, 3, 4))
 
+    # associative_scan on tuple PyTree
+    y = jnp.zeros((2, 5, 4))
+    scan_x, scan_y = lax.associative_scan(
+        lambda a, b: (a[0] + b[0], a[1] + b[1]), (x, y), axis=-1
+    )
+    assert_shape(scan_x.shape, (2, 3, 4))
+    assert_shape(scan_y.shape, (2, 5, 4))
+
     # cumlogsumexp
     assert_shape(lax.cumlogsumexp(x, axis=0).shape, (2, 3, 4))
     assert_shape(lax.cumlogsumexp(x, axis=1, reverse=True).shape, (2, 3, 4))
@@ -630,6 +652,17 @@ def test_lax_reductions() -> None:
     assert_shape(lax.reduce(x, 0.0, lax.add, (0, 2)).shape, (3,))
     assert_shape(lax.reduce(x, 0.0, lax.add, ()).shape, (2, 3, 4))
     assert_shape(lax.reduce(x, 0.0, lax.add, (0, 1, 2)).shape, ())
+
+    # reduce on tuple PyTree
+    y = jnp.ones((2, 3, 4))
+    red_x, red_y = lax.reduce(
+        (x, y),
+        (0.0, 0.0),
+        lambda a, b: (a[0] + b[0], a[1] + b[1]),
+        (0, 2),
+    )
+    assert_shape(red_x.shape, (3,))
+    assert_shape(red_y.shape, (3,))
 
     # reduce_sum, reduce_prod, reduce_max, reduce_min
     assert_shape(lax.reduce_sum(x, (1,)).shape, (2, 4))
@@ -1044,6 +1077,44 @@ def test_control_flow_and_higher_order() -> None:
     # while_loop
     wl = lax.while_loop(lambda x: x[0, 0] < 5, lambda x: x + 1, jnp.zeros((2, 3)))
     assert_shape(wl.shape, (2, 3))
+
+    # fori_loop with annotated jax.Array / int step_idx callbacks
+    def body_array(step_idx: jax.Array, carry: jax.Array[[2, 3]]) -> jax.Array[[2, 3]]:
+        del step_idx
+        return carry + 1
+
+    def body_int(step_idx: int, carry: jax.Array[[2, 3]]) -> jax.Array[[2, 3]]:
+        return carry + step_idx
+
+    fl_arr = lax.fori_loop(0, 3, body_array, jnp.zeros((2, 3)))
+    assert_shape(fl_arr.shape, (2, 3))
+    fl_int = lax.fori_loop(0, 3, body_int, jnp.zeros((2, 3)))
+    assert_shape(fl_int.shape, (2, 3))
+
+
+def generic_pytree_scans_and_reductions(
+    u1: jax.Array,
+    u2: jax.Array,
+    a_gradual: jax.Array[Any],
+    a_any: Any,
+) -> None:
+    s1, s2, _ = lax.associative_scan(lambda a, b: a, (u1, u2, a_any), axis=-1)
+    assert_type(s1, jax.Array[IntTuple])
+    assert_type(s2, jax.Array[IntTuple])
+
+    g1, _, _, _ = lax.associative_scan(
+        lambda a, b: a, (a_gradual, a_any, a_any, a_any), axis=-1
+    )
+    assert_type(g1, jax.Array[IntTuple])
+
+    r1, r2 = lax.reduce(
+        operands=(u1, u2),
+        init_values=(0.0, 0.0),
+        computation=lambda a, b: a,
+        dimensions=(1,),
+    )
+    assert_type(r1, jax.Array[IntTuple])
+    assert_type(r2, jax.Array[IntTuple])
 
 
 def generic_scan_over_tuple_xs[N: IntVar, D: IntVar, E: IntVar, H: IntVar](
