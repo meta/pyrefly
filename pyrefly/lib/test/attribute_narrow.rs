@@ -350,6 +350,28 @@ def f(x: A | B):
 );
 
 testcase!(
+    test_missing_attribute_narrow_preserves_refinement_on_mixed_union_rebase,
+    r#"
+from typing import assert_type, final
+
+@final
+class A:
+    foo: int | str
+@final
+class B:
+    foo: int
+class C:
+    pass
+
+def f(x: A | B | C):
+    if isinstance(x.foo, int):  # E: Object of class `C` has no attribute `foo`
+        assert_type(x.foo, int)
+        if not isinstance(x, A):
+            assert_type(x.foo, int)
+"#,
+);
+
+testcase!(
     test_missing_attribute_narrow_rebase_preserves_declared_errors,
     r#"
 from typing import final, reveal_type
