@@ -2,26 +2,45 @@
   "name": "test",
   "path": "test.py",
   "names": [
+    "test.Alias",
     "test.PLAIN",
     "test.ROOT",
     "test.ALIASED_ROOT",
     "test.FACTORY",
+    "test.NUMBER",
+    "test.SPAN",
+    "test.ALIASED",
     "test.BOX",
     "test.QUEUE",
     "test.OTHER",
     "test.MADE",
     "test.METHOD",
+    "test.NESTED",
+    "test.SHADOWED",
     "test.Factory.Plain",
     "test.Box.__init__",
     "test.Other.__new__",
     "test.make_plain",
+    "test.list",
     "test.Box",
     "test.Factory",
     "test.Other",
     "test.Plain"
   ],
-  "line_count": 44,
+  "line_count": 58,
   "symbol_reports": [
+    {
+      "kind": "attr",
+      "name": "test.Alias",
+      "n_typable": 0,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 41,
+        "column": 1
+      }
+    },
     {
       "kind": "attr",
       "name": "test.PLAIN",
@@ -30,7 +49,7 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 34,
+        "line": 43,
         "column": 1
       }
     },
@@ -42,7 +61,7 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 35,
+        "line": 44,
         "column": 1
       }
     },
@@ -54,7 +73,7 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 36,
+        "line": 45,
         "column": 1
       }
     },
@@ -66,7 +85,43 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 37,
+        "line": 46,
+        "column": 1
+      }
+    },
+    {
+      "kind": "attr",
+      "name": "test.NUMBER",
+      "n_typable": 0,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 47,
+        "column": 1
+      }
+    },
+    {
+      "kind": "attr",
+      "name": "test.SPAN",
+      "n_typable": 0,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 48,
+        "column": 1
+      }
+    },
+    {
+      "kind": "attr",
+      "name": "test.ALIASED",
+      "n_typable": 0,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 49,
         "column": 1
       }
     },
@@ -78,7 +133,7 @@
       "n_any": 0,
       "n_untyped": 1,
       "location": {
-        "line": 39,
+        "line": 51,
         "column": 1
       }
     },
@@ -90,7 +145,7 @@
       "n_any": 0,
       "n_untyped": 1,
       "location": {
-        "line": 40,
+        "line": 52,
         "column": 1
       }
     },
@@ -102,7 +157,7 @@
       "n_any": 0,
       "n_untyped": 1,
       "location": {
-        "line": 41,
+        "line": 53,
         "column": 1
       }
     },
@@ -114,7 +169,7 @@
       "n_any": 0,
       "n_untyped": 1,
       "location": {
-        "line": 42,
+        "line": 54,
         "column": 1
       }
     },
@@ -126,7 +181,31 @@
       "n_any": 0,
       "n_untyped": 1,
       "location": {
-        "line": 43,
+        "line": 55,
+        "column": 1
+      }
+    },
+    {
+      "kind": "attr",
+      "name": "test.NESTED",
+      "n_typable": 1,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 1,
+      "location": {
+        "line": 56,
+        "column": 1
+      }
+    },
+    {
+      "kind": "attr",
+      "name": "test.SHADOWED",
+      "n_typable": 0,
+      "n_typed": 0,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 57,
         "column": 1
       }
     },
@@ -138,7 +217,7 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 16,
+        "line": 18,
         "column": 5
       }
     },
@@ -150,7 +229,7 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 21,
+        "line": 23,
         "column": 5
       }
     },
@@ -162,7 +241,7 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 26,
+        "line": 28,
         "column": 5
       }
     },
@@ -174,7 +253,19 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 30,
+        "line": 32,
+        "column": 1
+      }
+    },
+    {
+      "kind": "function",
+      "name": "test.list",
+      "n_typable": 1,
+      "n_typed": 1,
+      "n_any": 0,
+      "n_untyped": 0,
+      "location": {
+        "line": 37,
         "column": 1
       }
     },
@@ -186,7 +277,7 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 20,
+        "line": 22,
         "column": 1
       }
     },
@@ -198,7 +289,7 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 15,
+        "line": 17,
         "column": 1
       }
     },
@@ -210,7 +301,7 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 25,
+        "line": 27,
         "column": 1
       }
     },
@@ -222,24 +313,24 @@
       "n_any": 0,
       "n_untyped": 0,
       "location": {
-        "line": 11,
+        "line": 13,
         "column": 1
       }
     }
   ],
   "type_ignores": [],
-  "n_typable": 9,
-  "n_typed": 4,
+  "n_typable": 11,
+  "n_typed": 5,
   "n_any": 0,
-  "n_untyped": 5,
-  "coverage": 44.44444444444444,
-  "strict_coverage": 44.44444444444444,
-  "n_functions": 1,
+  "n_untyped": 6,
+  "coverage": 45.45454545454545,
+  "strict_coverage": 45.45454545454545,
+  "n_functions": 2,
   "n_methods": 3,
   "n_function_params": 0,
   "n_method_params": 1,
   "n_classes": 4,
-  "n_attrs": 9,
+  "n_attrs": 15,
   "n_properties": 0,
   "n_type_ignores": 0
 }
