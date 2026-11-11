@@ -1610,6 +1610,78 @@ assert_type(D.make(), D)
     "#,
 );
 
+testcase!(
+    bug = "Generic metaclass callable conversion loses Self and bound TypeVars",
+    test_type_of_self_as_callable_with_type_var_metaclass,
+    r#"
+from typing import Callable, Self, TypeVar, assert_type, reveal_type
+
+def identity[**P, R](cb: Callable[P, R]) -> Callable[P, R]:
+    return cb
+
+class Meta(type):
+    def __call__[T](cls: type[T], x: int) -> T:
+        raise NotImplementedError
+
+class C(metaclass=Meta):
+    def __init__(self, x: int) -> None: ...
+
+    @classmethod
+    def make(cls) -> Self:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> C
+        return identity(cls)(1)  # E: Returned type `C` is not assignable to declared return type `Self@C`
+
+    @classmethod
+    def bounded[S: C](cls: type[S]) -> S:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> C
+        return identity(cls)(1)  # E: Returned type `C` is not assignable to declared return type `S`
+
+_T = TypeVar("_T")
+
+class LegacyMeta(type):
+    def __call__(cls: type[_T], x: int) -> _T:
+        raise NotImplementedError
+
+class Legacy(metaclass=LegacyMeta):
+    def __init__(self, x: int) -> None: ...
+
+    @classmethod
+    def make(cls) -> Self:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> Legacy
+        return identity(cls)(1)  # E: Returned type `Legacy` is not assignable to declared return type `Self@Legacy`
+
+class D(C): ...
+class LegacyD(Legacy): ...
+
+assert_type(D.make(), D)
+assert_type(D.bounded(), D)
+assert_type(LegacyD.make(), LegacyD)
+    "#,
+);
+
+testcase!(
+    test_generic_metaclass_callable_preserves_foreign_return,
+    r#"
+from typing import Callable, assert_type
+
+def identity[**P, R](cb: Callable[P, R]) -> Callable[P, R]:
+    return cb
+
+class Meta(type):
+    def __call__[T](cls: type[T], x: int) -> list[T]:
+        raise NotImplementedError
+
+class C(metaclass=Meta):
+    def __init__(self, x: str) -> None: ...
+
+ok: Callable[[int], list[C]] = C
+bad: Callable[[str], list[C]] = C  # E: `type[C]` is not assignable to `(str) -> list[C]`
+
+def check(cls: type[C]) -> None:
+    assert_type(identity(cls)(1), list[C])
+    "#,
+);
+
 // Soft errors, such as the ignored-by-default `unknown-argument-type`, must not make the
 // `__init__` check look redundant.
 testcase!(
