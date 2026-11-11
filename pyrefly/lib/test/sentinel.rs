@@ -374,3 +374,54 @@ S: ClassVar = Sentinel("S")
 assert_type(S, ClassVar)
     "#,
 );
+
+testcase!(
+    test_sentinel_final_initialized_in_body_is_read_only_in_init,
+    r#"
+from typing import Final
+from typing_extensions import Sentinel
+
+class C:
+    S: Final = Sentinel("S")
+    def __init__(self) -> None:
+        self.S = self.S  # E: Cannot set field `S`
+    "#,
+);
+
+testcase!(
+    test_sentinel_with_qualifier_as_dataclass_field,
+    r#"
+from dataclasses import dataclass
+from typing import ClassVar, Final
+from typing_extensions import Sentinel
+
+@dataclass
+class A:
+    S: Final = Sentinel("S")
+    T: ClassVar = Sentinel("T")
+
+A(S=A.S)
+A(T=A.T)  # E: Unexpected keyword argument `T`
+    "#,
+);
+
+testcase!(
+    test_sentinel_final_in_named_tuple,
+    r#"
+from typing import Final, NamedTuple
+from typing_extensions import Sentinel
+
+class C(NamedTuple):
+    S: Final = Sentinel("S")  # E: `Final` may not be used for NamedTuple members
+    "#,
+);
+
+testcase!(
+    test_sentinel_repr_none,
+    r#"
+from typing import Final
+from typing_extensions import Sentinel
+
+S: Final = Sentinel("S", repr=None)
+    "#,
+);

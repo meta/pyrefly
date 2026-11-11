@@ -3158,9 +3158,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Option<ReadOnlyReason> {
         if let Some(ann) = annotation {
             if ann.is_final() {
+                // Both definition kinds carry a class-body value, so the `Final` field is
+                // already initialized and a constructor may not assign it again.
                 let is_initialized = matches!(
                     field_definition,
                     ClassFieldDefinition::AssignedInBody { .. }
+                        | ClassFieldDefinition::DefinedWithoutAssign { .. }
                 );
                 return Some(ReadOnlyReason::Final(if is_initialized {
                     IsFinalVariableInitialized::Yes
