@@ -6,6 +6,7 @@
   ],
   "enabled_by": {
     "abstract-method-call": ["legacy", "default", "strict", "all"],
+    "abstract-method-with-implementation": ["all"],
     "assert-type": ["legacy", "default", "strict", "all"],
     "assert-type-unspellable-subtype": ["legacy", "default", "strict", "all"],
     "attribute-assign-on-never": ["legacy", "default", "strict", "all"],

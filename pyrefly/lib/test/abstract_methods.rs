@@ -928,6 +928,45 @@ class Foo:
 );
 
 testcase!(
+    test_abstract_method_with_implementation,
+    TestEnv::new().enable_abstract_method_with_implementation_error(),
+    r#"
+from abc import ABC, abstractmethod
+
+class Foo(ABC):
+    @abstractmethod
+    def implemented(self) -> int:  # E: `Foo.implemented` is decorated with `@abstractmethod` but has an implementation
+        return 1
+
+    @abstractmethod
+    def placeholder(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def trivial(self) -> None:
+        pass
+
+    @abstractmethod
+    def elided(self) -> None: ...
+"#,
+);
+
+testcase!(
+    test_abstract_method_with_implementation_no_type_check,
+    TestEnv::new().enable_abstract_method_with_implementation_error(),
+    r#"
+from abc import ABC, abstractmethod
+from typing import no_type_check
+
+class Foo(ABC):
+    @no_type_check
+    @abstractmethod
+    def implemented(self) -> int:
+        return 1
+"#,
+);
+
+testcase!(
     test_invalid_abstract_method_multiple,
     TestEnv::new().enable_invalid_abstract_method_error(),
     r#"
