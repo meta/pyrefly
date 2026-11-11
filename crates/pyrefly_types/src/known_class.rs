@@ -86,6 +86,7 @@ known_classes! {
     AbcAbstractClassMethod => ("abc", "abstractclassmethod"),
     AbcAbstractProperty => ("abc", "abstractproperty"),
     AbcAbstractStaticMethod => ("abc", "abstractstaticmethod"),
+    ArgparseNamespace => ("argparse", "Namespace"),
     CollectionsUserString => ("collections", "UserString"),
     CollectionsDeque => ("collections", "deque"),
     CollectionsAbcAsyncIterator => ("collections.abc", "AsyncIterator"),
