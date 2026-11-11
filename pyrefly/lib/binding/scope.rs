@@ -74,7 +74,6 @@ use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::InitializationStatus;
 use crate::binding::bindings::InitializedInClass;
-use crate::binding::bindings::InitializedInFlow;
 use crate::binding::bindings::UnsetNodeId;
 use crate::binding::bindings::UnsetNodes;
 use crate::binding::classmethod::ClassmethodReceiverState;
@@ -107,7 +106,7 @@ pub enum NameReadInfo {
         idx: Idx<Key>,
         /// The most recent value binding, before any flow narrowing.
         value_idx: Option<Idx<Key>>,
-        initialized: InitializedInFlow,
+        initialized: InitializationStatus,
     },
     /// The name is an anywhere-style lookup. If it came from a non-barrier scope
     /// relative to the current one, this means it is uninitialized; otherwise we
@@ -115,7 +114,7 @@ pub enum NameReadInfo {
     /// below it) and treat the read as initialized.
     Anywhere {
         key: Key,
-        initialized: InitializedInFlow,
+        initialized: InitializationStatus,
         is_module_scope: bool,
         implicit_builtin_module: Option<ModuleName>,
     },
@@ -734,8 +733,8 @@ fn propagate_new_flow_entries(
 ) {
     for (name, info) in source.iter() {
         if let Some(existing) = target.get(name) {
-            if matches!(existing.initialized(), InitializedInFlow::No)
-                && !matches!(info.initialized(), InitializedInFlow::No)
+            if existing.initialized() == InitializationStatus::Uninitialized
+                && info.initialized() != InitializationStatus::Uninitialized
             {
                 target.insert(name.clone(), info.clone());
             }
@@ -864,18 +863,16 @@ impl FlowInfo {
         self.value.as_mut()
     }
 
-    fn initialized(&self) -> InitializedInFlow {
+    fn initialized(&self) -> InitializationStatus {
         self.value()
-            .map_or(InitializedInFlow::Yes, |v| match &v.style {
-                FlowStyle::MaybeInitialized(nodes) => {
-                    InitializedInFlow::DeferredCheck(nodes.clone())
-                }
+            .map_or(InitializationStatus::Initialized, |v| match &v.style {
+                FlowStyle::MaybeInitialized(nodes) => InitializationStatus::Deferred(nodes.clone()),
                 FlowStyle::Uninitialized
                 | FlowStyle::ClassField {
                     initial_value: None,
-                } => InitializedInFlow::No,
-                FlowStyle::PossiblyUninitialized => InitializedInFlow::Conditionally,
-                _ => InitializedInFlow::Yes,
+                } => InitializationStatus::Uninitialized,
+                FlowStyle::PossiblyUninitialized => InitializationStatus::PossiblyUninitialized,
+                _ => InitializationStatus::Initialized,
             })
     }
 }
@@ -1280,7 +1277,10 @@ impl ReturnAttributeInitialization {
         );
         // List the attributes that only `other` lists, unless being unlisted here already makes
         // them uninitialized.
-        if self.unlisted != InitializationStatus::Uninitialized {
+        if !matches!(
+            self.unlisted,
+            InitializationStatus::PossiblyUninitialized | InitializationStatus::Uninitialized
+        ) {
             for name in other.attributes.keys() {
                 if !self.attributes.contains_key(name) {
                     self.attributes.insert(name.clone(), self.unlisted.clone());
@@ -3705,7 +3705,11 @@ impl Scopes {
                         );
                         // List the attributes this flow assigns, unless being unlisted already
                         // makes them uninitialized.
-                        if returns.unlisted != InitializationStatus::Uninitialized {
+                        if !matches!(
+                            returns.unlisted,
+                            InitializationStatus::PossiblyUninitialized
+                                | InitializationStatus::Uninitialized
+                        ) {
                             for name in current.keys() {
                                 if !returns.attributes.contains_key(name) {
                                     returns
@@ -3716,9 +3720,11 @@ impl Scopes {
                         }
                         returns.attributes.retain(|name, status| {
                             let here = match current.get(name) {
-                                None | Some(InitializationStatus::Uninitialized) => {
-                                    (Some(&missing), None)
-                                }
+                                None
+                                | Some(
+                                    InitializationStatus::PossiblyUninitialized
+                                    | InitializationStatus::Uninitialized,
+                                ) => (Some(&missing), None),
                                 here => (here, previous_stmt_expr),
                             };
                             *status = InitializationStatus::merge(
@@ -3918,30 +3924,31 @@ impl Scopes {
                         },
                     };
                     let initialized = match &value.style {
+                        // A bare annotation is initialized by the methods that assign it, which
+                        // are merged below. If no recognized method assigns it,
+                        // `uninitialized-instance-variable` reports it instead. Any assignment
+                        // to the instance created in `__new__` counts as initializing it.
+                        _ if matches!(
+                            definition,
+                            ClassFieldDefinition::DeclaredByAnnotation {
+                                initialized_in_recognized_method: true,
+                                initialized_on_new_instance: false,
+                                ..
+                            }
+                        ) =>
+                        {
+                            InitializationStatus::Uninitialized
+                        }
                         _ if static_info.sites == DefinitionSites::OnlyDefOrClass => {
-                            InitializedInFlow::Yes
+                            InitializationStatus::Initialized
                         }
-                        FlowStyle::PossiblyUninitialized => InitializedInFlow::Conditionally,
+                        FlowStyle::PossiblyUninitialized => {
+                            InitializationStatus::PossiblyUninitialized
+                        }
                         FlowStyle::MaybeInitialized(nodes) => {
-                            InitializedInFlow::DeferredCheck(nodes.clone())
+                            InitializationStatus::Deferred(nodes.clone())
                         }
-                        _ => InitializedInFlow::Yes,
-                    };
-                    // A bare annotation is initialized by the methods that assign it, which
-                    // are merged below. If no recognized method assigns it,
-                    // `uninitialized-instance-variable` reports it instead. Any assignment
-                    // to the instance created in `__new__` counts as initializing it.
-                    let initialized = if matches!(
-                        definition,
-                        ClassFieldDefinition::DeclaredByAnnotation {
-                            initialized_in_recognized_method: true,
-                            initialized_on_new_instance: false,
-                            ..
-                        }
-                    ) {
-                        InitializationStatus::Uninitialized
-                    } else {
-                        InitializationStatus::from(initialized)
+                        _ => InitializationStatus::Initialized,
                     };
                     field_definitions.insert_hashed(
                         name.owned(),
@@ -4265,18 +4272,18 @@ impl Scopes {
                 {
                     let initialized = if flow_barrier == FlowBarrier::AllowFlowUnchecked {
                         // Just assume the name is initialized without checking.
-                        InitializedInFlow::Yes
+                        InitializationStatus::Initialized
                     } else {
                         flow_info.initialized()
                     };
                     // Because class body scopes are dynamic, if we're in a non-stub file
                     // and we know that the name is definitely not initialized, we should skip it.
-                    if is_class && matches!(initialized, InitializedInFlow::No) {
+                    if is_class && initialized == InitializationStatus::Uninitialized {
                         if self.is_interface {
                             return Some(NameReadInfo::Flow {
                                 idx: flow_info.idx(),
                                 value_idx: flow_info.value().map(|value| value.idx),
-                                initialized: InitializedInFlow::Yes,
+                                initialized: InitializationStatus::Initialized,
                             });
                         }
                         return None;
@@ -4313,9 +4320,9 @@ impl Scopes {
                             || flow_barrier > FlowBarrier::AllowFlowChecked
                             || matches!(static_info.style, StaticStyle::PossibleLegacyTParam)
                         {
-                            InitializedInFlow::Yes
+                            InitializationStatus::Initialized
                         } else {
-                            InitializedInFlow::No
+                            InitializationStatus::Uninitialized
                         },
                         is_module_scope: matches!(scope.kind, ScopeKind::Module),
                         implicit_builtin_module: static_info.implicit_builtin_module(),
@@ -4672,8 +4679,8 @@ impl<'a> BindingsBuilder<'a> {
                 let (before_value, after_value) = (before.value()?, after.value()?);
                 if before_value.idx != after_value.idx
                     || before_value.style != after_value.style
-                    || !matches!(before.initialized(), InitializedInFlow::Yes)
-                    || !matches!(after.initialized(), InitializedInFlow::Yes)
+                    || before.initialized() != InitializationStatus::Initialized
+                    || after.initialized() != InitializationStatus::Initialized
                     || !matches!(
                         self.idx_to_binding(before_value.idx),
                         Some(Binding::FunctionParameter(_) | Binding::NameAssign(_))

@@ -55,6 +55,7 @@ use crate::binding::binding::PrivateAttributeAccessCheck;
 use crate::binding::binding::SuperStyle;
 use crate::binding::bindings::AwaitContext;
 use crate::binding::bindings::BindingsBuilder;
+use crate::binding::bindings::InitializationStatus;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::bindings::LegacyTParamId;
 use crate::binding::bindings::NameLookupResult;
@@ -470,9 +471,7 @@ impl<'a> BindingsBuilder<'a> {
                 // Uninitialized local errors are only reported in usage contexts that check
                 // initialization, and never in stubs.
                 if usage.checks_initialization() && !self.module_info.path().is_interface() {
-                    if let Some(unset_nodes) =
-                        is_initialized.deferred_unset_nodes().map(|s| s.to_vec())
-                    {
+                    if let InitializationStatus::Deferred(unset_nodes) = &is_initialized {
                         // Defer the uninitialized check to solve time.
                         // At solve time, we'll check whether any path on which it is unset reaches here.
                         self.insert_binding(
@@ -480,7 +479,7 @@ impl<'a> BindingsBuilder<'a> {
                             BindingExpect::UninitializedCheck {
                                 name: name.id.clone(),
                                 range: name.range,
-                                unset_nodes,
+                                unset_nodes: unset_nodes.clone(),
                             },
                         );
                     } else if let Some(error_message) = is_initialized.as_error_message(&name.id) {
