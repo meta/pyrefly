@@ -2349,6 +2349,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if self.is_equivalent(&old, &new) {
                 continue;
             }
+            // Missing attributes add no constraint to an established refinement. A mixed
+            // union can still refine a gradual facet through its known members.
+            let mixed_error_with_concrete_facet = matches!(
+                &new,
+                Type::Union(union) if union.members.iter().any(Type::is_error)
+            ) && !stored.is_any()
+                && !matches!(stored, Type::Union(union) if union.members.iter().any(Type::is_any));
+            if (new.is_error() || mixed_error_with_concrete_facet)
+                && self.attr_error_from_missing(result.ty(), name)
+            {
+                continue;
+            }
             let rebased = self.intersect(stored, &new);
             if rebased.is_never() {
                 return TypeInfo::of_ty(self.heap.mk_never());
