@@ -2042,6 +2042,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 signature,
                 Some(&metadata.kind),
                 tparams.as_deref(),
+                metadata.flags.unresolved_imports,
                 Some(obj),
                 args,
                 keywords,
@@ -2057,6 +2058,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 callable,
                 None,
                 tparams.as_deref(),
+                None,
                 None,
                 args,
                 keywords,
@@ -2078,6 +2080,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 callable,
                 Some(&metadata.kind),
                 tparams.as_deref(),
+                metadata.flags.unresolved_imports,
                 None,
                 args,
                 keywords,
@@ -2544,12 +2547,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
+    pub(crate) fn warn_unresolved_import_signature(
+        &self,
+        errors: &ErrorCollector,
+        range: TextRange,
+    ) {
+        self.error(
+            errors,
+            range,
+            ErrorKind::UnresolvedImportSignature,
+            "Call uses a signature that depends on unresolved imports".to_owned(),
+        );
+    }
+
     /// Wrapper for `callable_infer` that handles trying a call with and without a contextual hint.
     fn call_infer_inner(
         &self,
         callable: Callable,
         callable_name: Option<&FunctionKind>,
         tparams: Option<&TParams>,
+        declared_unresolved_imports: Option<bool>,
         self_obj: Option<Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -2561,6 +2578,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         hint: Option<HintRef>,
         ctor_targs: Option<&mut TArgs>,
     ) -> CallOutcome {
+        let signature_has_unresolved_imports = declared_unresolved_imports
+            .unwrap_or_else(|| callable.contains_unresolved_imports(tparams));
         let hint = HintRef::filter_for_call(hint, tparams);
         let retry_input = hint.map(|_| (callable.clone(), self_obj.clone()));
         // First try the call without the hint to see if it succeeds.
@@ -2648,6 +2667,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return_errors,
             context,
         );
+        if signature_has_unresolved_imports {
+            // The warning does not invalidate contextual typing or operator dispatch.
+            self.warn_unresolved_import_signature(return_errors, arguments_range);
+        }
         CallOutcome { ty, overload_table }
     }
 

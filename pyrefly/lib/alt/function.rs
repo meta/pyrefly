@@ -1078,6 +1078,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.validate_shape_extension_function_parameters(stmt, &def.params, &tparams, errors);
 
         let mut metadata = def.metadata.clone();
+        metadata.flags.unresolved_imports =
+            Some(callable.contains_unresolved_imports(Some(tparams.as_ref())));
         self.record_shape_flag_constructor_sources(
             stmt,
             &def.params,

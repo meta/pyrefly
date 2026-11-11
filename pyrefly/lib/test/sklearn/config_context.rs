@@ -18,7 +18,7 @@ testcase!(
     r#"
 import sklearn # pyrefly: ignore[missing-source-for-stubs]
 
-with sklearn.config_context(transform_output="pandas"):
+with sklearn.config_context(transform_output="pandas"):  # E: Call uses a signature that depends on unresolved imports
     pass
 "#,
 );

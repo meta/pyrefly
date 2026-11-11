@@ -6424,13 +6424,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.solve_import_missing(name, m, fallback, submodule_error, errors)
     }
 
-    /// Final missing-attribute step of `solve_import`'s cascade. Emits
-    /// `MissingModuleAttribute` (suppressed in dead code) and returns
-    /// `Any(Error)`. The other failure mode — `m` itself can't be
-    /// found — is handled out-of-band by the per-statement
-    /// `Binding::Module` that `bind_module_exports` inserts; this
-    /// method stays silent in that case (returns `Any(Error)`) so we
-    /// don't double-emit.
+    /// Final missing-attribute step of `solve_import`'s cascade. Actual missing modules
+    /// and imported names retain `Any(MissingImport)` provenance. Other find failures
+    /// recover with ordinary `Any`. The per-statement `Binding::Module` reports a
+    /// missing-module diagnostic, so this step reports only missing exported names.
     fn solve_import_missing(
         &self,
         name: &Name,

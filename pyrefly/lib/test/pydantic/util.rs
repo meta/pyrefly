@@ -11,7 +11,27 @@ use crate::test::util::TestEnv;
 
 pub fn pydantic_env() -> TestEnv {
     let path = std::env::var("PYDANTIC_TEST_PATH").expect("PYDANTIC_TEST_PATH must be set");
-    let env = TestEnv::new_with_site_package_paths(&[&path]);
+    // Modules omitted from this partial fixture are intentionally approximated as gradual.
+    let env = TestEnv::new_with_site_package_paths(&[&path]).with_replace_imports_with_any(&[
+        "annotated_types",
+        "annotated_types.*",
+        "pydantic_core",
+        "pydantic_core.*",
+        "typing_inspection",
+        "typing_inspection.*",
+        "pydantic._migration",
+        "pydantic.aliases",
+        "pydantic.errors",
+        "pydantic.warnings",
+        "pydantic._internal._generate_schema",
+        "pydantic._internal._utils",
+        "pydantic._internal._config",
+        "pydantic._internal._decorators",
+        "pydantic._internal._mock_val_ser",
+        "pydantic._internal._namespace_utils",
+        "pydantic._internal._typing_extra",
+        "pydantic._internal._dataclasses",
+    ]);
     let behavior = TypeIgnoreUnknownTagBehavior::Suppress;
     env.with_type_ignore_unknown_tag_behavior(behavior)
 }

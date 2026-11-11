@@ -2491,6 +2491,35 @@ __all__ = generate_all()
 # `__all__` could not be statically analyzed [unresolvable-dunder-all]
 ```
 
+## unresolved-import-signature
+
+Default severity: `warn`
+
+For example, when `missing_backend` cannot be resolved:
+
+```python
+from missing_backend import Array
+
+
+def consume(value: Array) -> None: ...
+
+
+value = object()
+consume(value)  # unresolved-import-signature
+```
+
+This warning is emitted when a call uses a signature that depends on unresolved
+imports. It is reported for the signature, not separately for each affected
+parameter. Explicit `Any` and imports intentionally replaced with `Any` are
+unaffected. Passing an unknown value to a well-defined generic API does not make
+its signature unavailable.
+
+In overloaded functions, each signature is checked independently. An unavailable
+signature does not prevent another overload from matching. If only one overload
+has compatible arity, it can still supply recovery information while this warning
+is reported. When no overload matches, `no-matching-overload` may also be reported.
+Configuring this warning to `ignore` hides it without restoring skipped candidates.
+
 ## unsafe-overlap
 
 Protocols decorated with `@runtime_checkable` may be used in `isinstance` and `issubclass` checks, but the runtime will only check that all the required attributes are present, without looking at their types.

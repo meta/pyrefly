@@ -474,9 +474,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         break;
                     }
                 }
+                // A unique arity match still supplies recovery when checking fails.
                 (
                     closest_overload,
-                    // If there was only one overload with the right arity, it definitely matched.
                     matched || arity_compatible_overloads.len() == 1,
                 )
             }
@@ -1195,6 +1195,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 contextually_opaque_defaults,
                 overload_ctor_targs.as_mut(),
             );
+        if callable
+            .1
+            .metadata
+            .flags
+            .unresolved_imports
+            .unwrap_or_else(|| callable.1.signature.contains_unresolved_imports(tparams))
+        {
+            // Unlike an ordinary call, an overload candidate is rejected by this warning.
+            self.warn_unresolved_import_signature(&call_errors, arguments_range);
+        }
         CalledOverload {
             func: callable,
             res,

@@ -14,11 +14,11 @@ from shape_extensions import assert_shape, IntTuple
 def test_numpy_conversions_remain_available_without_numpy() -> None:
     tensor = torch.zeros((2, 3))
     reveal_type(tensor)  # E: revealed type: Tensor[[2, 3]]
-    reveal_type(tensor.numpy())  # E: revealed type: Unknown
+    reveal_type(tensor.numpy())  # E: revealed type: Unknown  # E: unresolved imports
     assert_shape(tensor.shape, (2, 3))
-    assert_shape(tensor.numpy().shape, IntTuple)
+    assert_shape(tensor.numpy().shape, IntTuple)  # E: unresolved imports
 
     unknown_array = cast(Any, None)
-    converted = torch.from_numpy(unknown_array)
+    converted = torch.from_numpy(unknown_array)  # E: unresolved imports
     reveal_type(converted)  # E: revealed type: Tensor
     assert_shape(converted.shape, IntTuple)

@@ -11,7 +11,6 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
-    bug = "A missing backend shadows the available overload",
     test_signature_unresolved_import_overload,
     r#"
 from typing import Any, assert_type, overload
@@ -23,12 +22,11 @@ def transform(x: Array[int]) -> Array[str]: ...
 def transform(x: int) -> str: ...
 def transform(x: Any) -> Any: ...
 
-assert_type(transform(1), Any)
+assert_type(transform(1), str)
 "#,
 );
 
 testcase!(
-    bug = "An unresolved return type shadows the available overload",
     test_signature_unresolved_import_return_only,
     r#"
 from typing import Any, assert_type, overload
@@ -40,12 +38,11 @@ def transform(x: int) -> Array: ...
 def transform(x: int) -> str: ...
 def transform(x: Any) -> Any: ...
 
-assert_type(transform(1), Any)
+assert_type(transform(1), str)
 "#,
 );
 
 testcase!(
-    bug = "Calling a signature with unresolved imports does not warn",
     test_signature_unresolved_import_call,
     r#"
 from typing import Any, assert_type
@@ -55,12 +52,11 @@ import another_missing_backend as backend  # E: Cannot find module `another_miss
 def transform(x: Array, y: Other) -> backend.Array[int]:
     return x
 
-assert_type(transform(1, 2), Any)
+assert_type(transform(1, 2), Any)  # E: Call uses a signature that depends on unresolved imports
 "#,
 );
 
 testcase!(
-    bug = "Nested unresolved imports do not warn at the signature boundary",
     test_signature_unresolved_import_nested,
     r#"
 from typing import Any, Callable, assert_type
@@ -71,12 +67,11 @@ def transform(
 ) -> list[Array]:
     return x
 
-assert_type(transform([], lambda x: x), list[Any])
+assert_type(transform([], lambda x: x), list[Any])  # E: Call uses a signature that depends on unresolved imports
 "#,
 );
 
 testcase!(
-    bug = "Aliased unresolved imports do not warn at the signature boundary",
     test_signature_unresolved_import_alias,
     r#"
 from typing import Any, assert_type
@@ -86,7 +81,7 @@ Alias = Array[int]
 def transform(x: Alias) -> Alias:
     return x
 
-assert_type(transform(1), Any)
+assert_type(transform(1), Any)  # E: Call uses a signature that depends on unresolved imports
 "#,
 );
 
@@ -120,7 +115,6 @@ x = s
 );
 
 testcase!(
-    bug = "An unresolved imported name shadows the available overload",
     test_signature_unresolved_import_missing_export,
     TestEnv::one("backend", ""),
     r#"
@@ -132,7 +126,7 @@ def transform(x: Array) -> Any: ...
 @overload
 def transform(x: int) -> str: ...
 def transform(x: Any) -> Any: ...
-assert_type(transform(1), Any)
+assert_type(transform(1), str)
 "#,
 );
 
@@ -145,7 +139,7 @@ from missing_backend import Array  # E: Cannot find module `missing_backend`
 def transform[T](x: Array) -> list[T]:
     raise RuntimeError
 
-result: list[str] = transform(1)
+result: list[str] = transform(1)  # E: Call uses a signature that depends on unresolved imports
 assert_type(result, list[str])
 "#,
 );
@@ -164,22 +158,31 @@ class Right:
     def __radd__(self, other: object) -> int:
         return 0
 
-assert_type(Left() + Right(), str)
+assert_type(Left() + Right(), str)  # E: Call uses a signature that depends on unresolved imports
 "#,
 );
 
 testcase!(
     test_signature_unresolved_import_generic_class,
     r#"
-from typing import Any, assert_type
+from typing import Any, Callable, assert_type
 from missing_backend import Array  # E: Cannot find module `missing_backend`
 
+def identity[**P, R](f: Callable[P, R]) -> Callable[P, R]:
+    return f
+
 class Box[T]:
+    @identity
     def get(self) -> T:
         raise RuntimeError
 
-def exercise(box: Box[Array]) -> None:
+def exercise(box: Box[Array], values: list[Array]) -> None:
+    # Receiver substitution does not make these defined generic contracts unavailable.
     assert_type(box.get(), Any)
+    values.append(1)
+    assert_type(values.pop(), Any)
+    assert_type(values[0], Any)
+    assert_type(values + [1], list[Any])
 "#,
 );
 
@@ -195,12 +198,18 @@ class Model:
     array: Array
     other: Other
 
-assert_type(Model(1, 2), Model)
+assert_type(Model(1, 2), Model)  # E: Call uses a signature that depends on unresolved imports
+
+@dataclass
+class GenericModel[T]:
+    value: T
+
+def exercise(model: type[GenericModel[Array]]) -> None:
+    assert_type(model(1), GenericModel[Array])
 "#,
 );
 
 testcase!(
-    bug = "An entirely unresolved overload set accepts any argument",
     test_signature_unresolved_import_all_overloads,
     r#"
 from typing import Any, assert_type, overload
@@ -209,10 +218,19 @@ from missing_backend import Array, Other  # E: Cannot find module `missing_backe
 @overload
 def transform(x: Array) -> int: ...
 @overload
-def transform(x: Other) -> str: ...
-def transform(x: Any) -> Any: ...
+def transform(x: Other, y: Other) -> str: ...
+def transform(x: Any, y: Any = None) -> Any: ...
 
-assert_type(transform(1), int)
+assert_type(transform(1), int)  # E: Call uses a signature that depends on unresolved imports
+assert_type(transform(1, 2), str)  # E: Call uses a signature that depends on unresolved imports
+
+@overload
+def ambiguous(x: Array) -> int: ...
+@overload
+def ambiguous(x: Other) -> str: ...
+def ambiguous(x: Any) -> Any: ...
+
+assert_type(ambiguous(1), Any)  # E: No matching overload found
 "#,
 );
 
@@ -223,7 +241,7 @@ from typing import Any, Callable, assert_type
 from missing_backend import Array  # E: Cannot find module `missing_backend`
 
 def exercise(transform: Callable[[Array], Array]) -> None:
-    assert_type(transform(1), Any)
+    assert_type(transform(1), Any)  # E: Call uses a signature that depends on unresolved imports
 "#,
 );
 

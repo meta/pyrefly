@@ -170,7 +170,8 @@ impl TypeHeap {
     }
 
     /// Create a `Type::Function` from a Function.
-    pub fn mk_function(&self, func: Function) -> Type {
+    pub fn mk_function(&self, mut func: Function) -> Type {
+        func.initialize_unresolved_imports(None);
         Type::Function(Box::new(func))
     }
 
@@ -192,7 +193,10 @@ impl TypeHeap {
     }
 
     /// Create a `Type::Forall` from a Forall.
-    pub fn mk_forall(&self, forall: Forall<Forallable>) -> Type {
+    pub fn mk_forall(&self, mut forall: Forall<Forallable>) -> Type {
+        if let Forallable::Function(func) = &mut forall.body {
+            func.initialize_unresolved_imports(Some(forall.tparams.as_ref()));
+        }
         Type::Forall(Box::new(forall))
     }
 
