@@ -32,6 +32,7 @@ use pyrefly_types::types::AnyStyle;
 use pyrefly_types::types::Overload;
 use pyrefly_types::types::OverloadType;
 use pyrefly_types::types::Type;
+use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
@@ -894,17 +895,62 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     &Instance::of_protocol(base, self.heap.mk_class_type(cls.clone())),
                 ))
             }
+            DjangoClassMetadata::ManyRelatedManager { pk_type } => {
+                if !matches!(
+                    name.as_str(),
+                    "add" | "aadd" | "remove" | "aremove" | "set" | "aset"
+                ) {
+                    return None;
+                }
+                let member = self.get_class_member(cls.class_object(), name)?;
+                let mut attribute =
+                    self.as_instance_attribute(name, &member, &Instance::of_class(cls));
+                // The stubs accept `int` wherever a related object may be passed by primary key.
+                let int = self.heap.mk_class_type(self.stdlib.int().clone());
+                match &mut attribute {
+                    ClassAttribute::ReadWrite { read_type: ty, .. }
+                    | ClassAttribute::ReadOnly(ty, _) => {
+                        ty.transform_toplevel_callable_signatures(|signature, _| {
+                            signature.params.visit_mut(&mut |param_ty| {
+                                param_ty.transform_mut(&mut |t| {
+                                    if *t == int {
+                                        *t = pk_type.clone();
+                                    }
+                                })
+                            });
+                        });
+                    }
+                    _ => {
+                        unreachable!("ManyRelatedManager add, remove, and set are ordinary methods")
+                    }
+                }
+                Some(attribute)
+            }
         }
     }
 
-    // Get ManyRelatedManager class from django stubs
+    /// Get the ManyRelatedManager class from the django stubs, specialized to the target model.
+    /// The manager records the target's primary key type so that methods accepting related
+    /// objects by primary key use that type.
     fn get_manager_type(&self, target_model_type: Type) -> Option<Type> {
         let model_class = self.try_get_from_export(ModuleName::django_models(), MODEL)?;
         let model_instance_type = self.class_def_to_instance_type(model_class);
-        self.specialize_manager_type(
+        let pk_type = match &target_model_type {
+            Type::ClassType(target) => self
+                .get_pk_field_type(target.class_object())
+                .map(|(pk_type, _)| pk_type),
+            _ => None,
+        };
+        let manager = self.specialize_manager_type(
             MANYRELATEDMANAGER,
             vec![target_model_type, model_instance_type],
-        )
+        )?;
+        match (manager, pk_type) {
+            (Type::ClassType(manager), Some(pk_type)) => Some(self.heap.mk_class_type(
+                manager.with_django_metadata(DjangoClassMetadata::ManyRelatedManager { pk_type }),
+            )),
+            (manager, _) => Some(manager),
+        }
     }
 
     fn get_related_manager_type(&self, target_model_type: Type) -> Option<Type> {
