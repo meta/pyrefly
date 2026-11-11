@@ -216,6 +216,20 @@ def f(a1: A[int], a2: A):
 );
 
 testcase!(
+    test_typevar_default_self_preserves_generic_scope,
+    r#"
+from typing import Generic, Self, TypeVar
+
+class Scoped[T]:
+    def method[R = Self](self) -> R: ...
+
+T = TypeVar("T")
+class Legacy(Generic[T]):
+    def method[R = Self](self) -> R: ...
+"#,
+);
+
+testcase!(
     test_scoped_typevar_default_is_outer_scoped_typevar,
     r#"
 from typing import Any, Callable, Concatenate, assert_type
