@@ -1611,7 +1611,6 @@ assert_type(D.make(), D)
 );
 
 testcase!(
-    bug = "Generic metaclass callable conversion loses Self and bound TypeVars",
     test_type_of_self_as_callable_with_type_var_metaclass,
     r#"
 from typing import Callable, Self, TypeVar, assert_type, reveal_type
@@ -1628,13 +1627,13 @@ class C(metaclass=Meta):
 
     @classmethod
     def make(cls) -> Self:
-        reveal_type(identity(cls))  # E: revealed type: (x: int) -> C
-        return identity(cls)(1)  # E: Returned type `C` is not assignable to declared return type `Self@C`
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> Self@C
+        return identity(cls)(1)
 
     @classmethod
     def bounded[S: C](cls: type[S]) -> S:
-        reveal_type(identity(cls))  # E: revealed type: (x: int) -> C
-        return identity(cls)(1)  # E: Returned type `C` is not assignable to declared return type `S`
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> S
+        return identity(cls)(1)
 
 _T = TypeVar("_T")
 
@@ -1647,8 +1646,8 @@ class Legacy(metaclass=LegacyMeta):
 
     @classmethod
     def make(cls) -> Self:
-        reveal_type(identity(cls))  # E: revealed type: (x: int) -> Legacy
-        return identity(cls)(1)  # E: Returned type `Legacy` is not assignable to declared return type `Self@Legacy`
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> Self@Legacy
+        return identity(cls)(1)
 
 class D(C): ...
 class LegacyD(Legacy): ...

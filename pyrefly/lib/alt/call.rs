@@ -2865,7 +2865,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub fn constructor_to_callable(&self, cls: &ClassType) -> Type {
         let class_type = self.heap.mk_class_type(cls.clone());
-        if let Some(metaclass_call_attr_ty) = self.get_metaclass_dunder_call(cls) {
+        if let Some(mut metaclass_call_attr_ty) = self.get_metaclass_dunder_call(cls) {
+            // Receiver type variables must be solved before classifying the return.
+            if let Type::BoundMethod(method) = &metaclass_call_attr_ty
+                && let Some(bound) =
+                    self.bind_boundmethod(method, &mut |got, want| self.is_subset_eq(got, want))
+            {
+                metaclass_call_attr_ty = bound;
+            }
+            self.expand_mut(&mut metaclass_call_attr_ty);
             // Use the metaclass __call__ directly (ignoring __new__ and __init__) when either:
             // 1. Its return type is not a subclass of the current class, or
             // 2. The class is an enum (enum construction is handled by EnumMeta.__call__).
