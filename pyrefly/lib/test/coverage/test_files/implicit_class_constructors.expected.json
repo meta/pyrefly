@@ -200,10 +200,10 @@
     {
       "kind": "attr",
       "name": "test.SHADOWED",
-      "n_typable": 0,
+      "n_typable": 1,
       "n_typed": 0,
       "n_any": 0,
-      "n_untyped": 0,
+      "n_untyped": 1,
       "location": {
         "line": 57,
         "column": 1
@@ -319,12 +319,12 @@
     }
   ],
   "type_ignores": [],
-  "n_typable": 11,
+  "n_typable": 12,
   "n_typed": 5,
   "n_any": 0,
-  "n_untyped": 6,
-  "coverage": 45.45454545454545,
-  "strict_coverage": 45.45454545454545,
+  "n_untyped": 7,
+  "coverage": 41.66666666666667,
+  "strict_coverage": 41.66666666666667,
   "n_functions": 2,
   "n_methods": 3,
   "n_function_params": 0,

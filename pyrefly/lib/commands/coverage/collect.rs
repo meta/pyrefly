@@ -485,35 +485,36 @@ fn parse_variables(
             let key = Key::BoundName(ShortIdentifier::expr_name(name));
             answers.get_idx(bindings.key_to_idx_hashed_opt(Hashed::new(&key))?)
         };
-        let callee_names = |cls: &ClassType| {
-            let is_generic = !cls.targs().is_empty();
-            match call.func.as_ref() {
-                Expr::Name(n) if is_generic => {
-                    cls.known()
-                        .is_some_and(|known| IMPLICIT_GENERIC_BUILTINS.contains(&known))
-                        && *cls.name() == n.id
-                }
-                // Resolving the name also covers aliases, like `from pathlib import Path as P`.
-                Expr::Name(n) => bound_type(n).is_some_and(
-                    |t| matches!(t.ty(), Type::ClassDef(c) if c == cls.class_object()),
-                ),
-                // A module attribute, so that a method like `obj.Spam()` doesn't match.
-                Expr::Attribute(attr) => {
-                    !is_generic
-                        && *cls.name() == attr.attr.id
-                        && attr
-                            .value
-                            .as_name_expr()
-                            .and_then(bound_type)
-                            .is_some_and(|t| matches!(t.ty(), Type::Module(_)))
-                }
-                Expr::Subscript(sub) => match sub.value.as_ref() {
-                    Expr::Name(n) => *cls.name() == n.id,
-                    Expr::Attribute(attr) => *cls.name() == attr.attr.id,
-                    _ => false,
-                },
-                _ => false,
+        let callee_names = |cls: &ClassType| match call.func.as_ref() {
+            // Resolving the name covers aliases like `from pathlib import Path as P`, and rules
+            // out a function that shadows a builtin class.
+            Expr::Name(n) => {
+                (cls.targs().is_empty()
+                    || cls
+                        .known()
+                        .is_some_and(|known| IMPLICIT_GENERIC_BUILTINS.contains(&known)))
+                    && bound_type(n).is_some_and(
+                        |t| matches!(t.ty(), Type::ClassDef(c) if c == cls.class_object()),
+                    )
             }
+            // Only the attribute name is compared, so the base must be a module name and generic
+            // builtins are left out: a method like `obj.Spam()` or a function like `mod.list()`
+            // doesn't match. Nested modules like `a.b.Spam()` are left out too.
+            Expr::Attribute(attr) => {
+                cls.targs().is_empty()
+                    && *cls.name() == attr.attr.id
+                    && attr
+                        .value
+                        .as_name_expr()
+                        .and_then(bound_type)
+                        .is_some_and(|t| matches!(t.ty(), Type::Module(_)))
+            }
+            Expr::Subscript(sub) => match sub.value.as_ref() {
+                Expr::Name(n) => *cls.name() == n.id,
+                Expr::Attribute(attr) => *cls.name() == attr.attr.id,
+                _ => false,
+            },
+            _ => false,
         };
 
         let is_implicit_stdlib =
