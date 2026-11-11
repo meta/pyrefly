@@ -896,32 +896,36 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ))
             }
             DjangoClassMetadata::ManyRelatedManager { pk_type } => {
-                if !matches!(
-                    name.as_str(),
-                    "add" | "aadd" | "remove" | "aremove" | "set" | "aset"
-                ) {
+                let [target, _] = cls.targs().as_slice() else {
                     return None;
-                }
+                };
                 let member = self.get_class_member(cls.class_object(), name)?;
                 let mut attribute =
                     self.as_instance_attribute(name, &member, &Instance::of_class(cls));
-                // The stubs accept `int` wherever a related object may be passed by primary key.
+                let (ClassAttribute::ReadWrite { read_type: ty, .. }
+                | ClassAttribute::ReadOnly(ty, _)) = &mut attribute
+                else {
+                    return None;
+                };
+                // The stubs accept a related object by primary key as `_To | int`.
                 let int = self.heap.mk_class_type(self.stdlib.int().clone());
-                match &mut attribute {
-                    ClassAttribute::ReadWrite { read_type: ty, .. }
-                    | ClassAttribute::ReadOnly(ty, _) => {
-                        ty.transform_toplevel_callable_signatures(|signature, _| {
-                            signature.params.visit_mut(&mut |param_ty| {
-                                param_ty.transform_mut(&mut |t| {
-                                    if *t == int {
-                                        *t = pk_type.clone();
-                                    }
-                                })
-                            });
-                        });
-                    }
-                    _ => return None,
-                }
+                ty.transform_toplevel_callable_signatures(|signature, _| {
+                    signature.params.visit_mut(&mut |param_ty| {
+                        param_ty.transform_mut(&mut |t| {
+                            if let Type::Union(union) = t
+                                && union.members.contains(target)
+                                && union.members.contains(&int)
+                            {
+                                let members = union
+                                    .members
+                                    .iter()
+                                    .map(|m| if *m == int { pk_type } else { m }.clone())
+                                    .collect();
+                                *t = self.unions(members);
+                            }
+                        })
+                    });
+                });
                 Some(attribute)
             }
         }
