@@ -19,6 +19,7 @@ use pyrefly_build::handle::Handle;
 use pyrefly_python::sys_info::PythonVersion;
 use ruff_text_size::TextSize;
 
+use crate::lsp::wasm::completion::CompletionOptions;
 use crate::state::lsp::ImportFormat;
 use crate::state::require::Require;
 use crate::state::state::State;
@@ -2713,6 +2714,157 @@ def f():
         keyword_labels.iter().any(|l| l == "while"),
         "expected statement keyword `while` at statement start, got {keyword_labels:?}"
     );
+}
+
+#[test]
+fn completion_after_keyword_prefix_in_function_body() {
+    for (prefix, local, builtin) in [
+        ("as", "assertion", "classmethod"),
+        ("in", "initial", "int"),
+        ("is", "island", "isinstance"),
+    ] {
+        let code = format!("\ndef f({local}: int, unrelated: int):\n    {prefix}\n#     ^\n");
+        let items = completions_at_cursor(&code);
+        for keyword in ["assert", "async", "import", "is"] {
+            assert!(
+                items.iter().any(|item| {
+                    item.kind == Some(CompletionItemKind::Keyword) && item.label == keyword
+                }),
+                "expected keyword `{keyword}` after `{prefix}`, got {items:?}"
+            );
+        }
+        for name in [local, builtin] {
+            assert!(
+                items.iter().any(|item| item.label == name),
+                "expected `{name}` after `{prefix}`, got {items:?}"
+            );
+        }
+        for name in ["unrelated", "len"] {
+            assert!(
+                !items.iter().any(|item| item.label == name),
+                "unexpected `{name}` after `{prefix}`, got {items:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn completion_after_keyword_prefix_preserves_autoimport_behavior() {
+    for (prefix, local, auto_import, expected_incomplete, expected_autoimport) in [
+        ("as", "", true, true, false),
+        ("ass", "", true, false, true),
+        ("and", "", true, false, true),
+        ("and", "andromeda: int", true, true, false),
+        ("and_", "andromeda: int", true, false, true),
+        ("as", "", false, false, false),
+        ("and", "andromeda: int", false, false, false),
+    ] {
+        let code = format!("def f({local}):\n    {prefix}");
+        let (handles, state) = mk_multi_file_state(
+            &[
+                ("main", &code),
+                ("tools", "def and_tool(): pass\ndef assert_tool(): pass"),
+            ],
+            Require::Exports,
+            false,
+        );
+        let (items, is_incomplete) = state.transaction().completion_with_incomplete(
+            &handles["main"],
+            TextSize::of(code.as_str()),
+            ImportFormat::Absolute,
+            CompletionOptions {
+                auto_import,
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(!items.is_empty(), "expected completions in {code:?}");
+        assert_eq!(is_incomplete, expected_incomplete, "code: {code:?}");
+        assert_eq!(
+            items
+                .iter()
+                .any(|item| matches!(item.label.as_str(), "and_tool" | "assert_tool")),
+            expected_autoimport,
+            "code: {code:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_after_keyword_prefix_in_inline_suite() {
+    for header in [
+        "def f():\n    if True:",
+        "def f():\n    while True:",
+        "def f():\n    for item in ():",
+        "def f():\n    with open('file'):",
+        "def f():\n    try:",
+        "def f():\n    try: pass\n    except:",
+        "def f():\n    try: pass\n    finally:",
+        "def f():\n    if False: pass\n    elif True:",
+        "def f():\n    if False: pass\n    else:",
+        "class C:\n    def f(self):",
+        "def f():\n    class C:",
+        "def f():\n    match 1:\n        case 1:",
+    ] {
+        let code = format!("{header} as");
+        let (handles, state) = mk_multi_file_state(&[("main", &code)], Require::Exports, false);
+        let items = state.transaction().completion(
+            &handles["main"],
+            TextSize::of(code.as_str()),
+            ImportFormat::Absolute,
+            true,
+            None,
+        );
+        assert!(
+            items.iter().any(|item| {
+                item.kind == Some(CompletionItemKind::Keyword) && item.label == "assert"
+            }),
+            "expected `assert` in {code:?}, got {items:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_after_keyword_prefix_in_other_statement_positions() {
+    for code in [
+        "as\n# ^\n",
+        "class C:\n    as\n#     ^\n",
+        "if True:\n    as\n#     ^\n",
+        "def f():\n    if True:\n        as\n#         ^\n",
+        "def f():\n    # comment\n\n    as\n#     ^\n",
+        "def f():\n    pass; as\n#           ^\n",
+        "def f():\r\n    as\r\n#     ^\r\n",
+    ] {
+        let items = completions_at_cursor(code);
+        assert!(
+            items.iter().any(|item| {
+                item.kind == Some(CompletionItemKind::Keyword) && item.label == "assert"
+            }),
+            "expected `assert` in {code:?}, got {items:?}"
+        );
+    }
+}
+
+#[test]
+fn no_statement_completions_after_keyword_in_expression() {
+    for code in [
+        "def f(item):\n    value = item is\n#                  ^\n",
+        "def f():\n    return as\n#            ^\n",
+        "def f():\n    print(\n        as\n#         ^\n    )\n",
+        "def f():\n    value = {1: as}\n#                 ^\n",
+        "def f(items):\n    value = items[:as]\n#                    ^\n",
+        "def f():\n    value: as\n#            ^\n",
+        "def f():\n    value = lambda: as\n#                     ^\n",
+        "def f():\n    def g(value: as): pass\n#                  ^\n",
+    ] {
+        let items = completions_at_cursor(code);
+        for name in ["assert", "def", "return"] {
+            assert!(
+                !items.iter().any(|item| item.label == name),
+                "unexpected `{name}` in {code:?}, got {items:?}"
+            );
+        }
+    }
 }
 
 #[test]
