@@ -2395,7 +2395,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Validates `tparams` and returns a validated `TParams`.
-    /// References to out-of-scope legacy type variables are replaced with gradual fallbacks.
+    /// A default may only refer to earlier parameters in `tparams`. References to any other
+    /// type variable are reported and replaced with gradual fallbacks.
     pub fn validated_tparams(
         &self,
         range: TextRange,
@@ -2433,6 +2434,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         Type::TypeVar(t) => (t.qname().id(), QuantifiedKind::TypeVar),
                         Type::TypeVarTuple(t) => (t.qname().id(), QuantifiedKind::TypeVarTuple),
                         Type::ParamSpec(p) => (p.qname().id(), QuantifiedKind::ParamSpec),
+                        Type::Quantified(q) => (q.name(), q.kind()),
                         _ => return,
                     };
                     *ty = match seen.get(name) {
