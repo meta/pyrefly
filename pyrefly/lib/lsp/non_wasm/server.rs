@@ -3316,6 +3316,22 @@ impl Server {
             .collect()
     }
 
+    /// Draw an unset baseline match as a hint in an open file.
+    ///
+    /// The severity cap is chosen before `to_diagnostic_with_severity` runs.
+    /// That function shows an untagged hint as information, so the historical
+    /// hint for an unset `baseline-error-level` is assigned here.
+    fn show_unconfigured_baseline_as_hint(
+        unconfigured: bool,
+        path: &ModulePath,
+        open_files: &HashMap<PathBuf, OpenFile>,
+        diag: &mut Diagnostic,
+    ) {
+        if unconfigured && to_real_path(path).is_some_and(|open| open_files.contains_key(&open)) {
+            diag.severity = Some(DiagnosticSeverity::Hint);
+        }
+    }
+
     fn get_diag_if_shown(
         &self,
         e: &Error,
@@ -3560,13 +3576,15 @@ impl Server {
             }
         }
         for e in baseline_errors {
-            // Errors in open files that match a baseline file are downgraded to HINT.
             if let Some((path, mut diag)) =
                 self.get_diag_if_shown(e.error(), e.severity(), &open_files, None)
             {
-                if to_real_path(e.error().path()).is_some_and(|p| open_files.contains_key(&p)) {
-                    diag.severity = Some(DiagnosticSeverity::Hint);
-                }
+                Self::show_unconfigured_baseline_as_hint(
+                    e.unconfigured_baseline_hint(),
+                    e.error().path(),
+                    &open_files,
+                    &mut diag,
+                );
                 diags.entry(path.to_owned()).or_default().push(diag);
             }
         }
@@ -6622,13 +6640,15 @@ impl Server {
             }
         }
         for e in baseline_errors {
-            // Errors in open files that match a baseline file are downgraded to HINT.
             if let Some((_, mut diag)) =
                 self.get_diag_if_shown(e.error(), e.severity(), &open_files, cell_uri)
             {
-                if to_real_path(e.error().path()).is_some_and(|p| open_files.contains_key(&p)) {
-                    diag.severity = Some(DiagnosticSeverity::Hint);
-                }
+                Self::show_unconfigured_baseline_as_hint(
+                    e.unconfigured_baseline_hint(),
+                    e.error().path(),
+                    &open_files,
+                    &mut diag,
+                );
                 items.push(diag);
             }
         }

@@ -673,8 +673,10 @@ pub struct ConfigFile {
     /// Errors matching the baseline are suppressed by default.
     pub baseline: Option<PathBuf>,
 
-    /// Severity assigned to errors that match the baseline.
-    /// Defaults to `ignore`.
+    /// Severity cap for errors that match the baseline.
+    /// `pyrefly check` treats an unset value as `ignore`. The IDE shows hints
+    /// until this is set, then shows a match at the lower of its own severity
+    /// and this level.
     pub baseline_error_level: Option<Severity>,
 
     /// Fields used to match diagnostics against baseline entries.
