@@ -1544,6 +1544,72 @@ ok: Callable[[int], list[C[int]]] = C
     "#,
 );
 
+// https://github.com/meta/pyrefly/issues/5591
+testcase!(
+    test_type_of_self_as_callable,
+    r#"
+from typing import Callable, reveal_type
+
+def identity[**P, R](cb: Callable[P, R]) -> Callable[P, R]:
+    return cb
+
+class C:
+    def __init__(self, x: int) -> None: ...
+
+    @classmethod
+    def method(cls) -> None:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> Self@C
+        ok: Callable[[int], C] = cls
+        bad: Callable[[str], C] = cls  # E: `type[Self@C]` is not assignable to `(str) -> C`
+
+    @classmethod
+    def make[S: C](cls: type[S]) -> S:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> S
+        return identity(cls)(1)
+
+class G[T]:
+    def __init__(self, x: T) -> None: ...
+
+    @classmethod
+    def method(cls) -> None:
+        reveal_type(identity(cls))  # E: revealed type: (x: T) -> Self@G
+    "#,
+);
+
+testcase!(
+    test_type_of_self_as_callable_with_type_var_new,
+    r#"
+from typing import Callable, Self, TypeVar, assert_type, reveal_type
+
+def identity[**P, R](cb: Callable[P, R]) -> Callable[P, R]:
+    return cb
+
+class C:
+    def __new__[S: C](cls: type[S], x: int) -> S:
+        raise NotImplementedError
+
+    @classmethod
+    def make(cls) -> Self:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> Self@C
+        return identity(cls)(1)
+
+_S = TypeVar("_S", bound="Legacy")
+
+class Legacy:
+    def __new__(cls: type[_S], x: int) -> _S:
+        raise NotImplementedError
+
+    @classmethod
+    def make(cls) -> Self:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> Self@Legacy
+        return identity(cls)(1)
+
+class D(C): ...
+
+assert_type(D.make(), D)
+    "#,
+);
+
 // Soft errors, such as the ignored-by-default `unknown-argument-type`, must not make the
 // `__init__` check look redundant.
 testcase!(

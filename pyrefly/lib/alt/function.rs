@@ -2838,7 +2838,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub fn bind_dunder_new(&self, t: &Type, cls: ClassType) -> Option<Type> {
         let cls_type = self.heap.mk_type_of(self.heap.mk_class_type(cls));
         let t = self.filter_overloads_by_receiver(t.clone(), &cls_type);
-        self.bind_function(&t, &cls_type, false, &mut |a, b| self.is_subset_eq(a, b))
+        let mut bound =
+            self.bind_function(&t, &cls_type, false, &mut |a, b| self.is_subset_eq(a, b))?;
+        self.expand_mut(&mut bound);
+        Some(bound)
     }
 
     /// Bind a `__init__` method for constructor callable conversion.
