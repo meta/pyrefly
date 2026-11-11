@@ -741,6 +741,26 @@ def test(xs: list[int]):
 "#,
 );
 
+// An unknown-length splat may be empty, so it can match an overload with no positional
+// parameters, and the first matching overload wins. This matches mypy; pyright evaluates
+// `f(*xs)` as `Unknown`. A splat that is known to be nonempty skips the zero-arity overload.
+testcase!(
+    test_splat_unknown_length_zero_arity_overload,
+    r#"
+from typing import Any, assert_type, overload
+
+@overload
+def f() -> int: ...
+@overload
+def f(x: int, /) -> str: ...
+def f(*args: Any) -> Any: ...
+
+def test(xs: list[int], nonempty: tuple[int, *tuple[int, ...]]):
+    assert_type(f(*xs), int)
+    assert_type(f(*nonempty), str)
+"#,
+);
+
 testcase!(
     test_splat_unknown_length_zero_positional_params_5542,
     r#"
