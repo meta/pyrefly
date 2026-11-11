@@ -10,6 +10,24 @@
 use crate::test::util::TestEnv;
 use crate::testcase;
 
+// Constructor phases must deduplicate equivalent diagnostics at the same call range.
+testcase!(
+    test_signature_unresolved_import_constructor_details,
+    r#"
+from missing_backend import Array, Other  # E: Cannot find module `missing_backend`
+
+class Model:
+    def __new__(cls, array: Array, other: Other) -> "Model":
+        return super().__new__(cls)
+
+    def __init__(self, array: Array, other: Other) -> None:
+        pass
+
+def construct(array: Array, other: Other) -> Model:
+    return Model(array, other)  # E: Call uses a signature that depends on unresolved imports
+"#,
+);
+
 testcase!(
     test_signature_unresolved_import_overload,
     r#"
@@ -242,6 +260,138 @@ from missing_backend import Array  # E: Cannot find module `missing_backend`
 
 def exercise(transform: Callable[[Array], Array]) -> None:
     assert_type(transform(1), Any)  # E: Call uses a signature that depends on unresolved imports
+"#,
+);
+
+testcase!(
+    bug = "Usable union arms are blocked by unrelated optional imports",
+    test_signature_unresolved_import_usable_union,
+    r#"
+from typing import Any, Literal, assert_type, overload
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+@overload
+def repeat(value: int | Array, *, eager: Literal[True]) -> list[int]: ...
+@overload
+def repeat(value: int | Array, *, eager: Literal[False] = False) -> tuple[int, ...]: ...
+def repeat(value: Any, *, eager: bool = False) -> Any: ...
+
+assert_type(repeat(7, eager=True), Any)  # E: No matching overload found
+assert_type(repeat(7), tuple[int, ...])  # E: Call uses a signature that depends on unresolved imports
+
+def scalar(value: int | Array) -> int:
+    return 0
+
+assert_type(scalar(7), int)  # E: Call uses a signature that depends on unresolved imports
+assert_type(scalar("bad"), int)  # E: Call uses a signature that depends on unresolved imports
+"#,
+);
+
+testcase!(
+    bug = "Omitted optional input types make an ordinary call warn",
+    test_signature_unresolved_import_optional_input,
+    r#"
+from typing import assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+def optional(value: int, extra: Array | None = None) -> int:
+    return value
+
+assert_type(optional(7), int)  # E: Call uses a signature that depends on unresolved imports
+assert_type(optional(7, None), int)  # E: Call uses a signature that depends on unresolved imports
+assert_type(optional(7, object()), int)  # E: Call uses a signature that depends on unresolved imports
+"#,
+);
+
+testcase!(
+    bug = "A missing union arm warns even when an unrelated argument is invalid",
+    test_signature_unresolved_import_argument_errors,
+    r#"
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+def mixed(value: int | Array, count: int) -> str:
+    return "result"
+
+mixed(7, "bad")  # E: Argument  # E: Call uses a signature that depends on unresolved imports
+"#,
+);
+
+testcase!(
+    bug = "A usable nested callback return still warns for its optional union arm",
+    test_signature_unresolved_import_callable_input,
+    r#"
+from typing import Callable, assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+def consume(callback: Callable[[], int | Array]) -> int:
+    return 0
+
+def callback() -> int:
+    return 7
+
+assert_type(consume(callback), int)  # E: Call uses a signature that depends on unresolved imports
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_any_argument,
+    r#"
+from typing import Any, assert_type, overload
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+@overload
+def choose(value: Array) -> str: ...
+@overload
+def choose(value: int) -> bool: ...
+def choose(value: Any) -> Any: ...
+
+def exercise(value: Any) -> None:
+    assert_type(choose(value), bool)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_bound_input,
+    r#"
+from typing import Any, assert_type, overload
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+@overload
+def choose[T: int](value: list[T] | Array) -> str: ...
+@overload
+def choose(value: list[str]) -> bool: ...
+def choose(value: Any) -> Any: ...
+
+values: list[str] = ["bad"]
+assert_type(choose(values), bool)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_lambda_context,
+    r#"
+from typing import Any, Callable, assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+def consume(callback: Callable[[Array], int]) -> int:
+    return 0
+
+consume(lambda value: assert_type(value, Any) or 0)  # E: Call uses a signature that depends on unresolved imports
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_contextual_binding,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+def use(callback: Callable[[int], int], extra: Array | None = None) -> None:
+    pass
+
+def exercise(flag: bool) -> None:
+    use((lambda value: value) if flag else (lambda value: value))  # E: Call uses a signature that depends on unresolved imports
 "#,
 );
 
