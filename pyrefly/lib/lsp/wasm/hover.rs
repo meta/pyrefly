@@ -45,6 +45,7 @@ use regex::Regex;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::CmpOp;
 use ruff_python_ast::Expr;
+use ruff_python_ast::ExprContext;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
@@ -90,6 +91,7 @@ pub struct HoverValue {
     pub range: Option<Range>,
     pub docstring: Option<Docstring>,
     pub parameter_doc: Option<(String, String)>,
+    pub property_accessors: Option<String>,
     pub type_sources: Vec<String>,
     pub display: Option<String>,
     pub show_go_to_links: bool,
@@ -312,14 +314,21 @@ impl HoverValue {
             )
         });
 
+        let accessors_formatted = self
+            .property_accessors
+            .as_ref()
+            .map(|acc| format!("\n---\n**Property accessors**\n{acc}"))
+            .unwrap_or_default();
+
         Hover {
             contents: Contents::MarkupContent(MarkupContent {
                 kind: MarkupKind::Markdown,
                 value: format!(
-                    "```python\n{}{}{}\n```{}{}{}{}",
+                    "```python\n{}{}{}\n```{}{}{}{}{}",
                     kind_formatted,
                     name_formatted,
                     type_display,
+                    accessors_formatted,
                     type_source_formatted,
                     docstring_formatted,
                     parameter_doc_formatted,
@@ -1568,6 +1577,32 @@ pub fn get_hover(
     .map(|result| result.hover)
 }
 
+fn resolve_property_accessors(
+    transaction: &Transaction,
+    handle: &Handle,
+    id: &IdentifierWithContext,
+) -> Option<String> {
+    let IdentifierContext::Attribute {
+        base_range,
+        expr_context: ExprContext::Store,
+        ..
+    } = &id.context
+    else {
+        return None;
+    };
+    let answers = transaction.get_answers(handle)?;
+    let base_type = answers.get_type_trace(*base_range)?;
+    transaction.ad_hoc_solve(handle, "property_accessors", |solver| {
+        let accessors =
+            solver.property_accessor_types_for_assignment(base_type, &id.identifier.id)?;
+        let setter_str = accessors.setter_type.as_lsp_string(LspDisplayMode::Hover);
+        let getter_str = accessors.getter_type.as_lsp_string(LspDisplayMode::Hover);
+        Some(format!(
+            "- **Setter:** `{setter_str}` (assigned here)\n- **Getter:** `{getter_str}`"
+        ))
+    })?
+}
+
 /// Build hover contents and report whether the compact type display can be expanded.
 pub fn get_hover_with_verbosity(
     transaction: &Transaction<'_>,
@@ -1774,6 +1809,9 @@ pub fn get_hover_with_verbosity(
         };
 
     let parameter_doc = resolve_hover_parameter_doc(transaction, handle, position);
+    let property_accessors = hover_identifier
+        .as_ref()
+        .and_then(|id| resolve_property_accessors(transaction, handle, id));
 
     let mut hover = HoverValue {
         kind,
@@ -1782,6 +1820,7 @@ pub fn get_hover_with_verbosity(
         range,
         docstring,
         parameter_doc,
+        property_accessors,
         type_sources: type_sources_for_hover(transaction, handle, position),
         display: type_display,
         show_go_to_links: options.show_go_to_links,

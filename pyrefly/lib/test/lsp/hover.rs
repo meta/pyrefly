@@ -379,6 +379,135 @@ def update(c: C, name: str) -> None:
 }
 
 #[test]
+fn hover_on_property_assignment_target() {
+    let code = r#"
+class A:
+    def __init__(self) -> None:
+        self._x: int | None = None
+
+    @property
+    def x(self) -> int | None:
+        return self._x
+
+    @x.setter
+    def x(self, value: int | None) -> None:
+        self._x = value
+
+a = A()
+val = a.x
+#       ^
+a.x = 1
+# ^
+
+class B:
+    def __init__(self) -> None:
+        self._items: tuple[int, ...] = ()
+
+    @property
+    def items(self) -> tuple[int, ...]:
+        return self._items
+
+    @items.setter
+    def items(self, value: list[int]) -> None:
+        self._items = tuple(value)
+
+b = B()
+res = b.items
+#       ^
+b.items = [1, 2]
+# ^
+
+class Box[T]:
+    def __init__(self, val: T) -> None:
+        self._val = val
+
+    @property
+    def val(self) -> T:
+        return self._val
+
+    @val.setter
+    def val(self, v: T) -> None:
+        self._val = v
+
+box = Box[int](1)
+box.val = 2
+#   ^
+
+from typing import Any
+
+class CustomDesc[T]:
+    def __get__(self, obj: object, objtype: Any = None) -> tuple[T, ...]: ...
+    def __set__(self, obj: object, value: list[T]) -> None: ...
+
+class Holder:
+    attr: CustomDesc[int]
+
+h = Holder()
+h.attr = [1, 2]
+# ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+        match get_hover(&state.transaction(), handle, position, false) {
+            Some(Hover {
+                contents: Contents::MarkupContent(markup),
+                ..
+            }) => markup.value,
+            _ => "None".to_owned(),
+        }
+    });
+    assert_eq!(
+        r#"
+# main.py
+15 | val = a.x
+             ^
+```python
+(attribute) x: int | None
+```
+
+17 | a.x = 1
+       ^
+```python
+(attribute) x: int | None
+```
+
+33 | res = b.items
+             ^
+```python
+(attribute) items: tuple[int, ...]
+```
+
+35 | b.items = [1, 2]
+       ^
+```python
+(attribute) items: list[int]
+```
+---
+**Property accessors**
+- **Setter:** `list[int]` (assigned here)
+- **Getter:** `tuple[int, ...]`
+
+51 | box.val = 2
+         ^
+```python
+(attribute) val: int
+```
+
+64 | h.attr = [1, 2]
+       ^
+```python
+(attribute) attr: list[int]
+```
+---
+**Property accessors**
+- **Setter:** `list[int]` (assigned here)
+- **Getter:** `tuple[int, ...]`
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
 fn hover_on_union_class_attribute_shows_class() {
     let code = r#"
 class C:

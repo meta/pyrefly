@@ -6635,7 +6635,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             attr.attr.range,
             AttributeReferenceKind::Textual,
         );
-        let narrowed = self.check_assign_to_attribute_and_infer_narrow(
+        let res = self.check_assign_to_attribute_and_infer_narrow(
             &base,
             &attr.attr.id,
             got,
@@ -6644,7 +6644,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             errors,
         );
         // Assignment targets are not inferred as reads, so record their types for hover.
-        if let Some(ty) = &narrowed {
+        if let Some(ty) = &res.target_type {
             self.record_type_trace(attr.range, ty);
         }
         if let Some((identifier, unresolved_chain)) =
@@ -6657,7 +6657,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let mut type_info = self
                 .get(&Key::BoundName(ShortIdentifier::new(&identifier)))
                 .clone();
-            type_info.update_for_assignment(chain.facets(), narrowed);
+            type_info.update_for_assignment(chain.facets(), res.narrowed);
             type_info
         } else if let Some((identifier, unresolved_facets)) =
             identifier_and_chain_prefix_for_expr(&Expr::Attribute(attr.clone()))
