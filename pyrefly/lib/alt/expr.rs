@@ -3173,10 +3173,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             match &kw.arg {
                 Some(id) => match id.id.as_str() {
                     "repr" => {
+                        // The `Sentinel` constructor accepts `repr: str | None`.
                         let got = self.expr_infer(&kw.value, errors);
-                        if !self
-                            .is_subset_eq(&got, &self.heap.mk_class_type(self.stdlib.str().clone()))
-                        {
+                        if !self.is_subset_eq(
+                            &got,
+                            &self
+                                .heap
+                                .mk_optional(self.heap.mk_class_type(self.stdlib.str().clone())),
+                        ) {
                             self.error(
                                 errors,
                                 kw.range,
