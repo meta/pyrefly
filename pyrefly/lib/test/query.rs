@@ -826,11 +826,10 @@ class Config:
     );
 }
 
-// BUG: a sentinel under a bare `Final` is a `DefinedWithoutAssign` field, whose annotation
-// `get_attributes` does not read, so `is_final` is false even though the field is enforced
-// as read-only.
+// A sentinel under a bare `Final` is a `DefinedWithoutAssign` field, whose annotation carries
+// the qualifier that makes the field read-only.
 #[test]
-fn test_get_attributes_bare_final_sentinel_is_not_reported_final() {
+fn test_get_attributes_bare_final_sentinel() {
     let tdir = TempDir::new().unwrap();
     let file_path = tdir.path().join("main.py");
     let code = r#"from typing import Final
@@ -859,5 +858,5 @@ class C:
             .is_final
     };
     assert!(is_final("PLAIN"), "`PLAIN` is declared `Final`");
-    assert!(!is_final("MARKER"), "`MARKER` should be reported as final");
+    assert!(is_final("MARKER"), "`MARKER` is declared `Final`");
 }

@@ -991,8 +991,8 @@ class Foo:
     },
 );
 
-// BUG: a sentinel under a bare `Final` or `ClassVar` is a `DefinedWithoutAssign` field, whose
-// annotation the class export does not read, so no explicit annotation reaches Pysa.
+// A sentinel under a bare `Final` or `ClassVar` is a `DefinedWithoutAssign` field, whose
+// annotation the class export reads like any other.
 #[test]
 fn test_export_bare_qualifier_sentinel_field_annotation() {
     let code = r#"
@@ -1041,6 +1041,6 @@ class Foo:
         explicit_annotation("PLAIN").is_some(),
         "a bare `Final` on an ordinary class-body assignment is exported"
     );
-    assert_eq!(explicit_annotation("MARKER"), None);
-    assert_eq!(explicit_annotation("FLAG"), None);
+    assert_eq!(explicit_annotation("MARKER"), Some("Final".to_owned()));
+    assert_eq!(explicit_annotation("FLAG"), Some("ClassVar".to_owned()));
 }

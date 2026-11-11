@@ -1209,7 +1209,10 @@ impl Query {
                         ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => {
                             Some(*annotation)
                         }
-                        ClassFieldDefinition::AssignedInBody { annotation, .. } => *annotation,
+                        ClassFieldDefinition::AssignedInBody { annotation, .. }
+                        | ClassFieldDefinition::DefinedWithoutAssign { annotation, .. } => {
+                            *annotation
+                        }
                         _ => None,
                     }
                     .and_then(|idx| answers.get_idx(idx))

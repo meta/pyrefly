@@ -723,7 +723,8 @@ fn own_annotation_idx(
     match &bindings.get(field).definition {
         ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => Some(*annotation),
         ClassFieldDefinition::DefinedInMethod { annotation, .. }
-        | ClassFieldDefinition::AssignedInBody { annotation, .. } => *annotation,
+        | ClassFieldDefinition::AssignedInBody { annotation, .. }
+        | ClassFieldDefinition::DefinedWithoutAssign { annotation, .. } => *annotation,
         _ => None,
     }
 }
@@ -3559,9 +3560,8 @@ class Child(Middle):
         }
     }
 
-    /// BUG: a sentinel under a bare `Final` is a `DefinedWithoutAssign` field, so
-    /// `own_annotation_idx` cannot see its annotation and a subclass attribute inherits no
-    /// coverage from it.
+    /// A sentinel under a bare `Final` is a `DefinedWithoutAssign` field, and a subclass
+    /// attribute inherits its coverage from that annotation.
     #[test]
     fn test_inherited_bare_final_sentinel_annotation() {
         let base = r#"
@@ -3594,7 +3594,7 @@ class Child(Base):
                 .slots
         };
         assert_eq!(slots("plain"), SlotCounts::typed());
-        assert_eq!(slots("marker"), SlotCounts::untyped());
+        assert_eq!(slots("marker"), SlotCounts::typed());
     }
 
     /// Inheritance coverage follows the nearest explicit attribute annotation, even across a
