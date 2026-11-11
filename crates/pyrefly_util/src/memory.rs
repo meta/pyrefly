@@ -9,6 +9,7 @@ use std::cmp;
 use std::fmt;
 use std::fmt::Display;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::thread::sleep;
 use std::thread::spawn;
 use std::time::Duration;
@@ -22,7 +23,7 @@ use crate::lock::Mutex;
 
 #[derive(Debug, Clone, Copy, Dupe, Default)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Bytes(u64);
+pub struct Bytes(pub u64);
 
 impl Display for Bytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -82,34 +83,24 @@ pub struct JemallocStats {
     pub allocated: Option<Bytes>,
 }
 
-#[cfg(any(not(fbcode_build), target_os = "windows"))]
-fn get_jemalloc_stats() -> JemallocStats {
-    JemallocStats {
-        active: None,
-        allocated: None,
-    }
+static JEMALLOC_STATS: OnceLock<fn() -> JemallocStats> = OnceLock::new();
+
+/// Sets how `MemoryUsage` reads jemalloc statistics. Only the binary knows which
+/// allocator it links, so it calls this once at startup. Without it, the jemalloc
+/// fields of `MemoryUsage` are `None`.
+pub fn set_jemalloc_stats(get: fn() -> JemallocStats) {
+    JEMALLOC_STATS
+        .set(get)
+        .expect("`set_jemalloc_stats` must be called at most once");
 }
 
-#[cfg(all(fbcode_build, not(target_os = "windows")))]
 fn get_jemalloc_stats() -> JemallocStats {
-    fn get_all() -> Option<serde_json::Value> {
-        // This options configuration flag string is passed to `malloc_stats_print()`.
-        // Explanation: (<https://jemalloc.net/jemalloc.3.html>)
-        // The default configuration prints minimal output, formatted as JSON.
-        let alloc_stats_options = "Jmdablxg";
-        serde_json::from_str(&allocator_stats::malloc_stats(alloc_stats_options).ok()?).ok()
-    }
-
-    fn get_field(stats: &serde_json::Value, val: &str) -> Option<Bytes> {
-        Some(Bytes(
-            stats.get("jemalloc")?.get("stats")?.get(val)?.as_u64()?,
-        ))
-    }
-
-    let v = get_all().unwrap_or_default();
-    JemallocStats {
-        active: get_field(&v, "active"),
-        allocated: get_field(&v, "allocated"),
+    match JEMALLOC_STATS.get() {
+        Some(get) => get(),
+        None => JemallocStats {
+            active: None,
+            allocated: None,
+        },
     }
 }
 
@@ -148,5 +139,23 @@ impl MemoryUsageTrace {
     /// Won't necessarily be a single MemoryUsage, but the peak across many.
     pub fn peak(&self) -> MemoryUsage {
         self.state.lock().1.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "`set_jemalloc_stats` must be called at most once")]
+    fn test_set_jemalloc_stats_twice() {
+        fn get() -> JemallocStats {
+            JemallocStats {
+                active: None,
+                allocated: None,
+            }
+        }
+        set_jemalloc_stats(get);
+        set_jemalloc_stats(get);
     }
 }
