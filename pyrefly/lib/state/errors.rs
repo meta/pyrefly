@@ -614,20 +614,13 @@ impl Errors {
                 let start = baselined.len();
                 processor.process_errors(&mut group, &mut baselined);
                 // `baseline-error-level` caps a match here, where this config is already
-                // in hand. `ignore` drops the match. An unset level leaves the severity
-                // alone and asks the IDE to draw the open-file match as a hint.
-                match config.baseline_error_level {
-                    Some(Severity::Ignore) => baselined.truncate(start),
-                    Some(level) => {
-                        for error in &mut baselined[start..] {
-                            *error = error.with_severity(error.severity().min(level));
-                        }
-                    }
-                    None => {
-                        for error in &mut baselined[start..] {
-                            *error = error.with_unconfigured_baseline_hint();
-                        }
-                    }
+                // in hand. An unset level leaves the severity alone and asks the IDE to
+                // draw the open-file match as a hint.
+                for error in &mut baselined[start..] {
+                    *error = match config.baseline_error_level {
+                        Some(level) => error.with_severity(error.severity().min(level)),
+                        None => error.with_unconfigured_baseline_hint(),
+                    };
                 }
             }
             normal.extend(group);
