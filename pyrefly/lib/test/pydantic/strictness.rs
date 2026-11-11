@@ -405,6 +405,113 @@ assert_type(m.custom_model, CustomModel)
     "#,
 );
 
+// https://github.com/meta/pyrefly/issues/5545
+pydantic_testcase!(
+    bug = "Pydantic validates a NewType field with the lax schema of its base type",
+    test_lax_mode_new_type_inputs,
+    r#"
+from typing import NewType
+from pydantic import BaseModel
+
+CommitId = NewType("CommitId", str)
+Count = NewType("Count", int)
+Ids = NewType("Ids", list[int])
+
+class Model(BaseModel):
+    commit_id: CommitId
+    count: Count
+    parents: tuple[CommitId, ...]
+    ids: Ids
+
+Model(commit_id=CommitId("abc"), count=Count(1), parents=(CommitId("def"),), ids=Ids([1]))
+Model(
+    commit_id="abc",  # E: is not assignable to parameter `commit_id`
+    count="1",  # E: is not assignable to parameter `count`
+    parents=("def",),  # E: is not assignable to parameter `parents`
+    ids=["1"],  # E: is not assignable to parameter `ids`
+)
+Model(
+    commit_id=1,  # E: is not assignable to parameter `commit_id`
+    count=Count(1),
+    parents=(),
+    ids=Ids([]),
+)
+    "#,
+);
+
+// https://github.com/meta/pyrefly/issues/5543
+pydantic_testcase!(
+    bug = "A model validator that runs before validation can accept input of any type",
+    test_lax_mode_nested_model_with_model_validator,
+    r#"
+from typing import Any, Self
+from pydantic import BaseModel, model_validator
+
+class MenuRule(BaseModel):
+    id: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def from_str(cls, value: Any) -> Any:
+        return {"id": value} if isinstance(value, str) else value
+
+class InheritedMenuRule(MenuRule):
+    pass
+
+class CheckedRule(BaseModel):
+    id: str
+
+    @model_validator(mode="after")
+    def check(self) -> Self:
+        return self
+
+class Action(BaseModel):
+    menus: list[MenuRule] = []
+    inherited: InheritedMenuRule | None = None
+    checked: CheckedRule | None = None
+
+Action(menus=["edit"])  # E: is not assignable to parameter `menus`
+Action(inherited="edit")  # E: is not assignable to parameter `inherited`
+Action(checked="edit")  # E: is not assignable to parameter `checked`
+    "#,
+);
+
+// https://github.com/meta/pyrefly/issues/5543
+pydantic_testcase!(
+    bug = "A model with `from_attributes=True` accepts any object with matching attributes",
+    test_lax_mode_nested_model_from_attributes,
+    r#"
+from pydantic import BaseModel, ConfigDict
+
+class Row(BaseModel):
+    state_id: int
+
+class RowResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    state_id: int
+
+class InheritedRowResponse(RowResponse):
+    pass
+
+class KeywordRowResponse(BaseModel, from_attributes=True):
+    state_id: int
+
+class Response(BaseModel):
+    current: RowResponse | None = None
+    rows: list[RowResponse] = []
+    inherited: InheritedRowResponse | None = None
+    keyword: KeywordRowResponse | None = None
+    plain: Row | None = None
+
+row = Row(state_id=1)
+Response(current=row)  # E: is not assignable to parameter `current`
+Response(rows=[row])  # E: is not assignable to parameter `rows`
+Response(inherited=row)  # E: is not assignable to parameter `inherited`
+Response(keyword=row)  # E: is not assignable to parameter `keyword`
+Response(plain=RowResponse(state_id=1))  # E: is not assignable to parameter `plain`
+    "#,
+);
+
 pydantic_testcase!(
     test_lax_mode_builtin_schema_inputs,
     r#"
