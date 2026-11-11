@@ -290,6 +290,7 @@ use crate::config::config::ConfigScope;
 use crate::error::baseline::BaselineWrite;
 use crate::error::baseline::StaleRowScope;
 use crate::error::baseline::write_baseline_file;
+use crate::error::collector::CollectedDiagnostic;
 use crate::error::error::Error;
 use crate::lsp::module_helpers::to_real_path;
 use crate::lsp::non_wasm::build_system::should_requery_build_system;
@@ -3316,18 +3317,19 @@ impl Server {
             .collect()
     }
 
-    /// Draw an unset baseline match as a hint in an open file.
+    /// Draw a baseline match in an open file as an LSP hint if its severity is a hint
+    /// or its `baseline-error-level` is unset.
     ///
-    /// The severity cap is chosen before `to_diagnostic_with_severity` runs.
-    /// That function shows an untagged hint as information, so the historical
-    /// hint for an unset `baseline-error-level` is assigned here.
-    fn show_unconfigured_baseline_as_hint(
-        unconfigured: bool,
-        path: &ModulePath,
+    /// `to_diagnostic_with_severity` shows an untagged hint as information, so the
+    /// hint is assigned here.
+    fn show_baseline_hint(
+        e: CollectedDiagnostic,
         open_files: &HashMap<PathBuf, OpenFile>,
         diag: &mut Diagnostic,
     ) {
-        if unconfigured && to_real_path(path).is_some_and(|open| open_files.contains_key(&open)) {
+        if (e.unconfigured_baseline_hint() || e.severity() == Severity::Hint)
+            && to_real_path(e.error().path()).is_some_and(|open| open_files.contains_key(&open))
+        {
             diag.severity = Some(DiagnosticSeverity::Hint);
         }
     }
@@ -3579,12 +3581,7 @@ impl Server {
             if let Some((path, mut diag)) =
                 self.get_diag_if_shown(e.error(), e.severity(), &open_files, None)
             {
-                Self::show_unconfigured_baseline_as_hint(
-                    e.unconfigured_baseline_hint(),
-                    e.error().path(),
-                    &open_files,
-                    &mut diag,
-                );
+                Self::show_baseline_hint(e, &open_files, &mut diag);
                 diags.entry(path.to_owned()).or_default().push(diag);
             }
         }
@@ -6643,12 +6640,7 @@ impl Server {
             if let Some((_, mut diag)) =
                 self.get_diag_if_shown(e.error(), e.severity(), &open_files, cell_uri)
             {
-                Self::show_unconfigured_baseline_as_hint(
-                    e.unconfigured_baseline_hint(),
-                    e.error().path(),
-                    &open_files,
-                    &mut diag,
-                );
+                Self::show_baseline_hint(e, &open_files, &mut diag);
                 items.push(diag);
             }
         }

@@ -308,6 +308,42 @@ fn test_baseline_diagnostic_is_hint_push() {
     interaction.shutdown().unwrap();
 }
 
+/// `baseline-error-level = "hint"` shows the matched diagnostic as an LSP hint, not as
+/// information.
+#[test]
+fn test_baseline_diagnostic_configured_hint() {
+    let test_files_root = get_test_files_root();
+    let root_path = test_files_root.path().join("baseline_hint_level");
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root_path);
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .expect("Failed to initialize");
+
+    interaction.client.did_open("bad.py");
+
+    interaction
+        .client
+        .diagnostic("bad.py")
+        .expect_response_with(|response| {
+            let lsp_types::DocumentDiagnosticReport::RelatedFullDocumentDiagnosticReport(full) =
+                response
+            else {
+                return false;
+            };
+            let items = &full.full_document_diagnostic_report.items;
+            items.len() == 2
+                && severity_count(items, lsp_types::DiagnosticSeverity::Hint) == 1
+                && severity_count(items, lsp_types::DiagnosticSeverity::Error) == 1
+        })
+        .expect("Failed to receive hint diagnostic for a baselined error");
+
+    interaction.shutdown().unwrap();
+}
+
 /// `baseline-error-level = "warn"` raises the matched diagnostic above a hint
 /// so it is eligible for the Problems list. The unmatched error stays an error.
 #[test]
