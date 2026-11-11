@@ -32,6 +32,7 @@ use pyrefly_util::includes::Includes;
 use pyrefly_util::lock::Mutex;
 use pyrefly_util::thread_pool::ThreadCount;
 use ruff_python_ast::Expr;
+use ruff_python_ast::ExprName;
 use ruff_python_ast::Parameters;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
@@ -444,25 +445,15 @@ fn is_schema_class(answers: &Answers, cls_binding: &ClassBinding) -> bool {
         })
 }
 
-/// Builtin classes whose constructor names the type it yields. Iterator adapters are left out.
-const IMPLICIT_BUILTIN_CONSTRUCTORS: &[KnownClass] = &[
-    KnownClass::Bool,
-    KnownClass::ByteArray,
-    KnownClass::Bytes,
-    KnownClass::Complex,
+/// Generic builtin classes whose constructor names the type it returns.
+const IMPLICIT_GENERIC_BUILTINS: &[KnownClass] = &[
     KnownClass::Dict,
-    KnownClass::Float,
     KnownClass::FrozenDict,
     KnownClass::FrozenSet,
-    KnownClass::Int,
     KnownClass::List,
     KnownClass::MemoryView,
-    KnownClass::Object,
-    KnownClass::Range,
-    KnownClass::Sentinel,
     KnownClass::Set,
     KnownClass::Slice,
-    KnownClass::Str,
     KnownClass::Tuple,
 ];
 
@@ -479,26 +470,50 @@ fn parse_variables(
 ) -> Vec<Variable> {
     let bindings = answers.bindings();
 
-    /// Only a call hides its type at the assignment site, unless the callee names the class it
-    /// yields: a builtin constructor like `list()`, or an explicitly specialized class like
-    /// `Spam[int]()`. Instances of `IMPLICIT_STDLIB_CLASSES` are exempt whatever the call.
+    /// Only a call hides its type at the assignment site, unless the callee is the class it
+    /// returns: a non-generic class like `Spam()` or `module.Spam()`, a generic builtin like
+    /// `list()`, or an explicitly specialized class like `Spam[int]()`. Other generic classes are
+    /// left out because their type arguments are inferred. Instances of `IMPLICIT_STDLIB_CLASSES`
+    /// are exempt whatever the call.
     fn untyped_if_call(answers: &Answers, idx: Idx<Key>, expr: &Expr) -> SlotCounts {
         let Expr::Call(call) = expr else {
             return SlotCounts::default();
         };
 
-        let callee_names = |cls: &ClassType| match call.func.as_ref() {
-            Expr::Name(n) => {
-                cls.known()
-                    .is_some_and(|known| IMPLICIT_BUILTIN_CONSTRUCTORS.contains(&known))
-                    && *cls.name() == n.id
-            }
-            Expr::Subscript(sub) => match sub.value.as_ref() {
-                Expr::Name(n) => *cls.name() == n.id,
-                Expr::Attribute(attr) => *cls.name() == attr.attr.id,
+        let bindings = answers.bindings();
+        let bound_type = |name: &ExprName| {
+            let key = Key::BoundName(ShortIdentifier::expr_name(name));
+            answers.get_idx(bindings.key_to_idx_hashed_opt(Hashed::new(&key))?)
+        };
+        let callee_names = |cls: &ClassType| {
+            let is_generic = !cls.targs().is_empty();
+            match call.func.as_ref() {
+                Expr::Name(n) if is_generic => {
+                    cls.known()
+                        .is_some_and(|known| IMPLICIT_GENERIC_BUILTINS.contains(&known))
+                        && *cls.name() == n.id
+                }
+                // Resolving the name also covers aliases, like `from pathlib import Path as P`.
+                Expr::Name(n) => bound_type(n).is_some_and(
+                    |t| matches!(t.ty(), Type::ClassDef(c) if c == cls.class_object()),
+                ),
+                // A module attribute, so that a method like `obj.Spam()` doesn't match.
+                Expr::Attribute(attr) => {
+                    !is_generic
+                        && *cls.name() == attr.attr.id
+                        && attr
+                            .value
+                            .as_name_expr()
+                            .and_then(bound_type)
+                            .is_some_and(|t| matches!(t.ty(), Type::Module(_)))
+                }
+                Expr::Subscript(sub) => match sub.value.as_ref() {
+                    Expr::Name(n) => *cls.name() == n.id,
+                    Expr::Attribute(attr) => *cls.name() == attr.attr.id,
+                    _ => false,
+                },
                 _ => false,
-            },
-            _ => false,
+            }
         };
 
         let is_implicit_stdlib =
@@ -2336,6 +2351,14 @@ mod tests {
     fn test_report_implicit_stdlib_classes() {
         let report = build_module_report_for_test("implicit_stdlib_classes.py");
         compare_snapshot("implicit_stdlib_classes.expected.json", &report);
+    }
+
+    /// Calling a non-generic class has 0 slots. Calling a generic class counts, because its type
+    /// arguments are inferred, and so does a callee that doesn't name the class it returns.
+    #[test]
+    fn test_report_implicit_class_constructors() {
+        let report = build_module_report_for_test("implicit_class_constructors.py");
+        compare_snapshot("implicit_class_constructors.expected.json", &report);
     }
 
     /// gh-3773: optional imports must not be reported as untyped variables.
