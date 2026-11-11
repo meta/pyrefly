@@ -8,6 +8,7 @@
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::module::Module;
+use pyrefly_python::sys_info::SysInfo;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
@@ -55,6 +56,14 @@ impl AttributeContext {
                 Stmt::FunctionDef(function) if function.name.range == target_range => {
                     AttributeKind::Function
                 }
+                Stmt::If(if_stmt) => {
+                    if let Some(context) = Ast::if_branches(if_stmt).find_map(|(_, _, branch)| {
+                        Self::from_body(branch, &mut parents.clone(), target_range)
+                    }) {
+                        return Some(context);
+                    }
+                    continue;
+                }
                 Stmt::Assign(assign)
                     if assign.targets.iter().any(
                         |target| matches!(target, Expr::Name(name) if name.range() == target_range),
@@ -86,25 +95,56 @@ pub(crate) fn expr_matches_name(expr: &Expr, attr_name: &ruff_python_ast::name::
     }
 }
 
-/// Finds the declaration of `attr_name` in the scope that `context` describes.
+/// Finds the declaration of `attr_name` in the scope that `context` describes. Only the branches
+/// of `if` statements that `sys_info` does not rule out are searched, so a declaration is never
+/// taken from a branch that the checker considers unreachable.
 pub(crate) fn definition_from_ast(
     ast: &ModModule,
     context: &AttributeContext,
     attr_name: &ruff_python_ast::name::Name,
+    sys_info: SysInfo,
 ) -> Option<(TextRange, Option<TextRange>)> {
-    let mut body = ast.body.as_slice();
-    for class_name in &context.parent_classes {
-        let class_def = body.iter().find_map(|stmt| match stmt {
-            Stmt::ClassDef(class_def) if &class_def.name.id == class_name => Some(class_def),
+    definition_in_suite(
+        &ast.body,
+        &context.parent_classes,
+        context,
+        attr_name,
+        sys_info,
+    )
+}
+
+/// Searches `body` for the declaration, descending through the remaining `parent_classes` and
+/// then into the live branches of `if` statements, each of which is its own suite.
+fn definition_in_suite(
+    body: &[Stmt],
+    parent_classes: &[ruff_python_ast::name::Name],
+    context: &AttributeContext,
+    attr_name: &ruff_python_ast::name::Name,
+    sys_info: SysInfo,
+) -> Option<(TextRange, Option<TextRange>)> {
+    let direct = match parent_classes.split_first() {
+        Some((class_name, rest)) => body.iter().find_map(|stmt| match stmt {
+            Stmt::ClassDef(class_def) if &class_def.name.id == class_name => {
+                definition_in_suite(&class_def.body, rest, context, attr_name, sys_info)
+            }
             _ => None,
-        })?;
-        body = class_def.body.as_slice();
-    }
-    match context.kind {
-        AttributeKind::Function => definition_from_function(body, attr_name),
-        AttributeKind::Class => definition_from_class(body, attr_name),
-        AttributeKind::Assignment => definition_from_assignment(body, attr_name),
-    }
+        }),
+        None => match context.kind {
+            AttributeKind::Function => definition_from_function(body, attr_name),
+            AttributeKind::Class => definition_from_class(body, attr_name),
+            AttributeKind::Assignment => definition_from_assignment(body, attr_name),
+        },
+    };
+    direct.or_else(|| {
+        body.iter().find_map(|stmt| match stmt {
+            Stmt::If(if_stmt) => sys_info
+                .pruned_if_branches(if_stmt)
+                .find_map(|(_, _, branch)| {
+                    definition_in_suite(branch, parent_classes, context, attr_name, sys_info)
+                }),
+            _ => None,
+        })
+    })
 }
 
 fn definition_from_function(
@@ -168,4 +208,50 @@ fn definition_from_assignment(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use pyrefly_python::module_name::ModuleName;
+    use pyrefly_python::module_path::ModulePath;
+    use ruff_python_ast::PySourceType;
+    use ruff_python_ast::name::Name;
+
+    use super::*;
+
+    /// A method declared under `if sys.version_info` in a stub maps to the unconditional
+    /// method in the source, and the source docstring is found.
+    #[test]
+    fn test_method_in_conditional_block() {
+        let stub = "class C:\n    if sys.version_info >= (3, 12):\n        def f(self): ...\n    else:\n        def f(self, x): ...\n";
+        let source = "class C:\n    def f(self):\n        \"\"\"Doc.\"\"\"\n";
+        let stub_module = Module::new(
+            ModuleName::from_str("m"),
+            ModulePath::filesystem("m.pyi".into()),
+            Arc::new(stub.to_owned()),
+        );
+        let offset = stub.find("f(self)").unwrap();
+        let range = TextRange::at(u32::try_from(offset).unwrap().into(), 1.into());
+        let context = AttributeContext::from_module(&stub_module, range).unwrap();
+        let ast = Ast::parse(source, stub_module.source_type()).0;
+        let (_, docstring) =
+            definition_from_ast(&ast, &context, &Name::new("f"), SysInfo::default()).unwrap();
+        assert!(docstring.is_some());
+    }
+
+    /// Only the branch selected by the environment is searched, not the first branch in the file.
+    #[test]
+    fn test_unreachable_branch_is_skipped() {
+        let source = "if sys.version_info >= (3, 99):\n    def f(): \"\"\"Future.\"\"\"\nelse:\n    def f(): \"\"\"Current.\"\"\"\n";
+        let context = AttributeContext {
+            parent_classes: Vec::new(),
+            kind: AttributeKind::Function,
+        };
+        let ast = Ast::parse(source, PySourceType::Python).0;
+        let (_, docstring) =
+            definition_from_ast(&ast, &context, &Name::new("f"), SysInfo::default()).unwrap();
+        assert_eq!(&source[docstring.unwrap()], "\"\"\"Current.\"\"\"");
+    }
 }
