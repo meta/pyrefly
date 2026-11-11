@@ -254,4 +254,63 @@ mod tests {
             definition_from_ast(&ast, &context, &Name::new("f"), SysInfo::default()).unwrap();
         assert_eq!(&source[docstring.unwrap()], "\"\"\"Current.\"\"\"");
     }
+
+    // BUG: Separate live conditional definitions select the first declaration's documentation.
+    #[test]
+    fn test_repeated_live_conditionals() {
+        let cases = [
+            (
+                AttributeKind::Function,
+                Vec::new(),
+                "if sys.version_info >= (3, 8):\n    def f(): \"\"\"First.\"\"\"\nif sys.version_info >= (3, 10):\n    def f(): \"\"\"Last.\"\"\"\n",
+            ),
+            (
+                AttributeKind::Function,
+                vec![Name::new("C")],
+                "class C:\n    if sys.version_info >= (3, 8):\n        def f(self): \"\"\"First.\"\"\"\n    if sys.version_info >= (3, 10):\n        def f(self): \"\"\"Last.\"\"\"\n",
+            ),
+            (
+                AttributeKind::Class,
+                Vec::new(),
+                "if sys.version_info >= (3, 8):\n    class f:\n        \"\"\"First.\"\"\"\nif sys.version_info >= (3, 10):\n    class f:\n        \"\"\"Last.\"\"\"\n",
+            ),
+            (
+                AttributeKind::Function,
+                vec![Name::new("C")],
+                "if sys.version_info >= (3, 8):\n    class C:\n        def f(self): \"\"\"First.\"\"\"\nif sys.version_info >= (3, 10):\n    class C:\n        def f(self): \"\"\"Last.\"\"\"\n",
+            ),
+            (
+                AttributeKind::Assignment,
+                Vec::new(),
+                "if sys.version_info >= (3, 8):\n    f = 1\n    \"\"\"First.\"\"\"\nif sys.version_info >= (3, 10):\n    f: int = 2\n    \"\"\"Last.\"\"\"\n",
+            ),
+        ];
+        for (kind, parent_classes, source) in cases {
+            let context = AttributeContext {
+                parent_classes,
+                kind,
+            };
+            let ast = Ast::parse(source, PySourceType::Python).0;
+            let (_, docstring) =
+                definition_from_ast(&ast, &context, &Name::new("f"), SysInfo::default()).unwrap();
+            assert_eq!(
+                &source[docstring.unwrap()],
+                "\"\"\"First.\"\"\"",
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_later_unreachable_conditional_does_not_hide_live_definition() {
+        let source = "if sys.version_info >= (3, 8):\n    def f(): \"\"\"Live.\"\"\"\nif sys.version_info >= (3, 99):\n    def f(): \"\"\"Unreachable.\"\"\"\n";
+        let context = AttributeContext {
+            parent_classes: Vec::new(),
+            kind: AttributeKind::Function,
+        };
+        let ast = Ast::parse(source, PySourceType::Python).0;
+        let (_, docstring) =
+            definition_from_ast(&ast, &context, &Name::new("f"), SysInfo::default()).unwrap();
+        assert_eq!(&source[docstring.unwrap()], "\"\"\"Live.\"\"\"");
+    }
 }
