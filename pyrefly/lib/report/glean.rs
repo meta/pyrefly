@@ -290,9 +290,26 @@ class Outer:
 totals = [n * 2 for n in range(3)]
 "#;
 
-    let string_literal = r#"def f(s: str) -> None:
-    s.title()
-    "hello".title()
+    let string_literal = r#"from enum import StrEnum
+from typing import Literal, LiteralString
+
+def plain(word: str) -> str:
+    return word.title()
+
+def literal(word: Literal["red"]) -> str:
+    return word.title()
+
+def literal_string(word: LiteralString) -> str:
+    return word.title()
+
+def joined(parts: list[str]) -> str:
+    return ", ".join(parts)
+
+class Colour(StrEnum):
+    RED = "red"
+
+    def label(self) -> str:
+        return self.value.title()
 "#;
 
     let files = [
