@@ -825,3 +825,39 @@ class Config:
         "expected an attribute named `name`"
     );
 }
+
+// BUG: a sentinel under a bare `Final` is a `DefinedWithoutAssign` field, whose annotation
+// `get_attributes` does not read, so `is_final` is false even though the field is enforced
+// as read-only.
+#[test]
+fn test_get_attributes_bare_final_sentinel_is_not_reported_final() {
+    let tdir = TempDir::new().unwrap();
+    let file_path = tdir.path().join("main.py");
+    let code = r#"from typing import Final
+from typing_extensions import Sentinel
+
+class C:
+    PLAIN: Final = 1
+    MARKER: Final = Sentinel("MARKER")
+"#;
+    fs_anyhow::write(&file_path, code).unwrap();
+
+    let query = create_query();
+    let module_name = ModuleName::from_str("main");
+    let path = ModulePath::filesystem(file_path.clone());
+    let errors = query.add_files(vec![(module_name, path.clone())]);
+    assert!(errors.is_empty(), "Unexpected errors: {:?}", errors);
+
+    let attributes = query
+        .get_attributes(module_name, path, "C")
+        .expect("expected attributes for C");
+    let is_final = |name: &str| {
+        attributes
+            .iter()
+            .find(|a| a.name == name)
+            .unwrap_or_else(|| panic!("expected an attribute named `{name}`"))
+            .is_final
+    };
+    assert!(is_final("PLAIN"), "`PLAIN` is declared `Final`");
+    assert!(!is_final("MARKER"), "`MARKER` should be reported as final");
+}

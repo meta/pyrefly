@@ -3559,6 +3559,44 @@ class Child(Middle):
         }
     }
 
+    /// BUG: a sentinel under a bare `Final` is a `DefinedWithoutAssign` field, so
+    /// `own_annotation_idx` cannot see its annotation and a subclass attribute inherits no
+    /// coverage from it.
+    #[test]
+    fn test_inherited_bare_final_sentinel_annotation() {
+        let base = r#"
+from typing import Final
+from typing_extensions import Sentinel
+class Base:
+    plain: Final = 1
+    marker: Final = Sentinel("marker")
+"#;
+        let child = r#"
+from base import Base
+class Child(Base):
+    def __init__(self) -> None:
+        self.plain = Base.plain
+        self.marker = Base.marker
+"#;
+        let mut env = TestEnv::new();
+        env.add("base", base);
+        env.add("child", child);
+        let (state, handle) = env
+            .with_default_require_level(Require::Everything)
+            .to_state();
+        let symbols = collect_symbols(&state.transaction(), &handle("child"), false);
+        let slots = |name: &str| {
+            symbols
+                .variables
+                .iter()
+                .find(|v| v.name == format!("child.Child.{name}"))
+                .unwrap_or_else(|| panic!("missing attribute {name}"))
+                .slots
+        };
+        assert_eq!(slots("plain"), SlotCounts::typed());
+        assert_eq!(slots("marker"), SlotCounts::untyped());
+    }
+
     /// Inheritance coverage follows the nearest explicit attribute annotation, even across a
     /// property override. The property's solved field does not demand `Base.x`'s annotation.
     #[test]
