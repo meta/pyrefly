@@ -2395,8 +2395,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Validates `tparams` and returns a validated `TParams`.
-    /// A default may only refer to earlier parameters in `tparams`. References to any other
-    /// type variable are reported and replaced with gradual fallbacks.
+    /// Free type variable references in defaults must belong to earlier parameters in `tparams`.
+    /// Out-of-scope references are reported and replaced with gradual fallbacks.
     pub fn validated_tparams(
         &self,
         range: TextRange,
@@ -2429,12 +2429,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             if let Some(default) = &mut tparam.default {
                 let mut out_of_scope_names = Vec::new();
+                // Legacy references are resolved by name; quantified references below use identity.
                 default.transform_types_in_type_variable_positions(&mut |ty| {
                     let (name, kind) = match &*ty {
                         Type::TypeVar(t) => (t.qname().id(), QuantifiedKind::TypeVar),
                         Type::TypeVarTuple(t) => (t.qname().id(), QuantifiedKind::TypeVarTuple),
                         Type::ParamSpec(p) => (p.qname().id(), QuantifiedKind::ParamSpec),
-                        Type::Quantified(q) => (q.name(), q.kind()),
                         _ => return,
                     };
                     *ty = match seen.get(name) {
@@ -2445,6 +2445,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         }
                     };
                 });
+                // Select written dependencies without inspecting implicit `Self` or class metadata.
+                let mut quantified_replacements = SmallMap::new();
+                default.for_each_free_quantified(&mut |q| {
+                    let replacement = match seen.get(q.name()) {
+                        Some(previous) if *previous == q => (**previous).clone().to_type(self.heap),
+                        _ => {
+                            out_of_scope_names.push(q.name().clone());
+                            Quantified::as_gradual_type_helper(q.kind(), None)
+                        }
+                    };
+                    quantified_replacements.insert(q.clone(), replacement);
+                });
+                if !quantified_replacements.is_empty() {
+                    default.subst_mut_fn(&mut |q| quantified_replacements.get(q).cloned());
+                }
                 if !out_of_scope_names.is_empty() {
                     self.error(
                         errors,

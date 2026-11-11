@@ -9,7 +9,6 @@ use crate::test::util::shape_extensions_env;
 use crate::testcase;
 
 testcase!(
-    bug = "Defaults reject mapper-local type parameters",
     test_map_int_tuples_default_mapper_scope,
     shape_extensions_env(),
     r#"
@@ -17,14 +16,13 @@ from shape_extensions import IntTuple, IntTuples, MapIntTuples
 
 class Box[Shape: IntTuple]: ...
 
-def mapped[Shapes: IntTuples, T = MapIntTuples[lambda S: Box[S], Shapes]]() -> None: ...  # E: Default of type parameter `T` refers to out-of-scope type parameter `S`
+def mapped[Shapes: IntTuples, T = MapIntTuples[lambda S: Box[S], Shapes]]() -> None: ...
 
-type Mapped[Shapes: IntTuples, T = MapIntTuples[lambda S: Box[S], Shapes]] = T  # E: Default of type parameter `T` refers to out-of-scope type parameter `S`
+type Mapped[Shapes: IntTuples, T = MapIntTuples[lambda S: Box[S], Shapes]] = T
 "#,
 );
 
 testcase!(
-    bug = "Defaults capture same-name mapper parameters",
     test_map_int_tuples_default_mapper_identity,
     shape_extensions_env(),
     r#"
@@ -35,19 +33,18 @@ from typing import assert_type
 type Mapped[T, Shapes: IntTuples, U = MapIntTuples[lambda T: list[T], Shapes]] = U
 
 def check(value: Mapped[int, tuple[IntTuple[2]]]) -> None:
-    assert_type(value, Sequence[list[int]])
+    assert_type(value, Sequence[list[IntTuple]])
 "#,
 );
 
 testcase!(
-    bug = "Defaults reject local binders alongside free outer references",
     test_map_int_tuples_default_outer_capture,
     shape_extensions_env(),
     r#"
 from shape_extensions import IntTuple, IntTuples, MapIntTuples
 
 class Outer[K]:
-    def mapped[Shapes: IntTuples, T = MapIntTuples[lambda S: tuple[K, S], Shapes]](self) -> None: ...  # E: Default of type parameter `T` refers to out-of-scope type parameters `K`, `S`
+    def mapped[Shapes: IntTuples, T = MapIntTuples[lambda S: tuple[K, S], Shapes]](self) -> None: ...  # E: Default of type parameter `T` refers to out-of-scope type parameter `K`
 "#,
 );
 
