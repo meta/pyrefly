@@ -666,7 +666,6 @@ fun2(*{"1", "2", "3"})  # E: Expected 2 positional arguments, got 3
 );
 
 testcase!(
-    bug = "A dict literal splat should supply one positional argument per key",
     test_splat_dict_literal,
     r#"
 def fun0():
@@ -685,14 +684,14 @@ def key(x: list[int]) -> str: ...
 def value(x: list[str]) -> int: ...
 
 def test(d: dict[str, int]):
-    fun0(*{"a": 1})
+    fun0(*{"a": 1})  # E: Expected 0 positional arguments, got 1
     fun1(*{"a": 1})  # OK
     fun2(*{"a": 1}, b=None)  # OK
     fun2(*{"a": 1, "b": 2})  # OK
-    fun2(*{"a": 1})
-    fun2(*{"a": 1, "b": 2, "c": 3})
-    fun1(*{})
-    takes_int(*{"a": 1})  # E: Argument `str` is not assignable to parameter `x` with type `int`
+    fun2(*{"a": 1})  # E: Missing argument `b`
+    fun2(*{"a": 1, "b": 2, "c": 3})  # E: Expected 2 positional arguments, got 3
+    fun1(*{})  # E: Missing argument `a`
+    takes_int(*{"a": 1})  # E: Argument `Literal['a']` is not assignable to parameter `x` with type `int`
     fun0(*{**d})  # OK
     fun1(*{"a": undefined_name})  # E: Could not find name `undefined_name`
     x = []

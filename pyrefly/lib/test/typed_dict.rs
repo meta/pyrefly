@@ -1968,11 +1968,10 @@ a4: A = dict(**{'x': 'oops'})  # E: `Literal['oops']` is not assignable to Typed
 );
 
 testcase!(
-    bug = "`dict(*{\"a\": 2})` passes a `str` positionally and should be rejected",
     test_builtins_dict_star_args,
     r#"
 def test(xs: list[str]):
-    dict(*{"a": 2})
+    dict(*{"a": 2})  # E:
     dict(*xs)
     dict()
     dict(a=1)

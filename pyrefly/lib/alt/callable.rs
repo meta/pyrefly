@@ -541,6 +541,25 @@ impl<'a> CallArg<'a> {
                             return CallArgPreEval::Fixed(tys, 0);
                         }
                     }
+                    // Unpacking a dict literal yields one key per item. Only do this if there
+                    // are no `**` items, which add an unknown number of keys.
+                    if let Expr::Dict(dict_expr) = expr
+                        && let Some(items) = dict_expr
+                            .items
+                            .iter()
+                            .map(|item| Some((item.key.as_ref()?, &item.value)))
+                            .collect::<Option<Vec<_>>>()
+                    {
+                        let tys = items
+                            .into_iter()
+                            .map(|(key, value)| {
+                                let key_ty = solver.expr_infer(key, arg_errors);
+                                solver.expr_infer(value, arg_errors);
+                                key_ty
+                            })
+                            .collect();
+                        return CallArgPreEval::Fixed(tys, 0);
+                    }
                 }
                 let ty = e.infer(solver, arg_errors);
                 solver.maybe_error_any_argument_type(&ty, *_range, arg_errors);
