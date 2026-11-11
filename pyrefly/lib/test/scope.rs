@@ -2043,8 +2043,9 @@ def f():
 "#,
 );
 
+// `str` resolves to the field it annotates, and the solver settles the cycle as `Unknown`.
 testcase!(
-    bug = "Error is not caught",
+    bug = "Circular annotation is not reported",
     test_circular_ref_is_illegal,
     r#"
 class A:
@@ -2053,12 +2054,36 @@ class A:
 );
 
 testcase!(
-    bug = "Forward reference `int` is resolved incorrectly",
     test_forward_reference_to_shadowing_method,
     r#"
 class A:
-    x: "int"  # should be an error
+    x: "int"  # E: Expected a type form, got instance of `(self: Self@A) -> None`
     def int(self) -> None: ...
+    "#,
+);
+
+// A method body cannot see the class scope, even when the method's postponed annotations can.
+testcase!(
+    test_method_body_ignores_class_scope_name_in_own_annotation,
+    r#"
+from __future__ import annotations
+class C:
+    def list(self) -> list[str]:  # E: `(self: Self@C) -> Unknown` is not subscriptable
+        return list({"a": 1}.keys())
+    "#,
+);
+
+testcase!(
+    test_method_body_ignores_class_scope_name_in_annotations,
+    r#"
+from __future__ import annotations
+from typing import assert_type
+class C:
+    def f(self, x: str, y: object) -> None:  # E: Expected a type form, got instance of `Literal[1]`
+        if isinstance(y, str):
+            assert_type(y, str)
+        assert_type(str(1), str)
+    str = 1
     "#,
 );
 

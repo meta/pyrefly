@@ -3,7 +3,7 @@
   "pass": 140,
   "fail": 5,
   "pass_rate": 0.97,
-  "differences": 24,
+  "differences": 22,
   "passing": [
     "aliases_explicit.py",
     "aliases_implicit.py",
@@ -147,8 +147,8 @@
     "typeforms_typeform.py"
   ],
   "failing": {
-    "annotations_forward_refs.py": 2,
-    "annotations_future_import.py": 2,
+    "annotations_forward_refs.py": 1,
+    "annotations_future_import.py": 1,
     "generics_paramspec_variance.py": 9,
     "generics_typevartuple_variance.py": 9,
     "protocols_variance.py": 2

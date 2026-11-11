@@ -2631,7 +2631,6 @@ pub struct ClassBodyUnknownName {
     pub class_key: Idx<KeyClass>,
     pub name: Identifier,
     pub suggestion: Option<Name>,
-    pub allow_class_body_forward_reference: bool,
 }
 
 /// Where and how to report a `FindError` for the module of a `Binding::Module`.
@@ -3186,14 +3185,12 @@ impl DisplayWith<Bindings> for Binding {
                     class_key,
                     name,
                     suggestion,
-                    allow_class_body_forward_reference,
                 } = x.as_ref();
                 write!(
                     f,
-                    "ClassBodyUnknownName({}, {}, allow_class_body_forward_reference={}",
+                    "ClassBodyUnknownName({}, {}",
                     m.display(ctx.idx_to_key(*class_key)),
                     name,
-                    allow_class_body_forward_reference,
                 )?;
                 if let Some(suggestion) = suggestion {
                     write!(f, ", {suggestion}")?;

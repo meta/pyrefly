@@ -1767,6 +1767,17 @@
     },
     {
       "code": -2,
+      "column": 9,
+      "concise_description": "Expected a type form, got instance of `(self: Self@ClassD) -> None`",
+      "description": "Expected a type form, got instance of `(self: Self@ClassD) -> None`",
+      "line": 96,
+      "name": "not-a-type",
+      "severity": "error",
+      "stop_column": 12,
+      "stop_line": 96
+    },
+    {
+      "code": -2,
       "column": 8,
       "concise_description": "Expected a type form, got instance of `(self: Self@ClassD) -> None`",
       "description": "Expected a type form, got instance of `(self: Self@ClassD) -> None`",
@@ -1800,6 +1811,17 @@
     }
   ],
   "annotations_future_import.py": [
+    {
+      "code": -2,
+      "column": 8,
+      "concise_description": "Expected a type form, got instance of `(self: Self@ClassB) -> None`",
+      "description": "Expected a type form, got instance of `(self: Self@ClassB) -> None`",
+      "line": 39,
+      "name": "not-a-type",
+      "severity": "error",
+      "stop_column": 11,
+      "stop_line": 39
+    },
     {
       "code": -2,
       "column": 8,

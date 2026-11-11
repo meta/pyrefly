@@ -1984,7 +1984,7 @@ impl<'a> BindingsBuilder<'a> {
                         )
                         .definitions
                         .into_iter()
-                        .filter_map(|(name, d)| d.has_value_definition.then_some(name))
+                        .filter_map(|(name, d)| d.sites.binds_value().then_some(name))
                         .collect::<SmallSet<_>>()
                     })
                     .reduce(|all, next| {

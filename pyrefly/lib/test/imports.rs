@@ -638,6 +638,17 @@ except ImportError:
 );
 
 testcase!(
+    test_optional_import_with_annotation_fallback,
+    r#"
+from typing import Any
+try:
+    from nomod import x  # E: Cannot find module `nomod`
+except ImportError:
+    x: Any
+"#,
+);
+
+testcase!(
     bug = "A name imported from a module that lacks it at this version should have a fallback",
     test_optional_from_import_of_missing_name,
     TestEnv::new_with_version(PythonVersion::new(3, 10, 0)),

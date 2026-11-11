@@ -85,6 +85,7 @@ use crate::binding::narrow::ExcludedNonePair;
 use crate::binding::narrow::ExcludedNonePairs;
 use crate::binding::narrow::NarrowOps;
 use crate::export::definitions::Definition;
+use crate::export::definitions::DefinitionSites;
 use crate::export::definitions::DefinitionStyle;
 use crate::export::definitions::Definitions;
 use crate::export::definitions::MutableCaptureKind;
@@ -256,10 +257,8 @@ struct StaticInfo {
     /// Both fit in padding `StaticInfo` already had, so they cost nothing.
     char_len: u32,
     char_mask: u32,
-    /// True while every definition site is a `def` or `class` statement. A conditionally
-    /// defined method or nested class is not reported as a possibly uninitialized class
-    /// attribute.
-    definition_only: bool,
+    /// Whether the definition sites bind a value.
+    sites: DefinitionSites,
 }
 
 #[derive(Clone, Debug)]
@@ -370,7 +369,7 @@ impl StaticStyle {
                     Self::MutableCapture(MutableCapture {
                         kind: *kind,
                         original,
-                        has_value_definition: definition.has_value_definition,
+                        has_value_definition: definition.sites.binds_value(),
                     })
                 }
                 DefinitionStyle::Annotated(.., ann) => {
@@ -462,7 +461,7 @@ impl Static {
         range: TextRange,
         style: StaticStyle,
         last_range: TextRange,
-        definition_only: bool,
+        sites: DefinitionSites,
     ) {
         // Parse recovery produces empty names, such as a nameless type parameter. The
         // static scope never holds them, because `bind_name` never binds them.
@@ -478,7 +477,7 @@ impl Static {
                     last_range,
                     char_len,
                     char_mask,
-                    definition_only,
+                    sites,
                 });
             }
             Entry::Occupied(mut e) => {
@@ -487,7 +486,7 @@ impl Static {
                 if last_range.start() > found.last_range.start() {
                     found.last_range = last_range;
                 }
-                found.definition_only &= definition_only;
+                found.sites = found.sites.merge(sites);
                 if matches!(style, StaticStyle::PossibleLegacyTParam) {
                     // Static scopes are keyed by name, so `foo.T` and `foo.P` must share the
                     // `foo` entry. The caller links their bindings before each upsert, making
@@ -574,7 +573,7 @@ impl Static {
             // same name in this scope.
             let range = definition.range;
             let last_range = definition.last_range;
-            let definition_only = definition.definition_only;
+            let sites = definition.sites;
             let style = StaticStyle::of_definition(
                 name.as_ref(),
                 definition,
@@ -583,7 +582,7 @@ impl Static {
                 module_info.name(),
                 get_annotation_idx,
             );
-            self.upsert(name, range, style, last_range, definition_only);
+            self.upsert(name, range, style, last_range, sites);
         }
         for (module, range, wildcard) in all_wildcards {
             // Builtins are a fallback, so they should never shadow an existing definition.
@@ -599,7 +598,7 @@ impl Static {
                     range,
                     StaticStyle::MergeableImport,
                     range,
-                    false,
+                    DefinitionSites::SomeValue,
                 )
             }
         }
@@ -625,7 +624,7 @@ impl Static {
                 name.range,
                 StaticStyle::SingleDef(None),
                 name.range,
-                false,
+                DefinitionSites::SomeValue,
             )
         };
         Ast::expr_lvalue(x, &mut add);
@@ -2962,7 +2961,7 @@ impl Scopes {
             range,
             StaticStyle::ImplicitBuiltinImport(module),
             range,
-            false,
+            DefinitionSites::SomeValue,
         );
         Key::Import(Box::new((name.into_key().clone(), range)))
     }
@@ -3209,7 +3208,7 @@ impl Scopes {
             name.range,
             style,
             name.range,
-            false,
+            DefinitionSites::SomeValue,
         )
     }
 
@@ -3918,7 +3917,9 @@ impl Scopes {
                         },
                     };
                     let initialized = match &value.style {
-                        _ if static_info.definition_only => InitializedInFlow::Yes,
+                        _ if static_info.sites == DefinitionSites::OnlyDefOrClass => {
+                            InitializedInFlow::Yes
+                        }
                         FlowStyle::PossiblyUninitialized => InitializedInFlow::Conditionally,
                         FlowStyle::MaybeInitialized(nodes) => {
                             InitializedInFlow::DeferredCheck(nodes.clone())
@@ -4222,15 +4223,14 @@ impl Scopes {
                  static_barrier,
              }| {
                 let is_class = matches!(scope.kind, ScopeKind::Class(_));
-                // Class body scopes are dynamic, not static, so if we don't find a name in the
-                // current flow we keep looking. In every other kind of scope, anything the Python
-                // compiler has identified as local shadows enclosing scopes, so we should prefer
-                // inner static lookups to outer flow lookups.
-                let static_info = if is_class {
-                    None
-                } else {
-                    scope.stat.0.get_hashed(name)
-                };
+                // Class body scopes are dynamic, not static, so if an eager read doesn't find a
+                // name in the current flow we keep looking. A postponed read happens after the
+                // class body has run, so it sees every name the body binds. In every other kind
+                // of scope, anything the Python compiler has identified as local shadows
+                // enclosing scopes, so we should prefer inner static lookups to outer flow lookups.
+                let static_info = scope.stat.0.get_hashed(name).filter(|static_info| {
+                    !is_class || (usage.is_postponed() && static_info.sites.binds_value())
+                });
 
                 if static_barrier
                 && matches!(scope.kind, ScopeKind::Annotation { class_scope: true })
@@ -4305,8 +4305,10 @@ impl Scopes {
                         // flow, it is not initialized. PossibleLegacyTParam scope entries are an
                         // exception because they are synthesized scope entries that don't exist at all
                         // in the runtime; we treat them as always initialized to avoid false positives
-                        // for uninitialized local checks in class bodies.
+                        // for uninitialized local checks in class bodies. A class-scope entry is
+                        // only found by a postponed read, which runs after the class body.
                         initialized: if static_info.implicit_builtin_module().is_some()
+                            || is_class
                             || flow_barrier > FlowBarrier::AllowFlowChecked
                             || matches!(static_info.style, StaticStyle::PossibleLegacyTParam)
                         {
@@ -4358,7 +4360,7 @@ impl Scopes {
                                 last_range: TextRange::default(),
                                 char_len,
                                 char_mask,
-                                definition_only: false,
+                                sites: DefinitionSites::SomeValue,
                             }))
                         })
                     },

@@ -530,9 +530,6 @@ impl<'a> BindingsBuilder<'a> {
                             class_key: cls,
                             name: name.clone(),
                             suggestion,
-                            // A postponed context is evaluated after the class body, so it
-                            // may refer to fields declared later in it.
-                            allow_class_body_forward_reference: usage.is_postponed(),
                         })),
                     )
                 } else {
