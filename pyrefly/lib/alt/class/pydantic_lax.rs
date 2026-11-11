@@ -256,6 +256,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     return self.heap.mk_any_explicit();
                 }
                 let metadata = self.get_metadata_for_class(class_obj);
+                // Pydantic validates a `NewType` with the schema of its base type.
+                if metadata.is_new_type()
+                    && let Some(base) = self.get_base_types_for_class(class_obj).iter().next()
+                {
+                    return self.expand_type_for_lax_mode(&self.heap.mk_class_type(base.clone()));
+                }
                 if metadata.is_pydantic_model()
                     || metadata.dataclass_metadata().is_some_and(|dataclass| {
                         matches!(

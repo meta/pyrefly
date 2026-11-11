@@ -407,7 +407,6 @@ assert_type(m.custom_model, CustomModel)
 
 // https://github.com/meta/pyrefly/issues/5545
 pydantic_testcase!(
-    bug = "Pydantic validates a NewType field with the lax schema of its base type",
     test_lax_mode_new_type_inputs,
     r#"
 from typing import NewType
@@ -424,17 +423,12 @@ class Model(BaseModel):
     ids: Ids
 
 Model(commit_id=CommitId("abc"), count=Count(1), parents=(CommitId("def"),), ids=Ids([1]))
-Model(
-    commit_id="abc",  # E: is not assignable to parameter `commit_id`
-    count="1",  # E: is not assignable to parameter `count`
-    parents=("def",),  # E: is not assignable to parameter `parents`
-    ids=["1"],  # E: is not assignable to parameter `ids`
-)
+Model(commit_id="abc", count="1", parents=("def",), ids=["1"])
 Model(
     commit_id=1,  # E: is not assignable to parameter `commit_id`
-    count=Count(1),
-    parents=(),
-    ids=Ids([]),
+    count=None,  # E: is not assignable to parameter `count`
+    parents=(1,),  # E: is not assignable to parameter `parents`
+    ids=[None],  # E: is not assignable to parameter `ids`
 )
     "#,
 );
