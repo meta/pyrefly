@@ -1606,6 +1606,24 @@ X()  # E: Expected a callable
     "#,
 );
 
+testcase!(
+    bug = "Class-scoped TypeAlias is treated as an instance variable",
+    test_class_type_alias_is_not_instance_variable,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import TypeAlias
+
+class Base:
+    Alias: TypeAlias = int
+
+class Child(Base):
+    pass
+
+Base.Alias = Base.Alias  # E: Cannot set instance variable `Alias` from the class
+Child.Alias = Child.Alias  # E: Cannot set instance variable `Alias` from the class
+    "#,
+);
+
 /// Type variables from different modules can be declared at the same offset. As parameters of one
 /// alias they are still different type parameters.
 #[test]
