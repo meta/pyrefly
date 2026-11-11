@@ -26,16 +26,18 @@ use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_python::sys_info::SysInfo;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::fs_anyhow;
+use pyrefly_util::interned_path::InternedPath;
+use starlark_map::small_map::SmallMap;
 
 #[derive(Default)]
 pub struct ModuleNames {
     /// The working directory that the file paths are relative to.
     cwd: PathBuf,
     /// Module names by file path, as given: relative to `cwd`, with forward slashes.
-    by_file: HashMap<String, ModuleName>,
+    by_file: SmallMap<String, ModuleName>,
     /// Absolute paths of the files that each module name is given to. A name can have several
     /// files, e.g. vendored copies of a library.
-    by_module: HashMap<ModuleName, Vec<PathBuf>>,
+    by_module: SmallMap<ModuleName, Vec<InternedPath>>,
 }
 
 /// A summary: the map can hold millions of entries, and configs that hold it are logged.
@@ -58,15 +60,16 @@ impl ModuleNames {
     }
 
     pub fn new(names: HashMap<String, String>, cwd: &Path) -> Self {
-        let mut by_module: HashMap<ModuleName, Vec<PathBuf>> = HashMap::new();
-        let by_file = names
-            .into_iter()
-            .map(|(file, name)| {
-                let name = ModuleName::from_str(&name);
-                by_module.entry(name).or_default().push(cwd.join(&file));
-                (file, name)
-            })
-            .collect();
+        let mut by_file = SmallMap::with_capacity(names.len());
+        let mut by_module: SmallMap<ModuleName, Vec<InternedPath>> = SmallMap::new();
+        for (file, name) in names {
+            let name = ModuleName::from_str(&name);
+            by_module
+                .entry(name)
+                .or_default()
+                .push(InternedPath::new(cwd.join(&file)));
+            by_file.insert(file, name);
+        }
         // Sorted so that the choice among equally near files doesn't depend on hash order.
         by_module.values_mut().for_each(|paths| paths.sort());
         Self {

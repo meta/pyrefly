@@ -21,6 +21,7 @@ use pyrefly_python::sys_info::PythonVersion;
 use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::display;
+use pyrefly_util::interned_path::InternedPath;
 
 use crate::base::InferReturnTypes;
 use crate::base::Preset;
@@ -42,6 +43,10 @@ use crate::util::ConfigOrigin;
 fn absolute_path_parser(s: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(s);
     Ok(path.absolutize())
+}
+
+fn interned_path_parser(s: &str) -> Result<InternedPath, String> {
+    Ok(InternedPath::from_path(Path::new(s)))
 }
 
 /// Environment and module-resolution overrides shared by all commands that
@@ -138,8 +143,8 @@ pub struct EnvironmentArgs {
     /// names, for files that a build system imports under a name their path doesn't give.
     /// Pyrefly checks the listed files under these names, finds them by these names when no
     /// other import lookup finds a module, and reports such as `--report-glean` use them.
-    #[arg(long, value_name = "FILE")]
-    pub(crate) module_names: Option<PathBuf>,
+    #[arg(long, value_name = "FILE", value_parser = interned_path_parser)]
+    pub(crate) module_names: Option<InternedPath>,
 
     /// The contents of `module_names`, read once by `validate` and shared by every config.
     #[arg(skip)]
