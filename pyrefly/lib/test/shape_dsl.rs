@@ -136,6 +136,65 @@ fn shape_extensions_env_with_torch_and_jaxtyping() -> TestEnv {
     env
 }
 
+testcase!(
+    test_shape_transform_compatibility,
+    reexporting_shape_extensions_env(),
+    r#"
+import shape_extensions as shapes
+import shape_extensions.dsl as dsl
+from reexport import type_shape_dsl_function as transform
+from shape_extensions import Flag, IntTuple, IntVar, type_shape_dsl_function
+from torch import Tensor
+from typing import assert_type
+
+@type_shape_dsl_function
+def legacy(shape: IntTuple) -> IntTuple:
+    return shape
+
+@transform
+def renamed(shape: IntTuple, keep: bool) -> IntTuple:
+    if keep:
+        return legacy(shape)
+    return dsl.IntTuple(())
+
+@shapes.type_shape_dsl_function
+def qualified(shape: IntTuple, keep: bool) -> IntTuple:
+    return renamed(shape, keep)
+
+@type_shape_dsl_function
+def legacy_calls_renamed(shape: IntTuple, keep: bool) -> IntTuple:
+    return qualified(shape, keep)
+
+def apply[S: IntTuple, Keep: Flag[bool]](
+    value: Tensor[S], keep: Keep,
+) -> Tensor[legacy_calls_renamed(S, Keep)]: ...
+
+def test[N: IntVar](concrete: Tensor[[2, 3]], symbolic: Tensor[[N, 3]]) -> None:
+    assert_type(apply(concrete, True), Tensor[[2, 3]])
+    assert_type(apply(symbolic, True), Tensor[[N, 3]])
+    assert_type(apply(concrete, False), Tensor[[]])
+"#,
+);
+
+testcase!(
+    test_shape_transform_validation,
+    shape_extensions_env(),
+    r#"
+from shape_extensions import IntTuple, type_shape_dsl_function as transform
+import shape_extensions.dsl as dsl
+
+@transform
+def invalid_parameter(shape: float) -> IntTuple:  # E: parameter `shape` must be annotated
+    return dsl.IntTuple(())
+
+@transform
+def invalid_body(shape: IntTuple) -> IntTuple:
+    while len(shape):  # E: body supports only `if` and `return`
+        pass
+    return shape
+"#,
+);
+
 // https://github.com/facebook/pyrefly/issues/5172
 // A partial Torch overlay can inherit an Any base when runtime Torch is absent.
 testcase!(
