@@ -290,6 +290,11 @@ class Outer:
 totals = [n * 2 for n in range(3)]
 "#;
 
+    let string_literal = r#"def f(s: str) -> None:
+    s.title()
+    "hello".title()
+"#;
+
     let files = [
         ("simple", simple_code),
         ("classes", classes_code),
@@ -307,6 +312,7 @@ totals = [n * 2 for n in range(3)]
         ("inherited_members", inherited_members),
         ("nested_later_class", nested_later_class),
         ("comprehensions", comprehensions),
+        ("string_literal", string_literal),
     ];
     let (handles, state) = mk_multi_file_state_assert_no_errors(&files, Require::Everything);
     let transaction = state.transaction();

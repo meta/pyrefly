@@ -1,0 +1,1004 @@
+[
+  {
+    "facts": [],
+    "predicate": "gencode.GenCode.1"
+  },
+  {
+    "facts": [],
+    "predicate": "python.DeclarationDocstring.4"
+  },
+  {
+    "facts": [],
+    "predicate": "python.ImportStarLocation.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": ""
+      }
+    ],
+    "predicate": "python.Name.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "call_args": [],
+          "callee_span": {
+            "length": 15,
+            "start": 41
+          },
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "call_args": [],
+          "callee_span": {
+            "length": 9,
+            "start": 27
+          },
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          }
+        }
+      }
+    ],
+    "predicate": "python.FileCall.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "callee": {
+            "id": 0,
+            "key": "str.title"
+          },
+          "caller": {
+            "id": 0,
+            "key": "string_literal.f"
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "callee": {
+            "id": 0,
+            "key": "title"
+          },
+          "caller": {
+            "id": 0,
+            "key": "string_literal.f"
+          }
+        }
+      }
+    ],
+    "predicate": "python.CalleeToCaller.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "container": {
+            "func": {
+              "id": 0,
+              "key": {
+                "name": {
+                  "id": 0,
+                  "key": "string_literal.f"
+                }
+              }
+            }
+          },
+          "declaration": {
+            "variable": {
+              "id": 0,
+              "key": {
+                "name": {
+                  "id": 0,
+                  "key": "string_literal.f.<locals>.s"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "container": {
+            "module": {
+              "id": 0,
+              "key": {
+                "name": {
+                  "id": 0,
+                  "key": "string_literal"
+                }
+              }
+            }
+          },
+          "declaration": {
+            "func": {
+              "id": 0,
+              "key": {
+                "name": {
+                  "id": 0,
+                  "key": "string_literal.f"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "container": {
+            "module": {
+              "id": 0,
+              "key": {
+                "name": {
+                  "id": 0,
+                  "key": "string_literal"
+                }
+              }
+            }
+          },
+          "declaration": {
+            "module": {
+              "id": 0,
+              "key": {
+                "name": {
+                  "id": 0,
+                  "key": "string_literal"
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.ContainingTopLevelDeclaration.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "declaration": {
+            "func": {
+              "id": 0,
+              "key": {
+                "name": {
+                  "id": 0,
+                  "key": "string_literal.f"
+                }
+              }
+            }
+          },
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "span": {
+            "length": 56,
+            "start": 0
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "declaration": {
+            "module": {
+              "id": 0,
+              "key": {
+                "name": {
+                  "id": 0,
+                  "key": "string_literal"
+                }
+              }
+            }
+          },
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "span": {
+            "length": 57,
+            "start": 0
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "declaration": {
+            "variable": {
+              "id": 0,
+              "key": {
+                "name": {
+                  "id": 0,
+                  "key": "string_literal.f.<locals>.s"
+                }
+              }
+            }
+          },
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "span": {
+            "length": 1,
+            "start": 6
+          }
+        }
+      }
+    ],
+    "predicate": "python.DeclarationLocation.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "definition": {
+            "func": {
+              "id": 0,
+              "key": {
+                "container": {
+                  "module": {
+                    "id": 0,
+                    "key": {
+                      "name": {
+                        "id": 0,
+                        "key": "string_literal"
+                      }
+                    }
+                  }
+                },
+                "declaration": {
+                  "id": 0,
+                  "key": {
+                    "name": {
+                      "id": 0,
+                      "key": "string_literal.f"
+                    }
+                  }
+                },
+                "is_async": false,
+                "kwonly_params": [],
+                "params": [
+                  {
+                    "name": {
+                      "id": 0,
+                      "key": "s"
+                    },
+                    "typeInfo": {
+                      "displayType": {
+                        "id": 0,
+                        "key": "str"
+                      },
+                      "xrefs": [
+                        {
+                          "source": {
+                            "length": 3,
+                            "start": 0
+                          },
+                          "target": {
+                            "id": 0,
+                            "key": "str"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "posonly_params": [],
+                "returnsInfo": {
+                  "displayType": {
+                    "id": 0,
+                    "key": "None"
+                  },
+                  "xrefs": [
+                    {
+                      "source": {
+                        "length": 4,
+                        "start": 0
+                      },
+                      "target": {
+                        "id": 0,
+                        "key": "None"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "span": {
+            "length": 56,
+            "start": 0
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "definition": {
+            "module": {
+              "id": 0,
+              "key": {
+                "module": {
+                  "id": 0,
+                  "key": {
+                    "name": {
+                      "id": 0,
+                      "key": "string_literal"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "span": {
+            "length": 57,
+            "start": 0
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "definition": {
+            "variable": {
+              "id": 0,
+              "key": {
+                "container": {
+                  "func": {
+                    "id": 0,
+                    "key": {
+                      "name": {
+                        "id": 0,
+                        "key": "string_literal.f"
+                      }
+                    }
+                  }
+                },
+                "declaration": {
+                  "id": 0,
+                  "key": {
+                    "name": {
+                      "id": 0,
+                      "key": "string_literal.f.<locals>.s"
+                    }
+                  }
+                },
+                "typeInfo": {
+                  "displayType": {
+                    "id": 0,
+                    "key": "str"
+                  },
+                  "xrefs": [
+                    {
+                      "source": {
+                        "length": 3,
+                        "start": 0
+                      },
+                      "target": {
+                        "id": 0,
+                        "key": "str"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "span": {
+            "length": 1,
+            "start": 6
+          }
+        }
+      }
+    ],
+    "predicate": "python.DefinitionLocation.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "digest": {
+            "hash": "2472c7a45a1e7a66598a7a6db456010be1ab975e0764cfdcc9f05e98966dc2a7",
+            "size": 57
+          },
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          }
+        }
+      }
+    ],
+    "predicate": "digest.FileDigest.1"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "endsInNewline": true,
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "hasUnicodeOrTabs": false,
+          "lengths": [
+            14,
+            20,
+            23
+          ]
+        }
+      }
+    ],
+    "predicate": "src.FileLines.1"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "language": 7
+        }
+      }
+    ],
+    "predicate": "src.FileLanguage.1"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "spans": [
+            {
+              "length": 1,
+              "start": 27
+            }
+          ],
+          "target": {
+            "id": 0,
+            "key": "string_literal.f.<locals>.s"
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "spans": [
+            {
+              "length": 3,
+              "start": 9
+            }
+          ],
+          "target": {
+            "id": 0,
+            "key": "str"
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 17
+            }
+          ],
+          "target": {
+            "id": 0,
+            "key": "None"
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 29
+            }
+          ],
+          "target": {
+            "id": 0,
+            "key": "str.title"
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 49
+            }
+          ],
+          "target": {
+            "id": 0,
+            "key": "title"
+          }
+        }
+      }
+    ],
+    "predicate": "python.XRefsViaNameByTarget.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "spans": [
+            {
+              "length": 1,
+              "start": 27
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "string_literal.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "string_literal.f.<locals>.s"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "spans": [
+            {
+              "length": 3,
+              "start": 9
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "str"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 17
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "None"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 29
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "str.title"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 49
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "title"
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.TargetUses.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "xrefs": [
+            {
+              "source": {
+                "length": 1,
+                "start": 27
+              },
+              "target": {
+                "file": {
+                  "id": 0,
+                  "key": "string_literal.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "string_literal.f.<locals>.s"
+                }
+              }
+            },
+            {
+              "source": {
+                "length": 3,
+                "start": 9
+              },
+              "target": {
+                "name": {
+                  "id": 0,
+                  "key": "str"
+                }
+              }
+            },
+            {
+              "source": {
+                "length": 4,
+                "start": 17
+              },
+              "target": {
+                "name": {
+                  "id": 0,
+                  "key": "None"
+                }
+              }
+            },
+            {
+              "source": {
+                "length": 5,
+                "start": 29
+              },
+              "target": {
+                "name": {
+                  "id": 0,
+                  "key": "str.title"
+                }
+              }
+            },
+            {
+              "source": {
+                "length": 5,
+                "start": 49
+              },
+              "target": {
+                "name": {
+                  "id": 0,
+                  "key": "title"
+                }
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "predicate": "python.xrefs.XRefsByFile.1"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "string_literal.py"
+          },
+          "xrefs": [
+            {
+              "source": {
+                "length": 1,
+                "start": 27
+              },
+              "target": {
+                "id": 0,
+                "key": "string_literal.f.<locals>.s"
+              }
+            },
+            {
+              "source": {
+                "length": 3,
+                "start": 9
+              },
+              "target": {
+                "id": 0,
+                "key": "str"
+              }
+            },
+            {
+              "source": {
+                "length": 4,
+                "start": 17
+              },
+              "target": {
+                "id": 0,
+                "key": "None"
+              }
+            },
+            {
+              "source": {
+                "length": 5,
+                "start": 29
+              },
+              "target": {
+                "id": 0,
+                "key": "str.title"
+              }
+            },
+            {
+              "source": {
+                "length": 5,
+                "start": 49
+              },
+              "target": {
+                "id": 0,
+                "key": "title"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "predicate": "python.XRefsViaNameByFile.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "id": 0,
+          "key": ""
+        },
+        "value": {
+          "id": 0,
+          "key": {
+            "local_name": {
+              "id": 0,
+              "key": ""
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "id": 0,
+          "key": "string_literal"
+        },
+        "value": {
+          "id": 0,
+          "key": {
+            "local_name": {
+              "id": 0,
+              "key": "string_literal"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "id": 0,
+          "key": "string_literal.f"
+        },
+        "value": {
+          "id": 0,
+          "key": {
+            "local_name": {
+              "id": 0,
+              "key": "f"
+            },
+            "parent": {
+              "id": 0,
+              "key": {
+                "local_name": {
+                  "id": 0,
+                  "key": "string_literal"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "id": 0,
+          "key": "string_literal.f.<locals>"
+        },
+        "value": {
+          "id": 0,
+          "key": {
+            "local_name": {
+              "id": 0,
+              "key": "<locals>"
+            },
+            "parent": {
+              "id": 0,
+              "key": {
+                "local_name": {
+                  "id": 0,
+                  "key": "f"
+                },
+                "parent": {
+                  "id": 0,
+                  "key": {
+                    "local_name": {
+                      "id": 0,
+                      "key": "string_literal"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "id": 0,
+          "key": "string_literal.f.<locals>.s"
+        },
+        "value": {
+          "id": 0,
+          "key": {
+            "local_name": {
+              "id": 0,
+              "key": "s"
+            },
+            "parent": {
+              "id": 0,
+              "key": {
+                "local_name": {
+                  "id": 0,
+                  "key": "<locals>"
+                },
+                "parent": {
+                  "id": 0,
+                  "key": {
+                    "local_name": {
+                      "id": 0,
+                      "key": "f"
+                    },
+                    "parent": {
+                      "id": 0,
+                      "key": {
+                        "local_name": {
+                          "id": 0,
+                          "key": "string_literal"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.NameToSName.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "name": {
+            "id": 0,
+            "key": "string_literal"
+          }
+        }
+      }
+    ],
+    "predicate": "python.Module.4"
+  },
+  {
+    "schema_id": "60aea86d7ff049228df605cf3fda4c67"
+  }
+]
