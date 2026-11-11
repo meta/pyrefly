@@ -87,6 +87,7 @@ use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
 use crate::binding::binding::KeyExport;
+use crate::binding::bindings::Bindings;
 use crate::binding::metadata::BindingsMetadata;
 use crate::config::error_kind::ErrorKind;
 use crate::error::error::ErrorQuickFix;
@@ -380,6 +381,12 @@ fn definition_matcher(
             || (candidate_name == definition_name
                 && module.to_lsp_position(candidate_range.start()).line == definition_line)
     }
+}
+
+/// Connect an export name to its final local binding, including local import aliases.
+pub(crate) fn dunder_all_binding<'a>(bindings: &'a Bindings, name: &Name) -> Option<&'a Key> {
+    let export = bindings.key_to_idx_hashed_opt(Hashed::new(&KeyExport(name.clone())))?;
+    Some(bindings.idx_to_key(bindings.get(export).key_idx()))
 }
 
 /// Parses a forward-reference string such as `"list[Foo]"` into the expression the binder
@@ -2932,24 +2939,22 @@ impl<'a> Transaction<'a> {
         let exports = self.get_exports_data(handle);
         let (_entry_range, name) = exports.dunder_all_name_at(position)?;
 
-        if let Some((definition_handle, _, export)) =
-            self.resolve_named_import(handle, module_info.name(), name.clone(), preference)
-        {
-            let local_import = exports.import_definition(&name).filter(|(_, has_alias)| {
-                match preference.import_behavior {
-                    ImportBehavior::StopAtEverything => true,
-                    ImportBehavior::StopAtRenamedImports => *has_alias,
-                    ImportBehavior::JumpThroughEverything => false,
-                }
-            });
-            let (definition_module, definition_range) = if let Some((range, _)) = local_import {
-                (module_info, range)
-            } else {
-                (self.get_module_info(&definition_handle)?, export.location)
-            };
+        let definition = match preference.import_behavior {
+            ImportBehavior::JumpThroughEverything => self
+                .resolve_named_import(handle, module_info.name(), name.clone(), preference)
+                .map(|(handle, _, export)| (handle, export)),
+            // Reference queries start from the checked binding and preserve local aliases.
+            ImportBehavior::StopAtEverything | ImportBehavior::StopAtRenamedImports => {
+                let answers = self.get_answers(handle)?;
+                let key = dunder_all_binding(answers.bindings(), &name)?;
+                self.find_export_for_key(handle, key, preference).ok()?
+            }
+        };
+        if let Some((definition_handle, export)) = definition {
+            let definition_module = self.get_module_info(&definition_handle)?;
             return Some(FindDefinitionItemWithDocstring {
                 metadata: DefinitionMetadata::VariableOrAttribute(export.symbol_kind),
-                definition_range,
+                definition_range: export.location,
                 module: definition_module,
                 docstring_range: export.docstring_range,
                 display_name: Some(name.to_string()),
@@ -4935,33 +4940,6 @@ impl<'a> Transaction<'a> {
                 &definition_name,
             ));
         }
-        if let Some(entries) = self.get_exports_data(handle).dunder_all_names()
-            && let Some(module_info) = self.get_module_info(handle)
-        {
-            let ast = self.get_ast_or_parse_module(handle, &module_info);
-            for (range, _) in entries {
-                if let Some(definition) = self.find_definition_for_dunder_all_entry(
-                    handle,
-                    range.start(),
-                    FindPreference {
-                        import_behavior: ImportBehavior::StopAtRenamedImports,
-                        ..Default::default()
-                    },
-                ) && definition.module.path() == module.path()
-                    && definition.definition_range == definition_range
-                    && let Some(content_range) = Ast::locate_node(&ast, range.start())
-                        .into_iter()
-                        .find_map(|node| match node {
-                            AnyNodeRef::ExprStringLiteral(literal) if literal.range() == range => {
-                                Some(literal.as_single_part_string()?.content_range())
-                            }
-                            _ => None,
-                        })
-                {
-                    references.push(content_range);
-                }
-            }
-        }
         references.sort_by_key(|range| range.start());
         references.dedup();
         Some(references)
@@ -5180,19 +5158,18 @@ impl<'a> Transaction<'a> {
     ) -> Option<Vec<TextRange>> {
         let mut references = Vec::new();
         if let Some(mod_module) = self.get_ast(handle) {
-            let is_valid_use = |x: &ExprName| {
-                if x.id() == expected_name
-                    && let Some((def_handle, Export { location, .. })) = self
-                        .find_export_for_key(
-                            handle,
-                            &Key::BoundName(ShortIdentifier::expr_name(x)),
-                            FindPreference {
-                                import_behavior: ImportBehavior::StopAtRenamedImports,
-                                prefer_pyi: false,
-                                ..Default::default()
-                            },
-                        )
-                        .unwrap_or(None)
+            let is_valid_key = |key: &Key| {
+                if let Some((def_handle, Export { location, .. })) = self
+                    .find_export_for_key(
+                        handle,
+                        key,
+                        FindPreference {
+                            import_behavior: ImportBehavior::StopAtRenamedImports,
+                            prefer_pyi: false,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_or(None)
                     && def_handle.path() == handle.path()
                     && location == definition_range
                 {
@@ -5200,6 +5177,18 @@ impl<'a> Transaction<'a> {
                 } else {
                     false
                 }
+            };
+            if let Some(answers) = self.get_answers(handle) {
+                let bindings = answers.bindings();
+                references.extend(bindings.dunder_all_entries().iter().filter_map(|entry| {
+                    (entry.id == *expected_name
+                        && dunder_all_binding(bindings, &entry.id).is_some_and(is_valid_key))
+                    .then_some(entry.range)
+                }));
+            }
+            let is_valid_use = |x: &ExprName| {
+                x.id() == expected_name
+                    && is_valid_key(&Key::BoundName(ShortIdentifier::expr_name(x)))
             };
             let module_info = self.get_module_info(handle);
             // Only strings that mention the name can hold a forward reference to it.

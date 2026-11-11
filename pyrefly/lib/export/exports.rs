@@ -401,20 +401,6 @@ impl Exports {
         )
     }
 
-    /// Return an import's local definition range and whether it has an explicit alias.
-    pub fn import_definition(&self, name: &Name) -> Option<(TextRange, bool)> {
-        let definition = self.definitions.definitions.get(name)?;
-        match definition.style {
-            DefinitionStyle::ImportAs(_, _) | DefinitionStyle::ImportAsEq(_) => {
-                Some((definition.range, true))
-            }
-            DefinitionStyle::Import(_) | DefinitionStyle::ImportModule(_) => {
-                Some((definition.range, false))
-            }
-            _ => None,
-        }
-    }
-
     /// Whether `name` is defined in this module as a `Final` whose type is declared rather than
     /// inferred, as `FinalName::has_declared_type` describes.
     pub fn final_has_declared_type(&self, name: &Name) -> bool {

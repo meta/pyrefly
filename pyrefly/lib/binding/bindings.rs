@@ -36,6 +36,7 @@ use pyrefly_util::gas::Gas;
 use pyrefly_util::suggest::Candidate;
 use pyrefly_util::suggest::Search;
 use pyrefly_util::visit::Visit;
+use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
@@ -433,6 +434,8 @@ pub struct Bindings {
     annotated_metadata_ranges: Vec<TextRange>,
     /// Ranges of the types that were read from docstrings, sorted and non-overlapping.
     docstring_type_ranges: Vec<TextRange>,
+    /// Each entry records an `__all__` name and its range without string delimiters.
+    dunder_all_entries: Vec<Identifier>,
     scope_trace: Option<ScopeTrace>,
     /// Names `del`eted at module scope; retained outside the LSP `scope_trace`.
     module_deletes: SmallSet<Name>,
@@ -694,6 +697,7 @@ impl Bindings {
             annotated_metadata_ranges: Vec::new(),
             docstring_type_ranges: Vec::new(),
             scope_trace: None,
+            dunder_all_entries: Vec::new(),
             module_deletes: SmallSet::new(),
             unset_nodes: UnsetNodes::default(),
             global_declarations: SmallSet::new(),
@@ -951,6 +955,10 @@ impl Bindings {
         }
     }
 
+    pub fn dunder_all_entries(&self) -> &[Identifier] {
+        &self.dunder_all_entries
+    }
+
     /// Within the LSP, check if a key exists.
     /// It may not exist within `if False:` or `if sys.version == 0:` style code.
     pub fn is_valid_key(&self, k: &Key) -> bool {
@@ -1109,6 +1117,24 @@ impl Bindings {
         use_shape_comments_and_stubs: bool,
     ) -> Self {
         let module_range = x.range;
+        let dunder_all_entries = exports
+            .dunder_all_names()
+            .into_iter()
+            .flatten()
+            .filter_map(|(range, name)| {
+                Ast::locate_node(&x, range.start())
+                    .into_iter()
+                    .find_map(|node| match node {
+                        AnyNodeRef::ExprStringLiteral(literal) if literal.range() == range => {
+                            Some(Identifier::new(
+                                name.clone(),
+                                literal.as_single_part_string()?.content_range(),
+                            ))
+                        }
+                        _ => None,
+                    })
+            })
+            .collect();
         let pytest_info = PytestBindingInfo::from_module(&x);
         let errors = ErrorCollector::new(module_info.dupe(), error_style);
         let shape_comments = if use_shape_comments_and_stubs {
@@ -1297,6 +1323,7 @@ impl Bindings {
             module_ranges,
             annotated_metadata_ranges: merge_ranges(builder.annotated_metadata_ranges),
             docstring_type_ranges: merge_ranges(builder.docstring_type_ranges),
+            dunder_all_entries,
             scope_trace: if enable_trace {
                 Some(scope_trace)
             } else {
