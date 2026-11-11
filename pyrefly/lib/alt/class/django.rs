@@ -859,7 +859,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 signature.ret = self.heap.mk_class_type(queryset.clone());
                             });
                         }
-                        _ => unreachable!("BaseManager.all and get_queryset are ordinary methods"),
+                        _ => return None,
                     }
                     return Some(attribute);
                 }
@@ -920,9 +920,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             });
                         });
                     }
-                    _ => {
-                        unreachable!("ManyRelatedManager add, remove, and set are ordinary methods")
-                    }
+                    _ => return None,
                 }
                 Some(attribute)
             }
