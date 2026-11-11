@@ -784,6 +784,19 @@ impl ErrorKind {
             )
     }
 
+    /// A redundancy claim must hold in every accepted inference context.
+    /// This is independent of whether the diagnostic affects candidate selection.
+    pub fn requires_all_contexts(self) -> bool {
+        matches!(
+            self,
+            ErrorKind::RedundantCast
+                | ErrorKind::RedundantCondition
+                | ErrorKind::UnnecessaryComparison
+                | ErrorKind::UnnecessaryTypeConversion
+                | ErrorKind::PytorchEfficiencyLintRedundantToCall
+        )
+    }
+
     /// Coverage kinds are emitted only by `pyrefly coverage check`.
     pub fn is_coverage(self) -> bool {
         matches!(

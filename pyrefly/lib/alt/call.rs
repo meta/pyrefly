@@ -42,6 +42,7 @@ use vec1::Vec1;
 
 use crate::alt::answers::AttributeReferenceKind;
 use crate::alt::answers::LookupAnswer;
+use crate::alt::answers::TraceSideEffects;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::attr::NoAccessReason;
 use crate::alt::callable::ArgMap;
@@ -65,12 +66,14 @@ use crate::binding::binding::Key;
 use crate::binding::binding::LambdaParamId;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
+use crate::error::collector::ModuleDiagnostics;
 use crate::error::context::ErrorContext;
 use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
 use crate::solver::solver::OverloadTable;
 use crate::solver::solver::QuantifiedHandle;
 use crate::solver::solver::TypeVarSpecializationError;
+use crate::solver::solver::VarSnapshot;
 use crate::types::callable::Callable;
 use crate::types::callable::ParamList;
 use crate::types::callable::Params;
@@ -93,6 +96,7 @@ use crate::types::types::Forallable;
 use crate::types::types::Overload;
 use crate::types::types::OverloadType;
 use crate::types::types::Type;
+use crate::types::types::Var;
 
 pub enum CallStyle<'a> {
     Method(&'a Name),
@@ -320,6 +324,84 @@ impl ConstructedInstance {
             );
         }
         self.ty
+    }
+}
+
+/// Caller-owned inference state touched by a constructor attempt.
+struct ConstructorState {
+    vars: VarSnapshot,
+    lambda_types: Vec<(LambdaParamId, Option<Type>)>,
+}
+
+impl ConstructorState {
+    fn capture<Ans: LookupAnswer>(answers: &AnswersSolver<Ans>, roots: &[&Type]) -> Self {
+        let lambda_types = answers.snapshot_lambda_param_types();
+        let mut roots = roots.to_vec();
+        roots.extend(lambda_types.iter().filter_map(|(_, ty)| ty.as_ref()));
+        Self {
+            vars: answers.solver().snapshot_reachable_vars(&roots),
+            lambda_types,
+        }
+    }
+
+    fn restore<Ans: LookupAnswer>(self, answers: &AnswersSolver<Ans>) {
+        answers.solver().restore_vars(self.vars);
+        answers.restore_lambda_param_types(&self.lambda_types);
+    }
+}
+
+/// An outcome and its inference effects are committed together after selection.
+struct ConstructorAttempt {
+    outcome: ConstructedInstance,
+    state: ConstructorState,
+    inferred: Vec<(Var, Type)>,
+    traces: Option<TraceSideEffects>,
+}
+
+/// Select a complete match, or preserve the original contextual fallback preference.
+fn select_constructor_hint(
+    args: &[CallArg],
+    keywords: &[CallKeyword],
+    hints: &[Type],
+    attempt: &impl Fn(&[CallArg], &[CallKeyword], Option<&Type>) -> ConstructorAttempt,
+) -> ConstructorAttempt {
+    let mut fallback = None;
+    for hint in hints {
+        let result = attempt(args, keywords, Some(hint));
+        if result.outcome.is_match() {
+            return result;
+        }
+        if !result.outcome.errors.has_hard() && fallback.is_none() {
+            fallback = Some(result);
+        }
+    }
+    fallback.unwrap_or_else(|| attempt(args, keywords, None))
+}
+
+/// Expressions retain contextual checking; only prepared type values contribute solver roots.
+fn constructor_argument_types<'a>(
+    args: &[CallArg<'a>],
+    keywords: &[CallKeyword<'a>],
+) -> Vec<&'a Type> {
+    args.iter()
+        .map(|arg| match arg {
+            CallArg::Arg(value) | CallArg::Star(value, _) => *value,
+        })
+        .chain(keywords.iter().map(|keyword| keyword.value))
+        .filter_map(|value| match value.as_type_or_expr() {
+            TypeOrExpr::Type(ty, _) => Some(ty),
+            TypeOrExpr::Expr(_) => None,
+        })
+        .collect()
+}
+
+impl ConstructorAttempt {
+    fn commit<Ans: LookupAnswer>(self, answers: &AnswersSolver<Ans>) -> ConstructedInstance {
+        self.state.restore(answers);
+        if let Some(traces) = self.traces {
+            answers.trace_state().replay_traces(&traces);
+        }
+        self.outcome
     }
 }
 
@@ -1229,131 +1311,185 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// Selects a constructor outcome without publishing its diagnostics.
-    /// Prefers the first hint match without hard call errors or specialization failures.
-    /// Otherwise keeps the first outcome without hard call errors, or constructs without a hint.
-    /// A union hint may accept different argument expansions through different members.
+    /// Selects a complete match without publishing rejected inference effects or diagnostics.
+    /// Each argument expansion must match some hint member; otherwise retain the original fallback.
     /// Hints wider than `MAX_HINT_WIDTH` are ignored.
     fn construct_with_hint(
         &self,
+        targs: &TArgs,
         args: &[CallArg],
         keywords: &[CallKeyword],
         hint: Option<HintRef>,
         construct: impl Fn(&[CallArg], &[CallKeyword], Option<&Type>) -> ConstructedInstance,
     ) -> ConstructedInstance {
-        let budget = self.enter_constructor_budget();
-        let select = |args: &[CallArg], keywords: &[CallKeyword]| {
-            if let Some(hint) = hint
-                && let hints = hint.types()
-                && hints.len() <= MAX_HINT_WIDTH
-            {
-                let mut ret_no_match_hint = None;
-                for member_hint in hints.iter() {
-                    budget.spend();
-                    let ret = construct(args, keywords, Some(member_hint));
-                    if ret.errors.has_hard() {
-                        continue;
-                    }
-                    if ret.matched_hint && ret.specialization_errors.is_none() {
-                        // Prefer contextual results assignable to their hint, such as list[Base]
-                        // rather than list[Child] when the argument is [Child()].
-                        return ret;
-                    }
-                    if ret_no_match_hint.is_none() {
-                        ret_no_match_hint = Some(ret);
-                    }
-                }
-                if let Some(ret) = ret_no_match_hint {
-                    // Keep the first contextual result if only specialization failed.
-                    return ret;
+        let expandable =
+            hint.is_some_and(|hint| (2..=MAX_HINT_WIDTH).contains(&hint.types().len()));
+        let budget = self.enter_constructor_budget(expandable);
+        let Some(hint) = hint.filter(|hint| hint.types().len() <= MAX_HINT_WIDTH) else {
+            budget.spend();
+            return construct(args, keywords, None);
+        };
+        let first_use_types = self.active_first_use_types();
+        let mut roots = targs.as_slice().iter().collect::<Vec<_>>();
+        roots.extend(hint.types());
+        roots.extend(first_use_types.iter());
+        roots.extend(constructor_argument_types(args, keywords));
+        let attempt = |args: &[CallArg], keywords: &[CallKeyword], hint: Option<&Type>| {
+            budget.spend();
+            let mut roots = roots.clone();
+            roots.extend(constructor_argument_types(args, keywords));
+            let before = ConstructorState::capture(self, &roots);
+            let _lambda_context = self.enter_lambda_binding_context([]);
+            let (mut outcome, traces) = self
+                .trace_state()
+                .defer_traces(|| construct(args, keywords, hint));
+            outcome.ty = self.solver().expand(outcome.ty);
+            let inferred = self.solver().inferred_bounds(&before.vars);
+            let mut state = ConstructorState::capture(self, &roots);
+            for (_, ty) in &mut state.lambda_types {
+                if let Some(ty) = ty {
+                    *ty = self.solver().expand(ty.clone());
                 }
             }
-            // If the hint is too wide or always produces non-specialization errors, don't use it.
-            budget.spend();
-            construct(args, keywords, None)
+            before.restore(self);
+            ConstructorAttempt {
+                outcome,
+                state,
+                inferred,
+                traces,
+            }
         };
-        let unexpanded = select(args, keywords);
-        if !hint.is_some_and(|hint| (2..=MAX_HINT_WIDTH).contains(&hint.types().len()))
-            || (unexpanded.matched_hint && unexpanded.specialization_errors.is_none())
-        {
-            return unexpanded;
+        let unexpanded = select_constructor_hint(args, keywords, hint.types(), &attempt);
+        if !expandable || unexpanded.outcome.is_match() {
+            return unexpanded.commit(self);
         }
 
         let mut expander = ArgsExpander::new(args.to_vec(), keywords.to_vec(), self);
         let owner = Owner::new();
         let expansion_errors = self.error_collector();
-        while !budget.exhausted()
-            && let Some(arg_lists) = expander.expand(&expansion_errors, &owner)
-        {
-            if budget.exhausted() || expansion_errors.has_hard() {
-                break;
-            }
-            // Every expansion must match some hint. A rejected batch publishes nothing.
-            let Some(outcomes) = arg_lists
-                .into_iter()
-                .map(|(args, keywords)| {
-                    if budget.exhausted() {
-                        return None;
-                    }
-                    let outcome = select(&args, &keywords);
-                    outcome.is_match().then_some(outcome)
-                })
-                .collect::<Option<Vec<_>>>()
-            else {
-                continue;
-            };
-            let diagnostics = outcomes
-                .iter()
-                .map(|outcome| {
-                    [
-                        outcome.errors.take(),
-                        outcome.arg_errors.take(),
-                        outcome.return_errors.take(),
-                    ]
-                })
-                .collect::<Vec<_>>();
-            // A cast is redundant only if it is redundant in every accepted context.
-            // Other diagnostics, such as deprecation, still apply if any branch reports them.
-            let common_casts = diagnostics
-                .iter()
-                .map(|diagnostics| {
-                    diagnostics
-                        .iter()
-                        .flat_map(|diagnostics| diagnostics.iter())
-                        .filter(|error| error.error_kind() == ErrorKind::RedundantCast)
-                        .map(|error| error.range())
-                        .collect::<SmallSet<_>>()
-                })
-                .reduce(|mut common, casts| {
-                    common.retain(|range| casts.contains(range));
-                    common
-                })
-                .expect("An accepted batch contains at least one outcome");
-            let mut outcomes = outcomes.into_iter();
-            let mut result = outcomes
-                .next()
-                .expect("Argument expansion produces at least one call");
-            let mut types = vec![result.ty.clone()];
-            for outcome in outcomes {
-                types.push(outcome.ty);
-            }
-            for diagnostics in diagnostics {
-                for (diagnostics, errors) in diagnostics.iter().zip([
-                    &result.errors,
-                    &result.arg_errors,
-                    &result.return_errors,
-                ]) {
-                    diagnostics.replay_filtered(errors, |error| {
-                        error.error_kind() != ErrorKind::RedundantCast
-                            || common_casts.contains(&error.range())
-                    });
+        let mut expansion_traces = Vec::new();
+        let expanded = budget.speculate(|| {
+            loop {
+                if budget.exhausted() {
+                    break None;
                 }
+                let before = ConstructorState::capture(self, &roots);
+                let (arg_lists, traces) = self
+                    .trace_state()
+                    .defer_traces(|| expander.expand(&expansion_errors, &owner));
+                before.restore(self);
+                expansion_traces.extend(traces);
+                let Some(arg_lists) = arg_lists else {
+                    break None;
+                };
+                if budget.exhausted() || expansion_errors.has_hard() {
+                    break None;
+                }
+                // Every expansion must match some hint. A rejected batch publishes nothing.
+                let mut batch_roots = roots.clone();
+                for (args, keywords) in &arg_lists {
+                    batch_roots.extend(constructor_argument_types(args, keywords));
+                }
+                let before = ConstructorState::capture(self, &batch_roots);
+                let mut lambda_types = SmallMap::new();
+                let (outcomes, traces) = self.trace_state().defer_traces(|| {
+                    let probes = arg_lists
+                        .iter()
+                        .map(|(args, keywords)| {
+                            if budget.exhausted() {
+                                return None;
+                            }
+                            let probe =
+                                select_constructor_hint(args, keywords, hint.types(), &attempt);
+                            probe.outcome.is_match().then_some(probe)
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    let mut bounds = SmallMap::new();
+                    for probe in &probes {
+                        for (var, ty) in &probe.inferred {
+                            bounds.entry(*var).or_insert_with(Vec::new).push(ty.clone());
+                        }
+                    }
+                    let probes = if bounds.is_empty() {
+                        probes
+                    } else {
+                        // All input alternatives constrain the same caller. Join their evidence
+                        // before replaying constructors under that common inference state.
+                        for (var, types) in bounds {
+                            if !self.is_subset_eq(&self.unions(types), &Type::Var(var)) {
+                                return None;
+                            }
+                        }
+                        let mut replayed = Vec::new();
+                        for (args, keywords) in &arg_lists {
+                            if budget.exhausted() {
+                                return None;
+                            }
+                            let probe =
+                                select_constructor_hint(args, keywords, hint.types(), &attempt);
+                            if !probe.outcome.is_match() {
+                                return None;
+                            }
+                            // Replaying is independent until the complete batch is accepted.
+                            replayed.push(probe);
+                        }
+                        replayed
+                    };
+                    Some(
+                        probes
+                            .into_iter()
+                            .map(|attempt| {
+                                for (id, ty) in &attempt.state.lambda_types {
+                                    if let Some(ty) = ty {
+                                        lambda_types
+                                            .entry(*id)
+                                            .or_insert_with(Vec::new)
+                                            .push(ty.clone());
+                                    }
+                                }
+                                attempt.commit(self)
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                });
+                let Some(outcomes) = outcomes else {
+                    before.restore(self);
+                    continue;
+                };
+                let diagnostics = outcomes
+                    .iter()
+                    .map(|outcome| {
+                        [
+                            outcome.errors.take(),
+                            outcome.arg_errors.take(),
+                            outcome.return_errors.take(),
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                let mut outcomes = outcomes.into_iter();
+                let mut result = outcomes
+                    .next()
+                    .expect("Argument expansion produces at least one call");
+                let mut types = vec![result.ty.clone()];
+                for outcome in outcomes {
+                    types.push(outcome.ty);
+                }
+                ModuleDiagnostics::replay_alternatives(
+                    &diagnostics,
+                    [&result.errors, &result.arg_errors, &result.return_errors],
+                );
+                result.ty = self.unions(types);
+                result.arg_errors.extend(expansion_errors);
+                for (id, types) in lambda_types {
+                    self.set_lambda_param_type(id, self.unions(types));
+                }
+                for traces in expansion_traces.into_iter().chain(traces) {
+                    self.trace_state().replay_traces(&traces);
+                }
+                break Some(result);
             }
-            result.ty = self.unions(types);
-            result.arg_errors.extend(expansion_errors);
-            return result;
-        }
-        unexpanded
+        });
+        expanded.unwrap_or_else(|| unexpanded.commit(self))
     }
 
     fn construct_class(
@@ -1450,18 +1586,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let prepared = ConstructorArguments::new(hint);
         let (args, keywords) = prepared.prepare(args, keywords);
 
-        self.construct_with_hint(&args, &keywords, hint, |args, keywords, hint| {
-            self.construct_class_inner(
-                cls.clone(),
-                constructor_kind.clone(),
-                args,
-                keywords,
-                arguments_range,
-                callee_range,
-                context,
-                hint,
-            )
-        })
+        self.construct_with_hint(
+            cls.targs(),
+            &args,
+            &keywords,
+            hint,
+            |args, keywords, hint| {
+                self.construct_class_inner(
+                    cls.clone(),
+                    constructor_kind.clone(),
+                    args,
+                    keywords,
+                    arguments_range,
+                    callee_range,
+                    context,
+                    hint,
+                )
+            },
+        )
         .take(
             arguments_range,
             errors,
@@ -1784,16 +1926,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let hint = HintRef::filter_for_constructor(hint, typed_dict.targs());
         let prepared = ConstructorArguments::new(hint);
         let (args, keywords) = prepared.prepare(args, keywords);
-        self.construct_with_hint(&args, &keywords, hint, |args, keywords, hint| {
-            self.construct_typed_dict_inner(
-                typed_dict.clone(),
-                args,
-                keywords,
-                arguments_range,
-                context,
-                hint,
-            )
-        })
+        self.construct_with_hint(
+            typed_dict.targs(),
+            &args,
+            &keywords,
+            hint,
+            |args, keywords, hint| {
+                self.construct_typed_dict_inner(
+                    typed_dict.clone(),
+                    args,
+                    keywords,
+                    arguments_range,
+                    context,
+                    hint,
+                )
+            },
+        )
         .take(
             arguments_range,
             errors,

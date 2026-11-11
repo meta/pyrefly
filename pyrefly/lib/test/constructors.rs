@@ -5,7 +5,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use pyrefly_util::thread_pool::ThreadCount;
+
 use crate::test::util::TestEnv;
+use crate::test::util::testcase_for_macro;
 use crate::testcase;
 
 // Regression tests for https://github.com/facebook/pyrefly/issues/1134.
@@ -214,6 +217,154 @@ def f(value: int | str | bytes) -> None:
     result: Node[int] | Node[str] = Node(value, Node(value, Node(value)))  # E: is not assignable # E: is not assignable # E: is not assignable
 "#,
 );
+
+testcase!(
+    test_constructor_union_distribution_caller_bounds,
+    r#"
+class A[T]:
+    def __init__(self, x: T) -> None:
+        self.x: T = x
+
+def bounded[T: int](item: A[T] | A[str]) -> T: ...
+def constrained[T: (int, str)](item: A[T] | A[float]) -> None: ...
+
+def f(x: int | str | bytes) -> None:
+    bounded(A(x))  # E: upper bound
+
+def g(x: int | str | float | bytes) -> None:
+    constrained(A(x))  # E: constraints
+
+def valid(x: int | str, y: int | float) -> None:
+    bounded(A(x))
+    constrained(A(y))
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_later_hint,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable
+
+class A[T, U]:
+    def __init__(self, value: T, callback: Callable[[U], str]) -> None: ...
+
+def f(value: int | str) -> None:
+    original: A[int, str] | A[str, str] = A(value, lambda x: x.upper())
+    extended: A[int, int] | A[int, str] | A[str, str] = A(value, lambda x: x.upper())
+    keyword: A[int, int] | A[int, str] | A[str, str] = A(callback=lambda x: x.upper(), value=value)
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_caller_mixed_arguments,
+    r#"
+from typing import assert_type
+
+class Pair[T, U]:
+    def __init__(self, x: T, y: U) -> None: ...
+
+def same[T: int](item: Pair[T, T] | Pair[str, str]) -> None: ...
+def mixed[T: int, U: str](item: Pair[T, U] | Pair[str, int]) -> None: ...
+def infer[T](item: Pair[T, int] | Pair[T, str]) -> T: ...
+
+def invalid(x: int | str, y: int | str) -> None:
+    same(Pair(x, y))  # E: upper bound
+    mixed(Pair(x, y))  # E: upper bound # E: upper bound
+
+def valid(x: int | bytes, y: int | str) -> None:
+    assert_type(infer(Pair(x, y)), int | bytes)
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_contextual_conversion,
+    TestEnv::new().enable_deprecated_error(),
+    r#"
+from typing import Callable
+from typing_extensions import deprecated
+
+class A[T]:
+    def __init__(self, cb: Callable[[T], object], value: T) -> None: ...
+
+@deprecated("old callback")
+def old(value: object) -> object: ...
+
+def f(value: int | str, fixed: str) -> None:
+    necessary: A[int] | A[str] = A(lambda arg: str(arg), value)
+    redundant: A[int] | A[str] = A(lambda arg: str(fixed), value)  # E: Unnecessary `str()` call
+    deprecated: A[int] | A[str] = A(lambda arg: old(str(arg)), value)  # E: `old` is deprecated
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_binding_budget,
+    TestEnv::new().with_thread_count(ThreadCount::Inline),
+    r#"
+class A[T]:
+    def __init__(self, value: T) -> None: ...
+class Node[T]:
+    def __init__(self, value: T,
+                 child: Node[int] | Node[str] | None = None) -> None: ...
+class Wrap:
+    def __init__(self, a: Node[int] | Node[str], b: object) -> None: ...
+def need(x: A[int] | A[str]) -> int: ...
+
+def f(w: int | str | bytes, v: int | str) -> None:
+    Wrap(Node(w, Node(w, Node(w, Node(w, Node(w))))), helper(v))  # type: ignore
+
+def helper(v: int | str):
+    return need(A(v))
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_sibling_budget,
+    TestEnv::new().with_thread_count(ThreadCount::Inline),
+    r#"
+class A[T]:
+    def __init__(self, value: T) -> None: ...
+class Node[T]:
+    def __init__(self, value: T,
+                 child: Node[int] | Node[str] | None = None) -> None: ...
+class Wrap:
+    def __init__(self, a: object, b: object) -> None: ...
+def need(x: A[int] | A[str]) -> int: ...
+
+def f(w: int | str | bytes, v: int | str) -> None:
+    Wrap(
+        Node(w, Node(w, Node(w, Node(w, Node(w))))),  # type: ignore
+        need(A(v)),
+    )
+    Wrap(
+        need(A(v)),
+        Node(w, Node(w, Node(w, Node(w, Node(w))))),  # type: ignore
+    )
+"#,
+);
+
+#[test]
+fn test_constructor_union_distribution_plain_calls_budget() -> anyhow::Result<()> {
+    let calls = "P(), ".repeat(1001);
+    let source = format!(
+        r#"
+class P: ...
+class Wrap:
+    def __init__(self, value: object) -> None: ...
+class A[T]:
+    def __init__(self, value: T) -> None: ...
+def need(value: A[int] | A[str]) -> int: ...
+def f(value: int | str) -> None:
+    Wrap(({calls}need(A(value))))
+"#
+    );
+    testcase_for_macro(
+        TestEnv::new().with_thread_count(ThreadCount::Inline),
+        &source,
+        file!(),
+        line!(),
+    )
+}
 
 testcase!(
     test_constructor_union_distribution_new_and_init,

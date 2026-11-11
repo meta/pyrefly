@@ -40,6 +40,7 @@ use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::recurser::Guard;
 use pyrefly_util::recurser::Recurser;
 use pyrefly_util::uniques::UniqueFactory;
+use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
@@ -907,6 +908,28 @@ impl Solver {
         )
     }
 
+    /// Materialize evidence inferred for the caller's unfinished variables by a probe.
+    /// Replaying their combined lower bounds rechecks restrictions in the accepted context.
+    pub(crate) fn inferred_bounds(&self, before: &VarSnapshot) -> Vec<(Var, Type)> {
+        before
+            .0
+            .iter()
+            .filter(|(_, state)| {
+                matches!(
+                    state.variable,
+                    Variable::Quantified { .. }
+                        | Variable::Unwrap(_)
+                        | Variable::PartialQuantified(_)
+                        | Variable::PartialContained(_)
+                )
+            })
+            .filter_map(|(var, _)| {
+                let ty = self.expand(Type::Var(*var));
+                (ty != Type::Var(*var) && !ty.may_contain_placeholder_var()).then_some((*var, ty))
+            })
+            .collect()
+    }
+
     /// Returns the vars in `pending` together with every var reachable from them through
     /// union-find parents and the vars referenced by current bounds or answers.
     fn reachable_vars(variables: &Variables, mut pending: Vec<Var>) -> SmallSet<Var> {
@@ -922,7 +945,9 @@ impl Solver {
                 }
                 VariableNode::Root(variable, _) => match variable.as_ref() {
                     Variable::Quantified {
-                        quantified, bounds, ..
+                        quantified,
+                        bounds,
+                        bound_override,
                     } => {
                         pending.extend(
                             Type::Quantified(Box::new(quantified.clone())).collect_all_vars(),
@@ -934,6 +959,10 @@ impl Solver {
                                 .chain(&bounds.upper)
                                 .flat_map(Type::collect_all_vars),
                         );
+                        if let Some(restriction) = bound_override {
+                            restriction
+                                .recurse(&mut |ty: &Type| pending.extend(ty.collect_all_vars()));
+                        }
                     }
                     Variable::Unwrap(bounds) => pending.extend(
                         bounds
@@ -942,7 +971,15 @@ impl Solver {
                             .chain(&bounds.upper)
                             .flat_map(Type::collect_all_vars),
                     ),
-                    Variable::Answer { ty, .. } => pending.extend(ty.collect_all_vars()),
+                    Variable::Answer { ty, restricted, .. } => {
+                        pending.extend(ty.collect_all_vars());
+                        if let Some(restricted) = restricted {
+                            pending.extend(
+                                Type::Quantified(Box::new(restricted.param.clone()))
+                                    .collect_all_vars(),
+                            );
+                        }
+                    }
                     Variable::PartialQuantified(quantified) => pending
                         .extend(Type::Quantified(Box::new(quantified.clone())).collect_all_vars()),
                     Variable::PartialContained(_) | Variable::Recursive => {}
@@ -4730,6 +4767,51 @@ mod tests {
 
     fn quantified(kind: QuantifiedKind, index: u32) -> Quantified {
         quantified_with_restriction(kind, index, Restriction::Unrestricted)
+    }
+
+    #[test]
+    fn speculative_inference_snapshot_restores_restricted_answers() {
+        let solver = Solver::new(SolverConfig::default());
+        let uniques = UniqueFactory::new();
+        let inner = Var::new(&uniques);
+        let outer = Var::new(&uniques);
+        let param = quantified_with_restriction(
+            QuantifiedKind::TypeVar,
+            0,
+            Restriction::Bound(Type::Var(inner)),
+        );
+        {
+            let mut variables = solver.variables.lock();
+            variables.insert_fresh(inner, Variable::answer(Type::None));
+            variables.insert_fresh(
+                outer,
+                Variable::Answer {
+                    ty: Type::None,
+                    frozen: false,
+                    restricted: Some(Box::new(RestrictedAnswer {
+                        error: Some(TypeVarSpecializationError::BadBoundSpecialization {
+                            name: param.name().clone(),
+                            got: Type::None,
+                            want: Type::Var(inner),
+                        }),
+                        param,
+                    })),
+                },
+            );
+        }
+        let snapshot = solver.snapshot_reachable_vars(&[&Type::Var(outer)]);
+        {
+            let variables = solver.variables.lock();
+            variables.update(inner, Variable::answer(Type::any_implicit()));
+            variables.update(outer, Variable::answer(Type::None));
+        }
+        solver.restore_vars(snapshot);
+        let variables = solver.variables.lock();
+        assert!(matches!(&*variables.get(inner), Variable::Answer { ty, .. } if ty.is_none()));
+        assert!(matches!(
+            &*variables.get(outer),
+            Variable::Answer { restricted: Some(restricted), .. } if restricted.error.is_some()
+        ));
     }
 
     fn quantified_with_restriction(

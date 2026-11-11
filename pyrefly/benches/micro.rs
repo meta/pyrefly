@@ -641,6 +641,23 @@ fn nested_generic_constructor(c: &mut Criterion) {
             0,
         );
     }
+    // Deep contextual calls can exhaust the shared budget and retain fallback errors.
+    for (depth, errors) in [(3, 0), (4, 1), (6, 6), (8, 8)] {
+        measure(
+            c,
+            &format!("nested_contextual_constructor_union_{depth}"),
+            nested_init_only_constructor_hints(depth, "int | str", true),
+            errors,
+        );
+    }
+    for depth in [4, 6, 8] {
+        measure(
+            c,
+            &format!("nested_rejected_constructor_union_{depth}"),
+            nested_init_only_constructor_hints(depth, "int | str | bytes", false),
+            depth,
+        );
+    }
 }
 
 fn nested_nongeneric_constructor(c: &mut Criterion) {
