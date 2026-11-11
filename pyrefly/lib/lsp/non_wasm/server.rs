@@ -3316,36 +3316,20 @@ impl Server {
             .collect()
     }
 
-    /// Adjust a baseline match shown for an open file.
+    /// Draw an unset baseline match as a hint in an open file.
     ///
-    /// An unset `baseline-error-level` stays a hint. A configured level replaces
-    /// that hint, and `ignore` drops the diagnostic. Files that are not open keep
-    /// the severity `to_diagnostic` already chose.
-    fn with_open_file_baseline_severity(
-        &self,
-        e: &Error,
-        open_files: &HashMap<PathBuf, Arc<LspFile>>,
-        mut diag: Diagnostic,
-    ) -> Option<Diagnostic> {
-        if to_real_path(e.path()).is_some_and(|path| open_files.contains_key(&path)) {
-            let level = self
-                .state
-                .config_finder()
-                .python_file(
-                    ModuleNameWithKind::guaranteed(ModuleName::unknown()),
-                    e.path(),
-                )
-                .baseline_error_level;
-            let severity = match level {
-                None | Some(Severity::Hint) => DiagnosticSeverity::Hint,
-                Some(Severity::Ignore) => return None,
-                Some(Severity::Info) => DiagnosticSeverity::Information,
-                Some(Severity::Warn) => DiagnosticSeverity::Warning,
-                Some(Severity::Error) => DiagnosticSeverity::Error,
-            };
-            diag.severity = Some(severity);
+    /// The severity cap is chosen before `to_diagnostic_with_severity` runs.
+    /// That function shows an untagged hint as information, so the historical
+    /// hint for an unset `baseline-error-level` is assigned here.
+    fn show_unconfigured_baseline_as_hint(
+        unconfigured: bool,
+        path: &ModulePath,
+        open_files: &HashMap<PathBuf, OpenFile>,
+        diag: &mut Diagnostic,
+    ) {
+        if unconfigured && to_real_path(path).is_some_and(|open| open_files.contains_key(&open)) {
+            diag.severity = Some(DiagnosticSeverity::Hint);
         }
-        Some(diag)
     }
 
     fn get_diag_if_shown(
@@ -3592,11 +3576,15 @@ impl Server {
             }
         }
         for e in baseline_errors {
-            if let Some((path, diag)) =
+            if let Some((path, mut diag)) =
                 self.get_diag_if_shown(e.error(), e.severity(), &open_files, None)
-                && let Some(diag) =
-                    self.with_open_file_baseline_severity(e.error(), &open_files, diag)
             {
+                Self::show_unconfigured_baseline_as_hint(
+                    e.unconfigured_baseline_hint(),
+                    e.error().path(),
+                    &open_files,
+                    &mut diag,
+                );
                 diags.entry(path.to_owned()).or_default().push(diag);
             }
         }
@@ -6652,11 +6640,15 @@ impl Server {
             }
         }
         for e in baseline_errors {
-            if let Some((_, diag)) =
+            if let Some((_, mut diag)) =
                 self.get_diag_if_shown(e.error(), e.severity(), &open_files, cell_uri)
-                && let Some(diag) =
-                    self.with_open_file_baseline_severity(e.error(), &open_files, diag)
             {
+                Self::show_unconfigured_baseline_as_hint(
+                    e.unconfigured_baseline_hint(),
+                    e.error().path(),
+                    &open_files,
+                    &mut diag,
+                );
                 items.push(diag);
             }
         }
