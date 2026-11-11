@@ -290,6 +290,28 @@ class Outer:
 totals = [n * 2 for n in range(3)]
 "#;
 
+    let string_literal = r#"from enum import StrEnum
+from typing import Literal, LiteralString
+
+def plain(word: str) -> str:
+    return word.title()
+
+def literal(word: Literal["red"]) -> str:
+    return word.title()
+
+def literal_string(word: LiteralString) -> str:
+    return word.title()
+
+def joined(parts: list[str]) -> str:
+    return ", ".join(parts)
+
+class Colour(StrEnum):
+    RED = "red"
+
+    def label(self) -> str:
+        return self.value.title()
+"#;
+
     let files = [
         ("simple", simple_code),
         ("classes", classes_code),
@@ -307,6 +329,7 @@ totals = [n * 2 for n in range(3)]
         ("inherited_members", inherited_members),
         ("nested_later_class", nested_later_class),
         ("comprehensions", comprehensions),
+        ("string_literal", string_literal),
     ];
     let (handles, state) = mk_multi_file_state_assert_no_errors(&files, Require::Everything);
     let transaction = state.transaction();

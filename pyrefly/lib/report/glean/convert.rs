@@ -1002,11 +1002,22 @@ impl GleanState<'_> {
                     let completions = |ty| solver.completions(ty, Some(attr_name), false, false);
                     // The class that defines `attr_name`, as found by the solver's own member
                     // lookup, so that an inherited member is named after its defining class.
-                    let defining_type = |ty: Type| match &ty {
-                        Type::ClassType(cls) | Type::SelfType(cls) => solver
+                    let defining_type = |ty: Type| {
+                        // A literal is an instance of its general class (e.g. `"a"` is a `str`),
+                        // so its members are named after that class.
+                        let cls = match &ty {
+                            Type::ClassType(cls) | Type::SelfType(cls) => cls.clone(),
+                            Type::Literal(lit) => {
+                                lit.value.general_class_type(solver.stdlib).clone()
+                            }
+                            Type::LiteralString(_) => solver.stdlib.str().clone(),
+                            _ => return ty,
+                        };
+                        solver
                             .get_class_member_with_defining_class(cls.class_object(), attr_name)
-                            .map_or(ty.clone(), |member| Type::ClassDef(member.defining_class)),
-                        _ => ty,
+                            .map_or(Type::ClassType(cls), |member| {
+                                Type::ClassDef(member.defining_class)
+                            })
                     };
 
                     let tys = match base_type.clone() {
