@@ -36,6 +36,7 @@
 use std::sync::Arc;
 
 use dupe::Dupe;
+use dupe::OptionDupedExt;
 use parking_lot::Condvar;
 use parking_lot::Mutex;
 use ruff_python_ast::ModModule;
@@ -43,6 +44,7 @@ use ruff_python_ast::ModModule;
 use crate::alt::answers::Answers;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers::Solutions;
+use crate::error::collector::ModuleDiagnostics;
 use crate::export::exports::Exports;
 use crate::export::exports::LookupExport;
 use crate::state::dirty::AtomicComputedDirty;
@@ -452,6 +454,30 @@ pub trait ModuleStateReader {
     fn get_parsed_module(&self) -> Option<Arc<ParsedModule>>;
     fn get_answers(&self) -> Option<Arc<Answers>>;
     fn get_solutions(&self) -> Option<Arc<Solutions>>;
+    fn parse_errors(&self) -> Option<ModuleDiagnostics> {
+        self.get_parsed_module()
+            .map(|parsed| parsed.errors().dupe())
+            .or_else(|| {
+                self.get_answers()
+                    .map(|answers| answers.bindings().parse_errors().dupe())
+            })
+            .or_else(|| {
+                self.get_solutions()
+                    .map(|solutions| solutions.parse_errors().dupe())
+            })
+    }
+    fn binding_errors(&self) -> Option<ModuleDiagnostics> {
+        self.get_answers()
+            .map(|answers| answers.bindings().binding_errors().dupe())
+            .or_else(|| {
+                self.get_solutions()
+                    .map(|solutions| solutions.binding_errors().dupe())
+            })
+    }
+    fn solve_errors(&self) -> Option<ModuleDiagnostics> {
+        self.get_solutions()
+            .map(|solutions| solutions.solve_errors().dupe())
+    }
     fn module_ranges(&self) -> Option<Arc<ModuleRanges>>;
 }
 
@@ -478,12 +504,12 @@ impl ModuleStateReader for ModuleState {
 
     fn module_ranges(&self) -> Option<Arc<ModuleRanges>> {
         if let Some(answers) = self.steps.answers.as_ref() {
-            Some(answers.bindings().module_ranges().dupe())
+            answers.bindings().module_ranges().duped()
         } else {
             self.steps
                 .solutions
                 .as_ref()
-                .map(|s| s.module_ranges().dupe())
+                .and_then(|s| s.module_ranges().duped())
         }
     }
 }
@@ -511,11 +537,11 @@ impl ModuleStateReader for ModuleStateMut {
 
     fn module_ranges(&self) -> Option<Arc<ModuleRanges>> {
         self.with_answers(|answers| {
-            answers.map(|answers| answers.bindings().module_ranges().dupe())
+            answers.map(|answers| answers.bindings().module_ranges().duped())
         })
-        .or_else(|| {
+        .unwrap_or_else(|| {
             self.with_solutions(|solutions| {
-                solutions.map(|solutions| solutions.module_ranges().dupe())
+                solutions.and_then(|solutions| solutions.module_ranges().duped())
             })
         })
     }

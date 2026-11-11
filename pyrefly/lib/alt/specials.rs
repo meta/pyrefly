@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::mem::replace;
 use std::slice;
 
 use pyrefly_types::literal::LitStyle;
@@ -32,7 +33,6 @@ use crate::types::lit_int::LitInt;
 use crate::types::literal::Lit;
 use crate::types::special_form::SpecialForm;
 use crate::types::tuple::Tuple;
-use crate::types::types::AnyStyle;
 use crate::types::types::Type;
 
 fn is_chained_attribute_access(x: &Expr) -> bool {
@@ -219,8 +219,48 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    fn apply_literal(&self, x: &Expr, errors: &ErrorCollector, literals: &mut Vec<Type>) {
-        match x {
+    /// Append valid components even on failure; composition supplies recovery for invalid parts.
+    fn apply_literal(
+        &self,
+        x: &Expr,
+        errors: &ErrorCollector,
+        literals: &mut Vec<Type>,
+    ) -> Result<(), ()> {
+        fn append_literal_parts(ty: &Type, literals: &mut Vec<Type>) -> Result<(), ()> {
+            match ty {
+                Type::None | Type::Literal(_) => {
+                    literals.push(ty.clone());
+                    Ok(())
+                }
+                Type::Annotated(inner, metadata) => {
+                    let start = literals.len();
+                    let result = append_literal_parts(inner, literals);
+                    for literal in &mut literals[start..] {
+                        *literal = Type::Annotated(
+                            Box::new(replace(literal, Type::never())),
+                            metadata.clone(),
+                        );
+                    }
+                    result
+                }
+                Type::Union(union) => {
+                    let mut result = Ok(());
+                    for member in &union.members {
+                        if append_literal_parts(member, literals).is_err() {
+                            result = Err(());
+                        }
+                    }
+                    result
+                }
+                _ => Err(()),
+            }
+        }
+
+        let invalid = |message| {
+            self.error(errors, x.range(), ErrorKind::InvalidLiteral, message);
+            Err(())
+        };
+        let literal = match x {
             Expr::UnaryOp(ExprUnaryOp {
                 op: UnaryOp::UAdd,
                 operand,
@@ -230,7 +270,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ..
             }) = &**operand =>
             {
-                literals.push(LitInt::from_ast(i).to_explicit_type())
+                LitInt::from_ast(i).to_explicit_type()
             }
             Expr::UnaryOp(ExprUnaryOp {
                 op: UnaryOp::USub,
@@ -241,103 +281,69 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ..
             }) = &**operand =>
             {
-                literals.push(LitInt::from_ast(i).negate().to_explicit_type())
+                LitInt::from_ast(i).negate().to_explicit_type()
             }
             Expr::NumberLiteral(n) if let Number::Int(i) = &n.value => {
-                literals.push(LitInt::from_ast(i).to_explicit_type())
+                LitInt::from_ast(i).to_explicit_type()
             }
             Expr::StringLiteral(x) => match Lit::from_string_literal(x) {
-                Some(lit) => literals.push(lit.to_explicit_type()),
-                None => literals.push(self.heap.mk_literal_string(LitStyle::Explicit)),
+                Some(lit) => lit.to_explicit_type(),
+                None => self.heap.mk_literal_string(LitStyle::Explicit),
             },
             Expr::BytesLiteral(x) => match Lit::from_bytes_literal(x) {
-                Some(lit) => literals.push(lit.to_explicit_type()),
-                None => literals.push(self.heap.mk_class_type(self.stdlib.bytes().clone())),
+                Some(lit) => lit.to_explicit_type(),
+                None => self.heap.mk_class_type(self.stdlib.bytes().clone()),
             },
-            Expr::BooleanLiteral(x) => {
-                literals.push(Lit::from_boolean_literal(x).to_explicit_type())
-            }
-            Expr::NoneLiteral(_) => literals.push(self.heap.mk_none()),
-            Expr::Name(_) => {
-                fn is_valid_literal(x: &Type) -> bool {
-                    match x {
-                        Type::None | Type::Literal(_) | Type::Any(AnyStyle::Error) => true,
-                        Type::Annotated(inner, _) => is_valid_literal(inner),
-                        Type::Union(f) => f.members.iter().all(is_valid_literal),
-                        _ => false,
-                    }
+            Expr::BooleanLiteral(x) => Lit::from_boolean_literal(x).to_explicit_type(),
+            Expr::NoneLiteral(_) => self.heap.mk_none(),
+            Expr::Name(_) | Expr::Subscript(_) => {
+                let resolution_errors = self.error_collector();
+                let ty = self.expr_untype(x, TypeFormContext::type_argument(), &resolution_errors);
+                let failed = resolution_errors.has_hard();
+                errors.extend(resolution_errors);
+                let result = append_literal_parts(&ty, literals);
+                if failed {
+                    return Err(());
                 }
-                let t = self.expr_untype(x, TypeFormContext::type_argument(), errors);
-                if is_valid_literal(&t) {
-                    literals.push(t)
-                } else {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::InvalidLiteral,
-                        format!("Invalid type inside literal, `{t}`"),
-                    );
-                    literals.push(self.heap.mk_any_error())
+                if result.is_err() {
+                    return invalid(match x {
+                        Expr::Name(_) => format!("Invalid type inside literal, `{ty}`"),
+                        _ => "Invalid literal expression".to_owned(),
+                    });
                 }
+                return Ok(());
             }
             Expr::Attribute(ExprAttribute {
-                node_index: _,
-                range,
                 value,
                 attr: member_name,
-                ctx: _,
+                ..
             }) if is_chained_attribute_access(value) => {
-                let ty = self.expr_infer(value, errors);
+                let resolution_errors = self.error_collector();
+                let ty = self.expr_infer(value, &resolution_errors);
+                let failed = resolution_errors.has_hard();
+                errors.extend(resolution_errors);
+                if failed {
+                    return Err(());
+                }
                 match ty {
                     Type::ClassDef(c)
                         if let Some(e) = self.get_enum_member(&c, &member_name.id) =>
                     {
-                        literals.push(e.to_explicit_type())
+                        e.to_explicit_type()
                     }
-                    ty @ Type::Any(AnyStyle::Error) => literals.push(ty),
                     _ => {
-                        self.error(
-                            errors,
-                            *range,
-                            ErrorKind::InvalidLiteral,
-                            format!(
-                                "`{}.{}` is not a valid enum member",
-                                value.display_with(self.module()),
-                                member_name.id
-                            ),
-                        );
-                        literals.push(self.heap.mk_any_error())
+                        return invalid(format!(
+                            "`{}.{}` is not a valid enum member",
+                            value.display_with(self.module()),
+                            member_name.id
+                        ));
                     }
                 }
             }
-            Expr::Subscript(_) => {
-                let ty = self.expr_infer(x, errors);
-                self.map_over_union(&ty, |ty| match ty {
-                    Type::Type(lit) if matches!(&**lit, Type::Literal(_)) => {
-                        literals.push((**lit).clone())
-                    }
-                    ty @ Type::Any(AnyStyle::Error) => literals.push(ty.clone()),
-                    _ => {
-                        self.error(
-                            errors,
-                            x.range(),
-                            ErrorKind::InvalidLiteral,
-                            "Invalid literal expression".to_owned(),
-                        );
-                        literals.push(self.heap.mk_any_error())
-                    }
-                });
-            }
-            _ => {
-                self.error(
-                    errors,
-                    x.range(),
-                    ErrorKind::InvalidLiteral,
-                    "Invalid literal expression".to_owned(),
-                );
-                literals.push(self.heap.mk_any_error())
-            }
-        }
+            _ => return invalid("Invalid literal expression".to_owned()),
+        };
+        literals.push(literal);
+        Ok(())
     }
 
     pub fn apply_special_form(
@@ -384,10 +390,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         "`Literal` arguments cannot be parenthesized".to_owned(),
                     );
                 }
-                let mut literals = Vec::new();
-                arguments
-                    .iter()
-                    .for_each(|x| self.apply_literal(x, errors, &mut literals));
+                let mut literals = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    if self.apply_literal(argument, errors, &mut literals).is_err() {
+                        literals.push(self.heap.mk_any_error());
+                    }
+                }
                 self.heap.mk_type_of(self.unions(literals))
             }
             SpecialForm::Concatenate => {

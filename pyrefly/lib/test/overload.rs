@@ -11,6 +11,241 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    bug = "A missing backend shadows the available overload",
+    test_signature_unresolved_import_overload,
+    r#"
+from typing import Any, assert_type, overload
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+@overload
+def transform(x: Array[int]) -> Array[str]: ...
+@overload
+def transform(x: int) -> str: ...
+def transform(x: Any) -> Any: ...
+
+assert_type(transform(1), Any)
+"#,
+);
+
+testcase!(
+    bug = "An unresolved return type shadows the available overload",
+    test_signature_unresolved_import_return_only,
+    r#"
+from typing import Any, assert_type, overload
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+@overload
+def transform(x: int) -> Array: ...
+@overload
+def transform(x: int) -> str: ...
+def transform(x: Any) -> Any: ...
+
+assert_type(transform(1), Any)
+"#,
+);
+
+testcase!(
+    bug = "Calling a signature with unresolved imports does not warn",
+    test_signature_unresolved_import_call,
+    r#"
+from typing import Any, assert_type
+from missing_backend import Array, Other  # E: Cannot find module `missing_backend`
+import another_missing_backend as backend  # E: Cannot find module `another_missing_backend`
+
+def transform(x: Array, y: Other) -> backend.Array[int]:
+    return x
+
+assert_type(transform(1, 2), Any)
+"#,
+);
+
+testcase!(
+    bug = "Nested unresolved imports do not warn at the signature boundary",
+    test_signature_unresolved_import_nested,
+    r#"
+from typing import Any, Callable, assert_type
+from missing_backend import Array, Other  # E: Cannot find module `missing_backend`
+
+def transform(
+    x: list[Array], callback: Callable[[Other], Array]
+) -> list[Array]:
+    return x
+
+assert_type(transform([], lambda x: x), list[Any])
+"#,
+);
+
+testcase!(
+    bug = "Aliased unresolved imports do not warn at the signature boundary",
+    test_signature_unresolved_import_alias,
+    r#"
+from typing import Any, assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+Alias = Array[int]
+def transform(x: Alias) -> Alias:
+    return x
+
+assert_type(transform(1), Any)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_controls,
+    r#"
+from typing import Any, assert_type, overload
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+@overload
+def explicit_any(x: Any) -> Any: ...
+@overload
+def explicit_any(x: int) -> str: ...
+def explicit_any(x: Any) -> Any: ...
+assert_type(explicit_any(1), Any)
+
+def other_error(x: Undefined) -> Undefined:  # E: Could not find name `Undefined`  # E: Could not find name `Undefined`
+    return x
+assert_type(other_error(1), Any)
+
+# A missing argument is not a missing type in the declared signature.
+def identity[T](x: T) -> T:
+    return x
+assert_type(identity(Array()), Any)
+
+# Missing-import recovery remains gradual for ordinary assignments.
+x: Array = 1
+s: str = x
+x = s
+"#,
+);
+
+testcase!(
+    bug = "An unresolved imported name shadows the available overload",
+    test_signature_unresolved_import_missing_export,
+    TestEnv::one("backend", ""),
+    r#"
+from typing import Any, assert_type, overload
+from backend import Array  # E: Could not import `Array` from `backend`
+
+@overload
+def transform(x: Array) -> Any: ...
+@overload
+def transform(x: int) -> str: ...
+def transform(x: Any) -> Any: ...
+assert_type(transform(1), Any)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_contextual_return,
+    r#"
+from typing import assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+def transform[T](x: Array) -> list[T]:
+    raise RuntimeError
+
+result: list[str] = transform(1)
+assert_type(result, list[str])
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_operator,
+    r#"
+from typing import assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+class Left:
+    def __add__(self, other: Array) -> str:
+        return "left"
+
+class Right:
+    def __radd__(self, other: object) -> int:
+        return 0
+
+assert_type(Left() + Right(), str)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_generic_class,
+    r#"
+from typing import Any, assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+class Box[T]:
+    def get(self) -> T:
+        raise RuntimeError
+
+def exercise(box: Box[Array]) -> None:
+    assert_type(box.get(), Any)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_dataclass,
+    r#"
+from dataclasses import dataclass
+from typing import assert_type
+from missing_backend import Array, Other  # E: Cannot find module `missing_backend`
+
+@dataclass
+class Model:
+    array: Array
+    other: Other
+
+assert_type(Model(1, 2), Model)
+"#,
+);
+
+testcase!(
+    bug = "An entirely unresolved overload set accepts any argument",
+    test_signature_unresolved_import_all_overloads,
+    r#"
+from typing import Any, assert_type, overload
+from missing_backend import Array, Other  # E: Cannot find module `missing_backend`
+
+@overload
+def transform(x: Array) -> int: ...
+@overload
+def transform(x: Other) -> str: ...
+def transform(x: Any) -> Any: ...
+
+assert_type(transform(1), int)
+"#,
+);
+
+testcase!(
+    test_signature_unresolved_import_callable_alias,
+    r#"
+from typing import Any, Callable, assert_type
+from missing_backend import Array  # E: Cannot find module `missing_backend`
+
+def exercise(transform: Callable[[Array], Array]) -> None:
+    assert_type(transform(1), Any)
+"#,
+);
+
+testcase!(
+    test_overload_expansion_keeps_lambda_context,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable, overload, assert_type
+
+@overload
+def f(callback: Callable[[int], None], value: int) -> int: ...
+@overload
+def f(callback: Callable[[str], None], value: str) -> str: ...
+def f(callback, value) -> int | str: ...
+
+def g(value: int | str) -> None:
+    assert_type(f(lambda arg: None, value), int | str)
+    assert_type(f(value=value, callback=lambda arg: None), int | str)
+"#,
+);
+
+testcase!(
     test_py,
     r#"
 from typing import overload, assert_type
@@ -272,15 +507,32 @@ class A:
     @overload
     def B(self, x: int) -> B: ...
     @overload
-    def B(self, x: str) -> B: ...
+    def B(self, x: str) -> B: ...  # E: Expected a type form, got instance of `(self: Self@A, x: int) -> B`
     def B(self, x):
         return B()
 
 class B:
     x: int
+    "#,
+);
 
-assert_type(A().B(0).x, int)
-assert_type(A().B("1").x, int)
+// With postponed annotations, every `-> B` refers to the method `B`, not the class.
+testcase!(
+    test_overload_method_name_matches_class_postponed,
+    r#"
+from __future__ import annotations
+from typing import assert_type, overload
+
+class A:
+    @overload
+    def B(self, x: int) -> B: ...  # E: Expected a type form, got instance of `Overload[
+    @overload
+    def B(self, x: str) -> B: ...  # E: Expected a type form, got instance of `(self: Self@A, x: int) -> Unknown`
+    def B(self, x):
+        return B()
+
+class B:
+    x: int
     "#,
 );
 
@@ -1877,6 +2129,33 @@ def g(x, y): return x
 
 g(1, "hello")  # E: No matching overload found for function `g` called with arguments: (Literal[1], Literal['hello'])
 g(x=1, y="hello")  # E: No matching overload found for function `g` called with arguments: (x=Literal[1], y=Literal['hello'])
+    "#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/5074
+testcase!(
+    bug = "Lambda arguments are shown with Unknown parameters in the first line",
+    test_overload_error_shows_lambda_argument_types,
+    r#"
+from typing import Callable, overload
+
+class Key:
+    # Returning `object` keeps `Key` from satisfying `SupportsRichComparison`.
+    def __lt__(self, other: object) -> object:
+        return object()
+
+def sort_values(values: list[Key]) -> None:
+    values.sort(key=lambda value: value)  # E: No matching overload found for function `list.sort` called with arguments: (key=(value: Unknown) -> Unknown)
+
+class C:
+    @overload
+    def m(self, callback: Callable[[int], int], y: int) -> None: ...
+    @overload
+    def m(self, callback: Callable[[str], str], y: str) -> None: ...
+    def m(self, callback, y): ...
+
+# The lambda returns `None`, so like the one above it fails its check against the closest overload.
+C().m(lambda v: None, 1.5)  # E: No matching overload found for function `C.m` called with arguments: ((v: Unknown) -> None, float)
     "#,
 );
 

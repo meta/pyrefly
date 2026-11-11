@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
@@ -49,6 +50,22 @@ class Bar(Foo):
 def f(foo: Foo):
     if isinstance(foo.x, Bar):
         reveal_type(foo)  # E: revealed type: Foo (_.x: Bar)
+"#,
+);
+
+// The type and its narrowed facets are displayed together, so a name clash
+// between them is disambiguated with module names.
+testcase!(
+    test_facet_name_clash_is_qualified,
+    TestEnv::one("foo", "class Foo: ..."),
+    r#"
+from typing import reveal_type
+import foo
+class Foo:
+    x: object
+def f(x: Foo):
+    if isinstance(x.x, foo.Foo):
+        reveal_type(x)  # E: revealed type: main.Foo (_.x: foo.Foo)
 "#,
 );
 

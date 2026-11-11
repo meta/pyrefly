@@ -149,6 +149,17 @@ ok2: "str" | int = "foo"
 "#,
 );
 
+// A legacy type alias value is evaluated where it appears, even when annotations are postponed.
+testcase!(
+    test_union_type_with_bare_string_literal_in_alias_future_annotations,
+    TestEnv::new_with_version(PythonVersion::new(3, 13, 0)),
+    r#"
+from __future__ import annotations
+from typing import TypeAlias
+X: TypeAlias = int | "str"  # E: `|` union syntax does not work with string literals
+"#,
+);
+
 // Test legacy type alias with forward reference string literal
 testcase!(
     test_union_operator_with_legacy_type_alias,
@@ -208,6 +219,32 @@ testcase!(
     r#"
 class C:
     c: list[C]  # E: `C` is uninitialized
+"#,
+);
+
+testcase!(
+    test_unquoted_forward_reference_in_type_parameters_before_py314,
+    TestEnv::new_with_version(PythonVersion::new(3, 13, 0)),
+    r#"
+class Bound[T: list[A]]: ...
+class Constrained[T: (list[A], bytes)]: ...
+class Default[T = list[A]]: ...
+class A: ...
+"#,
+);
+
+// Postponed annotations do not postpone other type expressions, which run where they appear.
+testcase!(
+    bug = "Lookups through legacy tparam interception miss unquoted forward refs",
+    test_unquoted_forward_reference_in_eager_type_expression,
+    r#"
+from __future__ import annotations
+from typing import Optional, TypeVar, cast
+X = Optional[A]  # should be an error
+class B(list[A]): ...  # should be an error
+T = TypeVar("T", bound=list[A])  # E: `A` is uninitialized
+y = cast(list[A], 1)  # E: `A` is uninitialized
+class A: ...
 "#,
 );
 
@@ -376,7 +413,7 @@ def cls_cast(x: object) -> None:
     cast(type(MyClass), x)  # E: Function call cannot be used in annotations. Did you mean `type[MyClass]`?
 
 var_instance: type(instance)  # E: Function call cannot be used in annotations
-self_ref: type(self_ref) = 1  # E: Function call cannot be used in annotations
+self_ref: type(self_ref) = 1  # E: Function call cannot be used in annotations  # E: Circular reference to `self_ref` in annotation
 "#,
 );
 

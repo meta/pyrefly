@@ -643,14 +643,18 @@ impl Exports {
         {
             return false;
         }
-        self.definitions.definitions.get(name).is_some_and(|def| {
-            matches!(
-                def.style,
-                DefinitionStyle::Import(_)
-                    | DefinitionStyle::ImportModule(_)
-                    | DefinitionStyle::ImportAs(..)
-            )
-        })
+        self.definitions
+            .definitions
+            .get(name)
+            .is_some_and(|def| match &def.style {
+                // `from . import x` in a package's `__init__` binds the submodule `x`, with or
+                // without an alias.
+                DefinitionStyle::Import(from) | DefinitionStyle::ImportAs(from, _) => {
+                    !(self.is_init && *from == self.module_name)
+                }
+                DefinitionStyle::ImportModule(_) => true,
+                _ => false,
+            })
     }
 
     /// Returns the range of the unresolvable `__all__` RHS, if applicable.

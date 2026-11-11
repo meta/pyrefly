@@ -23,6 +23,25 @@ import shape_extensions
 from shape_extensions import _PostImportHook, _PostImportLoader, shape_vars
 
 
+class ShapeTransformRuntimeTest(unittest.TestCase):
+    def test_preserves_function_identity_and_behavior(self) -> None:
+        def identity(value: int) -> int:
+            return value
+
+        for decorator in (
+            shape_extensions.shape_transform,
+            shape_extensions.type_shape_dsl_function,
+        ):
+            decorated = decorator(identity)
+            self.assertIs(decorated, identity)
+            self.assertEqual(decorated(3), 3)
+        self.assertIs(
+            shape_extensions.type_shape_dsl_function, shape_extensions.shape_transform
+        )
+        self.assertIn("shape_transform", shape_extensions.__all__)
+        self.assertIn("type_shape_dsl_function", shape_extensions.__all__)
+
+
 class ShapeVarsRuntimeTest(unittest.TestCase):
     def test_empty_declaration_preserves_functions(self) -> None:
         def identity(value: int) -> int:

@@ -16,6 +16,7 @@
 
 use pyrefly_types::class::ClassType;
 use pyrefly_types::dimension::Int;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
 use pyrefly_types::types::Type;
@@ -40,7 +41,7 @@ pub(crate) fn regular_nested_list(ty: &Type) -> Option<RegularNestedList> {
     let Type::ClassType(cls) = ty else {
         return None;
     };
-    if !cls.has_qname("shape_extensions", "RegularNestedList") {
+    if !cls.is(KnownClass::ShapeExtensionsRegularNestedList) {
         return None;
     }
     let [_, domain] = cls.targs().as_slice() else {
@@ -98,7 +99,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         self.solver().expand_with_bounds(&mut expanded);
                         let hides_structure = match &expanded {
                             Type::Literal(_) | Type::LiteralString(_) => false,
-                            Type::ClassType(cls) if cls.is_builtin("list") => true,
+                            Type::ClassType(cls) if cls.is(KnownClass::List) => true,
                             Type::Tuple(_) | Type::Var(_) => true,
                             _ => self.is_sequence_for_pattern(&expanded),
                         };

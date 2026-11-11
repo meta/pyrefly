@@ -702,11 +702,13 @@ pub struct ModuleSearchResult {
 pub enum StubSearchResult {
     /// The stub package provides a module for this import: either a concrete
     /// package/module file, or a namespace from a stub that is not marked
-    /// `partial` (and so shadows the runtime). It is preferred over the runtime
-    /// package, preserving the normal `.pyi`-before-`.py` precedence.
+    /// `partial` when the runtime has no concrete module either (and so shadows
+    /// the runtime). It is preferred over the runtime package, preserving the
+    /// normal `.pyi`-before-`.py` precedence.
     Provides(FindResult),
-    /// A partial stub whose lookup landed on a bare namespace directory: it does
-    /// not itself provide this module, so the runtime package is preferred. The
+    /// A stub lookup that landed on a bare namespace directory, either in a
+    /// partial stub or while the runtime has a concrete module: it does not
+    /// itself provide this module, so the runtime package is preferred. The
     /// namespace roots are retained as a fallback for when no runtime module
     /// exists, and to merge with a runtime namespace of the same name.
     Transparent(Vec1<PathBuf>),
@@ -745,39 +747,45 @@ where
         phantom_paths,
         dir_cache,
         observer,
-    )
-    .map(|result| {
-        // A namespace package below the top-level stub package is always
-        // incomplete; otherwise the top-level stub package's `py.typed` decides.
-        // The top-level lookup is only performed when the cheap namespace check
-        // does not already settle it, and it reuses the populated directory cache.
-        let is_partial = (!rest.is_empty()
-            && matches!(&result, FindResult::ImplicitNamespacePackage(_)))
-            || find_one_part(
-                &stub_first,
-                include.clone(),
-                style_filter,
-                &mut None,
-                dir_cache,
-                observer,
-            )
-            .is_some_and(|(top_level, _)| top_level.stub_package_is_partial(dir_cache, observer));
-        match result {
-            FindResult::ImplicitNamespacePackage(namespaces) if is_partial => {
-                StubSearchResult::Transparent(namespaces)
-            }
-            result => StubSearchResult::Provides(result),
-        }
-    });
+    );
     let normal_result = find_module_components(
         first,
         rest,
-        include,
+        include.clone(),
         style_filter,
         phantom_paths,
         dir_cache,
         observer,
     );
+    let runtime_is_concrete = normal_result
+        .as_ref()
+        .is_some_and(|normal| !matches!(normal, FindResult::ImplicitNamespacePackage(_)));
+    let stub_result = stub_result.map(|result| match result {
+        // A bare namespace directory in a stub package provides no module of its own,
+        // so it never hides a concrete runtime module. Otherwise it shadows the runtime
+        // unless the stub package is incomplete: a namespace package below the
+        // top-level stub package always is, and otherwise the top-level stub package's
+        // `py.typed` decides. The top-level lookup is only performed when the cheaper
+        // checks do not already settle it, and it reuses the populated directory cache.
+        FindResult::ImplicitNamespacePackage(namespaces)
+            if runtime_is_concrete
+                || !rest.is_empty()
+                || find_one_part(
+                    &stub_first,
+                    include.clone(),
+                    style_filter,
+                    &mut None,
+                    dir_cache,
+                    observer,
+                )
+                .is_some_and(|(top_level, _)| {
+                    top_level.stub_package_is_partial(dir_cache, observer)
+                }) =>
+        {
+            StubSearchResult::Transparent(namespaces)
+        }
+        result => StubSearchResult::Provides(result),
+    });
     ModuleSearchResult {
         stub_result,
         normal_result,

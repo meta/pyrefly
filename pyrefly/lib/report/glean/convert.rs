@@ -17,11 +17,13 @@ use std::sync::Arc;
 use dupe::Dupe;
 use num_traits::ToPrimitive;
 use pyrefly_build::handle::Handle;
+use pyrefly_config::module_names::ModuleNames;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePathDetails;
+use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::visit::Visit;
 use regex::RegexBuilder;
 use ruff_python_ast::Alias;
@@ -179,24 +181,17 @@ fn file_fact(module_info: &ModuleInfo) -> src::File {
 /// report records.
 #[derive(Default)]
 pub struct GleanNaming {
-    /// Module names by repository-relative file path (`--glean-module-names`).
-    module_names: HashMap<String, String>,
-    /// The values of `module_names`.
-    mapped_modules: HashSet<ModuleName>,
+    /// Module names of repository files, from `--module-names`.
+    module_names: Option<ArcId<ModuleNames>>,
     /// Repository-relative directory holding the stdlib sources that Pyrefly's bundled typeshed
     /// stdlib stubs describe (`--glean-stdlib-root`), e.g. `third-party/python/3.12/Lib`.
     stdlib_root: Option<String>,
 }
 
 impl GleanNaming {
-    pub fn new(module_names: HashMap<String, String>, stdlib_root: Option<String>) -> Self {
-        let mapped_modules = module_names
-            .values()
-            .map(|name| ModuleName::from_str(name))
-            .collect();
+    pub fn new(module_names: Option<ArcId<ModuleNames>>, stdlib_root: Option<String>) -> Self {
         Self {
             module_names,
-            mapped_modules,
             stdlib_root,
         }
     }
@@ -215,14 +210,15 @@ impl GleanNaming {
         let Some(file) = file else {
             return resolved;
         };
-        if let Some(name) = self.module_names.get(file.key.as_str()) {
-            return ModuleName::from_str(name);
+        let module_names = self.module_names.as_deref();
+        if let Some(name) = module_names.and_then(|names| names.module_of_file(&file.key)) {
+            return name;
         }
         let is_stdlib_source = self
             .stdlib_root
             .as_ref()
             .is_some_and(|root| Path::new(&*file.key).starts_with(root));
-        let is_taken = self.mapped_modules.contains(&resolved)
+        let is_taken = module_names.is_some_and(|names| names.contains_module(resolved))
             || typeshed().is_ok_and(|stdlib| stdlib.has_module(resolved));
         if is_taken && !is_stdlib_source {
             path_module_name(&file.key)
@@ -233,9 +229,13 @@ impl GleanNaming {
 }
 
 /// The module name made from a repository-relative source path, e.g. `a.b` for `a/b.py` and for
-/// `a/b/__init__.pyi`.
+/// `a/b/__init__.pyi`. Only the file name's extension is dropped, so a directory such as `1.4.0`
+/// is kept whole.
 fn path_module_name(path: &str) -> ModuleName {
-    let module = path.rsplit_once('.').map_or(path, |(module, _)| module);
+    let file_start = path.rfind('/').map_or(0, |slash| slash + 1);
+    let module = path[file_start..]
+        .rfind('.')
+        .map_or(path, |dot| &path[..file_start + dot]);
     let module = module.strip_suffix("/__init__").unwrap_or(module);
     ModuleName::from_str(&module.replace('/', "."))
 }
@@ -298,7 +298,9 @@ fn stdlib_source_file(root: &str, stub_path: &Path) -> src::File {
     ))
 }
 
-fn gather_nonlocal_variables(body: &[Stmt]) -> (Arc<SmallSet<Name>>, Arc<SmallSet<Name>>) {
+pub(crate) fn gather_nonlocal_variables(
+    body: &[Stmt],
+) -> (Arc<SmallSet<Name>>, Arc<SmallSet<Name>>) {
     let mut globals = SmallSet::new();
     let mut nonlocals = SmallSet::new();
     for stmt in body {
@@ -411,6 +413,9 @@ struct Facts {
     containing_top_level_declarations: Vec<python::ContainingTopLevelDeclaration>,
     xrefs_via_name: Vec<python::XRefViaName>,
     xrefs_via_name_by_target: HashMap<python::Name, Vec<src::ByteSpan>>,
+    /// The spans of this file's references to each target, keyed by the target's
+    /// qualified name and, if it has one, the source file that declares it.
+    target_uses: HashMap<python::Target, Vec<src::ByteSpan>>,
     xrefs: Vec<python_xrefs::XRef>,
     declaration_docstrings: Vec<python::DeclarationDocstring>,
     name_to_sname: Vec<python::NameToSName>,
@@ -472,6 +477,7 @@ impl Facts {
             xrefs_via_name: vec![],
             xrefs: vec![],
             xrefs_via_name_by_target: HashMap::new(),
+            target_uses: HashMap::new(),
             declaration_docstrings: vec![],
             name_to_sname: vec![],
         }
@@ -996,11 +1002,22 @@ impl GleanState<'_> {
                     let completions = |ty| solver.completions(ty, Some(attr_name), false, false);
                     // The class that defines `attr_name`, as found by the solver's own member
                     // lookup, so that an inherited member is named after its defining class.
-                    let defining_type = |ty: Type| match &ty {
-                        Type::ClassType(cls) | Type::SelfType(cls) => solver
+                    let defining_type = |ty: Type| {
+                        // A literal is an instance of its general class (e.g. `"a"` is a `str`),
+                        // so its members are named after that class.
+                        let cls = match &ty {
+                            Type::ClassType(cls) | Type::SelfType(cls) => cls.clone(),
+                            Type::Literal(lit) => {
+                                lit.value.general_class_type(solver.stdlib).clone()
+                            }
+                            Type::LiteralString(_) => solver.stdlib.str().clone(),
+                            _ => return ty,
+                        };
+                        solver
                             .get_class_member_with_defining_class(cls.class_object(), attr_name)
-                            .map_or(ty.clone(), |member| Type::ClassDef(member.defining_class)),
-                        _ => ty,
+                            .map_or(Type::ClassType(cls), |member| {
+                                Type::ClassDef(member.defining_class)
+                            })
                     };
 
                     let tys = match base_type.clone() {
@@ -1169,6 +1186,18 @@ impl GleanState<'_> {
     fn add_xref(&mut self, definition_location: DefinitionLocation, range: TextRange) {
         let source = to_span(range);
         let target_name = python::Name::new(definition_location.name);
+        let use_target = match &definition_location.file {
+            Some(file) => python::Target::local(python::DisambiguatedName::new(
+                target_name.clone(),
+                file.clone(),
+            )),
+            None => python::Target::external(target_name.clone()),
+        };
+        self.facts
+            .target_uses
+            .entry(use_target)
+            .or_default()
+            .push(source.clone());
         let target = python_xrefs::XRefDefinitionLocation {
             name: target_name.clone(),
             file: definition_location.file,
@@ -2128,6 +2157,12 @@ pub fn glean(
         })
         .collect();
 
+    let target_uses: Vec<python::TargetUses> = facts
+        .target_uses
+        .into_iter()
+        .map(|(target, spans)| python::TargetUses::new(target, file_fact.clone(), spans))
+        .collect();
+
     let xrefs_by_file = python_xrefs::XRefsByFile::new(file_fact.clone(), facts.xrefs);
 
     let mut entries = vec![
@@ -2147,6 +2182,7 @@ pub fn glean(
         facts.containing_top_level_declarations.glean_entry(),
         xrefs_via_name_by_file_fact.glean_entry(),
         xrefs_via_name_by_target.glean_entry(),
+        target_uses.glean_entry(),
         xrefs_by_file.glean_entry(),
         facts.declaration_docstrings.glean_entry(),
         facts.name_to_sname.glean_entry(),
@@ -2311,9 +2347,29 @@ mod tests {
     }
 
     #[test]
+    fn test_path_module_name() {
+        let name = |path| path_module_name(path).to_string();
+        assert_eq!(name("a/b.py"), "a.b");
+        assert_eq!(name("a/b/__init__.pyi"), "a.b");
+        assert_eq!(
+            name("a/1.4.0/b.py"),
+            "a.1.4.0.b",
+            "A dot in a directory is not an extension"
+        );
+        assert_eq!(
+            name("a/1.4.0/b"),
+            "a.1.4.0.b",
+            "A file without an extension keeps its whole path"
+        );
+    }
+
+    #[test]
     fn test_emitted_module_name() {
         let naming = GleanNaming::new(
-            HashMap::from([("fbcode/base/foo.py".to_owned(), "foo".to_owned())]),
+            Some(ArcId::new(ModuleNames::new(
+                HashMap::from([("fbcode/base/foo.py".to_owned(), "foo".to_owned())]),
+                Path::new(""),
+            ))),
             Some("third-party/python/3.12/Lib".to_owned()),
         );
         let emitted = |path: Option<&str>, resolved: &str| {

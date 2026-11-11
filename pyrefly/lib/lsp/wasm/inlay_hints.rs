@@ -21,6 +21,7 @@ use ruff_python_ast::ExprDict;
 use ruff_python_ast::ExprList;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::ParameterWithDefault;
+use ruff_python_ast::Stmt;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
@@ -210,14 +211,15 @@ impl<'a> Transaction<'a> {
                     edits,
                 }
             };
-        // `None` keeps every hint. A selection includes a hint when it overlaps the
-        // declaration that hint annotates, including a cursor on the insertion point
-        // at the end of that declaration.
+        // `None` keeps every hint. An empty cursor includes the insertion point at
+        // the end of the declaration. A nonempty selection uses half-open overlap,
+        // so a declaration that only touches the selection's exclusive end is left out.
         let in_selection = |target: TextRange| match limit {
             None => true,
-            Some(selection) => {
-                selection.start() <= target.end() && target.start() <= selection.end()
+            Some(selection) if selection.is_empty() => {
+                selection.start() >= target.start() && selection.start() <= target.end()
             }
+            Some(selection) => selection.start() < target.end() && target.start() < selection.end(),
         };
         let mut res = Vec::new();
         for idx in bindings.keys::<Key>() {
@@ -279,8 +281,19 @@ impl<'a> Transaction<'a> {
                         // receiver case, could mislead users into
                         // annotating with the RHS-derived type. The same
                         // applies to receiver-bearing unpacked rebinds.
-                        Binding::NameAssign(x) if !x.is_pinned() => (Some(&*x.expr), false),
-                        Binding::Expr(None, e) => (Some(&**e), false),
+                        Binding::NameAssign(x) if !x.is_pinned() => {
+                            // `global` and `nonlocal` names cannot take an annotated assignment.
+                            if self.capture_forbids_annotation(handle, key.range().start(), &x.name)
+                            {
+                                insertable = false;
+                            }
+                            (Some(&*x.expr), false)
+                        }
+                        Binding::Expr(None, e) => {
+                            // Expression-bound names, such as walrus targets, cannot be annotated inline.
+                            insertable = false;
+                            (Some(&**e), false)
+                        }
                         Binding::UnpackedValue(value)
                             if value.annotation.is_none() && value.receiver.is_none() =>
                         {
@@ -398,6 +411,33 @@ impl<'a> Transaction<'a> {
         }
 
         Some(res)
+    }
+
+    /// `global` and `nonlocal` names cannot take an annotated assignment in that scope.
+    fn capture_forbids_annotation(&self, handle: &Handle, position: TextSize, name: &Name) -> bool {
+        fn declared(stmts: &[Stmt], position: TextSize, name: &Name) -> Option<bool> {
+            for stmt in stmts {
+                let body = match stmt {
+                    Stmt::FunctionDef(func) if func.range().contains(position) => {
+                        func.body.as_slice()
+                    }
+                    Stmt::ClassDef(class) if class.range().contains(position) => {
+                        class.body.as_slice()
+                    }
+                    _ => continue,
+                };
+                return Some(declared(body, position, name).unwrap_or_else(|| {
+                    body.iter().any(|stmt| match stmt {
+                        Stmt::Global(global) => global.names.iter().any(|id| id.id == *name),
+                        Stmt::Nonlocal(nonlocal) => nonlocal.names.iter().any(|id| id.id == *name),
+                        _ => false,
+                    })
+                }));
+            }
+            None
+        }
+        self.get_ast(handle)
+            .is_some_and(|ast| declared(&ast.body, position, name).unwrap_or(false))
     }
 
     /// Helper to extract the element expression from an unpacked source.

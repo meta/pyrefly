@@ -804,3 +804,17 @@ def check(a: Box[IntTuple[2, 3]], b: Box[IntTuple[2, 4, 5]], s: Box[IntTuple[()]
     each(lambda x: x, (s,))  # E: Cannot evaluate type-level shape DSL call: expected a leading axis
 "#,
 );
+
+// A `cast` argument is evaluated where it appears, even when annotations are postponed.
+testcase!(
+    test_map_int_tuples_eager_uninitialized_name_future_annotations,
+    shape_extensions_env(),
+    r#"
+from __future__ import annotations
+from typing import cast
+from shape_extensions import IntTuple, MapIntTuples
+
+x = cast(MapIntTuples[lambda S: tuple[S], Later], ())  # E: `Later` is uninitialized
+Later = tuple[IntTuple[2]]
+"#,
+);

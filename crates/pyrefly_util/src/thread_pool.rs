@@ -53,6 +53,14 @@ impl FromStr for ThreadCount {
     }
 }
 
+/// Whether the calling thread is a worker of a rayon thread pool. A parallel iterator runs on
+/// the pool of the thread that calls it; called from any other thread, it starts rayon's global
+/// pool, which spawns a thread per CPU whatever thread count was configured. Work that is worth
+/// parallelizing only on a pool that already exists checks this first.
+pub fn in_thread_pool() -> bool {
+    rayon::current_thread_index().is_some()
+}
+
 /// A WASM compatible thread-pool.
 pub struct ThreadPool(
     // Will be None on WASM

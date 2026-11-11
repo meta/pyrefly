@@ -129,11 +129,10 @@ assert_type(C.f.Result, type[Wrapper.Result])
 );
 
 testcase!(
-    bug = "Fails to resolve forward ref",
     test_unqualified_class_attr_ref,
     r#"
 class C:
-    type X = int | list[X]  # E: Could not find name `X`
+    type X = int | list[X]
     "#,
 );
 
@@ -284,6 +283,17 @@ type W = W  # E: cyclic self-reference in `W`
 type X = int | X  # E: cyclic self-reference in `X`
 type Y = int | Z  # E: cyclic self-reference in `Y`
 type Z = int | Y  # E: cyclic self-reference in `Z`
+    "#,
+);
+
+testcase!(
+    test_cyclic_class_body_alias,
+    r#"
+from typing import TypeAlias
+class C:
+    B: TypeAlias = "list[B] | B"  # E: cyclic self-reference in `B`
+def f(b: C.B) -> None:
+    b.x
     "#,
 );
 

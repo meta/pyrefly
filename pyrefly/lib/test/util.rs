@@ -257,6 +257,8 @@ pub struct TestEnv {
     recursion_depth_limit: Option<u32>,
     site_package_path: Vec<PathBuf>,
     implicitly_defined_attribute_error: bool,
+    inactive_code_error: bool,
+    invalid_format_spec_error: bool,
     uninitialized_instance_variable_error: bool,
     possibly_uninitialized_attribute_error: bool,
     explicit_any_error: bool,
@@ -294,12 +296,14 @@ pub struct TestEnv {
     legacy_overload_expansion: bool,
     treat_all_caps_as_final: bool,
     infer_param_types_from_docstring: bool,
+    reveal_type_qualified_names: bool,
     type_ignore_unknown_tag_behavior: TypeIgnoreUnknownTagBehavior,
     no_any_return_error: bool,
     no_any_return_explicit_error: bool,
     no_any_return_implicit_error: bool,
     implicit_any_lambda_error: bool,
     invalid_abstract_method_error: bool,
+    abstract_method_with_implementation_error: bool,
     empty_body_error: bool,
     instance_var_assign_error: bool,
     unknown_argument_type_error: bool,
@@ -335,6 +339,8 @@ impl TestEnv {
             recursion_depth_limit: None,
             site_package_path: Vec::new(),
             implicitly_defined_attribute_error: false,
+            inactive_code_error: false,
+            invalid_format_spec_error: false,
             uninitialized_instance_variable_error: false,
             possibly_uninitialized_attribute_error: false,
             explicit_any_error: false,
@@ -372,12 +378,14 @@ impl TestEnv {
             legacy_overload_expansion: false,
             treat_all_caps_as_final: false,
             infer_param_types_from_docstring: false,
+            reveal_type_qualified_names: false,
             type_ignore_unknown_tag_behavior: TypeIgnoreUnknownTagBehavior::Suppress,
             no_any_return_error: false,
             no_any_return_explicit_error: false,
             no_any_return_implicit_error: false,
             implicit_any_lambda_error: false,
             invalid_abstract_method_error: false,
+            abstract_method_with_implementation_error: false,
             empty_body_error: false,
             instance_var_assign_error: false,
             unknown_argument_type_error: false,
@@ -492,6 +500,11 @@ impl TestEnv {
         self
     }
 
+    pub fn enable_inactive_code_error(mut self) -> Self {
+        self.inactive_code_error = true;
+        self
+    }
+
     pub fn enable_uninitialized_instance_variable_error(mut self) -> Self {
         self.uninitialized_instance_variable_error = true;
         self
@@ -504,6 +517,11 @@ impl TestEnv {
 
     pub fn enable_explicit_any_error(mut self) -> Self {
         self.explicit_any_error = true;
+        self
+    }
+
+    pub fn enable_invalid_format_spec_error(mut self) -> Self {
+        self.invalid_format_spec_error = true;
         self
     }
 
@@ -682,6 +700,11 @@ impl TestEnv {
         self
     }
 
+    pub fn enable_reveal_type_qualified_names(mut self) -> Self {
+        self.reveal_type_qualified_names = true;
+        self
+    }
+
     pub fn with_type_ignore_unknown_tag_behavior(
         mut self,
         behavior: TypeIgnoreUnknownTagBehavior,
@@ -712,6 +735,11 @@ impl TestEnv {
 
     pub fn enable_invalid_abstract_method_error(mut self) -> Self {
         self.invalid_abstract_method_error = true;
+        self
+    }
+
+    pub fn enable_abstract_method_with_implementation_error(mut self) -> Self {
+        self.abstract_method_with_implementation_error = true;
         self
     }
 
@@ -872,6 +900,7 @@ impl TestEnv {
         config.root.legacy_overload_expansion = Some(self.legacy_overload_expansion);
         config.root.treat_all_caps_as_final = Some(self.treat_all_caps_as_final);
         config.root.infer_param_types_from_docstring = Some(self.infer_param_types_from_docstring);
+        config.reveal_type_qualified_names = self.reveal_type_qualified_names;
         if !self.replace_imports_with_any.is_empty() {
             let modules = self
                 .replace_imports_with_any
@@ -903,11 +932,17 @@ impl TestEnv {
         if self.implicitly_defined_attribute_error {
             errors.set_error_severity(ErrorKind::ImplicitlyDefinedAttribute, Severity::Error);
         }
+        if self.inactive_code_error {
+            errors.set_error_severity(ErrorKind::InactiveCode, Severity::Error);
+        }
         if self.uninitialized_instance_variable_error {
             errors.set_error_severity(ErrorKind::UninitializedInstanceVariable, Severity::Error);
         }
         if self.possibly_uninitialized_attribute_error {
             errors.set_error_severity(ErrorKind::PossiblyUninitializedAttribute, Severity::Error);
+        }
+        if self.invalid_format_spec_error {
+            errors.set_error_severity(ErrorKind::InvalidFormatSpec, Severity::Error);
         }
         if self.explicit_any_error {
             errors.set_error_severity(ErrorKind::ExplicitAny, Severity::Error);
@@ -1020,6 +1055,9 @@ impl TestEnv {
         }
         if self.invalid_abstract_method_error {
             errors.set_error_severity(ErrorKind::InvalidAbstractMethod, Severity::Error);
+        }
+        if self.abstract_method_with_implementation_error {
+            errors.set_error_severity(ErrorKind::AbstractMethodWithImplementation, Severity::Error);
         }
         if self.empty_body_error {
             errors.set_error_severity(ErrorKind::EmptyBody, Severity::Error);

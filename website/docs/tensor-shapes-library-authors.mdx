@@ -18,15 +18,16 @@ library APIs. Application authors normally need only the
 
 ## How shape DSL rules run
 
-A shape rule is a function decorated with `@type_shape_dsl_function`. A public
-stub calls that function in its return annotation:
+A shape rule is a function decorated with `@shape_transform`. The legacy
+`@type_shape_dsl_function` name remains a supported alias. A public stub calls
+that function in its return annotation:
 
 ```python
 import shape_extensions.dsl as dsl
-from shape_extensions import IntTuple, type_shape_dsl_function
+from shape_extensions import IntTuple, shape_transform
 from torch import Tensor
 
-@type_shape_dsl_function
+@shape_transform
 def repeat_shape(shape: IntTuple, repeats: IntTuple) -> IntTuple:
     if len(repeats) < len(shape):
         return dsl.Invalid("repeat dimensions cannot be shorter than the input rank")

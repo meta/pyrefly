@@ -10,6 +10,7 @@ from typing import assert_type, TYPE_CHECKING
 import torch
 from shape_extensions import assert_raises, assert_shape, Int, IntTuple, IntVar
 from torch import Tensor
+from torch.distributions import Normal
 
 
 def test_normal_tensor_parameter_shapes() -> None:
@@ -53,3 +54,54 @@ if TYPE_CHECKING:
         mean: Tensor[[N, 1]], std: Tensor[[1, M]]
     ) -> None:
         assert_type(torch.normal(mean, std), Tensor[[N, M]])
+
+
+def test_distribution_normal_scalar_parameters() -> None:
+    normal = Normal(0.0, 1.0)
+    if TYPE_CHECKING:
+        assert_type(normal, Normal[[]])
+    assert_shape(normal.loc.shape, ())
+    assert_shape(normal.scale.shape, ())
+    value = torch.zeros(())
+    assert_shape(normal.cdf(value).shape, ())
+    assert torch.equal(normal.cdf(value), torch.full((), 0.5))
+    assert_shape(normal.cdf(torch.zeros((2, 3))).shape, (2, 3))
+
+
+def test_distribution_normal_broadcast_parameters() -> None:
+    loc = torch.zeros((2, 1))
+    scale = torch.ones((1, 3))
+    normal = Normal(loc, scale, validate_args=True)
+    if TYPE_CHECKING:
+        assert_type(normal, Normal[[2, 3]])
+    assert_shape(normal.loc.shape, (2, 3))
+    assert_shape(normal.scale.shape, (2, 3))
+    value = torch.zeros((4, 2, 3))
+    assert_shape(normal.cdf(value).shape, (4, 2, 3))
+    assert torch.equal(normal.cdf(value), torch.full((4, 2, 3), 0.5))
+    assert_shape(Normal(loc, 1.0).loc.shape, (2, 1))
+    assert_shape(Normal(0.0, scale).scale.shape, (1, 3))
+    with assert_raises(RuntimeError):
+        # E: Cannot broadcast dimension
+        Normal(loc, torch.ones((3, 5)))
+    with assert_raises(ValueError):
+        # E: Cannot broadcast dimension
+        normal.cdf(torch.zeros(5))
+
+
+if TYPE_CHECKING:
+
+    def check_distribution_normal_shapes[N: IntVar, M: IntVar](
+        loc: Tensor[[N, 1]], scale: Tensor[[1, M]], unknown: Tensor[IntTuple]
+    ) -> None:
+        normal = Normal(loc, scale)
+        assert_type(normal, Normal[[N, M]])
+        assert_type(normal.loc, Tensor[[N, M]])
+        assert_type(normal.scale, Tensor[[N, M]])
+        assert_type(normal.cdf(torch.zeros((4, 1, 1))), Tensor[[4, N, M]])
+        assert_type(Normal(loc, 1.0), Normal[[N, 1]])
+        assert_type(Normal(0.0, scale), Normal[[1, M]])
+        assert_type(Normal(unknown, 1.0), Normal[IntTuple])
+        assert_type(Normal(0.0, unknown), Normal[IntTuple])
+        assert_type(Normal(unknown, unknown), Normal[IntTuple])
+        assert_type(normal.cdf(unknown), Tensor[IntTuple])

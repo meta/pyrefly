@@ -5,8 +5,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use ruff_python_ast::name::Name;
+
+use crate::binding::binding::KeyExport;
 use crate::test::util::TestEnv;
 use crate::testcase;
+use crate::types::types::Type;
 
 testcase!(
     test_type_alias_simple,
@@ -532,6 +536,20 @@ class C:
     type X = int
 def f(x: C.X):
     assert_type(x, int)
+    "#,
+);
+
+testcase!(
+    test_generic_legacy_type_alias_inside_class,
+    r#"
+from typing import TypeAlias, TypeVar, assert_type
+T = TypeVar("T")
+class C:
+    L = list[T]
+    M: TypeAlias = "dict[str, T]"
+def f(l: C.L[int], m: C.M[int]):
+    assert_type(l, list[int])
+    assert_type(m, dict[str, int])
     "#,
 );
 
@@ -1272,6 +1290,74 @@ def bad_type_aliases(
 );
 
 testcase!(
+    test_bad_implicit_type_alias_in_alias_value,
+    r#"
+from typing import TypeAlias, TypeAliasType
+BadTypeAlias = int if 1 < 3 else str
+A: TypeAlias = BadTypeAlias  # E: `BadTypeAlias` is not a valid type alias: If expression cannot be used in annotations
+type B = list[BadTypeAlias]  # E: `BadTypeAlias` is not a valid type alias: If expression cannot be used in annotations
+C = TypeAliasType("C", BadTypeAlias)  # E: `BadTypeAlias` is not a valid type alias: If expression cannot be used in annotations
+
+class Outer:
+    Inner = int
+BadOuter = Outer if 1 < 3 else Outer
+D: TypeAlias = BadOuter.Inner
+"#,
+);
+
+testcase!(
+    test_bad_implicit_type_alias_in_type_parameters,
+    r#"
+from typing import Callable
+
+Bad = int if True else str
+
+class Bound[T: Bad]: ...  # E: `Bad` is not a valid type alias
+def constrained[T: (Bad, bytes)](x: T) -> T: return x  # E: `Bad` is not a valid type alias
+type Default[T = Bad] = list[T]  # E: `Bad` is not a valid type alias
+type NestedBound[T: list[Bad]] = T  # E: `Bad` is not a valid type alias
+type ForwardBound[T: "Bad"] = T  # E: `Bad` is not a valid type alias
+type ParamSpecDefault[**P = [Bad]] = Callable[P, None]  # E: `Bad` is not a valid type alias
+type TupleDefault[*Ts = *tuple[Bad, ...]] = tuple[*Ts]  # E: `Bad` is not a valid type alias
+"#,
+);
+
+testcase!(
+    test_static_type_and_value_positions,
+    r#"
+from typing import Annotated, Callable, Literal
+from typing_extensions import TypeForm
+
+Bad = int if True else str
+class Base[T]: ...
+DynamicBase = Base if True else Base
+class Derived(DynamicBase[list[Bad]]): ...  # E: `Bad` is not a valid type alias
+
+list[Bad]([])  # E: `Bad` is not a valid type alias
+Annotated[Bad, Bad]  # E: `Bad` is not a valid type alias
+Callable[[Bad], None]  # E: `Bad` is not a valid type alias
+form: TypeForm = "Bad"  # E: `Bad` is not a valid type alias
+
+class Namespace:
+    Inner = int
+DynamicNamespace = Namespace if True else Namespace
+type Alias = DynamicNamespace.Inner
+
+def values(x: Annotated[int, Bad], y: Literal["Bad"]) -> None: ...
+"#,
+);
+
+testcase!(
+    test_static_generic_type_arguments,
+    r#"
+from __future__ import annotations
+Bad = int if True else str
+class Base[T]: ...
+Base[Bad]  # E: `Bad` is not a valid type alias
+"#,
+);
+
+testcase!(
     test_implicit_alias_exempt_class_constructors,
     r#"
 from typing import NamedTuple
@@ -1519,3 +1605,31 @@ X: TypeAlias = int | str
 X()  # E: Expected a callable
     "#,
 );
+
+/// Type variables from different modules can be declared at the same offset. As parameters of one
+/// alias they are still different type parameters.
+#[test]
+fn test_type_alias_type_params_declared_at_same_offset_are_distinct() {
+    let mut env = TestEnv::new();
+    env.add("foo", "from typing import TypeVar\nT = TypeVar('T')\n");
+    env.add("bar", "from typing import TypeVar\nU = TypeVar('U')\n");
+    env.add(
+        "main",
+        r#"
+from typing import TypeAliasType
+from foo import T
+from bar import U
+X = TypeAliasType("X", int, type_params=(T, U))
+"#,
+    );
+    let (state, handle) = env.to_state();
+    let transaction = state.transaction();
+    let solutions = transaction.get_solutions(&handle("main")).unwrap();
+    let Type::Forall(forall) = solutions.get(&KeyExport(Name::new_static("X"))) else {
+        panic!("`X` should be a generic type alias");
+    };
+    let [t, u] = forall.tparams.as_vec() else {
+        panic!("`X` should have two type parameters");
+    };
+    assert_ne!(t, u, "`T` and `U` must not be the same type parameter");
+}

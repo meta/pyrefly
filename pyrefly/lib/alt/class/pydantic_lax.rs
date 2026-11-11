@@ -9,6 +9,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::keywords::ConverterMap;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::tuple::Tuple;
@@ -191,9 +192,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if class_obj == self.stdlib.list_object()
             || class_obj == self.stdlib.set_object()
             || class_obj == self.stdlib.frozenset_object()
-            || class_obj.has_toplevel_qname(ModuleName::collections().as_str(), "deque")
-            || class_obj.has_toplevel_qname(ModuleName::typing().as_str(), "Sequence")
-            || class_obj.has_toplevel_qname(ModuleName::typing().as_str(), "Iterable")
+            || class_obj.is(KnownClass::CollectionsDeque)
+            || class_obj.is(KnownClass::TypingSequence)
+            || class_obj.is(KnownClass::TypingIterable)
         {
             return Some(self.heap.mk_class_type(self.stdlib.iterable(first_ty)));
         }
@@ -206,9 +207,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ty: &Type,
         targs: &[Type],
     ) -> Option<Type> {
-        if class_obj.has_toplevel_qname(ModuleName::from_str("re").as_str(), "Pattern")
-            || class_obj.has_toplevel_qname(ModuleName::typing().as_str(), "Pattern")
-        {
+        if class_obj.is(KnownClass::RePattern) || class_obj.is(KnownClass::TypingPattern) {
             let pattern_input = targs
                 .first()
                 .cloned()
@@ -246,21 +245,32 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     return converted;
                 }
                 let class_obj = cls.class_object();
-                // BaseModel's built-in hook preserves model validation. Other hooks may accept any input.
+                let metadata = self.get_metadata_for_class(class_obj);
+                // BaseModel's built-in hook preserves model validation. Other hooks, model
+                // validators that replace the raw input, and `from_attributes` may accept any
+                // input.
                 if self
                     .get_non_synthesized_class_member_and_defining_class(
                         class_obj,
                         &GET_PYDANTIC_CORE_SCHEMA,
                     )
-                    .is_some_and(|member| {
-                        !member
-                            .defining_class
-                            .has_toplevel_qname(ModuleName::pydantic().as_str(), "BaseModel")
+                    .is_some_and(|member| !member.defining_class.is(KnownClass::PydanticBaseModel))
+                    || metadata.dataclass_metadata().is_some_and(|dataclass| {
+                        dataclass.pydantic_validator_replaces_all_input()
+                            || dataclass
+                                .init_defaults
+                                .pydantic_validation_flags
+                                .may_validate_from_attributes()
                     })
                 {
                     return self.heap.mk_any_explicit();
                 }
-                let metadata = self.get_metadata_for_class(class_obj);
+                // Pydantic validates a `NewType` with the schema of its base type.
+                if metadata.is_new_type()
+                    && let Some(base) = self.get_base_types_for_class(class_obj).iter().next()
+                {
+                    return self.expand_type_for_lax_mode(&self.heap.mk_class_type(base.clone()));
+                }
                 if metadata.is_pydantic_model()
                     || metadata.dataclass_metadata().is_some_and(|dataclass| {
                         matches!(

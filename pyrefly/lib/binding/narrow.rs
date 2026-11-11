@@ -103,6 +103,12 @@ pub enum AtomicNarrowOp {
     AnyElementIsNone,
     /// No element of the subject is `None`.
     NoElementIsNone,
+    /// Narrow an original variable through an element of the evaluated match subject.
+    /// For `match (a, b):`, an anonymous binding `$S` stores the evaluated tuple.
+    /// Each case narrows `$S` with its pattern and exclusions from previous cases.
+    /// `MatchSubjectElement($S, 1)` narrows the original `b` to that case's `$S[1]` type.
+    /// The binding index identifies the narrowed `$S` for the current case.
+    MatchSubjectElement(Idx<Key>, usize),
     /// Narrowing for sequence pattern matching - confirms the subject is a sequence type
     IsSequence,
     /// Negation of IsSequence - confirms the subject is NOT a sequence type
@@ -160,6 +166,7 @@ impl NarrowOp {
                     | AtomicNarrowOp::NotCall(_, _)
                     | AtomicNarrowOp::IsTruthy
                     | AtomicNarrowOp::IsFalsy
+                    | AtomicNarrowOp::MatchSubjectElement(_, _)
                     | AtomicNarrowOp::Placeholder
             ),
             Self::And(ops) | Self::Or(ops) => ops.iter().all(Self::is_plain_root),
@@ -243,6 +250,9 @@ impl DisplayWith<ModuleInfo> for AtomicNarrowOp {
             AtomicNarrowOp::IsSequence => write!(f, "IsSequence"),
             AtomicNarrowOp::AnyElementIsNone => write!(f, "AnyElementIsNone"),
             AtomicNarrowOp::NoElementIsNone => write!(f, "NoElementIsNone"),
+            AtomicNarrowOp::MatchSubjectElement(subject, index) => {
+                write!(f, "MatchSubjectElement({subject:?}, {index})")
+            }
             AtomicNarrowOp::IsNotSequence => write!(f, "IsNotSequence"),
             AtomicNarrowOp::IsMapping => write!(f, "IsMapping"),
             AtomicNarrowOp::IsNotMapping => write!(f, "IsNotMapping"),
@@ -390,6 +400,7 @@ impl AtomicNarrowOp {
                 snippet(arguments.range()).unwrap_or_default()
             )),
             Self::Placeholder => None,
+            Self::MatchSubjectElement(_, _) => None,
             Self::ClassCoverageGate(_) | Self::ClassCoverageGateNeg(_) => None,
         }
     }
@@ -436,6 +447,8 @@ impl AtomicNarrowOp {
             Self::IsFalsy => Self::IsTruthy,
             Self::PolarsColumnMutation(kind) => Self::PolarsColumnMutation(kind.clone()),
             Self::Placeholder => Self::Placeholder,
+            // Element projections apply only within the current case.
+            Self::MatchSubjectElement(_, _) => Self::Placeholder,
             Self::ClassCoverageGate(ks) => Self::ClassCoverageGateNeg(ks.clone()),
             Self::ClassCoverageGateNeg(ks) => Self::ClassCoverageGate(ks.clone()),
         }

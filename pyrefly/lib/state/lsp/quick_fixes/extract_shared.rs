@@ -353,7 +353,7 @@ pub(crate) fn code_at_range<'a>(source: &'a str, range: TextRange) -> Option<&'a
 }
 
 pub(super) fn type_to_annotation(ty: Type, stdlib: &Stdlib) -> Option<String> {
-    let ty = ty.promote_implicit_literals(stdlib);
+    let ty = ty.promote(stdlib);
     if ty.is_any() {
         return None;
     }

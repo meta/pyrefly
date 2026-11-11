@@ -1071,6 +1071,532 @@
             }
           ],
           "target": {
+            "external": {
+              "id": 0,
+              "key": "int"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 3,
+              "start": 179
+            },
+            {
+              "length": 3,
+              "start": 211
+            },
+            {
+              "length": 3,
+              "start": 230
+            },
+            {
+              "length": 3,
+              "start": 241
+            },
+            {
+              "length": 3,
+              "start": 270
+            },
+            {
+              "length": 3,
+              "start": 293
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "str"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 3,
+              "start": 284
+            },
+            {
+              "length": 3,
+              "start": 51
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing.Set"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 3,
+              "start": 284
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "return_types.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "return_types.Set"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 166
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "bool"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 185
+            },
+            {
+              "length": 4,
+              "start": 320
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "None"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 200
+            },
+            {
+              "length": 4,
+              "start": 288
+            },
+            {
+              "length": 4,
+              "start": 35
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing.List"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 200
+            },
+            {
+              "length": 4,
+              "start": 288
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "return_types.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "return_types.List"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 225
+            },
+            {
+              "length": 4,
+              "start": 29
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing.Dict"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 4,
+              "start": 225
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "return_types.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "return_types.Dict"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 119
+            },
+            {
+              "length": 5,
+              "start": 134
+            },
+            {
+              "length": 5,
+              "start": 56
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing.Union"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 5,
+              "start": 119
+            },
+            {
+              "length": 5,
+              "start": 134
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "return_types.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "return_types.Union"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 6,
+              "start": 5
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 8,
+              "start": 140
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "return_types.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "return_types.FooClass"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 8,
+              "start": 150
+            },
+            {
+              "length": 8,
+              "start": 19
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing.Callable"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 8,
+              "start": 150
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "return_types.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "return_types.Callable"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 8,
+              "start": 255
+            },
+            {
+              "length": 8,
+              "start": 41
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing.Optional"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 8,
+              "start": 255
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "return_types.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "return_types.Optional"
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.TargetUses.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "return_types.py"
+          },
+          "spans": [
+            {
+              "length": 3,
+              "start": 160
+            },
+            {
+              "length": 3,
+              "start": 173
+            },
+            {
+              "length": 3,
+              "start": 205
+            },
+            {
+              "length": 3,
+              "start": 235
+            },
+            {
+              "length": 3,
+              "start": 264
+            }
+          ],
+          "target": {
             "id": 0,
             "key": "int"
           }
@@ -2788,6 +3314,6 @@
     "predicate": "python.Module.4"
   },
   {
-    "schema_id": "f329796272b9314200433ac342cbc15c"
+    "schema_id": "60aea86d7ff049228df605cf3fda4c67"
   }
 ]

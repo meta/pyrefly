@@ -41,6 +41,9 @@ use crate::binding::binding::UnpackedPosition;
 use crate::binding::binding::UnpackedValue;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::LegacyTParamCollector;
+use crate::binding::expr::Evaluation;
+use crate::binding::expr::StaticUsage;
+use crate::binding::expr::TypeExpressionContext;
 use crate::binding::expr::Usage;
 use crate::binding::narrow::identifier_and_chain_prefix_for_expr;
 use crate::binding::scope::FlowStyle;
@@ -162,7 +165,7 @@ impl<'a> BindingsBuilder<'a> {
         narrowed_idx: Idx<Key>,
     ) {
         let name = Hashed::new(&identifier.id);
-        let usage = Usage::NonPinningValue(None);
+        let usage = Usage::Inspection;
         let name_is_defined = match self.look_up_name_for_read(name, &usage) {
             NameReadInfo::Flow { .. }
             | NameReadInfo::Anywhere { .. }
@@ -356,7 +359,8 @@ impl<'a> BindingsBuilder<'a> {
                 );
                 // If this is a self-assignment, record it because we may use it to infer
                 // the existence of an instance-only attribute.
-                self.scopes.record_self_attr_assign(x, attr_value, None);
+                self.scopes
+                    .record_self_attr_assign(x, attr_value, None, true);
                 self.scopes.record_new_instance_attr_assign(x);
             }
             Expr::Subscript(x) => {
@@ -395,12 +399,7 @@ impl<'a> BindingsBuilder<'a> {
                 //
                 // We ignore such names for first-usage-tracking purposes, since
                 // we are not going to analyze the code at all.
-                self.ensure_expr(
-                    illegal_target,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
-                );
+                self.ensure_expr(illegal_target, &mut Usage::Unchecked);
                 // Make sure the RHS is properly bound, so that we can report errors there.
                 // `ensure_expr` may itself create a `Key::Anon` for this range (for example,
                 // functional NamedTuple syntax recovered as an invalid `for` target).
@@ -565,12 +564,7 @@ impl<'a> BindingsBuilder<'a> {
             // Parser error recovery can synthesize empty identifiers. Skip creating a definition
             // binding, but still analyze any assigned value so we surface downstream errors.
             if ensure_assigned && let Some(assigned) = &mut assigned {
-                self.ensure_expr(
-                    assigned,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
-                );
+                self.ensure_expr(assigned, &mut Usage::Unchecked);
             }
             return;
         }
@@ -652,7 +646,7 @@ impl<'a> BindingsBuilder<'a> {
                     && let Expr::StringLiteral(lit) = &kw.value
                     && lit.as_single_part_string().is_some()
                 {
-                    self.ensure_type(&mut kw.value, None);
+                    self.ensure_type(&mut kw.value, None, Evaluation::Eager);
                 }
             }
         }
@@ -736,25 +730,28 @@ impl<'a> BindingsBuilder<'a> {
                 self.ensure_type_with_usage(
                     &mut value,
                     Some(&mut legacy),
-                    &mut Usage::TypeAliasRhs,
+                    &mut Usage::Static(
+                        StaticUsage::TypeExpression(TypeExpressionContext::TypeAliasValue),
+                        Evaluation::Eager,
+                    ),
                 );
                 tparams = Some(legacy.lookup_keys().into_boxed_slice());
             } else if has_typeform_annotation && value.is_string_literal_expr() {
-                self.ensure_type_with_usage(
-                    &mut value,
-                    None,
-                    &mut Usage::StaticTypeInformation {
-                        is_annotation: false,
-                    },
-                );
+                self.ensure_type(&mut value, None, Evaluation::Eager);
             } else {
                 self.ensure_expr(&mut value, current.usage());
             }
         }
         self.ensure_attrs_specifier_type_forward_ref(value.as_mut());
         let style = if self.scopes.in_class_body() {
-            FlowStyle::ClassField {
-                initial_value: Some((*value).clone()),
+            if is_definitely_type_alias {
+                // As for a `type` statement, the class attribute takes its type from the alias
+                // binding rather than from re-inferring the value.
+                FlowStyle::Other
+            } else {
+                FlowStyle::ClassField {
+                    initial_value: Some((*value).clone()),
+                }
             }
         } else if let Some(base_idx) = receiver_idx {
             // `pristine: false` because the visible binding is this

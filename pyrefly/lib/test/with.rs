@@ -98,6 +98,77 @@ def f(x: str | bytes, again: bool) -> None:
 }
 
 testcase!(
+    test_with_narrow_match_tuple_subject,
+    r#"
+from contextlib import nullcontext, suppress
+from typing import assert_type
+
+def risky() -> None:
+    raise ValueError("suppressed before the match")
+
+def suppression(a: str | None) -> None:
+    with suppress(ValueError):
+        risky()
+        match a, 0:
+            case str(), _:
+                pass
+            case _:
+                return
+    assert_type(a, str | None)
+    a.upper()  # E: Object of class `NoneType` has no attribute `upper`
+
+def suppression_alias(a: str | None) -> None:
+    with suppress(ValueError):
+        risky()
+        match a, 0:
+            case (str(), _) as pair:
+                pass
+            case _:
+                return
+    assert_type(a, str | None)
+    a.upper()  # E: Object of class `NoneType` has no attribute `upper`
+
+def no_suppression(a: str | None) -> None:
+    with nullcontext():
+        match a, 0:
+            case str(), _:
+                pass
+            case _:
+                return
+    assert_type(a, str)
+    a.upper()
+"#,
+);
+
+testcase!(
+    bug = "Tuple-match Phi narrowing survives exception suppression",
+    test_with_narrow_match_tuple_multiple_survivors,
+    r#"
+from contextlib import suppress
+from typing import assert_type
+
+
+def risky() -> None:
+    raise ValueError("suppressed before the match")
+
+
+def multiple_survivors(a: str | None, b: int | None) -> None:
+    with suppress(ValueError):
+        risky()
+        match a, b:
+            case None, _:
+                return
+            case _, None:
+                pass
+            case _:
+                pass
+    # Suppression can skip the match, leaving a possibly None.
+    assert_type(a, str)
+    a.upper()
+"#,
+);
+
+testcase!(
     bug = "Hard returns keep the BASE missing-return diagnostic",
     test_with_narrow_hard_return_baseline,
     r#"
@@ -596,6 +667,24 @@ with async_context():  # E: Cannot use `_AsyncGeneratorContextManager[None]` as 
     "#,
 );
 
+// Regression test for https://github.com/facebook/pyrefly/issues/5548
+testcase!(
+    test_exit_error_reported_for_unparameterized_generic,
+    r#"
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
+class Envoy(Generic[T]):
+    def __enter__(self) -> None: ...
+    def __exit__(self) -> None: ...
+
+def use(e: Envoy) -> None:
+    with e:  # E: `__exit__` must be callable with the argument types (type[BaseException], BaseException, TracebackType)\n  `__exit__` must be callable with the argument types (None, None, None)
+        pass
+    "#,
+);
+
 testcase!(
     test_simple_with_wrong_enter_type,
     r#"
@@ -612,6 +701,36 @@ class Foo:
         ...
 
 with Foo() as foo:  # E: Expected `__enter__` to be a callable, got `int`
+    pass
+    "#,
+);
+
+testcase!(
+    test_with_combines_enter_exit_and_return_errors,
+    r#"
+class Foo:
+    __enter__: int = 42
+    def __exit__(self, exc_type: int, exc_value: int, traceback: int) -> str:
+        return ""
+
+with Foo():  # E: Cannot use `Foo` as a context manager\n  Expected `__enter__` to be a callable, got `int`\n  `__exit__` must be callable with the argument types (type[BaseException], BaseException, TracebackType)\n  `__exit__` must be callable with the argument types (None, None, None)\n  Return type `str` of function `Foo.__exit__` is not assignable to expected return type `bool | None`
+    pass
+    "#,
+);
+
+testcase!(
+    test_with_preserves_exit_deprecation_when_enter_fails,
+    r#"
+from types import TracebackType
+from typing_extensions import deprecated
+
+class Foo:
+    __enter__: int = 42
+    @deprecated("Exit is deprecated")
+    def __exit__(self, exc_type: type[BaseException] | None, exc_value: BaseException | None, traceback: TracebackType | None) -> None:
+        pass
+
+with Foo():  # E: Expected `__enter__` to be a callable, got `int` # E: Exit is deprecated
     pass
     "#,
 );
@@ -654,7 +773,7 @@ class Foo:
     def __exit__(self, exc_type: int, exc_value: int, traceback: int) -> None:
         ...
 
-with Foo() as foo: # E: `__exit__` must be callable with the argument types (type[BaseException], BaseException, TracebackType) # E: `__exit__` must be callable with the argument types (None, None, None)
+with Foo() as foo: # E: `__exit__` must be callable with the argument types (type[BaseException], BaseException, TracebackType)\n  `__exit__` must be callable with the argument types (None, None, None)
     pass
     "#,
 );

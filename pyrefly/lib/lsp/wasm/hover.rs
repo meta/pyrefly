@@ -59,6 +59,7 @@ use vec1::Vec1;
 
 use crate::alt::answers_solver::AnswersSolver;
 use crate::binding::binding::Key;
+use crate::binding::bindings::BindingsBuilder;
 use crate::error::error::Error;
 use crate::export::exports::ExportLocation;
 use crate::lsp::module_helpers::collect_symbol_def_paths;
@@ -443,9 +444,16 @@ fn fallback_hover_name_from_type(type_: &Type) -> Option<String> {
     }
     // Recurse through Type wrapper
     if let Type::Type(inner) = type_ {
-        return fallback_hover_name_from_type(inner);
+        return match inner.as_ref() {
+            Type::ClassType(cls) => Some(cls.name().to_string()),
+            _ => fallback_hover_name_from_type(inner),
+        };
     }
-    None
+    match type_ {
+        Type::ClassDef(cls) => Some(cls.name().to_string()),
+        Type::SpecializedClassDef(cls) => Some(cls.name().to_string()),
+        _ => None,
+    }
 }
 
 fn simple_python_string_literal_contents(snippet: &str) -> Option<&str> {
@@ -523,6 +531,7 @@ fn docstring_for_class_object_type(
 ) -> Option<Docstring> {
     let qname = match type_ {
         Type::ClassDef(cls) => cls.qname(),
+        Type::SpecializedClassDef(cls) => cls.qname(),
         Type::Type(inner) => match inner.as_ref() {
             Type::ClassType(cls) => cls.qname(),
             _ => return None,
@@ -680,7 +689,7 @@ fn type_parameter_hover_display(
 fn class_display_type(solver: &AnswersSolver<TransactionHandle<'_>>, type_: &Type) -> Option<Type> {
     let enum_class = match type_ {
         Type::ClassDef(cls) => Some(cls),
-        Type::ClassType(cls) => Some(cls.class_object()),
+        Type::ClassType(cls) | Type::SpecializedClassDef(cls) => Some(cls.class_object()),
         Type::Type(t) => match &**t {
             Type::ClassType(cls) => Some(cls.class_object()),
             _ => None,
@@ -708,6 +717,7 @@ fn class_display_type(solver: &AnswersSolver<TransactionHandle<'_>>, type_: &Typ
                 .type_order()
                 .constructor_to_callable(&solver.promote_nontypeddict_silently_to_classtype(cls)),
         ),
+        Type::SpecializedClassDef(cls) => Some(solver.type_order().constructor_to_callable(cls)),
         Type::Type(t) => match &**t {
             Type::ClassType(cls) => Some(solver.type_order().constructor_to_callable(cls)),
             _ => None,
@@ -1470,6 +1480,24 @@ fn resolve_hover_parameter_doc(
     None
 }
 
+/// The docstring after a class field's definition, if `position` is on the field's name there.
+fn field_docstring_at_definition(
+    ast: &ModModule,
+    module: Module,
+    position: TextSize,
+) -> Option<Docstring> {
+    let nodes = Ast::locate_node(ast, position);
+    let AnyNodeRef::ExprName(name) = nodes.first()? else {
+        return None;
+    };
+    let class = nodes.iter().find_map(|node| match node {
+        AnyNodeRef::StmtClassDef(class) => Some(*class),
+        _ => None,
+    })?;
+    let range = *BindingsBuilder::extract_field_docstrings(&class.body).get(&name.range)?;
+    Some(Docstring(range, module))
+}
+
 fn is_constructor_dunder(name: Option<&str>) -> bool {
     name.is_some_and(|name| name == dunder::INIT.as_str() || name == dunder::NEW.as_str())
 }
@@ -1688,7 +1716,8 @@ pub fn get_hover_with_verbosity(
         docstring.or_else(|| class_docstring_for_constructor(transaction, handle, position))
     } else {
         docstring
-    };
+    }
+    .or_else(|| field_docstring_at_definition(ast.as_deref()?, module_info?, position));
 
     let name = name.or_else(|| identifier_text_at(transaction, handle, position));
 
@@ -1697,7 +1726,8 @@ pub fn get_hover_with_verbosity(
     let type_parameter_owner_class = hover_identifier.as_ref().and_then(|id| {
         get_owner_class_of_pep695_type_parameter_at(id, transaction, handle, position)
     });
-    let show_constructor = kind == Some(SymbolKind::Class)
+    let show_constructor = (kind == Some(SymbolKind::Class)
+        || matches!(&type_, Type::SpecializedClassDef(_)))
         && hover_identifier
             .as_ref()
             .is_some_and(|id| !matches!(id.context, IdentifierContext::ClassDef { .. }));
@@ -1793,6 +1823,7 @@ mod tests {
     use ruff_python_ast::name::Name;
 
     use super::*;
+    use crate::test::util::get_batched_lsp_operations_report;
 
     fn make_function_type(heap: &TypeHeap, module_name: &str, func_name: &str) -> Type {
         let module = Module::new(
@@ -1813,6 +1844,19 @@ mod tests {
         let ty = make_function_type(&heap, "numpy", "arange");
         let fallback = fallback_hover_name_from_type(&ty);
         assert_eq!(fallback.as_deref(), Some("arange"));
+    }
+
+    #[test]
+    fn fallback_names_specialized_class_def() {
+        let code = "class Box[T]: ...\ndef f():\n    X = Box[int]\n    X\n#   ^\n";
+        let report =
+            get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+                let ty = state.transaction().get_type_at(handle, position).unwrap();
+                let name = fallback_hover_name_from_type(&ty);
+                assert_eq!(name.as_deref(), Some("Box"));
+                name.unwrap()
+            });
+        assert!(report.contains("Box"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, assert_type
 
 import numpy as np
-from shape_extensions import assert_raises, assert_shape
+from shape_extensions import assert_raises, assert_shape, IntTuple
 
 
 def check_number_is_not_gradual() -> None:
@@ -165,6 +165,27 @@ def test_integer_scalar_array_index() -> None:
 
     with assert_raises(TypeError):
         np.ones((1,), dtype=np.int64).__index__()  # E: not assignable
+
+
+def test_datetime_and_timedelta_unit_constructors() -> None:
+    epoch = np.datetime64("1970-01-01", "D")
+    delta = np.timedelta64(3, "D")
+    anniversary = epoch + delta
+    assert_type(epoch, Any)
+    assert_type(delta, Any)
+    assert_shape(epoch.shape, IntTuple, runtime=())
+    assert_shape(delta.shape, IntTuple, runtime=())
+    assert_type(anniversary, Any)
+    assert np.datetime_as_string(anniversary) == "1970-01-04"
+
+
+def test_datetime_constructors_do_not_convert_sequences_to_arrays() -> None:
+    values = np.ones(2, dtype=np.int64)
+    assert_shape(values.shape, (2,))
+    with assert_raises(ValueError):
+        np.datetime64(values, "D")
+    with assert_raises(ValueError):
+        np.timedelta64(values, "D")
 
 
 def test_flexible_and_datetime_scalar_hierarchy() -> None:
@@ -438,3 +459,17 @@ def test_structured_array_field_assignment() -> None:
 
     values["x"] = np.ones(3)
     assert_shape(values.shape, (3,))
+
+
+def test_dtype_hasobject() -> None:
+    objects = np.empty(2, dtype=object)
+    floats = np.ones((2, 3))
+
+    object_flag = np.dtype(object).hasobject
+    float_flag = floats.dtype.hasobject
+    assert_type(object_flag, bool)
+    assert_type(float_flag, bool)
+    assert_shape(floats.shape, (2, 3))
+    assert object_flag is True
+    assert float_flag is False
+    assert objects.dtype.hasobject is True

@@ -318,6 +318,69 @@ def svd_vt_shape(shape: IntTuple, full_matrices: bool) -> IntTuple:
         return dsl.concat(batch, dsl.IntTuple((n, n)))
     return dsl.concat(batch, dsl.IntTuple((dsl.Int.gradual(), n)))
 
+# Arithmetic gives both axis-normalization branches the same DSL value domain.
+# Negative bounds use subtraction because the DSL cannot negate Flag integers.
+@type_shape_dsl_function
+def lax_all_gather_shape(shape: IntTuple, axis: int, tiled: bool) -> IntTuple:
+    if tiled:
+        rank = len(shape)
+    else:
+        rank = len(shape) + 1
+    if axis < 0 - rank or axis >= rank:
+        return dsl.Invalid("all_gather axis out of bounds")
+    if axis < 0:
+        normalized = axis + rank
+    else:
+        normalized = axis + 0
+    # Axis names carry no group size; only the communicated dimension is gradual.
+    if tiled:
+        return dsl.IntTuple(
+            dsl.Int.gradual() if i == normalized else shape[i]
+            for i in range(len(shape))
+        )
+    return dsl.concat(
+        dsl.concat(shape[:normalized], dsl.IntTuple((dsl.Int.gradual(),))),
+        shape[normalized:],
+    )
+
+@type_shape_dsl_function
+def lax_psum_scatter_shape(shape: IntTuple, axis: int, tiled: bool) -> IntTuple:
+    rank = len(shape)
+    if axis < 0:
+        normalized = axis + rank
+    else:
+        normalized = axis + 0
+    if normalized < 0 or normalized >= rank:
+        return dsl.Invalid("psum_scatter dimension out of bounds")
+    if tiled:
+        return dsl.IntTuple(
+            dsl.Int.gradual() if i == normalized else shape[i] for i in range(rank)
+        )
+    return dsl.IntTuple(shape[i] for i in range(rank) if i != normalized)
+
+@type_shape_dsl_function
+def lax_reshape_shape(
+    shape: IntTuple,
+    new_sizes: IntTuple,
+    dimensions: int | tuple[int, ...] | None,
+) -> IntTuple:
+    if any(dsl.is_concrete_int(size) and size < 0 for size in new_sizes):
+        return dsl.Invalid("lax.reshape sizes must be non-negative")
+    total = dsl.prod(shape)
+    target = dsl.prod(new_sizes)
+    if dsl.is_concrete_int(total) and dsl.is_concrete_int(target) and total != target:
+        return dsl.Invalid("reshape target element count does not match the input")
+    if dimensions is not None:
+        if dsl.is_int_value(dimensions):
+            return dsl.Invalid("reshape dimensions must be a permutation")
+        if len(dimensions) != len(shape):
+            return dsl.Invalid("reshape dimensions must cover every input axis")
+        if any(axis < 0 or axis >= len(shape) for axis in dimensions):
+            return dsl.Invalid("reshape dimension out of bounds")
+        if any(dimensions.count(axis) > 1 for axis in dimensions):
+            return dsl.Invalid("duplicate reshape dimension")
+    return new_sizes
+
 @type_shape_dsl_function
 def reshape_shape(shape: IntTuple, newshape: int | tuple[int, ...] | None) -> IntTuple:
     # `None` is not a legal argument to `reshape`. The arm exists because an

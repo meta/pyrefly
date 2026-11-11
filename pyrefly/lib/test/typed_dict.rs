@@ -1334,7 +1334,7 @@ from typing import TypedDict
 class A(TypedDict):
     x: int
 class B(A):
-    x: str  # E: `B.x` has type `str`, which is not consistent with `int` in `A.x`
+    x: str  # E: `B.x` has type `str`, which is not assignable to `int`, the type of `A.x`
     "#,
 );
 
@@ -2127,7 +2127,7 @@ class Target(TypedDict):
 
 def f(o: Open) -> Target:
     # `x` could come from a subclass of `Open`, but `tag` is incompatible regardless.
-    return {**o}  # E: Unpacked `Open` is not assignable to `Target`
+    return {**o}  # E: Unpacked `Open` is not assignable to `Target` # E: Missing required key `x` for TypedDict `Target`
     "#,
 );
 
@@ -3090,5 +3090,44 @@ from typing import Literal, TypedDict, assert_type
 
 M = TypedDict("M", (x := 1), total=(x := True))  # E: Expected valid functional typed dictionary definition  # E: Unrecognized keyword argument `total` in typed dictionary definition
 assert_type(x, Literal[True])
+"#,
+);
+testcase!(
+    test_typed_dict_unpacking_missing_required_key,
+    r#"
+from typing import TypedDict
+class Open(TypedDict):
+    x: int
+class Closed(TypedDict, closed=True):
+    x: int
+class Target(TypedDict):
+    x: int
+    y: int
+def from_open(a: Open) -> Target:
+    return {**a} # E: Missing required key `y` for TypedDict `Target`
+def from_closed(a: Closed) -> Target:
+    return {**a} # E: Missing required key `y` for TypedDict `Target`
+def from_target(t: Target) -> Target:
+    return {**t}
+"#,
+);
+
+testcase!(
+    test_typed_dict_unpacking_anonymous_typed_dict,
+    r#"
+from typing import NotRequired, TypedDict
+
+class Target(TypedDict):
+    x: int
+
+class PartialSource(TypedDict):
+    x: NotRequired[int]
+
+def from_dict_literal() -> Target:
+    source = {"x": 1}
+    return {**source}
+
+def from_not_required(s: PartialSource) -> Target:
+    return {**s} # E: Missing required key `x` for TypedDict `Target`
 "#,
 );

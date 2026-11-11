@@ -6,6 +6,7 @@
  */
 
 use std::num::NonZeroU32;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use pyrefly_build::handle::Handle;
 use pyrefly_build::source_db::map_db::MapDatabase;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
+use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_python::sys_info::SysInfo;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::lined_buffer::DisplayPos;
@@ -101,17 +103,17 @@ impl Range {
         }
     }
 
+    /// Returns `None` for a range that is not valid, including one that ends before it starts.
     fn to_display_range(&self) -> Option<DisplayRange> {
-        Some(DisplayRange {
-            start: DisplayPos::Source {
-                line: LineNumber::new(u32::try_from(self.start_line).ok()?)?,
-                column: NonZeroU32::new(u32::try_from(self.start_col).ok()?)?,
-            },
-            end: DisplayPos::Source {
-                line: LineNumber::new(u32::try_from(self.end_line).ok()?)?,
-                column: NonZeroU32::new(u32::try_from(self.end_col).ok()?)?,
-            },
-        })
+        let start = DisplayPos::Source {
+            line: LineNumber::new(u32::try_from(self.start_line).ok()?)?,
+            column: NonZeroU32::new(u32::try_from(self.start_col).ok()?)?,
+        };
+        let end = DisplayPos::Source {
+            line: LineNumber::new(u32::try_from(self.end_line).ok()?)?,
+            column: NonZeroU32::new(u32::try_from(self.end_col).ok()?)?,
+        };
+        (start <= end).then_some(DisplayRange { start, end })
     }
 }
 
@@ -167,13 +169,21 @@ pub struct CompletionTextEdit {
 #[derive(Serialize)]
 pub struct AutoCompletionItem {
     label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
     /// A Monaco `CompletionItemKind`, whose numbering differs from LSP's.
+    #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<i32>,
-    #[serde(rename(serialize = "sortText"))]
+    #[serde(
+        rename(serialize = "sortText"),
+        skip_serializing_if = "Option::is_none"
+    )]
     sort_text: Option<String>,
     /// Without these, accepting an import completion does nothing visible.
-    #[serde(rename(serialize = "additionalTextEdits"))]
+    #[serde(
+        rename(serialize = "additionalTextEdits"),
+        skip_serializing_if = "Option::is_none"
+    )]
     import_edits: Option<Vec<CompletionTextEdit>>,
 }
 
@@ -208,6 +218,18 @@ fn to_monaco_completion_kind(kind: CompletionItemKind) -> i32 {
         CompletionItemKind::Snippet => 27,
         _ => unreachable!("unknown LSP CompletionItemKind"),
     }
+}
+
+/// A definition, in a sandbox file or in a file that comes with Pyrefly.
+#[derive(Serialize)]
+pub struct Location {
+    /// The sandbox filename, or the path of a stub that comes with Pyrefly.
+    filename: String,
+    range: Range,
+    /// The text of a file that is not a sandbox file, so that the sandbox can show it.
+    /// Set only when the caller asks for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contents: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -316,11 +338,16 @@ impl Playground {
                 ".py"
             };
             // Use from_relative_path to properly convert file paths like "folder/file.py"
-            // to module names like "folder.file" (instead of incorrectly creating "folder/file")
-            let module_name = ModuleName::from_relative_path(Path::new(filename.as_str()))
-                .unwrap_or_else(|_| {
-                    ModuleName::from_str(filename.strip_suffix(suffix).unwrap_or(filename))
-                });
+            // to module names like "folder.file" (instead of incorrectly creating "folder/file").
+            // Only the normal components count, so `./folder//file.py` and `/folder/file.py`
+            // give the same module name.
+            let relative_path: PathBuf = Path::new(filename.as_str())
+                .components()
+                .filter(|component| matches!(component, Component::Normal(_)))
+                .collect();
+            let module_name = ModuleName::from_relative_path(&relative_path).unwrap_or_else(|_| {
+                ModuleName::from_str(filename.strip_suffix(suffix).unwrap_or(filename))
+            });
             let module_path = PathBuf::from(filename.clone());
             let memory_path = ModulePath::memory(module_path.clone());
 
@@ -486,7 +513,9 @@ impl Playground {
         SemanticTokensLegends::lsp_semantic_token_legends()
     }
 
-    pub fn goto_definition(&mut self, pos: Position) -> Vec<Range> {
+    /// Returns the definitions at `pos`. With `with_contents`, a definition in a
+    /// file that is not a sandbox file comes with the text of that file.
+    pub fn goto_definition(&mut self, pos: Position, with_contents: bool) -> Vec<Location> {
         let handle = match self.handles.get(&self.active_filename) {
             Some(handle) => handle,
             None => return Vec::new(),
@@ -500,7 +529,39 @@ impl Playground {
             .goto_definition(handle, position)
             .unwrap_or_default()
             .into_iter()
-            .map(|r| Range::new(r.module.display_range(r.range)))
+            .filter_map(|r| {
+                // Bundled stubs keep the path relative to their own root, so the
+                // root goes in front of it to make the filename unique.
+                let (filename, is_sandbox_file) = match r.module.path().details() {
+                    ModulePathDetails::Memory(path) => (path.to_path_buf(), true),
+                    ModulePathDetails::FileSystem(path) => (path.to_path_buf(), false),
+                    ModulePathDetails::BundledTypeshed(path) => {
+                        (Path::new("typeshed/stdlib").join(path.as_path()), false)
+                    }
+                    ModulePathDetails::BundledTypeshedThirdParty(path) => {
+                        (Path::new("typeshed/stubs").join(path.as_path()), false)
+                    }
+                    ModulePathDetails::BundledThirdParty(path) => {
+                        (Path::new("stubs").join(path.as_path()), false)
+                    }
+                    // A namespace package is a directory, with no text to show.
+                    ModulePathDetails::Namespace(_) => return None,
+                };
+                let filename = filename.to_string_lossy();
+                // A stub path uses the native separator, but the sandbox reads the
+                // filename of a stub as a URI path.
+                let filename = if is_sandbox_file {
+                    filename.into_owned()
+                } else {
+                    filename.replace('\\', "/")
+                };
+                Some(Location {
+                    filename,
+                    range: Range::new(r.module.display_range(r.range)),
+                    contents: (with_contents && !is_sandbox_file)
+                        .then(|| r.module.contents().to_string()),
+                })
+            })
             .collect()
     }
 
@@ -601,6 +662,111 @@ mod tests {
                 .inlay_hint(true)
                 .iter()
                 .any(|hint| hint.label == "value= ")
+        );
+    }
+
+    #[test]
+    fn test_goto_definition_in_other_files() {
+        let mut state = Playground::new(None).unwrap();
+        let mut files = SmallMap::new();
+        files.insert(
+            "sandbox.py".to_owned(),
+            "import os\nfrom utils import helper\nhelper()\nos.getcwd()\n".to_owned(),
+        );
+        files.insert(
+            "utils.py".to_owned(),
+            "\n\ndef helper() -> None: ...\n".to_owned(),
+        );
+        state.update_sandbox_files(files, true);
+        state.set_active_file("sandbox.py");
+
+        let definitions = state.goto_definition(Position::new(3, 1), true);
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].filename, "utils.py");
+        assert_eq!(definitions[0].range.start_line, 3);
+        assert_eq!(definitions[0].range.start_col, 5);
+        assert!(
+            definitions[0].contents.is_none(),
+            "a sandbox file needs no contents"
+        );
+
+        let definitions = state.goto_definition(Position::new(4, 4), true);
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].filename, "typeshed/stdlib/os/__init__.pyi");
+        assert!(
+            definitions[0]
+                .contents
+                .as_ref()
+                .expect("a stub should come with its contents")
+                .contains("def getcwd()")
+        );
+
+        let definitions = state.goto_definition(Position::new(4, 4), false);
+        assert_eq!(definitions.len(), 1);
+        assert!(
+            definitions[0].contents.is_none(),
+            "a stub should come without its contents when the caller does not ask"
+        );
+    }
+
+    #[test]
+    fn test_import_file_with_unnormalized_name() {
+        let mut state = Playground::new(None).unwrap();
+        let mut files = SmallMap::new();
+        files.insert(
+            "sandbox.py".to_owned(),
+            "from utils import helper\nfrom pkg.mod import value\nhelper()\nprint(value)\n"
+                .to_owned(),
+        );
+        files.insert(
+            "./utils.py".to_owned(),
+            "def helper() -> None: ...\n".to_owned(),
+        );
+        files.insert("/pkg//mod.py".to_owned(), "value = 1\n".to_owned());
+        state.update_sandbox_files(files, true);
+
+        let errors = state.get_errors();
+        assert!(
+            errors.is_empty(),
+            "`./utils.py` and `/pkg//mod.py` should be importable as `utils` and `pkg.mod`, got: {:?}",
+            errors.iter().map(|e| &e.message_header).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_semantic_tokens_ignores_reversed_range() {
+        let mut state = Playground::new(None).unwrap();
+        let mut files = SmallMap::new();
+        files.insert("sandbox.py".to_owned(), "x = 1\ny = 2\n".to_owned());
+        state.update_sandbox_files(files, true);
+        state.set_active_file("sandbox.py");
+
+        let reversed = Range {
+            start_line: 2,
+            start_col: 1,
+            end_line: 1,
+            end_col: 1,
+        };
+        assert_eq!(
+            state.semantic_tokens(Some(reversed)).unwrap().data,
+            state.semantic_tokens(None).unwrap().data,
+            "a reversed range should give the tokens of the whole file"
+        );
+    }
+
+    #[test]
+    fn test_autocomplete_json_omits_unset_fields() {
+        let item = AutoCompletionItem {
+            label: "x".to_owned(),
+            detail: None,
+            kind: None,
+            sort_text: None,
+            import_edits: None,
+        };
+        assert_eq!(
+            serde_json::to_value(item).unwrap(),
+            serde_json::json!({ "label": "x" }),
+            "a field that is `None` should be absent, not `null`"
         );
     }
 

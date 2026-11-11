@@ -5,10 +5,14 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::borrow::Cow;
 use std::cmp;
+use std::fmt;
 use std::fmt::Debug;
+use std::fmt::Display;
 use std::io;
 use std::io::Write;
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use itertools::Itertools;
@@ -28,6 +32,8 @@ use pyrefly_util::display::number_thousands;
 use pyrefly_util::lined_buffer::DisplayRange;
 use pyrefly_util::lined_buffer::LineNumber;
 use pyrefly_util::lined_buffer::LinedBuffer;
+use pyrefly_util::thread_pool::in_thread_pool;
+use rayon::prelude::*;
 use ruff_annotate_snippets::Annotation;
 use ruff_annotate_snippets::AnnotationKind;
 use ruff_annotate_snippets::Group;
@@ -97,6 +103,29 @@ pub enum BaselineStatus {
     Unmatched,
     /// The error matched the loaded baseline.
     Matched,
+}
+
+/// A diagnostic as it is reported: an error, with the severity and baseline status it is
+/// reported with. These can differ from the error's own, so reporting can borrow an error
+/// rather than copy it to change them. Reports are built in parallel, hence `Sync`.
+pub trait ReportedError: Sync {
+    fn error(&self) -> &Error;
+    fn severity(&self) -> Severity;
+    fn baseline_status(&self) -> BaselineStatus;
+}
+
+impl ReportedError for Error {
+    fn error(&self) -> &Error {
+        self
+    }
+
+    fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    fn baseline_status(&self) -> BaselineStatus {
+        self.baseline_status
+    }
 }
 
 impl BaselineStatus {
@@ -201,6 +230,22 @@ impl Ranged for Error {
     }
 }
 
+/// Where an error is, as rendered: its path, and its cell for an error in a notebook.
+struct Origin<'a> {
+    path: &'a Path,
+    cell: Option<NonZeroU32>,
+}
+
+impl Display for Origin<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.path.to_string_lossy())?;
+        if let Some(cell) = self.cell {
+            write!(f, "#{cell}")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct ErrorRenderer<W> {
     writer: W,
@@ -240,25 +285,76 @@ impl<W: Write> ErrorRenderer<W> {
         }
     }
 
-    pub fn write(&mut self, error: &Error, project_root: &Path, verbose: bool) -> io::Result<()> {
-        if !error.severity.is_enabled() {
+    fn with_mode(writer: W, mode: ErrorRenderMode) -> Self {
+        match mode {
+            ErrorRenderMode::Plain => Self::plain(writer),
+            ErrorRenderMode::Color => Self::styled(writer),
+        }
+    }
+
+    pub fn write(
+        &mut self,
+        reported: &impl ReportedError,
+        project_root: &Path,
+        verbose: bool,
+    ) -> io::Result<()> {
+        let severity = reported.severity();
+        if !severity.is_enabled() {
             return Ok(());
         }
-        let origin = error.path_string_with_fragment(project_root);
+        let error = reported.error();
         let metadata = RenderMetadata {
-            severity: error.severity,
+            severity,
             header: &error.msg_header,
             name: error.error_kind.to_name(),
-            baselined: error.baseline_status == BaselineStatus::Matched,
+            baselined: reported.baseline_status() == BaselineStatus::Matched,
         };
         if verbose {
+            let origin = error.path_string_with_fragment(project_root);
             self.write_header(&metadata)?;
-            self.write_snippet(error.render_snippets(&origin))?;
+            self.write_snippet(error.render_snippets(&origin, severity))?;
             if let Some(details) = &error.msg_details {
                 writeln!(self.writer, "{details}")?;
             }
         } else {
-            self.write_concise(&metadata, &origin, &error.display_range.to_string())?;
+            self.write_concise(&metadata, error.origin(project_root), &error.display_range)?;
+        }
+        Ok(())
+    }
+
+    /// Write every error in `errors`, in order. On a thread pool, many errors are rendered in
+    /// parallel, each chunk into its own buffer, and the buffers are written in order. The work
+    /// is done in waves, so only a wave's buffers are held at once.
+    pub fn write_all(
+        &mut self,
+        errors: &[impl ReportedError],
+        project_root: &Path,
+        verbose: bool,
+    ) -> io::Result<()> {
+        const CHUNK: usize = 256;
+        if errors.len() <= CHUNK || !in_thread_pool() {
+            for error in errors {
+                self.write(error, project_root, verbose)?;
+            }
+            return Ok(());
+        }
+        let mode = self.mode;
+        for wave in errors.chunks(CHUNK * rayon::current_num_threads() * 4) {
+            let buffers: Vec<Vec<u8>> = wave
+                .par_chunks(CHUNK)
+                .map(|chunk| {
+                    let mut renderer = ErrorRenderer::with_mode(Vec::new(), mode);
+                    for error in chunk {
+                        renderer
+                            .write(error, project_root, verbose)
+                            .expect("writing to a `Vec` cannot fail");
+                    }
+                    renderer.writer
+                })
+                .collect();
+            for buffer in buffers {
+                self.writer.write_all(&buffer)?;
+            }
         }
         Ok(())
     }
@@ -286,7 +382,7 @@ impl<W: Write> ErrorRenderer<W> {
                 writeln!(self.writer, "{details}")?;
             }
         } else {
-            self.write_concise(&metadata, &error.origin, &legacy_error.display_range())?;
+            self.write_concise(&metadata, &error.origin, legacy_error.display_range())?;
         }
         Ok(())
     }
@@ -330,8 +426,8 @@ impl<W: Write> ErrorRenderer<W> {
     fn write_concise(
         &mut self,
         metadata: &RenderMetadata,
-        origin: &str,
-        display_range: &str,
+        origin: impl Display,
+        display_range: impl Display,
     ) -> io::Result<()> {
         let RenderMetadata {
             severity,
@@ -339,7 +435,11 @@ impl<W: Write> ErrorRenderer<W> {
             name,
             baselined,
         } = *metadata;
-        let header = header.lines().map(str::trim).join(" ");
+        let header: Cow<str> = if header.contains('\n') {
+            Cow::Owned(header.lines().map(str::trim).join(" "))
+        } else {
+            Cow::Borrowed(header.trim())
+        };
         match self.mode {
             ErrorRenderMode::Plain => writeln!(
                 self.writer,
@@ -356,10 +456,10 @@ impl<W: Write> ErrorRenderer<W> {
                     self.writer,
                     "{} {}:{}: {} {}",
                     severity.painted(),
-                    Paint::blue(origin),
-                    Paint::dim(display_range),
+                    Paint::blue(&origin),
+                    Paint::dim(&display_range),
                     Paint::new(&header),
-                    Paint::dim(format!("[{name}]").as_str()),
+                    Paint::dim(&format_args!("[{name}]")),
                 )?;
                 if baselined {
                     write!(self.writer, " {}", Paint::dim("[baselined]"))?;
@@ -414,12 +514,16 @@ impl<W: Write> ErrorRenderer<W> {
 impl Error {
     /// Return the path with a cell fragment if the error is in a notebook cell.
     pub fn path_string_with_fragment(&self, project_root: &Path) -> String {
+        self.origin(project_root).to_string()
+    }
+
+    /// The path relative to `project_root`, with a cell fragment if the error is in a
+    /// notebook cell.
+    fn origin(&self, project_root: &Path) -> Origin<'_> {
         let path = self.path().as_path();
-        let path = path.strip_prefix(project_root).unwrap_or(path);
-        if let Some(cell) = self.display_range.start.cell() {
-            format!("{}#{cell}", path.to_string_lossy())
-        } else {
-            path.to_string_lossy().to_string()
+        Origin {
+            path: path.strip_prefix(project_root).unwrap_or(path),
+            cell: self.display_range.start.cell(),
         }
     }
 
@@ -481,18 +585,21 @@ impl Error {
         snippets
     }
 
-    fn render_snippets<'a>(&'a self, origin: &'a str) -> Group<'a> {
+    /// Render the source snippets of this error as reported at `severity`, which can differ
+    /// from the error's own severity, so that they are drawn like the reported header.
+    fn render_snippets<'a>(&'a self, origin: &'a str, severity: Severity) -> Group<'a> {
         let mut layouts = self.snippet_layouts().into_iter();
-        let mut message = Group::with_level(severity_to_level(self.severity)).element(
+        let mut message = Group::with_level(severity_to_level(severity)).element(
             self.make_snippet(
                 origin,
                 layouts
                     .next()
                     .expect("a diagnostic always has a primary snippet"),
+                severity,
             ),
         );
         for layout in layouts {
-            message = message.element(self.make_snippet(origin, layout));
+            message = message.element(self.make_snippet(origin, layout, severity));
         }
         message
     }
@@ -501,15 +608,15 @@ impl Error {
         &'a self,
         origin: &'a str,
         layout: SnippetLayout<'a>,
+        severity: Severity,
     ) -> Snippet<'a, Annotation<'a>> {
         let data = self.snippet_data(layout);
         let mut snippet = Snippet::source(data.source)
             .line_start(data.line_start)
             .path(origin);
         if let Some(primary) = data.primary {
-            snippet = snippet.annotation(
-                severity_to_annotation_kind(self.severity).span(primary.start..primary.end),
-            );
+            snippet = snippet
+                .annotation(severity_to_annotation_kind(severity).span(primary.start..primary.end));
         }
         for (span, label) in data.secondary {
             snippet = snippet.annotation(
@@ -611,13 +718,14 @@ impl Error {
     }
 
     /// The tag editors use to draw this diagnostic in their own way: struck
-    /// through for a deprecated name, greyed out for unreachable or unused code.
+    /// through for a deprecated name, greyed out for inactive, unreachable, or unused code.
     pub fn editor_tag(&self) -> Option<DiagnosticTag> {
         if self.deprecated_tag {
             Some(DiagnosticTag::Deprecated)
         } else if matches!(
             self.error_kind(),
-            ErrorKind::Unreachable
+            ErrorKind::InactiveCode
+                | ErrorKind::Unreachable
                 | ErrorKind::UnusedImport
                 | ErrorKind::UnusedParameter
                 | ErrorKind::UnusedVariable
@@ -630,7 +738,12 @@ impl Error {
 
     /// Create a diagnostic suitable for use in LSP, or `None` for an ignored error.
     pub fn to_diagnostic(&self) -> Option<Diagnostic> {
-        let severity = self.severity().shown()?;
+        self.to_diagnostic_with_severity(self.severity)
+    }
+
+    /// Like `to_diagnostic`, but with `severity` in place of this error's own severity.
+    pub(crate) fn to_diagnostic_with_severity(&self, severity: Severity) -> Option<Diagnostic> {
+        let severity = severity.shown()?;
         let code = self.error_kind().to_name().to_owned();
         let code_description = Uri::parse(&self.error_kind().docs_url())
             .ok()
@@ -684,10 +797,10 @@ pub fn print_errors(project_root: &Path, errors: &[Error]) {
     }
 }
 
-fn count_error_kinds(errors: &[Error]) -> Vec<(ErrorKind, usize)> {
+fn count_error_kinds(errors: &[impl ReportedError]) -> Vec<(ErrorKind, usize)> {
     let mut map = SmallMap::new();
     for err in errors {
-        let kind = err.error_kind();
+        let kind = err.error().error_kind();
         *map.entry(kind).or_default() += 1;
     }
     let mut res = map.into_iter().collect::<Vec<_>>();
@@ -695,7 +808,7 @@ fn count_error_kinds(errors: &[Error]) -> Vec<(ErrorKind, usize)> {
     res
 }
 
-pub fn print_error_counts(errors: &[Error], limit: usize) {
+pub fn print_error_counts(errors: &[impl ReportedError], limit: usize) {
     let items = count_error_kinds(errors);
     let limit = if limit > 0 { limit } else { items.len() };
     for (error, count) in items.iter().rev().take(limit) {
@@ -898,10 +1011,14 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use dupe::Dupe;
     use pyrefly_python::module_name::ModuleName;
+    use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
+    use pyrefly_util::thread_pool::ThreadPool;
     use ruff_text_size::TextSize;
 
     use super::*;
+    use crate::error::collector::CollectedDiagnostic;
     use crate::test::util::TestEnv;
 
     fn render_error(error: &Error, root: &Path, verbose: bool) -> String {
@@ -921,6 +1038,59 @@ mod tests {
             renderer.write_serializable(&error, verbose).unwrap();
         }
         str::from_utf8(&output).unwrap().to_owned()
+    }
+
+    /// Errors in two modules, enough of them that `ErrorRenderer::write_all` renders them in
+    /// parallel, some with details and some with a header spanning lines.
+    fn many_errors() -> Vec<Error> {
+        let contents = Arc::new("x = 1\n".repeat(1000));
+        ["foo", "bar"]
+            .into_iter()
+            .flat_map(|name| {
+                let module = Module::new(
+                    ModuleName::from_str(name),
+                    ModulePath::filesystem(PathBuf::from(format!("/root/{name}.py"))),
+                    contents.dupe(),
+                );
+                (0..400u32).map(move |i| {
+                    let start = TextSize::new(i * 6);
+                    Error::new(
+                        module.dupe(),
+                        TextRange::new(start, start + TextSize::new(1)),
+                        format!("error {i} with \"quotes\"\n  over two lines"),
+                        if i % 2 == 0 {
+                            vec![format!("detail {i}")]
+                        } else {
+                            Vec::new()
+                        },
+                        ErrorKind::BadAssignment,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_write_all_matches_writing_each_error() {
+        let errors = many_errors();
+        for verbose in [false, true] {
+            let mut each = Vec::new();
+            let mut renderer = ErrorRenderer::plain(&mut each);
+            for error in &errors {
+                renderer.write(error, Path::new("/root"), verbose).unwrap();
+            }
+            // Errors are rendered in parallel only on a thread pool.
+            let mut all = Vec::new();
+            ThreadPool::new(TEST_THREAD_COUNT).install(|| {
+                ErrorRenderer::plain(&mut all)
+                    .write_all(&errors, Path::new("/root"), verbose)
+                    .unwrap()
+            });
+            assert!(
+                all == each,
+                "rendering in parallel should not change the output (verbose: {verbose})"
+            );
+        }
     }
 
     #[test]
@@ -981,6 +1151,37 @@ mod tests {
         assert_eq!(
             render_serializable_error(&error, root.as_path(), true),
             verbose
+        );
+    }
+
+    #[test]
+    fn test_snippet_drawn_at_reported_severity() {
+        let module_info = Module::new(
+            ModuleName::from_str("test"),
+            ModulePath::filesystem(PathBuf::from("test.py")),
+            Arc::new("return\nx = 1".to_owned()),
+        );
+        let error = Error::new(
+            module_info,
+            TextRange::new(TextSize::new(7), TextSize::new(12)),
+            "This code is unreachable".to_owned(),
+            Vec::new(),
+            ErrorKind::Unreachable,
+        )
+        .with_severity(Severity::Hint);
+        let reported = CollectedDiagnostic::new(&error, Severity::Warn);
+        let mut output = Vec::new();
+        ErrorRenderer::plain(&mut output)
+            .write(&reported, Path::new(""), true)
+            .unwrap();
+        assert_eq!(
+            str::from_utf8(&output).unwrap(),
+            r#" WARN This code is unreachable [unreachable]
+ --> test.py:2:1
+  |
+2 | x = 1
+  | ^^^^^
+"#,
         );
     }
 

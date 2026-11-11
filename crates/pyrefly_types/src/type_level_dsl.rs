@@ -70,6 +70,7 @@ use crate::function::FuncDefId;
 use crate::gufunc::GufuncClassification;
 use crate::gufunc::evaluate_gufunc;
 use crate::gufunc::parse_gufunc_signature;
+use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::map_int_tuples::MapIntTuples;
 use crate::quantified::Quantified;
@@ -7152,7 +7153,7 @@ impl StructurallyValidatedTypeShapeDslFunction {
                         EinsumClassification::Supported(equation) => {
                             evaluate_einsum(&equation, operands)
                         }
-                        EinsumClassification::Unsupported(_) => {
+                        EinsumClassification::Unsupported => {
                             return DslOutcome::Value(DslValue::Unknown);
                         }
                         EinsumClassification::Invalid(error) => {
@@ -7564,12 +7565,9 @@ impl StructurallyValidatedTypeShapeDslFunction {
                     unreachable!("validated IntTuple product expression is a call")
                 };
                 match self.evaluate_expression(&call.arguments.args[0], environment, budget) {
-                    DslOutcome::Value(DslValue::Shape(shape)) => match shape.product() {
-                        // TODO(stroxler): Preserve a gradual product as a gradual dimension once
-                        // callers can distinguish an unknown equality check from a proven match.
-                        Int::Int => DslOutcome::Value(DslValue::Unknown),
-                        product => DslOutcome::Value(DslValue::Dimension(product)),
-                    },
+                    DslOutcome::Value(DslValue::Shape(shape)) => {
+                        DslOutcome::Value(DslValue::Dimension(shape.product()))
+                    }
                     DslOutcome::Value(DslValue::Unknown) => DslOutcome::Value(DslValue::Unknown),
                     DslOutcome::ExplicitGradual => {
                         unreachable!("validated IntTuple product operand cannot return gradual")
@@ -8680,7 +8678,7 @@ fn lower_parameter(ty: &Type, domain: TypeShapeDslInputDomain) -> DslValue {
             }
             match ty {
                 Type::None => DslValue::FlagNone,
-                Type::ClassType(cls) if cls.is_builtin("int") => DslValue::GradualInt,
+                Type::ClassType(cls) if cls.is(KnownClass::Int) => DslValue::GradualInt,
                 Type::Int(Int::Literal(value)) => DslValue::FlagInt(*value),
                 // Symbolic shape integers satisfy `Flag[int]`, but DSL flag operations inspect
                 // only concrete runtime values. Generic substitution does not re-evaluate a call

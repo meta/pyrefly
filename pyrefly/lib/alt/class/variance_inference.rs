@@ -15,9 +15,7 @@ use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
 use pyrefly_python::dunder;
 use pyrefly_types::dimension::Int;
-use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::heap::TypeHeap;
-use pyrefly_types::shaped_array::IntTupleView;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
@@ -414,52 +412,6 @@ fn on_type(
         Type::Union(f) => {
             for ty in &f.members {
                 on_type(path, ty, on_edge, on_var);
-            }
-        }
-        Type::ShapedArray(tensor) => {
-            // Tensor dimensions are invariant - Tensor[2, 3] is not a subtype of Tensor[3, 2]
-            let mut visit_dim = |ty: &Type| {
-                on_type(
-                    path.with_direction(DirectionalVariance::Invariant),
-                    ty,
-                    on_edge,
-                    on_var,
-                );
-            };
-            match tensor.shape().view() {
-                IntTupleView::Concrete(dims) => {
-                    for dim in dims {
-                        visit_dim(&Type::Int(dim.clone()));
-                    }
-                }
-                IntTupleView::Gradual => {
-                    let middle = gradual_size();
-                    visit_dim(&middle);
-                }
-                IntTupleView::Unpacked {
-                    prefix,
-                    middle,
-                    suffix,
-                } => {
-                    for dim in prefix {
-                        visit_dim(&Type::Int(dim.clone()));
-                    }
-                    visit_dim(middle);
-                    for dim in suffix {
-                        visit_dim(&Type::Int(dim.clone()));
-                    }
-                }
-            }
-        }
-        Type::NNModule(module) => {
-            // NNModule fields are invariant
-            for (_, ty) in module.fields.iter() {
-                on_type(
-                    path.with_direction(DirectionalVariance::Invariant),
-                    ty,
-                    on_edge,
-                    on_var,
-                );
             }
         }
         Type::DataFrame(schema) => {

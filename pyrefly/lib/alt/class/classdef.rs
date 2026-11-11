@@ -12,7 +12,7 @@ use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_types::callable::Callable;
 use pyrefly_types::class::DjangoClassMetadata;
 use pyrefly_types::class::PrecomputedTParams;
-use pyrefly_types::quantified::Quantified;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::special_form::SpecialForm;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::name::Name;
@@ -115,22 +115,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .unwrap_or(ClassMetadata::recursive())
     }
 
-    pub fn shaped_array_shape_for_class(&self, cls: &Class) -> Option<Quantified> {
-        // Shaped-array registration is explicit per class, via the `@shaped_array` decorator.
-        self.get_metadata_for_class(cls)
-            .shaped_array_shape()
-            .cloned()
-    }
-
-    pub fn shaped_array_shape_for_class_type(&self, cls: &ClassType) -> Option<Quantified> {
-        self.shaped_array_shape_for_class(cls.class_object())
-    }
-
-    pub fn uses_builtin_shaped_array_indexing(&self, cls: &Class) -> bool {
-        self.get_metadata_for_class(cls)
-            .uses_builtin_shaped_array_indexing()
-    }
-
     pub fn get_abstract_members_for_class(&self, cls: &Class) -> &AbstractClassMembers {
         self.get_from_class(cls, &KeyAbstractClassCheck(cls.index()))
             .unwrap_or(AbstractClassMembers::recursive())
@@ -178,12 +162,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub fn unwrap_class_object_silently(&self, ty: &Type) -> Option<(TParams, Type)> {
         match ty {
-            Type::ClassDef(c) if c.is_builtin("tuple") => Some(self.instantiate_unbounded_tuple()),
+            Type::ClassDef(c) if c.is(KnownClass::Tuple) => {
+                Some(self.instantiate_unbounded_tuple())
+            }
             Type::ClassDef(c) => Some((
                 self.get_class_tparams(c)
                     .map_or_else(TParams::default, |tparams| (**tparams).clone()),
                 self.instantiate(c),
             )),
+            Type::SpecializedClassDef(c) => Some((TParams::empty(), Type::ClassType(c.clone()))),
             Type::TypeAlias(ta) => {
                 self.unwrap_class_object_silently(&self.get_type_alias(ta).as_value(self.stdlib))
             }
@@ -263,7 +250,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             && self.has_superclass(base.class_object(), want)
         {
             self.as_superclass(base, want)
-        } else if !class.class_object().is_builtin("tuple")
+        } else if !class.class_object().is(KnownClass::Tuple)
             && let Some(tuple) = self.as_tuple(class)
             && self.has_superclass(self.stdlib.tuple_object(), want)
         {

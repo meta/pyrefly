@@ -1034,8 +1034,8 @@ class HypernetworkMLP[In: IntVar, Hidden: IntVar, Out: IntVar](nn.Module):
     def forward[B: IntVar](self, x: Tensor[[B, In]]) -> Tensor[[B, Out]]:
         """Forward pass: Linear→ReLU→Linear→ReLU→Linear.
 
-        Typed like BottomMLP/TopMLP. When called with unrefined input,
-        the NNModule DSL still preserves the output dim from fc3.
+        The generic Linear stubs preserve the output dimension from fc3
+        even when the input shape is gradual.
         """
         h = F.relu(self.fc1(x))
         assert_type(h, Tensor[[B, Hidden]])

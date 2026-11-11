@@ -118,29 +118,60 @@ pub struct Definition {
     /// True while every definition site is inside an `if __name__ == "__main__":` body.
     /// Such names resolve in-module but are not importable, so the export surface excludes them.
     pub main_guard_only: bool,
-    /// True if any definition site assigns, imports or annotates the name (a bare `x: int`
-    /// counts), as opposed to merely declaring it (`global`/`nonlocal`) or deleting it. A
-    /// `MutableCapture` whose own scope defines a value (`global x; x = 1`) legally creates
-    /// the outer-scope name, so it needs no pre-existing outer definition.
-    pub has_value_definition: bool,
-    /// True while every definition site is a `def`. This is purely syntactic: a decorated `def`
-    /// (e.g. `@property`) counts, but a method-like assignment such as `f = staticmethod(g)` or
-    /// `f = lambda self: 1` does not. Telling such assignments apart from data attributes would
-    /// need type information, so the syntactic rule is much simpler and stays predictable.
-    pub function_def_only: bool,
+    /// Whether the definition sites bind a value to the name.
+    pub sites: DefinitionSites,
 }
 
-/// Does this definition style give the name a value in the current scope?
-/// `global`/`nonlocal` declarations and `del` do not; implicit globals are
-/// injected module-level, not defined here.
-fn is_value_definition(style: &DefinitionStyle) -> bool {
-    !matches!(
-        style,
-        DefinitionStyle::MutableCapture(..)
-            | DefinitionStyle::Delete
+/// Whether a name's definition sites bind a value to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinitionSites {
+    /// No site binds a value: each one declares the name (`global`, `nonlocal`, or a bare
+    /// `x: int`) or deletes it.
+    NoValue,
+    /// Some site binds a value by assigning or importing the name.
+    SomeValue,
+    /// Every site is a `def` or `class` statement. This is purely syntactic: a decorated `def`
+    /// (e.g. `@property`) counts, but a method- or class-like assignment such as
+    /// `f = staticmethod(g)`, `f = lambda self: 1`, or `Color = Enum("Color", "A B")` does not.
+    /// Telling such assignments apart from data attributes would need type information, so the
+    /// syntactic rule is much simpler and stays predictable.
+    OnlyDefOrClass,
+}
+
+impl DefinitionSites {
+    /// Classifies a single site by its style. A bare annotation has the same style as an
+    /// annotated assignment, so its caller classifies it instead. Implicit globals are injected
+    /// module-level, not defined here.
+    fn of_style(style: &DefinitionStyle) -> Self {
+        match style {
+            DefinitionStyle::Unannotated(SymbolKind::Function | SymbolKind::Class) => {
+                Self::OnlyDefOrClass
+            }
+            DefinitionStyle::Annotated(..)
+            | DefinitionStyle::Unannotated(..)
+            | DefinitionStyle::ImportAs(..)
+            | DefinitionStyle::ImportAsEq(..)
+            | DefinitionStyle::Import(..)
+            | DefinitionStyle::ImportModule(..) => Self::SomeValue,
+            DefinitionStyle::MutableCapture(..)
             | DefinitionStyle::ImplicitGlobal
             | DefinitionStyle::ImportInvalidRelative
-    )
+            | DefinitionStyle::Delete => Self::NoValue,
+        }
+    }
+
+    /// Combines the sites of two definitions of the same name.
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::OnlyDefOrClass, Self::OnlyDefOrClass) => Self::OnlyDefOrClass,
+            (Self::NoValue, Self::NoValue) => Self::NoValue,
+            _ => Self::SomeValue,
+        }
+    }
+
+    pub fn binds_value(self) -> bool {
+        self != Self::NoValue
+    }
 }
 
 impl Definition {
@@ -151,11 +182,15 @@ impl Definition {
         }
     }
 
-    fn merge(&mut self, other: DefinitionStyle, range: TextRange, in_main_guard: bool) {
+    fn merge(
+        &mut self,
+        other: DefinitionStyle,
+        range: TextRange,
+        in_main_guard: bool,
+        sites: DefinitionSites,
+    ) {
         self.main_guard_only &= in_main_guard;
-        self.function_def_only &=
-            matches!(other, DefinitionStyle::Unannotated(SymbolKind::Function));
-        self.has_value_definition |= is_value_definition(&other);
+        self.sites = self.sites.merge(sites);
         // To ensure binding code cannot produce invalid lookups, we ensure that
         // `self.style` and `self.range` always match.
         if other < self.style {
@@ -426,8 +461,7 @@ impl Definitions {
                     docstring_range: None,
                     last_range: TextRange::default(),
                     main_guard_only: false,
-                    has_value_definition: false,
-                    function_def_only: false,
+                    sites: DefinitionSites::NoValue,
                 },
             );
         }
@@ -516,6 +550,7 @@ impl DefinitionsBuilder {
         range: TextRange,
         style: DefinitionStyle,
         body: Option<&[Stmt]>,
+        sites: DefinitionSites,
     ) {
         if x.is_empty() {
             return;
@@ -524,11 +559,9 @@ impl DefinitionsBuilder {
         if self.in_environment_branch {
             self.inner.environment_names.insert(x.clone());
         }
-        let has_value_definition = is_value_definition(&style);
-        let function_def_only = matches!(style, DefinitionStyle::Unannotated(SymbolKind::Function));
         match self.inner.definitions.entry(x.clone()) {
             Entry::Occupied(mut e) => {
-                e.get_mut().merge(style, range, in_main_guard);
+                e.get_mut().merge(style, range, in_main_guard, sites);
             }
             Entry::Vacant(e) => {
                 e.insert(Definition {
@@ -538,14 +571,24 @@ impl DefinitionsBuilder {
                     docstring_range: body.and_then(Docstring::range_from_stmts),
                     last_range: range,
                     main_guard_only: in_main_guard,
-                    has_value_definition,
-                    function_def_only,
+                    sites,
                 });
             }
         }
     }
 
     fn add_name(&mut self, x: &Name, range: TextRange, style: DefinitionStyle) {
+        let sites = DefinitionSites::of_style(&style);
+        self.add_name_with_sites(x, range, style, sites)
+    }
+
+    fn add_name_with_sites(
+        &mut self,
+        x: &Name,
+        range: TextRange,
+        style: DefinitionStyle,
+        sites: DefinitionSites,
+    ) {
         if matches!(
             style,
             DefinitionStyle::Annotated(..) | DefinitionStyle::Unannotated(..)
@@ -554,7 +597,7 @@ impl DefinitionsBuilder {
         {
             self.inner.special_exports.insert(x.clone(), special_export);
         }
-        self.add_name_with_body(x, range, style, None)
+        self.add_name_with_body(x, range, style, None, sites)
     }
 
     fn add_identifier(&mut self, x: &Identifier, style: DefinitionStyle) {
@@ -567,7 +610,8 @@ impl DefinitionsBuilder {
         style: DefinitionStyle,
         body: Option<&[Stmt]>,
     ) {
-        self.add_name_with_body(&x.id, x.range, style, body);
+        let sites = DefinitionSites::of_style(&style);
+        self.add_name_with_body(&x.id, x.range, style, body, sites);
     }
 
     fn expr_lvalue(&mut self, x: &Expr) {
@@ -815,17 +859,22 @@ impl DefinitionsBuilder {
                         ),
                 });
                 match &*x.target {
-                    Expr::Name(x) => {
-                        self.add_name(
-                            &x.id,
-                            x.range,
+                    Expr::Name(name) => {
+                        self.add_name_with_sites(
+                            &name.id,
+                            name.range,
                             DefinitionStyle::Annotated(
                                 SymbolKind::Variable,
-                                ShortIdentifier::expr_name(x),
+                                ShortIdentifier::expr_name(name),
                             ),
+                            if x.value.is_some() {
+                                DefinitionSites::SomeValue
+                            } else {
+                                DefinitionSites::NoValue
+                            },
                         );
                         if let Some(final_name) = final_name {
-                            self.inner.final_names.insert(x.id.clone(), final_name);
+                            self.inner.final_names.insert(name.id.clone(), final_name);
                         }
                     }
                     _ => self.expr_lvalue(&x.target),

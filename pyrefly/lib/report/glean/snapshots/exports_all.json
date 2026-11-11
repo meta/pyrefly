@@ -717,6 +717,147 @@
             "id": 0,
             "key": "exports_all.py"
           },
+          "spans": [
+            {
+              "length": 1,
+              "start": 55
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "exports_all.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "exports_all.x"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "exports_all.py"
+          },
+          "spans": [
+            {
+              "length": 1,
+              "start": 60
+            },
+            {
+              "length": 5,
+              "start": 19
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing.Union"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "exports_all.py"
+          },
+          "spans": [
+            {
+              "length": 1,
+              "start": 60
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "exports_all.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "exports_all.U"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "exports_all.py"
+          },
+          "spans": [
+            {
+              "length": 1,
+              "start": 78
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "exports_all.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "exports_all.y"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "exports_all.py"
+          },
+          "spans": [
+            {
+              "length": 6,
+              "start": 5
+            }
+          ],
+          "target": {
+            "external": {
+              "id": 0,
+              "key": "typing"
+            }
+          }
+        }
+      }
+    ],
+    "predicate": "python.TargetUses.4"
+  },
+  {
+    "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "exports_all.py"
+          },
           "xrefs": [
             {
               "source": {
@@ -1077,6 +1218,6 @@
     "predicate": "python.Module.4"
   },
   {
-    "schema_id": "f329796272b9314200433ac342cbc15c"
+    "schema_id": "60aea86d7ff049228df605cf3fda4c67"
   }
 ]

@@ -14,6 +14,7 @@ use pyrefly_types::callable::Params;
 use pyrefly_types::class::Class;
 use pyrefly_types::dimension::Int;
 use pyrefly_types::function::Function;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::named_ints::NamedInt;
 use pyrefly_types::named_ints::NamedInts;
 use pyrefly_types::quantified::Quantified;
@@ -97,7 +98,7 @@ pub(crate) fn capture_named_ints_source(ty: &Type) -> Option<&Type> {
     let [source] = cls.targs().as_slice() else {
         return None;
     };
-    cls.has_qname("shape_extensions", "CaptureNamedInts")
+    cls.is(KnownClass::ShapeExtensionsCaptureNamedInts)
         .then_some(source)
 }
 
@@ -350,7 +351,7 @@ impl<Ans: LookupAnswer> AnswersSolver<'_, '_, Ans> {
                 | Param::KwOnly(_, ty, _)
                 | Param::Kwargs(_, ty) => ty,
             };
-            let is_capture = matches!(ty, Type::ClassType(cls) if cls.has_qname("shape_extensions", "CaptureNamedInts"));
+            let is_capture = matches!(ty, Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsCaptureNamedInts));
             if !is_capture {
                 continue;
             }
@@ -392,9 +393,9 @@ impl<Ans: LookupAnswer> AnswersSolver<'_, '_, Ans> {
         errors: &ErrorCollector,
     ) -> bool {
         let kind = match bound {
-            Type::ClassType(cls) if cls.has_qname("shape_extensions", "Flag") => "Flag",
-            Type::ClassType(cls) if cls.has_qname("shape_extensions", "Index") => "Index",
-            Type::ClassType(cls) if cls.has_qname("shape_extensions", "NamedInts") => "NamedInts",
+            Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsFlag) => "Flag",
+            Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsIndex) => "Index",
+            Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsNamedInts) => "NamedInts",
             _ => return false,
         };
         self.error(
@@ -456,13 +457,11 @@ impl<Ans: LookupAnswer> AnswersSolver<'_, '_, Ans> {
             TypeParameterBound::Ordinary(bound) => {
                 let bound_ty = self.expr_untype(bound, TypeFormContext::TypeVarConstraint, errors);
                 let aliased_kind = match &bound_ty {
-                    Type::ClassType(cls) if cls.has_qname("shape_extensions", "Flag") => {
-                        Some("Flag")
-                    }
-                    Type::ClassType(cls) if cls.has_qname("shape_extensions", "Index") => {
+                    Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsFlag) => Some("Flag"),
+                    Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsIndex) => {
                         Some("Index")
                     }
-                    Type::ClassType(cls) if cls.has_qname("shape_extensions", "NamedInts") => {
+                    Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsNamedInts) => {
                         Some("NamedInts")
                     }
                     _ => None,

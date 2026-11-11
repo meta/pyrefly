@@ -213,6 +213,7 @@ mod tests {
     use crate::class::Class;
     use crate::class::ClassDefIndex;
     use crate::class::PrecomputedTParams;
+    use crate::known_class::KnownClass;
     use crate::type_var::FlagMember;
 
     fn fake_class(module_name: ModuleName, name: &Name) -> Class {
@@ -246,14 +247,15 @@ mod tests {
         assert_eq!(extension.kind_name(), "Flag");
         assert!(extension.infer_default_as_value());
 
-        let stdlib = Stdlib::new(
+        let stdlib = Stdlib::new_with_bootstrapping(
+            true,
             PythonVersion::default(),
             &|module, name| Some((fake_class(module, name), None)),
             &|_, _| None,
         );
         let members = extension.upper_bound_members(&stdlib);
         assert_eq!(members.len(), 1);
-        assert!(matches!(&members[0], Type::ClassType(cls) if cls.is_builtin("int")));
+        assert!(matches!(&members[0], Type::ClassType(cls) if cls.is(KnownClass::Int)));
     }
 
     #[test]
@@ -269,13 +271,14 @@ mod tests {
         assert!(extension.infer_default_as_value());
         assert_eq!(extension.upper_bound_class_names(), vec!["builtins.object"]);
 
-        let stdlib = Stdlib::new(
+        let stdlib = Stdlib::new_with_bootstrapping(
+            true,
             PythonVersion::default(),
             &|module, name| Some((fake_class(module, name), None)),
             &|_, _| None,
         );
         let members = extension.upper_bound_members(&stdlib);
         assert_eq!(members.len(), 1);
-        assert!(matches!(&members[0], Type::ClassType(cls) if cls.is_builtin("object")));
+        assert!(matches!(&members[0], Type::ClassType(cls) if cls.is(KnownClass::Object)));
     }
 }

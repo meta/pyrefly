@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::fmt::Display;
 use std::fs::File;
+use std::io;
 use std::io::BufWriter;
 use std::io::Read;
 use std::io::Write;
@@ -88,9 +89,11 @@ use crate::error::baseline::StaleRowScope;
 use crate::error::baseline::prepare_baseline_rows;
 use crate::error::baseline::write_baseline_file;
 use crate::error::code_climate::CodeClimateIssues;
+use crate::error::collector::CollectedDiagnostic;
 use crate::error::error::BaselineStatus;
 use crate::error::error::Error;
 use crate::error::error::ErrorRenderer;
+use crate::error::error::ReportedError;
 use crate::error::error::SerializableError;
 use crate::error::error::print_error_counts;
 use crate::error::legacy::BaselineErrors;
@@ -115,20 +118,29 @@ use crate::state::subscriber::TestSubscriber;
 
 /// Result data from a non-watch check run, used for telemetry logging.
 pub struct CheckResult {
-    /// CLI-visible diagnostics in the legacy JSON format, suitable for serialization.
+    /// The first `CheckResult::LOGGED_ERROR_LIMIT` CLI-visible diagnostics, in the legacy
+    /// JSON format, suitable for serialization.
     pub legacy_errors: Vec<LegacyError>,
+    /// Number of CLI-visible diagnostics, including those beyond `legacy_errors`.
+    pub error_count: usize,
     /// Number of files (modules) that were checked.
     pub checked_file_count: usize,
 }
 
 impl CheckResult {
-    /// Build a `CheckResult` from the raw error list.
-    fn from_errors(errors: &[Error], relative_to: &Path, checked_file_count: usize) -> Self {
+    /// How many diagnostics telemetry logs. Converting every diagnostic of a large run only
+    /// to log a few would cost more than collecting them.
+    pub const LOGGED_ERROR_LIMIT: usize = 300;
+
+    fn new(
+        errors: &[CollectedDiagnostic<'_>],
+        relative_to: &Path,
+        checked_file_count: usize,
+    ) -> Self {
+        let logged = &errors[..errors.len().min(Self::LOGGED_ERROR_LIMIT)];
         Self {
-            legacy_errors: errors
-                .iter()
-                .map(|e| LegacyError::from_error(relative_to, e))
-                .collect(),
+            legacy_errors: LegacyErrors::from_errors(relative_to, logged).errors,
+            error_count: errors.len(),
             checked_file_count,
         }
     }
@@ -144,7 +156,7 @@ pub struct FullCheckArgs {
 
     /// Watch for file changes and re-check them.
     /// (Warning: This mode is highly experimental!)
-    #[arg(long, conflicts_with = "check_all")]
+    #[arg(long, conflicts_with_all = ["check_all", "report_scip"])]
     watch: bool,
 
     /// Type checking arguments and configuration
@@ -215,7 +227,7 @@ async fn run_check(
         .await?;
         Ok((CommandExitStatus::Success, None))
     } else {
-        let (status, _, check_result) =
+        let (status, check_result) =
             args.run_once(version, files_to_check, config_finder, upsell, thread_count)?;
         Ok((status, Some(check_result)))
     }
@@ -325,15 +337,31 @@ struct OutputArgs {
     #[arg(long, requires = "report_glean")]
     report_glean_ownership: bool,
 
-    /// JSON object mapping Glean file paths (relative to the working directory) to
-    /// module names. Affects Glean output only, without changing import resolution.
-    #[arg(long, value_name = "FILE", requires = "report_glean")]
-    glean_module_names: Option<PathBuf>,
     /// Directory, relative to the working directory, holding the stdlib sources that the
     /// typeshed stdlib stubs bundled with Pyrefly describe. Glean cross-references into the
     /// stdlib then record those source files instead of stub paths. Affects Glean output only.
     #[arg(long, value_name = "DIR", requires = "report_glean")]
     glean_stdlib_root: Option<String>,
+    /// Generate a SCIP index for the project
+    #[arg(
+        long,
+        value_name = "OUTPUT_FILE",
+        conflicts_with_all = [
+            "report_glean",
+            "report_pysa",
+            "report_trace",
+            "report_demand_tree",
+            "debug_info",
+            "report_binding_memory",
+        ]
+    )]
+    report_scip: Option<PathBuf>,
+    /// Package name for the project's symbols in the SCIP index. Defaults to the name in `pyproject.toml`.
+    #[arg(long, requires = "report_scip")]
+    report_scip_project_name: Option<String>,
+    /// Package version for the project's symbols in the SCIP index. Defaults to the version in `pyproject.toml`.
+    #[arg(long, requires = "report_scip")]
+    report_scip_project_version: Option<String>,
     /// Generate a Pysa-compatible JSON file for each module. Pysa treats every type error
     /// as a failure, so this defaults `--min-severity` to `error`.
     #[arg(long, value_name = "OUTPUT_FILE")]
@@ -346,7 +374,12 @@ struct OutputArgs {
     #[arg(long, value_name = "OUTPUT_FILE")]
     report_demand_tree: Option<PathBuf>,
     /// Generate a CinderX-format type report (experimental, internal-only).
-    #[arg(long, value_name = "OUTPUT_DIR", hide = true)]
+    #[arg(
+        long,
+        value_name = "OUTPUT_DIR",
+        hide = true,
+        conflicts_with = "report_scip"
+    )]
     report_cinderx: Option<PathBuf>,
     /// Also write human-readable .txt files alongside the CinderX JSON report.
     /// Each .txt file inlines type-table indices so types are fully readable without
@@ -439,8 +472,8 @@ struct OutputArgs {
     #[arg(long, group = "baseline_action")]
     error_stale_baseline: bool,
 
-    /// Minimum severity level for errors to be displayed.
-    /// Errors below this severity will not be shown. Defaults to "error".
+    /// Minimum severity level for errors to be displayed and to cause a nonzero exit code.
+    /// When unset, warnings and errors are displayed, and only errors cause a nonzero exit code.
     #[arg(long, value_enum)]
     min_severity: Option<Severity>,
 }
@@ -504,8 +537,10 @@ impl OutputArgs {
             report_timings,
             report_glean,
             report_glean_ownership,
-            glean_module_names,
             glean_stdlib_root,
+            report_scip,
+            report_scip_project_name,
+            report_scip_project_version,
             report_pysa,
             report_pysa_format,
             report_demand_tree,
@@ -550,8 +585,10 @@ impl OutputArgs {
             || report_timings.is_some()
             || report_glean.is_some()
             || *report_glean_ownership
-            || glean_module_names.is_some()
             || glean_stdlib_root.is_some()
+            || report_scip.is_some()
+            || report_scip_project_name.is_some()
+            || report_scip_project_version.is_some()
             || report_pysa.is_some()
             || !matches!(report_pysa_format, report::pysa::PysaFormat::Capnp)
             || report_demand_tree.is_some()
@@ -629,6 +666,10 @@ impl OutputArgs {
             // With no threshold set, warnings are printed but only errors make the exit
             // code nonzero.
             show_severity: min_severity.unwrap_or(Severity::Warn),
+            only: self
+                .only
+                .clone()
+                .or_else(|| config.and_then(|config| config.only.clone())),
         }
     }
 
@@ -659,6 +700,9 @@ struct OutputDefaults {
     /// Diagnostics at or above this severity are printed. It is never above
     /// `min_severity`.
     show_severity: Severity,
+    /// Diagnostics matching the specific kinds are reported.
+    /// If `None`, no filtering is applied and all error kinds are processed.
+    only: Option<Vec<ErrorKind>>,
 }
 
 #[derive(Clone, Debug, ValueEnum, Default, PartialEq, Eq)]
@@ -713,7 +757,7 @@ fn write_errors_to_file(
     path: &Path,
     version: &str,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     match format {
         OutputFormat::MinText => write_error_text_to_file(path, relative_to, errors, false),
@@ -734,7 +778,7 @@ pub(crate) fn write_errors_to_console(
     format: OutputFormat,
     version: &str,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     match format {
         OutputFormat::MinText => write_error_text_to_console(relative_to, errors, false),
@@ -774,15 +818,32 @@ fn write_serializable_error_text_to_console(
     errors: &[SerializableError],
     verbose: bool,
 ) -> anyhow::Result<()> {
-    let stdout = stdout();
-    let color_choice = stdout.current_choice();
-    let mut renderer = ErrorRenderer::new(BufWriter::new(stdout.lock()), color_choice);
-    // Serialized diagnostics arrive as a complete batch, so there is no partial result to flush.
-    for error in errors {
-        renderer.write_serializable(error, verbose)?;
+    fn write(
+        mut renderer: ErrorRenderer<impl Write>,
+        errors: &[SerializableError],
+        verbose: bool,
+    ) -> anyhow::Result<()> {
+        // Serialized diagnostics arrive as a complete batch, so there is no partial result to flush.
+        for error in errors {
+            renderer.write_serializable(error, verbose)?;
+        }
+        renderer.flush()?;
+        Ok(())
     }
-    renderer.flush()?;
-    Ok(())
+
+    // See `write_error_text_to_console` for why uncolored text bypasses `anstream`.
+    match stdout().current_choice() {
+        ColorChoice::Never => write(
+            ErrorRenderer::plain(BufWriter::new(io::stdout().lock())),
+            errors,
+            verbose,
+        ),
+        color_choice => write(
+            ErrorRenderer::new(BufWriter::new(stdout().lock()), color_choice),
+            errors,
+            verbose,
+        ),
+    }
 }
 
 #[derive(Serialize)]
@@ -792,72 +853,96 @@ struct LegacyErrorReferences<'a> {
 
 fn write_serializable_error_json_to_console(errors: &[SerializableError]) -> anyhow::Result<()> {
     let errors = errors.iter().map(SerializableError::legacy_error).collect();
-    let mut writer = BufWriter::new(stdout());
+    let mut writer = BufWriter::new(io::stdout().lock());
     serde_json::to_writer_pretty(&mut writer, &LegacyErrorReferences { errors })?;
     writer.flush()?;
+    Ok(())
+}
+
+fn write_error_text(
+    mut renderer: ErrorRenderer<impl Write>,
+    relative_to: &Path,
+    errors: &[impl ReportedError],
+    verbose: bool,
+) -> anyhow::Result<()> {
+    renderer.write_all(errors, relative_to, verbose)?;
+    renderer.flush()?;
     Ok(())
 }
 
 fn write_error_text_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
     verbose: bool,
 ) -> anyhow::Result<()> {
-    let mut renderer = ErrorRenderer::plain(BufWriter::new(File::create(path)?));
-    for e in errors {
-        renderer.write(e, relative_to, verbose)?;
-    }
-    renderer.flush()?;
-    Ok(())
+    write_error_text(
+        ErrorRenderer::plain(BufWriter::new(File::create(path)?)),
+        relative_to,
+        errors,
+        verbose,
+    )
 }
 
 fn write_error_text_to_console(
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
     verbose: bool,
 ) -> anyhow::Result<()> {
-    let stdout = stdout();
-    let color_choice = stdout.current_choice();
-    let mut renderer = ErrorRenderer::new(BufWriter::new(stdout.lock()), color_choice);
-    for error in errors {
-        renderer.write(error, relative_to, verbose)?;
-        renderer.flush()?;
+    // `anstream` strips escape codes from text written to a stream that does not take
+    // colors, which means scanning every byte. Uncolored text has no escape codes, so it is
+    // written to the stream directly.
+    match stdout().current_choice() {
+        ColorChoice::Never => write_error_text(
+            ErrorRenderer::plain(BufWriter::new(io::stdout().lock())),
+            relative_to,
+            errors,
+            verbose,
+        ),
+        color_choice => write_error_text(
+            ErrorRenderer::new(BufWriter::new(stdout().lock()), color_choice),
+            relative_to,
+            errors,
+            verbose,
+        ),
     }
-    renderer.flush()?;
-    Ok(())
 }
 
 pub(crate) fn write_errors_to_stderr(
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
     verbose: bool,
 ) -> anyhow::Result<()> {
-    let stderr = stderr();
-    let color_choice = stderr.current_choice();
-    let mut renderer = ErrorRenderer::new(BufWriter::new(stderr.lock()), color_choice);
-    for error in errors {
-        renderer.write(error, relative_to, verbose)?;
-        renderer.flush()?;
+    // See `write_error_text_to_console` for why uncolored text bypasses `anstream`.
+    match stderr().current_choice() {
+        ColorChoice::Never => write_error_text(
+            ErrorRenderer::plain(BufWriter::new(io::stderr().lock())),
+            relative_to,
+            errors,
+            verbose,
+        ),
+        color_choice => write_error_text(
+            ErrorRenderer::new(BufWriter::new(stderr().lock()), color_choice),
+            relative_to,
+            errors,
+            verbose,
+        ),
     }
-    renderer.flush()?;
-    Ok(())
 }
 
 fn write_error_json(
     writer: &mut impl Write,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    let legacy_errors = LegacyErrors::from_errors(relative_to, errors);
-    serde_json::to_writer_pretty(writer, &legacy_errors)?;
+    LegacyErrors::write_json(writer, relative_to, errors)?;
     Ok(())
 }
 
 fn buffered_write_error_json(
     writer: impl Write,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     write_error_json(&mut writer, relative_to, errors)?;
@@ -868,9 +953,9 @@ fn buffered_write_error_json(
 fn write_error_json_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    fn f(path: &Path, relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
+    fn f(path: &Path, relative_to: &Path, errors: &[impl ReportedError]) -> anyhow::Result<()> {
         let file = File::create(path)?;
         buffered_write_error_json(file, relative_to, errors)
     }
@@ -881,7 +966,7 @@ fn write_error_json_to_file(
 fn write_baseline_errors_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
     matching_mode: BaselineMatchingMode,
     format: BaselineFormat,
     min_severity: Severity,
@@ -897,11 +982,17 @@ fn write_baseline_errors_to_file(
     .map(|_| ())
 }
 
-fn write_error_json_to_console(relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
-    buffered_write_error_json(stdout(), relative_to, errors)
+fn write_error_json_to_console(
+    relative_to: &Path,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<()> {
+    buffered_write_error_json(io::stdout().lock(), relative_to, errors)
 }
 
-fn write_error_github(writer: &mut impl Write, errors: &[Error]) -> anyhow::Result<()> {
+fn write_error_github(
+    writer: &mut impl Write,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<()> {
     for error in errors {
         if let Some(command) = github_actions_command(error) {
             writeln!(writer, "{command}")?;
@@ -910,34 +1001,35 @@ fn write_error_github(writer: &mut impl Write, errors: &[Error]) -> anyhow::Resu
     Ok(())
 }
 
-fn buffered_write_error_github(writer: impl Write, errors: &[Error]) -> anyhow::Result<()> {
+fn buffered_write_error_github(
+    writer: impl Write,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     write_error_github(&mut writer, errors)?;
     writer.flush()?;
     Ok(())
 }
 
-fn write_error_github_to_file(path: &Path, errors: &[Error]) -> anyhow::Result<()> {
+fn write_error_github_to_file(path: &Path, errors: &[impl ReportedError]) -> anyhow::Result<()> {
     let file = File::create(path)?;
     buffered_write_error_github(file, errors)
 }
 
-fn write_error_github_to_console(errors: &[Error]) -> anyhow::Result<()> {
-    buffered_write_error_github(stdout(), errors)
+fn write_error_github_to_console(errors: &[impl ReportedError]) -> anyhow::Result<()> {
+    buffered_write_error_github(io::stdout().lock(), errors)
 }
 
 fn write_error_full_text_with_github(
     writer: impl Write,
     color_choice: ColorChoice,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     {
         let mut renderer = ErrorRenderer::new(&mut writer, color_choice);
-        for error in errors {
-            renderer.write(error, relative_to, true)?;
-        }
+        renderer.write_all(errors, relative_to, true)?;
         renderer.flush()?;
     }
     write_error_github(&mut writer, errors)?;
@@ -948,18 +1040,27 @@ fn write_error_full_text_with_github(
 fn write_error_full_text_with_github_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     write_error_full_text_with_github(File::create(path)?, ColorChoice::Never, relative_to, errors)
 }
 
 fn write_error_full_text_with_github_to_console(
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    let stdout = stdout();
-    let color_choice = stdout.current_choice();
-    write_error_full_text_with_github(stdout.lock(), color_choice, relative_to, errors)
+    // See `write_error_text_to_console` for why uncolored text bypasses `anstream`.
+    match stdout().current_choice() {
+        ColorChoice::Never => write_error_full_text_with_github(
+            io::stdout().lock(),
+            ColorChoice::Never,
+            relative_to,
+            errors,
+        ),
+        color_choice => {
+            write_error_full_text_with_github(stdout().lock(), color_choice, relative_to, errors)
+        }
+    }
 }
 
 /// True for characters allowed by the XML 1.0 `Char` production. Everything else
@@ -1013,7 +1114,7 @@ fn xml_escape_cdata(s: &str) -> String {
 fn write_error_junit_xml<W: Write>(
     mut writer: W,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let n = errors.len();
 
@@ -1025,6 +1126,7 @@ fn write_error_junit_xml<W: Write>(
     )?;
 
     for err in errors {
+        let err = err.error();
         let error_path = err.path().as_path();
         let path = error_path
             .strip_prefix(relative_to)
@@ -1061,7 +1163,7 @@ fn write_error_junit_xml<W: Write>(
 fn buffered_write_error_junit_xml(
     writer: impl Write,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     write_error_junit_xml(&mut writer, relative_to, errors)?;
@@ -1072,14 +1174,17 @@ fn buffered_write_error_junit_xml(
 fn write_error_junit_xml_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let file = File::create(path)?;
     buffered_write_error_junit_xml(file, relative_to, errors)
 }
 
-fn write_error_junit_xml_to_console(relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
-    buffered_write_error_junit_xml(stdout(), relative_to, errors)
+fn write_error_junit_xml_to_console(
+    relative_to: &Path,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<()> {
+    buffered_write_error_junit_xml(io::stdout().lock(), relative_to, errors)
 }
 
 fn severity_to_github_command(severity: Severity) -> Option<&'static str> {
@@ -1093,11 +1198,12 @@ fn severity_to_github_command(severity: Severity) -> Option<&'static str> {
     }
 }
 
-fn github_actions_command(error: &Error) -> Option<String> {
-    let command = severity_to_github_command(error.severity())?;
+fn github_actions_command(reported: &impl ReportedError) -> Option<String> {
+    let command = severity_to_github_command(reported.severity())?;
+    let baseline_marker = reported.baseline_status().display_suffix();
+    let error = reported.error();
     let range = error.display_range();
     let file = path_to_unix_string(error.path().as_path());
-    let baseline_marker = error.baseline_status().display_suffix();
     let params = format!(
         "file={},line={},col={},endLine={},endColumn={},title={}",
         escape_workflow_property(&file),
@@ -1128,7 +1234,7 @@ fn escape_workflow_property(value: &str) -> String {
 fn write_error_codeclimate(
     writer: &mut impl Write,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let issues = CodeClimateIssues::from_errors(relative_to, errors);
     serde_json::to_writer_pretty(writer, &issues)?;
@@ -1138,7 +1244,7 @@ fn write_error_codeclimate(
 fn buffered_write_error_codeclimate(
     writer: impl Write,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
     let mut writer = BufWriter::new(writer);
     write_error_codeclimate(&mut writer, relative_to, errors)?;
@@ -1149,9 +1255,9 @@ fn buffered_write_error_codeclimate(
 fn write_error_codeclimate_to_file(
     path: &Path,
     relative_to: &Path,
-    errors: &[Error],
+    errors: &[impl ReportedError],
 ) -> anyhow::Result<()> {
-    fn f(path: &Path, relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
+    fn f(path: &Path, relative_to: &Path, errors: &[impl ReportedError]) -> anyhow::Result<()> {
         let file = File::create(path)?;
         buffered_write_error_codeclimate(file, relative_to, errors)
     }
@@ -1159,8 +1265,11 @@ fn write_error_codeclimate_to_file(
         .with_context(|| format!("while writing CodeClimate issues to `{}`", path.display()))
 }
 
-fn write_error_codeclimate_to_console(relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
-    buffered_write_error_codeclimate(stdout(), relative_to, errors)
+fn write_error_codeclimate_to_console(
+    relative_to: &Path,
+    errors: &[impl ReportedError],
+) -> anyhow::Result<()> {
+    buffered_write_error_codeclimate(io::stdout().lock(), relative_to, errors)
 }
 
 /// A data structure to facilitate the creation of handles for all the files we want to check.
@@ -1588,7 +1697,7 @@ impl IncrementalCheckCommand {
         version: &str,
         events: &CategorizedEvents,
         upsell: UpsellDecision,
-    ) -> anyhow::Result<(CommandExitStatus, Vec<Error>)> {
+    ) -> anyhow::Result<CommandExitStatus> {
         let timings = Timings::new();
         let args = &self.args;
         let mut check = self.checker.prepare_check(events, &[]);
@@ -1601,7 +1710,7 @@ impl IncrementalCheckCommand {
             )
         });
         let defaults = args.output.resolve(config.as_deref());
-        let run = args.prepare_cli_run(timings, transaction, handles, &defaults)?;
+        let run = args.prepare_cli_run(timings, transaction, version, handles, &defaults)?;
         check.run(|transaction, handles, sourcedb_errors| {
             let result = args.finish_cli_run(
                 run,
@@ -1611,9 +1720,10 @@ impl IncrementalCheckCommand {
                 &defaults,
                 sourcedb_errors,
                 upsell,
+                |_, _| (),
             );
             transaction.discard_queued_steps();
-            result
+            result.map(|(status, ())| status)
         })
     }
 }
@@ -1648,6 +1758,7 @@ struct PreparedCliRun {
     memory_trace: MemoryUsageTrace,
     demand_tree_subscriber: Option<TestSubscriber>,
     type_check_start: Instant,
+    scip: Option<Arc<report::scip::ScipWriter<BufWriter<File>>>>,
 }
 
 impl CheckArgs {
@@ -1666,8 +1777,8 @@ impl CheckArgs {
         self.output.resolve(config).min_severity
     }
 
-    /// Run a one-shot type check. Returns the exit status, the CLI-visible errors,
-    /// and a `CheckResult` suitable for telemetry logging.
+    /// Run a one-shot type check. Returns the exit status and a `CheckResult` suitable for
+    /// telemetry logging.
     pub fn run_once(
         self,
         version: &str,
@@ -1675,7 +1786,36 @@ impl CheckArgs {
         config_finder: ConfigFinder,
         upsell: UpsellDecision,
         thread_count: ThreadCount,
-    ) -> anyhow::Result<(CommandExitStatus, Vec<Error>, CheckResult)> {
+    ) -> anyhow::Result<(CommandExitStatus, CheckResult)> {
+        let (status, checked_file_count, check_result) = self.run_once_with(
+            version,
+            files_to_check,
+            config_finder,
+            upsell,
+            thread_count,
+            |errors, relative_to| CheckResult::new(errors, relative_to, 0),
+        )?;
+        Ok((
+            status,
+            CheckResult {
+                checked_file_count,
+                ..check_result
+            },
+        ))
+    }
+
+    /// Run a one-shot type check. Returns the exit status, the number of files checked,
+    /// and what `inspect` makes of the displayed diagnostics, given the path they are
+    /// displayed relative to.
+    pub(crate) fn run_once_with<R>(
+        self,
+        version: &str,
+        files_to_check: Box<dyn Includes>,
+        config_finder: ConfigFinder,
+        upsell: UpsellDecision,
+        thread_count: ThreadCount,
+        inspect: impl FnOnce(&[CollectedDiagnostic<'_>], &Path) -> R,
+    ) -> anyhow::Result<(CommandExitStatus, usize, R)> {
         self.output.validate_outputs()?;
         let mut timings = Timings::new();
         let list_files_start = Instant::now();
@@ -1688,14 +1828,8 @@ impl CheckArgs {
             Timings::show(timings.list_files),
         );
         if handles.is_empty() {
-            return Ok((
-                CommandExitStatus::Success,
-                Vec::new(),
-                CheckResult {
-                    legacy_errors: Vec::new(),
-                    checked_file_count: 0,
-                },
-            ));
+            let relative_to = resolve_relative_to(self.output.relative_to.as_ref());
+            return Ok((CommandExitStatus::Success, 0, inspect(&[], &relative_to)));
         }
 
         let state = Forgetter::new(State::new(config_finder, thread_count), true);
@@ -1727,8 +1861,7 @@ impl CheckArgs {
         let defaults = self.output.resolve(config.as_deref());
 
         let checked_file_count = loaded_handles.len();
-        let relative_to = resolve_relative_to(self.output.relative_to.as_ref());
-        let (status, errors) = self.run_inner(
+        let (status, inspected) = self.run_inner(
             timings,
             transaction.as_mut(),
             version,
@@ -1737,9 +1870,9 @@ impl CheckArgs {
             sourcedb_errors,
             require_levels.specified,
             upsell,
+            inspect,
         )?;
-        let check_result = CheckResult::from_errors(&errors, &relative_to, checked_file_count);
-        Ok((status, errors, check_result))
+        Ok((status, checked_file_count, inspected))
     }
 
     pub fn run_once_with_snippet(
@@ -1781,8 +1914,7 @@ impl CheckArgs {
             Some(Arc::new(FileContents::from_source(code))),
         )]);
 
-        let relative_to = resolve_relative_to(self.output.relative_to.as_ref());
-        let (status, errors) = self.run_inner(
+        let (status, check_result) = self.run_inner(
             Timings::new(),
             transaction.as_mut(),
             version,
@@ -1792,8 +1924,9 @@ impl CheckArgs {
             require_levels.specified,
             // Snippet checks are interactive ad-hoc inputs — never upsell.
             UpsellDecision::Skip,
+            |errors, relative_to| CheckResult::new(errors, relative_to, 1),
         )?;
-        Ok((status, CheckResult::from_errors(&errors, &relative_to, 1)))
+        Ok((status, check_result))
     }
 
     fn get_required_levels(&self) -> RequireLevels {
@@ -1802,7 +1935,8 @@ impl CheckArgs {
             || self.output.report_trace.is_some()
             || self.output.report_glean.is_some();
         RequireLevels {
-            specified: if retain {
+            // The SCIP hook needs the AST and type traces until each document is written.
+            specified: if retain || self.output.report_scip.is_some() {
                 Require::Everything
             } else {
                 Require::Errors
@@ -1820,7 +1954,7 @@ impl CheckArgs {
         }
     }
 
-    fn run_inner(
+    fn run_inner<R>(
         &self,
         timings: Timings,
         transaction: &mut Transaction,
@@ -1830,8 +1964,9 @@ impl CheckArgs {
         sourcedb_errors: Vec<ConfigError>,
         require: Require,
         upsell: UpsellDecision,
-    ) -> anyhow::Result<(CommandExitStatus, Vec<Error>)> {
-        let run = self.prepare_cli_run(timings, transaction, handles, defaults)?;
+        inspect: impl FnOnce(&[CollectedDiagnostic<'_>], &Path) -> R,
+    ) -> anyhow::Result<(CommandExitStatus, R)> {
+        let run = self.prepare_cli_run(timings, transaction, version, handles, defaults)?;
         transaction.run(handles, require, None);
         self.finish_cli_run(
             run,
@@ -1841,6 +1976,7 @@ impl CheckArgs {
             defaults,
             sourcedb_errors,
             upsell,
+            inspect,
         )
     }
 
@@ -1848,6 +1984,7 @@ impl CheckArgs {
         &self,
         timings: Timings,
         transaction: &mut Transaction,
+        version: &str,
         handles: &[Handle],
         defaults: &OutputDefaults,
     ) -> anyhow::Result<PreparedCliRun> {
@@ -1908,6 +2045,33 @@ impl CheckArgs {
             transaction.set_cinderx_reporter(Some(cinderx_reporter));
         }
 
+        // Each indexed file is written as soon as it is solved, while its answers are still in
+        // memory, so they don't have to be kept for the whole run.
+        let scip = match &self.output.report_scip {
+            Some(path) => {
+                let relative_to = match &self.output.relative_to {
+                    Some(path) => PathBuf::from(path),
+                    None => std::env::current_dir()
+                        .context("while determining the SCIP project root")?,
+                };
+                let project = report::scip::Package::project(
+                    &relative_to,
+                    self.output.report_scip_project_name.clone(),
+                    self.output.report_scip_project_version.clone(),
+                )?;
+                let scip = report::scip::ScipWriter::new(
+                    BufWriter::new(File::create(path)?),
+                    handles,
+                    &relative_to,
+                    project,
+                    version,
+                )?
+                .start(transaction);
+                Some(scip)
+            }
+            None => None,
+        };
+
         let type_check_start = Instant::now();
         let demand_tree_subscriber = if self.output.report_demand_tree.is_some() {
             transaction.set_demand_collector(Some(DemandCollector::new()));
@@ -1924,10 +2088,13 @@ impl CheckArgs {
             memory_trace,
             demand_tree_subscriber,
             type_check_start,
+            scip,
         })
     }
 
-    fn finish_cli_run(
+    /// Report the diagnostics of a run, and return what `inspect` makes of the diagnostics
+    /// it displays, given the path they are displayed relative to.
+    fn finish_cli_run<R>(
         &self,
         run: PreparedCliRun,
         transaction: &mut Transaction,
@@ -1936,12 +2103,14 @@ impl CheckArgs {
         defaults: &OutputDefaults,
         mut sourcedb_errors: Vec<ConfigError>,
         upsell: UpsellDecision,
-    ) -> anyhow::Result<(CommandExitStatus, Vec<Error>)> {
+        inspect: impl FnOnce(&[CollectedDiagnostic<'_>], &Path) -> R,
+    ) -> anyhow::Result<(CommandExitStatus, R)> {
         let PreparedCliRun {
             mut timings,
             mut memory_trace,
             demand_tree_subscriber,
             type_check_start,
+            scip,
         } = run;
         transaction.set_subscriber(None);
 
@@ -1963,22 +2132,25 @@ impl CheckArgs {
             }
         }
 
-        let relative_to = self.output.relative_to.as_ref().map_or_else(
-            || std::env::current_dir().ok().unwrap_or_default(),
-            |x| PathBuf::from_str(x.as_str()).unwrap(),
-        );
+        let relative_to = resolve_relative_to(self.output.relative_to.as_ref());
         let output_format = defaults.output_format;
 
-        let mut collected = loads.collect_errors();
-        // Pass pre-collected errors to avoid redundant error collection.
-        let unused_ignore_errors = loads.collect_unused_ignore_errors_for_display(&collected);
-        collected.ordinary.extend(unused_ignore_errors.ordinary);
-        collected.ordinary.extend(unused_ignore_errors.hints);
+        // Every diagnostic below borrows its error, from `loads` or from `unused_ignores`.
+        // Collation and writing the report run on the state's thread pool, which the check has
+        // finished with, so that they can work in parallel on the configured threads.
+        let (collected, unused_ignores) =
+            transaction.install(|| loads.collect_error_refs_with_unused_ignores());
+        let shown_unused_ignores = loads.shown_unused_ignore_errors(&unused_ignores);
+        let mut ordinary = collected.ordinary;
+        ordinary.reserve_exact(shown_unused_ignores.len() + collected.hints.len());
+        ordinary.extend(shown_unused_ignores);
         // Hints go through baselines and `--min-severity` like other diagnostics.
-        collected.ordinary.append(&mut collected.hints);
+        ordinary.extend(collected.hints);
+        let mut baseline = Vec::new();
 
         let baseline_apply_result = loads.apply_baseline(
-            &mut collected,
+            &mut ordinary,
+            &mut baseline,
             defaults.baseline.as_deref(),
             relative_to.as_path(),
             defaults.baseline_matching_mode,
@@ -1990,47 +2162,36 @@ impl CheckArgs {
 
         let (baseline_status, unused_baseline_entries, retained_baseline_entries) =
             baseline_apply_result.resolve(self.output.update_baseline)?;
-        let errors = collected;
-        let only_filter = self
-            .output
+        let only_filter = defaults
             .only
             .as_ref()
             .map(|only| only.iter().collect::<SmallSet<&ErrorKind>>());
 
-        let with_status = |errors: Vec<Error>, status: BaselineStatus| -> Vec<Error> {
-            if let Some(only) = &only_filter {
-                errors
-                    .into_iter()
-                    .filter(|e| only.contains(&e.error_kind()))
-                    .map(|e| e.with_baseline_status(status))
-                    .collect()
-            } else {
-                errors
-                    .into_iter()
-                    .map(|e| e.with_baseline_status(status))
-                    .collect()
-            }
+        let shown_kind = |e: &CollectedDiagnostic| {
+            only_filter
+                .as_ref()
+                .is_none_or(|only| only.contains(&e.error().error_kind()))
+        };
+        let with_status = |errors: Vec<_>, status: BaselineStatus| {
+            errors
+                .into_iter()
+                .filter(shown_kind)
+                .map(|e| e.with_baseline_status(status))
+                .collect::<Vec<_>>()
         };
 
-        let directives = with_status(errors.directives, baseline_status);
-        let ordinary_errors = with_status(errors.ordinary, baseline_status);
+        let directives = with_status(collected.directives, baseline_status);
+        let mut ordinary_errors = with_status(ordinary, baseline_status);
 
-        // Baseline matches are cloned for display. Baseline maintenance uses the
-        // original severity and baseline representation.
+        // Baseline matches are displayed at a capped severity. Baseline maintenance uses
+        // the original severity and baseline representation.
         let baseline_error_level = defaults.baseline_error_level;
-        let displayed_baseline_errors = if baseline_error_level == Severity::Ignore {
+        let mut baseline_errors = if baseline_error_level == Severity::Ignore {
             Vec::new()
         } else {
-            errors
-                .baseline
+            baseline
                 .iter()
-                .filter(|e| {
-                    if let Some(only) = &only_filter {
-                        only.contains(&e.error_kind())
-                    } else {
-                        true
-                    }
-                })
+                .filter(|e| shown_kind(e))
                 .map(|e| {
                     e.with_severity(e.severity().min(baseline_error_level))
                         .with_baseline_status(BaselineStatus::Matched)
@@ -2045,14 +2206,10 @@ impl CheckArgs {
         // should not get a suppression comment written into source.
         let min_severity = defaults.min_severity;
         let show_severity = defaults.show_severity;
-        let (ordinary_errors, mut hidden_errors): (Vec<_>, Vec<_>) = ordinary_errors
-            .into_iter()
-            .partition(|e| e.severity() >= show_severity);
-        let (baseline_errors, hidden_baseline_errors): (Vec<_>, Vec<_>) = displayed_baseline_errors
-            .into_iter()
-            .partition(|e| e.severity() >= show_severity);
-        hidden_errors.extend(hidden_baseline_errors);
-        let fails = |e: &&Error| e.severity() >= min_severity;
+        let hidden = |e: &mut CollectedDiagnostic| e.severity() < show_severity;
+        let mut hidden_errors: Vec<_> = ordinary_errors.extract_if(.., hidden).collect();
+        hidden_errors.extend(baseline_errors.extract_if(.., hidden));
+        let fails = |e: &&CollectedDiagnostic| e.severity() >= min_severity;
 
         // Suppress operates on ordinary diagnostics only — directives are
         // structurally excluded since they live in `directives`, not `ordinary_errors`.
@@ -2061,16 +2218,14 @@ impl CheckArgs {
             let serialized_errors: Vec<SerializedError> = ordinary_errors
                 .iter()
                 .filter(fails)
-                .filter(|e| e.error_kind().is_suppressable())
-                .filter_map(SerializedError::from_error)
+                .filter(|e| e.error().error_kind().is_suppressable())
+                .filter_map(|e| SerializedError::from_error(e.error()))
                 .collect();
             suppress::suppress_errors(serialized_errors, CommentLocation::LineBefore);
         }
         if let Some(kind) = self.behavior.remove_unused_ignores {
             // TODO: Deprecate this in favor of `pyrefly suppress`
-            let collected = loads.collect_errors();
-            let unused_errors = loads.collect_unused_ignore_errors(&collected);
-            suppress::remove_unused_ignores(unused_errors, kind)?;
+            suppress::remove_unused_ignores(&unused_ignores, kind)?;
         }
 
         // We update the baseline file if requested, after reporting any new
@@ -2084,9 +2239,9 @@ impl CheckArgs {
                 .as_ref()
                 .expect("a baseline action requires a baseline path");
             // The baseline only tracks errors that meet the min-severity threshold.
-            let mut new_baseline = errors.baseline;
+            let mut new_baseline = baseline;
             new_baseline.retain(|e| e.severity() >= min_severity);
-            new_baseline.extend(ordinary_errors.iter().filter(fails).cloned());
+            new_baseline.extend(ordinary_errors.iter().filter(fails).copied());
             prepare_baseline_rows(&mut new_baseline, defaults.baseline_matching_mode);
             write_baseline_errors_to_file(
                 baseline_path,
@@ -2141,6 +2296,7 @@ impl CheckArgs {
         output_errors.extend(baseline_errors);
         output_errors.extend(directives);
         output_errors.sort_by_cached_key(|e| {
+            let e = e.error();
             (
                 e.module().name(),
                 e.path().dupe(),
@@ -2151,42 +2307,45 @@ impl CheckArgs {
 
         // A JUnit failure means a nonzero exit code, so the report lists only the diagnostics
         // that make the exit code nonzero; a shown warning that doesn't is left out.
-        let failing_errors: Vec<Error> = output_errors
+        let failing_errors: Vec<CollectedDiagnostic> = output_errors
             .iter()
             .filter(|e| e.severity() >= min_severity)
-            .cloned()
+            .copied()
             .collect();
         let errors_for = |format: OutputFormat| match format {
             OutputFormat::JunitXml => failing_errors.as_slice(),
             _ => output_errors.as_slice(),
         };
-        if self.output.output.is_empty() {
-            write_errors_to_console(
-                output_format,
-                version,
-                relative_to.as_path(),
-                errors_for(output_format),
-            )?;
-        } else {
-            for output in &self.output.output {
-                let format = output.format.unwrap_or(output_format);
-                match &output.destination {
-                    ErrorOutputDestination::Stdout => write_errors_to_console(
-                        format,
-                        version,
-                        relative_to.as_path(),
-                        errors_for(format),
-                    )?,
-                    ErrorOutputDestination::File(path) => write_errors_to_file(
-                        format,
-                        path,
-                        version,
-                        relative_to.as_path(),
-                        errors_for(format),
-                    )?,
+        transaction.install(|| -> anyhow::Result<()> {
+            if self.output.output.is_empty() {
+                write_errors_to_console(
+                    output_format,
+                    version,
+                    relative_to.as_path(),
+                    errors_for(output_format),
+                )?;
+            } else {
+                for output in &self.output.output {
+                    let format = output.format.unwrap_or(output_format);
+                    match &output.destination {
+                        ErrorOutputDestination::Stdout => write_errors_to_console(
+                            format,
+                            version,
+                            relative_to.as_path(),
+                            errors_for(format),
+                        )?,
+                        ErrorOutputDestination::File(path) => write_errors_to_file(
+                            format,
+                            path,
+                            version,
+                            relative_to.as_path(),
+                            errors_for(format),
+                        )?,
+                    }
                 }
             }
-        }
+            Ok(())
+        })?;
         memory_trace.stop();
         if let Some(limit) = self.output.count_errors {
             print_error_counts(&output_errors, limit);
@@ -2198,7 +2357,7 @@ impl CheckArgs {
 
         if self.output.summary != Summary::None {
             // A suppressed hint was never going to be shown, so it isn't counted either.
-            let suppress_count = errors
+            let suppress_count = collected
                 .suppressed
                 .iter()
                 .filter(|e| e.severity() != Severity::Hint)
@@ -2211,7 +2370,7 @@ impl CheckArgs {
             let mut parts = vec![count(diagnostics_count, label)];
             let (mut shown_warnings, mut shown_info) = (0, 0);
             for e in &output_errors {
-                if e.error_kind().is_directive() || e.severity() >= min_severity {
+                if e.error().error_kind().is_directive() || e.severity() >= min_severity {
                     continue;
                 }
                 match e.severity() {
@@ -2329,15 +2488,14 @@ impl CheckArgs {
             )?;
         }
         if let Some(glean) = &self.output.report_glean {
-            let naming = report::glean::GleanNaming::new(
-                match &self.output.glean_module_names {
-                    Some(path) => serde_json::from_str(&fs_anyhow::read_to_string(path)?)?,
-                    None => Default::default(),
-                },
-                self.output.glean_stdlib_root.clone(),
-            );
             fs_anyhow::create_dir_all(glean)?;
             for handle in handles {
+                let naming = report::glean::GleanNaming::new(
+                    transaction
+                        .get_config(handle)
+                        .and_then(|config| config.module_names.dupe()),
+                    self.output.glean_stdlib_root.clone(),
+                );
                 // Generate a safe filename using hash to avoid OS filename length limits
                 let module_hash = blake3::hash(handle.path().to_string().as_bytes());
                 fs_anyhow::write(
@@ -2350,6 +2508,13 @@ impl CheckArgs {
                     ),
                 )?;
             }
+        }
+        if let Some(scip) = scip
+            && let Some(path) = &self.output.report_scip
+        {
+            scip.finish(transaction)
+                .and_then(|mut writer| Ok(writer.flush()?))
+                .with_context(|| format!("while writing SCIP index to `{}`", path.display()))?;
         }
         if let Some(pysa_reporter) = transaction.take_pysa_reporter() {
             report::pysa::write_project_file(&pysa_reporter, transaction, handles, &output_errors)?;
@@ -2383,14 +2548,15 @@ impl CheckArgs {
             let output = report_json(&roots, &module_steps);
             fs_anyhow::write(path, output)?;
         }
-        if self.behavior.expectations {
+        let status = if self.behavior.expectations {
             loads.check_against_expectations()?;
-            Ok((CommandExitStatus::Success, output_errors))
+            CommandExitStatus::Success
         } else if diagnostics_count > 0 || stale_baseline {
-            Ok((CommandExitStatus::UserError, output_errors))
+            CommandExitStatus::UserError
         } else {
-            Ok((CommandExitStatus::Success, output_errors))
-        }
+            CommandExitStatus::Success
+        };
+        Ok((status, inspect(&output_errors, &relative_to)))
     }
 }
 
@@ -2403,7 +2569,11 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use clap::error::ErrorKind as ClapErrorKind;
+    use protobuf::Message as _;
     use pyrefly_config::config::ConfigScope;
+    use pyrefly_config::module_names::ModuleNames;
+    use pyrefly_config::module_names::ModuleNamesSourceDatabase;
     use pyrefly_python::module::Module;
     use pyrefly_python::module_name::ModuleName;
     use pyrefly_python::module_path::ModulePath;
@@ -2447,13 +2617,30 @@ mod tests {
     /// A config finder that resolves everything under `root` without querying an
     /// interpreter, so tests do not depend on the machine's Python environment.
     fn test_config_finder(root: &Path) -> ConfigFinder {
+        ConfigFinder::new_constant(ArcId::new(test_config(root)))
+    }
+
+    /// A config like `test_config_finder`'s, as `--module-names` sets it up.
+    fn test_config_finder_with_module_names(
+        root: &Path,
+        module_names: ModuleNames,
+    ) -> ConfigFinder {
+        let mut config = test_config(root);
+        let module_names = ArcId::new(module_names);
+        let source_db = ModuleNamesSourceDatabase::new(module_names.dupe(), config.get_sys_info());
+        config.fallback_source_db = Some(ArcId::new(Box::new(source_db)));
+        config.module_names = Some(module_names);
+        ConfigFinder::new_constant(ArcId::new(config))
+    }
+
+    fn test_config(root: &Path) -> ConfigFile {
         let mut config = ConfigFile::default();
         config.python_environment.set_empty_to_default();
         config.interpreters.skip_interpreter_query = true;
         config.search_path_from_file = vec![root.to_path_buf()];
         config.disable_search_path_heuristics = true;
         config.configure();
-        ConfigFinder::new_constant(ArcId::new(config))
+        config
     }
 
     fn incremental_checker(root: &Path, initial_files: Vec<PathBuf>) -> IncrementalChecker {
@@ -2552,25 +2739,31 @@ mod tests {
         let files = config.get_filtered_globs(None, ConfigScope::Default);
         let config_finder = ConfigFinder::new_constant(ArcId::new(config));
 
-        let (_, errors, check_result) = CheckArgs::parse_from(["check", "--summary=none"])
-            .run_once(
-                "test",
-                Box::new(files),
-                config_finder,
-                UpsellDecision::Skip,
-                ThreadCount::Inline,
-            )
-            .unwrap();
+        let (_, check_result) = CheckArgs::parse_from([
+            "check",
+            "--summary=none",
+            "--relative-to",
+            root.to_str().unwrap(),
+        ])
+        .run_once(
+            "test",
+            Box::new(files),
+            config_finder,
+            UpsellDecision::Skip,
+            ThreadCount::Inline,
+        )
+        .unwrap();
+        let errors = &check_result.legacy_errors;
         let bad_assignments = errors
             .iter()
-            .filter(|error| error.error_kind() == ErrorKind::BadAssignment)
-            .map(|error| error.path().as_path().to_path_buf())
+            .filter(|error| error.name == ErrorKind::BadAssignment.to_name())
+            .map(|error| error.path.as_str())
             .collect::<Vec<_>>();
 
         assert_eq!(check_result.checked_file_count, 2);
         assert_eq!(
             bad_assignments,
-            vec![source],
+            vec!["packages/my-lib/src/my_lib/main.py"],
             "the editable workspace source is now checked: {errors:#?}",
         );
     }
@@ -2579,6 +2772,74 @@ mod tests {
     /// See https://github.com/facebook/pyrefly/issues/4683: the CinderX report
     /// dropped the ASTs that the Glean report reads once the check is done, so
     /// the run died partway through writing its output.
+    /// A module that a build system imports under a name its path doesn't give is found through
+    /// `--module-names`. The type of a value from it is then known, so a method call on a
+    /// parameter annotated with its class refers to that method.
+    #[test]
+    fn module_names_resolve_imports() {
+        let temp = TempDir::new().unwrap();
+        // Canonical, so that the listed path and the checked file's path agree.
+        let root = fs::canonicalize(temp.path()).unwrap().join("project");
+        fs::create_dir_all(root.join("lib").join("src")).unwrap();
+        fs::create_dir_all(root.join("app")).unwrap();
+        let platform = root.join("lib").join("src").join("platform.py");
+        fs::write(
+            &platform,
+            "class Platform:\n    def chat(self) -> None: ...\n",
+        )
+        .unwrap();
+        let main = root.join("app").join("main.py");
+        fs::write(
+            &main,
+            r#"from platform_api.platform import Platform
+
+
+def go(p: Platform) -> None:
+    p.chat()
+"#,
+        )
+        .unwrap();
+        let glean_dir = temp.path().join("glean");
+
+        let cwd = fs::canonicalize(env::current_dir().unwrap()).unwrap();
+        let listed = platform
+            .strip_prefix(&cwd)
+            .unwrap_or(&platform)
+            .to_str()
+            .unwrap()
+            .replace('\\', "/");
+        let module_names = ModuleNames::new(
+            HashMap::from([(listed, "platform_api.platform".to_owned())]),
+            &cwd,
+        );
+        let args = CheckArgs::parse_from(["check", "--report-glean", glean_dir.to_str().unwrap()]);
+        let (_, check_result) = args
+            .run_once(
+                "test",
+                Box::new(TestIncludes {
+                    root: root.clone(),
+                    initial_files: vec![platform, main],
+                }),
+                test_config_finder_with_module_names(&root, module_names),
+                UpsellDecision::Skip,
+                ThreadCount::Inline,
+            )
+            .unwrap();
+        let errors = &check_result.legacy_errors;
+        assert!(errors.is_empty(), "the import should resolve: {errors:#?}");
+
+        let facts: String = fs::read_dir(&glean_dir)
+            .unwrap()
+            .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert!(
+            facts.contains("\"platform_api.platform.Platform.chat\""),
+            "the declaration and the method call should both name the method after the given module"
+        );
+        assert!(!facts.contains("<locals>.p.chat"));
+        assert!(!facts.contains("lib.src.platform"));
+    }
+
     #[test]
     fn check_writes_cinderx_and_glean_reports_together() {
         let temp = TempDir::new().unwrap();
@@ -2600,32 +2861,14 @@ def go(w: Widget) -> int:
         let cinderx_dir = temp.path().join("cinderx");
         let glean_dir = temp.path().join("glean");
 
-        // Glean file keys resolve symlinks, are relative to the working directory when
-        // possible, and use forward slashes rather than native path separators.
-        let module_path = fs::canonicalize(&module).unwrap();
-        let cwd = fs::canonicalize(env::current_dir().unwrap()).unwrap();
-        let module_key = module_path
-            .strip_prefix(&cwd)
-            .unwrap_or(&module_path)
-            .to_str()
-            .unwrap()
-            .replace('\\', "/");
-        let names_path = temp.path().join("module_names.json");
-        fs::write(
-            &names_path,
-            serde_json::to_string(&HashMap::from([(module_key, "public.api")])).unwrap(),
-        )
-        .unwrap();
         let args = CheckArgs::parse_from([
             "check",
             "--report-cinderx",
             cinderx_dir.to_str().unwrap(),
             "--report-glean",
             glean_dir.to_str().unwrap(),
-            "--glean-module-names",
-            names_path.to_str().unwrap(),
         ]);
-        let (status, errors, _) = args
+        let (status, check_result) = args
             .run_once(
                 "test",
                 Box::new(TestIncludes {
@@ -2637,6 +2880,7 @@ def go(w: Widget) -> int:
                 ThreadCount::Inline,
             )
             .unwrap();
+        let errors = &check_result.legacy_errors;
         assert!(errors.is_empty(), "unexpected type errors: {errors:#?}");
         assert!(matches!(status, CommandExitStatus::Success));
 
@@ -2655,8 +2899,85 @@ def go(w: Widget) -> int:
             .collect();
         assert_eq!(glean_files.len(), 1, "expected one Glean file per module");
         let facts = fs::read_to_string(&glean_files[0]).unwrap();
-        assert!(facts.contains("public.api.Widget"));
-        assert!(!facts.contains("main.Widget"));
+        assert!(facts.contains("main.Widget"));
+    }
+
+    #[test]
+    fn scip_rejects_incompatible_options() {
+        assert!(FullCheckArgs::try_parse_from(["check", "--report-scip", "index.scip"]).is_ok());
+        for options in [
+            &["--watch"][..],
+            &["--debug-info", "debug.json"][..],
+            &["--report-binding-memory", "memory.csv"][..],
+        ] {
+            assert!(
+                FullCheckArgs::try_parse_from(["check"].into_iter().chain(options.iter().copied()))
+                    .is_ok(),
+                "standalone options should remain valid: {options:?}"
+            );
+            let error = FullCheckArgs::try_parse_from(
+                ["check", "--report-scip", "index.scip"]
+                    .into_iter()
+                    .chain(options.iter().copied()),
+            )
+            .expect_err("SCIP must reject options requiring retained state");
+            assert_eq!(error.kind(), ClapErrorKind::ArgumentConflict);
+            let message = error.to_string();
+            assert!(message.contains("--report-scip"), "{message}");
+            assert!(message.contains(options[0]), "{message}");
+        }
+    }
+
+    #[test]
+    fn check_writes_scip_report() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let module = root.join("main.py");
+        fs::write(&module, "x = 1\n").unwrap();
+        let scip_path = temp.path().join("index.scip");
+
+        let args = CheckArgs::parse_from([
+            "check",
+            "--report-scip",
+            scip_path.to_str().unwrap(),
+            "--report-scip-project-name",
+            "demo",
+            "--relative-to",
+            root.to_str().unwrap(),
+        ]);
+        let (status, check_result) = args
+            .run_once(
+                "test",
+                Box::new(TestIncludes {
+                    root: root.clone(),
+                    initial_files: vec![module],
+                }),
+                test_config_finder(&root),
+                UpsellDecision::Skip,
+                ThreadCount::Inline,
+            )
+            .unwrap();
+        let errors = &check_result.legacy_errors;
+        assert!(errors.is_empty(), "unexpected type errors: {errors:#?}");
+        assert!(matches!(status, CommandExitStatus::Success));
+
+        let index = scip::types::Index::parse_from_bytes(&fs::read(&scip_path).unwrap()).unwrap();
+        assert_eq!(index.documents.len(), 1);
+        assert_eq!(index.documents[0].relative_path, "main.py");
+        assert_eq!(
+            index.documents[0].occurrences[0].symbol,
+            "scip-python python demo . main/__init__:"
+        );
+        let metadata = index.metadata.unwrap();
+        assert_eq!(metadata.tool_info.name, "scip-pyrefly");
+        assert_eq!(metadata.tool_info.version, "test");
+        assert!(
+            metadata.project_root.starts_with("file://")
+                && metadata.project_root.ends_with("/project/"),
+            "unexpected project root: {}",
+            metadata.project_root
+        );
     }
 
     #[test]
@@ -3339,6 +3660,31 @@ def go(w: Widget) -> int:
         assert_eq!(
             overridden.resolve(Some(&warn)).baseline_error_level,
             Severity::Error
+        );
+    }
+
+    #[test]
+    fn only_cli_and_config_precedence() {
+        let inherited = OutputArgs::parse_from(["pyrefly-check"]);
+        assert_eq!(inherited.resolve(None).only, None);
+        let config = ConfigFile {
+            only: Some(vec![ErrorKind::BadClassDefinition]),
+            ..Default::default()
+        };
+        assert_eq!(
+            inherited.resolve(Some(&config)).only,
+            Some(vec![ErrorKind::BadClassDefinition])
+        );
+
+        let overridden = OutputArgs::parse_from(["pyrefly-check", "--only", "bad-return"]);
+        assert_eq!(
+            overridden.resolve(None).only,
+            Some(vec![ErrorKind::BadReturn])
+        );
+
+        assert_eq!(
+            overridden.resolve(Some(&config)).only,
+            Some(vec![ErrorKind::BadReturn])
         );
     }
 

@@ -15,9 +15,12 @@ import warnings as warnings
 from collections.abc import Callable as Callable, Sequence
 from typing import (
     Any,
+    ClassVar,
     Literal,
     Optional as Optional,
     overload,
+    SupportsIndex,
+    SupportsInt,
     TYPE_CHECKING as TYPE_CHECKING,
 )
 
@@ -49,7 +52,6 @@ from torch import (
     selu_ as selu_,
     threshold_ as threshold_,
 )
-from torch._C import _ScalingType as ScalingType, _SwizzleType as SwizzleType
 from torch._C._nn import (
     elu_ as elu_,
     hardtanh_ as hardtanh_,
@@ -178,6 +180,35 @@ __all__ = [
     # Attention
     "scaled_dot_product_attention",
 ]
+
+# These nominal pybind types are exposed here but omitted from Torch's _C stubs.
+class ScalingType:
+    TensorWise: ClassVar[ScalingType]
+    RowWise: ClassVar[ScalingType]
+    BlockWise1x16: ClassVar[ScalingType]
+    BlockWise1x32: ClassVar[ScalingType]
+    BlockWise1x128: ClassVar[ScalingType]
+    BlockWise128x128: ClassVar[ScalingType]
+
+    def __init__(self, value: SupportsInt | SupportsIndex) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+    def __int__(self) -> int: ...
+    def __index__(self) -> int: ...
+
+class SwizzleType:
+    NO_SWIZZLE: ClassVar[SwizzleType]
+    SWIZZLE_32_4_4: ClassVar[SwizzleType]
+
+    def __init__(self, value: SupportsInt | SupportsIndex) -> None: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+    def __int__(self) -> int: ...
+    def __index__(self) -> int: ...
 
 # ====================================================================
 # Phase 3: Convolution & Pooling Operations
@@ -896,6 +927,7 @@ def avg_pool1d[
     """1D average pooling. Shape inference via meta-shape: torch.nn.functional.avg_pool1d"""
     ...
 
+@overload
 def avg_pool2d[
     Shape: IntTuple,
     Kernel: Flag[builtins.int | tuple[builtins.int, builtins.int]],
@@ -914,6 +946,49 @@ def avg_pool2d[
     """2D average pooling. Shape inference via meta-shape: torch.nn.functional.avg_pool2d"""
     ...
 
+# Mutable controls cannot carry fixed values into the DSL. Preserve the leading
+# dimensions with the same rank-preserving fallback used by adaptive pooling.
+@overload
+def avg_pool2d[Shape: IntTuple](
+    self: Tensor[Shape],
+    kernel_size: list[int],
+    stride: int | tuple[int, int] | list[int] | None = None,
+    padding: int | tuple[int, int] | list[int] = 0,
+    ceil_mode: bool = False,
+    count_include_pad: bool = True,
+    divisor_override: int | None = None,
+) -> Tensor[adaptive_pool_gradual_shape(Shape, 2)]: ...
+@overload
+def avg_pool2d[Shape: IntTuple](
+    self: Tensor[Shape],
+    kernel_size: int | tuple[int, int],
+    stride: list[int],
+    padding: int | tuple[int, int] | list[int] = 0,
+    ceil_mode: bool = False,
+    count_include_pad: bool = True,
+    divisor_override: int | None = None,
+) -> Tensor[adaptive_pool_gradual_shape(Shape, 2)]: ...
+@overload
+def avg_pool2d[Shape: IntTuple](
+    self: Tensor[Shape],
+    kernel_size: int | tuple[int, int],
+    stride: int | tuple[int, int] | None = None,
+    *,
+    padding: list[int],
+    ceil_mode: bool = False,
+    count_include_pad: bool = True,
+    divisor_override: int | None = None,
+) -> Tensor[adaptive_pool_gradual_shape(Shape, 2)]: ...
+@overload
+def avg_pool2d[Shape: IntTuple](
+    self: Tensor[Shape],
+    kernel_size: int | tuple[int, int],
+    stride: int | tuple[int, int] | None,
+    padding: list[int],
+    ceil_mode: bool = False,
+    count_include_pad: bool = True,
+    divisor_override: int | None = None,
+) -> Tensor[adaptive_pool_gradual_shape(Shape, 2)]: ...
 def avg_pool3d[
     Shape: IntTuple,
     Kernel: Flag[builtins.int | tuple[builtins.int, builtins.int, builtins.int]],

@@ -638,6 +638,17 @@ except ImportError:
 );
 
 testcase!(
+    test_optional_import_with_annotation_fallback,
+    r#"
+from typing import Any
+try:
+    from nomod import x  # E: Cannot find module `nomod`
+except ImportError:
+    x: Any
+"#,
+);
+
+testcase!(
     bug = "A name imported from a module that lacks it at this version should have a fallback",
     test_optional_from_import_of_missing_name,
     TestEnv::new_with_version(PythonVersion::new(3, 10, 0)),
@@ -2337,7 +2348,7 @@ testcase!(
     test_malformed_def_from_star,
     r#"
 def # E: Parse error: Expected an identifier
-from *a # E: Parse error: Expected `)`, found `from` # E: Parse error: Expected a module name # E: Parse error: Star import must be the only import # E: Parse error: Expected `,`, found name
+from *a # E: Parse error: Expected `)`, found `from` # E: Parse error: Expected a module name # E: Parse error: Star import must be the only import # E: Parse error: Expected `,`, found identifier
 "#,
 );
 
@@ -2346,7 +2357,7 @@ testcase!(
     test_malformed_class_from_star,
     r#"
 class # E: Parse error: Expected an identifier
-from *a # E: Parse error: Expected an indented block after `class` definition # E: Parse error: Expected a module name # E: Parse error: Star import must be the only import # E: Parse error: Expected `,`, found name # E: Cannot find module `main`
+from *a # E: Parse error: Expected an indented block after `class` definition # E: Parse error: Expected a module name # E: Parse error: Star import must be the only import # E: Parse error: Expected `,`, found identifier # E: Cannot find module `main`
 "#,
 );
 
@@ -3280,22 +3291,56 @@ fn env_implicit_reexport_submodule() -> TestEnv {
         "foo/__init__.py",
         r#"
 from . import a
+from . import c as cc
 from .b import b
 "#,
     );
     t.add_with_path("foo.a", "foo/a.py", "x: int = 1");
     t.add_with_path("foo.b", "foo/b.py", "b: int = 1");
+    t.add_with_path("foo.c", "foo/c.py", "x: int = 1");
     t
 }
 
 // https://github.com/facebook/pyrefly/issues/5134
 testcase!(
-    bug = "`from . import a` in `foo/__init__.py` binds the submodule `foo.a`",
     test_implicit_reexport_submodule,
     env_implicit_reexport_submodule().enable_implicit_reexport_error(),
     r#"
-from foo import a  # E: `a` is not exported from module `foo`
+from foo import a
+from foo import cc
 from foo import b  # E: `b` is not exported from module `foo`
+"#,
+);
+
+fn env_implicit_reexport_submodule_forms() -> TestEnv {
+    let mut t = TestEnv::new();
+    t.add_with_path(
+        "foo",
+        "foo/__init__.py",
+        r#"
+from foo import a
+from foo import c as cc
+"#,
+    );
+    t.add_with_path("foo.a", "foo/a.py", "x: int = 1");
+    t.add_with_path("foo.c", "foo/c.py", "x: int = 1");
+    t.add_with_path("foo.x", "foo/x.py", "from . import a");
+    t.add_with_path("bar", "bar/__init__.pyi", "from . import a");
+    t.add_with_path("bar.a", "bar/a.pyi", "x: int");
+    t
+}
+
+// A `from` import of the package itself, in that package's `__init__`, binds a
+// submodule, with or without an alias. A `from .` import in any other module
+// does not.
+testcase!(
+    test_implicit_reexport_submodule_forms,
+    env_implicit_reexport_submodule_forms().enable_implicit_reexport_error(),
+    r#"
+from foo import a
+from bar import a as a2
+from foo import cc
+from foo.x import a as a3  # E: `a` is not exported from module `foo.x`
 "#,
 );
 

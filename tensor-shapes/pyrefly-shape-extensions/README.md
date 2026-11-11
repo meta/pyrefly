@@ -21,6 +21,9 @@ integer tuples and lists. A direct, unstarred list literal such as `[2, 3]`
 binds `Values` to `IntTuple[2, 3]`; an existing or starred list remains gradual,
 while a direct literal containing a non-integer is rejected.
 
+`@shape_transform` marks a type-level shape DSL function and is a runtime no-op.
+`type_shape_dsl_function` remains available as a backward-compatible alias.
+
 The package is versioned in lockstep with Pyrefly.
 
 ## Portable shape annotations

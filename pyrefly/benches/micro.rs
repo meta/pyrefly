@@ -350,6 +350,23 @@ result: Base[object] = {expression}
     )
 }
 
+/// Each layer rejects the first hint and checks the same child under the second hint.
+fn nested_init_only_constructor_hints(depth: usize) -> String {
+    let mut expression = "Node(value)".to_owned();
+    for _ in 1..depth {
+        expression = format!("Node(value, {expression})");
+    }
+    format!(
+        r#"
+class Node[T]:
+    def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+
+def f(value: str) -> None:
+    root: Node[int] | Node[str] = {expression}
+"#
+    )
+}
+
 /// Models nested trees whose return annotation is a wide union.
 /// Each layer should be checked only once.
 fn nested_nongeneric_constructor_union_hint(depth: usize) -> String {
@@ -452,6 +469,69 @@ fn measure_module(
     c.bench_function(name, |b| b.iter(|| check_module(code.dupe(), module, path)));
 }
 
+#[derive(Clone, Copy)]
+enum AttributeInitializationShape {
+    Branches,
+    Loops,
+    Returns,
+}
+
+impl AttributeInitializationShape {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Branches => "branches",
+            Self::Loops => "loops",
+            Self::Returns => "returns",
+        }
+    }
+}
+
+/// Attribute initialization must track branches without constructing unused type joins.
+fn attribute_initialization(c: &mut Criterion) {
+    let mut group = c.benchmark_group("attribute_initialization");
+    for (attributes, joins) in [(16, 16), (64, 16), (16, 64), (64, 64)] {
+        for shape in [
+            AttributeInitializationShape::Branches,
+            AttributeInitializationShape::Loops,
+            AttributeInitializationShape::Returns,
+        ] {
+            let mut source = String::from(
+                "class C:\n    def __init__(self, flag: bool, values: list[int]) -> None:\n",
+            );
+            for i in 0..attributes {
+                let _ = writeln!(source, "        self.attribute_{i}: int = 0");
+            }
+            for i in 0..joins {
+                let attribute = i % attributes;
+                match shape {
+                    AttributeInitializationShape::Branches => {
+                        let _ = writeln!(
+                            source,
+                            "        if flag:\n            self.attribute_{attribute} = {i}\n        else:\n            self.attribute_{attribute} = -{i}"
+                        );
+                    }
+                    AttributeInitializationShape::Loops => {
+                        let _ = writeln!(
+                            source,
+                            "        for value in values:\n            self.attribute_{attribute} = value"
+                        );
+                    }
+                    AttributeInitializationShape::Returns => {
+                        let _ = writeln!(source, "        if flag:\n            return");
+                    }
+                }
+            }
+            let name = format!("{}_{attributes}_attributes_{joins}_joins", shape.name());
+            let code = Arc::new(FileContents::from_source(source));
+            assert_eq!(check_module(code.dupe(), "bench", BENCH_FILE), 0, "{name}");
+            group.bench_function(name, |b| {
+                b.iter(|| check_module(code.dupe(), "bench", BENCH_FILE))
+            });
+        }
+    }
+    group.finish();
+}
+
 /// Smoke benchmark validating the harness end-to-end.
 fn smoke(c: &mut Criterion) {
     measure(c, "smoke", "x: int = 1".to_owned(), 0);
@@ -537,6 +617,14 @@ fn nested_generic_constructor(c: &mut Criterion) {
         nested_generic_constructor_soft_error(12),
         1,
     );
+    for depth in [8, 12] {
+        measure(
+            c,
+            &format!("nested_init_only_constructor_hints_{depth}"),
+            nested_init_only_constructor_hints(depth),
+            0,
+        );
+    }
 }
 
 fn nested_nongeneric_constructor(c: &mut Criterion) {
@@ -546,6 +634,37 @@ fn nested_nongeneric_constructor(c: &mut Criterion) {
         nested_nongeneric_constructor_union_hint(5),
         0,
     );
+}
+
+/// Measure nested `getattr` arguments, including calls that retain builtin fallback typing.
+fn nested_getattr(c: &mut Criterion) {
+    for (attr, expected) in [("child", "C"), ("missing", "Any")] {
+        for depth in [10, 20, 40] {
+            for position in ["receiver", "default"] {
+                let mut expr = String::from("c");
+                for _ in 0..depth {
+                    expr = if position == "receiver" {
+                        format!("getattr({expr}, {attr:?})")
+                    } else {
+                        format!("getattr(c, {attr:?}, {expr})")
+                    };
+                }
+                let expected = if position == "default" {
+                    format!("{expected} | C")
+                } else {
+                    expected.to_owned()
+                };
+                measure(
+                    c,
+                    &format!("getattr_{attr}_{position}_{depth}"),
+                    format!(
+                        "from typing import Any, assert_type\nclass C:\n    child: C\ndef test(c: C) -> None:\n    assert_type({expr}, {expected})\n",
+                    ),
+                    0,
+                );
+            }
+        }
+    }
 }
 
 fn user_method_dispatch(c: &mut Criterion) {
@@ -567,6 +686,29 @@ fn method_name_collision(c: &mut Criterion) {
 
 fn constructor_dispatch(c: &mut Criterion) {
     measure(c, "constructor_calls_256", constructor_calls(256), 0);
+    for (name, argument) in [
+        ("constructor_literal_arguments_256", "1"),
+        ("constructor_factory_arguments_256", "make()"),
+    ] {
+        let calls = joined(256, "\n", |_| format!("k = K({argument})"));
+        measure(
+            c,
+            name,
+            format!(
+                "class K:\n    def __init__(self, value: int) -> None: ...\ndef make() -> int: ...\n{calls}"
+            ),
+            0,
+        );
+    }
+    let calls = joined(256, "\n", |i| format!("box{i}: Box[int] = Box(make())"));
+    measure(
+        c,
+        "constructor_single_hint_factory_arguments_256",
+        format!(
+            "class Box[T]:\n    def __init__(self, value: T) -> None: ...\ndef make() -> int: ...\n{calls}"
+        ),
+        0,
+    );
 }
 
 fn pandas_method_dispatch(c: &mut Criterion) {
@@ -926,6 +1068,10 @@ fn nested_scopes(depth: usize, per_scope: usize, missing: usize) -> String {
         let pad = "    ".repeat(level);
         if level % 4 == 3 && level + 1 < depth {
             let _ = writeln!(source, "{pad}class C{level}:");
+        } else if level > 0 && (level - 1) % 4 == 3 {
+            // Directly under a class inserted above: take `self` so the
+            // missing-receiver check does not inflate the expected error count.
+            let _ = writeln!(source, "{pad}def f{level}(self):");
         } else {
             let _ = writeln!(source, "{pad}def f{level}():");
         }
@@ -957,6 +1103,7 @@ fn suggestion_nested(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    attribute_initialization,
     smoke,
     enum_members,
     enum_value_access,
@@ -971,6 +1118,7 @@ criterion_group!(
     overloads,
     nested_generic_constructor,
     nested_nongeneric_constructor,
+    nested_getattr,
     user_method_dispatch,
     builtin_method_dispatch,
     method_name_collision,

@@ -17,11 +17,14 @@ use pyrefly_build::handle::Handle;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::sys_info::PythonVersion;
+use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
+use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
 use crate::lsp::wasm::hover::HoverOptions;
 use crate::lsp::wasm::hover::get_hover;
 use crate::lsp::wasm::hover::get_hover_with_verbosity;
+use crate::state::lsp::FindPreference;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
@@ -1165,6 +1168,137 @@ foo(x=1, y="hello")
 }
 
 #[test]
+fn hover_imported_keywords_without_dependency_answers() {
+    let library = r#"
+from dataclasses import dataclass
+from typing import overload
+
+def function(value: str) -> None: ...
+
+@overload
+def overloaded(first: int, *, value: str) -> int: ...
+@overload
+def overloaded(first: str, *, value: str) -> str: ...
+def overloaded(first: int | str, *, value: str) -> int | str: return first
+
+def generic[T](first: T, *, value: str) -> T: return first
+
+class Widget:
+    def __init__(self, value: str) -> None: ...
+    def method(self, value: str) -> None: ...
+
+@dataclass
+class Record:
+    value: str
+"#;
+    let caller = r#"
+from lib import function, overloaded, generic, Widget, Record
+function(value='text')
+overloaded('first', value='text')
+generic(1, value='text')
+widget = Widget(value='text')
+widget.method(value='text')
+Record(value='text')
+"#;
+    for retention in [Require::Exports, Require::Everything] {
+        let mut env = TestEnv::new();
+        env.add_with_path("main", "main.py", caller);
+        env.add_with_path("lib", "lib.py", library);
+        let handle = |name: &str| {
+            Handle::new(
+                ModuleName::from_str(name),
+                ModulePath::memory(PathBuf::from(format!("{name}.py"))),
+                env.sys_info(),
+            )
+        };
+        let main = handle("main");
+        let lib = handle("lib");
+        let state = State::new(env.config_finder(), TEST_THREAD_COUNT);
+        let mut transaction = state.new_transaction(retention, None);
+        transaction.set_memory(env.get_memory());
+        // Complete the dependency before checking the caller, so the low-retention case
+        // really has evicted answers rather than an unfinished lazy solve.
+        transaction.run(slice::from_ref(&lib), retention.max(Require::Errors), None);
+        transaction.run(slice::from_ref(&main), Require::Everything, None);
+        assert!(
+            transaction
+                .get_errors([&main, &lib])
+                .collect_errors()
+                .ordinary
+                .is_empty()
+        );
+        assert_eq!(
+            transaction.get_answers(&lib).is_some(),
+            retention == Require::Everything
+        );
+        for (offset, _) in caller.match_indices("value=") {
+            let position = TextSize::try_from(offset).unwrap();
+            let call_type = transaction
+                .get_expected_type_at(&main, position)
+                .map(|ty| ty.to_string());
+            // Signature help cannot currently recover this generic call's parameter type.
+            if caller[..offset]
+                .lines()
+                .last()
+                .unwrap()
+                .starts_with("generic(")
+            {
+                assert!(call_type.is_none());
+            } else {
+                assert_eq!(call_type, Some("str".to_owned()));
+            }
+            let expected = if retention == Require::Everything {
+                Some("str".to_owned())
+            } else {
+                call_type
+            };
+            assert_eq!(
+                transaction
+                    .get_type_at(&main, position)
+                    .map(|ty| ty.to_string()),
+                expected,
+                "retention {retention:?}; position {position:?}",
+            );
+            assert_eq!(
+                transaction
+                    .get_type_at_preserving_declaration(&main, position)
+                    .map(|ty| ty.to_string()),
+                expected,
+            );
+            assert_eq!(
+                transaction
+                    .get_computed_type_at_range(
+                        &main,
+                        TextRange::new(position, position + TextSize::from(5))
+                    )
+                    .map(|ty| ty.to_string()),
+                expected,
+            );
+            let hover = get_hover(&transaction, &main, position, false);
+            if expected.is_some() {
+                let Contents::MarkupContent(markup) = hover.unwrap().contents else {
+                    panic!("expected markdown hover");
+                };
+                assert!(markup.value.contains("value: str"), "{}", markup.value);
+            } else {
+                assert!(hover.is_none());
+            }
+            let definitions = transaction
+                .find_definition(&main, position, FindPreference::default())
+                .unwrap();
+            assert!(definitions.iter().any(|definition| {
+                definition.module.name() == ModuleName::from_str("lib")
+                    && definition.module.code_at(definition.definition_range) == "value"
+            }));
+            assert_eq!(
+                transaction.get_answers(&lib).is_some(),
+                retention == Require::Everything
+            );
+        }
+    }
+}
+
+#[test]
 fn hover_on_dataclass_constructor_keyword_shows_field_type() {
     let code = r#"
 from dataclasses import dataclass
@@ -1292,6 +1426,30 @@ widget.box
     assert!(
         report.contains("The box containing the widget."),
         "Expected dataclass field docstring to appear in hover, got: {report}"
+    );
+}
+
+#[test]
+fn hover_shows_field_docstring_at_definition() {
+    let code = r#"
+class Widget:
+    name: str
+#   ^
+    """Name of the widget."""
+"#;
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let position = extract_cursors_for_test(code)[0];
+    let hover = get_hover(&state.transaction(), &handle, position, false).unwrap();
+    let Contents::MarkupContent(markup) = hover.contents else {
+        panic!("expected markdown hover");
+    };
+    assert!(
+        markup.value.contains("Name of the widget."),
+        "got: {}",
+        markup.value
     );
 }
 
@@ -2113,6 +2271,20 @@ class Factory:
         "```python\n(class) target: type[lib.Outer.Target]\n```\n---\nNested target documentation.",
         report.trim(),
     );
+}
+
+#[test]
+fn hover_on_specialized_class_def_in_closed_library() {
+    let lib = r#"
+class Target[T]:
+    """Target class documentation."""
+    def __init__(self, value: T) -> None: ...
+"#;
+    let main = "from lib import Target\ndef f():\n    X = Target[int]\n    X\n#   ^\n";
+    let report = get_test_report_with_closed_library(lib, main);
+    assert!(report.contains("value: int"), "{report}");
+    assert!(report.contains("-> Target[int]"), "{report}");
+    assert!(report.contains("Target class documentation."), "{report}");
 }
 
 #[test]
@@ -3854,6 +4026,31 @@ Box[str]("hello")
     );
 }
 
+#[test]
+fn hover_on_prepared_constructor_argument() {
+    let code = r#"
+class Base: ...
+class Child(Base): ...
+
+class Box[T]:
+    def __init__(self, value: T) -> None: ...
+
+class Receiver[T]:
+    def __init__(self, value: T, other: object) -> None: ...
+
+def identity[T](value: T) -> T:
+    return value
+
+result: Receiver[str] | Receiver[int] = Receiver(1, Box(identity(Child())))
+#                                                          ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("def identity[T](value: T) -> T"),
+        "got: {report}"
+    );
+}
+
 // Regression test for https://github.com/facebook/pyrefly/issues/3240
 #[test]
 fn hover_on_generic_metaclass_constructor_does_not_show_inference_var() {
@@ -4252,4 +4449,69 @@ Widget(1)
         "got: {report}"
     );
     assert!(!report.contains("from the stub"), "got: {report}");
+}
+
+#[test]
+fn hover_inside_quoted_annotation() {
+    // Hovering a name inside a forward-reference string shows that name, not the string.
+    let code = r#"
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lib import Helper
+
+class Model:
+    """Model docs."""
+
+a: Model
+#  ^
+b: "Model"
+#   ^
+c: list[Helper]
+#       ^
+d: "dict[str, list[Helper]]"
+#                   ^
+"#;
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    env.add("lib", "class Helper: ...\n");
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let [unquoted_model, quoted_model, unquoted_helper, quoted_helper] =
+        extract_cursors_for_test(code)[..]
+    else {
+        panic!("expected four cursors");
+    };
+    let hover = |position| get_test_report(&state, &handle, position);
+
+    assert!(
+        hover(quoted_model).contains("Model docs."),
+        "got: {}",
+        hover(quoted_model)
+    );
+    assert_eq!(hover(unquoted_model), hover(quoted_model));
+    assert!(
+        hover(quoted_helper).contains("Helper"),
+        "got: {}",
+        hover(quoted_helper)
+    );
+    assert_eq!(hover(unquoted_helper), hover(quoted_helper));
+}
+
+#[test]
+fn hover_repeated_live_conditional_method() {
+    let mut env = TestEnv::new_with_version(PythonVersion::new(3, 12, 0));
+    env.add_with_path("m", "m.pyi", "class C:\n    def f(self) -> int: ...\n");
+    env.add_with_path(
+        "m",
+        "m.py",
+        "import sys\nclass C:\n    if sys.version_info >= (3, 8):\n        def f(self) -> int:\n            \"\"\"First.\"\"\"\n            return 0\n    if sys.version_info >= (3, 10):\n        def f(self) -> int:\n            \"\"\"Last.\"\"\"\n            return 1\n",
+    );
+    let main = "from m import C\nC().f()\n#   ^\n";
+    env.add("main", main);
+    let (state, handle) = env.to_state();
+    let report = get_test_report(&state, &handle("main"), extract_cursors_for_test(main)[0]);
+    assert!(report.contains("Last."), "got: {report}");
+    assert!(!report.contains("First."), "got: {report}");
+    assert!(report.contains("int"), "got: {report}");
 }

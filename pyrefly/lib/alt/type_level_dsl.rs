@@ -15,6 +15,7 @@ use pyrefly_types::dimension::is_optional_int;
 use pyrefly_types::dimension::is_optional_int_bound_type_var;
 use pyrefly_types::function::FuncDefId;
 use pyrefly_types::function::FunctionKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::shaped_array::is_int_tuples_type;
 use pyrefly_types::type_level_dsl::ParsedTypeShapeDslFunction;
@@ -38,7 +39,6 @@ use pyrefly_types::type_level_dsl::TypeShapeDslSlotReturnKind;
 use pyrefly_types::type_var::FlagDomain;
 use pyrefly_types::type_var::FlagMember;
 use pyrefly_types::type_var::Restriction;
-use pyrefly_types::types::AnyStyle;
 use pyrefly_types::types::CalleeKind;
 use pyrefly_types::types::Type;
 use pyrefly_util::display::pluralize;
@@ -274,7 +274,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         errors,
                         helper_call.callee().range(),
                         ErrorKind::InvalidArgument,
-                        "@type_shape_dsl_function return value must be a bare parameter name or validated DSL helper call; DSL helper callee must be a validated `@type_shape_dsl_function`".to_owned(),
+                        "@shape_transform return value must be a bare parameter name or validated DSL helper call; DSL helper callee must be a validated `@shape_transform`".to_owned(),
                     );
                     valid = false;
                 }
@@ -306,7 +306,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     errors,
                     error.range,
                     ErrorKind::InvalidArgument,
-                    format!("@type_shape_dsl_function {}", error.message),
+                    format!("@shape_transform {}", error.message),
                 );
                 return None;
             }
@@ -332,7 +332,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     dsl.parameter_annotation_range(index),
                     ErrorKind::InvalidArgument,
                     format!(
-                        "`@type_shape_dsl_function` parameter `{}` must be annotated as `Int`, `Int | None`, `IntTuple`, `IntTuples`, or a supported Flag value type (`int`, `bool`, `str`, `tuple[int, ...]`, `None`, or a union of these); `NamedInts` is also accepted",
+                        "`@shape_transform` parameter `{}` must be annotated as `Int`, `Int | None`, `IntTuple`, `IntTuples`, or a supported Flag value type (`int`, `bool`, `str`, `tuple[int, ...]`, `None`, or a union of these); `NamedInts` is also accepted",
                         dsl.parameter_name(index)
                     ),
                 );
@@ -352,10 +352,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 dsl.return_annotation_range(),
                 ErrorKind::InvalidArgument,
                 if flag_value {
-                    "`@type_shape_dsl_function` Flag values are input-only; return must be annotated as `Int`, `IntTuple`, or `IntTuples`"
+                    "`@shape_transform` Flag values are input-only; return must be annotated as `Int`, `IntTuple`, or `IntTuples`"
                         .to_owned()
                 } else {
-                    "`@type_shape_dsl_function` return must be annotated as `Int`, `IntTuple`, or `IntTuples`"
+                    "`@shape_transform` return must be annotated as `Int`, `IntTuple`, or `IntTuples`"
                         .to_owned()
                 },
             );
@@ -376,7 +376,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 errors,
                                 error.range,
                                 ErrorKind::InvalidArgument,
-                                format!("@type_shape_dsl_function {}", error.message),
+                                format!("@shape_transform {}", error.message),
                             );
                             None
                         }
@@ -428,15 +428,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 | TypeShapeDslComparisonOp::NotEqual
                                 | TypeShapeDslComparisonOp::LessThan
                         ))
-                        .then_some("`@type_shape_dsl_function` `Int` comparisons support only `==`, `!=`, and `<`"),
+                        .then_some("`@shape_transform` `Int` comparisons support only `==`, `!=`, and `<`"),
                         Some(TypeShapeDslComparisonDomain::FlagInt) => None,
                         Some(TypeShapeDslComparisonDomain::FlagString) => (!matches!(
                             op,
                             TypeShapeDslComparisonOp::Equal
                                 | TypeShapeDslComparisonOp::NotEqual
                         ))
-                        .then_some("`@type_shape_dsl_function` Flag string comparisons support only `==` and `!=`"),
-                        None => Some("`@type_shape_dsl_function` comparison operands must both be annotated as `Int` or both be `Flag[int]`; string equality also accepts compatible Flag string values"),
+                        .then_some("`@shape_transform` Flag string comparisons support only `==` and `!=`"),
+                        None => Some("`@shape_transform` comparison operands must both be annotated as `Int` or both be `Flag[int]`; string equality also accepts compatible Flag string values"),
                     },
                     TypeShapeDslConditionKind::Any { .. }
                     | TypeShapeDslConditionKind::DimensionEquality { .. }
@@ -453,7 +453,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                     | TypeShapeDslInputDomain::OptionalInt
                             )
                         }))
-                        .then_some("`@type_shape_dsl_function` `is_concrete_int` requires an `Int` or `Int | None` value")
+                        .then_some("`@shape_transform` `is_concrete_int` requires an `Int` or `Int | None` value")
                     }),
                     TypeShapeDslConditionKind::IsIntValue {
                         parameter_origins, ..
@@ -463,7 +463,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             TypeShapeDslInputDomain::Flag(domain)
                                 if domain.is_subset_of(type_shape_dsl_narrowable_flag_domain())
                         )))
-                        .then_some("`@type_shape_dsl_function` `is_int_value` requires a Flag[int | tuple[int, ...] | None] value")
+                        .then_some("`@shape_transform` `is_int_value` requires a Flag[int | tuple[int, ...] | None] value")
                     }),
                     TypeShapeDslConditionKind::IsNone {
                         parameter_origins,
@@ -479,9 +479,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 )
                         }))
                         .then_some(if *negated {
-                            "`@type_shape_dsl_function` `is not None` requires an `Int | None` value or a supported Flag value"
+                            "`@shape_transform` `is not None` requires an `Int | None` value or a supported Flag value"
                         } else {
-                            "`@type_shape_dsl_function` `is None` requires an `Int | None` value or a supported Flag value"
+                            "`@shape_transform` `is None` requires an `Int | None` value or a supported Flag value"
                         })
                     }),
                     TypeShapeDslConditionKind::BoolSlot {
@@ -496,7 +496,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                         && domain.is_subset_of(type_shape_dsl_optional_flag_domain(FlagMember::Bool))
                             )
                         }))
-                        .then_some("`@type_shape_dsl_function` a name used directly as a condition requires a boolean Flag value")
+                        .then_some("`@shape_transform` a name used directly as a condition requires a boolean Flag value")
                     }),
                     TypeShapeDslConditionKind::FlagIntCompare(_)
                     | TypeShapeDslConditionKind::Membership { .. }
@@ -537,7 +537,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         parameter_domains[use_.parameter()]
                             .can_use_as(TypeShapeDslDomain::Int, use_.narrowing())
                     }))
-                    .then_some("`@type_shape_dsl_function` IntTuple elements must be annotated as `Int`, or as `Int | None` and narrowed to exclude `None`"),
+                    .then_some("`@shape_transform` IntTuple elements must be annotated as `Int`, or as `Int | None` and narrowed to exclude `None`"),
                     TypeShapeDslExpressionKind::IntegerSlot {
                         parameter_uses: Some(uses),
                         ..
@@ -558,7 +558,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 _ => false,
                             }
                         });
-                        (!valid).then_some("`@type_shape_dsl_function` dimension arithmetic operands must be annotated as `Int`, as `Int | None` narrowed to exclude `None`, or as a compatible integer Flag")
+                        (!valid).then_some("`@shape_transform` dimension arithmetic operands must be annotated as `Int`, as `Int | None` narrowed to exclude `None`, or as a compatible integer Flag")
                     }
                     TypeShapeDslExpressionKind::IntTupleIndex {
                         parameter_origins: Some(shapes),
@@ -567,7 +567,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         parameter_domains[*shape]
                             == TypeShapeDslInputDomain::Value(TypeShapeDslDomain::IntTuple)
                     }))
-                    .then_some("`@type_shape_dsl_function` len and indexing require an `IntTuple` parameter"),
+                    .then_some("`@shape_transform` len and indexing require an `IntTuple` parameter"),
                     TypeShapeDslExpressionKind::IntTupleLength {
                         parameter_origins: Some(shapes),
                         ..
@@ -588,9 +588,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 TypeShapeDslInputDomain::Flag(_)
                             )
                         }) {
-                            Some("`@type_shape_dsl_function` `len` of a Flag value requires control-flow narrowing to a sequence")
+                            Some("`@shape_transform` `len` of a Flag value requires control-flow narrowing to a sequence")
                         } else {
-                            Some("`@type_shape_dsl_function` `len` requires an `IntTuple` or `IntTuples` parameter")
+                            Some("`@shape_transform` `len` requires an `IntTuple` or `IntTuples` parameter")
                         }
                     }
                     TypeShapeDslExpressionKind::IntTupleSlot {
@@ -601,7 +601,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             parameter_domains[*shape]
                                 == TypeShapeDslInputDomain::Value(TypeShapeDslDomain::IntTuple)
                         }))
-                        .then_some("`@type_shape_dsl_function` shape expression operands must be annotated as `IntTuple`")
+                        .then_some("`@shape_transform` shape expression operands must be annotated as `IntTuple`")
                     }
                     TypeShapeDslExpressionKind::GeneratorSourceSlot {
                         parameter_uses: Some(uses),
@@ -617,22 +617,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                     ))
                         });
                         (!valid).then_some(if *allow_int_tuples {
-                            "`@type_shape_dsl_function` generator source must be an `IntTuple`, `IntTuples`, or Flag sequence"
+                            "`@shape_transform` generator source must be an `IntTuple`, `IntTuples`, or Flag sequence"
                         } else {
-                            "`@type_shape_dsl_function` generator source must be an `IntTuple` or Flag sequence"
+                            "`@shape_transform` generator source must be an `IntTuple` or Flag sequence"
                         })
                     }
                     TypeShapeDslExpressionKind::GeneratorElementAsDimension {
                         source_parameter_uses: Some(uses),
                         ..
                     } => (!uses.iter().all(is_integer_generator_source)).then_some(
-                        "`@type_shape_dsl_function` generator item dimension operation requires an `IntTuple` or `Flag[tuple[int, ...]]` source",
+                        "`@shape_transform` generator item dimension operation requires an `IntTuple` or `Flag[tuple[int, ...]]` source",
                     ),
                     TypeShapeDslExpressionKind::GeneratorElementAsFlagInt {
                         source_parameter_uses: Some(uses),
                         ..
                     } => (!uses.iter().all(is_integer_generator_source)).then_some(
-                        "`@type_shape_dsl_function` generator item Flag operation requires an `IntTuple` or `Flag[tuple[int, ...]]` source",
+                        "`@shape_transform` generator item Flag operation requires an `IntTuple` or `Flag[tuple[int, ...]]` source",
                     ),
                     TypeShapeDslExpressionKind::GeneratorElementAsIntTuple {
                         source_parameter_uses,
@@ -642,7 +642,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             parameter_domains[use_.parameter()]
                                 == TypeShapeDslInputDomain::Value(TypeShapeDslDomain::IntTuples)
                         }))
-                        .then_some("`@type_shape_dsl_function` generator item shape operation requires an `IntTuples` source")
+                        .then_some("`@shape_transform` generator item shape operation requires an `IntTuples` source")
                     }
                     TypeShapeDslExpressionKind::Einsum {
                         parameter_origins: Some(parameters),
@@ -655,7 +655,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         parameter_domains[*parameter]
                             == TypeShapeDslInputDomain::Value(TypeShapeDslDomain::IntTuples)
                     }))
-                    .then_some("`@type_shape_dsl_function` einsum operands must be annotated as `IntTuples`"),
+                    .then_some("`@shape_transform` einsum operands must be annotated as `IntTuples`"),
                     TypeShapeDslExpressionKind::GufuncBroadcast {
                         parameter_origins: Some(parameters),
                         ..
@@ -663,7 +663,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         parameter_domains[*parameter]
                             == TypeShapeDslInputDomain::Value(TypeShapeDslDomain::IntTuples)
                     }))
-                    .then_some("`@type_shape_dsl_function` gufunc operands must be annotated as `IntTuples`"),
+                    .then_some("`@shape_transform` gufunc operands must be annotated as `IntTuples`"),
                     TypeShapeDslExpressionKind::AxisReduce {
                         axis_parameters,
                         parameter_origins,
@@ -698,7 +698,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     } => (!parameter_origins.iter().all(|parameter| {
                         parameter_domains[*parameter] == TypeShapeDslInputDomain::NamedInts
                     }))
-                    .then_some("`@type_shape_dsl_function` einops axis lengths must be annotated as `NamedInts`"),
+                    .then_some("`@shape_transform` einops axis lengths must be annotated as `NamedInts`"),
                     TypeShapeDslExpressionKind::FlagValueSlot {
                         parameter_uses: Some(uses),
                         required,
@@ -735,7 +735,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 _ => false,
                             }
                         });
-                        (!valid).then_some("`@type_shape_dsl_function` Flag operation requires a compatible Flag parameter")
+                        (!valid).then_some("`@shape_transform` Flag operation requires a compatible Flag parameter")
                     }
                     TypeShapeDslExpressionKind::DimensionLiteral(_)
                     | TypeShapeDslExpressionKind::Gradual
@@ -794,7 +794,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         kind: TypeShapeDslSlotReturnKind::KnownDomain { domain, .. },
                         ..
                     } if *domain != result => {
-                        self.error(errors, return_.range(), ErrorKind::InvalidArgument, "`@type_shape_dsl_function` local return domain must match the declared result".to_owned());
+                        self.error(
+                            errors,
+                            return_.range(),
+                            ErrorKind::InvalidArgument,
+                            "`@shape_transform` local return domain must match the declared result"
+                                .to_owned(),
+                        );
                         valid_body = false;
                     }
                     TypeShapeDslReturnKind::Slot {
@@ -813,7 +819,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             return_.range(),
                             ErrorKind::InvalidArgument,
                             format!(
-                                "`@type_shape_dsl_function` local return requires contributing parameters to use the `{}` domain",
+                                "`@shape_transform` local return requires contributing parameters to use the `{}` domain",
                                 domain.as_str(),
                             ),
                         );
@@ -832,21 +838,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             ErrorKind::InvalidArgument,
                             match parameter_domains[parameter] {
                                 TypeShapeDslInputDomain::Flag(_) => format!(
-                                    "`@type_shape_dsl_function` Flag parameter `{}` is input-only and cannot be returned",
+                                    "`@shape_transform` Flag parameter `{}` is input-only and cannot be returned",
                                     dsl.parameter_name(parameter)
                                 ),
                                 TypeShapeDslInputDomain::NamedInts => format!(
-                                    "`@type_shape_dsl_function` NamedInts parameter `{}` is input-only and cannot be returned",
+                                    "`@shape_transform` NamedInts parameter `{}` is input-only and cannot be returned",
                                     dsl.parameter_name(parameter)
                                 ),
                                 TypeShapeDslInputDomain::OptionalInt
                                     if result == TypeShapeDslDomain::Int => format!(
-                                    "`@type_shape_dsl_function` `Int | None` parameter `{}` must be narrowed to exclude `None` before it can be returned as `Int`",
+                                    "`@shape_transform` `Int | None` parameter `{}` must be narrowed to exclude `None` before it can be returned as `Int`",
                                     dsl.parameter_name(parameter)
                                 ),
                                 TypeShapeDslInputDomain::OptionalInt
                                 | TypeShapeDslInputDomain::Value(_) => format!(
-                                    "`@type_shape_dsl_function` return annotation must match returned parameter `{}`",
+                                    "`@shape_transform` return annotation must match returned parameter `{}`",
                                     dsl.parameter_name(parameter)
                                 ),
                             },
@@ -863,20 +869,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         }) {
                             let message = match parameter_domains[invalid_use.parameter()] {
                                 TypeShapeDslInputDomain::Flag(_) => format!(
-                                        "`@type_shape_dsl_function` Flag parameter `{}` is input-only and cannot be returned",
+                                        "`@shape_transform` Flag parameter `{}` is input-only and cannot be returned",
                                         dsl.parameter_name(invalid_use.parameter())
                                     ),
                                 TypeShapeDslInputDomain::NamedInts => format!(
-                                        "`@type_shape_dsl_function` NamedInts parameter `{}` is input-only and cannot be returned",
+                                        "`@shape_transform` NamedInts parameter `{}` is input-only and cannot be returned",
                                         dsl.parameter_name(invalid_use.parameter())
                                     ),
                                 TypeShapeDslInputDomain::OptionalInt
                                     if result == TypeShapeDslDomain::Int => format!(
-                                        "`@type_shape_dsl_function` `Int | None` parameter `{}` must be narrowed to exclude `None` before it can be returned as `Int`",
+                                        "`@shape_transform` `Int | None` parameter `{}` must be narrowed to exclude `None` before it can be returned as `Int`",
                                         dsl.parameter_name(invalid_use.parameter())
                                     ),
                                 TypeShapeDslInputDomain::OptionalInt
-                                | TypeShapeDslInputDomain::Value(_) => "`@type_shape_dsl_function` local alias return domain must match the declared result".to_owned(),
+                                | TypeShapeDslInputDomain::Value(_) => "`@shape_transform` local alias return domain must match the declared result".to_owned(),
                             };
                             self.error(
                                 errors,
@@ -893,7 +899,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             return_.range(),
                             ErrorKind::InvalidArgument,
                             format!(
-                                "`@type_shape_dsl_function` declares return domain `{}`, but `shape_extensions.dsl.{}.gradual()` returns `{}`",
+                                "`@shape_transform` declares return domain `{}`, but `shape_extensions.dsl.{}.gradual()` returns `{}`",
                                 result.as_str(),
                                 domain.as_str(),
                                 domain.as_str(),
@@ -907,7 +913,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             return_.range(),
                             ErrorKind::InvalidArgument,
                             format!(
-                                "`@type_shape_dsl_function` returned expression requires a result in the `{}` domain",
+                                "`@shape_transform` returned expression requires a result in the `{}` domain",
                                 domain.as_str(),
                             ),
                         );
@@ -948,7 +954,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     errors,
                     function_range,
                     ErrorKind::InvalidArgument,
-                    "`@type_shape_dsl_function` must be applied to an ordinary function definition"
+                    "`@shape_transform` must be applied to an ordinary function definition"
                         .to_owned(),
                 );
             }
@@ -960,35 +966,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// reexports work while unrelated same-spelling functions do not.
     fn resolve_type_shape_dsl_intrinsic(&self, expr: &Expr) -> Option<TypeShapeDslIntrinsic> {
         let callee = self.expr_infer(expr, &self.error_swallower());
-        if let Type::ClassDef(class) = &callee
-            && class.qname().module_name().as_str() == "shape_extensions.dsl"
-            && class.qname().id().as_str() == "IntTuple"
-        {
-            return Some(TypeShapeDslIntrinsic::IntTuple);
-        }
-        if let Type::ClassDef(class) = &callee
-            && class.qname().module_name().as_str() == "shape_extensions.dsl"
-            && class.qname().id().as_str() == "IntTuples"
-        {
-            return Some(TypeShapeDslIntrinsic::IntTuples);
-        }
-        if let Type::ClassDef(class) = &callee
-            && class.qname().module_name().as_str() == "builtins"
-            && class.qname().id().as_str() == "range"
-        {
-            return Some(TypeShapeDslIntrinsic::Range);
-        }
-        if let Type::ClassDef(class) = &callee
-            && class.qname().module_name().as_str() == "builtins"
-            && class.qname().id().as_str() == "tuple"
-        {
-            return Some(TypeShapeDslIntrinsic::Tuple);
-        }
-        if let Type::ClassDef(class) = &callee
-            && class.qname().module_name().as_str() == "builtins"
-            && class.qname().id().as_str() == "zip"
-        {
-            return Some(TypeShapeDslIntrinsic::Zip);
+        if let Type::ClassDef(class) = &callee {
+            match class.known() {
+                Some(KnownClass::ShapeExtensionsDslIntTuple) => {
+                    return Some(TypeShapeDslIntrinsic::IntTuple);
+                }
+                Some(KnownClass::ShapeExtensionsDslIntTuples) => {
+                    return Some(TypeShapeDslIntrinsic::IntTuples);
+                }
+                Some(KnownClass::Range) => return Some(TypeShapeDslIntrinsic::Range),
+                Some(KnownClass::Tuple) => return Some(TypeShapeDslIntrinsic::Tuple),
+                Some(KnownClass::Zip) => return Some(TypeShapeDslIntrinsic::Zip),
+                _ => {}
+            }
         }
         let Some(CalleeKind::Function(function_kind)) = callee.callee_kind() else {
             return None;
@@ -1056,11 +1046,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if id.qname.id().as_str() != "gradual" {
             return None;
         }
-        if class.has_toplevel_qname("shape_extensions.dsl", "Int") {
+        if class.is(KnownClass::ShapeExtensionsDslInt) {
             Some(TypeShapeDslIntrinsic::Gradual(TypeShapeDslDomain::Int))
-        } else if class.has_toplevel_qname("shape_extensions.dsl", "IntTuple") {
+        } else if class.is(KnownClass::ShapeExtensionsDslIntTuple) {
             Some(TypeShapeDslIntrinsic::Gradual(TypeShapeDslDomain::IntTuple))
-        } else if class.has_toplevel_qname("shape_extensions.dsl", "IntTuples") {
+        } else if class.is(KnownClass::ShapeExtensionsDslIntTuples) {
             Some(TypeShapeDslIntrinsic::Gradual(
                 TypeShapeDslDomain::IntTuples,
             ))
@@ -1179,16 +1169,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 parameter_name: function.parameter_name(index).as_str(),
                 position: index + 1,
             };
-            let arg = self.parse_type_shape_dsl_argument(
+            let Ok(arg) = self.parse_type_shape_dsl_argument(
                 arg_expr,
                 *domain,
                 type_argument_context,
                 argument_context,
                 errors,
-            );
-            if arg.is_error() {
-                return arg;
-            }
+            ) else {
+                return Type::any_error();
+            };
             if !self.is_type_shape_dsl_argument(&arg, *domain) {
                 let article = match domain {
                     TypeShapeDslInputDomain::Flag(_) | TypeShapeDslInputDomain::NamedInts => "a",
@@ -1215,6 +1204,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     fn parse_type_shape_dsl_argument(
+        &self,
+        arg: &Expr,
+        domain: TypeShapeDslInputDomain,
+        type_form_context: TypeFormContext<'_>,
+        argument_context: TypeShapeDslArgumentContext<'_>,
+        errors: &ErrorCollector,
+    ) -> Result<Type, ()> {
+        let parse_errors = self.error_collector();
+        let ty = self.parse_type_shape_dsl_argument_inner(
+            arg,
+            domain,
+            type_form_context,
+            argument_context,
+            &parse_errors,
+        );
+        // Diagnostics produced by this parse, not an inherited Any flavor, signal failure.
+        let failed = parse_errors.has_hard();
+        errors.extend(parse_errors);
+        if failed { Err(()) } else { Ok(ty) }
+    }
+
+    fn parse_type_shape_dsl_argument_inner(
         &self,
         arg: &Expr,
         domain: TypeShapeDslInputDomain,
@@ -1272,7 +1283,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         type_form_context,
                         &dimension_errors,
                     ) {
-                    Ok(dimensions) => dimensions.into_iter().next().filter(|ty| !ty.is_error()),
+                    Ok(dimensions) => dimensions.into_iter().next(),
                     Err(DimensionExprError::Invalid) => None,
                     Err(DimensionExprError::InvalidExplicitIntWrapper) => {
                         errors.extend(dimension_errors);
@@ -1289,7 +1300,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 } else {
                     let ordinary_errors = self.error_collector();
                     let ty = self.expr_untype(arg, type_form_context, &ordinary_errors);
-                    if ty.is_error() {
+                    if ordinary_errors.has_hard() {
                         errors.extend(dimension_errors);
                         Type::any_error()
                     } else {
@@ -1344,7 +1355,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub(crate) fn is_int_tuples_dsl_argument(&self, ty: &Type) -> bool {
         let restriction = match ty {
-            Type::Any(style) => return *style != AnyStyle::Error,
+            Type::Any(_) => return true,
             Type::Tuple(_) | Type::Union(_) if is_int_tuples_type(ty) => return true,
             Type::TypeLevelDslCall(call) => {
                 return call.result_domain() == Some(TypeShapeDslDomain::IntTuples);
@@ -1389,9 +1400,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ),
             },
             TypeShapeDslInputDomain::Flag(domain) => {
-                if matches!(ty, Type::Any(AnyStyle::Error)) {
-                    return false;
-                }
                 domain.accepts_with_str_subclasses(ty, |member| match member {
                     Type::ClassType(cls) | Type::SelfType(cls) => {
                         self.has_superclass(cls.class_object(), self.stdlib.str().class_object())
@@ -1400,7 +1408,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 })
             }
             TypeShapeDslInputDomain::NamedInts => match ty {
-                Type::Any(style) => *style != AnyStyle::Error,
+                Type::Any(_) => true,
                 Type::NamedInts(_) => true,
                 Type::Quantified(q) if q.kind == QuantifiedKind::TypeVar => {
                     q.restriction.is_named_ints()
@@ -1429,7 +1437,7 @@ fn type_shape_dsl_input_domain(ty: &Type) -> Option<TypeShapeDslInputDomain> {
     }
     if matches!(
         ty,
-        Type::ClassType(cls) if cls.has_qname("shape_extensions", "NamedInts")
+        Type::ClassType(cls) if cls.is(KnownClass::ShapeExtensionsNamedInts)
     ) || matches!(
         ty,
         Type::Quantified(q) if q.restriction.is_named_ints()

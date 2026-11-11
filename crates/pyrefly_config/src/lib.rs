@@ -14,6 +14,7 @@ pub mod error_kind;
 pub mod file_kind;
 pub mod finder;
 pub mod migration;
+pub mod module_names;
 pub(crate) mod module_wildcard;
 pub mod pyproject;
 pub mod resolve_unconfigured;

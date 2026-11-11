@@ -1237,7 +1237,7 @@ def try_except_twice():
     except Exception:
         e3 # E: `e3` is uninitialized
 
-    e3 # E: `e3` is uninitialized
+    e3 # E: `e3` may be uninitialized
 
 def try_except_multiple_finally():
     try:
@@ -1249,7 +1249,7 @@ def try_except_multiple_finally():
     except OSError as e5:  # E: This `except` clause is unreachable, because an earlier clause already catches `OSError`
         e4 # E: `e4` is uninitialized
     finally:
-        e4 # E: `e4` is uninitialized
+        e4 # E: `e4` may be uninitialized
         e5 # E: `e5` is uninitialized
 
     e4
@@ -1409,7 +1409,7 @@ from typing import assert_type, Literal
 x = 'string'
 class A:
     x = 42
-    def f():
+    def f(self):
         assert_type(x, str)
     lambda_f = lambda: assert_type(x, str)
     class B:
@@ -1433,6 +1433,23 @@ class C:
     x_chars = [char for char in X]
     def __init__(self, x: str = X):
         self.x = x
+    "#,
+);
+
+// A method body cannot see a class-body name, even one that its signature mentions.
+testcase!(
+    test_class_scope_name_in_signature_is_not_visible_in_body,
+    r#"
+from typing import TypeVar
+class A:
+    import collections
+    def f(self, x: collections.OrderedDict) -> None:
+        collections  # E: Could not find name `collections`
+class B:
+    T = TypeVar("T")
+    def f(self, x: T) -> T:
+        T  # E: Could not find name `T`
+        return x
     "#,
 );
 
@@ -1865,14 +1882,13 @@ def f():
 
 // https://github.com/facebook/pyrefly/issues/4318
 testcase!(
-    bug = "Attributes assigned in methods are not checked for initialization",
     test_conditionally_defined_class_member,
     TestEnv::new().enable_possibly_uninitialized_attribute_error(),
     r#"
+from typing import Any, Never
+
 def coin() -> bool:
     return True
-
-from typing import Any, Never
 
 def stop() -> Never:
     raise Exception()
@@ -1898,7 +1914,7 @@ class Instance:
         else:
             self.complete = 2
         if coin():
-            self.partial = 1
+            self.partial = 1  # E: Attribute `partial` may be uninitialized
 
 class DynamicInstance:
     if coin():
@@ -1921,11 +1937,11 @@ class PartialWithReturn:
     def __init__(self) -> None:
         if coin():
             return
-        self.value = 1
+        self.value = 1  # E: Attribute `value` may be uninitialized
 
 class BareAnnotation:
     def __init__(self) -> None:
-        self.value: int
+        self.value: int  # E: Attribute `value` may be uninitialized
 
 class CompleteWithNever:
     def __init__(self) -> None:
@@ -2025,4 +2041,96 @@ def f():
         (y := 1)
         y: int
 "#,
+);
+
+testcase!(
+    test_circular_ref_is_illegal,
+    r#"
+class A:
+    str: "str" = ""  # E: Circular reference to `str` in annotation
+    "#,
+);
+
+testcase!(
+    test_indirect_circular_ref_is_illegal,
+    r#"
+x: "y" = 1  # E: Circular reference to `y` in annotation
+y: "x" = 2  # E: Circular reference to `x` in annotation
+    "#,
+);
+
+testcase!(
+    test_circular_ref_through_loop,
+    r#"
+y = 0
+for _ in range(3):
+    y: "x" = 1  # E: Circular reference to `x` in annotation
+x: "y" = 2  # E: Circular reference to `y` in annotation  # E: Expected a type form, got instance of `Literal[0] | Unknown`
+    "#,
+);
+
+testcase!(
+    test_circular_ref_through_narrow,
+    r#"
+y: "x" = 1  # E: Circular reference to `x` in annotation
+if isinstance(y, int):
+    pass
+else:
+    def y() -> None: ...
+x: y = 2  # E: Circular reference to `y` in annotation  # E: Expected a type form, got instance of `(() -> None) | int`
+    "#,
+);
+
+testcase!(
+    test_circular_ref_through_function,
+    r#"
+from __future__ import annotations
+def A() -> A: ...  # E: Expected a type form, got instance of `() -> Unknown`
+    "#,
+);
+
+testcase!(
+    test_forward_reference_to_shadowing_method,
+    r#"
+class A:
+    x: "int"  # E: Expected a type form, got instance of `(self: Self@A) -> None`
+    def int(self) -> None: ...
+    "#,
+);
+
+// A method body cannot see the class scope, even when the method's postponed annotations can.
+testcase!(
+    test_method_body_ignores_class_scope_name_in_own_annotation,
+    r#"
+from __future__ import annotations
+class C:
+    def list(self) -> list[str]:  # E: `(self: Self@C) -> Unknown` is not subscriptable
+        return list({"a": 1}.keys())
+    "#,
+);
+
+testcase!(
+    test_method_body_ignores_class_scope_name_in_annotations,
+    r#"
+from __future__ import annotations
+from typing import assert_type
+class C:
+    def f(self, x: str, y: object) -> None:  # E: Expected a type form, got instance of `Literal[1]`
+        if isinstance(y, str):
+            assert_type(y, str)
+        assert_type(str(1), str)
+    str = 1
+    "#,
+);
+
+// A type alias value is evaluated where it appears, even when annotations are postponed.
+testcase!(
+    test_alias_value_in_class_body_is_not_postponed,
+    r#"
+from __future__ import annotations
+from typing import TypeAlias
+class C:
+    X: TypeAlias = Y  # E: Could not find name `Y`
+    Y = int
+    "#,
 );

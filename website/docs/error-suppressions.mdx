@@ -39,6 +39,34 @@ def foo() -> int:
   return "this is a type error" # pyrefly: ignore[bad-return]
 ```
 
+To suppress the `unused-ignore` diagnostic for a suppression comment, include
+`unused-ignore` in that comment's error codes:
+
+```python
+x: int = 1  # pyrefly: ignore[bad-assignment, unused-ignore]
+```
+
+This also suppresses the diagnostic when `unused-ignore` is the only listed code.
+Other suppression comments still produce unused-ignore diagnostics.
+Explicit cleanup with `pyrefly suppress --remove-unused` still removes unused
+suppressions, including comments that contain `unused-ignore`.
+
+If a comment still suppresses an error, cleanup keeps its used codes and removes
+its unused codes. For example, cleanup rewrites:
+
+```python
+x: int = ""  # pyrefly: ignore[bad-assignment, unused-ignore]
+```
+
+to:
+
+```python
+x: int = ""  # pyrefly: ignore[bad-assignment]
+```
+
+The comment still suppresses `bad-assignment`, but cleanup removes its
+`unused-ignore` opt-out.
+
 We respect the specification and allow `type: ignore` to be used:
 
 ```python
@@ -129,6 +157,8 @@ baseline = "baseline.json"
 
 When the baseline is specified in the configuration file, you don't need to pass the `--baseline` flag on every invocation. The CLI flag takes precedence if both are specified.
 
+`pyrefly init` does this for a BasedPyright project that already has a baseline file. It asks whether to create `pyrefly_baseline.json` in the project root and fill it with the errors Pyrefly reports. The BasedPyright entries are not copied. Answering yes adds `baseline = "pyrefly_baseline.json"` and creates the file. Answering no, including `--non-interactive`, leaves that line out and continues with the normal check and error-suppression prompt.
+
 Note that `baseline` is a **project-level setting** and cannot be overridden in [`sub-config`](./configuration.mdx#sub-configs) sections. If you need different baseline files for different parts of your codebase, consider using separate Pyrefly configuration files.
 
 `baseline-matching-mode` controls how errors are matched:
@@ -160,12 +190,18 @@ baseline-format = "minimal"
 Both settings are configuration-only so all users interpret and update the
 checked-in baseline consistently.
 
-Note that errors suppressed by the baseline file are still shown in the IDE.
+Errors that match the baseline are still shown in the IDE. Until
+`baseline-error-level` is set they appear as hints, which most editors leave out
+of the Problems list.
 
 `--baseline-error-level=<ignore|hint|info|warn|error>` and the project-level
-`baseline-error-level` setting control how matching errors are reported. The
-default is `ignore`, which omits them from CLI output; the other levels emit them
-at a reduced or unchanged severity:
+`baseline-error-level` setting control how matching errors are reported, in
+`pyrefly check` and in the IDE. For `pyrefly check`, an unset value acts as
+`ignore` and omits them from CLI output. Otherwise a match is shown at the
+lower of its own severity and this level, so a warning recorded in the baseline
+stays a warning when the level is `error`. The IDE keeps showing hints until
+the option is set, then uses that same cap. `ignore` hides the matched
+diagnostic in the editor too:
 
 ```toml
 baseline = "baseline.json"

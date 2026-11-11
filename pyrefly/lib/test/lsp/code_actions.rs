@@ -854,6 +854,38 @@ BytesIO
     );
 }
 
+// https://github.com/facebook/pyrefly/issues/5223
+#[test]
+fn insert_import_skips_module_name_with_non_identifier() {
+    let (handles, state) = mk_multi_file_state(
+        &[
+            ("main", "Migration\n"),
+            ("pkg.migrations.0001_initial", "class Migration: ...\n"),
+            ("pkg.models", "class Migration: ...\n"),
+        ],
+        Require::Exports,
+        false,
+    );
+    let import_titles: Vec<String> = state
+        .transaction()
+        .local_quickfix_code_actions_sorted(
+            &handles["main"],
+            TextRange::empty(TextSize::new(0)),
+            ImportFormat::Absolute,
+            InlayHintConfig::default(),
+            None,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(title, _)| title)
+        .filter(|title| title.starts_with("Insert import:"))
+        .collect();
+    assert_eq!(
+        import_titles,
+        ["Insert import: `from pkg.models import Migration`"]
+    );
+}
+
 #[test]
 fn import_edits_with_non_future_imports() {
     let (handles, _) = mk_multi_file_state(
@@ -8566,4 +8598,80 @@ zzz = grow(2)
     assert!(actions[1].1.contains("zzz: int = grow(2)"));
     assert!(!actions[0].1.contains("zzz: int"));
     assert!(!actions[1].1.contains("yyy: int"));
+}
+
+#[test]
+fn insert_inferred_type_ignores_declaration_at_selection_end() {
+    let code = "\
+def grow(x: int):
+    return x
+
+yyy = grow(1)
+zzz = grow(2)
+";
+    let start = code.find("yyy").unwrap();
+    let end = code.find("zzz").unwrap();
+    let selection = TextRange::new(
+        TextSize::try_from(start).unwrap(),
+        TextSize::try_from(end).unwrap(),
+    );
+    let actions = inferred_annotation_actions(&[("main", code)], selection, Default::default());
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].1.contains("yyy: int = grow(1)"));
+    assert!(!actions[0].1.contains("zzz: int"));
+}
+
+#[test]
+fn insert_inferred_type_skips_walrus_and_captured_writes() {
+    let walrus = "\
+def make() -> int:
+    return 1
+
+if (assigned := make()):
+    print(assigned)
+";
+    assert!(
+        inferred_annotation_actions(
+            &[("main", walrus)],
+            range_of(walrus, "assigned :="),
+            Default::default(),
+        )
+        .is_empty()
+    );
+
+    let global = "\
+def make() -> int:
+    return 1
+
+def write() -> None:
+    global item
+    item = make()
+";
+    assert!(
+        inferred_annotation_actions(
+            &[("main", global)],
+            range_of(global, "item = make()"),
+            Default::default(),
+        )
+        .is_empty()
+    );
+
+    let nonlocal_write = "\
+def make() -> int:
+    return 1
+
+def outer() -> None:
+    item = 1
+    def write() -> None:
+        nonlocal item
+        item = make()
+";
+    assert!(
+        inferred_annotation_actions(
+            &[("main", nonlocal_write)],
+            range_of(nonlocal_write, "item = make()"),
+            Default::default(),
+        )
+        .is_empty()
+    );
 }

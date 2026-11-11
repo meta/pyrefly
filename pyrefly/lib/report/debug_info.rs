@@ -5,11 +5,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use pyrefly_build::handle::Handle;
 use pyrefly_python::module_name::ModuleName;
-use pyrefly_util::arc_id::ArcId;
+use pyrefly_python::module_path::ModulePath;
 use pyrefly_util::display::DisplayWithCtx;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::visit::VisitMut;
@@ -26,32 +27,19 @@ use crate::binding::binding::Keyed;
 use crate::binding::bindings::BindingEntry;
 use crate::binding::bindings::BindingTable;
 use crate::binding::table::TableKeyed;
-use crate::config::config::ConfigFile;
-use crate::error::collector::ErrorCollector;
+use crate::error::collector::CollectedErrors;
 use crate::module::module_info::ModuleInfo;
-use crate::state::load::Load;
 use crate::state::state::Transaction;
 use crate::table_for_each;
 
 pub fn debug_info(transaction: &Transaction, handles: &[Handle], is_javascript: bool) -> String {
-    fn f(
-        transaction: &Transaction,
-        handles: &[Handle],
-    ) -> Option<Vec<(ArcId<ConfigFile>, Arc<Load>, Arc<Answers>)>> {
-        handles
-            .iter()
-            .map(|x| {
-                Some((
-                    transaction.get_config(x)?,
-                    transaction.get_load(x)?,
-                    transaction.get_answers(x)?,
-                ))
-            })
-            .collect()
+    fn f(transaction: &Transaction, handles: &[Handle]) -> Option<Vec<Arc<Answers>>> {
+        handles.iter().map(|x| transaction.get_answers(x)).collect()
     }
 
     let owned = f(transaction, handles).expect("Everything to be computed for debug info");
-    let debug_info = DebugInfo::new(&owned.map(|x| (&*x.0, &x.1.module_info, &x.1.errors, &*x.2)));
+    let errors = transaction.get_errors(handles).collect_errors();
+    let debug_info = DebugInfo::new(&owned.map(|x| (x.bindings().module(), &**x)), &errors);
     let mut output = serde_json::to_string(&debug_info).unwrap();
 
     // It's super handy to be able to diff the output, which we can do most easily if each binding is on its own line.
@@ -93,7 +81,7 @@ struct Error {
 }
 
 impl DebugInfo {
-    pub fn new(modules: &[(&ConfigFile, &ModuleInfo, &ErrorCollector, &Answers)]) -> Self {
+    pub fn new(modules: &[(&ModuleInfo, &Answers)], errors: &CollectedErrors) -> Self {
         fn f<K: Keyed>(
             _t: &AnswerEntry<K>,
             module_info: &ModuleInfo,
@@ -127,29 +115,51 @@ impl DebugInfo {
             }
         }
 
+        let mut errors_by_module: HashMap<&ModulePath, Vec<Error>> = HashMap::new();
+        for error in errors.ordinary.iter().chain(&errors.directives) {
+            errors_by_module
+                .entry(error.path())
+                .or_default()
+                .push(Error {
+                    location: error.display_range().to_string(),
+                    message: error.msg().to_owned(),
+                });
+        }
+
         Self {
             modules: modules
                 .iter()
-                .map(|(config, module_info, errors, answers)| {
+                .map(|(module_info, answers)| {
                     let mut res = Vec::new();
-                    let error_config = config.get_error_config(module_info.path());
                     table_for_each!(answers.table(), |t| f(t, module_info, answers, &mut res));
-                    let collected = errors.collect(&error_config);
-                    let mut output_errors = collected.ordinary;
-                    output_errors.extend(collected.directives);
-                    let errors = output_errors.map(|e| Error {
-                        location: e.display_range().to_string(),
-                        message: e.msg().to_owned(),
-                    });
                     (
                         module_info.name(),
                         Module {
                             bindings: res,
-                            errors,
+                            // A module without diagnostics has no entry.
+                            errors: errors_by_module
+                                .remove(module_info.path())
+                                .unwrap_or_default(),
                         },
                     )
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test::util::TestEnv;
+
+    #[test]
+    fn test_debug_info_includes_parse_errors() {
+        let (state, handle) = TestEnv::one("main", "1 +\n").to_state();
+        let output = debug_info(&state.transaction(), &[handle("main")], false);
+        assert!(
+            output.contains("Parse error"),
+            "debug info should report the parse error:\n{output}"
+        );
     }
 }

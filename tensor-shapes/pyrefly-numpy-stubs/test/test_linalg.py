@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-from typing import Any, assert_type, TYPE_CHECKING
+from typing import Any, assert_type, cast, TYPE_CHECKING
 
 import numpy as np
-from shape_extensions import assert_shape, Int, IntTuple, IntVar
+from shape_extensions import assert_raises, assert_shape, Int, IntTuple, IntVar
 
 N = IntVar("N")
 M = IntVar("M")
@@ -18,9 +18,9 @@ def square_svd_components[N: IntVar, DType](
     x: np.ndarray[[N, N], DType],
 ) -> np.ndarray[[N, N], DType]:
     u, s, vt = np.linalg.svd(x, full_matrices=False)
-    assert_type(u, np.ndarray[[N, N], DType])
-    assert_type(s, np.ndarray[[N], DType])
-    assert_type(vt, np.ndarray[[N, N], DType])
+    assert_type(u, np.ndarray[[N, N]])
+    assert_type(s, np.ndarray[[N]])
+    assert_type(vt, np.ndarray[[N, N]])
     return vt
 
 
@@ -32,20 +32,21 @@ def unrelated_svd_components[M: IntVar, N: IntVar, DType](
     np.ndarray[[int, N], DType],
 ]:
     u, s, vt = np.linalg.svd(x, full_matrices=False)
-    assert_type(u, np.ndarray[[M, int], DType])
-    assert_type(s, np.ndarray[[int], DType])
-    assert_type(vt, np.ndarray[[int, N], DType])
+    assert_type(u, np.ndarray[[M, int]])
+    assert_type(s, np.ndarray[[int]])
+    assert_type(vt, np.ndarray[[int, N]])
     return u, s, vt
 
 
-def reject_non_2d_svd(x: np.ndarray[[M, N, 3]]) -> None:
-    np.linalg.svd(x, full_matrices=False)  # E: not assignable
+def batched_svd(x: np.ndarray[[M, N, 3]]) -> None:
+    u, s, vt = np.linalg.svd(x, full_matrices=False)
+    assert_type(u, np.ndarray[[M, N, int]])
+    assert_type(s, np.ndarray[[M, int]])
+    assert_type(vt, np.ndarray[[M, int, 3]])
 
 
 def reject_unsupported_svd_options(x: np.ndarray[[M, N]]) -> None:
-    np.linalg.svd(x, full_matrices=True)  # E: not assignable
-    np.linalg.svd(x, full_matrices=False, compute_uv=False)  # E: not assignable
-    np.linalg.svd(x, full_matrices=False, hermitian=True)  # E: not assignable
+    np.linalg.svd(x, full_matrices=False, hermitian=True)  # E: No matching overload
 
 
 def generic_matmul[
@@ -263,6 +264,95 @@ def test_particle_in_box_shape_path() -> None:
     assert_shape(wavefunctions.shape, (5, 5))
 
 
+def test_eigh_eigenvalues_are_real() -> None:
+    real32 = np.eye(3, dtype=np.float32)
+    complex64 = np.eye(3, dtype=np.complex64)
+    real64 = np.eye(3)
+    complex128 = np.eye(3, dtype=np.complex128)
+
+    values32, vectors32 = np.linalg.eigh(real32)
+    values_c64, vectors_c64 = np.linalg.eigh(complex64)
+    values64, vectors64 = np.linalg.eigh(real64)
+    values_c128, vectors_c128 = np.linalg.eigh(complex128)
+    assert_type(values32, np.ndarray[[3], np.dtype[np.float32]])
+    assert_type(vectors32, np.ndarray[[3, 3], np.dtype[np.float32]])
+    assert_type(values_c64, np.ndarray[[3], np.dtype[np.float32]])
+    assert_type(vectors_c64, np.ndarray[[3, 3], np.dtype[np.complex64]])
+    assert_type(values64, np.ndarray[[3], np.dtype[np.float64]])
+    assert_type(vectors64, np.ndarray[[3, 3], np.dtype[np.float64]])
+    assert_type(values_c128, np.ndarray[[3], np.dtype[np.float64]])
+    assert_type(vectors_c128, np.ndarray[[3, 3], np.dtype[np.complex128]])
+    assert_shape(values_c128.shape, (3,))
+    assert_shape(vectors_c128.shape, (3, 3))
+    assert values32.dtype == np.dtype(np.float32)
+    assert vectors32.dtype == np.dtype(np.float32)
+    assert values_c64.dtype == np.dtype(np.float32)
+    assert vectors_c64.dtype == np.dtype(np.complex64)
+    assert values64.dtype == np.dtype(np.float64)
+    assert vectors64.dtype == np.dtype(np.float64)
+    assert values_c128.dtype == np.dtype(np.float64)
+    assert vectors_c128.dtype == np.dtype(np.complex128)
+
+
+def test_eigh_integer_input_promotes() -> None:
+    integers = np.eye(3, dtype=np.int64)
+
+    values, vectors = np.linalg.eigh(integers)
+    assert_type(values, np.ndarray[[3], Any])
+    assert_type(vectors, np.ndarray[[3, 3], Any])
+    assert_shape(values.shape, (3,))
+    assert_shape(vectors.shape, (3, 3))
+    assert values.dtype == np.dtype(np.float64)
+    assert vectors.dtype == np.dtype(np.float64)
+
+
+def test_eigh_lowercase_uplo_and_non_square_inputs() -> None:
+    matrix = np.eye(3)
+
+    lower = np.linalg.eigh(matrix, UPLO="l")
+    upper = np.linalg.eigh(matrix, "u")
+    assert_type(lower[0], np.ndarray[[3], np.dtype[np.float64]])
+    assert_type(upper[1], np.ndarray[[3, 3], np.dtype[np.float64]])
+    assert lower[0].shape == (3,)
+    assert upper[1].shape == (3, 3)
+    with assert_raises(np.linalg.LinAlgError):
+        np.linalg.eigh(np.ones((2, 3)))  # E: No matching overload
+    with assert_raises(np.linalg.LinAlgError):
+        np.linalg.eigh(np.ones(3))  # E: No matching overload
+    with assert_raises(np.linalg.LinAlgError):
+        np.linalg.eigh(np.ones((4, 2, 3)))  # E: No matching overload
+
+
+def test_eigh_uplo_batched_and_unknown_rank_inputs() -> None:
+    matrix = np.eye(3, dtype=np.complex128)
+    batch = np.ones((4, 3, 3))
+    unknown = cast(np.ndarray, np.eye(3))
+
+    upper = np.linalg.eigh(matrix, UPLO="U")
+    positional = np.linalg.eigh(matrix, "U")
+    batched_values, batched_vectors = np.linalg.eigh(batch)
+    unknown_values, unknown_vectors = np.linalg.eigh(unknown)
+    assert_type(
+        upper,
+        tuple[
+            np.ndarray[[3], np.dtype[np.float64]],
+            np.ndarray[[3, 3], np.dtype[np.complex128]],
+        ],
+    )
+    assert_type(positional[0], np.ndarray[[3], np.dtype[np.float64]])
+    assert_type(batched_values, np.ndarray[[4, 3], np.dtype[np.float64]])
+    assert_type(batched_vectors, np.ndarray[[4, 3, 3], np.dtype[np.float64]])
+    assert upper[0].dtype == np.dtype(np.float64)
+    assert upper[1].shape == (3, 3)
+    assert positional[0].shape == (3,)
+    assert batched_values.shape == (4, 3)
+    assert batched_vectors.shape == (4, 3, 3)
+    assert unknown_values.shape == (3,)
+    assert unknown_vectors.shape == (3, 3)
+    with assert_raises(ValueError):
+        np.linalg.eigh(matrix, UPLO="X")  # E: No matching overload
+
+
 def test_norm_3d_axis_keepdims_for_nbody() -> None:
     positions = np.ones((5, 3))
     pairwise_deltas = positions[:, None, :] - positions[None, :, :]
@@ -358,6 +448,68 @@ def test_svd_reduced_dtype_preserved() -> None:
     assert_type(u.dtype, np.dtype[np.float32])
     assert_type(s.dtype, np.dtype[np.float32])
     assert_type(vt.dtype, np.dtype[np.float32])
+
+
+def test_svd_defaults_to_full_matrices() -> None:
+    tall = np.ones((5, 3))
+
+    u, s, vh = np.linalg.svd(tall)
+    explicit_u, _, explicit_vh = np.linalg.svd(tall, full_matrices=True)
+    assert_type(u, np.ndarray[[5, 5], np.dtype[np.float64]])
+    assert_type(vh, np.ndarray[[3, 3], np.dtype[np.float64]])
+    assert_type(explicit_u, np.ndarray[[5, 5], np.dtype[np.float64]])
+    assert_shape(s.shape, (3,))
+    assert u.shape == (5, 5)
+    assert vh.shape == (3, 3)
+    assert explicit_u.shape == (5, 5)
+    assert explicit_vh.shape == (3, 3)
+
+
+def test_svd_values_only() -> None:
+    tall = np.ones((5, 3), dtype=np.float32)
+
+    values = np.linalg.svd(tall, compute_uv=False)
+    reduced_values = np.linalg.svd(tall, full_matrices=False, compute_uv=False)
+    assert_type(values, np.ndarray[[3], np.dtype[np.float32]])
+    assert_type(reduced_values, np.ndarray[[3], np.dtype[np.float32]])
+    assert_shape(values.shape, (3,))
+    assert_shape(reduced_values.shape, (3,))
+    assert values.dtype == np.dtype(np.float32)
+
+
+def test_svd_singular_values_are_real() -> None:
+    complex_tall = np.ones((5, 3), dtype=np.complex128)
+    integers = np.ones((5, 3), dtype=np.int64)
+
+    u, s, vh = np.linalg.svd(complex_tall, full_matrices=False)
+    int_u, int_s, int_vh = np.linalg.svd(integers, full_matrices=False)
+    assert_type(u, np.ndarray[[5, 3], np.dtype[np.complex128]])
+    assert_type(s, np.ndarray[[3], np.dtype[np.float64]])
+    assert_type(vh, np.ndarray[[3, 3], np.dtype[np.complex128]])
+    assert_type(int_u, np.ndarray[[5, 3]])
+    assert_type(int_s, np.ndarray[[3]])
+    assert_type(int_vh, np.ndarray[[3, 3]])
+    assert_shape(s.shape, (3,))
+    assert u.dtype == np.dtype(np.complex128)
+    assert s.dtype == np.dtype(np.float64)
+    assert vh.dtype == np.dtype(np.complex128)
+    assert int_u.dtype == np.dtype(np.float64)
+    assert int_s.dtype == np.dtype(np.float64)
+    assert int_vh.dtype == np.dtype(np.float64)
+
+
+def test_svd_batched_and_invalid_ranks() -> None:
+    batch = np.ones((4, 2, 3))
+
+    u, s, vh = np.linalg.svd(batch, full_matrices=False)
+    assert_shape(u.shape, (4, 2, 2))
+    assert_shape(s.shape, (4, 2))
+    assert_shape(vh.shape, (4, 2, 3))
+    assert_shape(np.linalg.svd(batch, compute_uv=False).shape, (4, 2))
+    with assert_raises(np.linalg.LinAlgError):
+        np.linalg.svd(np.ones(3), full_matrices=False)  # E: No matching overload
+    with assert_raises(np.linalg.LinAlgError):
+        np.linalg.svd(np.ones(()), full_matrices=False)  # E: No matching overload
 
 
 def test_svd_all_component_pca_projection() -> None:

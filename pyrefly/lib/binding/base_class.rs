@@ -7,8 +7,12 @@
 
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
+use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::Expr;
+use ruff_python_ast::ExprAttribute;
+use ruff_python_ast::ExprContext;
 use ruff_python_ast::ExprName;
+use ruff_python_ast::ExprSubscript;
 use ruff_python_ast::Identifier;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
@@ -44,6 +48,31 @@ impl Ranged for BaseClassExpr {
 }
 
 impl BaseClassExpr {
+    /// Reconstruct a type expression only when annotation-specific parsing needs it.
+    pub fn to_expr(&self) -> Expr {
+        match self {
+            Self::Name(name) => Expr::Name(name.clone()),
+            Self::Attribute { value, attr, range } => Expr::Attribute(ExprAttribute {
+                node_index: AtomicNodeIndex::default(),
+                range: *range,
+                value: Box::new(value.to_expr()),
+                attr: attr.clone(),
+                ctx: ExprContext::Load,
+            }),
+            Self::Subscript {
+                value,
+                slice,
+                range,
+            } => Expr::Subscript(ExprSubscript {
+                node_index: AtomicNodeIndex::default(),
+                range: *range,
+                value: Box::new(value.to_expr()),
+                slice: slice.clone(),
+                ctx: ExprContext::Load,
+            }),
+        }
+    }
+
     pub fn from_expr(expr: &Expr) -> Option<Self> {
         match expr {
             Expr::Name(x) => Some(Self::Name(x.clone())),

@@ -184,6 +184,40 @@ fn test_rename_source_updates_stub_and_consumers() {
 }
 
 #[test]
+fn test_references_repeated_live_conditional_stub() {
+    let source = "class C:\n    def f(self) -> int:\n        return 1\n";
+    let stub = "import sys\nclass C:\n    if sys.version_info >= (3, 8):\n        def f(self) -> int: ...\n    if sys.version_info >= (3, 10):\n        def f(self) -> int: ...\n";
+    let consumer = "from lib import C\nC().f()\n";
+    for options in [
+        ReferenceOptions::textual_only(true),
+        ReferenceOptions::all(true),
+    ] {
+        let references = replace_paired_references(
+            source,
+            stub,
+            consumer,
+            None,
+            source.find("f(").unwrap(),
+            options,
+        );
+        assert_eq!(
+            references.iter().find(|(path, _)| path == "consumer.py"),
+            Some(&(
+                "consumer.py".to_owned(),
+                consumer.replace(".f()", ".renamed()"),
+            )),
+        );
+        assert_eq!(
+            references.iter().find(|(path, _)| path == "lib.py"),
+            Some(&(
+                "lib.py".to_owned(),
+                source.replace("def f(", "def renamed("),
+            )),
+        );
+    }
+}
+
+#[test]
 fn test_references_ignore_docstring_types_in_other_modules() {
     let source = "class Item:\n    pass\n";
     let stub = "class Item: ...\n";
@@ -652,6 +686,57 @@ Rename locations:
                        ^^
 17 | def h(value: tuple[*Ts]) -> None:
                          ^^
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn test_rename_from_inside_quoted_annotation() {
+    let code = r#"
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lib import Helper
+
+class Model: ...
+
+def make(helper: "Helper") -> "list[Model]":
+#                                   ^
+    return [Model()]
+x: "Helper | None" = None
+#   ^
+"#;
+    let report = get_batched_lsp_operations_report(
+        &[("main", code), ("lib", "class Helper: ...\n")],
+        get_test_report,
+    );
+    assert_eq!(
+        r#"
+# main.py
+9 | def make(helper: "Helper") -> "list[Model]":
+                                        ^
+Rename locations:
+7 | class Model: ...
+          ^^^^^
+9 | def make(helper: "Helper") -> "list[Model]":
+                                        ^^^^^
+11 |     return [Model()]
+                 ^^^^^
+
+12 | x: "Helper | None" = None
+         ^
+Rename locations:
+5 |     from lib import Helper
+                        ^^^^^^
+9 | def make(helper: "Helper") -> "list[Model]":
+                      ^^^^^^
+12 | x: "Helper | None" = None
+         ^^^^^^
+
+
+# lib.py
 "#
         .trim(),
         report.trim(),

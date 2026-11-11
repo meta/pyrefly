@@ -8,6 +8,7 @@
 use std::slice;
 
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::types::TArgs;
 use pyrefly_types::types::TParams;
 use ruff_python_ast::name::Name;
@@ -63,6 +64,11 @@ impl<'a, 'b> HintRef<'a, 'b> {
 
     pub fn errors(&self) -> Option<&ErrorCollector> {
         self.1
+    }
+
+    /// Retains the hint members while directing diagnostics to another attempt.
+    pub fn with_errors<'c>(self, errors: Option<&'c ErrorCollector>) -> HintRef<'c, 'b> {
+        HintRef(self.0, errors)
     }
 
     pub fn filter_for_call(hint: Option<Self>, tparams: Option<&TParams>) -> Option<Self> {
@@ -227,9 +233,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // for pattern matching per PEP 634
         match ty {
             Type::ClassType(cls)
-                if cls.is_builtin("str")
-                    || cls.is_builtin("bytes")
-                    || cls.is_builtin("bytearray") =>
+                if cls.is(KnownClass::Str)
+                    || cls.is(KnownClass::Bytes)
+                    || cls.is(KnownClass::ByteArray) =>
             {
                 return false;
             }

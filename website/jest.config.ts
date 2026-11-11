@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+import * as path from 'path';
 import type { Config } from '@jest/types';
 import { pathsToModuleNameMapper } from 'ts-jest';
 import { compilerOptions } from './tsconfig.json';
@@ -20,6 +21,19 @@ const config: Config.InitialOptions = {
     moduleFileExtensions: ['js', 'jsx', 'json', 'ts', 'tsx'],
     // The transform configuration
     transform: {
+        // The wasm bindings are an ES module for the browser.
+        'pyrefly_wasm_for_testing\\.js$': [
+            'babel-jest',
+            {
+                plugins: [
+                    '@babel/plugin-transform-modules-commonjs',
+                    path.join(
+                        __dirname,
+                        'src/__tests__/__test_utils__/importMetaUrlBabelPlugin.js'
+                    ),
+                ],
+            },
+        ],
         '^.+\\.(js|jsx)$': 'babel-jest',
         '^.+\\.(ts|tsx)$': [
             'ts-jest',

@@ -14,6 +14,7 @@ from typing import (
     Generic,
     Iterable,
     Iterator,
+    Literal,
     overload,
     Self,
     TYPE_CHECKING,
@@ -180,17 +181,45 @@ class Module:
     ) -> dict[str, Tensor]: ...
     def load_state_dict(
         self,
-        state_dict: dict[str, Tensor],
+        state_dict: Mapping[str, Any],
         strict: bool = True,
         assign: bool = False,
     ) -> Any: ...
+    @overload
     def _register_load_state_dict_pre_hook(
         self,
-        hook: Callable[[dict[str, Tensor], str], None],
-        with_module: bool = False,
-    ) -> Any:
-        """Register a hook to be called before loading state_dict."""
-        ...
+        hook: Callable[
+            [
+                dict[str, Any],
+                str,
+                dict[str, Any],
+                bool,
+                list[str],
+                list[str],
+                list[str],
+            ],
+            object,
+        ],
+        with_module: Literal[False] = False,
+    ) -> Any: ...
+    @overload
+    def _register_load_state_dict_pre_hook(
+        self,
+        hook: Callable[
+            [
+                Module,
+                dict[str, Any],
+                str,
+                dict[str, Any],
+                bool,
+                list[str],
+                list[str],
+                list[str],
+            ],
+            object,
+        ],
+        with_module: Literal[True],
+    ) -> Any: ...
 
 class Parameter[Shape: IntTuple = IntTuple](Tensor[Shape]):
     @overload
@@ -284,6 +313,12 @@ class Embedding[NUM_EMB: IntVar, EMB_DIM: IntVar](Module):
 # ModuleDict
 class ModuleDict[T](Module):
     """Holds submodules in a dictionary"""
+
+    # A TypedDict is not assignable to `dict[str, M]`, so typed module dictionaries
+    # select the second overload and keep their per-key module types.
+    @overload
+    def __init__[M: Module](self: ModuleDict[M], modules: dict[str, M]) -> None: ...
+    @overload
     def __init__(self, modules: T | None = None) -> None: ...
     def __getitem__(self, key: str) -> T: ...
     def __setitem__(self, key: str, module: Module) -> None: ...
@@ -808,16 +843,18 @@ class ConvTranspose2d[
 class ConvTranspose3d[
     InC: IntVar,
     OutC: IntVar,
-    K: IntVar,
-    S: IntVar = 1,
-    P: IntVar = 0,
-    OP: IntVar = 0,
-    D: IntVar = 1,
+    K: IntVar = int,
+    S: IntVar = int,
+    P: IntVar = int,
+    OP: IntVar = int,
+    D: IntVar = int,
 ](Module):
-    """3D transposed convolution. Tracks channel and spatial dimensions.
+    """3D transposed convolution with precise scalar-argument shape tracking.
 
     Type parameters S, P, OP, D are bound from constructor arguments via _Int[T].
-    PEP 696 defaults apply when arguments are omitted.
+    Omitted arguments use their precise scalar defaults. Tuple-valued dimensions
+    leave the corresponding spatial output dimensions gradual, as do type
+    parameters omitted from an explicit annotation.
     """
 
     weight: Tensor[[InC, OutC, K, K, K]]
@@ -826,13 +863,13 @@ class ConvTranspose3d[
         self,
         in_channels: _Int[InC],
         out_channels: _Int[OutC],
-        kernel_size: _Int[K],
-        stride: _Int[S] = 1,
-        padding: _Int[P] = 0,
-        output_padding: _Int[OP] = 0,
+        kernel_size: _Int[K] | tuple[int, int, int],
+        stride: _Int[S] | tuple[int, int, int] = 1,
+        padding: _Int[P] | tuple[int, int, int] = 0,
+        output_padding: _Int[OP] | tuple[int, int, int] = 0,
         groups: int = 1,
         bias: bool = True,
-        dilation: _Int[D] = 1,
+        dilation: _Int[D] | tuple[int, int, int] = 1,
         padding_mode: str = "zeros",
         device: Any = None,
         dtype: Any = None,
@@ -1012,8 +1049,11 @@ class AdaptiveMaxPool1d[OL: IntVar](Module):
         self, input: Tensor[[B, C, Any]]
     ) -> Tensor[[B, C, OL]]: ...
 
-class AdaptiveMaxPool2d[OH: IntVar, OW: IntVar](Module):
+class AdaptiveMaxPool2d[OH: IntVar, OW: IntVar = OH](Module):
     """2D adaptive max pooling"""
+    @overload
+    def __init__(self, output_size: _Int[OH], return_indices: bool = False) -> None: ...
+    @overload
     def __init__(
         self, output_size: tuple[_Int[OH], _Int[OW]], return_indices: bool = False
     ) -> None: ...

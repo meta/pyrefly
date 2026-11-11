@@ -9,7 +9,7 @@ repository = "https://github.com/facebook/pyrefly"
 license = "MIT"
 
 [dependencies]
-anstream = "0.6.11"
+anstream = "1.0.0"
 anyhow = "1.0.104"
 crossbeam-channel = "0.5.17"
 lsp-server = "0.10.0"

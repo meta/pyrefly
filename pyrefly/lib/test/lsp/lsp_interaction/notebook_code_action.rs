@@ -192,3 +192,115 @@ fn test_notebook_code_action_insert_inferred_type() {
         .unwrap();
     interaction.shutdown().unwrap();
 }
+
+#[test]
+fn test_notebook_code_action_import_cell_header() {
+    let root = get_test_files_root();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .unwrap();
+
+    for (name, source, reference_line) in [
+        (
+            "future.ipynb",
+            "from __future__ import annotations\nTypedDict\n",
+            1,
+        ),
+        (
+            "docstring.ipynb",
+            "\"\"\"Cell documentation.\"\"\"\nTypedDict\n",
+            1,
+        ),
+        (
+            "docstring_future.ipynb",
+            "\"\"\"Cell documentation.\"\"\"\nfrom __future__ import annotations\nTypedDict\n",
+            2,
+        ),
+        (
+            "unicode_docstring.ipynb",
+            "\"\"\"😀 cell\n documentation.\"\"\"\nfrom __future__ import annotations\nTypedDict\n",
+            3,
+        ),
+    ] {
+        interaction.open_notebook(name, vec!["x = 1\n", source]);
+        let cell_uri = interaction.cell_uri(name, "cell2");
+        interaction
+            .code_action_cell(name, "cell2", reference_line, 0, reference_line, 9)
+            .expect_response_with(|response| {
+                response.is_some_and(|actions| {
+                    actions.iter().any(|action| {
+                        let CodeActionResponse::CodeAction(action) = action else {
+                            return false;
+                        };
+                        let Some(changes) =
+                            action.edit.as_ref().and_then(|edit| edit.changes.as_ref())
+                        else {
+                            return false;
+                        };
+                        let Some(edits) = changes.get(&cell_uri) else {
+                            return false;
+                        };
+                        let import_position = Position::new(reference_line, 0);
+                        changes.len() == 1
+                            && edits.len() == 1
+                            && edits[0].range == Range::new(import_position, import_position)
+                            && edits[0].new_text == "from typing import TypedDict\n"
+                    })
+                })
+            })
+            .unwrap();
+    }
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_notebook_code_action_import_merge_target() {
+    let root = get_test_files_root();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.open_notebook(
+        "merge.ipynb",
+        vec![
+            "from typing import NamedTuple\n",
+            "from __future__ import annotations\nTypedDict\n",
+        ],
+    );
+    // A merge suffix modifies the existing import, not the requesting cell.
+    let target_uri = interaction.cell_uri("merge.ipynb", "cell1");
+    let position = Position::new(0, 29);
+    interaction
+        .code_action_cell("merge.ipynb", "cell2", 1, 0, 1, 9)
+        .expect_response_with(|response| {
+            response.is_some_and(|actions| {
+                actions.iter().any(|action| {
+                    let CodeActionResponse::CodeAction(action) = action else {
+                        return false;
+                    };
+                    let Some(changes) = action.edit.as_ref().and_then(|edit| edit.changes.as_ref())
+                    else {
+                        return false;
+                    };
+                    let Some(edits) = changes.get(&target_uri) else {
+                        return false;
+                    };
+                    changes.len() == 1
+                        && edits.len() == 1
+                        && edits[0].range == Range::new(position, position)
+                        && edits[0].new_text == ", TypedDict"
+                })
+            })
+        })
+        .unwrap();
+    interaction.shutdown().unwrap();
+}

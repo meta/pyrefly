@@ -21,6 +21,7 @@ use pyrefly_types::callable::Param;
 use pyrefly_types::callable::Params;
 use pyrefly_types::class::Class;
 use pyrefly_types::facet::FacetKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::type_info::TypeInfo;
 use pyrefly_types::types::BoundMethodType;
 use pyrefly_types::types::Type;
@@ -107,24 +108,33 @@ pub(crate) fn collect_module_types(
     })
 }
 
-/// Known CinderX primitive type names from `__static__`.
+/// Known CinderX primitive types from `__static__`.
 ///
 /// These are simple subclasses of `int` or `float` that map to C-level
 /// primitives in the CinderX compiler. Other classes exported by the
 /// `__static__` module (e.g. `chkdict`, `StaticGeneric`, `Array`) are
 /// not primitives and should not receive contextual typing.
-const STATIC_PRIMITIVE_NAMES: &[&str] = &[
-    "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "cbool", "char",
-    "double", "single",
+const STATIC_PRIMITIVES: &[KnownClass] = &[
+    KnownClass::StaticInt8,
+    KnownClass::StaticInt16,
+    KnownClass::StaticInt32,
+    KnownClass::StaticInt64,
+    KnownClass::StaticUint8,
+    KnownClass::StaticUint16,
+    KnownClass::StaticUint32,
+    KnownClass::StaticUint64,
+    KnownClass::StaticCbool,
+    KnownClass::StaticChar,
+    KnownClass::StaticDouble,
+    KnownClass::StaticSingle,
 ];
 
 /// Check whether a type is a `__static__` primitive (CinderX C-level type).
 fn is_static_primitive(ty: &Type) -> bool {
     match ty {
-        Type::ClassType(ct) => {
-            ct.class_object().module_name().as_str() == "__static__"
-                && STATIC_PRIMITIVE_NAMES.contains(&ct.class_object().name().as_str())
-        }
+        Type::ClassType(ct) => ct
+            .known()
+            .is_some_and(|known| STATIC_PRIMITIVES.contains(&known)),
         _ => false,
     }
 }

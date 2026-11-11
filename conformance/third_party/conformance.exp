@@ -179,6 +179,17 @@
     },
     {
       "code": -2,
+      "column": 21,
+      "concise_description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "line": 87,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 25,
+      "stop_line": 87
+    },
+    {
+      "code": -2,
       "column": 22,
       "concise_description": "Bool literal cannot be used in annotations",
       "description": "Bool literal cannot be used in annotations",
@@ -1045,6 +1056,17 @@
     },
     {
       "code": -2,
+      "column": 22,
+      "concise_description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "line": 45,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 26,
+      "stop_line": 45
+    },
+    {
+      "code": -2,
       "column": 23,
       "concise_description": "Bool literal cannot be used in annotations",
       "description": "Bool literal cannot be used in annotations",
@@ -1400,6 +1422,17 @@
     {
       "code": -2,
       "column": 42,
+      "concise_description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "description": "`var1` is not a valid type alias: Number literal cannot be used in annotations",
+      "line": 60,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 46,
+      "stop_line": 60
+    },
+    {
+      "code": -2,
+      "column": 42,
       "concise_description": "Bool literal cannot be used in annotations",
       "description": "Bool literal cannot be used in annotations",
       "line": 61,
@@ -1734,6 +1767,28 @@
     },
     {
       "code": -2,
+      "column": 11,
+      "concise_description": "Circular reference to `str` in annotation",
+      "description": "Circular reference to `str` in annotation",
+      "line": 94,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 14,
+      "stop_line": 94
+    },
+    {
+      "code": -2,
+      "column": 9,
+      "concise_description": "Expected a type form, got instance of `(self: Self@ClassD) -> None`",
+      "description": "Expected a type form, got instance of `(self: Self@ClassD) -> None`",
+      "line": 96,
+      "name": "not-a-type",
+      "severity": "error",
+      "stop_column": 12,
+      "stop_line": 96
+    },
+    {
+      "code": -2,
       "column": 8,
       "concise_description": "Expected a type form, got instance of `(self: Self@ClassD) -> None`",
       "description": "Expected a type form, got instance of `(self: Self@ClassD) -> None`",
@@ -1767,6 +1822,28 @@
     }
   ],
   "annotations_future_import.py": [
+    {
+      "code": -2,
+      "column": 10,
+      "concise_description": "Circular reference to `str` in annotation",
+      "description": "Circular reference to `str` in annotation",
+      "line": 37,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 13,
+      "stop_line": 37
+    },
+    {
+      "code": -2,
+      "column": 8,
+      "concise_description": "Expected a type form, got instance of `(self: Self@ClassB) -> None`",
+      "description": "Expected a type form, got instance of `(self: Self@ClassB) -> None`",
+      "line": 39,
+      "name": "not-a-type",
+      "severity": "error",
+      "stop_column": 11,
+      "stop_line": 39
+    },
     {
       "code": -2,
       "column": 8,
@@ -7409,6 +7486,17 @@
     },
     {
       "code": -2,
+      "column": 17,
+      "concise_description": "`t1` is not a valid type alias: Tuple literal cannot be used in annotations",
+      "description": "`t1` is not a valid type alias: Tuple literal cannot be used in annotations",
+      "line": 71,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 19,
+      "stop_line": 71
+    },
+    {
+      "code": -2,
       "column": 18,
       "concise_description": "Expected a type form, got instance of `Literal[3]`",
       "description": "Expected a type form, got instance of `Literal[3]`",
@@ -12975,9 +13063,9 @@
       "code": -2,
       "column": 4,
       "concise_description": "Class member `Y1.x` overrides parent class `X1` in an inconsistent manner",
-      "description": "Class member `Y1.x` overrides parent class `X1` in an inconsistent manner\n  `Y1.x` has type `int`, which is not consistent with `str` in `X1.x` (the type of read-write attributes cannot be changed)",
+      "description": "Class member `Y1.x` overrides parent class `X1` in an inconsistent manner\n  `Y1.x` has type `int`, which is not assignable to `str`, the type of `X1.x`",
       "line": 55,
-      "name": "bad-override-mutable-attribute",
+      "name": "bad-override",
       "severity": "error",
       "stop_column": 5,
       "stop_line": 55

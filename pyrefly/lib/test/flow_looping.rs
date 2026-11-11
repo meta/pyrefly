@@ -492,6 +492,26 @@ def literal() -> int:
 "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/5566
+testcase!(
+    test_possibly_unbound_after_loop_with_conditional_break,
+    r#"
+def f(xs: list[int]) -> int:
+    for x in xs:
+        y = x
+        if y == 0:
+            break
+    return y  # E: `y` may be uninitialized
+
+def g(xs: list[int]) -> int:
+    for x in [1, 2, 3]:
+        y = x
+        if y == 0:
+            break
+    return y
+"#,
+);
+
 testcase!(
     test_for_with_reassign,
     r#"

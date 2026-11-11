@@ -59,9 +59,14 @@ class MockState {
      * Provides definition location
      * @param line Line number
      * @param column Column number
+     * @param withContents Whether to return the text of stub files
      * @returns Empty definition result
      */
-    gotoDefinition(_line?: number, _column?: number): Record<string, any>[] {
+    gotoDefinition(
+        _line?: number,
+        _column?: number,
+        _withContents?: boolean
+    ): Record<string, any>[] {
         return [];
     }
 

@@ -401,7 +401,6 @@ from torch._C._VariableFunctions import (
     log2_ as log2_,
     log10_ as log10_,
     log_ as log_,
-    log_softmax as log_softmax,
     logaddexp as logaddexp,
     logaddexp2 as logaddexp2,
     logcumsumexp as logcumsumexp,
@@ -434,7 +433,6 @@ from torch._C._VariableFunctions import (
     msort as msort,
     multiply as multiply,
     mvlgamma as mvlgamma,
-    nan_to_num as nan_to_num,
     nan_to_num_ as nan_to_num_,
     nanmean as nanmean,
     nanmedian as nanmedian,
@@ -589,6 +587,7 @@ from torch._C._VariableFunctions import (
 )
 from torch._higher_order_ops import cond as cond
 from torch._lobpcg import lobpcg as lobpcg
+from torch._prims_common import DeviceLikeType
 from torch._shapes import (
     arange_extent,
     arange_step_extent,
@@ -689,6 +688,8 @@ type _IntegerTensorLike[Shape: _Shape] = Tensor[Shape] | _IntegerScalar
 type _BasicIndex = builtins.int | slice | list[builtins.int] | None | EllipsisType
 type _TensorScalar = builtins.bool | builtins.int | builtins.float | builtins.complex
 type _LegacyTensorScalar = builtins.bool | builtins.int | builtins.float
+# `Tensor` declares a `dtype` attribute, which shadows the class inside its body.
+type _DType = dtype
 
 # Dtype and memory-format constants
 qint8: Any
@@ -702,9 +703,19 @@ int16: Any
 int32: Any
 int64: Any
 uint8: Any
+uint16: dtype
+uint32: dtype
+uint64: dtype
+float8_e4m3fn: dtype
+float8_e5m2: dtype
+float8_e8m0fnu: dtype
+float4_e2m1fn_x2: dtype
 int: Any
 bool: Any
+contiguous_format: memory_format
 channels_last: memory_format
+channels_last_3d: memory_format
+preserve_format: memory_format
 strided: layout
 ops: Any
 
@@ -907,6 +918,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def __int__(self) -> builtins.int: ...
     def __index__(self) -> builtins.int: ...
     def __len__(self) -> builtins.int: ...
+    def __format__(self, format_spec: str) -> str: ...
 
     # ==== Comparison Operations ====
 
@@ -970,13 +982,17 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
 
     @overload
     def view[Shape: IntTuple, NewShape: IntTuple](
-        self: Tensor[Shape], shape: NewShape
+        self: Tensor[Shape], size: NewShape
     ) -> Tensor[reshape_shape(Shape, NewShape)]:
         """View tensor. Shape inference via type-level DSL."""
         ...
 
     @overload
-    def view(self, shape: Sequence[builtins.int]) -> Tensor: ...
+    def view(self, size: Sequence[builtins.int]) -> Tensor: ...
+    # Reinterpreting the bytes as another dtype can change the last dimension by the
+    # ratio of the byte widths, which this overlay does not track.
+    @overload
+    def view(self, dtype: _DType) -> Tensor: ...
     def flatten[
         Shape: IntTuple,
         StartDim: Flag[builtins.int],
@@ -1014,7 +1030,9 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     @overload
     def permute(self, *dims: builtins.int) -> Tensor: ...
     @overload
-    def permute(self, dims: tuple[builtins.int, ...]) -> Tensor: ...
+    def permute(
+        self, dims: tuple[builtins.int, ...] | list[builtins.int]
+    ) -> Tensor: ...
     def squeeze[
         Shape: IntTuple,
         Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
@@ -1128,9 +1146,20 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     # These create new tensors; shape depends on size args, not self's shape.
 
     @overload
+    def new_zeros[NewShape: IntTuple](
+        self,
+        size: NewShape,
+        *,
+        dtype: Any = None,
+        layout: Any = None,
+        device: Any = None,
+        requires_grad: builtins.bool = False,
+        pin_memory: builtins.bool = False,
+    ) -> Tensor[NewShape]: ...
+    @overload
     def new_zeros(
         self,
-        size: tuple[builtins.int, ...],
+        size: Sequence[builtins.int],
         *,
         dtype: Any = None,
         layout: Any = None,
@@ -1156,9 +1185,20 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         ...
 
     @overload
+    def new_ones[NewShape: IntTuple](
+        self,
+        size: NewShape,
+        *,
+        dtype: Any = None,
+        layout: Any = None,
+        device: Any = None,
+        requires_grad: builtins.bool = False,
+        pin_memory: builtins.bool = False,
+    ) -> Tensor[NewShape]: ...
+    @overload
     def new_ones(
         self,
-        size: tuple[builtins.int, ...],
+        size: Sequence[builtins.int],
         *,
         dtype: Any = None,
         layout: Any = None,
@@ -1191,9 +1231,18 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         ...
 
     @overload
+    def new_empty[NewShape: IntTuple](
+        self,
+        size: NewShape,
+        *,
+        dtype: Any = None,
+        device: Any = None,
+        requires_grad: builtins.bool = False,
+    ) -> Tensor[NewShape]: ...
+    @overload
     def new_empty(
         self,
-        size: tuple[builtins.int, ...],
+        size: Sequence[builtins.int],
         *,
         dtype: Any = None,
         device: Any = None,
@@ -1211,9 +1260,19 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Create uninitialized tensor with same dtype/device."""
         ...
 
+    @overload
+    def new_full[NewShape: IntTuple](
+        self,
+        size: NewShape,
+        fill_value: _Scalar,
+        dtype: Any = None,
+        device: Any = None,
+        requires_grad: builtins.bool = False,
+    ) -> Tensor[NewShape]: ...
+    @overload
     def new_full(
         self,
-        size: tuple[builtins.int, ...],
+        size: Sequence[builtins.int],
         fill_value: _Scalar,
         dtype: Any = None,
         device: Any = None,
@@ -1498,7 +1557,11 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
         Keepdim: Flag[builtins.bool],
     ](
-        self: Tensor[Shape], dim: Dim = None, keepdim: Keepdim = False
+        self: Tensor[Shape],
+        dim: Dim = None,
+        keepdim: Keepdim = False,
+        *,
+        dtype: Any = None,
     ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
         """Sum along dimension(s). Shape inference via meta-shape: torch.Tensor.sum"""
         ...
@@ -1737,6 +1800,14 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Top k elements. Returns (values, indices). Shape inference via meta-shape: torch.Tensor.topk"""
         ...
 
+    def argsort(
+        self,
+        dim: builtins.int = -1,
+        descending: builtins.bool = False,
+        stable: builtins.bool = False,
+    ) -> Self: ...
+    def log_softmax(self, dim: builtins.int, dtype: Any = None) -> Self: ...
+    def logit(self, eps: builtins.float | None = None) -> Self: ...
     def sort[Shape: IntTuple](
         self: Tensor[Shape],
         dim: builtins.int = -1,
@@ -2717,19 +2788,25 @@ def segment_reduce(
 
 @overload
 def permute[Shape: IntTuple, Dims: Flag[tuple[builtins.int, ...]]](
-    self: Tensor[Shape], dims: Dims
+    input: Tensor[Shape], dims: Dims
 ) -> Tensor[permute_shape(Shape, Dims)]:
     """Permute dimensions. Shape inference via type-level DSL."""
     ...
 
 @overload
-def permute(self: Tensor, dims: tuple[builtins.int, ...]) -> Tensor: ...
+def permute(
+    input: Tensor, dims: tuple[builtins.int, ...] | list[builtins.int]
+) -> Tensor: ...
 def sum[
     Shape: IntTuple,
     Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
     Keepdim: Flag[builtins.bool],
 ](
-    input: Tensor[Shape], dim: Dim = None, keepdim: Keepdim = False
+    input: Tensor[Shape],
+    dim: Dim = None,
+    keepdim: Keepdim = False,
+    *,
+    dtype: Any = None,
 ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
     """Sum along dimension(s). Shape inference via meta-shape: torch.sum"""
     ...
@@ -3073,8 +3150,12 @@ def linspace[Steps: IntVar](
     end: builtins.float,
     steps: _Int[Steps],
     *,
+    out: Tensor | None = None,
     dtype: Any = None,
+    layout: Any = None,
     device: Any = None,
+    pin_memory: builtins.bool = False,
+    requires_grad: builtins.bool = False,
 ) -> Tensor[[nonnegative_extent(_Int[Steps])]]:
     """Create a 1D tensor with one linearly spaced value per step."""
     ...
@@ -3421,6 +3502,18 @@ def std_mean[
     """Standard deviation and mean. Returns (std, mean). Shape inference via meta-shape: torch.std_mean"""
     ...
 
+def log_softmax[Shape: IntTuple](
+    input: Tensor[Shape], dim: builtins.int, dtype: Any = None
+) -> Tensor[Shape]: ...
+def nan_to_num[Shape: IntTuple](
+    input: Tensor[Shape],
+    nan: builtins.float = 0.0,
+    posinf: builtins.float | None = None,
+    neginf: builtins.float | None = None,
+    *,
+    out: Tensor | None = None,
+) -> Tensor[Shape]: ...
+
 # ==== Phase 1.3: Tensor Creation Operations ====
 
 def zeros_like[Shape: IntTuple](
@@ -3448,12 +3541,29 @@ def ones_like[Shape: IntTuple](
     ...
 
 def full_like[Shape: IntTuple](
-    input: Tensor[Shape], fill_value: builtins.float
+    input: Tensor[Shape],
+    fill_value: builtins.float | builtins.complex,
+    *,
+    memory_format: memory_format | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create tensor with same shape filled with value. Shape inference via generic fixture signature."""
     ...
 
-def empty_like[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]:
+def empty_like[Shape: IntTuple](
+    input: Tensor[Shape],
+    *,
+    memory_format: memory_format | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
+) -> Tensor[Shape]:
     """Create uninitialized tensor with same shape. Shape inference via generic fixture signature."""
     ...
 
@@ -3461,7 +3571,17 @@ def rand_like[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]:
     """Create random tensor [0,1) with same shape. Shape inference via generic fixture signature."""
     ...
 
-def randn_like[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]:
+def randn_like[Shape: IntTuple](
+    input: Tensor[Shape],
+    *,
+    generator: Generator | None = None,
+    memory_format: memory_format | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
+) -> Tensor[Shape]:
     """Create random normal tensor with same shape. Shape inference via generic fixture signature."""
     ...
 
@@ -3485,13 +3605,25 @@ def triu[Shape: IntTuple](input: Tensor[Shape], diagonal: int = 0) -> Tensor[Sha
     ...
 
 def tril_indices(
-    row: builtins.int, col: builtins.int, offset: builtins.int = 0
+    row: builtins.int,
+    col: builtins.int,
+    offset: builtins.int = 0,
+    *,
+    dtype: Any = None,
+    device: Any = None,
+    layout: Any = None,
 ) -> Tensor[[2, Any]]:
     """Indices of the lower triangular part. The count depends on the argument values."""
     ...
 
 def triu_indices(
-    row: builtins.int, col: builtins.int, offset: builtins.int = 0
+    row: builtins.int,
+    col: builtins.int,
+    offset: builtins.int = 0,
+    *,
+    dtype: Any = None,
+    device: Any = None,
+    layout: Any = None,
 ) -> Tensor[[2, Any]]:
     """Indices of the upper triangular part. The count depends on the argument values."""
     ...
@@ -4255,12 +4387,6 @@ int64: Any = ...  # torch.int64 dtype constant
 pi: builtins.float = ...  # torch.pi value constant
 inf: builtins.float = ...  # torch.inf value constant
 
-# dtype type (for type annotations)
-class dtype:
-    """PyTorch data type."""
-
-    ...
-
 float: dtype = ...
 complex64: dtype = ...
 complex128: dtype = ...
@@ -4500,6 +4626,10 @@ def set_default_dtype(d: dtype, /) -> None: ...
 def get_num_threads() -> builtins.int: ...
 def get_float32_matmul_precision() -> str: ...
 def are_deterministic_algorithms_enabled() -> builtins.bool: ...
+def is_deterministic_algorithms_warn_only_enabled() -> builtins.bool: ...
+def use_deterministic_algorithms(
+    mode: builtins.bool, *, warn_only: builtins.bool = False
+) -> None: ...
 def manual_seed(seed: int) -> Generator:
     """Set the seed for generating random numbers on all devices."""
     ...

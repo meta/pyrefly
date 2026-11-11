@@ -12,6 +12,21 @@ from shape_extensions import assert_raises, assert_shape, Int, IntTuple, IntVar
 from torch import Tensor
 
 
+def test_sum_dtype_preserves_reduced_shape() -> None:
+    tensor = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    reduced = tensor.sum(dim=-1, dtype=torch.float64)
+    kept = tensor.sum(dim=(1, 2), keepdim=True, dtype=torch.float64)
+    scalar = torch.sum(tensor, dtype=torch.float64)
+    assert_shape(reduced.shape, (2, 3))
+    assert_shape(kept.shape, (2, 1, 1))
+    assert_shape(scalar.shape, ())
+    assert reduced.dtype == kept.dtype == scalar.dtype == torch.float64
+    assert torch.equal(
+        reduced,
+        torch.tensor([[6.0, 22.0, 38.0], [54.0, 70.0, 86.0]], dtype=torch.float64),
+    )
+
+
 def test_median_shapes() -> None:
     matrix = torch.randn((3, 4))
     assert_shape(torch.median(matrix).shape, ())
@@ -24,6 +39,16 @@ def test_median_shapes() -> None:
     values, indices = tensor.median(dim=-2, keepdim=True)
     assert_shape(values.shape, (2, 1, 4))
     assert_shape(indices.shape, (2, 1, 4))
+
+
+def test_log_softmax_preserves_shape() -> None:
+    tensor = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    functional = torch.log_softmax(tensor, dim=1, dtype=torch.float64)
+    method = tensor.log_softmax(dim=1, dtype=torch.float64)
+    assert_shape(functional.shape, (2, 3, 4))
+    assert_shape(method.shape, (2, 3, 4))
+    assert functional.dtype == method.dtype == torch.float64
+    assert torch.equal(functional, method)
 
 
 def test_logsumexp_shapes() -> None:

@@ -10,7 +10,6 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Display;
 use std::hash::Hash;
-use std::hash::Hasher;
 use std::mem;
 use std::sync::Arc;
 
@@ -43,8 +42,6 @@ use crate::class::ClassType;
 use crate::data_frame::DataFrameSchema;
 use crate::dimension;
 use crate::dimension::Int;
-use crate::equality::TypeEq;
-use crate::equality::TypeEqCtx;
 use crate::function::Deprecation;
 use crate::function::FuncMetadata;
 use crate::function::Function;
@@ -54,6 +51,7 @@ use crate::function::PropertyRole;
 use crate::heap::TypeHeap;
 use crate::identity::IdentityIgnored;
 use crate::keywords::KwCall;
+use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::literal::LitStyle;
 use crate::literal::Literal;
@@ -64,7 +62,6 @@ use crate::quantified::Quantified;
 use crate::sentinel::Sentinel;
 use crate::series::SeriesSchema;
 use crate::shaped_array::IntTuple;
-use crate::shaped_array::ShapedArrayType;
 use crate::simplify::unions;
 use crate::special_form::SpecialForm;
 use crate::stdlib::Stdlib;
@@ -244,22 +241,30 @@ impl TParams {
     }
 }
 
+/// The type arguments of a class instance, together with the class's type parameters.
+///
+/// Invariant: the field is `None` exactly when there are no type arguments. Most class
+/// types are not generic, so they carry no allocation, and cloning or dropping them
+/// touches no reference count shared with other threads.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[derive(TypeEq)]
-pub struct TArgs(Arc<(Arc<TParams>, Box<[Type]>)>);
+pub struct TArgs(Option<Arc<(Arc<TParams>, Box<[Type]>)>>);
 
 impl Visit<Type> for TArgs {
     fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
         // TParams describe the declaration; only applied arguments are contained types.
-        self.0.1.visit(f);
+        for ty in self.as_slice() {
+            ty.visit(f);
+        }
     }
 }
 
 impl VisitMut<Type> for TArgs {
     fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
         // Arc<TParams> has a no-op VisitMut, so we only need to visit the types.
-        let inner = Arc::make_mut(&mut self.0);
-        inner.1.visit_mut(f);
+        for ty in self.as_mut() {
+            ty.visit_mut(f);
+        }
     }
 }
 
@@ -268,41 +273,57 @@ impl TArgs {
         if tparams.len() != targs.len() {
             panic!("TParams and TArgs must have the same length");
         }
-        Self(Arc::new((tparams, targs.into_boxed_slice())))
+        if targs.is_empty() {
+            return Self(None);
+        }
+        Self(Some(Arc::new((tparams, targs.into_boxed_slice()))))
     }
 
     pub fn tparams(&self) -> &TParams {
-        &self.0.0
+        match &self.0 {
+            Some(inner) => &inner.0,
+            None => TParams::empty_ref(),
+        }
     }
 
     pub fn iter_paired(&self) -> impl ExactSizeIterator<Item = (&Quantified, &Type)> {
-        self.0.0.iter().zip(self.0.1.iter())
+        self.tparams().iter().zip(self.as_slice().iter())
     }
 
     pub fn iter_paired_mut(&mut self) -> impl ExactSizeIterator<Item = (&Quantified, &mut Type)> {
-        let inner = Arc::make_mut(&mut self.0);
-        inner.0.iter().zip(inner.1.iter_mut())
+        let (tparams, targs) = self.split_mut();
+        tparams.iter().zip(targs.iter_mut())
     }
 
     pub fn len(&self) -> usize {
-        self.0.1.len()
+        self.as_slice().len()
     }
 
     pub fn as_slice(&self) -> &[Type] {
-        &self.0.1
+        match &self.0 {
+            Some(inner) => &inner.1,
+            None => &[],
+        }
     }
 
     pub fn as_mut(&mut self) -> &mut [Type] {
-        &mut Arc::make_mut(&mut self.0).1
+        self.split_mut().1
     }
 
+    /// Mutable access to the arguments. Without arguments this neither allocates nor
+    /// touches a reference count; with them, a shared allocation is copied first.
     pub fn split_mut(&mut self) -> (&TParams, &mut [Type]) {
-        let inner = Arc::make_mut(&mut self.0);
-        (&inner.0, &mut inner.1)
+        match &mut self.0 {
+            Some(inner) => {
+                let inner = Arc::make_mut(inner);
+                (&inner.0, &mut inner.1)
+            }
+            None => (TParams::empty_ref(), &mut []),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.1.is_empty()
+        self.0.is_none()
     }
 
     /// Returns the number of type arguments to display, stripping trailing args
@@ -329,13 +350,14 @@ impl TArgs {
     /// Unions in the substituted arguments are simplified, so type arguments that differ only in
     /// the order, nesting or duplication of union members compare equal.
     pub fn substitute_with(&self, substitution: &Substitution) -> Self {
+        let Some((tparams, targs)) = self.0.as_deref() else {
+            return Self::default();
+        };
         if substitution.0.is_empty() {
             return self.clone();
         }
         let heap = TypeHeap::new();
-        let tys = self
-            .0
-            .1
+        let tys = targs
             .iter()
             .map(|ty| {
                 let mut ty = substitution.substitute_into(ty.clone());
@@ -351,7 +373,7 @@ impl TArgs {
                 ty
             })
             .collect();
-        Self::new(self.0.0.dupe(), tys)
+        Self::new(tparams.dupe(), tys)
     }
 
     pub fn substitution_map(&self) -> SmallMap<&Quantified, &Type> {
@@ -425,16 +447,24 @@ pub enum AnyStyle {
     /// There was an error, so we made up `Any`.
     /// If this `Any` is used in an error position, don't report another error.
     Error,
+    /// An import could not be resolved. Retains error recovery behavior while identifying
+    /// signatures that depend on unavailable imports.
+    MissingImport,
 }
 
 impl AnyStyle {
+    /// Whether this `Any` is recovery from a diagnostic.
+    pub fn is_error(self) -> bool {
+        matches!(self, Self::Error | Self::MissingImport)
+    }
+
     /// Downgrade an explicit `Any` to an implicit one, for a type that is derived from an `Any`
     /// rather than being the user's `Any` itself, so that the derived type is not reported as a
     /// use of an annotation the user wrote. An operation on an `Any` operand keeps the operand's
     /// style instead of downgrading it: see `Type::merge_any_operands`.
     pub fn propagate(self) -> Type {
         match self {
-            Self::Implicit | Self::Error => Type::Any(self),
+            Self::Implicit | Self::Error | Self::MissingImport => Type::Any(self),
             Self::Explicit => Type::Any(Self::Implicit),
         }
     }
@@ -444,6 +474,7 @@ impl AnyStyle {
     /// implicit `Any` beats an explicit one for the same reason.
     pub fn merge(self, other: Self) -> Type {
         match (self, other) {
+            (Self::MissingImport, _) | (_, Self::MissingImport) => Type::Any(Self::MissingImport),
             (Self::Error, _) | (_, Self::Error) => Type::Any(Self::Error),
             (Self::Implicit, _) | (_, Self::Implicit) => Type::Any(Self::Implicit),
             (Self::Explicit, Self::Explicit) => Type::Any(Self::Explicit),
@@ -817,100 +848,6 @@ pub struct Union {
     pub display_name: IdentityIgnored<Option<(ModuleName, Name)>>,
 }
 
-/// An nn.Module instance with captured constructor arguments.
-///
-/// Analogous to how `ShapedArrayType` wraps `ClassType` + shape info, `NNModuleType`
-/// wraps `ClassType` + a field map of captured init args. This allows DSL forward
-/// functions to access constructor parameters (e.g., `kernel_size`, `stride`)
-/// directly from the type, without requiring every shape-relevant parameter to
-/// be a generic type param on the class.
-///
-/// Created by init DSL functions during `construct_class`. When `forward` is
-/// called on an NNModule instance, the fields are injected as `Val::Module`
-/// into the DSL's bound_args.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NNModuleType {
-    /// The underlying nn.Module subclass (e.g., MaxPool2d).
-    pub class: ClassType,
-    /// Captured init args (e.g., kernel_size → Int(3), stride → None).
-    /// Ordered by constructor parameter order.
-    pub fields: SmallMap<Name, Type>,
-}
-
-impl Hash for NNModuleType {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.class.hash(state);
-        self.fields.len().hash(state);
-        for (k, v) in self.fields.iter() {
-            k.hash(state);
-            v.hash(state);
-        }
-    }
-}
-
-impl PartialOrd for NNModuleType {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for NNModuleType {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.class.cmp(&other.class).then_with(|| {
-            let len_cmp = self.fields.len().cmp(&other.fields.len());
-            if len_cmp != Ordering::Equal {
-                return len_cmp;
-            }
-            for ((k1, v1), (k2, v2)) in self.fields.iter().zip(other.fields.iter()) {
-                let c = k1.cmp(k2).then_with(|| v1.cmp(v2));
-                if c != Ordering::Equal {
-                    return c;
-                }
-            }
-            Ordering::Equal
-        })
-    }
-}
-
-impl Visit<Type> for NNModuleType {
-    fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
-        self.class.recurse(f);
-        for (_, ty) in self.fields.iter() {
-            f(ty);
-        }
-    }
-}
-
-impl VisitMut<Type> for NNModuleType {
-    fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
-        self.class.recurse_mut(f);
-        for (_, ty) in self.fields.iter_mut() {
-            f(ty);
-        }
-    }
-}
-
-impl TypeEq for NNModuleType {
-    fn type_eq(&self, other: &Self, ctx: &mut TypeEqCtx) -> bool {
-        crate::equality::TypeEq::type_eq(&self.class, &other.class, ctx)
-            && self.fields.len() == other.fields.len()
-            && self
-                .fields
-                .iter()
-                .zip(other.fields.iter())
-                .all(|((k1, v1), (k2, v2))| {
-                    k1 == k2 && crate::equality::TypeEq::type_eq(v1, v2, ctx)
-                })
-    }
-}
-
-impl NNModuleType {
-    /// Create a new NNModuleType with the given class and captured fields.
-    pub fn new(class: ClassType, fields: SmallMap<Name, Type>) -> Self {
-        Self { class, fields }
-    }
-}
-
 // Note: The fact that Literal and LiteralString are at the front is important for
 // optimisations in `unions_with_literals`.
 #[derive(Debug, Clone, PartialEq, Eq, TypeEq, PartialOrd, Ord, Hash)]
@@ -954,12 +891,14 @@ pub enum Type {
     /// up the class `tparams` and setting defaults using gradual types: for
     /// example `list` in an annotation position means `list[Any]`.
     ClassDef(Class),
+    /// An exact class object with explicit type arguments, such as the value of
+    /// the expression `C[int]`.
+    SpecializedClassDef(ClassType),
     /// A value that indicates a concrete, instantiated type with known type
     /// arguments that are validated against the class type parameters. If the
     /// class is not generic, the arguments are empty.
     ///
-    /// Instances of classes have this type, and a term of the form `C[arg1, arg2]`
-    /// would have the form `Type::Type(box Type::ClassType(C, [arg1, arg2]))`.
+    /// Instances of classes have this type.
     ClassType(ClassType),
     /// Instances of TypedDicts have this type, and a term of the form `TD[arg1, arg2]`
     /// would have the form `Type::Type(box Type::TypedDict(TD, [arg1, arg2]))`. Note
@@ -971,17 +910,10 @@ pub enum Type {
     /// For a TypedDict type `C`, `Partial[C]` represents an object with any subset of read-write
     /// keys from `C`, where each present key has the same value type as in `C`.
     PartialTypedDict(TypedDict),
-    /// Shaped-array type with shape information.
-    /// Example: Tensor[2, 3] represents a 2x3 tensor
-    ShapedArray(Box<ShapedArrayType>),
     /// First-class tensor shape tuple.
     IntTuple(Box<IntTuple>),
     /// Named integer values captured by the experimental shape extensions.
     NamedInts(Box<NamedInts>),
-    /// nn.Module instance with captured constructor arguments.
-    /// Wraps a ClassType + field map of init args, enabling DSL forward
-    /// functions to access shape-relevant constructor parameters directly.
-    NNModule(Box<NNModuleType>),
     /// DataFrame instance with an ordered column schema.
     DataFrame(Box<DataFrameSchema>),
     /// Series instance carrying its element dtype.
@@ -1075,6 +1007,14 @@ pub enum Type {
     ///
     /// See https://typing.python.org/en/latest/spec/glossary.html#term-materialize.
     Materialization,
+    /// Every value that is always falsy. It appears only as a member of an intersection: the left
+    /// operand `x: A` of `x and y` is returned only when it is falsy, so it contributes `A & Falsy`
+    /// to the result, and a later truthy narrow removes that member.
+    Falsy,
+    /// Every value that is always truthy. It appears only as a member of an intersection: the left
+    /// operand `x: A` of `x or y` is returned only when it is truthy, so it contributes
+    /// `A & Truthy` to the result, and a later falsy narrow removes that member.
+    Truthy,
     None,
 }
 
@@ -1092,13 +1032,12 @@ impl Visit for Type {
             Type::Union(x) => x.visit(f),
             Type::Intersect(x) => x.visit(f),
             Type::ClassDef(x) => x.visit(f),
+            Type::SpecializedClassDef(x) => x.visit(f),
             Type::ClassType(x) => x.visit(f),
             Type::TypedDict(x) => x.visit(f),
             Type::PartialTypedDict(x) => x.visit(f),
-            Type::ShapedArray(x) => x.visit(f),
             Type::IntTuple(x) => x.visit(f),
             Type::NamedInts(x) => x.visit(f),
-            Type::NNModule(x) => x.visit(f),
             Type::DataFrame(x) => x.visit(f),
             Type::Series(x) => x.visit(f),
             Type::Int(x) => x.visit(f),
@@ -1129,7 +1068,7 @@ impl Visit for Type {
             Type::KwargsValue(x) => x.visit(f),
             Type::Type(x) => x.visit(f),
             Type::TypeForm(x) => x.visit(f),
-            Type::Ellipsis => {}
+            Type::Ellipsis | Type::Falsy | Type::Truthy => {}
             Type::Any(x) => x.visit(f),
             Type::Never(x) => x.visit(f),
             Type::TypeAlias(x) => x.visit(f),
@@ -1156,13 +1095,12 @@ impl VisitMut for Type {
             Type::Union(x) => x.visit_mut(f),
             Type::Intersect(x) => x.visit_mut(f),
             Type::ClassDef(x) => x.visit_mut(f),
+            Type::SpecializedClassDef(x) => x.visit_mut(f),
             Type::ClassType(x) => x.visit_mut(f),
             Type::TypedDict(x) => x.visit_mut(f),
             Type::PartialTypedDict(x) => x.visit_mut(f),
-            Type::ShapedArray(x) => x.visit_mut(f),
             Type::IntTuple(x) => x.visit_mut(f),
             Type::NamedInts(x) => x.visit_mut(f),
-            Type::NNModule(x) => x.visit_mut(f),
             Type::DataFrame(x) => x.visit_mut(f),
             Type::Series(x) => x.visit_mut(f),
             Type::Int(x) => x.visit_mut(f),
@@ -1193,7 +1131,7 @@ impl VisitMut for Type {
             Type::KwargsValue(x) => x.visit_mut(f),
             Type::Type(x) => x.visit_mut(f),
             Type::TypeForm(x) => x.visit_mut(f),
-            Type::Ellipsis => {}
+            Type::Ellipsis | Type::Falsy | Type::Truthy => {}
             Type::Any(x) => x.visit_mut(f),
             Type::Never(x) => x.visit_mut(f),
             Type::TypeAlias(x) => x.visit_mut(f),
@@ -1331,11 +1269,13 @@ impl Type {
         matches!(self, Type::Never(_))
     }
 
-    pub fn is_implicit_literal(&self) -> bool {
+    pub fn is_promotable(&self) -> bool {
         match self {
             Type::Literal(lit) => lit.style == LitStyle::Implicit,
             Type::LiteralString(LitStyle::Implicit) => true,
-            _ => false,
+            Type::Union(xs) => xs.members.iter().any(Type::is_promotable),
+            Type::Intersect(xs) => xs.0.iter().any(Type::is_promotable),
+            _ => self.is_truthiness_marker(),
         }
     }
 
@@ -1433,7 +1373,7 @@ impl Type {
     }
 
     pub fn is_object(&self) -> bool {
-        matches!(self, Type::ClassType(cls) if cls.is_builtin("object"))
+        matches!(self, Type::ClassType(cls) if cls.is(KnownClass::Object))
     }
 
     pub fn is_typed_dict(&self) -> bool {
@@ -1441,7 +1381,7 @@ impl Type {
     }
 
     pub fn is_error(&self) -> bool {
-        matches!(self, Type::Any(AnyStyle::Error))
+        matches!(self, Type::Any(style) if style.is_error())
     }
 
     /// Whether this is an implicit `Any` or a union with an implicit `Any` member. Like pyright's
@@ -1796,6 +1736,7 @@ impl Type {
             Type::Callable(_) => Some(CalleeKind::Callable),
             Type::Function(func) => Some(CalleeKind::Function(func.metadata.kind.clone())),
             Type::ClassDef(c) => Some(CalleeKind::Class(c.kind())),
+            Type::SpecializedClassDef(c) => Some(CalleeKind::Class(c.class_object().kind())),
             Type::Forall(forall) => forall.body.clone().as_type().callee_kind(),
             Type::Overload(overload) => Some(CalleeKind::Function(overload.metadata.kind.clone())),
             Type::KwCall(call) => call.return_ty.callee_kind(),
@@ -2182,7 +2123,12 @@ impl Type {
         }
     }
 
-    fn promote_one_implicit_literal(ty: &mut Type, stdlib: &Stdlib) {
+    fn promote_one(ty: &mut Type, stdlib: &Stdlib) {
+        Self::promote_implicit_literal(ty, stdlib);
+        Self::remove_truthiness_markers(ty);
+    }
+
+    fn promote_implicit_literal(ty: &mut Type, stdlib: &Stdlib) {
         match &*ty {
             Type::Literal(lit) if lit.style == LitStyle::Implicit => {
                 *ty = lit.value.general_class_type(stdlib).clone().to_type()
@@ -2192,27 +2138,41 @@ impl Type {
         }
     }
 
-    /// Like `promote_implicit_literals` but only recurses into unions.
-    pub fn promote_shallow_implicit_literals(mut self, stdlib: &Stdlib) -> Type {
+    /// Remove the truthiness markers from `ty` if it is an intersection. This does not recurse.
+    fn remove_truthiness_markers(ty: &mut Type) {
+        if let Type::Intersect(x) = ty
+            && x.0.iter().any(Type::is_truthiness_marker)
+        {
+            x.0.retain(|m| !m.is_truthiness_marker());
+            if let [member] = x.0.as_slice() {
+                *ty = member.clone();
+            }
+        }
+    }
+
+    /// Like `promote` but only recurses into unions.
+    pub fn promote_shallow(mut self, stdlib: &Stdlib) -> Type {
         match &mut self {
             Type::Union(union) => {
                 for member in &mut union.members {
-                    Self::promote_one_implicit_literal(member, stdlib);
+                    Self::promote_one(member, stdlib);
                 }
             }
-            _ => Self::promote_one_implicit_literal(&mut self, stdlib),
+            _ => Self::promote_one(&mut self, stdlib),
         }
         self
     }
 
-    pub fn promote_implicit_literals(mut self, stdlib: &Stdlib) -> Type {
+    /// Widen an inferred type for a slot that later assignments can write, such as an attribute,
+    /// a container element or a solved type variable. This removes precision that describes only
+    /// the value of one expression: implicit literals become their class, and truthiness markers
+    /// are removed.
+    pub fn promote(mut self, stdlib: &Stdlib) -> Type {
         fn g(ty: &mut Type, f: &mut dyn FnMut(&mut Type)) {
             ty.recurse_mut(&mut |ty| g(ty, f));
             f(ty);
         }
-        g(&mut self, &mut |ty| {
-            Self::promote_one_implicit_literal(ty, stdlib)
-        });
+        g(&mut self, &mut |ty| Self::promote_one(ty, stdlib));
         self
     }
 
@@ -2316,6 +2276,32 @@ impl Type {
         self
     }
 
+    /// Whether this type only records the truthiness of a boolean operand for narrowing.
+    pub fn is_truthiness_marker(&self) -> bool {
+        matches!(self, Type::Falsy | Type::Truthy)
+    }
+
+    /// For an intersection of a type and a truthiness marker, the type users see: the type without
+    /// the marker. For any other type, the type itself.
+    pub fn ignoring_truthiness_marker(&self) -> &Type {
+        if let Type::Intersect(x) = self
+            && let [a, b] = x.0.as_slice()
+        {
+            if b.is_truthiness_marker() {
+                return a;
+            }
+            if a.is_truthiness_marker() {
+                return b;
+            }
+        }
+        self
+    }
+
+    /// Remove truthiness markers from every intersection.
+    pub fn without_truthiness_markers(self) -> Type {
+        self.transform(&mut Self::remove_truthiness_markers)
+    }
+
     /// Replace every DataFrame and Series schema with its plain underlying class. The schema forms
     /// (`DataFrame[a: Int64, ...]`, `Series[Int64]`) are not valid annotation syntax, so a surface
     /// that emits a type as source must strip them first.
@@ -2383,6 +2369,7 @@ impl Type {
     pub fn qname(&self) -> Option<&QName> {
         match self {
             Type::ClassDef(cls) => Some(cls.qname()),
+            Type::SpecializedClassDef(c) => Some(c.qname()),
             Type::ClassType(c) => Some(c.qname()),
             Type::TypedDict(TypedDict::TypedDict(c)) => Some(c.qname()),
             Type::PartialTypedDict(TypedDict::TypedDict(c)) => Some(c.qname()),
@@ -2403,8 +2390,8 @@ impl Type {
             Type::Literal(lit) if let Lit::Int(x) = &lit.value => Some(x.as_bool()),
             Type::Literal(lit) if let Lit::Bytes(x) = &lit.value => Some(!x.is_empty()),
             Type::Literal(lit) if let Lit::Str(x) = &lit.value => Some(!x.is_empty()),
-            Type::Type(_) => Some(true),
-            Type::None => Some(false),
+            Type::SpecializedClassDef(_) | Type::Type(_) | Type::Truthy => Some(true),
+            Type::None | Type::Falsy => Some(false),
             Type::Sentinel(_) => Some(true),
             Type::Tuple(Tuple::Concrete(elements)) => Some(!elements.is_empty()),
             Type::Union(u) => {
@@ -2420,11 +2407,21 @@ impl Type {
                 }
                 answer
             }
+            // Every value of an intersection is a value of each member, so one member with a known
+            // truthiness decides it. If two members disagree, the intersection has no values, and
+            // either answer is correct.
+            Type::Intersect(x) => x.0.iter().find_map(Type::as_bool),
             Type::ClassType(cls) => {
                 // `Never` containers cannot hold any items; they are always empty; they are always falsy.
-                const CONTAINER_NAMES: &[&str] = &["set", "frozenset", "list", "dict"];
-                (CONTAINER_NAMES.iter().any(|n| cls.is_builtin(n))
-                    && cls.targs().as_slice().first().is_some_and(|t| t.is_never()))
+                (matches!(
+                    cls.known(),
+                    Some(
+                        KnownClass::Set
+                            | KnownClass::FrozenSet
+                            | KnownClass::List
+                            | KnownClass::Dict
+                    )
+                ) && cls.targs().as_slice().first().is_some_and(|t| t.is_never()))
                 .then_some(false)
             }
             _ => None,
@@ -2469,13 +2466,12 @@ impl Type {
             | Type::Overload(_)
             | Type::Union(_)
             | Type::ClassDef(_)
+            | Type::SpecializedClassDef(_)
             | Type::ClassType(_)
             | Type::TypedDict(_)
             | Type::PartialTypedDict(_)
-            | Type::ShapedArray(_)
             | Type::IntTuple(_)
             | Type::NamedInts(_)
-            | Type::NNModule(_)
             | Type::DataFrame(_)
             | Type::Series(_)
             | Type::Int(_)
@@ -2508,6 +2504,8 @@ impl Type {
             | Type::SelfType(_)
             | Type::KwCall(_)
             | Type::Materialization
+            | Type::Falsy
+            | Type::Truthy
             | Type::None => false,
         })
     }
@@ -2557,7 +2555,6 @@ impl Type {
         match self {
             Type::Int(dim) => dim.materialize(),
             Type::IntTuple(tuple) => tuple.materialize(),
-            Type::ShapedArray(shaped) => shaped.materialize_inline_shape(),
             _ => {}
         }
         self.transform_toplevel_callable_signatures(|callable: &mut Callable, _| {
@@ -2589,7 +2586,7 @@ impl Type {
     /// Note the difference with `Type::Ellipsis`, which represents `...` in a type annotation,
     /// e.g., `x: Callable[Concatenate[int, ...], int]`.
     pub fn is_ellipsis_value(&self) -> bool {
-        matches!(self, Type::ClassType(cls) if cls.has_qname("types", "EllipsisType"))
+        matches!(self, Type::ClassType(cls) if cls.is(KnownClass::TypesEllipsisType))
     }
 }
 
@@ -2891,8 +2888,18 @@ mod tests {
         // relies on that matching `AnyStyle::merge`. These agree only because the variants are
         // declared weakest-first; this guards the coupling so reordering them fails here rather
         // than silently changing which `Any` a union keeps.
-        for a in [AnyStyle::Explicit, AnyStyle::Implicit, AnyStyle::Error] {
-            for b in [AnyStyle::Explicit, AnyStyle::Implicit, AnyStyle::Error] {
+        for a in [
+            AnyStyle::Explicit,
+            AnyStyle::Implicit,
+            AnyStyle::Error,
+            AnyStyle::MissingImport,
+        ] {
+            for b in [
+                AnyStyle::Explicit,
+                AnyStyle::Implicit,
+                AnyStyle::Error,
+                AnyStyle::MissingImport,
+            ] {
                 assert_eq!(Type::Any(a.max(b)), a.merge(b));
             }
         }

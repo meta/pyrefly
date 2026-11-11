@@ -12,6 +12,7 @@ import { PyreflyState } from '../sandbox/Sandbox';
 import { DEFAULT_SANDBOX_PROGRAM } from '../sandbox/DefaultSandboxProgram';
 import {
     createPyreflyState,
+    createPyreflyWasmModule,
     findError,
     isPyreflyWasmAvailable,
 } from './__test_utils__/PyreflyWasmTestUtils';
@@ -27,6 +28,11 @@ describe('pyrefly_wasm', () => {
 
     beforeAll(async () => {
         wasmAvailable = await isPyreflyWasmAvailable();
+        if (!wasmAvailable && process.env.PYREFLY_WASM_REQUIRED) {
+            throw new Error(
+                'PYREFLY_WASM_REQUIRED is set, but the wasm module is not built.'
+            );
+        }
         if (!wasmAvailable) {
             console.log(
                 'Skipping pyrefly_wasm tests: wasm module not built. ' +
@@ -132,17 +138,50 @@ movie: Movie = {'name': 'Blade Runner',
             if (!wasmAvailable) return;
             pyreService.setActiveFile('main.py');
             // Position of "test" in "reveal_type(test(42))" on line 6
-            const definitions = pyreService.gotoDefinition(6, 13);
+            const definitions = pyreService.gotoDefinition(6, 13, true);
 
             expect(definitions).toBeDefined();
             expect(definitions).not.toBeNull();
             expect(definitions!.length).toBeGreaterThan(0);
 
             const definition = definitions![0];
-            expect(definition.startLineNumber).toBe(3);
-            expect(definition.startColumn).toBe(5);
-            expect(definition.endLineNumber).toBe(3);
-            expect(definition.endColumn).toBe(9);
+            expect(definition.filename).toBe('main.py');
+            expect(definition.range).toEqual({
+                startLineNumber: 3,
+                startColumn: 5,
+                endLineNumber: 3,
+                endColumn: 9,
+            });
+            expect(definition.contents).toBeUndefined();
+        });
+
+        it('should return the file of a definition in another file', () => {
+            if (!wasmAvailable) return;
+            pyreService.updateSandboxFiles(
+                {
+                    'main.py':
+                        'import os\nfrom utils import f\nf()\nos.getcwd()\n',
+                    'utils.py': '\n\ndef f() -> None: ...\n',
+                },
+                true
+            );
+            pyreService.setActiveFile('main.py');
+            expect(pyreService.gotoDefinition(3, 1, true)).toEqual([
+                {
+                    filename: 'utils.py',
+                    range: {
+                        startLineNumber: 3,
+                        startColumn: 5,
+                        endLineNumber: 3,
+                        endColumn: 6,
+                    },
+                },
+            ]);
+            const [stub] = pyreService.gotoDefinition(4, 4, true)!;
+            expect(stub.filename).toBe('typeshed/stdlib/os/__init__.pyi');
+            expect(stub.contents).toContain('def getcwd()');
+            const [stubOnly] = pyreService.gotoDefinition(4, 4, false)!;
+            expect(stubOnly.contents).toBeUndefined();
         });
     });
 
@@ -233,5 +272,149 @@ tes
                     .some((hint: any) => hint.label === 'value= ')
             ).toBe(true);
         });
+    });
+
+    describe('semanticTokens', () => {
+        it('should return tokens that use the legend', () => {
+            if (!wasmAvailable) return;
+            pyreService.setActiveFile('main.py');
+            const legend = pyreService.semanticTokensLegend();
+            expect(legend.tokenTypes).toContain('function');
+            expect(
+                pyreService.semanticTokens(null).data.length
+            ).toBeGreaterThan(0);
+        });
+    });
+
+    describe('bindings', () => {
+        it('should return the Pyrefly version', async () => {
+            if (!wasmAvailable) return;
+            const pyreflyWasm = await createPyreflyWasmModule();
+            expect(pyreflyWasm.version()).toMatch(/^\d+\.\d+\.\d+/);
+        });
+
+        it('should throw for an unsupported Python version', async () => {
+            if (!wasmAvailable) return;
+            const pyreflyWasm = await createPyreflyWasmModule();
+            expect(() => new pyreflyWasm.State('2.7')).toThrow('not supported');
+        });
+
+        it('should keep each state separate', async () => {
+            if (!wasmAvailable) return;
+            const pyreflyWasm = await createPyreflyWasmModule();
+            const other = new pyreflyWasm.State('3.12');
+            other.updateSandboxFiles({ 'main.py': 'x: int = ""\n' }, true);
+            other.setActiveFile('main.py');
+            expect(other.getErrors().length).toBe(1);
+            pyreService.setActiveFile('main.py');
+            expect(
+                findError(pyreService.getErrors(), 'is not assignable to `int`')
+            ).toBeUndefined();
+        });
+
+        it('should return ENOSYS for an unimplemented WASI import', async () => {
+            if (!wasmAvailable) return;
+            const compile = jest
+                .spyOn(WebAssembly, 'compile')
+                .mockResolvedValue({} as WebAssembly.Module);
+            const instantiate = jest
+                .spyOn(WebAssembly, 'instantiate')
+                .mockResolvedValue({ exports: {} } as any);
+            try {
+                // A fresh copy of the bindings, because `init` instantiates only once.
+                await jest.isolateModulesAsync(async () => {
+                    const pyreflyWasm = (await import(
+                        './wasm/pyrefly_wasm_for_testing'
+                    )) as unknown as {
+                        default: (source: Uint8Array) => Promise<void>;
+                    };
+                    await pyreflyWasm.default(new Uint8Array());
+                });
+                const wasi = instantiate.mock.calls[0][1]!
+                    .wasi_snapshot_preview1 as Record<string, () => number>;
+                // ERRNO_NOSYS
+                expect(wasi.args_get()).toBe(52);
+                // ERRNO_BADF, which ends the preopened directory scan in wasi-libc.
+                expect(wasi.fd_prestat_get()).toBe(8);
+            } finally {
+                compile.mockRestore();
+                instantiate.mockRestore();
+            }
+        });
+
+        it('should omit unset completion fields', () => {
+            if (!wasmAvailable) return;
+            pyreService.updateSingleFile('main.py', 'value = 1\nval');
+            pyreService.setActiveFile('main.py');
+            const items = pyreService.autoComplete(2, 4);
+            const value = items.find((item: any) => item.label === 'value');
+            expect(value).toBeDefined();
+            expect('additionalTextEdits' in value).toBe(false);
+            expect(
+                items.every((item: any) => !Object.values(item).includes(null))
+            ).toBe(true);
+        });
+
+        it('should open each playground again after a crash', async () => {
+            if (!wasmAvailable) return;
+            const pyreflyWasm = await createPyreflyWasmModule();
+            const state = new pyreflyWasm.State('3.12');
+            state.updateSandboxFiles({ 'main.py': 'x: int = ""\n' }, true);
+            state.setActiveFile('main.py');
+            // Nesting this deep overflows the stack.
+            const deep = `x = ${'['.repeat(5000)}${']'.repeat(5000)}\n`;
+            expect(() => state.updateSingleFile('main.py', deep)).toThrow();
+            expect(() => state.getErrors()).toThrow('not ready');
+
+            // Waits for the new instance.
+            await createPyreflyWasmModule();
+            // The playground opens with the last input that did not crash.
+            expect(state.getErrors().length).toBe(1);
+
+            // New input after a crash replaces the files of the last input
+            // that did not crash.
+            expect(() => state.updateSingleFile('main.py', deep)).toThrow();
+            await createPyreflyWasmModule();
+            state.updateSingleFile('main.py', 'y: str = 1\nz: int = ""\n');
+            expect(state.getErrors().length).toBe(2);
+
+            pyreService.setActiveFile('main.py');
+            expect(
+                findError(pyreService.getErrors(), 'revealed type:')
+            ).toBeDefined();
+        });
+
+        it('should check text with a lone surrogate', () => {
+            if (!wasmAvailable) return;
+            pyreService.updateSingleFile(
+                'main.py',
+                'from typing import reveal_type\nreveal_type("\ud800")\n'
+            );
+            pyreService.setActiveFile('main.py');
+            expect(
+                findError(pyreService.getErrors(), "Literal['\ufffd']")
+            ).toBeDefined();
+        });
+
+        it('should convert arguments as wasm-bindgen does', () => {
+            if (!wasmAvailable) return;
+            pyreService.setActiveFile('main.py');
+            expect(pyreService.hover(NaN, undefined as any)).toBeNull();
+            const whole = pyreService.semanticTokens(null).data;
+            expect(pyreService.semanticTokens({} as any).data).toEqual(whole);
+        });
+    });
+
+    it('should check 450 levels of nested lists', () => {
+        if (!wasmAvailable) return;
+        // With Rust's default 1 MiB wasm stack, this fails with `memory
+        // access out of bounds`.
+        const depth = 450;
+        pyreService.updateSingleFile(
+            'main.py',
+            `x = ${'['.repeat(depth)}${']'.repeat(depth)}\n`
+        );
+        pyreService.setActiveFile('main.py');
+        expect(pyreService.getErrors()).toEqual([]);
     });
 });

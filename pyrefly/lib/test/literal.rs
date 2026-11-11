@@ -8,6 +8,72 @@
 use crate::testcase;
 
 testcase!(
+    test_literal_annotation_recovery_boundary,
+    r#"
+from typing import Any, Literal, assert_type
+from missing_backend import Value  # E: Cannot find module `missing_backend`
+
+Alias = Any
+
+def explicit(value: Literal[Any]) -> None: ...  # E: Invalid type inside literal
+def aliased(value: Literal[Alias]) -> None: ...  # E: Invalid type inside literal
+def missing(value: Literal[Value]) -> None: ...  # E: Invalid type inside literal
+def attribute(value: Literal[Value.member]) -> None: ...  # E: not a valid enum member
+def undefined(value: Literal[Undefined]) -> None: ...  # E: Could not find name `Undefined`  # E: Invalid type inside literal
+def bad(value: Literal[1.5]) -> None: ...  # E: Invalid literal expression
+
+def check(value: Literal[1, "ok", None]) -> None:
+    assert_type(value, Literal[1, "ok"] | None)
+"#,
+);
+
+testcase!(
+    test_literal_partial_recovery,
+    r#"
+from enum import Enum
+from typing import Annotated, Any, Literal, TypeAlias, assert_type
+
+class E(Enum):
+    A = 1
+    B = 2
+
+Legacy: TypeAlias = Literal[1, 1.5, 3]  # E: Invalid literal expression
+type Scoped = Literal["ok", 1.5, None]  # E: Invalid literal expression
+AnnotatedLegacy: TypeAlias = Annotated[Legacy, "metadata"]
+
+def flat(value: Literal[1, 1.5, 3]) -> None:  # E: Invalid literal expression
+    assert_type(value, Any | Literal[1, 3])
+
+def nested(value: Literal[Literal[1, 1.5], 3]) -> None:  # E: Invalid literal expression
+    assert_type(value, Any | Literal[1, 3])
+
+def legacy(value: Literal[Legacy, "extra"]) -> None:  # E: Invalid type inside literal
+    assert_type(value, Any | Literal[1, 3, "extra"])
+
+def scoped(value: Literal[Scoped, 4]) -> None:  # E: Invalid type inside literal
+    assert_type(value, Any | Literal["ok", 4] | None)
+
+def annotated(value: Literal[AnnotatedLegacy, 4]) -> None:  # E: Invalid type inside literal
+    assert_type(value, Annotated[Literal[1], "metadata"] | Annotated[Literal[3], "metadata"] | Any | Literal[4])
+
+def explicit_any(value: Literal[1, Any, 3]) -> None:  # E: Invalid type inside literal
+    assert_type(value, Any | Literal[1, 3])
+
+def enum_member(value: Literal[E.A, E.invalid, "ok"]) -> None:  # E: not a valid enum member
+    assert_type(value, Any | Literal[E.A, "ok"])
+
+def nonliteral_type(value: Literal[list[int]]) -> None:  # E: Invalid literal expression
+    assert_type(value, Any)
+
+def all_invalid(value: Literal[1.5, int]) -> None:  # E: Invalid literal expression  # E: Invalid type inside literal
+    assert_type(value, Any)
+
+def valid(value: Literal[Literal[1, 3], E.A, "ok", None]) -> None:
+    assert_type(value, Literal[1, 3, E.A, "ok"] | None)
+"#,
+);
+
+testcase!(
     test_fstring_literal,
     r#"
 from typing import assert_type, Literal, LiteralString
@@ -643,4 +709,14 @@ x = Color.RED
 def foo():
     assert_type(x, Color)
     "#,
+);
+
+// Control characters in a string literal type are written as escapes, as `repr` writes them,
+// so that displaying the type never sends a raw control character to a terminal or editor.
+testcase!(
+    test_string_literal_control_characters_are_escaped,
+    r#"
+from typing import reveal_type
+reveal_type("\x00\x1b[31m\t\x7f\x9b☃")  # E: revealed type: Literal['\x00\x1b[31m\t\x7f\x9b☃']
+"#,
 );

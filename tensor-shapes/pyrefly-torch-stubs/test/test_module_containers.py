@@ -70,6 +70,13 @@ def test_module_dict_typed_fields() -> None:
     assert_shape(module_dict.dropout(projected).shape, (2, 4))
 
 
+def test_module_dict_homogeneous_mapping() -> None:
+    module_dict = nn.ModuleDict({str(i): nn.Linear(3, 4) for i in range(2)})
+    assert_type(module_dict["0"], nn.Linear[3, 4])
+    projected = module_dict["1"](torch.ones((2, 3)))
+    assert_shape(projected.shape, (2, 4))
+
+
 if TYPE_CHECKING:
 
     def check_symbolic_module_list[B: IntVar, T: IntVar, N: IntVar](

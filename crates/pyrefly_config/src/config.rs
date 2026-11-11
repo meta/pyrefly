@@ -78,9 +78,11 @@ use crate::environment::environment::PythonEnvironment;
 use crate::environment::interpreters::Interpreters;
 use crate::error::ErrorConfig;
 use crate::error::ErrorDisplayConfig;
+use crate::error_kind::ErrorKind;
 use crate::error_kind::Severity;
 use crate::finder::ConfigError;
 use crate::migration::run::MigratedFromKind;
+use crate::module_names::ModuleNames;
 use crate::module_wildcard::Match;
 use crate::module_wildcard::ModuleWildcard;
 use crate::pyproject::PyProject;
@@ -622,6 +624,10 @@ pub struct ConfigFile {
     #[serde(skip)]
     pub search_path_from_args: Vec<PathBuf>,
 
+    /// Set only by the `--reveal-type-qualified-names` command-line flag.
+    #[serde(skip)]
+    pub reveal_type_qualified_names: bool,
+
     /// The list of directories where imports are
     /// imported from, including type checked files.
     /// Does not include command-line overrides or the import root!
@@ -667,8 +673,10 @@ pub struct ConfigFile {
     /// Errors matching the baseline are suppressed by default.
     pub baseline: Option<PathBuf>,
 
-    /// Severity assigned to errors that match the baseline.
-    /// Defaults to `ignore`.
+    /// Severity cap for errors that match the baseline.
+    /// `pyrefly check` treats an unset value as `ignore`. The IDE shows hints
+    /// until this is set, then shows a match at the lower of its own severity
+    /// and this level.
     pub baseline_error_level: Option<Severity>,
 
     /// Fields used to match diagnostics against baseline entries.
@@ -740,6 +748,19 @@ pub struct ConfigFile {
     #[derivative(PartialEq = "ignore")]
     pub source_db: Option<ArcId<Box<dyn SourceDatabase>>>,
 
+    /// A source database asked after the search path, the stdlib and site packages, for the
+    /// modules that none of them has, and for the module names of files that `source_db`
+    /// doesn't name. Unlike `source_db`, it can't shadow a stdlib or installed module.
+    #[serde(skip)]
+    #[derivative(PartialEq = "ignore")]
+    pub fallback_source_db: Option<ArcId<Box<dyn SourceDatabase>>>,
+
+    /// Module names of listed files, from `--module-names`, for reports. Imports and the names of
+    /// checked files use them through `fallback_source_db`.
+    #[serde(skip)]
+    #[derivative(PartialEq = "ignore")]
+    pub module_names: Option<ArcId<ModuleNames>>,
+
     /// Config overrides from `source_db`, deserialized on first use. Every
     /// per-file setting lookup consults the owning target's config, so the raw
     /// JSON must not be re-parsed each time. `None` records a config that failed
@@ -749,9 +770,15 @@ pub struct ConfigFile {
     #[derivative(PartialEq = "ignore")]
     pub target_configs: ArcId<RwLock<SmallMap<ConfigName, Option<Arc<ConfigBase>>>>>,
 
-    /// Minimum severity level for errors to be displayed.
-    /// Errors below this severity will not be shown. Defaults to "error".
+    /// Minimum severity level for errors to be displayed and to cause a nonzero exit code.
+    /// When unset, warnings and errors are displayed, and only errors cause a nonzero exit code.
     pub min_severity: Option<Severity>,
+
+    /// Only report errors of specified kinds, such as `["bad-assignment"]`.
+    /// This is equivalent to `--only` on the command line. If this is set in
+    /// both the CLI and the config value, the CLI value overrides the config value.
+    /// If left unset, it displays all kinds of errors.
+    pub only: Option<Vec<ErrorKind>>,
 
     /// Should we let Pyrefly try to index the project's files? Disabling this
     /// may speed up LSP operations on large projects.
@@ -801,6 +828,7 @@ impl Default for ConfigFile {
                 skip_interpreter_query: false,
             },
             search_path_from_args: Vec::new(),
+            reveal_type_qualified_names: false,
             search_path_from_file: Vec::new(),
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -814,6 +842,8 @@ impl Default for ConfigFile {
             coverage: Default::default(),
             build_system: Default::default(),
             source_db: Default::default(),
+            fallback_source_db: Default::default(),
+            module_names: None,
             target_configs: ArcId::new(RwLock::new(SmallMap::new())),
             use_ignore_files: true,
             typeshed_path: None,
@@ -823,6 +853,7 @@ impl Default for ConfigFile {
             baseline_format: BaselineFormat::default(),
             baseline_auto_update: false,
             min_severity: None,
+            only: None,
             output_format: None,
             skip_lsp_config_indexing: false,
             extra_file_extensions: Vec::new(),
@@ -1148,17 +1179,30 @@ impl ConfigFile {
         ));
         if !self.disable_search_path_heuristics {
             result.push(ImportLookupPathPart::ImportRoot(self.import_root.as_ref()));
-            result.push(ImportLookupPathPart::FallbackSearchPath(
+        }
+        let fallback_search_path = (!self.disable_search_path_heuristics).then(|| {
+            ImportLookupPathPart::FallbackSearchPath(
                 &self.fallback_search_path,
                 origin.and_then(|p| p.parent()),
-            ));
-        }
+            )
+        });
+        // A directory-relative fallback search path is only consulted when everything
+        // else fails, so it comes after the site package path.
+        let (fallback_before_site_packages, fallback_after_site_packages) =
+            match self.fallback_search_path {
+                FallbackSearchPath::DirectoryRelative(_) => (None, fallback_search_path),
+                FallbackSearchPath::Explicit(_) | FallbackSearchPath::Empty => {
+                    (fallback_search_path, None)
+                }
+            };
+        result.extend(fallback_before_site_packages);
         result.push(ImportLookupPathPart::SitePackagePath(
             self.python_environment.site_package_path.as_ref().unwrap(),
         ));
         result.push(ImportLookupPathPart::InterpreterSitePackagePath(
             &self.python_environment.interpreter_site_package_path,
         ));
+        result.extend(fallback_after_site_packages);
         result
     }
 
@@ -1463,11 +1507,11 @@ impl ConfigFile {
     /// Create a `Handle` for the given path, deriving its module name from the search paths,
     /// falling back to `self.fallback_search_path` and finally `__unknown__`.
     pub fn handle_from_module_path(&self, module_path: ModulePath) -> Handle {
-        match &self
-            .source_db
-            .as_ref()
-            .and_then(|db| db.handle_from_module_path(&module_path))
-        {
+        let named_by = |db: &Option<ArcId<Box<dyn SourceDatabase>>>| {
+            db.as_ref()
+                .and_then(|db| db.handle_from_module_path(&module_path))
+        };
+        match &named_by(&self.source_db).or_else(|| named_by(&self.fallback_source_db)) {
             Some(handle) => handle.dupe(),
             None => {
                 // Order: explicit search paths (user intent) > custom typeshed
@@ -2125,6 +2169,14 @@ impl ConfigFile {
                 )));
             }
 
+            if let Some(only) = &config.only
+                && only.is_empty()
+            {
+                errors.push(ConfigError::error(anyhow!(
+                    "a config with a value is required for `only`"
+                )));
+            }
+
             if !config.root.extras.0.is_empty() {
                 let extra_keys = config.root.extras.0.keys().join(", ");
                 errors.push(ConfigError::warn(anyhow!(
@@ -2738,6 +2790,7 @@ mod tests {
                 .unwrap(),
                 project_excludes: Globs::new(vec!["tests/untyped/**".to_owned()]).unwrap(),
                 search_path_from_args: Vec::new(),
+                reveal_type_qualified_names: false,
                 search_path_from_file: vec![PathBuf::from("../..")],
                 disable_search_path_heuristics: false,
                 enable_fallback_search_path: false,
@@ -2802,6 +2855,8 @@ mod tests {
                     infer_param_types_from_docstring: None,
                 },
                 source_db: Default::default(),
+                fallback_source_db: Default::default(),
+                module_names: None,
                 target_configs: Default::default(),
                 sub_configs: vec![SubConfig {
                     matches: Glob::new("sub/project/**".to_owned()).unwrap(),
@@ -2848,6 +2903,7 @@ mod tests {
                 baseline_format: BaselineFormat::Full,
                 baseline_auto_update: false,
                 min_severity: None,
+                only: None,
                 skip_lsp_config_indexing: false,
                 extra_file_extensions: Vec::new(),
                 synthesized_preset_reason: None,
@@ -3150,6 +3206,7 @@ mod tests {
                 .unwrap(),
             project_excludes: Globs::new(vec!["tests/untyped/**".to_owned()]).unwrap(),
             search_path_from_args: Vec::new(),
+            reveal_type_qualified_names: false,
             search_path_from_file: vec![PathBuf::from("../..")],
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -3171,6 +3228,8 @@ mod tests {
             },
             root: Default::default(),
             source_db: Default::default(),
+            fallback_source_db: Default::default(),
+            module_names: None,
             target_configs: Default::default(),
             build_system: Default::default(),
             sub_configs: vec![SubConfig {
@@ -3189,6 +3248,7 @@ mod tests {
             baseline_format: BaselineFormat::Full,
             baseline_auto_update: false,
             min_severity: None,
+            only: None,
             skip_lsp_config_indexing: false,
             extra_file_extensions: Vec::new(),
             synthesized_preset_reason: None,
@@ -3239,6 +3299,7 @@ mod tests {
                 skip_interpreter_query: false,
             },
             search_path_from_args: Vec::new(),
+            reveal_type_qualified_names: false,
             search_path_from_file: search_path,
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -3252,6 +3313,8 @@ mod tests {
             root: Default::default(),
             build_system: Default::default(),
             source_db: Default::default(),
+            fallback_source_db: Default::default(),
+            module_names: None,
             target_configs: Default::default(),
             sub_configs: vec![SubConfig {
                 matches: sub_config_matches,
@@ -3269,6 +3332,7 @@ mod tests {
             baseline_format: BaselineFormat::Full,
             baseline_auto_update: false,
             min_severity: None,
+            only: None,
             skip_lsp_config_indexing: false,
             extra_file_extensions: Vec::new(),
             synthesized_preset_reason: None,
@@ -3366,6 +3430,40 @@ mod tests {
                  "#;
         let err = ConfigFile::parse_config(config_str).unwrap_err();
         assert!(err.to_string().contains("missing field `matches`"));
+    }
+
+    #[test]
+    fn test_only_config_parsing() {
+        let config_str = r#"
+        only = ["bad-assignment", "bad-return"]
+        "#;
+
+        let config = ConfigFile::parse_config(config_str).unwrap();
+        assert_eq!(
+            config.only,
+            Some(vec![ErrorKind::BadAssignment, ErrorKind::BadReturn])
+        );
+
+        let defaults = ConfigFile::parse_config("").unwrap();
+        assert_eq!(defaults.only, None);
+    }
+
+    #[test]
+    fn test_only_empty_list_is_rejected() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join(ConfigFile::PYREFLY_FILE_NAME);
+        for (content, expect_error) in
+            [("only = []", true), (r#"only = ["bad-assignment"]"#, false)]
+        {
+            fs::write(&path, content).unwrap();
+            let (_, errors) = ConfigFile::from_file(&path);
+            if expect_error {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].severity(), Severity::Error);
+            } else {
+                assert!(errors.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -4261,6 +4359,7 @@ output-format = "omit-errors"
                 "Basic preset should keep {kind:?} as Hint"
             );
         }
+        assert_eq!(errors.severity(ErrorKind::RevealType), Severity::Info);
         // A representative sample of kinds that should be silenced. Exhaustive
         // enumeration is covered by `test_preset_fields_propagate`.
         for kind in [
@@ -5624,6 +5723,7 @@ bad-override = "error"
 
         let mut config = ConfigFile {
             search_path_from_args: vec![mylib_dir.clone()],
+            reveal_type_qualified_names: false,
             import_root: Some(root.path().to_path_buf()),
             interpreters: Interpreters {
                 skip_interpreter_query: true,

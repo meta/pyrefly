@@ -25,6 +25,25 @@ def test_functional_pooling() -> None:
     )
 
 
+def test_avg_pool2d_list_controls() -> None:
+    image = torch.randn(2, 3, 4, 8)
+    kernel = F.avg_pool2d(image, [1, 2])
+    stride = F.avg_pool2d(image, 2, stride=[1, 2])
+    padding = F.avg_pool2d(image, 2, padding=[0, 1])
+    positional = F.avg_pool2d(image, [1, 2], [1, 2])
+    unbatched = F.avg_pool2d(image[0], [1, 2])
+    assert_type(kernel, Tensor[[2, 3, int, int]])
+    assert_type(stride, Tensor[[2, 3, int, int]])
+    assert_type(padding, Tensor[[2, 3, int, int]])
+    assert_type(positional, Tensor[[2, 3, int, int]])
+    assert_type(unbatched, Tensor[[3, int, int]])
+    assert_shape(kernel.shape, (2, 3, int, int), runtime=(2, 3, 4, 4))
+    assert_shape(stride.shape, (2, 3, int, int), runtime=(2, 3, 3, 4))
+    assert_shape(padding.shape, (2, 3, int, int), runtime=(2, 3, 2, 5))
+    assert_shape(positional.shape, (2, 3, int, int), runtime=(2, 3, 4, 4))
+    assert_shape(unbatched.shape, (3, int, int), runtime=(3, 4, 4))
+
+
 def test_pooling_modules() -> None:
     tensor = torch.randn((2, 3, 8, 9))
     assert_shape(nn.MaxPool2d(2)(tensor).shape, (2, 3, 4, 4))
@@ -69,6 +88,12 @@ def test_adaptive_pooling() -> None:
         F.adaptive_max_pool3d(unbatched_volume, (4, 5, 6)).shape,
         (3, 4, 5, 6),
     )
+
+
+def test_adaptive_max_pool2d_scalar_output_size() -> None:
+    tensor = torch.randn((2, 3, 9, 9))
+    pool = nn.AdaptiveMaxPool2d(4)
+    assert_shape(pool(tensor).shape, (2, 3, 4, 4))
 
 
 def test_pooling_rejects_invalid_rank_and_controls() -> None:

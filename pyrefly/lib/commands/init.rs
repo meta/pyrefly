@@ -12,8 +12,11 @@ use std::path::PathBuf;
 use clap::Parser;
 use pyrefly_config::args::ConfigOverrideArgs;
 use pyrefly_config::file_kind::ConfigFileKind;
+use pyrefly_config::migration::run::MigrationResult;
 use pyrefly_config::migration::run::MigrationSource;
+use pyrefly_config::migration::run::PYREFLY_BASELINE_FILE;
 use pyrefly_config::migration::run::config_migration;
+use pyrefly_config::migration::run::write_pyrefly_baseline;
 use pyrefly_config::pyproject::PyProject;
 use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::fs_anyhow;
@@ -26,7 +29,6 @@ use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::files::FilesArgs;
 use crate::commands::util::CommandExitStatus;
 use crate::config::config::ConfigFile;
-use crate::error::error::Error as CheckError;
 
 const MAX_ERRORS_TO_PROMPT_SUPPRESSION: usize = 100;
 
@@ -112,46 +114,94 @@ impl InitArgs {
         thread_count: ThreadCount,
     ) -> anyhow::Result<CommandExitStatus> {
         // 1. Create Pyrefly Config
-        let create_config_result = self.create_config();
+        let (status, migrated) = self.create_config()?;
+        if status != CommandExitStatus::Success || self.dry_run || self.print_config {
+            // Dry-run writes nothing, so the follow-on check and suppression
+            // prompt would violate that. Print-config reserves stdout for the
+            // TOML, so a y/N prompt would break that too.
+            return Ok(status);
+        }
+        let Some(migrated) = migrated else {
+            return Ok(status);
+        };
 
-        match create_config_result {
-            Err(e) => Err(e),
-            Ok((status, _)) if status != CommandExitStatus::Success => Ok(status),
-            // Dry-run: no config was actually written, so running check + the
-            // suppression prompt (which writes `pyrefly: ignore` comments into
-            // .py files) would either be misleading or itself violate the
-            // "don't write" contract.
-            //
-            // Print-config: stdout is reserved for the machine-readable TOML.
-            // The follow-on suppression prompt would write a y/N question to
-            // stdout and block on stdin, breaking the contract for the
-            // automation use case the flag exists to support.
-            Ok((status, _)) if self.dry_run || self.print_config => Ok(status),
-            Ok((_, config_path)) => {
-                // 2. Run pyrefly check
-                let check_result =
-                    self.run_check(config_path.clone(), version, wrapper.clone(), thread_count);
+        // A yes creates the baseline and stops. A no, including
+        // `--non-interactive`, falls through to the normal check and
+        // suppression prompt without writing a baseline file.
+        if migrated.migrated_baseline
+            && self.prompt_user_confirmation(&format!(
+                "Found a basedpyright baseline. Generate a pyrefly baseline at {PYREFLY_BASELINE_FILE} for existing errors? (y/N): "
+            ))
+        {
+            write_pyrefly_baseline(&migrated.config_path)?;
+            info!("Running pyrefly check with --update-baseline...");
+            // Those reported errors are the ones just recorded in the new
+            // baseline, so a completed run is still a successful init.
+            if let Err(e) = self.run_configured_check(
+                Some(migrated.config_path),
+                version,
+                wrapper,
+                thread_count,
+                &["--update-baseline"],
+            ) {
+                error!("Failed to run pyrefly check with --update-baseline: {e}");
+            }
+            return Ok(CommandExitStatus::Success);
+        }
 
-                // Check if there are errors and if there are fewer than 100
-                if let Ok((_, errors)) = check_result {
-                    let error_count = errors.len();
-                    if error_count == 0 {
-                        return Ok(CommandExitStatus::Success);
-                    }
-                    // 3a. Prompt error suppression if there are less than the maximum number of errors
-                    else if error_count <= MAX_ERRORS_TO_PROMPT_SUPPRESSION {
-                        return self.prompt_error_suppression(
-                            config_path,
-                            error_count,
-                            version,
-                            wrapper,
-                            thread_count,
-                        );
-                    }
-                }
-                Ok(CommandExitStatus::Success)
+        let config_path = Some(migrated.config_path);
+        // 2. Run pyrefly check
+        let check_result =
+            self.run_check(config_path.clone(), version, wrapper.clone(), thread_count);
+
+        // Check if there are errors and if there are fewer than 100
+        if let Ok((_, error_count)) = check_result {
+            if error_count == 0 {
+                return Ok(CommandExitStatus::Success);
+            }
+            // 3a. Prompt error suppression if there are less than the maximum number of errors
+            else if error_count <= MAX_ERRORS_TO_PROMPT_SUPPRESSION {
+                return self.prompt_error_suppression(
+                    config_path,
+                    error_count,
+                    version,
+                    wrapper,
+                    thread_count,
+                );
             }
         }
+        Ok(CommandExitStatus::Success)
+    }
+
+    /// Run `pyrefly check` against the config init just wrote.
+    /// `extra_args` are flags beyond `--output-format omit-errors`.
+    fn run_configured_check(
+        &self,
+        config_path: Option<PathBuf>,
+        version: &str,
+        wrapper: Option<ConfigConfigurerWrapper>,
+        thread_count: ThreadCount,
+        extra_args: &[&str],
+    ) -> anyhow::Result<(CommandExitStatus, usize)> {
+        let mut args = vec!["check", "--output-format", "omit-errors"];
+        args.extend_from_slice(extra_args);
+        let check_args = check::CheckArgs::parse_from(args);
+        let (globs, config_finder, upsell) = FilesArgs::get(
+            Vec::new(),
+            config_path,
+            ConfigOverrideArgs::default(),
+            wrapper,
+        )?;
+        check_args
+            .run_once_with(
+                version,
+                globs,
+                config_finder,
+                upsell,
+                thread_count,
+                |errors, _| errors.len(),
+            )
+            .map(|(status, _, error_count)| (status, error_count))
     }
 
     fn run_check(
@@ -160,26 +210,13 @@ impl InitArgs {
         version: &str,
         wrapper: Option<ConfigConfigurerWrapper>,
         thread_count: ThreadCount,
-    ) -> anyhow::Result<(CommandExitStatus, Vec<CheckError>)> {
+    ) -> anyhow::Result<(CommandExitStatus, usize)> {
         info!("Running pyrefly check...");
-
-        // Create check args by parsing arguments with output-format set to omit-errors
-        let check_args = check::CheckArgs::parse_from(["check", "--output-format", "omit-errors"]);
-
-        // Use get to get the filtered globs and config finder
-        let (filtered_globs, config_finder, upsell) = FilesArgs::get(
-            Vec::new(),
-            config_path,
-            ConfigOverrideArgs::default(),
-            wrapper,
-        )?;
-
-        // Run the check directly
-        let res = check_args.run_once(version, filtered_globs, config_finder, upsell, thread_count);
+        let res = self.run_configured_check(config_path, version, wrapper, thread_count, &[]);
         if let Err(e) = &res {
             error!("Failed to run pyrefly check: {}", e);
         }
-        res.map(|(status, errors, _check_result)| (status, errors))
+        res
     }
 
     fn prompt_error_suppression(
@@ -196,31 +233,12 @@ impl InitArgs {
 
         if self.prompt_user_confirmation(&prompt) {
             info!("Running pyrefly check with suppress-errors flag...");
-
-            // Create check args with suppress-errors flag
-            let suppress_args = check::CheckArgs::parse_from([
-                "check",
-                "--suppress-errors",
-                "--output-format",
-                "omit-errors",
-                "--summary=none",
-            ]);
-
-            // Use get to get the filtered globs and config finder
-            let (suppress_globs, suppress_config_finder, suppress_upsell) = FilesArgs::get(
-                Vec::new(),
+            match self.run_configured_check(
                 config_path,
-                ConfigOverrideArgs::default(),
-                wrapper,
-            )?;
-
-            // Run the check with suppress-errors flag
-            match suppress_args.run_once(
                 version,
-                suppress_globs,
-                suppress_config_finder,
-                suppress_upsell,
+                wrapper,
                 thread_count,
+                &["--suppress-errors", "--summary=none"],
             ) {
                 Ok(_) => return Ok(CommandExitStatus::Success),
                 Err(e) => {
@@ -233,7 +251,7 @@ impl InitArgs {
         Ok(CommandExitStatus::Success)
     }
 
-    fn create_config(&self) -> anyhow::Result<(CommandExitStatus, Option<PathBuf>)> {
+    fn create_config(&self) -> anyhow::Result<(CommandExitStatus, Option<MigrationResult>)> {
         let path = self.path.absolutize();
 
         let dir: Option<&Path> = if path.is_dir() {
@@ -273,15 +291,9 @@ impl InitArgs {
         // 2. Migrate existing configuration to Pyrefly configuration
         if found_mypy || found_pyright || found_basedpyright {
             info!("Found an existing type checking configuration - setting up pyrefly ...");
-            return Ok((
-                CommandExitStatus::Success,
-                Some(config_migration(
-                    &path,
-                    self.migrate_from,
-                    self.dry_run,
-                    self.print_config,
-                )?),
-            ));
+            let migrated =
+                config_migration(&path, self.migrate_from, self.dry_run, self.print_config)?;
+            return Ok((CommandExitStatus::Success, Some(migrated)));
         }
 
         // Generate a basic config with a couple sensible defaults.
@@ -325,7 +337,13 @@ impl InitArgs {
             }
             PyProject::update(&config_path, cfg)?;
             info!("Config written to `{}`", config_path.display());
-            return Ok((CommandExitStatus::Success, Some(config_path)));
+            return Ok((
+                CommandExitStatus::Success,
+                Some(MigrationResult {
+                    config_path,
+                    migrated_baseline: false,
+                }),
+            ));
         }
 
         // 4. Initialize pyrefly.toml configuration in the case that there are no existing Mypy or Pyright configurations and user didn't specify a pyproject.toml
@@ -369,7 +387,13 @@ impl InitArgs {
         }
         fs_anyhow::write(&config_path, serialized)?;
         info!("New config written to `{}`", config_path.display());
-        Ok((CommandExitStatus::Success, Some(config_path)))
+        Ok((
+            CommandExitStatus::Success,
+            Some(MigrationResult {
+                config_path,
+                migrated_baseline: false,
+            }),
+        ))
     }
 
     fn read_from_stdin(prompt: &str) -> String {

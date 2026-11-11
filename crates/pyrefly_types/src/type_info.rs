@@ -15,6 +15,7 @@ use pyrefly_derive::TypeEq;
 use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
 use pyrefly_util::assert_bytes;
+use pyrefly_util::display::Fmt;
 use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::name::Name;
@@ -22,6 +23,7 @@ use starlark_map::small_map::SmallMap;
 use starlark_map::smallmap;
 use vec1::Vec1;
 
+use crate::display::TypeDisplayContext;
 use crate::facet::FacetKind;
 use crate::type_var::TypeVar;
 use crate::types::AnyStyle;
@@ -182,12 +184,22 @@ impl TypeInfo {
                     .into_iter()
                     .map(|TypeInfo { ty, facets }| (ty, facets.map(|x| *x)))
                     .unzip();
-                let ty = join_types(
-                    tys,
-                    union_types,
-                    is_subset_eq,
-                    join_style.map(|base_type_info| base_type_info.ty.clone()),
-                );
+                // Whole-name NarrowOf excludes reassignment; facet NarrowOf may not.
+                // Keep error-Any absorption here so assigned facet types stay in the join.
+                let ty = match &join_style {
+                    JoinStyle::NarrowOf(base)
+                        if matches!(base.ty, Type::Any(style) if style.is_error())
+                            && tys.iter().any(|ty| ty == &base.ty) =>
+                    {
+                        base.ty.clone()
+                    }
+                    _ => join_types(
+                        tys,
+                        union_types,
+                        is_subset_eq,
+                        join_style.map(|base_type_info| base_type_info.ty.clone()),
+                    ),
+                };
                 let branches = facets_branches.into_iter().flatten().collect::<Vec<_>>();
                 let facets = if branches.len() == n {
                     NarrowedFacets::join(
@@ -364,17 +376,29 @@ impl TypeInfo {
             })
             .collect()
     }
+
+    /// `ctx` must have been created from every type in this `TypeInfo`.
+    pub fn display_with<'a>(&'a self, ctx: &'a TypeDisplayContext<'a>) -> impl Display + 'a {
+        Fmt(move |f| {
+            write!(f, "{}", ctx.display(self.ty()))?;
+            if let Some(facets) = &self.facets
+                && facets.has_displayable_content()
+            {
+                write!(f, " (")?;
+                facets.fmt_with_prefix(&mut Vec::new(), ctx, f)?;
+                write!(f, ")")?;
+            }
+            Ok(())
+        })
+    }
 }
 
 impl Display for TypeInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.ty().fmt(f)?;
-        if let Some(facets) = &self.facets
-            && facets.has_displayable_content()
-        {
-            write!(f, " ({facets})")?;
-        }
-        Ok(())
+        let mut types = Vec::new();
+        self.visit(&mut |ty| types.push(ty));
+        let ctx = TypeDisplayContext::new(&types);
+        self.display_with(&ctx).fmt(f)
     }
 }
 
@@ -576,6 +600,7 @@ impl NarrowedFacets {
     fn fmt_with_prefix(
         &self,
         prefix: &mut Vec<FacetKind>,
+        ctx: &TypeDisplayContext,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         let mut first = true;
@@ -591,17 +616,17 @@ impl NarrowedFacets {
                 write!(f, ", ")?;
             }
             match value {
-                NarrowedFacet::Leaf(ty) => Self::fmt_type_with_label(prefix, facet, ty, f),
+                NarrowedFacet::Leaf(ty) => Self::fmt_type_with_label(prefix, facet, ty, ctx, f),
                 NarrowedFacet::WithRoot(ty, facets) => {
-                    Self::fmt_type_with_label(prefix, facet, ty, f)?;
+                    Self::fmt_type_with_label(prefix, facet, ty, ctx, f)?;
                     if facets.has_displayable_content() {
                         write!(f, ", ")?;
-                        facets.fmt_with_prefix_and_facet(prefix, facet, f)?;
+                        facets.fmt_with_prefix_and_facet(prefix, facet, ctx, f)?;
                     }
                     Ok(())
                 }
                 NarrowedFacet::WithoutRoot { facets, .. } => {
-                    facets.fmt_with_prefix_and_facet(prefix, facet, f)
+                    facets.fmt_with_prefix_and_facet(prefix, facet, ctx, f)
                 }
             }?;
         }
@@ -612,10 +637,11 @@ impl NarrowedFacets {
         &self,
         prefix: &mut Vec<FacetKind>,
         facet: &'a FacetKind,
+        ctx: &TypeDisplayContext,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         prefix.push(facet.clone());
-        self.fmt_with_prefix(prefix, f)?;
+        self.fmt_with_prefix(prefix, ctx, f)?;
         prefix.pop();
         Ok(())
     }
@@ -624,9 +650,16 @@ impl NarrowedFacets {
         prefix: &[FacetKind],
         facet: &FacetKind,
         ty: &Type,
+        ctx: &TypeDisplayContext,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
-        write!(f, "_{}{}: {}", prefix.iter().join(""), facet, ty)
+        write!(
+            f,
+            "_{}{}: {}",
+            prefix.iter().join(""),
+            facet,
+            ctx.display(ty)
+        )
     }
 }
 
@@ -645,12 +678,6 @@ impl VisitMut<Type> for NarrowedFacets {
         facets.values_mut().for_each(|value| {
             value.visit_mut(f);
         })
-    }
-}
-
-impl Display for NarrowedFacets {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_with_prefix(&mut Vec::new(), f)
     }
 }
 
@@ -927,8 +954,8 @@ fn join_types(
 /// the join.
 /// - If the base type is `Any`, and `Any` is still present in the join, just use `Any`.
 ///   This avoids creating union types like `Any | int` on gradual code that assigns or
-///   narrows a gradually-typed variable. We only do this for explicit and implicit any,
-///   not for `Any` that resulted from a type error.
+///   narrows a gradually-typed variable. We only do this for explicit and implicit any;
+///   `TypeInfo::join` handles unchanged error-derived Any in whole-name narrow-only joins.
 /// - If the merge involves only narrows of base *and* the base type is a subset
 ///   of the resulting union, simplify the union. This would not be needed if we
 ///   had general union simplification, but it is useful today because:

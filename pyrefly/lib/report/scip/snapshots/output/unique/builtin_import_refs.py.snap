@@ -1,0 +1,15 @@
+# < definition scip-python python snapshot-util 0.1 builtin_import_refs/__init__:
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
+from typing import Any
+#    ^^^^^^ reference  python-stdlib 3.13 typing/__init__:
+#                  ^^^ reference  python-stdlib 3.13 typing/Any.
+
+print(Any)
+#^^^^ reference  python-stdlib 3.13 builtins/print().
+#     ^^^ reference  python-stdlib 3.13 typing/Any.
+

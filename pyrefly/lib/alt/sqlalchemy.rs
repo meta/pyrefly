@@ -7,6 +7,7 @@
 
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_types::function::FunctionKind;
+use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_util::suggest::Candidate;
 use pyrefly_util::suggest::best_suggestion;
@@ -124,7 +125,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             python_type = Type::optional(python_type);
         }
         if let Type::ClassType(class_type) = &mut ret
-            && class_type.has_qname("sqlalchemy.orm.properties", "MappedColumn")
+            && class_type.is(KnownClass::SqlAlchemyMappedColumn)
             && let Some(slot) = class_type.targs_mut().as_mut().get_mut(0)
         {
             *slot = python_type;
@@ -135,12 +136,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn python_type_from_type_engine_arg(&self, source: &Expr, ty: &Type) -> Option<Type> {
         // Enum's Python value type is available at its constructor, not its String base.
         if let Type::ClassType(cls) = ty
-            && cls.has_qname("sqlalchemy.sql.sqltypes", "Enum")
+            && cls.is(KnownClass::SqlAlchemyEnum)
             && let Expr::Call(call) = source
             && matches!(
                 self.expr_infer(&call.func, &self.error_swallower()),
                 Type::ClassDef(cls)
-                    if cls.has_toplevel_qname("sqlalchemy.sql.sqltypes", "Enum")
+                    if cls.is(KnownClass::SqlAlchemyEnum)
             )
             && let Some(enum_class) = call.arguments.args.first()
         {
@@ -184,20 +185,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn python_type_from_type_engine_class(&self, cls: &ClassType) -> Option<Type> {
         let mro = self.get_mro_for_class(cls.class_object());
         // Enum's String base does not describe its Python enum values.
-        if cls.has_qname("sqlalchemy.sql.sqltypes", "Enum")
+        if cls.is(KnownClass::SqlAlchemyEnum)
             || mro
                 .ancestors_no_object()
                 .iter()
-                .any(|ancestor| ancestor.has_qname("sqlalchemy.sql.sqltypes", "Enum"))
+                .any(|ancestor| ancestor.is(KnownClass::SqlAlchemyEnum))
         {
             return None;
         }
         // Concrete SQL subclasses supply the value type; bare TypeEngine stays gradual.
-        let type_engine = mro.ancestors(self.stdlib).find(|ancestor| {
-            ancestor
-                .class_object()
-                .has_toplevel_qname("sqlalchemy.sql.type_api", "TypeEngine")
-        })?;
+        let type_engine = mro
+            .ancestors(self.stdlib)
+            .find(|ancestor| ancestor.class_object().is(KnownClass::SqlAlchemyTypeEngine))?;
         self.as_superclass(cls, type_engine.class_object())?
             .targs()
             .as_slice()
@@ -208,8 +207,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub(super) fn is_sqlalchemy_mapped_annotation(ty: &Type) -> bool {
         match ty {
             Type::ClassType(cls) => {
-                cls.has_qname("sqlalchemy.orm", "Mapped")
-                    || cls.has_qname("sqlalchemy.orm.base", "Mapped")
+                cls.is(KnownClass::SqlAlchemyMapped) || cls.is(KnownClass::SqlAlchemyBaseMapped)
             }
             Type::Annotated(inner, _) => Self::is_sqlalchemy_mapped_annotation(inner),
             _ => false,
@@ -347,10 +345,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .rev()
             .map(|cls| cls.class_object())
             .chain(std::iter::once(model))
-            .skip_while(|cls| {
-                !(cls.has_toplevel_qname("sqlmodel", "SQLModel")
-                    || cls.has_toplevel_qname("sqlmodel.main", "SQLModel"))
-            })
+            .skip_while(|cls| !(cls.is(KnownClass::SqlModel) || cls.is(KnownClass::SqlModelMain)))
             .find(|cls| {
                 self.get_metadata_for_class(cls)
                     .keywords()

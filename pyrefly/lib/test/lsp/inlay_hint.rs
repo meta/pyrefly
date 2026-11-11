@@ -72,6 +72,48 @@ def f(xs: list[int]) -> None:
 }
 
 #[test]
+fn walrus_hint_insertability() {
+    for expression in [
+        "if (assigned := make()):\n    print(assigned)\n",
+        "print(assigned := make())\n",
+        "while (assigned := make()):\n    break\n",
+        "[assigned for _ in range(1) if (assigned := make())]\n",
+    ] {
+        let code = format!("def make() -> int:\n    return 1\n\nregular = make()\n{expression}");
+        let files = [("main", code.as_str())];
+        let (handles, state) = mk_multi_file_state_assert_no_errors(&files, Require::Exports);
+        let handle = handles.get("main").unwrap();
+        let hints = state
+            .transaction()
+            .inlay_hints(handle, Default::default(), Default::default())
+            .unwrap();
+        let assigned_position =
+            TextSize::try_from(code.find("assigned :=").unwrap() + "assigned".len()).unwrap();
+        let assigned_hint = hints
+            .iter()
+            .find(|hint| hint.position == assigned_position)
+            .expect("the walrus target has a display hint");
+        assert_eq!(
+            assigned_hint
+                .label_parts
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
+            ": int"
+        );
+        assert!(assigned_hint.edits.is_none());
+
+        let regular_position =
+            TextSize::try_from(code.find("regular").unwrap() + "regular".len()).unwrap();
+        let regular_hint = hints
+            .iter()
+            .find(|hint| hint.position == regular_position)
+            .expect("the regular assignment has a display hint");
+        assert_eq!(regular_hint.edits.as_ref().unwrap().annotation, ": int");
+    }
+}
+
+#[test]
 fn inherited_classvar_inlay_hint_prefers_resolved_field_type() {
     let code = r#"
 from typing import ClassVar
