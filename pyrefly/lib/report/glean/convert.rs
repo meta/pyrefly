@@ -1005,19 +1005,19 @@ impl GleanState<'_> {
                     let defining_type = |ty: Type| {
                         // A literal is an instance of its general class (e.g. `"a"` is a `str`),
                         // so its members are named after that class.
-                        let ty = match ty {
+                        let cls = match &ty {
+                            Type::ClassType(cls) | Type::SelfType(cls) => cls.clone(),
                             Type::Literal(lit) => {
-                                Type::ClassType(lit.value.general_class_type(solver.stdlib).clone())
+                                lit.value.general_class_type(solver.stdlib).clone()
                             }
-                            Type::LiteralString(_) => Type::ClassType(solver.stdlib.str().clone()),
-                            ty => ty,
+                            Type::LiteralString(_) => solver.stdlib.str().clone(),
+                            _ => return ty,
                         };
-                        match &ty {
-                            Type::ClassType(cls) | Type::SelfType(cls) => solver
-                                .get_class_member_with_defining_class(cls.class_object(), attr_name)
-                                .map_or(ty.clone(), |member| Type::ClassDef(member.defining_class)),
-                            _ => ty,
-                        }
+                        solver
+                            .get_class_member_with_defining_class(cls.class_object(), attr_name)
+                            .map_or(Type::ClassType(cls), |member| {
+                                Type::ClassDef(member.defining_class)
+                            })
                     };
 
                     let tys = match base_type.clone() {
