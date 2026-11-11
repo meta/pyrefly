@@ -516,6 +516,26 @@ class B:
     "#,
 );
 
+// With postponed annotations, every `-> B` refers to the method `B`, not the class.
+testcase!(
+    test_overload_method_name_matches_class_postponed,
+    r#"
+from __future__ import annotations
+from typing import assert_type, overload
+
+class A:
+    @overload
+    def B(self, x: int) -> B: ...  # E: Expected a type form, got instance of `Overload[
+    @overload
+    def B(self, x: str) -> B: ...  # E: Expected a type form, got instance of `(self: Self@A, x: int) -> Unknown`
+    def B(self, x):
+        return B()
+
+class B:
+    x: int
+    "#,
+);
+
 testcase!(
     test_overload_arg_errors,
     r#"

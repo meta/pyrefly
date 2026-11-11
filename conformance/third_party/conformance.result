@@ -8,12 +8,8 @@
   "aliases_typealiastype.py": [],
   "aliases_variance.py": [],
   "annotations_coroutines.py": [],
-  "annotations_forward_refs.py": [
-    "Line 94: Expected 1 errors"
-  ],
-  "annotations_future_import.py": [
-    "Line 37: Expected 1 errors"
-  ],
+  "annotations_forward_refs.py": [],
+  "annotations_future_import.py": [],
   "annotations_generators.py": [],
   "annotations_methods.py": [],
   "annotations_typeexpr.py": [],

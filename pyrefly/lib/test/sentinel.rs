@@ -100,11 +100,11 @@ def foo(a: A):
 );
 
 testcase!(
-    test_sentinel_typehint_success,
+    test_sentinel_annotated_with_own_name,
     r#"
 from typing_extensions import Sentinel
 
-A: A = Sentinel("A")
+A: A = Sentinel("A")  # E: Circular reference to `A` in annotation
     "#,
 );
 

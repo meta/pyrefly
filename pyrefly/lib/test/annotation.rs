@@ -413,7 +413,7 @@ def cls_cast(x: object) -> None:
     cast(type(MyClass), x)  # E: Function call cannot be used in annotations. Did you mean `type[MyClass]`?
 
 var_instance: type(instance)  # E: Function call cannot be used in annotations
-self_ref: type(self_ref) = 1  # E: Function call cannot be used in annotations
+self_ref: type(self_ref) = 1  # E: Function call cannot be used in annotations  # E: Circular reference to `self_ref` in annotation
 "#,
 );
 

@@ -35,10 +35,12 @@ use pyrefly_util::display::DisplayWithCtx;
 use pyrefly_util::gas::Gas;
 use pyrefly_util::suggest::Candidate;
 use pyrefly_util::suggest::Search;
+use pyrefly_util::visit::Visit;
 use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
 use ruff_python_ast::ExprBooleanLiteral;
+use ruff_python_ast::ExprName;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Parameter;
@@ -1191,6 +1193,7 @@ impl Bindings {
         assert_eq!(builder.scopes.loop_depth(), 0);
 
         builder.process_deferred_bound_names();
+        builder.report_circular_annotations();
 
         // Validate that all entries in __all__ are defined in the module.
         // Synthesize bindings only for nonempty names, so importers resolve to
@@ -2828,6 +2831,98 @@ impl<'a> BindingsBuilder<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Report annotations that depend on themselves, which the solver would otherwise resolve to
+    /// `Unknown` without an error. A name in an annotation depends on the annotation of the
+    /// variable it resolves to, because the variable's type is computed from it. A function that
+    /// depends on its own signature needs no check, because the solver resolves it to a callable,
+    /// which is reported as not a type.
+    fn report_circular_annotations(&mut self) {
+        let mut circular = Vec::new();
+        for (start, binding) in self.table.get::<KeyAnnotation>().1.iter() {
+            if let BindingAnnotation::AnnotateExpr(_, expr, ..) = binding
+                && let Some(name) = self.circular_reference(start, expr)
+            {
+                circular.push((name.id.clone(), name.range));
+            }
+        }
+        for (name, range) in circular {
+            self.error(
+                range,
+                ErrorKind::InvalidAnnotation,
+                format!("Circular reference to `{name}` in annotation"),
+            );
+        }
+    }
+
+    /// The first name in `expr`, the expression of the annotation `start`, through which `start`
+    /// depends on itself.
+    fn circular_reference<'b>(
+        &self,
+        start: Idx<KeyAnnotation>,
+        expr: &'b Expr,
+    ) -> Option<&'b ExprName> {
+        fn names<'b>(expr: &'b Expr, out: &mut Vec<&'b ExprName>) {
+            if let Expr::Name(name) = expr {
+                out.push(name);
+            }
+            expr.recurse(&mut |e| names(e, out));
+        }
+        let key =
+            |name: &ExprName| self.promised_idx(&Key::BoundName(ShortIdentifier::expr_name(name)));
+        let mut start_names = Vec::new();
+        names(expr, &mut start_names);
+        // A binding or annotation that a previous name reaches without reaching `start` cannot
+        // reach it through a later name either.
+        let mut visited_keys = SmallSet::new();
+        let mut visited_annotations = SmallSet::new();
+        start_names.into_iter().find(|name| {
+            let mut pending: Vec<Idx<Key>> = key(name).into_iter().collect();
+            while let Some(idx) = pending.pop() {
+                if !visited_keys.insert(idx) {
+                    continue;
+                }
+                // A variable's type is computed from its annotation, or from the bindings that
+                // flow into it.
+                let annotation = match self.get_original_binding(idx) {
+                    Some((_, Some(Binding::NameAssign(x)))) => {
+                        x.annotation.as_ref().map(|(_, annotation)| *annotation)
+                    }
+                    Some((_, Some(Binding::AnnotatedType(annotation, _)))) => Some(*annotation),
+                    Some((_, Some(Binding::Phi(_, branches)))) => {
+                        pending.extend(branches.iter().map(|branch| branch.value_key));
+                        None
+                    }
+                    Some((_, Some(Binding::LoopPhi(phi)))) => {
+                        let (prior, branches) = &**phi;
+                        pending.push(*prior);
+                        pending.extend(branches.iter().copied());
+                        None
+                    }
+                    Some((_, Some(Binding::Narrow(narrowed, ..)))) => {
+                        pending.push(*narrowed);
+                        None
+                    }
+                    _ => None,
+                };
+                let Some(annotation) = annotation else {
+                    continue;
+                };
+                if annotation == start {
+                    return true;
+                }
+                if visited_annotations.insert(annotation)
+                    && let Some(BindingAnnotation::AnnotateExpr(_, expr, ..)) =
+                        self.idx_to_binding(annotation)
+                {
+                    let mut dependency_names = Vec::new();
+                    names(expr, &mut dependency_names);
+                    pending.extend(dependency_names.into_iter().filter_map(key));
+                }
+            }
+            false
+        })
     }
 
     /// Mark a NameAssign as used by a specific binding for first-use pinning.

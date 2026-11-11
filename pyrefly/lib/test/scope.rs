@@ -2043,13 +2043,49 @@ def f():
 "#,
 );
 
-// `str` resolves to the field it annotates, and the solver settles the cycle as `Unknown`.
 testcase!(
-    bug = "Circular annotation is not reported",
     test_circular_ref_is_illegal,
     r#"
 class A:
-    str: "str" = ""  # should be an error
+    str: "str" = ""  # E: Circular reference to `str` in annotation
+    "#,
+);
+
+testcase!(
+    test_indirect_circular_ref_is_illegal,
+    r#"
+x: "y" = 1  # E: Circular reference to `y` in annotation
+y: "x" = 2  # E: Circular reference to `x` in annotation
+    "#,
+);
+
+testcase!(
+    test_circular_ref_through_loop,
+    r#"
+y = 0
+for _ in range(3):
+    y: "x" = 1  # E: Circular reference to `x` in annotation
+x: "y" = 2  # E: Circular reference to `y` in annotation  # E: Expected a type form, got instance of `Literal[0] | Unknown`
+    "#,
+);
+
+testcase!(
+    test_circular_ref_through_narrow,
+    r#"
+y: "x" = 1  # E: Circular reference to `x` in annotation
+if isinstance(y, int):
+    pass
+else:
+    def y() -> None: ...
+x: y = 2  # E: Circular reference to `y` in annotation  # E: Expected a type form, got instance of `(() -> None) | int`
+    "#,
+);
+
+testcase!(
+    test_circular_ref_through_function,
+    r#"
+from __future__ import annotations
+def A() -> A: ...  # E: Expected a type form, got instance of `() -> Unknown`
     "#,
 );
 

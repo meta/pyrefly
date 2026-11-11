@@ -1767,6 +1767,17 @@
     },
     {
       "code": -2,
+      "column": 11,
+      "concise_description": "Circular reference to `str` in annotation",
+      "description": "Circular reference to `str` in annotation",
+      "line": 94,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 14,
+      "stop_line": 94
+    },
+    {
+      "code": -2,
       "column": 9,
       "concise_description": "Expected a type form, got instance of `(self: Self@ClassD) -> None`",
       "description": "Expected a type form, got instance of `(self: Self@ClassD) -> None`",
@@ -1811,6 +1822,17 @@
     }
   ],
   "annotations_future_import.py": [
+    {
+      "code": -2,
+      "column": 10,
+      "concise_description": "Circular reference to `str` in annotation",
+      "description": "Circular reference to `str` in annotation",
+      "line": 37,
+      "name": "invalid-annotation",
+      "severity": "error",
+      "stop_column": 13,
+      "stop_line": 37
+    },
     {
       "code": -2,
       "column": 8,
