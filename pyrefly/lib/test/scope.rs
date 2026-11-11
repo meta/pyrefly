@@ -1237,7 +1237,7 @@ def try_except_twice():
     except Exception:
         e3 # E: `e3` is uninitialized
 
-    e3 # E: `e3` is uninitialized
+    e3 # E: `e3` may be uninitialized
 
 def try_except_multiple_finally():
     try:
@@ -1249,7 +1249,7 @@ def try_except_multiple_finally():
     except OSError as e5:  # E: This `except` clause is unreachable, because an earlier clause already catches `OSError`
         e4 # E: `e4` is uninitialized
     finally:
-        e4 # E: `e4` is uninitialized
+        e4 # E: `e4` may be uninitialized
         e5 # E: `e5` is uninitialized
 
     e4
