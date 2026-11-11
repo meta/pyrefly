@@ -36,9 +36,10 @@ stub is also analyzed (`--prefer-stubs=false` disables this). With `--public-onl
 reachable from public modules via re-export chains count: the library's public API.
 
 A simple unannotated assignment to a module-level variable only counts as a typable if the value is
-a call, since a call hides the type at the assignment site. Three kinds of call are exempt:
+a call, since a call hides the type at the assignment site. Four kinds of call are exempt:
 
-- Some builtin constructors, like `list()`.
+- Constructors of non-generic classes that return an instance of that class, like `Path(".")`.
+- Constructors of some generic builtins, like `list()`.
 - Explicitly specialized classes, like `Spam[int]()`.
 - Anything that returns a `logging.Logger` or `re.Pattern`, since those are conventionally left
   unannotated.
