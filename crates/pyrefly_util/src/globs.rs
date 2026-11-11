@@ -1381,6 +1381,15 @@ mod tests {
         glob_matches("**/*.pyi", false);
     }
 
+    // BUG: Pyright and gitignore treat a `**` that is not a whole path component as `*`, but we
+    // reject it. https://github.com/facebook/pyrefly/issues/1471
+    #[test]
+    fn test_recursive_wildcard_within_component() {
+        for pattern in ["env-**", "a**b/***/c", "**/x**/**"] {
+            assert!(Glob::new(pattern.to_owned()).is_err(), "{pattern}");
+        }
+    }
+
     #[test]
     fn test_globbing_on_project() {
         use std::path::StripPrefixError;
