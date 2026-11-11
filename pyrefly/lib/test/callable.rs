@@ -666,6 +666,53 @@ fun2(*{"1", "2", "3"})  # E: Expected 2 positional arguments, got 3
 );
 
 testcase!(
+    bug = "A dict literal splat should supply one positional argument per key",
+    test_splat_dict_literal,
+    r#"
+def fun0():
+    return
+
+def fun1(a):
+    return
+
+def fun2(a, b):
+    return
+
+def takes_int(x: int):
+    return
+
+def key(x: list[int]) -> str: ...
+def value(x: list[str]) -> int: ...
+
+def test(d: dict[str, int]):
+    fun0(*{"a": 1})
+    fun1(*{"a": 1})  # OK
+    fun2(*{"a": 1}, b=None)  # OK
+    fun2(*{"a": 1, "b": 2})  # OK
+    fun2(*{"a": 1})
+    fun2(*{"a": 1, "b": 2, "c": 3})
+    fun1(*{})
+    takes_int(*{"a": 1})  # E: Argument `str` is not assignable to parameter `x` with type `int`
+    fun0(*{**d})  # OK
+    fun1(*{"a": undefined_name})  # E: Could not find name `undefined_name`
+    x = []
+    fun1(*{key(x): value(x)})  # E: Argument `list[int]` is not assignable to parameter `x` with type `list[str]`
+"#,
+);
+
+testcase!(
+    bug = "Known keys in a dict literal with `**` items should count toward the arity",
+    test_splat_dict_literal_with_unpacking,
+    r#"
+def fun0():
+    return
+
+def test(d: dict[str, int]):
+    fun0(*{"a": 1, **d})
+"#,
+);
+
+testcase!(
     test_splat_unknown_length_with_keyword,
     r#"
 def fun(a: str, b: str, c: int):
