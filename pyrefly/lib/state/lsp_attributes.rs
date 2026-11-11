@@ -8,6 +8,7 @@
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::module::Module;
+use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_python::sys_info::SysInfo;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ModModule;
@@ -103,6 +104,7 @@ pub(crate) fn definition_from_ast(
     context: &AttributeContext,
     attr_name: &ruff_python_ast::name::Name,
     sys_info: SysInfo,
+    module_style: ModuleStyle,
 ) -> Option<(TextRange, Option<TextRange>)> {
     definition_in_suite(
         &ast.body,
@@ -110,6 +112,7 @@ pub(crate) fn definition_from_ast(
         context,
         attr_name,
         sys_info,
+        module_style,
     )
 }
 
@@ -121,12 +124,18 @@ fn definition_in_suite(
     context: &AttributeContext,
     attr_name: &ruff_python_ast::name::Name,
     sys_info: SysInfo,
+    module_style: ModuleStyle,
 ) -> Option<(TextRange, Option<TextRange>)> {
     let direct = match parent_classes.split_first() {
         Some((class_name, rest)) => body.iter().find_map(|stmt| match stmt {
-            Stmt::ClassDef(class_def) if &class_def.name.id == class_name => {
-                definition_in_suite(&class_def.body, rest, context, attr_name, sys_info)
-            }
+            Stmt::ClassDef(class_def) if &class_def.name.id == class_name => definition_in_suite(
+                &class_def.body,
+                rest,
+                context,
+                attr_name,
+                sys_info,
+                module_style,
+            ),
             _ => None,
         }),
         None => match context.kind {
@@ -136,14 +145,27 @@ fn definition_in_suite(
         },
     };
     direct.or_else(|| {
-        body.iter().find_map(|stmt| match stmt {
+        let find_in_if = |stmt: &Stmt| match stmt {
             Stmt::If(if_stmt) => sys_info
                 .pruned_if_branches(if_stmt)
                 .find_map(|(_, _, branch)| {
-                    definition_in_suite(branch, parent_classes, context, attr_name, sys_info)
+                    definition_in_suite(
+                        branch,
+                        parent_classes,
+                        context,
+                        attr_name,
+                        sys_info,
+                        module_style,
+                    )
                 }),
             _ => None,
-        })
+        };
+        // References use the interface's first declaration as its identity; source documentation
+        // follows the last live definition across separate conditional statements.
+        match module_style {
+            ModuleStyle::Interface => body.iter().find_map(find_in_if),
+            ModuleStyle::Executable => body.iter().rev().find_map(find_in_if),
+        }
     })
 }
 
@@ -236,8 +258,14 @@ mod tests {
         let range = TextRange::at(u32::try_from(offset).unwrap().into(), 1.into());
         let context = AttributeContext::from_module(&stub_module, range).unwrap();
         let ast = Ast::parse(source, stub_module.source_type()).0;
-        let (_, docstring) =
-            definition_from_ast(&ast, &context, &Name::new("f"), SysInfo::default()).unwrap();
+        let (_, docstring) = definition_from_ast(
+            &ast,
+            &context,
+            &Name::new("f"),
+            SysInfo::default(),
+            ModuleStyle::Executable,
+        )
+        .unwrap();
         assert!(docstring.is_some());
     }
 
@@ -250,12 +278,17 @@ mod tests {
             kind: AttributeKind::Function,
         };
         let ast = Ast::parse(source, PySourceType::Python).0;
-        let (_, docstring) =
-            definition_from_ast(&ast, &context, &Name::new("f"), SysInfo::default()).unwrap();
+        let (_, docstring) = definition_from_ast(
+            &ast,
+            &context,
+            &Name::new("f"),
+            SysInfo::default(),
+            ModuleStyle::Executable,
+        )
+        .unwrap();
         assert_eq!(&source[docstring.unwrap()], "\"\"\"Current.\"\"\"");
     }
 
-    // BUG: Separate live conditional definitions select the first declaration's documentation.
     #[test]
     fn test_repeated_live_conditionals() {
         let cases = [
@@ -291,13 +324,15 @@ mod tests {
                 kind,
             };
             let ast = Ast::parse(source, PySourceType::Python).0;
-            let (_, docstring) =
-                definition_from_ast(&ast, &context, &Name::new("f"), SysInfo::default()).unwrap();
-            assert_eq!(
-                &source[docstring.unwrap()],
-                "\"\"\"First.\"\"\"",
-                "{source}"
-            );
+            let (_, docstring) = definition_from_ast(
+                &ast,
+                &context,
+                &Name::new("f"),
+                SysInfo::default(),
+                ModuleStyle::Executable,
+            )
+            .unwrap();
+            assert_eq!(&source[docstring.unwrap()], "\"\"\"Last.\"\"\"", "{source}");
         }
     }
 
@@ -309,8 +344,14 @@ mod tests {
             kind: AttributeKind::Function,
         };
         let ast = Ast::parse(source, PySourceType::Python).0;
-        let (_, docstring) =
-            definition_from_ast(&ast, &context, &Name::new("f"), SysInfo::default()).unwrap();
+        let (_, docstring) = definition_from_ast(
+            &ast,
+            &context,
+            &Name::new("f"),
+            SysInfo::default(),
+            ModuleStyle::Executable,
+        )
+        .unwrap();
         assert_eq!(&source[docstring.unwrap()], "\"\"\"Live.\"\"\"");
     }
 }

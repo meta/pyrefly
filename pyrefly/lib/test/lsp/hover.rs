@@ -4498,7 +4498,6 @@ d: "dict[str, list[Helper]]"
     assert_eq!(hover(unquoted_helper), hover(quoted_helper));
 }
 
-// BUG: Hover chooses the earlier method when separate version checks both define it.
 #[test]
 fn hover_repeated_live_conditional_method() {
     let mut env = TestEnv::new_with_version(PythonVersion::new(3, 12, 0));
@@ -4512,7 +4511,7 @@ fn hover_repeated_live_conditional_method() {
     env.add("main", main);
     let (state, handle) = env.to_state();
     let report = get_test_report(&state, &handle("main"), extract_cursors_for_test(main)[0]);
-    assert!(report.contains("First."), "got: {report}");
-    assert!(!report.contains("Last."), "got: {report}");
+    assert!(report.contains("Last."), "got: {report}");
+    assert!(!report.contains("First."), "got: {report}");
     assert!(report.contains("int"), "got: {report}");
 }
