@@ -23,6 +23,7 @@ from shape_extensions import assert_shape, IntTuple
 from torch import arange, ones, Tensor
 
 if TYPE_CHECKING:
+    from einops import _NumpyResult
     from jax import Array
 
 
@@ -122,27 +123,34 @@ def test_numpy_shape_operations() -> None:
         "batch row inner, batch inner col -> batch row col",
     )
     diagonal = einsum(np.ones((3, 3)), "row row -> row")
+    mixed = einsum(
+        np.ones((2,), dtype=np.float32), np.ones((2,), dtype=np.int32), "i, i -> i"
+    )
     triple = einsum(np.ones((2,)), np.ones((2,)), np.ones((2,)), "i, i, i -> i")
     quadruple = einsum(
         np.ones((2,)), np.ones((2,)), np.ones((2,)), np.ones((2,)), "i, i, i, i -> i"
     )
-    assert_shape(rearranged.shape, IntTuple, runtime=(2, 5, 7, 3))
-    assert_shape(reduced.shape, IntTuple, runtime=(2,))
-    assert_shape(repeated.shape, IntTuple, runtime=(2, 3, 4))
-    assert_shape(product.shape, IntTuple, runtime=(2, 3, 7))
-    assert_shape(diagonal.shape, IntTuple, runtime=(3,))
-    assert_shape(triple.shape, IntTuple, runtime=(2,))
-    assert_shape(quadruple.shape, IntTuple, runtime=(2,))
+    assert_shape(rearranged.shape, (2, 5, 7, 3), runtime=(2, 5, 7, 3))
+    assert_shape(reduced.shape, (2,), runtime=(2,))
+    assert_shape(repeated.shape, (2, 3, 4), runtime=(2, 3, 4))
+    assert_shape(product.shape, (2, 3, 7), runtime=(2, 3, 7))
+    assert_shape(diagonal.shape, (3,), runtime=(3,))
+    assert_shape(mixed.shape, (2,), runtime=(2,))
+    assert_shape(triple.shape, (2,), runtime=(2,))
+    assert_shape(quadruple.shape, (2,), runtime=(2,))
     if TYPE_CHECKING:
-        assert_type(rearranged, Any)
-        assert_type(reduced, Any)
-        assert_type(repeated, Any)
-        assert_type(product, Any)
-        assert_type(diagonal, Any)
-        assert_type(triple, Any)
-        assert_type(quadruple, Any)
-        rearrange(image, "b c h w -> b c h missing")
-        repeat(image, "b c h w -> b c h w", unused=2)
+        assert_type(rearranged, np.ndarray[[2, 5, 7, 3], np.dtype[np.float64]])
+        assert_type(reduced, _NumpyResult[[2]])
+        assert_type(repeated, np.ndarray[[2, 3, 4], np.dtype[np.float64]])
+        assert_type(product, _NumpyResult[[2, 3, 7]])
+        assert_type(diagonal, _NumpyResult[[3]])
+        assert_type(mixed, _NumpyResult[[2]])
+        assert_type(triple, _NumpyResult[[2]])
+        assert_type(quadruple, _NumpyResult[[2]])
+        rearrange(  # E: named axes must appear on both sides of the pattern
+            image, "b c h w -> b c h missing"
+        )
+        repeat(image, "b c h w -> b c h w", unused=2)  # E: axis 'unused' is not used
     else:
         try:
             rearrange(image, "b c h w -> b c h missing")
@@ -155,12 +163,28 @@ def test_numpy_shape_operations() -> None:
 def test_numpy_scalar_results() -> None:
     total = reduce(np.ones((2, 3)), "row col ->", "sum")
     diagonal_sum = einsum(np.ones((3, 3)), "row row ->")
-    assert_shape(total.shape, IntTuple, runtime=())
-    assert_shape(diagonal_sum.shape, IntTuple, runtime=())
+    object_array = np.array([1, 2], dtype=np.object_)
+    object_sum = reduce(object_array, "i ->", "sum")
+    object_contractions = (
+        einsum(object_array, "i ->"),
+        einsum(object_array, object_array, "i, i ->"),
+        einsum(object_array, object_array, object_array, "i, i, i ->"),
+        einsum(object_array, object_array, object_array, object_array, "i, i, i, i ->"),
+    )
+    converted = total.__array__()
+    assert_shape(total.shape, (), runtime=())
+    assert_shape(diagonal_sum.shape, (), runtime=())
+    assert_shape(converted.shape, (), runtime=())
     if TYPE_CHECKING:
-        assert_type(total, Any)
-        assert_type(diagonal_sum, Any)
+        assert_type(total, _NumpyResult[[]])
+        assert_type(diagonal_sum, _NumpyResult[[]])
+        assert_type(converted, np.ndarray[[], Any])
+        assert_type(object_sum, Any)
+        assert_type(object_contractions, tuple[Any, Any, Any, Any])
     else:
+        assert object_contractions == (3, 5, 9, 17)
+        assert object_sum == 3
+        assert isinstance(object_sum, int)
         assert isinstance(total, np.generic)
         assert isinstance(diagonal_sum, np.generic)
         assert not isinstance(total, np.ndarray)
