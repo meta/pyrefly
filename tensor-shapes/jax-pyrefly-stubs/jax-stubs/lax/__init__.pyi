@@ -1365,20 +1365,10 @@ def cond[*InVals, OutVal](
     false_fun: Callable[[*InVals], OutVal],
     *operands: *InVals,
 ) -> OutVal: ...
-@overload
 def fori_loop[T](
     lower: _ArrayLike[[]],
     upper: _ArrayLike[[]],
     body_fun: Callable[[_Array[[]], T], T],
-    init_val: T,
-    *,
-    unroll: int | bool | None = None,
-) -> T: ...
-@overload
-def fori_loop[T](
-    lower: _ArrayLike[[]],
-    upper: _ArrayLike[[]],
-    body_fun: Callable[[int, T], T],
     init_val: T,
     *,
     unroll: int | bool | None = None,
