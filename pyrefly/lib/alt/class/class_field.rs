@@ -2218,12 +2218,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     None,
                 )
             }
-            ClassFieldDefinition::DefinedWithoutAssign { definition } => {
+            ClassFieldDefinition::DefinedWithoutAssign {
+                definition,
+                annotation: annot,
+            } => {
                 let initialization = ClassFieldInitialization::ClassBody(None);
+                let direct_annotation = annot.map(|a| self.get_idx(a).annotation.clone());
                 let value =
                     value_storage.push(ExprOrBinding::Binding(Binding::Forward(*definition)));
-                let (value_ty, annotation, is_inherited) =
-                    self.analyze_class_field_value(value, class, name, None, false, range, errors);
+                let (value_ty, annotation, is_inherited) = self.analyze_class_field_value(
+                    value,
+                    class,
+                    name,
+                    direct_annotation.as_ref(),
+                    false,
+                    range,
+                    errors,
+                );
                 // A class-body name bound by unpacking, a `for` loop or `with` is a class
                 // attribute, so an unknown type is reported like a plain class-body assignment: an
                 // implicit or explicit `Any` at the binding that produced it, and an error `Any` at
@@ -2273,7 +2284,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     value_ty,
                     annotation,
                     is_inherited,
-                    None,
+                    direct_annotation,
                 )
             }
             ClassFieldDefinition::DeclaredWithoutAnnotation => {
@@ -2478,6 +2489,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ..
             } => Some(*annotation),
             ClassFieldDefinition::MethodLike {
+                annotation: Some(annotation),
+                ..
+            }
+            | ClassFieldDefinition::DefinedWithoutAssign {
                 annotation: Some(annotation),
                 ..
             } => Some(*annotation),

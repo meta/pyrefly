@@ -342,3 +342,35 @@ class Baz:
     _value: int | MARKER
     "#,
 );
+
+testcase!(
+    test_sentinel_qualifiers_enforced_on_class_fields,
+    r#"
+from typing import ClassVar, Final
+from typing_extensions import Sentinel
+
+class A:
+    M: Final = Sentinel("M")
+
+A.M = A.M  # E: Cannot set field `M`
+
+class Sub(A):
+    M = A.M  # E: `M` is declared as final in parent class `A`
+
+class B:
+    M: ClassVar = Sentinel("M")
+
+B().M = B.M  # E: Cannot set field `M`
+    "#,
+);
+
+testcase!(
+    test_sentinel_with_explicit_any_named_class_var,
+    r#"
+from typing import Any as ClassVar, assert_type
+from typing_extensions import Sentinel
+
+S: ClassVar = Sentinel("S")
+assert_type(S, ClassVar)
+    "#,
+);

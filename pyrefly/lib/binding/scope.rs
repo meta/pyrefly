@@ -3905,6 +3905,7 @@ impl Scopes {
                         },
                         _ => ClassFieldDefinition::DefinedWithoutAssign {
                             definition: value.idx,
+                            annotation: static_info.annotation(),
                         },
                     };
                     let initialized = match &value.style {

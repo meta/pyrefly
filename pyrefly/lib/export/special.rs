@@ -84,6 +84,7 @@ pub enum SpecialExport {
     BuiltinsFloat,
     Deprecated,
     Final,
+    ClassVar,
     TypingMapping,
     TypeForm,
     UsesShapeDsl,
@@ -180,6 +181,7 @@ impl SpecialExport {
             "float" => Some(Self::BuiltinsFloat),
             "deprecated" => Some(Self::Deprecated),
             "Final" => Some(Self::Final),
+            "ClassVar" => Some(Self::ClassVar),
             "Mapping" => Some(Self::TypingMapping),
             "TypeForm" => Some(Self::TypeForm),
             "uses_shape_dsl" => Some(Self::UsesShapeDsl),
@@ -236,6 +238,7 @@ impl SpecialExport {
             | Self::TypingList
             | Self::TypingTuple
             | Self::Final
+            | Self::ClassVar
             | Self::TypingMapping
             | Self::TypeForm => {
                 matches!(m.as_str(), "typing" | "typing_extensions")

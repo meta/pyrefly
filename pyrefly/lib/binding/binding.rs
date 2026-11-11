@@ -3625,8 +3625,13 @@ pub enum ClassFieldDefinition {
     /// The definition field stores the Idx<Key> that points to the class binding.
     NestedClass { definition: Idx<Key> },
     /// Defined in some way other than assignment or a `def` form,
-    /// for example a name imported into a class body.
-    DefinedWithoutAssign { definition: Idx<Key> },
+    /// for example a name imported into a class body, or a sentinel assigned
+    /// under a bare `Final` or `ClassVar` annotation, whose qualifiers
+    /// must still apply to the field.
+    DefinedWithoutAssign {
+        definition: Idx<Key>,
+        annotation: Option<Idx<KeyAnnotation>>,
+    },
     /// Implicitly defined in a method, without any explicit reference
     /// in the class body.
     DefinedInMethod {
