@@ -69,6 +69,7 @@ from jax._shapes import (
     ravel_shape,
     reduce_shape,
     repeat_shape,
+    reshape_scalar_shape,
     reshape_shape,
     reverse_shape,
     roll_shape,
@@ -146,9 +147,9 @@ from . import fft as fft, linalg as linalg
 type _Shape = IntTuple
 type _Axis = int | tuple[int, ...] | None
 type _SingleAxis = int | None
-# The trailing `None` is not a legal argument to `reshape`. It is present because
+# The trailing `None` is not a legal argument to `broadcast_to`. It is present because
 # an `int | tuple[int, ...]` parameter cannot be iterated inside a DSL function
-# after narrowing with `is_int_value` alone. See `reshape_shape`, which rejects it.
+# after narrowing with `is_int_value` alone. See `broadcast_to_shape`, which rejects it.
 type _NewShape = int | tuple[int, ...] | None
 type _Scalar = bool | int | float | complex | np.number
 type _ShapedArrayLike[Shape: _Shape] = _Array[Shape] | np.ndarray[Shape]
@@ -1209,7 +1210,7 @@ def matrix_transpose[Batch: IntTuple, M: IntVar, N: IntVar](
 # A single int or tuple, matching JAX: the free function is not variadic, so
 # `jnp.reshape(a, 2, 3)` is an error there. `Array.reshape` is the variadic one.
 @overload
-def reshape[NewShape: Flag[_NewShape], Shape: _Shape = []](
+def reshape[NewShape: _Shape, Shape: _Shape = []](
     a: _ArrayLike[Shape],
     shape: NewShape,
     order: str = ...,
@@ -1218,14 +1219,14 @@ def reshape[NewShape: Flag[_NewShape], Shape: _Shape = []](
     out_sharding: _NamedSharding | _PartitionSpec | None = ...,
 ) -> _Array[reshape_shape(Shape, NewShape)]: ...
 @overload
-def reshape[NewShape: _Shape](
-    a: _ArrayLike[Any],
-    shape: NewShape,
+def reshape[NewDim: Int, Shape: _Shape = []](
+    a: _ArrayLike[Shape],
+    shape: NewDim,
     order: str = ...,
     *,
     copy: bool | None = ...,
     out_sharding: _NamedSharding | _PartitionSpec | None = ...,
-) -> _Array[NewShape]: ...
+) -> _Array[reshape_scalar_shape(Shape, NewDim)]: ...
 @overload
 def reshape(
     a: _ArrayLike[Any],

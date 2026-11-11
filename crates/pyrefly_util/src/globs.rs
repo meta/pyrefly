@@ -14,6 +14,7 @@ use std::num::NonZeroUsize;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::path::is_separator;
 use std::thread::available_parallelism;
 
 use anyhow::Context;
@@ -132,7 +133,23 @@ impl Glob {
         Ok(Self::from_base_pattern(Self::base_pattern(pattern)?))
     }
 
-    fn base_pattern(mut pattern: String) -> anyhow::Result<Pattern> {
+    fn base_pattern(pattern: String) -> anyhow::Result<Pattern> {
+        // The `glob` crate accepts `**` only as a whole path component. Like Pyright and
+        // gitignore, we treat any other run of `*` as a single `*`. Components are split on the
+        // platform's separators, because an absolutized pattern uses `\` on Windows.
+        let mut pattern: String = pattern
+            .split_inclusive(is_separator)
+            .map(|piece| {
+                if piece.trim_end_matches(is_separator) == "**" {
+                    piece.to_owned()
+                } else {
+                    piece
+                        .chars()
+                        .dedup_by(|a, b| *a == '*' && *b == '*')
+                        .collect()
+                }
+            })
+            .collect();
         if pattern.ends_with("**") {
             pattern.push_str("/*");
         } else if pattern.ends_with("**/") {
@@ -1357,6 +1374,8 @@ mod tests {
         glob_matches("path/to/my/", true);
         glob_matches("path/to/m", false);
         glob_matches("path/to/m*", true);
+        glob_matches("path/to/m**", true);
+        glob_matches("path/to/x**", false);
 
         glob_matches("path/to/my/file.py", true);
         glob_matches("path/to/my/file.py/", true);
@@ -1379,6 +1398,26 @@ mod tests {
         glob_matches("**/*", true);
         glob_matches("**/*.py", true);
         glob_matches("**/*.pyi", false);
+    }
+
+    // Pyright and gitignore treat a `**` that is not a whole path component as `*`.
+    // https://github.com/facebook/pyrefly/issues/1471
+    #[test]
+    fn test_recursive_wildcard_within_component() {
+        let normalized = |pattern: &str| Glob::new(pattern.to_owned()).unwrap().to_string();
+        assert_eq!(normalized("env-**"), "env-*");
+        assert_eq!(normalized("a**b/***/c"), "a*b/*/c");
+        assert_eq!(normalized("**/x**/**"), "**/x*/**/*");
+    }
+
+    // On Windows, `\` is also a path separator, so a `**` component bounded by `\` is kept.
+    #[cfg(windows)]
+    #[test]
+    fn test_recursive_wildcard_with_windows_separator() {
+        let normalized = |pattern: &str| Glob::new(pattern.to_owned()).unwrap().to_string();
+        assert_eq!(normalized(r"C:\a\**/*.py"), r"C:\a\**/*.py");
+        assert_eq!(normalized(r"C:\a\**\*.py"), r"C:\a\**\*.py");
+        assert_eq!(normalized(r"C:\a\x**\*.py"), r"C:\a\x*\*.py");
     }
 
     #[test]

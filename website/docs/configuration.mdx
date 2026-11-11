@@ -664,10 +664,11 @@ baseline-format = "minimal"
 
 ### `baseline-error-level`
 
-The severity assigned to diagnostics that match the baseline. The default value,
-`"ignore"`, suppresses them from CLI output. Set this to `"hint"`, `"info"`, `"warn"`,
-or `"error"` to report matched diagnostics at that severity. Reported matches follow
-the normal [`min-severity`](#min-severity) filtering and exit-status behaviour.
+The maximum severity of diagnostics that match the baseline. When unset, matched
+diagnostics are suppressed from CLI output. Set this to `"hint"`, `"info"`, `"warn"`,
+or `"error"` to report matched diagnostics at the lower of their own severity and this
+level. Reported matches follow the normal [`min-severity`](#min-severity) filtering and
+exit-status behaviour.
 
 ```toml
 baseline = "baseline.json"
@@ -675,14 +676,14 @@ baseline-error-level = "warn"
 ```
 
 - Type: `"ignore"` | `"hint"` | `"info"` | `"warn"` | `"error"`
-- Default: `"ignore"`
+- Default: unset
 - Flag equivalent: `--baseline-error-level`
 - Notes:
     - `baseline-error-level` is a **project-level setting** and cannot be overridden
       in [`sub-config`](#sub-configs) sections.
     - A CLI flag takes precedence over the configuration value.
-    - This setting affects `pyrefly check` output only. The IDE displays baselined
-      diagnostics as hints.
+    - The IDE also applies this setting, but displays matched diagnostics as hints
+      when it is unset.
 
 ### `baseline-auto-update`
 

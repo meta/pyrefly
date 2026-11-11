@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import assert_type, TYPE_CHECKING
+from typing import Any, assert_type, TYPE_CHECKING
 
 import jax.numpy as jnp
 import numpy as np
@@ -21,6 +21,10 @@ from einops import (
 )
 from shape_extensions import assert_shape, IntTuple
 from torch import arange, ones, Tensor
+
+if TYPE_CHECKING:
+    from einops import _NumpyResult
+    from jax import Array
 
 
 def test_pattern_operations() -> None:
@@ -106,6 +110,133 @@ def test_einsum() -> None:
         IntTuple,
         runtime=(2,),
     )
+
+
+def test_numpy_shape_operations() -> None:
+    image = np.ones((2, 3, 5, 7))
+    rearranged = rearrange(image, "b c h w -> b h w c")
+    reduced = reduce(np.ones((2, 3)), "row col -> row", "mean")
+    repeated = repeat(np.ones((2, 3)), "row col -> row col copies", copies=4)
+    product = einsum(
+        np.ones((2, 3, 5)),
+        np.ones((2, 5, 7)),
+        "batch row inner, batch inner col -> batch row col",
+    )
+    diagonal = einsum(np.ones((3, 3)), "row row -> row")
+    mixed = einsum(
+        np.ones((2,), dtype=np.float32), np.ones((2,), dtype=np.int32), "i, i -> i"
+    )
+    triple = einsum(np.ones((2,)), np.ones((2,)), np.ones((2,)), "i, i, i -> i")
+    quadruple = einsum(
+        np.ones((2,)), np.ones((2,)), np.ones((2,)), np.ones((2,)), "i, i, i, i -> i"
+    )
+    assert_shape(rearranged.shape, (2, 5, 7, 3), runtime=(2, 5, 7, 3))
+    assert_shape(reduced.shape, (2,), runtime=(2,))
+    assert_shape(repeated.shape, (2, 3, 4), runtime=(2, 3, 4))
+    assert_shape(product.shape, (2, 3, 7), runtime=(2, 3, 7))
+    assert_shape(diagonal.shape, (3,), runtime=(3,))
+    assert_shape(mixed.shape, (2,), runtime=(2,))
+    assert_shape(triple.shape, (2,), runtime=(2,))
+    assert_shape(quadruple.shape, (2,), runtime=(2,))
+    if TYPE_CHECKING:
+        assert_type(rearranged, np.ndarray[[2, 5, 7, 3], np.dtype[np.float64]])
+        assert_type(reduced, _NumpyResult[[2]])
+        assert_type(repeated, np.ndarray[[2, 3, 4], np.dtype[np.float64]])
+        assert_type(product, _NumpyResult[[2, 3, 7]])
+        assert_type(diagonal, _NumpyResult[[3]])
+        assert_type(mixed, _NumpyResult[[2]])
+        assert_type(triple, _NumpyResult[[2]])
+        assert_type(quadruple, _NumpyResult[[2]])
+        rearrange(  # E: named axes must appear on both sides of the pattern
+            image, "b c h w -> b c h missing"
+        )
+        repeat(image, "b c h w -> b c h w", unused=2)  # E: axis 'unused' is not used
+    else:
+        try:
+            rearrange(image, "b c h w -> b c h missing")
+        except EinopsError:
+            pass
+        else:
+            raise AssertionError("invalid NumPy pattern should raise EinopsError")
+
+
+def test_numpy_scalar_results() -> None:
+    total = reduce(np.ones((2, 3)), "row col ->", "sum")
+    diagonal_sum = einsum(np.ones((3, 3)), "row row ->")
+    object_array = np.array([1, 2], dtype=np.object_)
+    object_sum = reduce(object_array, "i ->", "sum")
+    object_contractions = (
+        einsum(object_array, "i ->"),
+        einsum(object_array, object_array, "i, i ->"),
+        einsum(object_array, object_array, object_array, "i, i, i ->"),
+        einsum(object_array, object_array, object_array, object_array, "i, i, i, i ->"),
+    )
+    converted = total.__array__()
+    assert_shape(total.shape, (), runtime=())
+    assert_shape(diagonal_sum.shape, (), runtime=())
+    assert_shape(converted.shape, (), runtime=())
+    if TYPE_CHECKING:
+        assert_type(total, _NumpyResult[[]])
+        assert_type(diagonal_sum, _NumpyResult[[]])
+        assert_type(converted, np.ndarray[[], Any])
+        assert_type(object_sum, Any)
+        assert_type(object_contractions, tuple[Any, Any, Any, Any])
+    else:
+        assert object_contractions == (3, 5, 9, 17)
+        assert object_sum == 3
+        assert isinstance(object_sum, int)
+        assert isinstance(total, np.generic)
+        assert isinstance(diagonal_sum, np.generic)
+        assert not isinstance(total, np.ndarray)
+        assert np.asarray(total).item() == 6
+        assert np.asarray(diagonal_sum).item() == 3
+
+
+def test_jax_shape_operations() -> None:
+    image = jnp.ones((2, 3, 5, 7))
+    rearranged = rearrange(image, "b c h w -> b h w c")
+    reduced = reduce(jnp.ones((2, 3)), "row col -> row", "mean")
+    repeated = repeat(jnp.ones((2, 3)), "row col -> row col copies", copies=4)
+    product = einsum(
+        jnp.ones((2, 3, 5)),
+        jnp.ones((2, 5, 7)),
+        "batch row inner, batch inner col -> batch row col",
+    )
+    diagonal = einsum(jnp.ones((3, 3)), "row row ->")
+    triple = einsum(jnp.ones((2,)), jnp.ones((2,)), jnp.ones((2,)), "i, i, i -> i")
+    quadruple = einsum(
+        jnp.ones((2,)),
+        jnp.ones((2,)),
+        jnp.ones((2,)),
+        jnp.ones((2,)),
+        "i, i, i, i -> i",
+    )
+    assert_shape(rearranged.shape, (2, 5, 7, 3), runtime=(2, 5, 7, 3))
+    assert_shape(reduced.shape, (2,), runtime=(2,))
+    assert_shape(repeated.shape, (2, 3, 4), runtime=(2, 3, 4))
+    assert_shape(product.shape, (2, 3, 7), runtime=(2, 3, 7))
+    assert_shape(diagonal.shape, (), runtime=())
+    assert_shape(triple.shape, (2,), runtime=(2,))
+    assert_shape(quadruple.shape, (2,), runtime=(2,))
+    if TYPE_CHECKING:
+        assert_type(rearranged, Array[[2, 5, 7, 3]])
+        assert_type(reduced, Array[[2]])
+        assert_type(repeated, Array[[2, 3, 4]])
+        assert_type(product, Array[[2, 3, 7]])
+        assert_type(diagonal, Array[[]])
+        assert_type(triple, Array[[2]])
+        assert_type(quadruple, Array[[2]])
+        rearrange(  # E: named axes must appear on both sides of the pattern
+            image, "b c h w -> b c h missing"
+        )
+        repeat(image, "b c h w -> b c h w", unused=2)  # E: axis 'unused' is not used
+    else:
+        try:
+            rearrange(image, "b c h w -> b c h missing")
+        except EinopsError:
+            pass
+        else:
+            raise AssertionError("invalid JAX pattern should raise EinopsError")
 
 
 def test_other_backends_at_runtime() -> None:

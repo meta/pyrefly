@@ -990,3 +990,57 @@ class Foo:
         ]))
     },
 );
+
+// A sentinel under a bare `Final` or `ClassVar` is a `DefinedWithoutAssign` field, whose
+// annotation the class export reads like any other.
+#[test]
+fn test_export_bare_qualifier_sentinel_field_annotation() {
+    let code = r#"
+from typing import ClassVar, Final
+from typing_extensions import Sentinel
+
+class Foo:
+    PLAIN: Final = 1
+    MARKER: Final = Sentinel("MARKER")
+    FLAG: ClassVar = Sentinel("FLAG")
+"#;
+    let state = create_state("test", code);
+    let transaction = state.transaction();
+    let handles = transaction.handles();
+    let module_ids = ModuleIds::new(&handles);
+    let test_module_handle = get_handle_for_module_name("test", &transaction);
+    let resolver = PysaResolver::new_for_test(
+        &transaction,
+        &module_ids,
+        test_module_handle.dupe(),
+        &handles,
+    );
+    let context = ModuleContext {
+        answers_context: ModuleAnswersContext::create(
+            test_module_handle.dupe(),
+            &transaction,
+            &module_ids,
+        ),
+        resolver: &resolver,
+    };
+
+    let foo = export_all_classes(&context)
+        .into_values()
+        .find(|class_definition| class_definition.name == "Foo")
+        .expect("expected an exported class `Foo`");
+    let explicit_annotation = |name: &str| {
+        foo.fields
+            .iter()
+            .find(|(field_name, _)| field_name.as_str() == name)
+            .unwrap_or_else(|| panic!("expected an exported field `{name}`"))
+            .1
+            .explicit_annotation
+            .clone()
+    };
+    assert!(
+        explicit_annotation("PLAIN").is_some(),
+        "a bare `Final` on an ordinary class-body assignment is exported"
+    );
+    assert_eq!(explicit_annotation("MARKER"), Some("Final".to_owned()));
+    assert_eq!(explicit_annotation("FLAG"), Some("ClassVar".to_owned()));
+}

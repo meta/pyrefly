@@ -11,6 +11,9 @@ use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::CompletionItemTag;
 use lsp_types::CompletionItemTextEdit;
+use lsp_types::Position;
+use lsp_types::Range;
+use lsp_types::TextEdit;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::sys_info::PythonVersion;
@@ -3175,6 +3178,258 @@ a.zz
             .map(|item| item.label.as_str())
             .collect::<Vec<_>>()
     );
+}
+
+fn completions_at_cursor(code: &str) -> Vec<CompletionItem> {
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let position = extract_cursors_for_test(code)[0];
+    state.transaction().completion(
+        &handles["main"],
+        position,
+        ImportFormat::Absolute,
+        true,
+        None,
+    )
+}
+
+/// The labels of the completions that rewrite the attribute access into a subscript.
+fn subscript_rewrite_labels(code: &str) -> Vec<String> {
+    completions_at_cursor(code)
+        .into_iter()
+        .filter(|item| item.text_edit.is_some())
+        .map(|item| item.label)
+        .collect()
+}
+
+// https://github.com/meta/pyrefly/issues/5478
+#[test]
+fn typed_dict_attribute_completion_rewrites_to_subscript() {
+    let code = r#"
+from typing import TypedDict
+
+class A(TypedDict):
+    f1: int
+    f2: str
+
+a: A
+a.
+# ^
+"#;
+    let completions = completions_at_cursor(code);
+    let f1 = completions
+        .iter()
+        .find(|item| item.label == "f1")
+        .expect("missing completion for TypedDict key `f1`");
+    assert_eq!(f1.kind, Some(CompletionItemKind::Field));
+    assert_eq!(f1.detail.as_deref(), Some("int"));
+    assert_eq!(f1.filter_text.as_deref(), Some(".f1"));
+    assert_eq!(
+        f1.text_edit,
+        Some(CompletionItemTextEdit::TextEdit(TextEdit {
+            range: Range::new(Position::new(8, 1), Position::new(8, 2)),
+            new_text: r#"["f1"]"#.to_owned(),
+        }))
+    );
+    assert_eq!(subscript_rewrite_labels(code), vec!["f1", "f2"]);
+    for method in ["get", "keys", "items"] {
+        assert!(
+            completions
+                .iter()
+                .any(|item| item.label == method && item.kind == Some(CompletionItemKind::Method)),
+            "missing dict method `{method}`"
+        );
+    }
+}
+
+#[test]
+fn typed_dict_attribute_completion_replaces_typed_prefix() {
+    let code = r#"
+from typing import TypedDict
+
+class A(TypedDict):
+    field: int
+
+a: A
+a.fi
+#   ^
+"#;
+    let completions = completions_at_cursor(code);
+    let field = completions
+        .iter()
+        .find(|item| item.label == "field")
+        .expect("missing completion for TypedDict key `field`");
+    assert_eq!(field.filter_text.as_deref(), Some(".field"));
+    assert_eq!(
+        field.text_edit,
+        Some(CompletionItemTextEdit::TextEdit(TextEdit {
+            range: Range::new(Position::new(7, 1), Position::new(7, 4)),
+            new_text: r#"["field"]"#.to_owned(),
+        }))
+    );
+}
+
+#[test]
+fn typed_dict_attribute_completion_includes_inherited_and_qualified_keys() {
+    let code = r#"
+from typing_extensions import NotRequired, ReadOnly, TypedDict
+
+class Base(TypedDict):
+    base: int
+
+class Child(Base):
+    child: str
+    optional: NotRequired[int]
+    frozen: ReadOnly[bytes]
+
+c: Child
+c.
+# ^
+"#;
+    assert_eq!(
+        subscript_rewrite_labels(code),
+        vec!["base", "child", "frozen", "optional"]
+    );
+}
+
+#[test]
+fn typed_dict_attribute_completion_quotes_non_identifier_keys() {
+    let code = r#"
+from typing import TypedDict
+
+Weird = TypedDict("Weird", {"two words": int, 'say "hi"': str})
+
+w: Weird
+w.
+# ^
+"#;
+    let new_texts: Vec<_> = completions_at_cursor(code)
+        .into_iter()
+        .filter_map(|item| match item.text_edit {
+            Some(CompletionItemTextEdit::TextEdit(edit)) => Some(edit.new_text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(new_texts, vec![r#"["say \"hi\""]"#, r#"["two words"]"#]);
+}
+
+#[test]
+fn typed_dict_attribute_completion_skips_non_typed_dict_bases() {
+    let code = r#"
+from typing import TypedDict
+
+class A(TypedDict):
+    f1: int
+
+class C:
+    f1: int
+
+c = C()
+c.
+# ^
+A.
+# ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    for position in extract_cursors_for_test(code) {
+        let completions = state.transaction().completion(
+            &handles["main"],
+            position,
+            ImportFormat::Absolute,
+            true,
+            None,
+        );
+        assert!(!completions.is_empty());
+        assert!(
+            completions.iter().all(|item| item.text_edit.is_none()),
+            "{completions:?}"
+        );
+    }
+}
+
+#[test]
+fn typed_dict_attribute_completion_keeps_parentheses_around_the_base() {
+    let code = r#"
+from typing import TypedDict
+
+class A(TypedDict):
+    field: int
+
+a: A
+(a).fi
+#     ^
+"#;
+    let completions = completions_at_cursor(code);
+    let field = completions
+        .iter()
+        .find(|item| item.label == "field")
+        .expect("missing completion for TypedDict key `field`");
+    assert_eq!(field.filter_text.as_deref(), Some(".field"));
+    assert_eq!(
+        field.text_edit,
+        Some(CompletionItemTextEdit::TextEdit(TextEdit {
+            range: Range::new(Position::new(7, 3), Position::new(7, 6)),
+            new_text: r#"["field"]"#.to_owned(),
+        }))
+    );
+}
+
+#[test]
+fn typed_dict_attribute_completion_avoids_enclosing_f_string_quotes() {
+    let code = r#"
+from typing import TypedDict
+
+Keys = TypedDict("Keys", {"field": int, "fi'eld": int, 'fi"eld': int})
+
+k: Keys
+f"{k.fi}"
+#      ^
+f'{k.fi}'
+#      ^
+f"{f'{k.fi}'}"
+#         ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let new_texts: Vec<Vec<String>> = extract_cursors_for_test(code)
+        .into_iter()
+        .map(|position| {
+            state
+                .transaction()
+                .completion(
+                    &handles["main"],
+                    position,
+                    ImportFormat::Absolute,
+                    true,
+                    None,
+                )
+                .into_iter()
+                .filter_map(|item| match item.text_edit {
+                    Some(CompletionItemTextEdit::TextEdit(edit)) => Some(edit.new_text),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        new_texts,
+        vec![vec!["['field']"], vec![r#"["field"]"#], Vec::<&str>::new()]
+    );
+}
+
+#[test]
+fn typed_dict_attribute_completion_skips_value_patterns() {
+    let code = r#"
+from typing import TypedDict
+
+class A(TypedDict):
+    field: int
+
+a: A
+match 0:
+    case a.fi:
+#            ^
+        pass
+"#;
+    assert!(subscript_rewrite_labels(code).is_empty());
 }
 
 #[test]

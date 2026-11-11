@@ -32,6 +32,7 @@ use crate::class::ClassType;
 use crate::equality::TypeEq;
 use crate::keywords::DataclassTransformMetadata;
 use crate::type_level_dsl::ResolvedTypeShapeDslFunction;
+use crate::types::TParams;
 use crate::types::Type;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -39,6 +40,16 @@ use crate::types::Type;
 pub struct Function {
     pub signature: Callable,
     pub metadata: FuncMetadata,
+}
+
+impl Function {
+    /// Preserve an existing declared classification when rebuilding a substituted function.
+    pub fn initialize_unresolved_imports(&mut self, tparams: Option<&TParams>) {
+        if self.metadata.flags.unresolved_imports.is_none() {
+            self.metadata.flags.unresolved_imports =
+                Some(self.signature.contains_unresolved_imports(tparams));
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -257,6 +268,9 @@ pub struct FuncFlags {
     /// `Proto[Any]` where the params are `*args: T, **kwargs: T`) is not mistaken
     /// for a gradual signature.
     pub has_gradual_variadic_params: bool,
+    /// Preserve the defined contract across receiver and argument substitution.
+    /// Unclassified signatures use a structural fallback at their construction or call boundary.
+    pub unresolved_imports: Option<bool>,
 }
 
 impl FuncFlags {

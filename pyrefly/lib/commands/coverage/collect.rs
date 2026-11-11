@@ -32,6 +32,7 @@ use pyrefly_util::includes::Includes;
 use pyrefly_util::lock::Mutex;
 use pyrefly_util::thread_pool::ThreadCount;
 use ruff_python_ast::Expr;
+use ruff_python_ast::ExprName;
 use ruff_python_ast::Parameters;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
@@ -444,25 +445,15 @@ fn is_schema_class(answers: &Answers, cls_binding: &ClassBinding) -> bool {
         })
 }
 
-/// Builtin classes whose constructor names the type it yields. Iterator adapters are left out.
-const IMPLICIT_BUILTIN_CONSTRUCTORS: &[KnownClass] = &[
-    KnownClass::Bool,
-    KnownClass::ByteArray,
-    KnownClass::Bytes,
-    KnownClass::Complex,
+/// Generic builtin classes whose constructor names the type it returns.
+const IMPLICIT_GENERIC_BUILTINS: &[KnownClass] = &[
     KnownClass::Dict,
-    KnownClass::Float,
     KnownClass::FrozenDict,
     KnownClass::FrozenSet,
-    KnownClass::Int,
     KnownClass::List,
     KnownClass::MemoryView,
-    KnownClass::Object,
-    KnownClass::Range,
-    KnownClass::Sentinel,
     KnownClass::Set,
     KnownClass::Slice,
-    KnownClass::Str,
     KnownClass::Tuple,
 ];
 
@@ -479,19 +470,44 @@ fn parse_variables(
 ) -> Vec<Variable> {
     let bindings = answers.bindings();
 
-    /// Only a call hides its type at the assignment site, unless the callee names the class it
-    /// yields: a builtin constructor like `list()`, or an explicitly specialized class like
-    /// `Spam[int]()`. Instances of `IMPLICIT_STDLIB_CLASSES` are exempt whatever the call.
+    /// Only a call hides its type at the assignment site, unless the callee is the class it
+    /// returns: a non-generic class like `Spam()` or `module.Spam()`, a generic builtin like
+    /// `list()`, or an explicitly specialized class like `Spam[int]()`. Other generic classes are
+    /// left out because their type arguments are inferred. Instances of `IMPLICIT_STDLIB_CLASSES`
+    /// are exempt whatever the call.
     fn untyped_if_call(answers: &Answers, idx: Idx<Key>, expr: &Expr) -> SlotCounts {
         let Expr::Call(call) = expr else {
             return SlotCounts::default();
         };
 
+        let bindings = answers.bindings();
+        let bound_type = |name: &ExprName| {
+            let key = Key::BoundName(ShortIdentifier::expr_name(name));
+            answers.get_idx(bindings.key_to_idx_hashed_opt(Hashed::new(&key))?)
+        };
         let callee_names = |cls: &ClassType| match call.func.as_ref() {
+            // Resolving the name covers aliases like `from pathlib import Path as P`, and rules
+            // out a function that shadows a builtin class.
             Expr::Name(n) => {
-                cls.known()
-                    .is_some_and(|known| IMPLICIT_BUILTIN_CONSTRUCTORS.contains(&known))
-                    && *cls.name() == n.id
+                (cls.targs().is_empty()
+                    || cls
+                        .known()
+                        .is_some_and(|known| IMPLICIT_GENERIC_BUILTINS.contains(&known)))
+                    && bound_type(n).is_some_and(
+                        |t| matches!(t.ty(), Type::ClassDef(c) if c == cls.class_object()),
+                    )
+            }
+            // Only the attribute name is compared, so the base must be a module name and generic
+            // builtins are left out: a method like `obj.Spam()` or a function like `mod.list()`
+            // doesn't match. Nested modules like `a.b.Spam()` are left out too.
+            Expr::Attribute(attr) => {
+                cls.targs().is_empty()
+                    && *cls.name() == attr.attr.id
+                    && attr
+                        .value
+                        .as_name_expr()
+                        .and_then(bound_type)
+                        .is_some_and(|t| matches!(t.ty(), Type::Module(_)))
             }
             Expr::Subscript(sub) => match sub.value.as_ref() {
                 Expr::Name(n) => *cls.name() == n.id,
@@ -707,7 +723,8 @@ fn own_annotation_idx(
     match &bindings.get(field).definition {
         ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => Some(*annotation),
         ClassFieldDefinition::DefinedInMethod { annotation, .. }
-        | ClassFieldDefinition::AssignedInBody { annotation, .. } => *annotation,
+        | ClassFieldDefinition::AssignedInBody { annotation, .. }
+        | ClassFieldDefinition::DefinedWithoutAssign { annotation, .. } => *annotation,
         _ => None,
     }
 }
@@ -2338,6 +2355,14 @@ mod tests {
         compare_snapshot("implicit_stdlib_classes.expected.json", &report);
     }
 
+    /// Calling a non-generic class has 0 slots. Calling a generic class counts, because its type
+    /// arguments are inferred, and so does a callee that doesn't name the class it returns.
+    #[test]
+    fn test_report_implicit_class_constructors() {
+        let report = build_module_report_for_test("implicit_class_constructors.py");
+        compare_snapshot("implicit_class_constructors.expected.json", &report);
+    }
+
     /// gh-3773: optional imports must not be reported as untyped variables.
     #[test]
     fn test_report_optional_imports() {
@@ -3533,6 +3558,43 @@ class Child(Middle):
                 }
             }
         }
+    }
+
+    /// A sentinel under a bare `Final` is a `DefinedWithoutAssign` field, and a subclass
+    /// attribute inherits its coverage from that annotation.
+    #[test]
+    fn test_inherited_bare_final_sentinel_annotation() {
+        let base = r#"
+from typing import Final
+from typing_extensions import Sentinel
+class Base:
+    plain: Final = 1
+    marker: Final = Sentinel("marker")
+"#;
+        let child = r#"
+from base import Base
+class Child(Base):
+    def __init__(self) -> None:
+        self.plain = Base.plain
+        self.marker = Base.marker
+"#;
+        let mut env = TestEnv::new();
+        env.add("base", base);
+        env.add("child", child);
+        let (state, handle) = env
+            .with_default_require_level(Require::Everything)
+            .to_state();
+        let symbols = collect_symbols(&state.transaction(), &handle("child"), false);
+        let slots = |name: &str| {
+            symbols
+                .variables
+                .iter()
+                .find(|v| v.name == format!("child.Child.{name}"))
+                .unwrap_or_else(|| panic!("missing attribute {name}"))
+                .slots
+        };
+        assert_eq!(slots("plain"), SlotCounts::typed());
+        assert_eq!(slots("marker"), SlotCounts::typed());
     }
 
     /// Inheritance coverage follows the nearest explicit attribute annotation, even across a

@@ -216,6 +216,44 @@ def f(a1: A[int], a2: A):
 );
 
 testcase!(
+    test_typevar_default_self_preserves_generic_scope,
+    r#"
+from typing import Generic, Self, TypeVar
+
+class Scoped[T]:
+    def method[R = Self](self) -> R: ...
+
+T = TypeVar("T")
+class Legacy(Generic[T]):
+    def method[R = Self](self) -> R: ...
+"#,
+);
+
+testcase!(
+    test_scoped_typevar_default_is_outer_scoped_typevar,
+    r#"
+from typing import Any, Callable, Concatenate, assert_type
+
+class A[K]:
+    def m[T = dict[int, K]](self) -> T: ...  # E: Default of type parameter `T` refers to out-of-scope type parameter `K`
+    type Alias[T = K] = list[T]  # E: Default of type parameter `T` refers to out-of-scope type parameter `K`
+
+def outer[T]() -> None:
+    def inner[X = T]() -> X: ...  # E: Default of type parameter `X` refers to out-of-scope type parameter `T`
+    assert_type(inner(), Any)
+
+class B[**P]:
+    def apply[T = Callable[Concatenate[int, P], int]](self) -> None: ...  # E: Default of type parameter `T` refers to out-of-scope type parameter `P`
+
+class C[T]:
+    class D[V = T]: ...  # E: Type variable `T` is not in scope
+
+def f(a: A[str]):
+    assert_type(a.m(), dict[int, Any])
+    "#,
+);
+
+testcase!(
     test_out_of_scope_old_typevar,
     r#"
 from typing import Any, Callable, TypeVar

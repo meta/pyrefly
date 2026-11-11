@@ -176,7 +176,7 @@ pub enum NameLookupResult {
         idx: Idx<Key>,
         /// The most recent value binding, before any flow narrowing.
         value_idx: Option<Idx<Key>>,
-        initialized: InitializedInFlow,
+        initialized: InitializationStatus,
         is_module_scope: bool,
         /// Does this name resolve to a type parameter outside the current class's scope?
         is_outer_class_type_parameter: bool,
@@ -281,44 +281,18 @@ impl UnsetNodes {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum InitializedInFlow {
-    Yes,
-    Conditionally,
-    No,
-    /// Initialization depends on whether termination keys have Never type. The nodes are the
-    /// latest merges on the paths on which the variable is unset. If none of those paths reaches
-    /// the use, the variable is initialized; otherwise it may be uninitialized.
-    DeferredCheck(Vec<UnsetNodeId>),
-}
-
-impl InitializedInFlow {
-    pub fn as_error_message(&self, name: &Name) -> Option<String> {
-        match self {
-            InitializedInFlow::Yes => None,
-            InitializedInFlow::Conditionally => Some(format!("`{name}` may be uninitialized")),
-            InitializedInFlow::No => Some(format!("`{name}` is uninitialized")),
-            InitializedInFlow::DeferredCheck(_) => None, // Checked at solve time
-        }
-    }
-
-    pub fn deferred_unset_nodes(&self) -> Option<&[UnsetNodeId]> {
-        match self {
-            InitializedInFlow::DeferredCheck(nodes) => Some(nodes),
-            _ => None,
-        }
-    }
-}
-
-/// Initialization on every path through a control-flow merge.
+/// Whether a name or attribute is initialized on every path that reaches a point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitializationStatus {
-    /// Every path initializes the attribute.
+    /// Every path initializes it.
     Initialized,
-    /// Some path completes without initializing the attribute.
+    /// Some path reaches this point without initializing it.
+    PossiblyUninitialized,
+    /// No path initializes it.
     Uninitialized,
-    /// The latest merges on the paths that miss the assignment, as for
-    /// `InitializedInFlow::DeferredCheck`. Initialized unless one of those paths continues.
+    /// Initialization depends on whether termination keys have `Never` type. The nodes are the
+    /// latest merges on the paths on which it is unset. If none of those paths reaches this
+    /// point, it is initialized. This is decided at solve time.
     Deferred(Vec<UnsetNodeId>),
 }
 
@@ -326,7 +300,8 @@ impl InitializationStatus {
     /// Combine the flows that reach a merge, each with the termination key of its last
     /// statement. Flows that miss the assignment start new paths at this merge, and paths that
     /// already miss it continue through the flows that carry them, so every such flow must
-    /// end in a `Never` call for the attribute to be initialized.
+    /// end in a `Never` call for the value to be initialized. A flow that reaches the merge
+    /// without the value makes the result `PossiblyUninitialized`, even if no flow initializes it.
     pub fn merge<'a>(
         unset_nodes: &mut UnsetNodes,
         flows: impl IntoIterator<Item = (Option<&'a Self>, Option<Idx<Key>>)>,
@@ -350,10 +325,12 @@ impl InitializationStatus {
                             carried_keys
                         });
                 }
-                None | Some(Self::Uninitialized) => match termination_key {
-                    Some(key) => missing_keys.push(key),
-                    None => return Self::Uninitialized,
-                },
+                None | Some(Self::PossiblyUninitialized | Self::Uninitialized) => {
+                    match termination_key {
+                        Some(key) => missing_keys.push(key),
+                        None => return Self::PossiblyUninitialized,
+                    }
+                }
             }
         }
         let mut latest = Vec::new();
@@ -379,18 +356,17 @@ impl InitializationStatus {
     pub fn is_initialized(&self, some_path_continues: impl Fn(&[UnsetNodeId]) -> bool) -> bool {
         match self {
             Self::Initialized => true,
-            Self::Uninitialized => false,
+            Self::PossiblyUninitialized | Self::Uninitialized => false,
             Self::Deferred(nodes) => !some_path_continues(nodes),
         }
     }
-}
 
-impl From<InitializedInFlow> for InitializationStatus {
-    fn from(initialized: InitializedInFlow) -> Self {
-        match initialized {
-            InitializedInFlow::Yes => Self::Initialized,
-            InitializedInFlow::Conditionally | InitializedInFlow::No => Self::Uninitialized,
-            InitializedInFlow::DeferredCheck(nodes) => Self::Deferred(nodes),
+    /// The error for reading a name in this state, unless the check is deferred to solve time.
+    pub fn as_error_message(&self, name: &Name) -> Option<String> {
+        match self {
+            Self::Initialized | Self::Deferred(_) => None,
+            Self::PossiblyUninitialized => Some(format!("`{name}` may be uninitialized")),
+            Self::Uninitialized => Some(format!("`{name}` is uninitialized")),
         }
     }
 }
@@ -414,7 +390,10 @@ impl InitializedInClass {
             (Self::IfAny(groups), deferred @ InitializationStatus::Deferred(_)) => {
                 groups.push(deferred)
             }
-            (Self::IfAny(_), InitializationStatus::Uninitialized) => {}
+            (
+                Self::IfAny(_),
+                InitializationStatus::PossiblyUninitialized | InitializationStatus::Uninitialized,
+            ) => {}
         }
     }
 }
@@ -423,7 +402,9 @@ impl From<InitializationStatus> for InitializedInClass {
     fn from(initialized: InitializationStatus) -> Self {
         match initialized {
             InitializationStatus::Initialized => Self::Yes,
-            InitializationStatus::Uninitialized => Self::IfAny(Vec::new()),
+            InitializationStatus::PossiblyUninitialized | InitializationStatus::Uninitialized => {
+                Self::IfAny(Vec::new())
+            }
             deferred @ InitializationStatus::Deferred(_) => Self::IfAny(vec![deferred]),
         }
     }
@@ -2506,13 +2487,7 @@ impl<'a> BindingsBuilder<'a> {
                 self.scopes.mark_parameter_used(name.key());
                 self.scopes.mark_import_used(name.key());
                 self.scopes.mark_variable_used(name.key(), value_idx);
-                if usage.checks_initialization()
-                    && matches!(
-                        initialized,
-                        InitializedInFlow::No
-                            | InitializedInFlow::Conditionally
-                            | InitializedInFlow::DeferredCheck(_)
-                    )
+                if usage.checks_initialization() && initialized != InitializationStatus::Initialized
                 {
                     // When we use a variable, we mark it as initialized
                     // If the variable was uninitialized before, this will
@@ -2545,8 +2520,10 @@ impl<'a> BindingsBuilder<'a> {
                 if let Some(module) = implicit_builtin_module {
                     self.insert_implicit_builtin_binding(idx, module, name.key());
                 }
-                // NameReadInfo::Anywhere can only be InitializedInFlow::Yes or InitializedInFlow::No
-                if usage.checks_initialization() && matches!(initialized, InitializedInFlow::No) {
+                // NameReadInfo::Anywhere can only be Initialized or Uninitialized
+                if usage.checks_initialization()
+                    && initialized == InitializationStatus::Uninitialized
+                {
                     // When we use a variable, we mark it as initialized
                     // If the variable was uninitialized before, this will
                     // prevent us from emitting errors for every subsequent usage
@@ -2566,7 +2543,7 @@ impl<'a> BindingsBuilder<'a> {
                 NameLookupResult::Found {
                     idx,
                     value_idx: None,
-                    initialized: InitializedInFlow::Yes,
+                    initialized: InitializationStatus::Initialized,
                     is_module_scope: true,
                     is_outer_class_type_parameter: false,
                 }
@@ -2574,7 +2551,7 @@ impl<'a> BindingsBuilder<'a> {
             NameReadInfo::OuterClassTypeParameter { key } => NameLookupResult::Found {
                 idx: self.idx_for_promise(key),
                 value_idx: None,
-                initialized: InitializedInFlow::Yes,
+                initialized: InitializationStatus::Initialized,
                 is_module_scope: false,
                 is_outer_class_type_parameter: true,
             },
@@ -3442,14 +3419,14 @@ struct PossibleTParam {
     id: LegacyTParamId,
     idx: Idx<Key>,
     tparam_idx: Idx<KeyLegacyTypeParam>,
-    initialized: InitializedInFlow,
+    initialized: InitializationStatus,
 }
 
 enum TParamLookupResult {
     MaybeTParam(PossibleTParam),
     NotTParam {
         idx: Idx<Key>,
-        initialized: InitializedInFlow,
+        initialized: InitializationStatus,
         is_outer_class_type_parameter: bool,
     },
     NotFound,
@@ -3685,7 +3662,7 @@ impl<'a> BindingsBuilder<'a> {
             id,
             idx,
             tparam_idx,
-            initialized: InitializedInFlow::Yes,
+            initialized: InitializationStatus::Initialized,
         })
     }
 
@@ -3923,7 +3900,7 @@ mod initialization_tests {
         ));
         assert!(matches!(
             InitializationStatus::merge(&mut nodes, [(Some(&initialized), None), (None, None)]),
-            InitializationStatus::Uninitialized
+            InitializationStatus::PossiblyUninitialized
         ));
     }
 

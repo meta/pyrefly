@@ -201,7 +201,7 @@ impl<'a> CallValue<'a> {
 pub struct ConstructorArguments(Option<OnceCell<Box<Owner<ArgumentCache>>>>);
 
 /// Lambda and comprehension bindings must be checked again under each parameter context.
-fn contains_argument_bindings(expr: &Expr) -> bool {
+pub(crate) fn contains_argument_bindings(expr: &Expr) -> bool {
     if matches!(
         expr,
         Expr::Lambda(_)
@@ -541,6 +541,25 @@ impl<'a> CallArg<'a> {
                             return CallArgPreEval::Fixed(tys, 0);
                         }
                     }
+                    // Unpacking a dict literal yields one key per item. Only do this if there
+                    // are no `**` items, which add an unknown number of keys.
+                    if let Expr::Dict(dict_expr) = expr
+                        && let Some(items) = dict_expr
+                            .items
+                            .iter()
+                            .map(|item| Some((item.key.as_ref()?, &item.value)))
+                            .collect::<Option<Vec<_>>>()
+                    {
+                        let tys = items
+                            .into_iter()
+                            .map(|(key, value)| {
+                                let key_ty = solver.expr_infer(key, arg_errors);
+                                solver.expr_infer(value, arg_errors);
+                                key_ty
+                            })
+                            .collect();
+                        return CallArgPreEval::Fixed(tys, 0);
+                    }
                 }
                 let ty = e.infer(solver, arg_errors);
                 solver.maybe_error_any_argument_type(&ty, *_range, arg_errors);
@@ -590,7 +609,7 @@ impl<'a> CallArg<'a> {
                         middle,
                         suffix,
                         consumed: 0,
-                        matched: false,
+                        matched_count: 0,
                         done: false,
                     }
                 }
@@ -610,7 +629,7 @@ enum CallArgPreEval<'a> {
         middle: Type,
         suffix: Vec<Type>,
         consumed: usize,
-        matched: bool,
+        matched_count: usize,
         done: bool,
     },
     Fixed(Vec<Type>, usize),
@@ -676,17 +695,17 @@ impl CallArgPreEval<'_> {
             Self::Star {
                 prefix,
                 consumed,
-                matched,
+                matched_count,
                 done,
                 ..
             } => {
-                if !vararg && *consumed < prefix.len() {
-                    // A prefix element is consumed once matched; the variadic tail remains on
-                    // offer to every later parameter.
-                    *consumed += 1;
-                }
                 if !vararg {
-                    *matched = true;
+                    if *consumed < prefix.len() {
+                        // A prefix element is consumed once matched; the variadic tail remains on
+                        // offer to every later parameter.
+                        *consumed += 1;
+                    }
+                    *matched_count += 1;
                 }
                 *done = vararg;
             }
@@ -1401,14 +1420,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                     None => {
                         arg_pre.post_infer(self, arg_errors);
-                        // A gradual splat can match any arity. For a non-gradual splat, only
-                        // reject it here if it has not already matched a positional parameter:
-                        // that prevents zero-arity overloads from swallowing it without adding
-                        // a spurious extra argument after a finite parameter list.
+                        // An unknown-length splat only guarantees an extra positional argument if
+                        // it still has more fixed elements (prefix + suffix) than the number
+                        // of non-variadic positional parameters it has already matched (fixes #5542).
                         let extra_arg = match &arg_pre {
                             CallArgPreEval::Star {
-                                middle, matched, ..
-                            } => !middle.is_any() && !matched,
+                                prefix,
+                                suffix,
+                                matched_count,
+                                ..
+                            } => prefix.len() + suffix.len() > *matched_count,
                             _ => true,
                         };
                         if extra_arg {

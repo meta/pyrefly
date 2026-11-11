@@ -718,10 +718,7 @@ fn class_display_type(solver: &AnswersSolver<TransactionHandle<'_>>, type_: &Typ
                 .constructor_to_callable(&solver.promote_nontypeddict_silently_to_classtype(cls)),
         ),
         Type::SpecializedClassDef(cls) => Some(solver.type_order().constructor_to_callable(cls)),
-        Type::Type(t) => match &**t {
-            Type::ClassType(cls) => Some(solver.type_order().constructor_to_callable(cls)),
-            _ => None,
-        },
+        Type::Type(t) => solver.type_order().constructor_to_callable_for_type_of(t),
         _ => None,
     }?;
     constructor

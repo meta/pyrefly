@@ -17,6 +17,7 @@ use pyrefly_types::dimension::ShapeError;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::Quantified;
+use pyrefly_types::simplify::unions;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::typed_dict::TypedDictInner;
 use pyrefly_types::types::CalleeKind;
@@ -25,6 +26,7 @@ use pyrefly_types::types::TParams;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::prelude::VecExt;
 use pyrefly_util::visit::Visit;
+use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
@@ -41,12 +43,14 @@ use crate::alt::answers::AttributeReferenceKind;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::attr::NoAccessReason;
+use crate::alt::callable::ArgMap;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
 use crate::alt::callable::CallValue;
 use crate::alt::callable::CallWithTypes;
 use crate::alt::callable::ConstructorArguments;
 use crate::alt::callable::ReturnTypeResolutionError;
+use crate::alt::callable::contains_argument_bindings;
 use crate::alt::class::class_field::ClassAttribute;
 use crate::alt::class::class_field::DescriptorBase;
 use crate::alt::class::dataclass::ReplaceKind;
@@ -2042,6 +2046,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 signature,
                 Some(&metadata.kind),
                 tparams.as_deref(),
+                metadata.flags.unresolved_imports,
                 Some(obj),
                 args,
                 keywords,
@@ -2057,6 +2062,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 callable,
                 None,
                 tparams.as_deref(),
+                None,
                 None,
                 args,
                 keywords,
@@ -2078,6 +2084,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 callable,
                 Some(&metadata.kind),
                 tparams.as_deref(),
+                metadata.flags.unresolved_imports,
                 None,
                 args,
                 keywords,
@@ -2544,12 +2551,121 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
+    /// Probe input compatibility without committing its generic or contextual solutions.
+    pub(crate) fn unresolved_import_input_errors(
+        &self,
+        callable: &Callable,
+        tparams: Option<&TParams>,
+        self_obj: Option<&Type>,
+        args: &[CallArg],
+        keywords: &[CallKeyword],
+        range: TextRange,
+        original_args: &ArgMap,
+    ) -> Option<ErrorCollector> {
+        let mut probe = callable.clone();
+        let mut changed = false;
+        probe.params.visit_mut(&mut |ty| {
+            if ty.contains_missing_import() {
+                ty.transform_mut(&mut |ty| match ty {
+                    Type::Any(AnyStyle::MissingImport) => {
+                        *ty = self.heap.mk_never();
+                        changed = true;
+                    }
+                    Type::Union(union) => *ty = unions(union.members.clone(), self.heap),
+                    _ => {}
+                });
+            }
+        });
+        if !changed {
+            return None;
+        }
+        let mut vars = self.collect_placeholder_vars(self_obj, args, keywords);
+        // Captured signature variables need not occur in the receiver or argument types.
+        callable.visit(&mut |ty: &Type| vars.extend(ty.collect_all_vars()));
+        for param in original_args.arg_to_param.values() {
+            vars.extend(param.ty.collect_all_vars());
+        }
+        let roots: Vec<_> = vars.into_iter().map(|var| var.to_type(self.heap)).collect();
+        let snapshot = self
+            .solver()
+            .snapshot_reachable_vars(&roots.iter().collect::<Vec<_>>());
+        let lambda_snapshot = self.snapshot_lambda_param_types();
+        let errors = self.error_collector();
+        let (_, specialization_errors, _, probe_args, _, _) = self.callable_infer(
+            probe,
+            None,
+            tparams,
+            self_obj.cloned(),
+            args,
+            keywords,
+            range,
+            &self.error_swallower(),
+            &errors,
+            None,
+            None,
+            None,
+            None,
+        );
+        if let Ok(specialization_errors) = Vec1::try_from_vec(specialization_errors) {
+            self.add_specialization_errors(specialization_errors, range, &errors, None);
+        }
+        self.solver().restore_vars(snapshot);
+        self.restore_lambda_param_types(&lambda_snapshot);
+        // Gradual Any can match Never; a wholly unavailable input still supplies no match.
+        for (position, param) in &probe_args.arg_to_param {
+            if param.ty.is_never()
+                && original_args
+                    .arg_to_param
+                    .get(position)
+                    .is_some_and(|original| original.ty.contains_missing_import())
+            {
+                let parameter = param.name.as_ref().map_or_else(
+                    || "The positional parameter".to_owned(),
+                    |name| format!("Parameter `{name}`"),
+                );
+                // This private argument failure becomes a detail of the signature diagnostic.
+                self.error(
+                    &errors,
+                    range,
+                    ErrorKind::BadArgumentType,
+                    format!("{parameter} has no available input type"),
+                );
+            }
+        }
+        errors.has_hard().then_some(errors)
+    }
+
+    pub(crate) fn warn_unresolved_import_signature(
+        &self,
+        errors: &ErrorCollector,
+        range: TextRange,
+        input_errors: ErrorCollector,
+    ) {
+        // HashMap iteration is unordered. Canonical details let same-range diagnostics deduplicate.
+        let details = input_errors
+            .finish()
+            .iter()
+            .map(|error| error.msg_header().to_owned())
+            .sorted()
+            .dedup()
+            .collect();
+        errors
+            .error_builder(
+                range,
+                ErrorKind::UnresolvedImportSignature,
+                "Call uses a signature that depends on unresolved imports".to_owned(),
+            )
+            .with_details(details)
+            .emit();
+    }
+
     /// Wrapper for `callable_infer` that handles trying a call with and without a contextual hint.
     fn call_infer_inner(
         &self,
         callable: Callable,
         callable_name: Option<&FunctionKind>,
         tparams: Option<&TParams>,
+        declared_unresolved_imports: Option<bool>,
         self_obj: Option<Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -2561,6 +2677,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         hint: Option<HintRef>,
         ctor_targs: Option<&mut TArgs>,
     ) -> CallOutcome {
+        let signature_has_unresolved_imports = declared_unresolved_imports
+            .unwrap_or_else(|| callable.contains_unresolved_imports(tparams));
+        // Replaying nested calls can recursively double inference; bindings need their real context.
+        // Ordinary probes exclude both. Overload callers already prepare closed call arguments.
+        let reusable = |value: CallValue<'_>| match value.as_type_or_expr() {
+            TypeOrExpr::Type(..) => true,
+            TypeOrExpr::Expr(expr) => !nests_calls(expr, 1) && !contains_argument_bindings(expr),
+        };
+        let probe_inputs = signature_has_unresolved_imports
+            && args.iter().all(|arg| match arg {
+                CallArg::Arg(value) | CallArg::Star(value, _) => reusable(*value),
+            })
+            && keywords.iter().all(|keyword| reusable(keyword.value));
+        let unresolved_input = probe_inputs.then(|| (callable.clone(), self_obj.clone()));
         let hint = HintRef::filter_for_call(hint, tparams);
         let retry_input = hint.map(|_| (callable.clone(), self_obj.clone()));
         // First try the call without the hint to see if it succeeds.
@@ -2630,6 +2760,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     res_no_hint,
                 )
             };
+        let unresolved_import_errors = if !chosen_call_errors.has_hard() && chosen_res.1.is_empty()
+        {
+            unresolved_input.and_then(|(callable, self_obj)| {
+                self.unresolved_import_input_errors(
+                    &callable,
+                    tparams,
+                    self_obj.as_ref(),
+                    args,
+                    keywords,
+                    arguments_range,
+                    &chosen_res.3,
+                )
+            })
+        } else {
+            None
+        };
         call_errors.extend(chosen_call_errors);
         arg_errors.extend(chosen_arg_errors);
         if let Some(targs) = ctor_targs
@@ -2648,6 +2794,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return_errors,
             context,
         );
+        if let Some(input_errors) = unresolved_import_errors {
+            // Keep probe failures out of the real call's contextual typing and operator dispatch.
+            self.warn_unresolved_import_signature(return_errors, arguments_range, input_errors);
+        }
         CallOutcome { ty, overload_table }
     }
 
@@ -2865,7 +3015,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     pub fn constructor_to_callable(&self, cls: &ClassType) -> Type {
         let class_type = self.heap.mk_class_type(cls.clone());
-        if let Some(metaclass_call_attr_ty) = self.get_metaclass_dunder_call(cls) {
+        if let Some(mut metaclass_call_attr_ty) = self.get_metaclass_dunder_call(cls) {
+            // Receiver type variables must be solved before classifying the return.
+            if let Type::BoundMethod(method) = &metaclass_call_attr_ty
+                && let Some(bound) =
+                    self.bind_boundmethod(method, &mut |got, want| self.is_subset_eq(got, want))
+            {
+                metaclass_call_attr_ty = bound;
+            }
+            self.expand_mut(&mut metaclass_call_attr_ty);
             // Use the metaclass __call__ directly (ignoring __new__ and __init__) when either:
             // 1. Its return type is not a subclass of the current class, or
             // 2. The class is an enum (enum construction is handled by EnumMeta.__call__).
@@ -2949,6 +3107,33 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let constructor = self.constructor_to_callable(&self.as_class_type_unchecked(cls));
         // Quantify the free type parameters to make the resulting callable generic.
         self.normalize_class_constructor_tparams(constructor, class_tparams)
+    }
+
+    /// Convert `type[inner]` to a callable when `inner` is a class, `Self`, or a type variable
+    /// bounded by a class.
+    pub fn constructor_to_callable_for_type_of(&self, inner: &Type) -> Option<Type> {
+        let cls = match inner {
+            Type::ClassType(cls) => return Some(self.constructor_to_callable(cls)),
+            Type::SelfType(cls) => cls,
+            Type::Quantified(q)
+                if let Restriction::Bound(Type::ClassType(cls)) = q.restriction() =>
+            {
+                cls
+            }
+            _ => return None,
+        };
+        Some(
+            self.distribute_over_union(&self.constructor_to_callable(cls), |ty| {
+                let mut ty = ty.clone();
+                ty.transform_toplevel_callable_signatures(|callable: &mut Callable, _| {
+                    if self.is_compatible_constructor_return(&callable.ret, cls.class_object()) {
+                        // Rewrite the return type to match a direct call through `type[inner]`.
+                        callable.ret = inner.clone();
+                    }
+                });
+                ty
+            }),
+        )
     }
 
     /// Normalize class type parameters for each callable branch in `ty`.

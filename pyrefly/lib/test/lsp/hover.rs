@@ -4497,3 +4497,21 @@ d: "dict[str, list[Helper]]"
     );
     assert_eq!(hover(unquoted_helper), hover(quoted_helper));
 }
+
+#[test]
+fn hover_repeated_live_conditional_method() {
+    let mut env = TestEnv::new_with_version(PythonVersion::new(3, 12, 0));
+    env.add_with_path("m", "m.pyi", "class C:\n    def f(self) -> int: ...\n");
+    env.add_with_path(
+        "m",
+        "m.py",
+        "import sys\nclass C:\n    if sys.version_info >= (3, 8):\n        def f(self) -> int:\n            \"\"\"First.\"\"\"\n            return 0\n    if sys.version_info >= (3, 10):\n        def f(self) -> int:\n            \"\"\"Last.\"\"\"\n            return 1\n",
+    );
+    let main = "from m import C\nC().f()\n#   ^\n";
+    env.add("main", main);
+    let (state, handle) = env.to_state();
+    let report = get_test_report(&state, &handle("main"), extract_cursors_for_test(main)[0]);
+    assert!(report.contains("Last."), "got: {report}");
+    assert!(!report.contains("First."), "got: {report}");
+    assert!(report.contains("int"), "got: {report}");
+}

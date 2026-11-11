@@ -326,3 +326,102 @@ MISSING = Sentinel("MISSING", z := 1)  # E: Sentinel only takes one positional a
 assert_type(z, Literal[1])
 "#,
 );
+
+testcase!(
+    test_sentinel_with_type_qualifier,
+    r#"
+from typing import ClassVar, Final
+from typing_extensions import Sentinel
+
+class Bar:
+    MARKER: ClassVar = Sentinel("MARKER")
+    _value: int | MARKER
+
+class Baz:
+    MARKER: Final = Sentinel("MARKER")
+    _value: int | MARKER
+    "#,
+);
+
+testcase!(
+    test_sentinel_qualifiers_enforced_on_class_fields,
+    r#"
+from typing import ClassVar, Final
+from typing_extensions import Sentinel
+
+class A:
+    M: Final = Sentinel("M")
+
+A.M = A.M  # E: Cannot set field `M`
+
+class Sub(A):
+    M = A.M  # E: `M` is declared as final in parent class `A`
+
+class B:
+    M: ClassVar = Sentinel("M")
+
+B().M = B.M  # E: Cannot set field `M`
+    "#,
+);
+
+testcase!(
+    test_sentinel_with_explicit_any_named_class_var,
+    r#"
+from typing import Any as ClassVar, assert_type
+from typing_extensions import Sentinel
+
+S: ClassVar = Sentinel("S")
+assert_type(S, ClassVar)
+    "#,
+);
+
+testcase!(
+    test_sentinel_final_initialized_in_body_is_read_only_in_init,
+    r#"
+from typing import Final
+from typing_extensions import Sentinel
+
+class C:
+    S: Final = Sentinel("S")
+    def __init__(self) -> None:
+        self.S = self.S  # E: Cannot set field `S`
+    "#,
+);
+
+testcase!(
+    test_sentinel_with_qualifier_as_dataclass_field,
+    r#"
+from dataclasses import dataclass
+from typing import ClassVar, Final
+from typing_extensions import Sentinel
+
+@dataclass
+class A:
+    S: Final = Sentinel("S")
+    T: ClassVar = Sentinel("T")
+
+A(S=A.S)
+A(T=A.T)  # E: Unexpected keyword argument `T`
+    "#,
+);
+
+testcase!(
+    test_sentinel_final_in_named_tuple,
+    r#"
+from typing import Final, NamedTuple
+from typing_extensions import Sentinel
+
+class C(NamedTuple):
+    S: Final = Sentinel("S")  # E: `Final` may not be used for NamedTuple members
+    "#,
+);
+
+testcase!(
+    test_sentinel_repr_none,
+    r#"
+from typing import Final
+from typing_extensions import Sentinel
+
+S: Final = Sentinel("S", repr=None)
+    "#,
+);

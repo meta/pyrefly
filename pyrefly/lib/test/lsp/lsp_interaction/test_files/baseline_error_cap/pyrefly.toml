@@ -1,0 +1,5 @@
+baseline = "baseline.json"
+baseline-error-level = "error"
+
+[errors]
+bad-assignment = "warn"

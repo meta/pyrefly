@@ -214,6 +214,10 @@ pub(crate) struct CollectedDiagnostic<'a> {
     error: &'a Error,
     severity: Severity,
     baseline_status: BaselineStatus,
+    /// The match's `baseline-error-level` is unset. An open file shows it as an
+    /// LSP hint, which `to_diagnostic_with_severity` does not produce for an
+    /// untagged hint.
+    unconfigured_baseline_hint: bool,
 }
 
 impl<'a> CollectedDiagnostic<'a> {
@@ -222,6 +226,7 @@ impl<'a> CollectedDiagnostic<'a> {
             error,
             severity,
             baseline_status: error.baseline_status(),
+            unconfigured_baseline_hint: false,
         }
     }
 
@@ -242,6 +247,17 @@ impl<'a> CollectedDiagnostic<'a> {
             baseline_status,
             ..self
         }
+    }
+
+    pub(crate) fn with_unconfigured_baseline_hint(self) -> Self {
+        Self {
+            unconfigured_baseline_hint: true,
+            ..self
+        }
+    }
+
+    pub(crate) fn unconfigured_baseline_hint(self) -> bool {
+        self.unconfigured_baseline_hint
     }
 
     pub(crate) fn into_error(self) -> Error {

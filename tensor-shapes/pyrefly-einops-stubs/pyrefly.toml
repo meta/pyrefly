@@ -2,6 +2,8 @@ search_path = [
     ".",
     "../pyrefly-shape-extensions",
     "../pyrefly-torch-stubs",
+    "../jax-pyrefly-stubs",
+    "../pyrefly-numpy-stubs",
 ]
 
 python_version = "3.13"

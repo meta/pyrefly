@@ -525,7 +525,8 @@ impl<'a> BindingsBuilder<'a> {
                         (false, annotation.is_some(), false)
                     }
                     ClassFieldDefinition::DeclaredByAnnotation { .. } => (false, true, true),
-                    ClassFieldDefinition::AssignedInBody { annotation, .. } => {
+                    ClassFieldDefinition::AssignedInBody { annotation, .. }
+                    | ClassFieldDefinition::DefinedWithoutAssign { annotation, .. } => {
                         (true, annotation.is_some(), true)
                     }
                     _ => (true, false, true),

@@ -52,6 +52,9 @@ def test_reshape_accepts_the_variadic_method_spelling() -> None:
     # Only the method is variadic; `jnp.reshape(a, 2, 6)` is an error in JAX itself.
     assert_shape(a.reshape(2, 6).shape, (2, 6))
     assert_shape(a.reshape(2, 2, 3).shape, (2, 2, 3))
+    assert_shape(a.reshape(2, -1).shape, (2, 6))
+    assert_shape(a.reshape(1, 1, -1).shape, (1, 1, 12))
+    assert_shape((a.reshape(1, 1, -1) * jnp.ones((1, 2, 12))).shape, (1, 2, 12))
 
 
 def test_reshape_accepts_keywords_where_jax_does() -> None:

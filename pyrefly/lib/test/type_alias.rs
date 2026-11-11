@@ -1606,6 +1606,23 @@ X()  # E: Expected a callable
     "#,
 );
 
+testcase!(
+    test_class_type_alias_is_not_instance_variable,
+    TestEnv::new().enable_instance_var_assign_error(),
+    r#"
+from typing import TypeAlias
+
+class Base:
+    Alias: TypeAlias = int
+
+class Child(Base):
+    pass
+
+Base.Alias = Base.Alias
+Child.Alias = Child.Alias
+    "#,
+);
+
 /// Type variables from different modules can be declared at the same offset. As parameters of one
 /// alias they are still different type parameters.
 #[test]
