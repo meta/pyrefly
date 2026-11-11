@@ -1436,6 +1436,23 @@ class C:
     "#,
 );
 
+// A method body cannot see a class-body name, even one that its signature mentions.
+testcase!(
+    test_class_scope_name_in_signature_is_not_visible_in_body,
+    r#"
+from typing import TypeVar
+class A:
+    import collections
+    def f(self, x: collections.OrderedDict) -> None:
+        collections  # E: Could not find name `collections`
+class B:
+    T = TypeVar("T")
+    def f(self, x: T) -> T:
+        T  # E: Could not find name `T`
+        return x
+    "#,
+);
+
 testcase!(
     test_class_scope_edge_cases,
     r#"

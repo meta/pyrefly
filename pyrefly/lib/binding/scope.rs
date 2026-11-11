@@ -3237,6 +3237,13 @@ impl Scopes {
     /// intercept the raw runtime value of a pre-PEP-695 legacy type variable
     /// to turn it into a quantified type parameter.
     pub fn add_possible_legacy_tparam_to_current_static(&mut self, name: &Identifier) {
+        // The function or class body cannot see an enclosing class scope, so it must not see
+        // a class-bound name through this entry.
+        if self.iter_rev().nth(1).is_some_and(|parent| {
+            matches!(parent.kind, ScopeKind::Class(_)) && parent.stat.0.contains_key(&name.id)
+        }) {
+            return;
+        }
         self.add_to_current_static(name, StaticStyle::PossibleLegacyTParam)
     }
 
