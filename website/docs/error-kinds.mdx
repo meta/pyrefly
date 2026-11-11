@@ -2508,17 +2508,26 @@ value = object()
 consume(value)  # unresolved-import-signature
 ```
 
-This warning is emitted when a call uses a signature that depends on unresolved
-imports. It is reported for the signature, not separately for each affected
-parameter. Explicit `Any` and imports intentionally replaced with `Any` are
-unaffected. Passing an unknown value to a well-defined generic API does not make
-its signature unavailable.
+This warning is emitted when a call needs input types recovered from unresolved
+imports. Known alternatives such as `int` in `int | missing.Array` remain usable,
+and an omitted optional parameter does not make the call unavailable. The warning
+is reported for the signature, not separately for each affected parameter.
 
-In overloaded functions, each signature is checked independently. An unavailable
-signature does not prevent another overload from matching. If only one overload
-has compatible arity, it can still supply recovery information while this warning
-is reported. When no overload matches, `no-matching-overload` may also be reported.
+In overloaded functions, each signature is checked independently. Unavailable
+candidates do not prevent another overload from matching. If only one overload has
+compatible arity, it can still supply recovery information while this warning is
+reported. When no overload matches, `no-matching-overload` may also be reported.
 Configuring this warning to `ignore` hides it without restoring skipped candidates.
+
+Explicit `Any` and imports intentionally replaced with `Any` are unaffected.
+Passing an unknown value to a well-defined generic API does not make its signature
+unavailable.
+
+This check does not validate every imported annotation. Return-only and nested
+contravariant dependencies can still weaken inference or shadow a usable overload.
+In non-overloaded calls, arguments containing calls or contextual
+lambda/comprehension bindings are not checked for this warning and retain their
+normal contextual typing.
 
 ## unsafe-overlap
 

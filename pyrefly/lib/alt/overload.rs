@@ -1124,7 +1124,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Collect placeholder vars from self_obj and Type-valued arguments.
-    fn collect_placeholder_vars(
+    pub(crate) fn collect_placeholder_vars(
         &self,
         self_obj: Option<&Type>,
         args: &[CallArg],
@@ -1195,15 +1195,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 contextually_opaque_defaults,
                 overload_ctor_targs.as_mut(),
             );
-        if callable
-            .1
-            .metadata
-            .flags
-            .unresolved_imports
-            .unwrap_or_else(|| callable.1.signature.contains_unresolved_imports(tparams))
+        if !call_errors.has_hard()
+            && specialization_errors.is_empty()
+            && callable
+                .1
+                .metadata
+                .flags
+                .unresolved_imports
+                .unwrap_or_else(|| callable.1.signature.contains_unresolved_imports(tparams))
+            && let Some(input_errors) = self.unresolved_import_input_errors(
+                &callable.1.signature,
+                tparams,
+                self_obj,
+                args,
+                keywords,
+                arguments_range,
+                &argmap,
+            )
         {
-            // Unlike an ordinary call, an overload candidate is rejected by this warning.
-            self.warn_unresolved_import_signature(&call_errors, arguments_range);
+            self.warn_unresolved_import_signature(&call_errors, arguments_range, input_errors);
         }
         CalledOverload {
             func: callable,

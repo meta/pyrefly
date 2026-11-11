@@ -201,7 +201,7 @@ impl<'a> CallValue<'a> {
 pub struct ConstructorArguments(Option<OnceCell<Box<Owner<ArgumentCache>>>>);
 
 /// Lambda and comprehension bindings must be checked again under each parameter context.
-fn contains_argument_bindings(expr: &Expr) -> bool {
+pub(crate) fn contains_argument_bindings(expr: &Expr) -> bool {
     if matches!(
         expr,
         Expr::Lambda(_)

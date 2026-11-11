@@ -293,10 +293,10 @@ def unknown_flag() -> Tensor[flags(Shape)]: ...
 def unknown_axes() -> Tensor[axes(Shape)]: ...
 def unknown_shapes() -> Tensor[shapes(Shape)]: ...
 
-assert_type(unknown_shape(), Tensor[IntTuple])  # E: unresolved imports
-assert_type(unknown_flag(), Tensor[[]])  # E: unresolved imports
-assert_type(unknown_axes(), Tensor[[]])  # E: unresolved imports
-assert_type(unknown_shapes(), Tensor[[]])  # E: unresolved imports
+assert_type(unknown_shape(), Tensor[IntTuple])
+assert_type(unknown_flag(), Tensor[[]])
+assert_type(unknown_axes(), Tensor[[]])
+assert_type(unknown_shapes(), Tensor[[]])
 "#,
 );
 

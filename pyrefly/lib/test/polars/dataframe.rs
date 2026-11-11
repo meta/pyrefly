@@ -155,7 +155,7 @@ class InputSchema:
 def transform(df: Annotated[pl.DataFrame, InputSchema]) -> pl.LazyFrame:
     return df.lazy().select("missing")
 
-reveal_type(transform(pl.DataFrame({"a": [1]})))  # E: revealed type: Unknown  # E: Call uses a signature that depends on unresolved imports
+reveal_type(transform(pl.DataFrame({"a": [1]})))  # E: revealed type: Unknown
 "#,
 );
 
@@ -179,8 +179,8 @@ def update(flag: bool):
         df = df.rename({name: f"{name}_renamed"})
     return df
 
-reveal_type(update(True))  # E: revealed type: Unknown  # E: Call uses a signature that depends on unresolved imports
-update(False)["never_known"]  # E: Call uses a signature that depends on unresolved imports
+reveal_type(update(True))  # E: revealed type: Unknown
+update(False)["never_known"]
 "#,
 );
 
