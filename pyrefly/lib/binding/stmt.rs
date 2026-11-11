@@ -1468,12 +1468,14 @@ impl<'a> BindingsBuilder<'a> {
                 // Check if the iterable is definitely non-empty before binding
                 // (must be done before x.iter is moved)
                 let loop_definitely_runs = self.is_definitely_nonempty_iterable(&x.iter);
+                let is_unpacking = matches!(&*x.target, Expr::Tuple(_) | Expr::List(_));
                 let in_class_body = self.scopes.in_class_body();
                 self.bind_target_with_expr(&mut x.target, &mut x.iter, &|expr, ann| {
                     Binding::IterableValueLoop(
                         ann,
                         Box::new(expr.clone()),
                         IsAsync::new(x.is_async),
+                        is_unpacking,
                         in_class_body,
                     )
                 });

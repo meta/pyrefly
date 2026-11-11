@@ -1046,8 +1046,67 @@ for k, v in {"x": 1}:  # E: Cannot unpack
     pass
 
 xs: list[str] = []
-for a, b in xs:  # E: Cannot unpack
+for a, b in xs:
     pass
+"#,
+);
+
+testcase!(
+    test_for_loop_unpack_display_lengths,
+    r#"
+from typing import Literal, LiteralString, assert_type
+
+for a, b in {"xy": 1}:
+    pass
+for a, b in {"": 1}:  # E: Cannot unpack
+    pass
+for a, b in {"xyz": 1}:  # E: Cannot unpack
+    pass
+for a, b in {"xy": 1, "z": 2}:  # E: Cannot unpack
+    pass
+for a, b in {**{"xy": 1}}:
+    pass
+for a, b in {**{"x": 1}}:  # E: Cannot unpack
+    pass
+for a, b in ["xy", "ab"]:
+    pass
+for a, b in ["x"]:  # E: Cannot unpack
+    pass
+for a, b in {"xy", "ab"}:
+    pass
+for a, b in {"xyz"}:  # E: Cannot unpack
+    pass
+for a, b in [*["x"]]:  # E: Cannot unpack
+    pass
+for a, b in {b"xy": 1}:
+    pass
+for a, b in [b"x"]:  # E: Cannot unpack
+    pass
+for a, *rest in ["123", "12", "1"]:
+    pass
+for a, *rest in [""]:  # E: Cannot unpack
+    pass
+for *chars, in ["", "1", "12", "123"]:
+    pass
+for a, b in [(1, 2)]:
+    assert_type(a, int)
+    assert_type(b, int)
+
+valid = [(a, b) for a, b in {"xy": 1}]
+invalid = [(a, b) for a, b in {"x": 1}]  # E: Cannot unpack
+invalid_values = [(a, b) for a, b in ["x"]]  # E: Cannot unpack
+
+def unknown(s: str, literal: LiteralString, xs: list[str]) -> None:
+    a, b = s
+    a, *rest = literal
+    for a, b in [s]:
+        pass
+    for a, b in xs:
+        pass
+
+def known(xs: list[Literal["x", "xy"]]) -> None:
+    for a, b in xs:  # E: Cannot unpack
+        pass
 "#,
 );
 
@@ -1084,13 +1143,13 @@ testcase!(
 from typing import Literal, LiteralString
 
 def f(xs: list[str | tuple[int, int]], literals: list[LiteralString | tuple[int, int]]) -> None:
-    for a, b in xs:  # E: Cannot unpack
+    for a, b in xs:
         pass
-    for a, *rest in xs:  # E: Cannot unpack
+    for a, *rest in xs:
         pass
     for *chars, in xs:
         pass
-    for a, b in literals:  # E: Cannot unpack
+    for a, b in literals:
         pass
     for *literal_chars, in literals:
         pass

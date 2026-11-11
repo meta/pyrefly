@@ -39,7 +39,9 @@ use ruff_python_ast::ExprAttribute;
 use ruff_python_ast::ExprBinOp;
 use ruff_python_ast::ExprBoolOp;
 use ruff_python_ast::ExprCall;
+use ruff_python_ast::ExprList;
 use ruff_python_ast::ExprName;
+use ruff_python_ast::ExprSet;
 use ruff_python_ast::ExprSubscript;
 use ruff_python_ast::ExprUnaryOp;
 use ruff_python_ast::Identifier;
@@ -2560,10 +2562,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // body defines a class attribute, which is reported by the class field check like a
         // plain class-body assignment.
         let target_range = match binding {
-            Binding::IterableValueLoop(None, _, _, false)
+            Binding::IterableValueLoop(None, _, _, _, false)
             | Binding::ContextValue(None, _, _, _, false) => Some(range),
             Binding::UnpackedValue(x) if x.annotation.is_none() && !x.in_class_body => Some(range),
-            Binding::IterableValueComprehension(_, _, target_range) => Some(*target_range),
+            Binding::IterableValueComprehension(_, _, target_range, _) => Some(*target_range),
             _ => None,
         };
         if let Some(target_range) = target_range
@@ -2607,8 +2609,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// expression lies within the report's range and explains it.
     pub fn target_value_range(&self, binding: &Binding) -> Option<TextRange> {
         match binding {
-            Binding::IterableValueLoop(_, e, _, _)
-            | Binding::IterableValueComprehension(e, _, _)
+            Binding::IterableValueLoop(_, e, _, _, _)
+            | Binding::IterableValueComprehension(e, _, _, _)
             | Binding::Expr(_, e) => Some(e.range()),
             Binding::ContextValue(_, _, range, _, _) => Some(*range),
             Binding::UnpackedValue(x) => self.target_value_range(self.bindings().get(x.source)),
@@ -3110,17 +3112,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     Type::Literal(lit) if let Lit::Bytes(b) = &lit.value => {
                         let elem_ty = self.heap.mk_class_type(self.stdlib.int().clone());
                         iterables.push(Iterable::FixedLen(vec![elem_ty; b.len()]));
-                    }
-                    _ if !matches!(expect, SizeExpectation::Ge(0))
-                        && (matches!(ty, Type::ClassType(cls) if cls == self.stdlib.str())
-                            || matches!(ty, Type::LiteralString(_))) =>
-                    {
-                        self.error(
-                            errors,
-                            *range,
-                            ErrorKind::BadUnpacking,
-                            format!("Cannot unpack {} into {}", ty, expect.message()),
-                        );
                     }
                     _ => iterables.extend(self.iterate(ty, *range, errors, None)),
                 });
@@ -5758,6 +5749,80 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    /// Iterate over displays before mutable-container inference promotes their literal elements.
+    fn iterate_expr(&self, e: &Expr, errors: &ErrorCollector) -> Vec<Iterable> {
+        let promote_element = |ty: Type| {
+            self.distribute_over_union(&ty, |ty| match ty {
+                // String and bytes literals carry the length of the value being unpacked.
+                Type::Literal(lit) if matches!(lit.value, Lit::Str(_) | Lit::Bytes(_)) => {
+                    ty.clone()
+                }
+                _ => ty.clone().promote(self.stdlib),
+            })
+        };
+        match e {
+            Expr::List(ExprList { elts, .. }) | Expr::Set(ExprSet { elts, .. })
+                if !elts.is_empty() =>
+            {
+                let types = elts
+                    .iter()
+                    .map(|elt| {
+                        promote_element(match elt {
+                            Expr::Starred(star) => {
+                                self.get_produced_type(self.iterate_expr(&star.value, errors))
+                            }
+                            _ => self.expr_infer(elt, errors),
+                        })
+                    })
+                    .collect();
+                let element = self.unions(types);
+                let container = match e {
+                    Expr::List(_) => self.stdlib.list(element.clone().promote(self.stdlib)),
+                    Expr::Set(_) => self.stdlib.set(element.clone().promote(self.stdlib)),
+                    _ => unreachable!("Only list and set displays match this branch"),
+                };
+                self.record_type_trace(e.range(), &self.heap.mk_class_type(container));
+                vec![Iterable::OfType(element)]
+            }
+            Expr::Dict(dict) if !dict.items.is_empty() => {
+                let mut keys = Vec::new();
+                let mut values = Vec::new();
+                for item in Ast::flatten_dict_items(&dict.items) {
+                    if let Some(key) = &item.key {
+                        keys.push(promote_element(self.expr_infer(key, errors)));
+                        values.push(self.expr_infer(&item.value, errors));
+                    } else {
+                        let ty = self.expr_infer(&item.value, errors);
+                        if let Some((key, value)) = self.unwrap_mapping_for_unpacking(&ty) {
+                            keys.push(key);
+                            values.push(value);
+                        } else {
+                            keys.push(self.error(
+                                errors,
+                                item.value.range(),
+                                ErrorKind::InvalidArgument,
+                                format!("Expected a mapping, got {}", self.for_display(ty)),
+                            ));
+                        }
+                    }
+                }
+                let key = self.unions(keys);
+                self.record_type_trace(
+                    e.range(),
+                    &self.heap.mk_class_type(self.stdlib.dict(
+                        key.clone().promote(self.stdlib),
+                        self.unions(values).promote(self.stdlib),
+                    )),
+                );
+                vec![Iterable::OfType(key)]
+            }
+            _ => {
+                let iterable = self.expr_infer(e, errors);
+                self.iterate(&iterable, e.range(), errors, None)
+            }
+        }
+    }
+
     /// Handle `Binding::IterableValue` - extract value type from an iterable.
     /// The `#[inline(never)]` annotation is intentional to reduce stack frame size.
     #[inline(never)]
@@ -5766,6 +5831,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ann: Option<Idx<KeyAnnotation>>,
         e: &Expr,
         is_async: IsAsync,
+        is_unpacking: bool,
         errors: &ErrorCollector,
     ) -> Type {
         let ann = ann.map(|k| self.get_idx(k));
@@ -5802,6 +5868,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let iterable =
                 self.expr_infer_with_hint(e, infer_hint.as_ref().map(HintRef::soft), errors);
             self.async_iterate(&iterable, e.range(), errors)
+        } else if is_unpacking {
+            self.iterate_expr(e, errors)
         } else {
             let infer_hint = ann.and_then(|x| {
                 x.ty(self.heap, self.stdlib)
@@ -7559,11 +7627,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.binding_to_type_exception_handler(classes, *is_star, *range, errors)
             }
             Binding::AugAssign(ann, x) => self.augassign_infer(*ann, x, errors),
-            Binding::IterableValueComprehension(e, is_async, _) => {
-                self.binding_to_type_iterable_value(None, e, *is_async, errors)
+            Binding::IterableValueComprehension(e, is_async, _, is_unpacking) => {
+                self.binding_to_type_iterable_value(None, e, *is_async, *is_unpacking, errors)
             }
-            Binding::IterableValueLoop(ann, e, is_async, _) => {
-                self.binding_to_type_iterable_value(*ann, e, *is_async, errors)
+            Binding::IterableValueLoop(ann, e, is_async, is_unpacking, _) => {
+                self.binding_to_type_iterable_value(*ann, e, *is_async, *is_unpacking, errors)
             }
             Binding::ContextValue(ann, e, range, kind, _) => {
                 self.binding_to_type_context_value(*ann, *e, *range, *kind, errors)
