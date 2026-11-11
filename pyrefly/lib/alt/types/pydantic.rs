@@ -16,6 +16,8 @@ use crate::binding::pydantic::PydanticAliasGenerator;
 pub struct PydanticValidationFlags {
     pub validate_by_name: Option<bool>,
     pub validate_by_alias: Option<bool>,
+    /// Whether the model validates arbitrary objects by reading their attributes.
+    pub from_attributes: bool,
     /// Model validation configuration was present but could not be interpreted.
     pub uncertain: bool,
 }
@@ -27,6 +29,12 @@ impl PydanticValidationFlags {
 
     pub fn validate_by_alias(&self) -> bool {
         self.validate_by_alias.unwrap_or(true)
+    }
+
+    /// Whether the model may validate arbitrary objects by reading their attributes, including
+    /// when its configuration could not be interpreted.
+    pub fn may_validate_from_attributes(&self) -> bool {
+        self.from_attributes || self.uncertain
     }
 }
 

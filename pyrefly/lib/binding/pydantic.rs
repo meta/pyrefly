@@ -26,6 +26,15 @@ pub const VALIDATION_ALIAS: Name = Name::new_static("validation_alias");
 pub const VALIDATE_BY_NAME: Name = Name::new_static("validate_by_name");
 pub const VALIDATE_BY_ALIAS: Name = Name::new_static("validate_by_alias");
 pub const POPULATE_BY_NAME: Name = Name::new_static("populate_by_name");
+pub const FROM_ATTRIBUTES: Name = Name::new_static("from_attributes");
+/// Configuration options read into `PydanticValidationFlags`. A value that is not a literal
+/// makes the validation configuration uncertain.
+pub const VALIDATION_FLAGS: &[Name] = &[
+    VALIDATE_BY_NAME,
+    VALIDATE_BY_ALIAS,
+    POPULATE_BY_NAME,
+    FROM_ATTRIBUTES,
+];
 pub const GT: Name = Name::new_static("gt");
 pub const LT: Name = Name::new_static("lt");
 pub const GE: Name = Name::new_static("ge");
@@ -211,6 +220,7 @@ pub struct PydanticConfigDict {
     pub validate_by_alias: Option<bool>,
     /// Deprecated compatibility option normalized during class metadata construction.
     pub populate_by_name: Option<bool>,
+    pub from_attributes: Option<bool>,
     pub alias_generator: Option<PydanticAliasGenerator>,
     pub validation_uncertain: bool,
 }
@@ -314,10 +324,8 @@ impl<'a> BindingsBuilder<'a> {
                 }),
             };
             for (name, value) in pydantic_config_expr.iter() {
-                if matches!(
-                    name,
-                    "validate_by_name" | "validate_by_alias" | "populate_by_name"
-                ) && !matches!(value, Expr::BooleanLiteral(_) | Expr::NoneLiteral(_))
+                if VALIDATION_FLAGS.iter().any(|flag| name == *flag)
+                    && !matches!(value, Expr::BooleanLiteral(_) | Expr::NoneLiteral(_))
                 {
                     pydantic_config_dict.validation_uncertain = true;
                 }
@@ -352,6 +360,10 @@ impl<'a> BindingsBuilder<'a> {
                     && let Expr::BooleanLiteral(bl) = value
                 {
                     pydantic_config_dict.populate_by_name = Some(bl.value);
+                } else if name == FROM_ATTRIBUTES
+                    && let Expr::BooleanLiteral(bl) = value
+                {
+                    pydantic_config_dict.from_attributes = Some(bl.value);
                 } else if name == ALIAS_GENERATOR {
                     pydantic_config_dict.alias_generator = self.extract_alias_generator(value);
                     pydantic_config_dict.validation_uncertain |=

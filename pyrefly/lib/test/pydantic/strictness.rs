@@ -471,7 +471,6 @@ Action(checked="edit")  # E: is not assignable to parameter `checked`
 
 // https://github.com/meta/pyrefly/issues/5543
 pydantic_testcase!(
-    bug = "A model with `from_attributes=True` accepts any object with matching attributes",
     test_lax_mode_nested_model_from_attributes,
     r#"
 from pydantic import BaseModel, ConfigDict
@@ -489,18 +488,22 @@ class InheritedRowResponse(RowResponse):
 class KeywordRowResponse(BaseModel, from_attributes=True):
     state_id: int
 
+SHARED_CONFIG = ConfigDict(from_attributes=True)
+
+class SharedConfigRowResponse(BaseModel):
+    model_config = SHARED_CONFIG
+    state_id: int
+
 class Response(BaseModel):
     current: RowResponse | None = None
     rows: list[RowResponse] = []
     inherited: InheritedRowResponse | None = None
     keyword: KeywordRowResponse | None = None
+    shared: SharedConfigRowResponse | None = None
     plain: Row | None = None
 
 row = Row(state_id=1)
-Response(current=row)  # E: is not assignable to parameter `current`
-Response(rows=[row])  # E: is not assignable to parameter `rows`
-Response(inherited=row)  # E: is not assignable to parameter `inherited`
-Response(keyword=row)  # E: is not assignable to parameter `keyword`
+Response(current=row, rows=[row], inherited=row, keyword=row, shared=row)
 Response(plain=RowResponse(state_id=1))  # E: is not assignable to parameter `plain`
     "#,
 );

@@ -53,6 +53,7 @@ use crate::binding::binding::BindingTypeAlias;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
 use crate::binding::pydantic::EXTRA;
+use crate::binding::pydantic::FROM_ATTRIBUTES;
 use crate::binding::pydantic::FROZEN;
 use crate::binding::pydantic::FROZEN_DEFAULT;
 use crate::binding::pydantic::GET_PYDANTIC_CORE_SCHEMA;
@@ -65,6 +66,7 @@ use crate::binding::pydantic::STRICT_DEFAULT;
 use crate::binding::pydantic::STRICT_TYPES;
 use crate::binding::pydantic::VALIDATE_BY_ALIAS;
 use crate::binding::pydantic::VALIDATE_BY_NAME;
+use crate::binding::pydantic::VALIDATION_FLAGS;
 use crate::error::collector::ErrorCollector;
 use crate::types::class::Class;
 use crate::types::types::Type;
@@ -498,6 +500,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             validate_by_name,
             validate_by_alias,
             populate_by_name,
+            from_attributes,
             alias_generator,
             validation_uncertain,
         } = pydantic_config_dict;
@@ -543,6 +546,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let validation_flags = PydanticValidationFlags {
             validate_by_name: merged_validate_by_name,
             validate_by_alias: merged_validate_by_alias,
+            from_attributes: self.get_bool_config_value(
+                &FROM_ATTRIBUTES,
+                keywords,
+                *from_attributes,
+                bases_with_metadata,
+                |dm| dm.init_defaults.pydantic_validation_flags.from_attributes,
+                false,
+            ),
             uncertain: *validation_uncertain
                 || bases_with_metadata.iter().any(|(_, metadata)| {
                     metadata
@@ -550,10 +561,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .is_some_and(|dm| dm.init_defaults.pydantic_validation_flags.uncertain)
                 })
                 || keywords.iter().any(|(name, value)| {
-                    matches!(
-                        name.as_str(),
-                        "validate_by_name" | "validate_by_alias" | "populate_by_name"
-                    ) && value.get_type().as_bool().is_none()
+                    VALIDATION_FLAGS.contains(name) && value.get_type().as_bool().is_none()
                 }),
         };
         let validation_alias_generator = alias_generator.clone().or_else(|| {
