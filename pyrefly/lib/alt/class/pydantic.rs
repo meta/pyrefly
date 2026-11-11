@@ -1150,9 +1150,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     if flags.pydantic_unchecked_metadata
                         || dataclass.pydantic_before_validator_fields.contains(&name)
-                        || dataclass
-                            .pydantic_before_validator_fields
-                            .contains(&Name::new_static("*"))
+                        || dataclass.pydantic_validator_replaces_all_input()
                     {
                         continue;
                     }

@@ -712,6 +712,13 @@ impl DataclassMetadata {
         self.fields.contains_key(name) && !self.pseudo_field_names.contains(name)
     }
 
+    /// Whether a model validator, or a field validator with unknown targets, can replace the raw
+    /// input of every field.
+    pub fn pydantic_validator_replaces_all_input(&self) -> bool {
+        self.pydantic_before_validator_fields
+            .contains(&Name::new_static("*"))
+    }
+
     /// Whether Pydantic lax mode converts the `__init__` input for this field.
     pub fn is_pydantic_lax_field(&self, name: &Name, keywords: &DataclassFieldKeywords) -> bool {
         !keywords.strict.unwrap_or(self.kws.strict)

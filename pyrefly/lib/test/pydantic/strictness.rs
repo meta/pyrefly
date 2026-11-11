@@ -435,7 +435,6 @@ Model(
 
 // https://github.com/meta/pyrefly/issues/5543
 pydantic_testcase!(
-    bug = "A model validator that runs before validation can accept input of any type",
     test_lax_mode_nested_model_with_model_validator,
     r#"
 from typing import Any, Self
@@ -464,8 +463,8 @@ class Action(BaseModel):
     inherited: InheritedMenuRule | None = None
     checked: CheckedRule | None = None
 
-Action(menus=["edit"])  # E: is not assignable to parameter `menus`
-Action(inherited="edit")  # E: is not assignable to parameter `inherited`
+Action(menus=["edit"])
+Action(inherited="edit")
 Action(checked="edit")  # E: is not assignable to parameter `checked`
     "#,
 );
