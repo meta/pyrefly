@@ -742,8 +742,14 @@ impl<'a> BindingsBuilder<'a> {
         }
         self.ensure_attrs_specifier_type_forward_ref(value.as_mut());
         let style = if self.scopes.in_class_body() {
-            FlowStyle::ClassField {
-                initial_value: Some((*value).clone()),
+            if is_definitely_type_alias {
+                // As for a `type` statement, the class attribute takes its type from the alias
+                // binding rather than from re-inferring the value.
+                FlowStyle::Other
+            } else {
+                FlowStyle::ClassField {
+                    initial_value: Some((*value).clone()),
+                }
             }
         } else if let Some(base_idx) = receiver_idx {
             // `pristine: false` because the visible binding is this

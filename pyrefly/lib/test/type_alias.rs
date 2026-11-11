@@ -539,6 +539,20 @@ def f(x: C.X):
     "#,
 );
 
+testcase!(
+    test_generic_legacy_type_alias_inside_class,
+    r#"
+from typing import TypeAlias, TypeVar, assert_type
+T = TypeVar("T")
+class C:
+    L = list[T]
+    M: TypeAlias = "dict[str, T]"
+def f(l: C.L[int], m: C.M[int]):
+    assert_type(l, list[int])
+    assert_type(m, dict[str, int])
+    "#,
+);
+
 // Note: this test documents how Pyre currently treats type aliases inside classes
 // when the try to "close" over class type parameters. It is not 100% clear what
 // the behavior should be. But we disagree with Pyright, which disallows the use of
