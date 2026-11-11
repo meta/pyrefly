@@ -6,6 +6,7 @@
 from collections.abc import Sequence
 from typing import Any, overload, Protocol
 
+from jax import Array as JaxArray
 from shape_extensions import CaptureNamedInts, Flag, IntTuple, NamedInts
 from torch import Tensor
 
@@ -31,13 +32,14 @@ def unpack(
     packed_shapes: Sequence[Sequence[int]],
     pattern: str,
 ) -> list[Tensor[IntTuple]]: ...
-
-# TODO: Replace these Torch-specific overloads with library-agnostic `MapShape`
-# signatures that preserve each input array's nominal type.
 @overload
 def rearrange[Shape: IntTuple, Pattern: Flag[str], Axes: NamedInts](
     tensor: Tensor[Shape], pattern: Pattern, **axes_lengths: CaptureNamedInts[Axes]
 ) -> Tensor[rearrange_shape(Pattern, Shape, Axes)]: ...
+@overload
+def rearrange[Shape: IntTuple, Pattern: Flag[str], Axes: NamedInts](
+    tensor: JaxArray[Shape], pattern: Pattern, **axes_lengths: CaptureNamedInts[Axes]
+) -> JaxArray[rearrange_shape(Pattern, Shape, Axes)]: ...
 @overload
 def rearrange(tensor: Any, pattern: str, **axes_lengths: int) -> Any: ...
 @overload
@@ -48,11 +50,22 @@ def reduce[Shape: IntTuple, Pattern: Flag[str], Axes: NamedInts](
     **axes_lengths: CaptureNamedInts[Axes],
 ) -> Tensor[reduce_shape(Pattern, Shape, Axes)]: ...
 @overload
+def reduce[Shape: IntTuple, Pattern: Flag[str], Axes: NamedInts](
+    tensor: JaxArray[Shape],
+    pattern: Pattern,
+    reduction: Any,
+    **axes_lengths: CaptureNamedInts[Axes],
+) -> JaxArray[reduce_shape(Pattern, Shape, Axes)]: ...
+@overload
 def reduce(tensor: Any, pattern: str, reduction: Any, **axes_lengths: int) -> Any: ...
 @overload
 def repeat[Shape: IntTuple, Pattern: Flag[str], Axes: NamedInts](
     tensor: Tensor[Shape], pattern: Pattern, **axes_lengths: CaptureNamedInts[Axes]
 ) -> Tensor[repeat_shape(Pattern, Shape, Axes)]: ...
+@overload
+def repeat[Shape: IntTuple, Pattern: Flag[str], Axes: NamedInts](
+    tensor: JaxArray[Shape], pattern: Pattern, **axes_lengths: CaptureNamedInts[Axes]
+) -> JaxArray[repeat_shape(Pattern, Shape, Axes)]: ...
 @overload
 def repeat(tensor: Any, pattern: str, **axes_lengths: int) -> Any: ...
 @overload
@@ -86,5 +99,36 @@ def einsum[
     pattern: Pattern,
     /,
 ) -> Tensor[einsum_shape(Pattern, tuple[S1, S2, S3, S4])]: ...
+@overload
+def einsum[S1: IntTuple, Pattern: Flag[str]](
+    tensor: JaxArray[S1], pattern: Pattern, /
+) -> JaxArray[einsum_shape(Pattern, tuple[S1])]: ...
+@overload
+def einsum[S1: IntTuple, S2: IntTuple, Pattern: Flag[str]](
+    tensor1: JaxArray[S1], tensor2: JaxArray[S2], pattern: Pattern, /
+) -> JaxArray[einsum_shape(Pattern, tuple[S1, S2])]: ...
+@overload
+def einsum[S1: IntTuple, S2: IntTuple, S3: IntTuple, Pattern: Flag[str]](
+    tensor1: JaxArray[S1],
+    tensor2: JaxArray[S2],
+    tensor3: JaxArray[S3],
+    pattern: Pattern,
+    /,
+) -> JaxArray[einsum_shape(Pattern, tuple[S1, S2, S3])]: ...
+@overload
+def einsum[
+    S1: IntTuple,
+    S2: IntTuple,
+    S3: IntTuple,
+    S4: IntTuple,
+    Pattern: Flag[str],
+](
+    tensor1: JaxArray[S1],
+    tensor2: JaxArray[S2],
+    tensor3: JaxArray[S3],
+    tensor4: JaxArray[S4],
+    pattern: Pattern,
+    /,
+) -> JaxArray[einsum_shape(Pattern, tuple[S1, S2, S3, S4])]: ...
 @overload
 def einsum(*tensors_and_pattern: Any) -> Any: ...

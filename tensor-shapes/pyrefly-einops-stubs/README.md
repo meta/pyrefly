@@ -5,12 +5,17 @@ shape-aware annotations for `rearrange`, `reduce`, `repeat`, and `einsum` using
 Pyrefly's type-level shape DSL. The `einops.layers.torch` `Rearrange` and `Reduce`
 modules preserve the constructor pattern and axis lengths across calls.
 
-The precise annotations currently target PyTorch. The runtime corpus also
-exercises NumPy and JAX to validate that the shared einops pattern semantics
-agree across backends.
+The precise annotations target PyTorch and JAX. The runtime corpus also exercises
+NumPy to validate that the shared einops pattern semantics agree across backends.
 
-TODO: Once Pyrefly supports a `MapShape` type operator, make the annotations
-generic over array libraries while preserving the input's nominal array type.
+Backend shape stubs are optional dependencies: install the `torch` or `jax` extra
+for the libraries your project uses, or combine them as `[torch,jax]`. The base
+package does not install an array library. Install matching shape stubs for every
+installed backend used in these annotations.
+
+Optional-backend overload selection requires Pyrefly's `unresolved-import-signature`
+support. Hide that diagnostic if desired rather than replacing missing imports
+with `Any`, which would make an unavailable backend a broad overload again.
 
 Literal `axes_lengths` keyword arguments are carried into the shape rules, so named
 input splits and repeated output axes remain tracked. Dynamically unpacked mappings

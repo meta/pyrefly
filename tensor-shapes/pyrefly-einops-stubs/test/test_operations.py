@@ -22,6 +22,9 @@ from einops import (
 from shape_extensions import assert_shape, IntTuple
 from torch import arange, ones, Tensor
 
+if TYPE_CHECKING:
+    from jax import Array
+
 
 def test_pattern_operations() -> None:
     image = ones((2, 3, 5, 7))
@@ -184,23 +187,25 @@ def test_jax_shape_operations() -> None:
         jnp.ones((2,)),
         "i, i, i, i -> i",
     )
-    assert_shape(rearranged.shape, IntTuple, runtime=(2, 5, 7, 3))
-    assert_shape(reduced.shape, IntTuple, runtime=(2,))
-    assert_shape(repeated.shape, IntTuple, runtime=(2, 3, 4))
-    assert_shape(product.shape, IntTuple, runtime=(2, 3, 7))
-    assert_shape(diagonal.shape, IntTuple, runtime=())
-    assert_shape(triple.shape, IntTuple, runtime=(2,))
-    assert_shape(quadruple.shape, IntTuple, runtime=(2,))
+    assert_shape(rearranged.shape, (2, 5, 7, 3), runtime=(2, 5, 7, 3))
+    assert_shape(reduced.shape, (2,), runtime=(2,))
+    assert_shape(repeated.shape, (2, 3, 4), runtime=(2, 3, 4))
+    assert_shape(product.shape, (2, 3, 7), runtime=(2, 3, 7))
+    assert_shape(diagonal.shape, (), runtime=())
+    assert_shape(triple.shape, (2,), runtime=(2,))
+    assert_shape(quadruple.shape, (2,), runtime=(2,))
     if TYPE_CHECKING:
-        assert_type(rearranged, Any)
-        assert_type(reduced, Any)
-        assert_type(repeated, Any)
-        assert_type(product, Any)
-        assert_type(diagonal, Any)
-        assert_type(triple, Any)
-        assert_type(quadruple, Any)
-        rearrange(image, "b c h w -> b c h missing")
-        repeat(image, "b c h w -> b c h w", unused=2)
+        assert_type(rearranged, Array[[2, 5, 7, 3]])
+        assert_type(reduced, Array[[2]])
+        assert_type(repeated, Array[[2, 3, 4]])
+        assert_type(product, Array[[2, 3, 7]])
+        assert_type(diagonal, Array[[]])
+        assert_type(triple, Array[[2]])
+        assert_type(quadruple, Array[[2]])
+        rearrange(  # E: named axes must appear on both sides of the pattern
+            image, "b c h w -> b c h missing"
+        )
+        repeat(image, "b c h w -> b c h w", unused=2)  # E: axis 'unused' is not used
     else:
         try:
             rearrange(image, "b c h w -> b c h missing")

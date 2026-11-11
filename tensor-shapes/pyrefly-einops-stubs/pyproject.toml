@@ -19,8 +19,11 @@ classifiers = [
 ]
 dependencies = [
   "pyrefly-shape-extensions==0.0.0",
-  "pyrefly-torch-stubs==0.0.0",
 ]
+
+[project.optional-dependencies]
+torch = ["pyrefly-torch-stubs==0.0.0"]
+jax = ["jax-pyrefly-stubs==0.0.0"]
 
 [project.urls]
 homepage = "https://pyrefly.org"
