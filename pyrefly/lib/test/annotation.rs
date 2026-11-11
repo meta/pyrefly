@@ -233,6 +233,21 @@ class A: ...
 "#,
 );
 
+// Postponed annotations do not postpone other type expressions, which run where they appear.
+testcase!(
+    bug = "Lookups through legacy tparam interception miss unquoted forward refs",
+    test_unquoted_forward_reference_in_eager_type_expression,
+    r#"
+from __future__ import annotations
+from typing import Optional, TypeVar, cast
+X = Optional[A]  # should be an error
+class B(list[A]): ...  # should be an error
+T = TypeVar("T", bound=list[A])  # E: `A` is uninitialized
+y = cast(list[A], 1)  # E: `A` is uninitialized
+class A: ...
+"#,
+);
+
 testcase!(
     bug = "Function annotations routed through legacy tparam lookup miss unquoted forward refs",
     test_unquoted_function_annotation_forward_reference_before_py314,

@@ -488,13 +488,7 @@ impl<'a> BindingsBuilder<'a> {
                     }
                 }
                 if is_runtime_evaluated_annotation
-                    && matches!(
-                        usage,
-                        Usage::Static(
-                            StaticUsage::TypeExpression(TypeExpressionContext::Other),
-                            Evaluation::Eager
-                        )
-                    )
+                    && !usage.is_postponed()
                     && self.module_info.path().style() == ModuleStyle::Executable
                     && let Some(error_message) = is_initialized.as_error_message(&name.id)
                 {
