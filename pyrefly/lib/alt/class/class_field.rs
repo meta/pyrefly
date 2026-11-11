@@ -2228,7 +2228,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 annotation: annot,
             } => {
                 let initialization = ClassFieldInitialization::ClassBody(None);
-                let direct_annotation = annot.map(|a| self.get_idx(a).annotation.clone());
+                // `TypeAlias` declares a type, not an instance-variable annotation.
+                let direct_annotation = annot
+                    .map(|a| self.get_idx(a).annotation.clone())
+                    .filter(|ann| !ann.has_qualifier(&Qualifier::TypeAlias));
                 let value =
                     value_storage.push(ExprOrBinding::Binding(Binding::Forward(*definition)));
                 let (value_ty, annotation, is_inherited) = self.analyze_class_field_value(
