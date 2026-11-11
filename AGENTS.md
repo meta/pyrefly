@@ -147,6 +147,11 @@ Do not write a laundry list of implementation changes. Focus on:
 - **What** (high level): the approach or solution, not individual file edits
 - **Why it works**: how the code changes realize the solution
 
+## Shape-stub packaging
+
+Before changing `tensor-shapes` package layouts, dependencies, or the shape-stub
+build/publish workflows, read `tensor-shapes/AGENTS.md`.
+
 ## Development environments
 
 Pyrefly is developed both on GitHub and inside Meta's monorepo, and the
