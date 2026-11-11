@@ -132,7 +132,22 @@ impl Glob {
         Ok(Self::from_base_pattern(Self::base_pattern(pattern)?))
     }
 
-    fn base_pattern(mut pattern: String) -> anyhow::Result<Pattern> {
+    fn base_pattern(pattern: String) -> anyhow::Result<Pattern> {
+        // The `glob` crate accepts `**` only as a whole path component. Like Pyright and
+        // gitignore, we treat any other run of `*` as a single `*`.
+        let mut pattern = pattern
+            .split('/')
+            .map(|component| {
+                if component == "**" {
+                    component.to_owned()
+                } else {
+                    component
+                        .chars()
+                        .dedup_by(|a, b| *a == '*' && *b == '*')
+                        .collect()
+                }
+            })
+            .join("/");
         if pattern.ends_with("**") {
             pattern.push_str("/*");
         } else if pattern.ends_with("**/") {
@@ -1357,6 +1372,8 @@ mod tests {
         glob_matches("path/to/my/", true);
         glob_matches("path/to/m", false);
         glob_matches("path/to/m*", true);
+        glob_matches("path/to/m**", true);
+        glob_matches("path/to/x**", false);
 
         glob_matches("path/to/my/file.py", true);
         glob_matches("path/to/my/file.py/", true);
@@ -1381,13 +1398,14 @@ mod tests {
         glob_matches("**/*.pyi", false);
     }
 
-    // BUG: Pyright and gitignore treat a `**` that is not a whole path component as `*`, but we
-    // reject it. https://github.com/facebook/pyrefly/issues/1471
+    // Pyright and gitignore treat a `**` that is not a whole path component as `*`.
+    // https://github.com/facebook/pyrefly/issues/1471
     #[test]
     fn test_recursive_wildcard_within_component() {
-        for pattern in ["env-**", "a**b/***/c", "**/x**/**"] {
-            assert!(Glob::new(pattern.to_owned()).is_err(), "{pattern}");
-        }
+        let normalized = |pattern: &str| Glob::new(pattern.to_owned()).unwrap().to_string();
+        assert_eq!(normalized("env-**"), "env-*");
+        assert_eq!(normalized("a**b/***/c"), "a*b/*/c");
+        assert_eq!(normalized("**/x**/**"), "**/x*/**/*");
     }
 
     #[test]
