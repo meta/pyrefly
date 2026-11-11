@@ -3197,14 +3197,14 @@ class Base:
 
 class Derived(Base):
     @decorate
-    def callback(self, x: int) -> None: ...  # E: `Derived.callback` and `Base.callback` must both be descriptors
+    def callback(self, x: int) -> None: ...  # E: `Derived.callback` is read-only, but `Base.callback` is read-write
 
 class BaseNonCallable:
     x: int = 1
 
 class DerivedNonCallable(BaseNonCallable):
     @decorate
-    def x(self) -> int: ...  # E: `DerivedNonCallable.x` and `BaseNonCallable.x` must both be descriptors
+    def x(self) -> int: ...  # E: `(...) -> int`, which is not assignable to `int`
 "#,
 );
 

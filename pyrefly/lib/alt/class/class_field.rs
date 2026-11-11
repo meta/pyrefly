@@ -6460,7 +6460,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     read_type: want_ty, ..
                 }
                 | ClassAttribute::ReadOnly(want_ty, _),
-            ) if !desc.is_method && !want_ty.has_toplevel_func_metadata() => {
+            ) if !want_ty.has_toplevel_func_metadata() => {
                 let (read_ty, setter) = self.resolve_descriptor_types(desc, base);
                 is_subset(&read_ty, want_ty).map_err(|subset_error| {
                     Box::new(AttrSubsetError::Covariant {
@@ -6494,7 +6494,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 | ClassAttribute::ReadOnly(got_ty, _),
                 ClassAttribute::Descriptor(desc, base),
-            ) if !desc.is_method && !got_ty.has_toplevel_func_metadata() => {
+            ) if !got_ty.has_toplevel_func_metadata() => {
                 let (read_ty, setter) = self.resolve_descriptor_types(desc, base);
                 is_subset(got_ty, &read_ty).map_err(|subset_error| {
                     Box::new(AttrSubsetError::Covariant {

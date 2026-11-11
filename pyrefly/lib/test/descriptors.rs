@@ -1593,3 +1593,26 @@ class K:
 reveal_type(K.__init__)  # E: revealed type: (self: K, x: bool = ...) -> None
 "#,
 );
+
+testcase!(
+    test_decorator_override,
+    r#"
+from typing import Any
+
+class Descriptor:
+    def __init__(self, *_: object) -> None:
+        pass
+    def __get__(self, *_: object) -> int:
+        return 1
+    def __set__(self, *_: Any) -> None:
+        pass
+
+class Base:
+    x: Any
+
+class Decorated(Base):
+    @Descriptor
+    def x(cls) -> int:
+        return 1
+    "#,
+);
