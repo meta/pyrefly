@@ -143,9 +143,6 @@ pub enum TypeExpressionContext {
     /// The value of a type alias. Names that resolve to type aliases produce
     /// `Binding::TypeAliasRef` instead of `Binding::Forward`.
     TypeAliasValue,
-    /// The bound, constraints, or default of a PEP 695 type parameter, which Python evaluates
-    /// lazily.
-    ScopedTypeParam,
     /// Any other type expression, such as an annotation, a `cast` argument, or a legacy `TypeVar`
     /// argument.
     Other,

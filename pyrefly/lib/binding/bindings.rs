@@ -3102,7 +3102,7 @@ impl<'a> BindingsBuilder<'a> {
             let mut constraints = None;
             let mut usage = Usage::Static(StaticUsage::Value, Evaluation::Postponed);
             let mut type_usage = Usage::Static(
-                StaticUsage::TypeExpression(TypeExpressionContext::ScopedTypeParam),
+                StaticUsage::TypeExpression(TypeExpressionContext::Other),
                 Evaluation::Postponed,
             );
             let kind = match x {
