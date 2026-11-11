@@ -14,6 +14,7 @@ use std::num::NonZeroUsize;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::path::is_separator;
 use std::thread::available_parallelism;
 
 use anyhow::Context;
@@ -134,20 +135,21 @@ impl Glob {
 
     fn base_pattern(pattern: String) -> anyhow::Result<Pattern> {
         // The `glob` crate accepts `**` only as a whole path component. Like Pyright and
-        // gitignore, we treat any other run of `*` as a single `*`.
-        let mut pattern = pattern
-            .split('/')
-            .map(|component| {
-                if component == "**" {
-                    component.to_owned()
+        // gitignore, we treat any other run of `*` as a single `*`. Components are split on the
+        // platform's separators, because an absolutized pattern uses `\` on Windows.
+        let mut pattern: String = pattern
+            .split_inclusive(is_separator)
+            .map(|piece| {
+                if piece.trim_end_matches(is_separator) == "**" {
+                    piece.to_owned()
                 } else {
-                    component
+                    piece
                         .chars()
                         .dedup_by(|a, b| *a == '*' && *b == '*')
                         .collect()
                 }
             })
-            .join("/");
+            .collect();
         if pattern.ends_with("**") {
             pattern.push_str("/*");
         } else if pattern.ends_with("**/") {
@@ -1406,6 +1408,16 @@ mod tests {
         assert_eq!(normalized("env-**"), "env-*");
         assert_eq!(normalized("a**b/***/c"), "a*b/*/c");
         assert_eq!(normalized("**/x**/**"), "**/x*/**/*");
+    }
+
+    // On Windows, `\` is also a path separator, so a `**` component bounded by `\` is kept.
+    #[cfg(windows)]
+    #[test]
+    fn test_recursive_wildcard_with_windows_separator() {
+        let normalized = |pattern: &str| Glob::new(pattern.to_owned()).unwrap().to_string();
+        assert_eq!(normalized(r"C:\a\**/*.py"), r"C:\a\**/*.py");
+        assert_eq!(normalized(r"C:\a\**\*.py"), r"C:\a\**\*.py");
+        assert_eq!(normalized(r"C:\a\x**\*.py"), r"C:\a\x*\*.py");
     }
 
     #[test]
