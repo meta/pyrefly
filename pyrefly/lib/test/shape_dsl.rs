@@ -142,7 +142,7 @@ testcase!(
     r#"
 import shape_extensions as shapes
 import shape_extensions.dsl as dsl
-from reexport import type_shape_dsl_function as transform
+from reexport import shape_transform as transform
 from shape_extensions import Flag, IntTuple, IntVar, type_shape_dsl_function
 from torch import Tensor
 from typing import assert_type
@@ -157,7 +157,7 @@ def renamed(shape: IntTuple, keep: bool) -> IntTuple:
         return legacy(shape)
     return dsl.IntTuple(())
 
-@shapes.type_shape_dsl_function
+@shapes.shape_transform
 def qualified(shape: IntTuple, keep: bool) -> IntTuple:
     return renamed(shape, keep)
 
@@ -180,16 +180,16 @@ testcase!(
     test_shape_transform_validation,
     shape_extensions_env(),
     r#"
-from shape_extensions import IntTuple, type_shape_dsl_function as transform
+from shape_extensions import IntTuple, shape_transform as transform
 import shape_extensions.dsl as dsl
 
 @transform
-def invalid_parameter(shape: float) -> IntTuple:  # E: parameter `shape` must be annotated
+def invalid_parameter(shape: float) -> IntTuple:  # E: `@shape_transform` parameter `shape` must be annotated
     return dsl.IntTuple(())
 
 @transform
 def invalid_body(shape: IntTuple) -> IntTuple:
-    while len(shape):  # E: body supports only `if` and `return`
+    while len(shape):  # E: @shape_transform body supports only `if` and `return`
         pass
     return shape
 "#,
@@ -777,39 +777,39 @@ testcase!(
 from shape_extensions import Int, type_shape_dsl_function
 
 @type_shape_dsl_function
-async def asynchronous(x: Int) -> Int:  # E: @type_shape_dsl_function does not support async functions
+async def asynchronous(x: Int) -> Int:  # E: @shape_transform does not support async functions
     return x
 
 @type_shape_dsl_function
-def generic[T](x: Int) -> Int:  # E: @type_shape_dsl_function does not support type parameters
+def generic[T](x: Int) -> Int:  # E: @shape_transform does not support type parameters
     return x
 
 @type_shape_dsl_function
-def zero_parameters() -> Int:  # E: @type_shape_dsl_function supports only ordinary positional parameters and requires at least one
+def zero_parameters() -> Int:  # E: @shape_transform supports only ordinary positional parameters and requires at least one
     return x  # E: Could not find name `x`
 
 @type_shape_dsl_function
-def default(x: Int = 1) -> Int:  # E: @type_shape_dsl_function does not support parameter defaults
+def default(x: Int = 1) -> Int:  # E: @shape_transform does not support parameter defaults
     return x
 
 @type_shape_dsl_function
-def positional_only(x: Int, /, y: Int) -> Int:  # E: @type_shape_dsl_function supports only ordinary positional parameters and requires at least one
+def positional_only(x: Int, /, y: Int) -> Int:  # E: @shape_transform supports only ordinary positional parameters and requires at least one
     return y
 
 @type_shape_dsl_function
-def keyword_only(x: Int, *, y: Int) -> Int:  # E: @type_shape_dsl_function supports only ordinary positional parameters and requires at least one
+def keyword_only(x: Int, *, y: Int) -> Int:  # E: @shape_transform supports only ordinary positional parameters and requires at least one
     return x
 
 @type_shape_dsl_function
-def variadic(x: Int, *args: Int) -> Int:  # E: @type_shape_dsl_function supports only ordinary positional parameters and requires at least one
+def variadic(x: Int, *args: Int) -> Int:  # E: @shape_transform supports only ordinary positional parameters and requires at least one
     return x
 
 @type_shape_dsl_function
-def keyword_variadic(x: Int, **kwargs: Int) -> Int:  # E: @type_shape_dsl_function supports only ordinary positional parameters and requires at least one
+def keyword_variadic(x: Int, **kwargs: Int) -> Int:  # E: @shape_transform supports only ordinary positional parameters and requires at least one
     return x
 
 @type_shape_dsl_function
-def duplicate(x: Int, x: Int) -> Int:  # E: @type_shape_dsl_function parameter names must be unique  # E: Duplicate parameter "x"
+def duplicate(x: Int, x: Int) -> Int:  # E: @shape_transform parameter names must be unique  # E: Duplicate parameter "x"
     return x
 
 @type_shape_dsl_function
@@ -817,29 +817,29 @@ def expression(x: Int) -> Int:
     return x + 1
 
 @type_shape_dsl_function
-def docstring_only(x: Int) -> Int:  # E: @type_shape_dsl_function every control-flow path must return  # E: Function declared to return `Int[int]` but is missing an explicit `return`
+def docstring_only(x: Int) -> Int:  # E: @shape_transform every control-flow path must return  # E: Function declared to return `Int[int]` but is missing an explicit `return`
     """A docstring is not a return statement."""
 
 @type_shape_dsl_function
 def second_string_is_not_a_docstring(x: Int) -> Int:
     """The function docstring is allowed."""
-    "A later string expression is not allowed."  # E: @type_shape_dsl_function body supports only `if` and `return`, plus supported immutable local assignments
+    "A later string expression is not allowed."  # E: @shape_transform body supports only `if` and `return`, plus supported immutable local assignments
     return x
 
 @type_shape_dsl_function
 def nested_string_is_not_a_docstring(x: Int) -> Int:
     if x < 0:
-        "A nested string expression is not allowed."  # E: @type_shape_dsl_function body supports only `if` and `return`, plus supported immutable local assignments
+        "A nested string expression is not allowed."  # E: @shape_transform body supports only `if` and `return`, plus supported immutable local assignments
         return x
     return x
 
 @type_shape_dsl_function
 def wrong_name(x: Int) -> Int:
-    return other  # E: @type_shape_dsl_function returned name must match a parameter name  # E: Could not find name `other`
+    return other  # E: @shape_transform returned name must match a parameter name  # E: Could not find name `other`
 
 def outer() -> None:
     @type_shape_dsl_function
-    def nested(x: Int) -> Int:  # E: @type_shape_dsl_function must decorate a top-level function
+    def nested(x: Int) -> Int:  # E: @shape_transform must decorate a top-level function
         return x
 
 "#,
@@ -856,7 +856,7 @@ def missing_parameter(x) -> Int:  # E: parameter `x` must be annotated as `Int`,
     return x
 
 @type_shape_dsl_function
-def missing_return(x: Int):  # E: `@type_shape_dsl_function` return must be annotated as `Int`, `IntTuple`, or `IntTuples`
+def missing_return(x: Int):  # E: `@shape_transform` return must be annotated as `Int`, `IntTuple`, or `IntTuples`
     return x
 
 @type_shape_dsl_function
@@ -865,7 +865,7 @@ def wrong_type(x: str) -> str:  # E: Flag values are input-only
 
 @type_shape_dsl_function
 def cross_domain(x: Int) -> IntTuple:
-    return x  # E: `@type_shape_dsl_function` return annotation must match returned parameter `x`  # E: Returned type `Int[int]` is not assignable to declared return type `IntTuple`
+    return x  # E: `@shape_transform` return annotation must match returned parameter `x`  # E: Returned type `Int[int]` is not assignable to declared return type `IntTuple`
 
 @type_shape_dsl_function
 def missing_second(x: Int, y) -> Int:  # E: parameter `y` must be annotated as `Int`, `Int | None`, `IntTuple`, `IntTuples`, or a supported Flag value type
@@ -3354,31 +3354,31 @@ class SpoofInt:
 
 @type_shape_dsl_function
 def positional(x: Int) -> Int:
-    return official_gradual(x)  # E: @type_shape_dsl_function `gradual()` does not accept arguments  # E: Expected 0 positional arguments
+    return official_gradual(x)  # E: @shape_transform `gradual()` does not accept arguments  # E: Expected 0 positional arguments
 
 @type_shape_dsl_function
 def keyword(x: Int) -> Int:
-    return official_gradual(x=x)  # E: @type_shape_dsl_function `gradual()` does not accept arguments  # E: Unexpected keyword argument
+    return official_gradual(x=x)  # E: @shape_transform `gradual()` does not accept arguments  # E: Unexpected keyword argument
 
 @type_shape_dsl_function
 def starred(x: Int) -> Int:
-    return official_gradual(*())  # E: @type_shape_dsl_function `gradual()` does not accept arguments
+    return official_gradual(*())  # E: @shape_transform `gradual()` does not accept arguments
 
 @type_shape_dsl_function
 def keyword_starred(x: Int) -> Int:
-    return official_gradual(**{})  # E: @type_shape_dsl_function `gradual()` does not accept arguments
+    return official_gradual(**{})  # E: @shape_transform `gradual()` does not accept arguments
 
 @type_shape_dsl_function
 def bare(x: Int) -> Int:
-    return official_gradual  # E: @type_shape_dsl_function gradual return must be called  # E: Returned type
+    return official_gradual  # E: @shape_transform gradual return must be called  # E: Returned type
 
 @type_shape_dsl_function
 def bare_qualified_int(x: Int) -> Int:
-    return dsl.Int.gradual  # E: @type_shape_dsl_function gradual return must be called  # E: Returned type
+    return dsl.Int.gradual  # E: @shape_transform gradual return must be called  # E: Returned type
 
 @type_shape_dsl_function
 def bare_qualified_shape(x: IntTuple) -> IntTuple:
-    return dsl.IntTuple.gradual  # E: @type_shape_dsl_function gradual return must be called  # E: Returned type
+    return dsl.IntTuple.gradual  # E: @shape_transform gradual return must be called  # E: Returned type
 
 @type_shape_dsl_function
 def nested(x: Int) -> Int:
@@ -3386,7 +3386,7 @@ def nested(x: Int) -> Int:
 
 @type_shape_dsl_function
 def statement(x: Int) -> Int:
-    official_gradual()  # E: @type_shape_dsl_function body supports only `if` and `return`
+    official_gradual()  # E: @shape_transform body supports only `if` and `return`
     return x
 
 @type_shape_dsl_function
@@ -3419,7 +3419,7 @@ def shadowed_module_alias(dsl: Int) -> Int:
 
 @type_shape_dsl_function
 def wrong_domain(x: Int) -> Int:
-    return DslIntTuple.gradual()  # E: `@type_shape_dsl_function` declares return domain `Int`, but `shape_extensions.dsl.IntTuple.gradual()` returns `IntTuple`
+    return DslIntTuple.gradual()  # E: `@shape_transform` declares return domain `Int`, but `shape_extensions.dsl.IntTuple.gradual()` returns `IntTuple`
 "#,
 );
 
@@ -3951,7 +3951,7 @@ from shape_extensions.dsl import IntTuple as DslIntTuple
 
 @type_shape_dsl_function
 def chained(a: Int, b: Int, c: Int) -> Int:
-    if a == b == c:  # E: @type_shape_dsl_function comparison must be exactly
+    if a == b == c:  # E: @shape_transform comparison must be exactly
         return a
     return b
 
@@ -3982,10 +3982,10 @@ def unsupported_statement(a: Int) -> Int:
 @type_shape_dsl_function
 def unreachable(a: Int) -> Int:
     return a
-    return a  # E: @type_shape_dsl_function statement is unreachable  # E: This code is unreachable
+    return a  # E: @shape_transform statement is unreachable  # E: This code is unreachable
 
 @type_shape_dsl_function
-def fallthrough(a: Int, b: Int) -> Int:  # E: @type_shape_dsl_function every control-flow path must return  # E: one or more paths are missing an explicit `return`
+def fallthrough(a: Int, b: Int) -> Int:  # E: @shape_transform every control-flow path must return  # E: one or more paths are missing an explicit `return`
     if a == b:
         return a
 
@@ -4697,31 +4697,31 @@ class Spoof:
 
 @type_shape_dsl_function
 def missing(x: Int) -> Int:
-    if dsl.is_concrete_int():  # E: @type_shape_dsl_function `is_concrete_int` condition requires exactly one positional argument  # E: Missing argument `value`
+    if dsl.is_concrete_int():  # E: @shape_transform `is_concrete_int` condition requires exactly one positional argument  # E: Missing argument `value`
         return x
     return x
 
 @type_shape_dsl_function
 def excess(x: Int) -> Int:
-    if dsl.is_concrete_int(x, x):  # E: @type_shape_dsl_function `is_concrete_int` condition requires exactly one positional argument  # E: Expected 1 positional argument
+    if dsl.is_concrete_int(x, x):  # E: @shape_transform `is_concrete_int` condition requires exactly one positional argument  # E: Expected 1 positional argument
         return x
     return x
 
 @type_shape_dsl_function
 def keyword(x: Int) -> Int:
-    if dsl.is_concrete_int(value=x):  # E: @type_shape_dsl_function `is_concrete_int` condition requires exactly one positional argument
+    if dsl.is_concrete_int(value=x):  # E: @shape_transform `is_concrete_int` condition requires exactly one positional argument
         return x
     return x
 
 @type_shape_dsl_function
 def starred(x: Int) -> Int:
-    if dsl.is_concrete_int(*(x,)):  # E: @type_shape_dsl_function `is_concrete_int` condition requires exactly one positional argument
+    if dsl.is_concrete_int(*(x,)):  # E: @shape_transform `is_concrete_int` condition requires exactly one positional argument
         return x
     return x
 
 @type_shape_dsl_function
 def keyword_starred(x: Int) -> Int:
-    if dsl.is_concrete_int(**{"value": x}):  # E: @type_shape_dsl_function `is_concrete_int` condition requires exactly one positional argument
+    if dsl.is_concrete_int(**{"value": x}):  # E: @shape_transform `is_concrete_int` condition requires exactly one positional argument
         return x
     return x
 
@@ -4759,25 +4759,25 @@ def optional_flag_only_comparison(x: Int | None, fallback: Int) -> Int:
 
 @type_shape_dsl_function
 def builtin_isinstance(x: Int) -> Int:
-    if isinstance(x, int):  # E: @type_shape_dsl_function condition may use only boolean Flag values
+    if isinstance(x, int):  # E: @shape_transform condition may use only boolean Flag values
         return x
     return x
 
 @type_shape_dsl_function
 def imported_lookalike(x: Int) -> Int:
-    if lookalike(x):  # E: @type_shape_dsl_function condition may use only boolean Flag values
+    if lookalike(x):  # E: @shape_transform condition may use only boolean Flag values
         return x
     return x
 
 @type_shape_dsl_function
 def spoof(x: Int) -> Int:
-    if Spoof.is_concrete_int(x):  # E: @type_shape_dsl_function condition may use only boolean Flag values
+    if Spoof.is_concrete_int(x):  # E: @shape_transform condition may use only boolean Flag values
         return x
     return x
 
 @type_shape_dsl_function
 def shadowed(is_concrete_int: Int, x: Int) -> Int:
-    if is_concrete_int(x):  # E: @type_shape_dsl_function condition may use only boolean Flag values  # E: Expected a callable
+    if is_concrete_int(x):  # E: @shape_transform condition may use only boolean Flag values  # E: Expected a callable
         return x
     return x
 
@@ -10093,7 +10093,7 @@ def Invalid(message: str) -> Any: ...
 
 @type_shape_dsl_function
 def local_lookalike(shape: IntTuple) -> IntTuple:
-    return make_shape((shape[0],))  # E: @type_shape_dsl_function return value must be
+    return make_shape((shape[0],))  # E: @shape_transform return value must be
 
 @type_shape_dsl_function
 def value_alias(shape: IntTuple) -> IntTuple:
@@ -10101,15 +10101,15 @@ def value_alias(shape: IntTuple) -> IntTuple:
 
 @type_shape_dsl_function
 def local_invalid(shape: IntTuple) -> IntTuple:
-    return Invalid("bad")  # E: @type_shape_dsl_function return value must be
+    return Invalid("bad")  # E: @shape_transform return value must be
 
 @type_shape_dsl_function
 def shadowed_invalid(Invalid: IntTuple) -> IntTuple:
-    return Invalid("bad")  # E: @type_shape_dsl_function return value must be  # E: Expected a callable
+    return Invalid("bad")  # E: @shape_transform return value must be  # E: Expected a callable
 
 @type_shape_dsl_function
 def list_argument(shape: IntTuple) -> IntTuple:
-    return dsl.IntTuple([shape[0]])  # E: @type_shape_dsl_function `dsl.IntTuple` argument must be a fixed tuple
+    return dsl.IntTuple([shape[0]])  # E: @shape_transform `dsl.IntTuple` argument must be a fixed tuple
 
 @type_shape_dsl_function
 def generator_argument(shape: IntTuple) -> IntTuple:
@@ -10117,7 +10117,7 @@ def generator_argument(shape: IntTuple) -> IntTuple:
 
 @type_shape_dsl_function
 def mutation(shape: IntTuple) -> IntTuple:
-    shape[0] = 1  # E: @type_shape_dsl_function body supports only `if` and `return`  # E: Cannot set item
+    shape[0] = 1  # E: @shape_transform body supports only `if` and `return`  # E: Cannot set item
     return shape
 
 @type_shape_dsl_function
@@ -10148,19 +10148,19 @@ def wrong_result(dim: Int) -> Int:
 
 @type_shape_dsl_function
 def invalid_message(shape: IntTuple, message: str) -> IntTuple:
-    return dsl.Invalid(message)  # E: @type_shape_dsl_function `dsl.Invalid` requires exactly one positional string literal
+    return dsl.Invalid(message)  # E: @shape_transform `dsl.Invalid` requires exactly one positional string literal
 
 @type_shape_dsl_function
 def invalid_keyword(shape: IntTuple) -> IntTuple:
-    return dsl.Invalid(message="bad")  # E: @type_shape_dsl_function `dsl.Invalid` requires exactly one positional string literal
+    return dsl.Invalid(message="bad")  # E: @shape_transform `dsl.Invalid` requires exactly one positional string literal
 
 @type_shape_dsl_function
 def gradual_arguments(shape: IntTuple) -> IntTuple:
-    return dsl.IntTuple.gradual(1)  # E: @type_shape_dsl_function `gradual()` does not accept arguments  # E: Expected 0 positional arguments
+    return dsl.IntTuple.gradual(1)  # E: @shape_transform `gradual()` does not accept arguments  # E: Expected 0 positional arguments
 
 @type_shape_dsl_function
 def unsupported_unary(shape: IntTuple) -> IntTuple:
-    return dsl.IntTuple((~1,))  # E: @type_shape_dsl_function dimension literal supports only unary `+` or `-`
+    return dsl.IntTuple((~1,))  # E: @shape_transform dimension literal supports only unary `+` or `-`
 
 def invalid_metadata() -> Tensor[local_lookalike(IntTuple[2])]: ...  # E: Expected a type-level DSL function
 "#,

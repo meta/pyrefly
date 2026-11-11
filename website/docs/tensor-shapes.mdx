@@ -145,7 +145,7 @@ chosen by the caller:
 
 ```python
 # Abridged from pyrefly-numpy-stubs/numpy-stubs/_shapes.pyi
-@type_shape_dsl_function
+@shape_transform
 def expand_dims_shape(shape: IntTuple, axis: int) -> IntTuple:
     output_rank = len(shape) + 1
     if axis < 0 - output_rank or axis >= output_rank:

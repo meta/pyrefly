@@ -28,9 +28,18 @@ class ShapeTransformRuntimeTest(unittest.TestCase):
         def identity(value: int) -> int:
             return value
 
-        decorated = shape_extensions.type_shape_dsl_function(identity)
-        self.assertIs(decorated, identity)
-        self.assertEqual(decorated(3), 3)
+        for decorator in (
+            shape_extensions.shape_transform,
+            shape_extensions.type_shape_dsl_function,
+        ):
+            decorated = decorator(identity)
+            self.assertIs(decorated, identity)
+            self.assertEqual(decorated(3), 3)
+        self.assertIs(
+            shape_extensions.type_shape_dsl_function, shape_extensions.shape_transform
+        )
+        self.assertIn("shape_transform", shape_extensions.__all__)
+        self.assertIn("type_shape_dsl_function", shape_extensions.__all__)
 
 
 class ShapeVarsRuntimeTest(unittest.TestCase):

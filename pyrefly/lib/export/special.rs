@@ -179,7 +179,7 @@ impl SpecialExport {
             "Final" => Some(Self::Final),
             "Mapping" => Some(Self::TypingMapping),
             "TypeForm" => Some(Self::TypeForm),
-            "type_shape_dsl_function" => Some(Self::TypeShapeDslFunction),
+            "shape_transform" | "type_shape_dsl_function" => Some(Self::TypeShapeDslFunction),
             "MapIntTuples" => Some(Self::MapIntTuples),
             "NamedInts" => Some(Self::NamedInts),
             "static_jaxtyping" => Some(Self::StaticJaxtyping),

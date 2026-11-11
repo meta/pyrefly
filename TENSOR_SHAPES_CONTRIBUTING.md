@@ -16,7 +16,7 @@ Shape tracking uses three complementary mechanisms:
    cover modules like `nn.Linear`, `nn.Conv2d`, and functions like `torch.mm`.
 2. **Type-level shape DSL functions**: shape transforms written in a small
    Python subset in `tensor-shapes/pyrefly-torch-stubs/torch-stubs/_shapes.pyi`,
-   decorated with `@type_shape_dsl_function`, and called directly from public
+   decorated with `@shape_transform`, and called directly from public
    return annotations. These cover operations with computed shape logic like
    reductions, padding, pooling, and convolution.
 3. **Special handlers**: Pyrefly implementation logic for constructs that need
@@ -109,6 +109,8 @@ Since `GroupNorm` does not change shape, the forward signature is simply
 ## Shape DSL Functions
 
 Use the DSL when a plain signature cannot express the output shape.
+`@shape_transform` is the preferred decorator; `@type_shape_dsl_function`
+remains supported for backward compatibility.
 
 ### Where They Live
 
@@ -122,10 +124,10 @@ Public stubs call a type-level DSL function directly in their return annotation.
 For example:
 
 ```python
-from shape_extensions import IntTuple, type_shape_dsl_function
+from shape_extensions import IntTuple, shape_transform
 import shape_extensions.dsl as dsl
 
-@type_shape_dsl_function
+@shape_transform
 def repeat_shape(shape: IntTuple, repeats: IntTuple) -> IntTuple:
     if len(repeats) < len(shape):
         return dsl.Invalid("repeat dimensions cannot be shorter than the input rank")
@@ -154,7 +156,7 @@ computations, including:
 - Arithmetic such as `+`, `-`, `*`, `//`, and `%`
 - `if` / `else`
 - Single-assignment local variables
-- Direct returns from other `@type_shape_dsl_function` helpers
+- Direct returns from other `@shape_transform` helpers
 - DSL operations such as `dsl.concat`, `dsl.prod`, and `dsl.Invalid`
 - `dsl.Int.gradual()` for a gradual dimension expression, and a direct
   `return dsl.IntTuple.gradual()` for a gradual shape
@@ -170,7 +172,7 @@ that passes through to a helper, prefer a type parameter bound exactly by shape
 `Int` and annotate the runtime parameter with that type parameter:
 
 ```python
-@type_shape_dsl_function
+@shape_transform
 def resize_shape(size: Int) -> IntTuple:
     return dsl.IntTuple((size,))
 
@@ -232,7 +234,7 @@ before writing one, because neither is guessable:
 ### Example: reduction
 
 ```python
-@type_shape_dsl_function
+@shape_transform
 def reduce_shape(shape: IntTuple, dim: int, keepdim: bool) -> IntTuple:
     axis = dim % len(shape)
     return dsl.IntTuple(
@@ -248,7 +250,7 @@ then calls `reduce_shape(...)` in the return annotation.
 ### Adding a New DSL Function
 
 1. Write the shape transform in `tensor-shapes/pyrefly-torch-stubs/torch-stubs/_shapes.pyi`.
-2. Decorate it with `@type_shape_dsl_function`.
+2. Decorate it with `@shape_transform`.
 3. Bind the relevant public arguments with `Int`, `IntVar`, `IntTuple`, or
    `Flag[...]` type parameters and call the DSL function from the return
    annotation.
