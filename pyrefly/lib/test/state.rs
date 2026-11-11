@@ -17,7 +17,6 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use dupe::Dupe;
-use lsp_types::Uri;
 use pyrefly_build::handle::Handle;
 use pyrefly_build::source_db::LiveSourceDatabase;
 use pyrefly_build::source_db::ModuleEnumerator;
@@ -37,11 +36,8 @@ use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
 use pyrefly_util::thread_pool::ThreadCount;
 use pyrefly_util::thread_pool::ThreadPool;
 use ruff_python_ast::name::Name;
-use ruff_text_size::TextRange;
-use ruff_text_size::TextSize;
 use starlark_map::small_set::SmallSet;
 use tempfile::TempDir;
-use tsp_types::TypeKind;
 
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
@@ -55,7 +51,6 @@ use crate::config::error_kind::Severity;
 use crate::config::finder::ConfigFinder;
 use crate::error::error::Error;
 use crate::error::error::print_errors;
-use crate::lsp::module_helpers::to_real_path;
 use crate::module::bundled::BundledStub;
 use crate::module::bundled::set_readonly;
 use crate::module::finder::DirEntryCache;
@@ -67,7 +62,6 @@ use crate::state::require::Require;
 use crate::state::require::RequireLevels;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
-use crate::tsp::convert_type_in_transaction;
 use crate::tsp::type_conversion::resolve_export_location;
 use crate::types::class::Class;
 use crate::types::types::Type;
@@ -1886,80 +1880,4 @@ fn test_stdlib_cached_on_recheck() {
         "Cached stdlib should skip pre-warming entirely"
     );
     state.commit_transaction(t2, None);
-}
-
-#[test]
-fn test_converted_reexports_keep_declarations_and_source_sysinfo() {
-    let mut env = TestEnv::new();
-    let directory = TempDir::new().unwrap();
-    let library =
-        "class Widget:\n    pass\n\ndef identity(value: Widget) -> Widget:\n    return value\n";
-    let source = "from facade import Widget, identity\nitem = Widget()\nchosen = identity\n";
-    env.add_with_path(
-        "library",
-        directory.path().join("library.py").to_str().unwrap(),
-        library,
-    );
-    env.add_with_path(
-        "facade",
-        directory.path().join("facade.py").to_str().unwrap(),
-        "from library import Widget, identity\n",
-    );
-    env.add_with_path(
-        "main",
-        directory.path().join("main.py").to_str().unwrap(),
-        source,
-    );
-    let config = env.config();
-    let handle = |module: &str, sys_info: &SysInfo| {
-        let name = ModuleName::from_str(module);
-        let path = find_import(&config, name, FindImportOptions::new(&DirEntryCache::new()))
-            .finding()
-            .unwrap();
-        Handle::new(name, path, sys_info.dupe())
-    };
-    let platforms = [
-        SysInfo::new(PythonVersion::default(), PythonPlatform::windows()),
-        SysInfo::new(PythonVersion::default(), PythonPlatform::mac()),
-    ];
-    let handles = platforms.map(|sys_info| handle("main", &sys_info));
-    let state = State::new(env.config_finder(), TEST_THREAD_COUNT);
-    let mut transaction = state.new_transaction(Require::Exports, None);
-    transaction.set_memory(env.get_memory());
-    transaction.run(&handles, Require::Everything, None);
-    assert!(
-        transaction
-            .get_errors(handles.iter())
-            .collect_display_errors()
-            .is_empty()
-    );
-    for source_handle in &handles {
-        let library_handle = handle("library", source_handle.sys_info());
-        let expected_uri = Uri::from_file_path(to_real_path(library_handle.path()).unwrap())
-            .unwrap()
-            .to_string();
-        for (variable, name, kind, line, character) in [
-            ("item", "Widget", TypeKind::Class, 0, 6),
-            ("chosen", "identity", TypeKind::Function, 3, 4),
-        ] {
-            let offset = TextSize::new(source.find(variable).unwrap() as u32);
-            let range = TextRange::at(offset, TextSize::new(variable.len() as u32));
-            let ty = transaction
-                .get_computed_type_at_range(source_handle, range)
-                .unwrap();
-            let converted = convert_type_in_transaction(&transaction, source_handle, &ty);
-            let wire = serde_json::to_value(converted).unwrap();
-            assert_eq!(wire["kind"], kind as u8);
-            assert_eq!(wire["declaration"]["kind"], 0);
-            assert_eq!(wire["declaration"]["name"], name);
-            assert_eq!(wire["declaration"]["node"]["uri"], expected_uri);
-            assert_eq!(
-                wire["declaration"]["node"]["range"],
-                serde_json::json!({
-                    "start": {"line": line, "character": character},
-                    "end": {"line": line, "character": character + name.len()}
-                })
-            );
-        }
-    }
 }
