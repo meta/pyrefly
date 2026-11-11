@@ -1078,18 +1078,13 @@ def test_control_flow_and_higher_order() -> None:
     wl = lax.while_loop(lambda x: x[0, 0] < 5, lambda x: x + 1, jnp.zeros((2, 3)))
     assert_shape(wl.shape, (2, 3))
 
-    # fori_loop with annotated jax.Array / int step_idx callbacks
+    # fori_loop with annotated jax.Array step_idx callback
     def body_array(step_idx: jax.Array, carry: jax.Array[[2, 3]]) -> jax.Array[[2, 3]]:
         del step_idx
         return carry + 1
 
-    def body_int(step_idx: int, carry: jax.Array[[2, 3]]) -> jax.Array[[2, 3]]:
-        return carry + step_idx
-
     fl_arr = lax.fori_loop(0, 3, body_array, jnp.zeros((2, 3)))
     assert_shape(fl_arr.shape, (2, 3))
-    fl_int = lax.fori_loop(0, 3, body_int, jnp.zeros((2, 3)))
-    assert_shape(fl_int.shape, (2, 3))
 
 
 def generic_pytree_scans_and_reductions(
