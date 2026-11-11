@@ -1576,6 +1576,40 @@ class G[T]:
     "#,
 );
 
+testcase!(
+    test_type_of_self_as_callable_with_type_var_new,
+    r#"
+from typing import Callable, Self, TypeVar, assert_type, reveal_type
+
+def identity[**P, R](cb: Callable[P, R]) -> Callable[P, R]:
+    return cb
+
+class C:
+    def __new__[S: C](cls: type[S], x: int) -> S:
+        raise NotImplementedError
+
+    @classmethod
+    def make(cls) -> Self:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> Self@C
+        return identity(cls)(1)
+
+_S = TypeVar("_S", bound="Legacy")
+
+class Legacy:
+    def __new__(cls: type[_S], x: int) -> _S:
+        raise NotImplementedError
+
+    @classmethod
+    def make(cls) -> Self:
+        reveal_type(identity(cls))  # E: revealed type: (x: int) -> Self@Legacy
+        return identity(cls)(1)
+
+class D(C): ...
+
+assert_type(D.make(), D)
+    "#,
+);
+
 // Soft errors, such as the ignored-by-default `unknown-argument-type`, must not make the
 // `__init__` check look redundant.
 testcase!(
