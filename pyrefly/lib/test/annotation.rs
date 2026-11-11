@@ -149,6 +149,17 @@ ok2: "str" | int = "foo"
 "#,
 );
 
+// A legacy type alias value is evaluated where it appears, even when annotations are postponed.
+testcase!(
+    test_union_type_with_bare_string_literal_in_alias_future_annotations,
+    TestEnv::new_with_version(PythonVersion::new(3, 13, 0)),
+    r#"
+from __future__ import annotations
+from typing import TypeAlias
+X: TypeAlias = int | "str"  # E: `|` union syntax does not work with string literals
+"#,
+);
+
 // Test legacy type alias with forward reference string literal
 testcase!(
     test_union_operator_with_legacy_type_alias,

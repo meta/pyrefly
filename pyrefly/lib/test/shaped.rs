@@ -964,3 +964,19 @@ def unbounded[T](x: T) -> IntTuple:
     return x  # E: Returned type `T` is not assignable to declared return type `IntTuple`
 "#,
 );
+
+// A shape string is never evaluated, so it may refer to a field declared later in a class body.
+testcase!(
+    test_shaped_string_class_body_forward_reference,
+    shaped_env(),
+    r#"
+from typing import Any, TypeAlias
+from arrays import ndarray
+from shape_extensions import Shaped, shape_vars
+
+@shape_vars("M")
+class C:
+    x: Shaped[ndarray, "[M, L]"]
+    L: TypeAlias = Any
+"#,
+);

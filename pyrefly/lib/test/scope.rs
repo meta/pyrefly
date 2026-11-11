@@ -2061,3 +2061,15 @@ class A:
     def int(self) -> None: ...
     "#,
 );
+
+// A type alias value is evaluated where it appears, even when annotations are postponed.
+testcase!(
+    test_alias_value_in_class_body_is_not_postponed,
+    r#"
+from __future__ import annotations
+from typing import TypeAlias
+class C:
+    X: TypeAlias = Y  # E: Could not find name `Y`
+    Y = int
+    "#,
+);

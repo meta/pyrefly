@@ -76,6 +76,7 @@ use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::InitializationStatus;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::classmethod::FunctionDecorators;
+use crate::binding::expr::Evaluation;
 use crate::binding::expr::StaticUsage;
 use crate::binding::expr::TypeExpressionContext;
 use crate::binding::expr::Usage;
@@ -435,8 +436,10 @@ impl<'a> BindingsBuilder<'a> {
                     continue;
                 };
                 let mut names = Vec::new();
-                let usage =
-                    Usage::Static(StaticUsage::TypeExpression(TypeExpressionContext::Other));
+                let usage = Usage::Static(
+                    StaticUsage::TypeExpression(TypeExpressionContext::Other),
+                    Evaluation::Eager,
+                );
                 if !is_simple_type_expr(&expr, &mut names)
                     || names.into_iter().any(|x| {
                         matches!(
@@ -447,7 +450,7 @@ impl<'a> BindingsBuilder<'a> {
                 {
                     continue;
                 }
-                self.ensure_type(&mut expr, Some(&mut *legacy));
+                self.ensure_type(&mut expr, Some(&mut *legacy), Evaluation::Eager);
                 self.docstring_type_ranges.push(expr.range());
                 bound_types.insert(start, expr.clone());
                 expr
@@ -467,7 +470,7 @@ impl<'a> BindingsBuilder<'a> {
         override_func: Option<Idx<KeyUndecoratedFunction>>,
         tparams_builder: Option<&mut LegacyTParamCollector>,
     ) -> (TextRange, Idx<KeyAnnotation>) {
-        self.ensure_type(&mut x, tparams_builder);
+        self.ensure_type(&mut x, tparams_builder, self.annotation_evaluation());
         (
             x.range(),
             self.insert_binding(
@@ -505,7 +508,9 @@ impl<'a> BindingsBuilder<'a> {
         // We need to bind all the parameters expressions _after_ the type params, but before the parameter names,
         // which might shadow some types.
         for (param, default) in Ast::parameters_iter_mut(&mut x.parameters) {
-            self.ensure_type_opt(param.annotation.as_deref_mut(), Some(&mut legacy));
+            if let Some(annotation) = param.annotation.as_deref_mut() {
+                self.ensure_type(annotation, Some(&mut legacy), self.annotation_evaluation());
+            }
             if let Some(default) = default {
                 self.ensure_expr_opt(default.as_deref_mut(), usage);
             }

@@ -113,7 +113,7 @@ pub enum Usage {
     /// A name lookup that no binding owns, such as when a narrowing looks up the name it narrows.
     Inspection,
     /// Static type context that does not pin partial types.
-    Static(StaticUsage),
+    Static(StaticUsage, Evaluation),
     /// An expression that no binding type-checks, such as an invalid assignment target.
     Unchecked,
 }
@@ -125,6 +125,16 @@ pub enum StaticUsage {
     TypeExpression(TypeExpressionContext),
     /// A value expression within a static context, such as the contents of `Literal[...]`.
     Value,
+}
+
+/// When a static context is evaluated, relative to the code around it.
+#[derive(Debug, Clone, Copy)]
+pub enum Evaluation {
+    /// Where it appears, such as a legacy type alias value or a `cast` argument.
+    Eager,
+    /// After the code around it has run, such as a string annotation, any annotation when
+    /// annotations are postponed, or a `type` statement value.
+    Postponed,
 }
 
 /// Where a type expression appears, for the positions that need special handling.
@@ -146,23 +156,54 @@ impl Usage {
     pub fn as_condition(&self) -> Self {
         match self {
             Self::CurrentIdx(idx) | Self::Condition(idx) => Self::Condition(*idx),
-            Self::Inspection | Self::Static(_) | Self::Unchecked => self.clone(),
+            Self::Inspection | Self::Static(..) | Self::Unchecked => self.clone(),
         }
     }
 
     /// The usage for a type argument, preserving the context of an enclosing type expression.
     pub fn as_type(&self) -> Self {
         match self {
-            Self::Static(StaticUsage::TypeExpression(_)) => self.clone(),
-            _ => Self::Static(StaticUsage::TypeExpression(TypeExpressionContext::Other)),
+            Self::Static(StaticUsage::TypeExpression(_), _) => self.clone(),
+            _ => Self::Static(
+                StaticUsage::TypeExpression(TypeExpressionContext::Other),
+                self.evaluation(),
+            ),
         }
+    }
+
+    /// The usage for a value inside a static context, such as the contents of `Literal[...]`.
+    pub fn as_static_value(&self) -> Self {
+        Self::Static(StaticUsage::Value, self.evaluation())
+    }
+
+    /// The usage for the contents of a string annotation, a shape string, or a shape comment,
+    /// none of which are evaluated where they appear.
+    pub fn as_postponed(&self) -> Self {
+        match self {
+            Self::Static(kind, _) => Self::Static(*kind, Evaluation::Postponed),
+            _ => self.clone(),
+        }
+    }
+
+    fn evaluation(&self) -> Evaluation {
+        match self {
+            Self::Static(_, evaluation) => *evaluation,
+            Self::CurrentIdx(_) | Self::Condition(_) | Self::Inspection | Self::Unchecked => {
+                Evaluation::Eager
+            }
+        }
+    }
+
+    /// Whether this usage is in a static context that is evaluated after the code around it.
+    pub fn is_postponed(&self) -> bool {
+        matches!(self, Self::Static(_, Evaluation::Postponed))
     }
 
     /// Get the current binding idx, if any.
     pub fn current_idx(&self) -> Option<Idx<Key>> {
         match self {
             Usage::CurrentIdx(idx) | Usage::Condition(idx) => Some(*idx),
-            Usage::Inspection | Usage::Static(_) | Usage::Unchecked => None,
+            Usage::Inspection | Usage::Static(..) | Usage::Unchecked => None,
         }
     }
 
@@ -173,7 +214,7 @@ impl Usage {
 
     /// Whether this usage is in a static type.
     pub fn is_static(&self) -> bool {
-        matches!(self, Usage::Static(_))
+        matches!(self, Usage::Static(..))
     }
 
     pub fn checks_initialization(&self) -> bool {
@@ -324,17 +365,7 @@ impl<'a> BindingsBuilder<'a> {
         usage: &mut Usage,
         tparams_builder: Option<&mut LegacyTParamCollector>,
     ) -> Idx<Key> {
-        // A static context, such as `Annotated` metadata, is not evaluated where it appears when
-        // annotations are postponed, so it may refer to fields declared later in a class body.
-        let allow_class_body_forward_reference =
-            usage.is_static() && self.annotations_are_postponed();
-        self.ensure_name_in_type(
-            name,
-            usage,
-            tparams_builder,
-            false,
-            allow_class_body_forward_reference,
-        )
+        self.ensure_name_in_type(name, usage, tparams_builder, false)
     }
 
     fn ensure_name_in_type(
@@ -343,7 +374,6 @@ impl<'a> BindingsBuilder<'a> {
         usage: &mut Usage,
         tparams_builder: Option<&mut LegacyTParamCollector>,
         is_runtime_evaluated_annotation: bool,
-        allow_class_body_forward_reference: bool,
     ) -> Idx<Key> {
         self.ensure_name_impl(
             name,
@@ -351,7 +381,6 @@ impl<'a> BindingsBuilder<'a> {
             tparams_builder
                 .map(|tparams_builder| (tparams_builder, LegacyTParamId::Name(name.clone()))),
             is_runtime_evaluated_annotation,
-            allow_class_body_forward_reference,
         )
     }
 
@@ -368,7 +397,6 @@ impl<'a> BindingsBuilder<'a> {
             tparams_builder.map(|tparams_builder| {
                 (tparams_builder, LegacyTParamId::Attr(value.clone(), attrs))
             }),
-            false,
             false,
         )
     }
@@ -400,7 +428,6 @@ impl<'a> BindingsBuilder<'a> {
         usage: &mut Usage,
         tparams_lookup: Option<(&mut LegacyTParamCollector, LegacyTParamId)>,
         is_runtime_evaluated_annotation: bool,
-        allow_class_body_forward_reference: bool,
     ) -> Idx<Key> {
         let short_name = ShortIdentifier::new(name);
         let key = Key::BoundName(short_name);
@@ -466,10 +493,12 @@ impl<'a> BindingsBuilder<'a> {
                 if is_runtime_evaluated_annotation
                     && matches!(
                         usage,
-                        Usage::Static(StaticUsage::TypeExpression(TypeExpressionContext::Other))
+                        Usage::Static(
+                            StaticUsage::TypeExpression(TypeExpressionContext::Other),
+                            Evaluation::Eager
+                        )
                     )
                     && self.module_info.path().style() == ModuleStyle::Executable
-                    && !self.annotations_are_postponed()
                     && let Some(error_message) = is_initialized.as_error_message(&name.id)
                 {
                     self.error(name.range, ErrorKind::UnboundName, error_message);
@@ -510,7 +539,9 @@ impl<'a> BindingsBuilder<'a> {
                             class_key: cls,
                             name: name.clone(),
                             suggestion,
-                            allow_class_body_forward_reference,
+                            // A postponed context is evaluated after the class body, so it
+                            // may refer to fields declared later in it.
+                            allow_class_body_forward_reference: usage.is_postponed(),
                         })),
                     )
                 } else {
@@ -766,9 +797,9 @@ impl<'a> BindingsBuilder<'a> {
     /// Bind the metadata items of an `Annotated[...]` type form. Names in them still resolve, but
     /// the metadata is not type-checked, so their ranges are recorded and bindings created inside
     /// them only report name resolution errors.
-    fn bind_annotated_metadata(&mut self, metadata: &mut [Expr]) {
+    fn bind_annotated_metadata(&mut self, metadata: &mut [Expr], usage: &Usage) {
         for e in metadata {
-            self.ensure_expr(e, &mut Usage::Static(StaticUsage::Value));
+            self.ensure_expr(e, &mut usage.as_static_value());
             self.annotated_metadata_ranges.push(e.range());
         }
     }
@@ -832,7 +863,7 @@ impl<'a> BindingsBuilder<'a> {
                             &mut type_usage,
                             false,
                         );
-                        self.bind_annotated_metadata(&mut tup.elts[1..]);
+                        self.bind_annotated_metadata(&mut tup.elts[1..], &type_usage);
                     } else {
                         self.ensure_type_impl(
                             &mut *slice,
@@ -843,7 +874,7 @@ impl<'a> BindingsBuilder<'a> {
                             false,
                         );
                     }
-                } else if self.annotations_are_postponed()
+                } else if matches!(self.annotation_evaluation(), Evaluation::Postponed)
                     && let Expr::Name(name) = &**value
                     && let Some((class_object_idx, FlowStyle::ClassDef { .. })) =
                         self.scopes.binding_idx_for_name(&name.id)
@@ -997,7 +1028,7 @@ impl<'a> BindingsBuilder<'a> {
                         self.ensure_expr(&mut call.func, usage);
                         for (i, arg) in call.arguments.args.iter_mut().enumerate() {
                             if i == 1 {
-                                self.ensure_type(arg, None);
+                                self.ensure_type(arg, None, Evaluation::Eager);
                             } else {
                                 self.ensure_expr(arg, usage);
                             }
@@ -1011,7 +1042,7 @@ impl<'a> BindingsBuilder<'a> {
                         // Forward-reference support in the first argument to a `cast` call.
                         self.ensure_expr(&mut call.func, usage);
                         if let Some(arg) = call.arguments.args.first_mut() {
-                            self.ensure_type(arg, None)
+                            self.ensure_type(arg, None, Evaluation::Eager)
                         }
                         for arg in call.arguments.args.iter_mut().skip(1) {
                             self.ensure_expr(arg, usage);
@@ -1020,7 +1051,7 @@ impl<'a> BindingsBuilder<'a> {
                             if let Some(id) = &kw.arg
                                 && id.as_str() == "typ"
                             {
-                                self.ensure_type(&mut kw.value, None);
+                                self.ensure_type(&mut kw.value, None, Evaluation::Eager);
                             } else {
                                 self.ensure_expr(&mut kw.value, usage);
                             }
@@ -1031,7 +1062,7 @@ impl<'a> BindingsBuilder<'a> {
                         // `TypeForm(expr)` — treat the argument as a type expression.
                         self.ensure_expr(&mut call.func, usage);
                         if let Some(arg) = call.arguments.args.first_mut() {
-                            self.ensure_type(arg, None)
+                            self.ensure_type(arg, None, Evaluation::Eager)
                         }
                         for arg in call.arguments.args.iter_mut().skip(1) {
                             self.ensure_expr(arg, usage);
@@ -1278,11 +1309,15 @@ impl<'a> BindingsBuilder<'a> {
         &mut self,
         x: &mut Expr,
         tparams_builder: Option<&mut LegacyTParamCollector>,
+        evaluation: Evaluation,
     ) {
         self.ensure_type_with_usage(
             x,
             tparams_builder,
-            &mut Usage::Static(StaticUsage::TypeExpression(TypeExpressionContext::Other)),
+            &mut Usage::Static(
+                StaticUsage::TypeExpression(TypeExpressionContext::Other),
+                evaluation,
+            ),
         );
     }
 
@@ -1330,9 +1365,10 @@ impl<'a> BindingsBuilder<'a> {
         let invalid_proxy_method_use = !allow_proxy_method
             && matches!(
                 usage,
-                Usage::Static(StaticUsage::TypeExpression(
-                    TypeExpressionContext::TypeAliasValue
-                ))
+                Usage::Static(
+                    StaticUsage::TypeExpression(TypeExpressionContext::TypeAliasValue),
+                    _
+                )
             )
             && self.type_expr_is_proxy_method_node(x);
         let allow_proxy_method = allow_proxy_method || invalid_proxy_method_use;
@@ -1351,14 +1387,13 @@ impl<'a> BindingsBuilder<'a> {
                     usage,
                     tparams_builder,
                     check_runtime_name && !in_string_literal,
-                    in_string_literal || self.annotations_are_postponed(),
                 );
             }
             Expr::Subscript(ExprSubscript { value, .. })
                 if self.as_special_export(value) == Some(SpecialExport::Literal) =>
             {
                 // Don't go inside a literal, since you might find strings which are really strings, not string-types
-                self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value));
+                self.ensure_expr(x, &mut usage.as_static_value());
             }
             Expr::Subscript(ExprSubscript { value, slice, .. })
                 if self.as_special_export(value) == Some(SpecialExport::ProxyMethod) =>
@@ -1371,7 +1406,7 @@ impl<'a> BindingsBuilder<'a> {
                     usage,
                     true,
                 );
-                self.ensure_expr(&mut *slice, &mut Usage::Static(StaticUsage::Value));
+                self.ensure_expr(&mut *slice, &mut usage.as_static_value());
             }
             Expr::Subscript(ExprSubscript {
                 value,
@@ -1406,7 +1441,7 @@ impl<'a> BindingsBuilder<'a> {
                 let bound_as_shape = special == SpecialExport::Shaped
                     && self.bind_shape_string(*range, tup, tparams_builder, &mut type_usage);
                 if !bound_as_shape {
-                    self.bind_annotated_metadata(&mut tup.elts[1..]);
+                    self.bind_annotated_metadata(&mut tup.elts[1..], usage);
                 }
             }
             Expr::Subscript(ExprSubscript { value, slice, .. })
@@ -1463,7 +1498,7 @@ impl<'a> BindingsBuilder<'a> {
                             tparams_builder,
                             true,
                             check_runtime_name,
-                            usage,
+                            &mut usage.as_postponed(),
                             allow_proxy_method,
                         );
                     }
@@ -1473,11 +1508,11 @@ impl<'a> BindingsBuilder<'a> {
                 }
             }
             // Bind the lambda so we don't crash on undefined parameter names.
-            Expr::Lambda(_) => self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value)),
+            Expr::Lambda(_) => self.ensure_expr(x, &mut usage.as_static_value()),
             // Bind the call so we generate all expected bindings. See
             // test::class_super::test_super_in_base_classes for an example of a SuperInstance
             // binding that we crash looking for if we don't do this.
-            Expr::Call(_) => self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value)),
+            Expr::Call(_) => self.ensure_expr(x, &mut usage.as_static_value()),
             // Bind walrus so we don't crash when looking up the assigned name later.
             // Named expressions are not allowed inside type aliases (PEP 695).
             Expr::Named(named) => {
@@ -1488,14 +1523,14 @@ impl<'a> BindingsBuilder<'a> {
                         "Named expression cannot be used within a type alias".to_owned(),
                     );
                 }
-                self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value));
+                self.ensure_expr(x, &mut usage.as_static_value());
             }
             // Bind yield and yield from so we don't crash when checking return type later.
             Expr::Yield(_) => {
-                self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value));
+                self.ensure_expr(x, &mut usage.as_static_value());
             }
             Expr::YieldFrom(_) => {
-                self.ensure_expr(x, &mut Usage::Static(StaticUsage::Value));
+                self.ensure_expr(x, &mut usage.as_static_value());
             }
             Expr::Attribute(..)
                 if let Some((base, attrs)) = chase_static_attr_chain(x)
@@ -1512,7 +1547,7 @@ impl<'a> BindingsBuilder<'a> {
                 // implicit alias validation. We use `StaticUsage::Value` to prevent
                 // `ImplicitAliasCheck` from being inserted for the value name.
                 let mut attr_value_usage = match *usage {
-                    Usage::Static(_) => Usage::Static(StaticUsage::Value),
+                    Usage::Static(..) => usage.as_static_value(),
                     ref u => u.clone(),
                 };
                 self.ensure_simple_attr(
@@ -1538,7 +1573,7 @@ impl<'a> BindingsBuilder<'a> {
                     .and_then(|tb| self.try_intercept_lookup(tb, &id));
                 // Same as above: args/kwargs attribute values are not type references.
                 let mut attr_value_usage = match *usage {
-                    Usage::Static(_) => Usage::Static(StaticUsage::Value),
+                    Usage::Static(..) => usage.as_static_value(),
                     ref u => u.clone(),
                 };
                 self.ensure_name(&name, &mut attr_value_usage, resolved.and(tparams_builder));
@@ -1574,11 +1609,11 @@ impl<'a> BindingsBuilder<'a> {
                 );
 
                 // Only create the check if we're in an executable file, at least one side
-                // is a forward ref, and we're not in Python 3.14+ or with future annotations
-                // (which make annotations lazy and avoid the runtime error)
+                // is a forward ref, and the union is evaluated where it appears (a postponed
+                // union avoids the runtime error)
                 if self.module_info.path().style() == ModuleStyle::Executable
                     && (left_is_forward_ref || right_is_forward_ref)
-                    && !self.annotations_are_postponed()
+                    && matches!(usage.evaluation(), Evaluation::Eager)
                 {
                     self.insert_binding(
                         KeyExpect::ForwardRefUnion(*range),
@@ -1614,17 +1649,6 @@ impl<'a> BindingsBuilder<'a> {
                 self.as_special_export(&subscript.value) == Some(SpecialExport::ProxyMethod)
             }
             _ => false,
-        }
-    }
-
-    /// Execute through the expr, ensuring every name has a binding.
-    pub fn ensure_type_opt(
-        &mut self,
-        x: Option<&mut Expr>,
-        tparams_builder: Option<&mut LegacyTParamCollector>,
-    ) {
-        if let Some(x) = x {
-            self.ensure_type(x, tparams_builder);
         }
     }
 

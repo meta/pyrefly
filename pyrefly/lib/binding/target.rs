@@ -41,6 +41,7 @@ use crate::binding::binding::UnpackedPosition;
 use crate::binding::binding::UnpackedValue;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::LegacyTParamCollector;
+use crate::binding::expr::Evaluation;
 use crate::binding::expr::StaticUsage;
 use crate::binding::expr::TypeExpressionContext;
 use crate::binding::expr::Usage;
@@ -645,7 +646,7 @@ impl<'a> BindingsBuilder<'a> {
                     && let Expr::StringLiteral(lit) = &kw.value
                     && lit.as_single_part_string().is_some()
                 {
-                    self.ensure_type(&mut kw.value, None);
+                    self.ensure_type(&mut kw.value, None, Evaluation::Eager);
                 }
             }
         }
@@ -729,13 +730,14 @@ impl<'a> BindingsBuilder<'a> {
                 self.ensure_type_with_usage(
                     &mut value,
                     Some(&mut legacy),
-                    &mut Usage::Static(StaticUsage::TypeExpression(
-                        TypeExpressionContext::TypeAliasValue,
-                    )),
+                    &mut Usage::Static(
+                        StaticUsage::TypeExpression(TypeExpressionContext::TypeAliasValue),
+                        Evaluation::Eager,
+                    ),
                 );
                 tparams = Some(legacy.lookup_keys().into_boxed_slice());
             } else if has_typeform_annotation && value.is_string_literal_expr() {
-                self.ensure_type(&mut value, None);
+                self.ensure_type(&mut value, None, Evaluation::Eager);
             } else {
                 self.ensure_expr(&mut value, current.usage());
             }

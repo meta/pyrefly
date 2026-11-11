@@ -1262,3 +1262,15 @@ def check(x: ndarray[[3]], y: ndarray) -> None:
     assert_type(f(x, y), ndarray[[4]])
 "#,
 );
+
+// A shape comment is never evaluated, so it may refer to a field declared later in a class body.
+testcase!(
+    test_shaped_comments_class_body_forward_reference,
+    shaped_env(),
+    r#"
+# enable-shape-type-comments
+class C:
+    x: int  # shaped: type = D
+    class D: ...
+"#,
+);

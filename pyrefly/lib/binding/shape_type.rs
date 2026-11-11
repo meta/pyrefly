@@ -37,7 +37,6 @@ use crate::binding::binding::KeyClass;
 use crate::binding::binding::LambdaKind;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::LegacyTParamCollector;
-use crate::binding::expr::StaticUsage;
 use crate::binding::expr::Usage;
 use crate::binding::shape_comments::ShapeCommentAnnotation;
 use crate::binding::shape_comments::ShapeCommentTarget;
@@ -296,7 +295,7 @@ impl BindingsBuilder<'_> {
                 tparams_builder.as_deref_mut(),
                 true,
                 false,
-                usage,
+                &mut usage.as_postponed(),
                 false,
             );
             self.shape_string_annotation = outer;
@@ -516,7 +515,7 @@ impl BindingsBuilder<'_> {
             tparams_builder,
             true,
             false,
-            usage,
+            &mut usage.as_postponed(),
             false,
         );
         self.shape_string_annotation = outer;
@@ -950,7 +949,7 @@ impl BindingsBuilder<'_> {
             && self.shape_extension_type_parameter_bound_marker(&subscript.value)
                 == Some(SpecialExport::Flag)
         {
-            self.ensure_expr(&mut subscript.value, &mut Usage::Static(StaticUsage::Value));
+            self.ensure_expr(&mut subscript.value, &mut usage.as_static_value());
             self.ensure_type_with_usage(&mut subscript.slice, None, usage);
             return TypeParameterBound::ShapeFlag {
                 domain: Some((*subscript.slice).clone()),
@@ -961,18 +960,18 @@ impl BindingsBuilder<'_> {
         match self.shape_extension_type_parameter_bound_marker(bound_expr) {
             Some(SpecialExport::Flag) => {
                 let range = bound_expr.range();
-                self.ensure_expr(bound_expr, &mut Usage::Static(StaticUsage::Value));
+                self.ensure_expr(bound_expr, &mut usage.as_static_value());
                 TypeParameterBound::ShapeFlag {
                     domain: None,
                     range,
                 }
             }
             Some(SpecialExport::Index) => {
-                self.ensure_expr(bound_expr, &mut Usage::Static(StaticUsage::Value));
+                self.ensure_expr(bound_expr, &mut usage.as_static_value());
                 TypeParameterBound::ShapeIndex
             }
             Some(SpecialExport::NamedInts) => {
-                self.ensure_expr(bound_expr, &mut Usage::Static(StaticUsage::Value));
+                self.ensure_expr(bound_expr, &mut usage.as_static_value());
                 TypeParameterBound::ShapeNamedInts
             }
             _ => {

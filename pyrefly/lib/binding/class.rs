@@ -79,6 +79,7 @@ use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::InitializedInClass;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::django::collect_django_queryset_only;
+use crate::binding::expr::Evaluation;
 use crate::binding::expr::StaticUsage;
 use crate::binding::expr::Usage;
 use crate::binding::pydantic::PydanticConfigDict;
@@ -364,7 +365,11 @@ impl<'a> BindingsBuilder<'a> {
                 }
                 _ => None,
             };
-            self.ensure_type_with_usage(&mut base, legacy, &mut Usage::Static(StaticUsage::Value));
+            self.ensure_type_with_usage(
+                &mut base,
+                legacy,
+                &mut Usage::Static(StaticUsage::Value, Evaluation::Eager),
+            );
 
             if let Some(comment_range) = base_comment_range {
                 self.shape_declarations
@@ -426,7 +431,7 @@ impl<'a> BindingsBuilder<'a> {
                     .is_some_and(|name| name.id == "extra_items")
                 {
                     // TypedDict's `extra_items` keyword is a type expression.
-                    self.ensure_type(&mut keyword.value, Some(&mut legacy));
+                    self.ensure_type(&mut keyword.value, Some(&mut legacy), Evaluation::Eager);
                 } else {
                     self.ensure_expr(&mut keyword.value, class_object.usage());
                 }
@@ -961,7 +966,7 @@ impl<'a> BindingsBuilder<'a> {
                 Expr::Tuple(ExprTuple { elts, .. }) => match elts.as_mut_slice() {
                     [Expr::StringLiteral(k), v] => {
                         if ensure_unmatched {
-                            self.ensure_type(v, None);
+                            self.ensure_type(v, None, Evaluation::Eager);
                         }
                         fields.push((k.value.to_string(), k.range(), Some(v.clone())));
                         None
@@ -974,7 +979,7 @@ impl<'a> BindingsBuilder<'a> {
                         match value {
                             Some(value) => {
                                 if ensure_unmatched {
-                                    self.ensure_type(v, None);
+                                    self.ensure_type(v, None, Evaluation::Eager);
                                 }
                                 fields.push((value, n.range(), Some(v.clone())));
                                 None
@@ -1558,7 +1563,7 @@ impl<'a> BindingsBuilder<'a> {
         self.ensure_expr(func, class_object.usage());
         self.ensure_expr(new_type_name, class_object.usage());
         self.check_functional_definition_name(&name.id, new_type_name, ErrorKind::InvalidArgument);
-        self.ensure_type(base, None);
+        self.ensure_type(base, None, Evaluation::Eager);
         self.bind_unread_keywords(keywords);
         self.synthesize_class_def(
             class_name,
@@ -1599,7 +1604,7 @@ impl<'a> BindingsBuilder<'a> {
                         if let Some(key) = &mut item.key {
                             self.ensure_expr(key, class_object.usage());
                         }
-                        self.ensure_type(&mut item.value, None);
+                        self.ensure_type(&mut item.value, None, Evaluation::Eager);
                         match (&item.key, &item.value) {
                             (Some(Expr::StringLiteral(k)), v) => {
                                 Some((k.value.to_string(), k.range(), Some(v.clone()), None))

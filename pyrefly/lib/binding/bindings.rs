@@ -103,6 +103,7 @@ use crate::binding::binding::TypeAliasParams;
 use crate::binding::binding::TypeAliasRefBinding;
 use crate::binding::binding::TypeLevelLambdaParameter;
 use crate::binding::binding::TypeParameter;
+use crate::binding::expr::Evaluation;
 use crate::binding::expr::StaticUsage;
 use crate::binding::expr::TypeExpressionContext;
 use crate::binding::expr::Usage;
@@ -2672,9 +2673,10 @@ impl<'a> BindingsBuilder<'a> {
         // non-recursive Refs at solve time.
         if matches!(
             deferred.usage,
-            Usage::Static(StaticUsage::TypeExpression(
-                TypeExpressionContext::TypeAliasValue
-            ))
+            Usage::Static(
+                StaticUsage::TypeExpression(TypeExpressionContext::TypeAliasValue),
+                _
+            )
         ) && let Some((name, key_type_alias, tparams)) =
             self.follow_to_type_alias(deferred.lookup_result_idx)
         {
@@ -2736,7 +2738,7 @@ impl<'a> BindingsBuilder<'a> {
 
         if matches!(
             deferred.usage,
-            Usage::Static(StaticUsage::TypeExpression(_))
+            Usage::Static(StaticUsage::TypeExpression(_), _)
         ) {
             let range = self.idx_to_key(deferred.bound_name_idx).range();
             self.maybe_insert_implicit_alias_check(range, deferred.lookup_result_idx);
@@ -3098,10 +3100,11 @@ impl<'a> BindingsBuilder<'a> {
             let mut default = None;
             let mut bound = None;
             let mut constraints = None;
-            let mut usage = Usage::Static(StaticUsage::Value);
-            let mut type_usage = Usage::Static(StaticUsage::TypeExpression(
-                TypeExpressionContext::ScopedTypeParam,
-            ));
+            let mut usage = Usage::Static(StaticUsage::Value, Evaluation::Postponed);
+            let mut type_usage = Usage::Static(
+                StaticUsage::TypeExpression(TypeExpressionContext::ScopedTypeParam),
+                Evaluation::Postponed,
+            );
             let kind = match x {
                 TypeParam::TypeVar(tv) => {
                     let mut kind = QuantifiedKind::TypeVar;

@@ -78,6 +78,7 @@ use crate::binding::bindings::InitializedInFlow;
 use crate::binding::bindings::UnsetNodeId;
 use crate::binding::bindings::UnsetNodes;
 use crate::binding::classmethod::ClassmethodReceiverState;
+use crate::binding::expr::Evaluation;
 use crate::binding::expr::Usage;
 use crate::binding::function::SelfAssignments;
 use crate::binding::narrow::ExcludedNonePair;
@@ -3331,7 +3332,7 @@ impl Scopes {
     }
 
     /// Does the module have `from __future__ import annotations`?
-    /// Most callers should use `BindingsBuilder::annotations_are_postponed`.
+    /// Most callers should use `BindingsBuilder::annotation_evaluation`.
     pub fn has_future_annotations(&self) -> bool {
         // Look up through scopes to find the module scope's flag
         for scope in self.iter_rev() {
@@ -5562,9 +5563,13 @@ impl<'a> BindingsBuilder<'a> {
         self.start_branch();
     }
 
-    /// Whether annotations in this module are evaluated lazily rather than where they appear.
-    pub fn annotations_are_postponed(&self) -> bool {
-        self.scopes.has_future_annotations() || self.sys_info.version().at_least(3, 14)
+    /// When annotations in this module are evaluated.
+    pub fn annotation_evaluation(&self) -> Evaluation {
+        if self.scopes.has_future_annotations() || self.sys_info.version().at_least(3, 14) {
+            Evaluation::Postponed
+        } else {
+            Evaluation::Eager
+        }
     }
 }
 
