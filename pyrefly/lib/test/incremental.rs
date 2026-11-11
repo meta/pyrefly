@@ -3969,7 +3969,7 @@ g("x")  # E: `str` is not assignable to upper bound `int` of type variable `T`
             }))
         }),
         Box::new(move |_| (main_load.dupe(), Vec::new())),
-        Box::new(move |_, _| main_fallback.dupe()),
+        Box::new(move |_, _| (main_fallback.dupe(), Vec::new())),
         Box::new(|config, _| config),
         Box::new(|| {}),
     );
