@@ -382,21 +382,10 @@ def lax_reshape_shape(
     return new_sizes
 
 @type_shape_dsl_function
-def reshape_shape(shape: IntTuple, newshape: int | tuple[int, ...] | None) -> IntTuple:
-    # `None` is not a legal argument to `reshape`. The arm exists because an
-    # `int | tuple[int, ...]` parameter cannot be iterated after narrowing with
-    # `is_int_value` alone -- the DSL function silently evaluates to `Unknown`.
-    # Leading with the `None` check is what makes the narrowing work. The Torch
-    # stubs use the same workaround in `conv_shape`.
-    if newshape is None:
-        return dsl.Invalid("reshape requires a shape")
-    if dsl.is_int_value(newshape):
-        dims = (newshape,)
-    else:
-        dims = newshape
+def reshape_shape(shape: IntTuple, dims: IntTuple) -> IntTuple:
     if any(dsl.is_concrete_int(dim) and dim < -1 for dim in dims):
         return dsl.Invalid("reshape sizes must be -1 or non-negative")
-    inferred = tuple(dim for dim in dims if dsl.is_concrete_int(dim) and dim == -1)
+    inferred = tuple(1 for dim in dims if dsl.is_concrete_int(dim) and dim == -1)
     if len(inferred) > 1:
         return dsl.Invalid("reshape accepts at most one -1")
     known_shape = dsl.IntTuple(
@@ -407,7 +396,7 @@ def reshape_shape(shape: IntTuple, newshape: int | tuple[int, ...] | None) -> In
     if len(inferred) == 0:
         if dsl.is_concrete_int(total) and dsl.is_concrete_int(known) and total != known:
             return dsl.Invalid("reshape target element count does not match the input")
-        return dsl.IntTuple(dim for dim in dims)
+        return dims
     if dsl.is_concrete_int(known):
         if known == 0:
             return dsl.Invalid("could not infer size for dimension -1")
@@ -419,6 +408,11 @@ def reshape_shape(shape: IntTuple, newshape: int | tuple[int, ...] | None) -> In
             for dim in dims
         )
     )
+
+@type_shape_dsl_function
+def reshape_scalar_shape(shape: IntTuple, dim: Int) -> IntTuple:
+    dims = dsl.IntTuple((dim,))
+    return reshape_shape(shape, dims)
 
 @type_shape_dsl_function
 def tile_shape(shape: IntTuple, repeats: int | tuple[int, ...] | None) -> IntTuple:
