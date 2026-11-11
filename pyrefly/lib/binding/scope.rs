@@ -4202,25 +4202,6 @@ impl Scopes {
     /// Look up the information needed to create a binding for a read of a name
     /// in the current scope stack.
     ///
-    /// The `usage` parameter determines lookup behavior:
-    /// - For `Usage::Static`: Skips class-scope overload definitions so that
-    ///   annotations in overload signatures are not accidentally resolved to other overloads.
-    ///   That is, in:
-    ///   ```python
-    ///   class A: ...
-    ///   class B: ...
-    ///       @overload
-    ///       def A(self) -> A: ...
-    ///       @overload
-    ///       def A(self) -> A: ...
-    ///       def A(self): ...
-    ///   ```
-    ///   we want the `A` return annotation in the second overload signature to resolve to class `A`,
-    ///   not the first overload. (Note that this is intentionally divergent from the runtime and
-    ///   different from how name lookup usually works.) In all other cases, if the name of a type
-    ///   is locally shadowed by a non-type definition, we error if it is then used in an annotation.
-    /// - For other usages: Normal lookup behavior.
-    ///
     /// When the name is not found in any lexical scope, this falls back to implicit builtins and
     /// reports `NameReadInfo::ImplicitBuiltin` (the builtin is not materialized here; the caller
     /// decides what to do with it). This is the single name-read entry point: callers match on
@@ -4278,21 +4259,8 @@ impl Scopes {
                 }
 
                 let flow_info = scope.flow.get_info_hashed(name);
-                let is_class_overload = is_class
-                    && flow_info.is_some_and(|info| {
-                        info.value().is_some_and(|value| {
-                            matches!(
-                                value.style,
-                                FlowStyle::FunctionDef {
-                                    is_overload: true,
-                                    ..
-                                }
-                            )
-                        })
-                    });
                 if let Some(flow_info) = flow_info
                     && flow_barrier < FlowBarrier::BlockFlow
-                    && !(usage.is_static() && is_class_overload)
                 {
                     let initialized = if flow_barrier == FlowBarrier::AllowFlowUnchecked {
                         // Just assume the name is initialized without checking.

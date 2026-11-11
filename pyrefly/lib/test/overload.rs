@@ -507,15 +507,12 @@ class A:
     @overload
     def B(self, x: int) -> B: ...
     @overload
-    def B(self, x: str) -> B: ...
+    def B(self, x: str) -> B: ...  # E: Expected a type form, got instance of `(self: Self@A, x: int) -> B`
     def B(self, x):
         return B()
 
 class B:
     x: int
-
-assert_type(A().B(0).x, int)
-assert_type(A().B("1").x, int)
     "#,
 );
 
