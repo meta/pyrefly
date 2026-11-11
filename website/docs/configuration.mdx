@@ -664,14 +664,11 @@ baseline-format = "minimal"
 
 ### `baseline-error-level`
 
-The severity cap for diagnostics that match the baseline. For `pyrefly check`,
-an unset value acts as `"ignore"` and suppresses them from CLI output. Set this to
-`"hint"`, `"info"`, `"warn"`, or `"error"` to show a match at the lower of its own
-severity and this level. A warning recorded in the baseline stays a warning when
-the level is `"error"`. Reported matches follow the normal
-[`min-severity`](#min-severity) filtering and exit-status behaviour. The IDE uses
-the same cap when the option is set, and shows matched diagnostics as hints when
-it is unset.
+The maximum severity of diagnostics that match the baseline. When unset, matched
+diagnostics are suppressed from CLI output. Set this to `"hint"`, `"info"`, `"warn"`,
+or `"error"` to report matched diagnostics at the lower of their own severity and this
+level. Reported matches follow the normal [`min-severity`](#min-severity) filtering and
+exit-status behaviour.
 
 ```toml
 baseline = "baseline.json"
@@ -679,18 +676,14 @@ baseline-error-level = "warn"
 ```
 
 - Type: `"ignore"` | `"hint"` | `"info"` | `"warn"` | `"error"`
-- Default: unset. `pyrefly check` treats that as `"ignore"`. The IDE shows hints.
+- Default: unset
 - Flag equivalent: `--baseline-error-level`
 - Notes:
     - `baseline-error-level` is a **project-level setting** and cannot be overridden
       in [`sub-config`](#sub-configs) sections.
-    - A CLI flag takes precedence over the configuration value for `pyrefly check`.
-    - When the option is unset, the IDE shows matched diagnostics as hints. Hints
-      stay out of VS Code's Problems list.
-    - `"info"`, `"warn"`, and `"error"` cap the IDE severity at that level. The
-      shown severity is the lower of the error's own severity and this setting.
-      `"ignore"` hides the matched diagnostic in the IDE as well as in
-      `pyrefly check`.
+    - A CLI flag takes precedence over the configuration value.
+    - The IDE also applies this setting, but displays matched diagnostics as hints
+      when it is unset.
 
 ### `baseline-auto-update`
 
