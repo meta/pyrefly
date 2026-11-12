@@ -1151,7 +1151,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Returns a contiguous tensor. Shape inference via generic fixture signature."""
         ...
 
-    def clone(self) -> Self:
+    def clone(self, *, memory_format: memory_format | None = None) -> Self:
         """Returns a copy. Shape inference via generic fixture signature."""
         ...
 
