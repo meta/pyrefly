@@ -3787,7 +3787,10 @@ def dot[N: IntVar](input: Tensor[[N]], other: Tensor[[N]]) -> Tensor[[]]:
 
 # Arithmetic operations (element-wise)
 def add[Shape: IntTuple, OtherShape: IntTuple = []](
-    input: Tensor[Shape], other: _TensorLike[OtherShape]
+    input: Tensor[Shape],
+    other: _TensorLike[OtherShape],
+    *,
+    out: Tensor | None = None,
 ) -> Tensor[broadcast(Shape, OtherShape)]:
     """Element-wise addition. Shape inference via generic fixture signature."""
     ...
