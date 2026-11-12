@@ -4165,24 +4165,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // with a narrower variance. We only check invariant TypeVars here
         // because wrong variance on covariant/contravariant TypeVars is
         // already caught by InvalidVariance at the usage site.
-        // Constraints often enumerate unrelated alternatives, making narrower-variance
-        // suggestions noisy. Explicit variance still matters for overlapping constraints
-        // and is validated above. This exemption intentionally differs from the
-        // constrained protocol case in protocols_variance.py.
         let metadata = self.get_metadata_for_class(class);
         if metadata.is_protocol()
-            && tparams.as_vec().iter().any(|p| {
-                p.is_type_var()
-                    && p.variance() == PreInferenceVariance::Invariant
-                    && !matches!(p.restriction(), Restriction::Constraints(_))
-            })
+            && tparams
+                .as_vec()
+                .iter()
+                .any(|p| p.is_type_var() && p.variance() == PreInferenceVariance::Invariant)
         {
             let inferred = self.infer_variance_ignoring_declared(class);
             for tparam in tparams.as_vec() {
-                if !tparam.is_type_var()
-                    || tparam.variance() != PreInferenceVariance::Invariant
-                    || matches!(tparam.restriction(), Restriction::Constraints(_))
-                {
+                if !tparam.is_type_var() || tparam.variance() != PreInferenceVariance::Invariant {
                     continue;
                 }
                 let inferred_v = inferred.get(tparam.name());

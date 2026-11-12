@@ -138,7 +138,6 @@
   "protocols_self.py": [],
   "protocols_subtyping.py": [],
   "protocols_variance.py": [
-    "Line 41: Expected 1 errors",
     "Line 15: Unexpected errors ['Unexpected keyword argument `contravariant` to ParamSpec']"
   ],
   "qualifiers_annotated.py": [],

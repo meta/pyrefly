@@ -612,10 +612,10 @@ from typing import Protocol, TypeVar
 
 T = TypeVar("T", str, bytes)
 
-class Foo(Protocol[T]):
+class Foo(Protocol[T]):  # E: could be covariant
     def value(self) -> T: ...
 
-class Bar(Protocol[T]):
+class Bar(Protocol[T]):  # E: could be contravariant
     def consume(self, x: T) -> None: ...
 "#,
 );
@@ -630,13 +630,13 @@ B = TypeVar("B", bound=float)
 U = TypeVar("U")
 
 # Eligible siblings force the diagnostic loop to run, but only those siblings warn.
-class Producer(Protocol[T, B]):  # E: Type variable `B` in class `Producer` is declared as invariant, but could be covariant based on its usage
+class Producer(Protocol[T, B]):  # E: `T` in class `Producer` is declared as invariant, but could be covariant  # E: `B` in class `Producer` is declared as invariant, but could be covariant
     def value(self) -> tuple[T, B]: ...
 
-class Consumer(Protocol[T, B]):  # E: Type variable `B` in class `Consumer` is declared as invariant, but could be contravariant based on its usage
+class Consumer(Protocol[T, B]):  # E: `T` in class `Consumer` is declared as invariant, but could be contravariant  # E: `B` in class `Consumer` is declared as invariant, but could be contravariant
     def consume(self, x: T, y: B) -> None: ...
 
-class UnconstrainedProducer(Protocol[T, U]):  # E: Type variable `U` in class `UnconstrainedProducer` is declared as invariant, but could be covariant based on its usage
+class UnconstrainedProducer(Protocol[T, U]):  # E: `T` in class `UnconstrainedProducer` is declared as invariant, but could be covariant  # E: `U` in class `UnconstrainedProducer` is declared as invariant, but could be covariant
     def value(self) -> tuple[T, U]: ...
 "#,
 );
@@ -650,7 +650,7 @@ T = TypeVar("T", int, float)
 T_co = TypeVar("T_co", int, float, covariant=True)
 T_contra = TypeVar("T_contra", int, float, contravariant=True)
 
-class InvariantProducer(Protocol[T]):
+class InvariantProducer(Protocol[T]):  # E: could be covariant
     def value(self) -> T: ...
 
 class Producer(Protocol[T_co]):
