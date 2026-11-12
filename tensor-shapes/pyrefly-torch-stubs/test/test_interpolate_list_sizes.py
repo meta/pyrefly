@@ -12,8 +12,8 @@ from torch import Tensor
 
 
 def resize_list(image: Tensor, size: list[int]) -> Tensor:
-    result = F.interpolate(image, size=size, mode="nearest")  # E: No matching overload
-    assert_type(result, Tensor)  # E: assert_type
+    result = F.interpolate(image, size=size, mode="nearest")
+    assert_type(result, Tensor)
     return result
 
 
@@ -24,8 +24,8 @@ def test_interpolate_integer_lists() -> None:
     if not TYPE_CHECKING:
         assert_shape(result.shape, (1, 1, 4, 4))
     signal = torch.ones((2, 3, 8))
-    resized = F.interpolate(signal, [4])  # E: No matching overload
-    assert_type(resized, Tensor)  # E: assert_type
+    resized = F.interpolate(signal, [4])
+    assert_type(resized, Tensor)
     assert torch.equal(resized, torch.ones((2, 3, 4)))
     if not TYPE_CHECKING:
         assert_shape(resized.shape, (2, 3, 4))
