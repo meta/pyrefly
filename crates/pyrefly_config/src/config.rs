@@ -108,11 +108,12 @@ impl SubConfig {
 /// The configs that apply to a file, besides the root config. Files with the same key
 /// have the same per-file settings.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ResolvedConfigKey {
-    /// The build system's configs for the file, most specific first.
-    target_configs: Vec<ConfigName>,
+enum ResolvedConfigKey {
+    /// The file's build system config: its target's config, or the source database's
+    /// default config. Sub-configs don't apply to a file that has one.
+    TargetConfig(ConfigName),
     /// Indices of the sub-configs that match the file, in order.
-    sub_configs: Vec<usize>,
+    SubConfigs(Vec<usize>),
 }
 
 const RESOLVED_SETTING: &str = "resolved configs set every setting that has a built-in default";
@@ -1452,55 +1453,57 @@ impl ConfigFile {
             == Some(true)
     }
 
-    /// The settings for `path`, layering its build system configs, then its matching
-    /// sub-configs, then the root config.
+    /// The settings for `path`, layering its build system config, or its matching
+    /// sub-configs if it has none, over the root config.
     fn resolved(&self, path: &ModulePath) -> Arc<ResolvedConfig> {
-        let key = ResolvedConfigKey {
-            target_configs: self.target_config_names(path),
-            sub_configs: self
-                .sub_configs
-                .iter()
-                .positions(|sub| sub.matches.matches(path.as_path()))
-                .collect(),
+        let target_config = self.file_target_config(path);
+        let (key, layers): (_, Vec<&ConfigBase>) = match &target_config {
+            Some((name, config)) => (ResolvedConfigKey::TargetConfig(name.dupe()), vec![config]),
+            None => {
+                let indices: Vec<usize> = self
+                    .sub_configs
+                    .iter()
+                    .positions(|sub| sub.matches.matches(path.as_path()))
+                    .collect();
+                let layers = indices
+                    .iter()
+                    .map(|&i| &self.sub_configs[i].settings)
+                    .collect();
+                (ResolvedConfigKey::SubConfigs(indices), layers)
+            }
         };
         if let Some(resolved) = self.resolved_configs.0.read().get(&key) {
             return resolved.dupe();
         }
-        let target_configs = key
-            .target_configs
-            .iter()
-            .filter_map(|name| self.target_config(name))
-            .collect::<Vec<_>>();
-        let sub_configs = key
-            .sub_configs
-            .iter()
-            .map(|&i| &self.sub_configs[i].settings)
-            .collect::<Vec<_>>();
 
         let mut settings = ConfigBase::default();
-        for config in target_configs.iter().map(|config| config.as_ref()) {
-            settings.fill_unset_from(config);
-        }
-        for config in &sub_configs {
+        for config in &layers {
             settings.fill_unset_from(config);
         }
         settings.fill_unset_from(&self.root);
 
         // `configure` merges the root's errors into each sub-config's, so the first
-        // sub-config that sets `errors` already includes the root's. The build system's
-        // errors apply on top, and only the most specific config that sets them counts.
-        let mut errors = sub_configs
-            .iter()
-            .find_map(|config| config.errors.as_ref())
-            .or(self.root.errors.as_ref())
-            .expect("the value in the root config must be set in `ConfigFile::configure()`")
-            .clone();
-        if let Some(target_errors) = target_configs
-            .iter()
-            .find_map(|config| config.errors.as_ref())
-        {
-            errors.merge_user_overrides(target_errors);
-        }
+        // sub-config that sets `errors` already includes the root's. A build system
+        // config's errors apply on top of the root's.
+        let root_errors = self
+            .root
+            .errors
+            .as_ref()
+            .expect("the value in the root config must be set in `ConfigFile::configure()`");
+        let errors = match &target_config {
+            Some((_, target_config)) => {
+                let mut errors = root_errors.clone();
+                if let Some(target_errors) = &target_config.errors {
+                    errors.merge_user_overrides(target_errors);
+                }
+                errors
+            }
+            None => layers
+                .iter()
+                .find_map(|config| config.errors.as_ref())
+                .unwrap_or(root_errors)
+                .clone(),
+        };
 
         self.resolved_configs
             .0
@@ -1513,32 +1516,24 @@ impl ConfigFile {
             .dupe()
     }
 
-    /// The names of the build system's configs for `path`, most specific first: the
-    /// config of the target that owns `path`, then the source database's default
-    /// config.
-    fn target_config_names(&self, path: &ModulePath) -> Vec<ConfigName> {
+    /// The build system's config for `path`, with its name: the config of the target
+    /// that owns `path` if it has one, otherwise the source database's default config.
+    /// A config that fails to parse doesn't count.
+    fn file_target_config(&self, path: &ModulePath) -> Option<(ConfigName, Arc<ConfigBase>)> {
         // Stubs bundled with Pyrefly belong to no build target, and `default_config`
         // otherwise answers for every file. Letting it reach them would mean a build
         // system could change how the standard library itself is checked.
         if path.is_bundled() {
-            return Vec::new();
+            return None;
         }
-        let Some(source_db) = self
-            .source_db
-            .as_ref()
-            .and_then(|db| db.as_live_source_database())
-        else {
-            return Vec::new();
-        };
-        // The target's own config must win over `default_config`, which by
-        // definition only supplies what the target config leaves unset.
+        let source_db = self.source_db.as_ref()?.as_live_source_database()?;
         [
             source_db.get_target_config_name(Some(path.as_path())),
             source_db.get_default_config_name(),
         ]
         .into_iter()
         .flatten()
-        .collect()
+        .find_map(|name| Some((name.dupe(), self.target_config(&name)?)))
     }
 
     /// The build system's config called `name`, parsed on first use. Returns `None`
@@ -3774,7 +3769,7 @@ output-format = "omit-errors"
     }
 
     #[test]
-    fn test_target_config_precedes_sub_config() {
+    fn test_target_config_replaces_sub_configs() {
         let config_name: ConfigName = serde_json::from_str("\"target\"").unwrap();
         let mut config = ConfigFile {
             root: ConfigBase {
@@ -3825,17 +3820,20 @@ output-format = "omit-errors"
         };
         config.configure();
 
+        // The sub-config matches the file, but it doesn't apply because the file has a
+        // target config. Settings the target config leaves unset come from the root.
         let path = test_path("src/test.py");
         assert!(!config.check_unannotated_defs(&path));
         assert_eq!(config.infer_return_types(&path), InferReturnTypes::Never);
-        assert!(!config.infer_with_first_use(&path));
+        assert!(config.infer_with_first_use(&path));
         assert!(!config.strict_callable_subtyping(&path));
 
         assert!(
             config.replace_imports_with_any(Some(&path), ModuleName::from_str("target.module"))
         );
         assert!(!config.replace_imports_with_any(Some(&path), ModuleName::from_str("sub.module")));
-        assert!(config.ignore_missing_imports(Some(&path), ModuleName::from_str("sub.module")));
+        assert!(!config.ignore_missing_imports(Some(&path), ModuleName::from_str("sub.module")));
+        assert!(config.ignore_missing_imports(Some(&path), ModuleName::from_str("root.module")));
         assert!(
             config
                 .replace_untyped_imports_with_any(Some(&path), ModuleName::from_str("root.module"))
@@ -3843,7 +3841,7 @@ output-format = "omit-errors"
 
         let errors = config.errors(&path);
         assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Error);
-        assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Ignore);
+        assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Error);
         assert_eq!(errors.severity(ErrorKind::UnknownName), Severity::Ignore);
         assert_eq!(
             errors.severity(ErrorKind::PytorchEfficiencyLintItemCall),
@@ -3901,23 +3899,23 @@ output-format = "omit-errors"
         config
     }
 
+    /// A file with a target config uses it instead of the default config, without
+    /// taking any settings from the default config.
     #[test]
-    fn test_target_config_precedes_default_config() {
-        let config =
-            default_config_test_config(Some(serde_json::json!({"check-unannotated-defs": true})));
+    fn test_target_config_replaces_default_config() {
+        let config = default_config_test_config(Some(serde_json::json!({
+            "check-unannotated-defs": true,
+            "errors": {"bad-assignment": "warn"}
+        })));
 
         let path = test_path("src/test.py");
-        // Only the target config sets this to `true`, so the default config,
-        // which sets it to `false`, did not get to answer.
         assert!(config.check_unannotated_defs(&path));
-        // The default config supplies settings the target config leaves unset,
-        // beating both the sub-config and the root config, which set `true`.
-        assert!(!config.infer_with_first_use(&path));
-        assert_eq!(
-            config.errors(&path).severity(ErrorKind::BadReturn),
-            Severity::Warn
-        );
-        // Nothing but the root config sets this.
+        let errors = config.errors(&path);
+        assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Warn);
+        // The default config sets these to `false` and `warn`. Neither it nor the
+        // sub-config applies, so they come from the root and the built-in default.
+        assert!(config.infer_with_first_use(&path));
+        assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Error);
         assert!(config.strict_callable_subtyping(&path));
     }
 
@@ -3965,6 +3963,18 @@ output-format = "omit-errors"
         assert!(config.check_unannotated_defs(&path));
     }
 
+    /// A target config that parses replaces the default config even if it sets nothing,
+    /// while one that fails to parse doesn't count.
+    #[test]
+    fn test_target_config_must_parse_to_replace_default_config() {
+        let path = test_path("src/test.py");
+        let empty = default_config_test_config(Some(serde_json::json!({})));
+        assert!(empty.infer_with_first_use(&path));
+        let invalid =
+            default_config_test_config(Some(serde_json::json!({"infer-with-first-use": "yes"})));
+        assert!(!invalid.infer_with_first_use(&path));
+    }
+
     #[test]
     fn test_default_config_applies_to_file_in_no_target() {
         let config = default_config_test_config(None);
@@ -3977,32 +3987,6 @@ output-format = "omit-errors"
             config.errors(&path).severity(ErrorKind::BadReturn),
             Severity::Warn
         );
-    }
-
-    /// `errors` falls through as one whole setting, so a target config that sets it
-    /// at all supplies the entire build-system error map and `default_config`'s
-    /// `errors` is not consulted for that target.
-    #[test]
-    fn test_target_config_errors_suppress_default_config_errors() {
-        let config = default_config_test_config(Some(serde_json::json!({
-            "errors": {"bad-assignment": "warn"}
-        })));
-
-        let path = test_path("src/test.py");
-        assert_eq!(
-            config.errors(&path).severity(ErrorKind::BadAssignment),
-            Severity::Warn,
-            "the target config's error map applies",
-        );
-        assert_eq!(
-            config.errors(&path).severity(ErrorKind::BadReturn),
-            Severity::Error,
-            "`default_config` sets `bad-return` to `warn`, but its error map is \
-             skipped entirely once the target config sets `errors`, leaving the \
-             preset default",
-        );
-        // Settings other than `errors` still fall through to the default config.
-        assert!(!config.infer_with_first_use(&path));
     }
 
     /// Stubs bundled with Pyrefly belong to no build target, so a build system must
@@ -4848,8 +4832,8 @@ output-format = "omit-errors"
             Severity::Error
         );
 
-        // An empty target config should still replace `default_config` and the
-        // sub-configs, leaving the root's `strict` preset. This holds trivially until
+        // An empty target config still replaces `default_config` and the sub-configs,
+        // leaving the root's `strict` preset. This holds trivially until
         // build system configs can set a preset.
         let config = build_system_preset_config(
             Some(serde_json::json!({})),
