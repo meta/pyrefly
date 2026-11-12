@@ -3374,7 +3374,11 @@ def index_select[
     Dim: Flag[builtins.int],
     IndexShape: IntTuple,
 ](
-    self: Tensor[Shape], dim: Dim, index: Tensor[IndexShape]
+    input: Tensor[Shape],
+    dim: Dim,
+    index: Tensor[IndexShape],
+    *,
+    out: Tensor | None = None,
 ) -> Tensor[index_select_shape(Shape, Dim, IndexShape)]:
     """Select elements along dimension. Shape inference via meta-shape: torch.index_select"""
     ...
