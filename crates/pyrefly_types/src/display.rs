@@ -3768,6 +3768,7 @@ def overloaded_func[T](
             Identifier::new(Name::new("P"), TextRange::empty(TextSize::new(75))),
             mi,
             None,
+            PreInferenceVariance::Invariant,
         );
         let t = Type::ParamSpec(param_spec);
         let parts = get_parts(&t);

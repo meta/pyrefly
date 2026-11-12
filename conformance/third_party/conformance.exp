@@ -6756,99 +6756,33 @@
     },
     {
       "code": -2,
-      "column": 24,
-      "concise_description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "line": 97,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 42,
-      "stop_line": 97
-    },
-    {
-      "code": -2,
-      "column": 26,
-      "concise_description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "line": 98,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 40,
-      "stop_line": 98
-    },
-    {
-      "code": -2,
-      "column": 30,
-      "concise_description": "Unexpected keyword argument `infer_variance` to ParamSpec",
-      "description": "Unexpected keyword argument `infer_variance` to ParamSpec",
-      "line": 99,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 49,
-      "stop_line": 99
-    },
-    {
-      "code": -2,
-      "column": 28,
-      "concise_description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "line": 100,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 42,
-      "stop_line": 100
-    },
-    {
-      "code": -2,
       "column": 44,
-      "concise_description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "description": "Unexpected keyword argument `contravariant` to ParamSpec",
+      "concise_description": "Contradictory variance specifications",
+      "description": "Contradictory variance specifications",
       "line": 100,
-      "name": "invalid-param-spec",
+      "name": "invalid-type-var",
       "severity": "error",
       "stop_column": 62,
       "stop_line": 100
     },
     {
       "code": -2,
-      "column": 28,
-      "concise_description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "line": 101,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 42,
-      "stop_line": 101
-    },
-    {
-      "code": -2,
       "column": 44,
-      "concise_description": "Unexpected keyword argument `infer_variance` to ParamSpec",
-      "description": "Unexpected keyword argument `infer_variance` to ParamSpec",
+      "concise_description": "Contradictory variance specifications",
+      "description": "Contradictory variance specifications",
       "line": 101,
-      "name": "invalid-param-spec",
+      "name": "invalid-type-var",
       "severity": "error",
       "stop_column": 63,
       "stop_line": 101
     },
     {
       "code": -2,
-      "column": 28,
-      "concise_description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "line": 102,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 46,
-      "stop_line": 102
-    },
-    {
-      "code": -2,
       "column": 48,
-      "concise_description": "Unexpected keyword argument `infer_variance` to ParamSpec",
-      "description": "Unexpected keyword argument `infer_variance` to ParamSpec",
+      "concise_description": "Contradictory variance specifications",
+      "description": "Contradictory variance specifications",
       "line": 102,
-      "name": "invalid-param-spec",
+      "name": "invalid-type-var",
       "severity": "error",
       "stop_column": 67,
       "stop_line": 102
@@ -11091,17 +11025,6 @@
     }
   ],
   "protocols_variance.py": [
-    {
-      "code": -2,
-      "column": 20,
-      "concise_description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "line": 15,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 38,
-      "stop_line": 15
-    },
     {
       "code": -2,
       "column": 7,

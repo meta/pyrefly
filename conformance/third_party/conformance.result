@@ -72,9 +72,6 @@
   "generics_paramspec_variance.py": [
     "Line 117: Expected 1 errors",
     "Line 126: Expected 1 errors",
-    "Line 97: Unexpected errors ['Unexpected keyword argument `contravariant` to ParamSpec']",
-    "Line 98: Unexpected errors ['Unexpected keyword argument `covariant` to ParamSpec']",
-    "Line 99: Unexpected errors ['Unexpected keyword argument `infer_variance` to ParamSpec']",
     "Line 122: Unexpected errors ['`ContravariantParamSpecOld[[object]]` is not assignable to `ContravariantParamSpecOld[[int]]`']",
     "Line 133: Unexpected errors ['`CovariantParamSpecOld[[int]]` is not assignable to `CovariantParamSpecOld[[object]]`']",
     "Line 143: Unexpected errors ['`InferredContravariantParamSpecOld[[object]]` is not assignable to `InferredContravariantParamSpecOld[[int]]`']",
@@ -137,9 +134,7 @@
   "protocols_runtime_checkable.py": [],
   "protocols_self.py": [],
   "protocols_subtyping.py": [],
-  "protocols_variance.py": [
-    "Line 15: Unexpected errors ['Unexpected keyword argument `contravariant` to ParamSpec']"
-  ],
+  "protocols_variance.py": [],
   "qualifiers_annotated.py": [],
   "qualifiers_final_annotation.py": [],
   "qualifiers_final_decorator.py": [],

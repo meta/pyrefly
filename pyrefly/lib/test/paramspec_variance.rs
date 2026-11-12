@@ -105,12 +105,10 @@ def f(gradual: A[...], int_: A[[int]]):
 );
 
 testcase!(
-    bug = "A legacy ParamSpec should accept a variance keyword",
     test_legacy_paramspec_accepts_variance_keyword,
     r#"
 from typing import ParamSpec
-
-P = ParamSpec("P", covariant=True)  # E: Unexpected keyword argument `covariant` to ParamSpec
+P = ParamSpec("P", covariant=True)
 "#,
 );
 
@@ -120,7 +118,7 @@ testcase!(
     r#"
 from typing import Generic, ParamSpec
 
-P = ParamSpec("P", contravariant=True)  # E: Unexpected keyword argument `contravariant` to ParamSpec
+P = ParamSpec("P", contravariant=True)
 
 class A(Generic[P]):
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> None: ...
@@ -137,7 +135,7 @@ testcase!(
     r#"
 from typing import Generic, ParamSpec
 
-P = ParamSpec("P", covariant=True)  # E: Unexpected keyword argument `covariant` to ParamSpec
+P = ParamSpec("P", covariant=True)
 
 class A(Generic[P]):
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> None: ...
@@ -150,7 +148,7 @@ testcase!(
     r#"
 from typing import Callable, Generic, ParamSpec
 
-P = ParamSpec("P", contravariant=True)  # E: Unexpected keyword argument `contravariant` to ParamSpec
+P = ParamSpec("P", contravariant=True)
 
 class A(Generic[P]):
     def accept(self, fn: Callable[P, None]) -> None: ...

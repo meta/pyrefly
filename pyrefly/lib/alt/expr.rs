@@ -3417,6 +3417,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> ParamSpec {
         // TODO: check and complain on extra args, keywords
         let mut arg_name = false;
+        let mut variance = None;
 
         let check_name_arg = |arg: &Expr| {
             if let Expr::StringLiteral(lit) = arg {
@@ -3468,6 +3469,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             kw.range(),
                         ));
                     }
+                    "covariant" => self.try_set_variance(
+                        &mut variance,
+                        kw,
+                        PreInferenceVariance::Covariant,
+                        errors,
+                    ),
+                    "contravariant" => self.try_set_variance(
+                        &mut variance,
+                        kw,
+                        PreInferenceVariance::Contravariant,
+                        errors,
+                    ),
+                    "invariant" => self.try_set_variance(
+                        &mut variance,
+                        kw,
+                        PreInferenceVariance::Invariant,
+                        errors,
+                    ),
+                    "infer_variance" => self.try_set_variance(
+                        &mut variance,
+                        kw,
+                        PreInferenceVariance::Undefined,
+                        errors,
+                    ),
                     _ => {
                         self.error(
                             errors,
@@ -3507,7 +3532,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 errors,
             ));
         }
-        ParamSpec::new(name, self.module().dupe(), default_value)
+        ParamSpec::new(
+            name,
+            self.module().dupe(),
+            default_value,
+            variance.unwrap_or(PreInferenceVariance::Invariant),
+        )
     }
 
     pub fn typevartuple_from_call(

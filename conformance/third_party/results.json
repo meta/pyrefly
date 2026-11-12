@@ -1,9 +1,9 @@
 {
   "total": 145,
-  "pass": 142,
-  "fail": 3,
-  "pass_rate": 0.98,
-  "differences": 19,
+  "pass": 143,
+  "fail": 2,
+  "pass_rate": 0.99,
+  "differences": 15,
   "passing": [
     "aliases_explicit.py",
     "aliases_implicit.py",
@@ -120,6 +120,7 @@
     "protocols_runtime_checkable.py",
     "protocols_self.py",
     "protocols_subtyping.py",
+    "protocols_variance.py",
     "qualifiers_annotated.py",
     "qualifiers_final_annotation.py",
     "qualifiers_final_decorator.py",
@@ -149,9 +150,8 @@
     "typeforms_typeform.py"
   ],
   "failing": {
-    "generics_paramspec_variance.py": 9,
-    "generics_typevartuple_variance.py": 9,
-    "protocols_variance.py": 1
+    "generics_paramspec_variance.py": 6,
+    "generics_typevartuple_variance.py": 9
   },
   "comment": "@generated"
 }
