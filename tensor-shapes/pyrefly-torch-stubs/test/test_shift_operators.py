@@ -13,30 +13,30 @@ from torch import Tensor
 def test_right_shift_by_scalar_and_tensor() -> None:
     values = torch.tensor([0, 1, 2, 3])
     shifted = values >> 1
-    assert_type(shifted, Tensor[[4]])  # E: assert_type(Tensor, Tensor[[4]])
+    assert_type(shifted, Tensor[[4]])
     assert shifted.tolist() == [0, 0, 1, 1]
     rows = torch.tensor([[8], [16]])
     broadcast = rows >> values
-    assert_type(broadcast, Tensor[[2, 4]])  # E: assert_type(Tensor, Tensor[[2, 4]])
+    assert_type(broadcast, Tensor[[2, 4]])
     assert broadcast.tolist() == [[8, 4, 2, 1], [16, 8, 4, 2]]
     assert_shape(values.shape, (4,))
 
 
 def test_scalar_right_shifted_by_tensor() -> None:
     bits = torch.arange(4)
-    shifted = 5 >> bits  # E: `>>` is not supported
-    assert_type(shifted, Tensor[[4]])  # E: assert_type(int, Tensor[[4]])
-    assert shifted.tolist() == [5, 2, 1, 0]  # E: no attribute `tolist`
-    flags = ((5 >> bits) & 1).float()  # E: `>>` is not supported # E: `float`
+    shifted = 5 >> bits
+    assert_type(shifted, Tensor[[4]])
+    assert shifted.tolist() == [5, 2, 1, 0]
+    flags = ((5 >> bits) & 1).float()
     assert flags.tolist() == [1.0, 0.0, 1.0, 0.0]
     assert_shape(bits.shape, (4,))
 
 
 def test_scalar_right_shifted_by_parameter() -> None:
     parameter = torch.nn.Parameter(torch.arange(4), requires_grad=False)
-    shifted = 5 >> parameter  # E: `>>` is not supported
+    shifted = 5 >> parameter
     # Torch returns a plain tensor, not a parameter.
-    assert_type(shifted, Tensor[[4]])  # E: assert_type(int, Tensor[[4]])
+    assert_type(shifted, Tensor[[4]])
     assert type(shifted) is torch.Tensor
     assert shifted.tolist() == [5, 2, 1, 0]
     assert_shape(parameter.shape, (4,))
@@ -48,7 +48,7 @@ def test_right_shift_runtime_errors() -> None:
     assert_shape(bits.shape, (4,))
     # Torch declares floating-point scalars, but its integer kernels reject them.
     with assert_raises(NotImplementedError):
-        5.0 >> bits  # E: `>>` is not supported
+        5.0 >> bits
     with assert_raises(NotImplementedError):
         bits >> 1.0
     with assert_raises(TypeError):
@@ -56,4 +56,4 @@ def test_right_shift_runtime_errors() -> None:
     with assert_raises(TypeError):
         "1" >> bits  # E: `>>` is not supported
     with assert_raises(RuntimeError):
-        bits >> wrong
+        bits >> wrong  # E: broadcast
