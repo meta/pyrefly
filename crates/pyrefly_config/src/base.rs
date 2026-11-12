@@ -428,6 +428,7 @@ impl ConfigBase {
             replace_untyped_imports_with_any: Some(Vec::new()),
             check_unannotated_defs: Some(true),
             infer_return_types: Some(InferReturnTypes::Checked),
+            disable_type_errors_in_ide: Some(false),
             ignore_errors_in_generated_code: Some(false),
             infer_with_first_use: Some(true),
             strict_callable_subtyping: Some(false),

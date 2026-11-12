@@ -105,6 +105,23 @@ impl SubConfig {
     }
 }
 
+/// The configs that apply to a file, besides the root config. Files with the same key
+/// have the same per-file settings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ResolvedConfigKey {
+    /// The build system's configs for the file, most specific first.
+    target_configs: Vec<ConfigName>,
+    /// Indices of the sub-configs that match the file, in order.
+    sub_configs: Vec<usize>,
+}
+
+const RESOLVED_SETTING: &str = "resolved configs set every setting that has a built-in default";
+
+/// Per-file settings, resolved on first use by [`ConfigFile::resolved`]. Clones share the
+/// cache, like `target_configs`, until one of them is configured again.
+#[derive(Debug, Default, Clone)]
+pub struct ResolvedConfigs(Arc<RwLock<SmallMap<ResolvedConfigKey, Arc<ConfigBase>>>>);
+
 /// Config overrides for the `pyrefly coverage` commands.
 #[skip_serializing_none]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -776,6 +793,11 @@ pub struct ConfigFile {
     #[derivative(PartialEq = "ignore")]
     pub target_configs: ArcId<RwLock<SmallMap<ConfigName, Option<Arc<ConfigBase>>>>>,
 
+    /// Cleared by [`ConfigFile::configure`] and whenever `target_configs` is.
+    #[serde(skip)]
+    #[derivative(PartialEq = "ignore")]
+    pub resolved_configs: ResolvedConfigs,
+
     /// Minimum severity level for errors to be displayed and to cause a nonzero exit code.
     /// When unset, warnings and errors are displayed, and only errors cause a nonzero exit code.
     pub min_severity: Option<Severity>,
@@ -851,6 +873,7 @@ impl Default for ConfigFile {
             fallback_source_db: Default::default(),
             module_names: None,
             target_configs: ArcId::new(RwLock::new(SmallMap::new())),
+            resolved_configs: Default::default(),
             use_ignore_files: true,
             script_command: None,
             typeshed_path: None,
@@ -1304,82 +1327,69 @@ impl ConfigFile {
     }
 
     pub fn check_unannotated_defs(&self, path: &ModulePath) -> bool {
-        self.get_from_config_overrides(ConfigBase::get_check_unannotated_defs, path)
-            .unwrap_or_else(|| self.root.check_unannotated_defs.unwrap())
+        self.resolved(path)
+            .check_unannotated_defs
+            .expect(RESOLVED_SETTING)
     }
 
     pub fn infer_return_types(&self, path: &ModulePath) -> InferReturnTypes {
-        self.get_from_config_overrides(ConfigBase::get_infer_return_types, path)
-            .unwrap_or_else(|| self.root.infer_return_types.unwrap())
-    }
-
-    pub fn disable_type_errors_in_ide(&self, path: &ModulePath) -> bool {
-        self.get_from_config_overrides(ConfigBase::get_disable_type_errors_in_ide, path)
-            .unwrap_or_else(|| self.root.disable_type_errors_in_ide.unwrap_or_default())
-    }
-
-    fn ignore_errors_in_generated_code(&self, path: &ModulePath) -> bool {
-        self.get_from_config_overrides(ConfigBase::get_ignore_errors_in_generated_code, path)
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 self.root.ignore_errors_in_generated_code.unwrap())
+        self.resolved(path)
+            .infer_return_types
+            .expect(RESOLVED_SETTING)
     }
 
     pub fn infer_with_first_use(&self, path: &ModulePath) -> bool {
-        self.get_from_config_overrides(ConfigBase::get_infer_with_first_use, path)
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 self.root.infer_with_first_use.unwrap())
+        self.resolved(path)
+            .infer_with_first_use
+            .expect(RESOLVED_SETTING)
     }
 
     pub fn strict_callable_subtyping(&self, path: &ModulePath) -> bool {
-        self.get_from_config_overrides(ConfigBase::get_strict_callable_subtyping, path)
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 self.root.strict_callable_subtyping.unwrap())
+        self.resolved(path)
+            .strict_callable_subtyping
+            .expect(RESOLVED_SETTING)
     }
 
     pub fn strict_partial_subtyping(&self, path: &ModulePath) -> bool {
-        self.get_from_config_overrides(ConfigBase::get_strict_partial_subtyping, path)
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 self.root.strict_partial_subtyping.unwrap())
+        self.resolved(path)
+            .strict_partial_subtyping
+            .expect(RESOLVED_SETTING)
     }
 
     pub fn spec_compliant_overloads(&self, path: &ModulePath) -> bool {
-        self.get_from_config_overrides(ConfigBase::get_spec_compliant_overloads, path)
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 self.root.spec_compliant_overloads.unwrap())
+        self.resolved(path)
+            .spec_compliant_overloads
+            .expect(RESOLVED_SETTING)
     }
 
     pub fn legacy_overload_expansion(&self, path: &ModulePath) -> bool {
-        self.get_from_config_overrides(ConfigBase::get_legacy_overload_expansion, path)
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 self.root.legacy_overload_expansion.unwrap())
+        self.resolved(path)
+            .legacy_overload_expansion
+            .expect(RESOLVED_SETTING)
     }
 
     pub fn treat_all_caps_as_final(&self, path: &ModulePath) -> bool {
-        self.get_from_config_overrides(ConfigBase::get_treat_all_caps_as_final, path)
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 self.root.treat_all_caps_as_final.unwrap())
+        self.resolved(path)
+            .treat_all_caps_as_final
+            .expect(RESOLVED_SETTING)
     }
 
     pub fn infer_param_types_from_docstring(&self, path: &ModulePath) -> bool {
-        self.get_from_config_overrides(ConfigBase::get_infer_param_types_from_docstring, path)
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 self.root.infer_param_types_from_docstring.unwrap())
+        self.resolved(path)
+            .infer_param_types_from_docstring
+            .expect(RESOLVED_SETTING)
+    }
+
+    pub fn disable_type_errors_in_ide(&self, path: &ModulePath) -> bool {
+        self.resolved(path)
+            .disable_type_errors_in_ide
+            .expect(RESOLVED_SETTING)
+    }
+
+    fn ignore_errors_in_generated_code(&self, path: &ModulePath) -> bool {
+        self.resolved(path)
+            .ignore_errors_in_generated_code
+            .expect(RESOLVED_SETTING)
     }
 
     pub fn enabled_ignores(&self, path: &ModulePath) -> Cow<'_, SmallSet<Tool>> {
@@ -1401,12 +1411,9 @@ impl ConfigFile {
         &self,
         path: &ModulePath,
     ) -> TypeIgnoreUnknownTagBehavior {
-        self.get_from_config_overrides(ConfigBase::get_type_ignore_unknown_tag_behavior, path)
-            .unwrap_or_else(|| {
-                self.root
-                    .type_ignore_unknown_tag_behavior
-                    .expect("the value in the root config must be set in `ConfigFile::configure()`")
-            })
+        self.resolved(path)
+            .type_ignore_unknown_tag_behavior
+            .expect(RESOLVED_SETTING)
     }
 
     /// Get the recursion limit configuration.
@@ -1482,45 +1489,100 @@ impl ConfigFile {
         getter: impl Fn(&ConfigBase) -> Option<T>,
         path: &ModulePath,
     ) -> Option<T> {
+        self.target_config_names(path)
+            .iter()
+            .find_map(|name| getter(self.target_config(name)?.as_ref()))
+    }
+
+    /// The settings for `path`, layering its build system configs, then its matching
+    /// sub-configs, then the root config. Every setting that has a built-in default is
+    /// set.
+    fn resolved(&self, path: &ModulePath) -> Arc<ConfigBase> {
+        let key = ResolvedConfigKey {
+            target_configs: self.target_config_names(path),
+            sub_configs: self
+                .sub_configs
+                .iter()
+                .positions(|sub| sub.matches.matches(path.as_path()))
+                .collect(),
+        };
+        if let Some(resolved) = self.resolved_configs.0.read().get(&key) {
+            return resolved.dupe();
+        }
+        let mut resolved = ConfigBase::default();
+        for config in key
+            .target_configs
+            .iter()
+            .filter_map(|name| self.target_config(name))
+        {
+            resolved.fill_unset_from(&config);
+        }
+        for &i in &key.sub_configs {
+            resolved.fill_unset_from(&self.sub_configs[i].settings);
+        }
+        resolved.fill_unset_from(&self.root);
+        self.resolved_configs
+            .0
+            .write()
+            .entry(key)
+            .or_insert(Arc::new(resolved))
+            .dupe()
+    }
+
+    /// The names of the build system's configs for `path`, most specific first: the
+    /// config of the target that owns `path`, then the source database's default
+    /// config.
+    fn target_config_names(&self, path: &ModulePath) -> Vec<ConfigName> {
         // Stubs bundled with Pyrefly belong to no build target, and `default_config`
         // otherwise answers for every file. Letting it reach them would mean a build
         // system could change how the standard library itself is checked.
         if path.is_bundled() {
-            return None;
+            return Vec::new();
         }
-        let source_db = self.source_db.as_ref()?.as_live_source_database()?;
-
-        let resolve = |name: ConfigName| -> Option<Arc<ConfigBase>> {
-            if let Some(config) = self.target_configs.read().get(&name) {
-                return config.dupe();
-            }
-            let parsed = source_db
-                .get_config(&name)
-                .and_then(|raw| {
-                    serde_json::from_value(raw)
-                        .map(|mut config: ConfigBase| {
-                            config.resolve_legacy_settings();
-                            config
-                        })
-                        .inspect_err(|e| {
-                            error!("Invalid config `{name}` in build system response: {e}");
-                        })
-                        .ok()
-                })
-                .map(Arc::new);
-            self.target_configs
-                .write()
-                .entry(name)
-                .or_insert(parsed)
-                .dupe()
+        let Some(source_db) = self
+            .source_db
+            .as_ref()
+            .and_then(|db| db.as_live_source_database())
+        else {
+            return Vec::new();
         };
-
-        let lookup = |name: Option<ConfigName>| -> Option<T> { getter(resolve(name?)?.as_ref()) };
-
         // The target's own config must win over `default_config`, which by
         // definition only supplies what the target config leaves unset.
-        lookup(source_db.get_target_config_name(Some(path.as_path())))
-            .or_else(|| lookup(source_db.get_default_config_name()))
+        [
+            source_db.get_target_config_name(Some(path.as_path())),
+            source_db.get_default_config_name(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The build system's config called `name`, parsed on first use. Returns `None`
+    /// if the build system has no such config or it fails to parse.
+    fn target_config(&self, name: &ConfigName) -> Option<Arc<ConfigBase>> {
+        if let Some(config) = self.target_configs.read().get(name) {
+            return config.dupe();
+        }
+        let source_db = self.source_db.as_ref()?.as_live_source_database()?;
+        let parsed = source_db
+            .get_config(name)
+            .and_then(|raw| {
+                serde_json::from_value(raw)
+                    .map(|mut config: ConfigBase| {
+                        config.resolve_legacy_settings();
+                        config
+                    })
+                    .inspect_err(|e| {
+                        error!("Invalid config `{name}` in build system response: {e}");
+                    })
+                    .ok()
+            })
+            .map(Arc::new);
+        self.target_configs
+            .write()
+            .entry(name.dupe())
+            .or_insert(parsed)
+            .dupe()
     }
 
     /// Create a `Handle` for the given path, deriving its module name from the search paths,
@@ -1709,6 +1771,7 @@ impl ConfigFile {
                 stats.common.changed = true;
                 for (config, _) in &configs_and_files {
                     config.target_configs.write().clear();
+                    config.resolved_configs.0.write().clear();
                 }
                 debug!(
                     "Performed grouped source db query for configs at {:?}",
@@ -1741,6 +1804,9 @@ impl ConfigFile {
     /// Config finders should pass the root associated with the file being checked because
     /// synthesized configurations do not have an on-disk [`ConfigSource`] to supply one.
     pub fn configure_at(&mut self, project_root: Option<&Path>) -> Vec<ConfigError> {
+        // Settings resolved before now may be stale. A fresh cache also stops sharing with
+        // the config this one was cloned from.
+        self.resolved_configs = ResolvedConfigs::default();
         let mut configure_errors = Vec::new();
         let project_root = self
             .source
@@ -2506,6 +2572,8 @@ pub fn validate_path(path: &Path) -> anyhow::Result<()> {
 mod tests {
     use std::collections::HashMap;
     use std::fs;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
 
     use pretty_assertions::assert_eq;
     use pyrefly_build::source_db::LiveSourceDatabase;
@@ -2534,6 +2602,9 @@ mod tests {
         target_config_name: Option<ConfigName>,
         default_config_name: Option<ConfigName>,
         configs: HashMap<ConfigName, serde_json::Value>,
+        /// When set, querying the source database replaces `configs` with these.
+        reloaded_configs: Option<HashMap<ConfigName, serde_json::Value>>,
+        reloaded: AtomicBool,
     }
 
     impl SourceDatabase for TestSourceDatabase {
@@ -2561,7 +2632,12 @@ mod tests {
             _files: SmallSet<InternedPath>,
             _force: bool,
         ) -> (anyhow::Result<bool>, TelemetrySourceDbRebuildInstanceStats) {
-            (Ok(false), TelemetrySourceDbRebuildInstanceStats::default())
+            let changed = self.reloaded_configs.is_some();
+            self.reloaded.store(changed, Ordering::Relaxed);
+            (
+                Ok(changed),
+                TelemetrySourceDbRebuildInstanceStats::default(),
+            )
         }
 
         fn get_paths_to_watch(&self) -> SmallSet<WatchPattern> {
@@ -2585,7 +2661,11 @@ mod tests {
         }
 
         fn get_config(&self, name: &ConfigName) -> Option<serde_json::Value> {
-            self.configs.get(name).cloned()
+            match &self.reloaded_configs {
+                Some(reloaded) if self.reloaded.load(Ordering::Relaxed) => reloaded.get(name),
+                _ => self.configs.get(name),
+            }
+            .cloned()
         }
 
         fn get_default_config_name(&self) -> Option<ConfigName> {
@@ -2887,6 +2967,7 @@ mod tests {
                 fallback_source_db: Default::default(),
                 module_names: None,
                 target_configs: Default::default(),
+                resolved_configs: Default::default(),
                 sub_configs: vec![SubConfig {
                     matches: Glob::new("sub/project/**".to_owned()).unwrap(),
                     settings: ConfigBase {
@@ -3261,6 +3342,7 @@ mod tests {
             fallback_source_db: Default::default(),
             module_names: None,
             target_configs: Default::default(),
+            resolved_configs: Default::default(),
             build_system: Default::default(),
             sub_configs: vec![SubConfig {
                 matches: Glob::new("sub/project/**".to_owned()).unwrap(),
@@ -3347,6 +3429,7 @@ mod tests {
             fallback_source_db: Default::default(),
             module_names: None,
             target_configs: Default::default(),
+            resolved_configs: Default::default(),
             sub_configs: vec![SubConfig {
                 matches: sub_config_matches,
                 settings: Default::default(),
@@ -3826,6 +3909,7 @@ output-format = "omit-errors"
                 target_config_name,
                 default_config_name: Some(default_name),
                 configs,
+                ..Default::default()
             }))),
             ..Default::default()
         };
@@ -3851,6 +3935,50 @@ output-format = "omit-errors"
         );
         // Nothing but the root config sets this.
         assert!(config.strict_callable_subtyping(&path));
+    }
+
+    #[test]
+    fn test_configure_refreshes_resolved_settings() {
+        let mut config = ConfigFile::default();
+        config.configure();
+        let path = test_path("foo.py");
+        assert!(config.check_unannotated_defs(&path));
+
+        config.root.check_unannotated_defs = Some(false);
+        config.configure();
+        assert!(!config.check_unannotated_defs(&path));
+    }
+
+    /// A reload can change a build system config's contents without changing its name.
+    #[test]
+    fn test_source_db_reload_refreshes_resolved_settings() {
+        let name: ConfigName = serde_json::from_str("\"target\"").unwrap();
+        let mut config = ConfigFile {
+            source_db: Some(ArcId::new(Box::new(TestSourceDatabase {
+                target_config_name: Some(name.dupe()),
+                configs: HashMap::from([(
+                    name.dupe(),
+                    serde_json::json!({"check-unannotated-defs": false}),
+                )]),
+                reloaded_configs: Some(HashMap::from([(
+                    name,
+                    serde_json::json!({"check-unannotated-defs": true}),
+                )])),
+                ..Default::default()
+            }))),
+            ..Default::default()
+        };
+        config.configure();
+        let path = test_path("foo.py");
+        assert!(!config.check_unannotated_defs(&path));
+
+        let config = ArcId::new(config);
+        ConfigFile::query_source_db(
+            &SmallMap::from_iter([(config.dupe(), SmallSet::new())]),
+            false,
+            None,
+        );
+        assert!(config.check_unannotated_defs(&path));
     }
 
     #[test]
@@ -4699,6 +4827,7 @@ output-format = "omit-errors"
             target_config_name,
             default_config_name,
             configs,
+            ..Default::default()
         })));
         config.configure();
         config
