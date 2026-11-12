@@ -1563,7 +1563,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         dim: Dim = None,
         keepdim: Keepdim = False,
         *,
-        dtype: Any = None,
+        dtype: _DType | None = None,
     ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
         """Sum along dimension(s). Shape inference via meta-shape: torch.Tensor.sum"""
         ...
@@ -2808,7 +2808,7 @@ def sum[
     dim: Dim = None,
     keepdim: Keepdim = False,
     *,
-    dtype: Any = None,
+    dtype: dtype | None = None,
 ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
     """Sum along dimension(s). Shape inference via meta-shape: torch.sum"""
     ...
