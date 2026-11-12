@@ -275,6 +275,27 @@ impl ScriptEnvironments {
     }
 }
 
+/// A config finder that returns `config` for every Python file, except that a PEP 723 script gets
+/// its own environment when `config` sets `script-command`. `args` and `wrapper` must be the ones
+/// that produced `config`.
+pub fn constant_config_finder(
+    config: ArcId<ConfigFile>,
+    args: ConfigOverrideArgs,
+    wrapper: Option<ConfigConfigurerWrapper>,
+) -> ConfigFinder {
+    let configure: Arc<dyn ConfigConfigurer> =
+        Arc::new(DefaultConfigConfigurerWithOverrides::new(args, false));
+    let configure = match wrapper {
+        Some(wrap) => wrap(configure),
+        None => configure,
+    };
+    let scripts = ScriptEnvironments::new(configure);
+    ConfigFinder::new_constant_with_file(
+        config,
+        Box::new(move |config, path| scripts.config(config, path)),
+    )
+}
+
 pub fn default_config_finder(wrapper: Option<ConfigConfigurerWrapper>) -> ConfigFinder {
     standard_config_finder(Arc::new(DefaultConfigConfigurer {}), wrapper)
 }
