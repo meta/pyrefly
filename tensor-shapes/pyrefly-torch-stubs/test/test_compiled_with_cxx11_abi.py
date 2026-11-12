@@ -10,9 +10,9 @@ from shape_extensions import assert_raises
 
 
 def test_compiled_with_cxx11_abi_returns_bool() -> None:
-    result = torch.compiled_with_cxx11_abi()  # E: No attribute
-    assert_type(result, bool)  # E: assert_type
+    result = torch.compiled_with_cxx11_abi()
+    assert_type(result, bool)
     assert type(result) is bool
     assert result is torch._C._GLIBCXX_USE_CXX11_ABI
     with assert_raises(TypeError):
-        torch.compiled_with_cxx11_abi(1)  # E: No attribute
+        torch.compiled_with_cxx11_abi(1)  # E: Expected 0 positional
