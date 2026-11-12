@@ -2562,7 +2562,13 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Sample from multinomial distribution. Shape inference via meta-shape: torch.Tensor.multinomial"""
         ...
 
-    def normal_(self, mean: builtins.float = 0.0, std: builtins.float = 1.0) -> Self:
+    def normal_(
+        self,
+        mean: builtins.float = 0.0,
+        std: builtins.float = 1.0,
+        *,
+        generator: Generator | None = None,
+    ) -> Self:
         """Fill with normal distribution in-place. Shape inference via generic fixture signature."""
         ...
 
