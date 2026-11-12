@@ -90,9 +90,11 @@ def cond() -> bool: ...
 class Constructor:
     if cond():
         x = 1  # E: Attribute `x` may be uninitialized
+        y: int  # E: Attribute `y` may be uninitialized
 
     def __init__(self) -> None:
         self.x = 2
+        self.y = 2
 
 class Helper:
     if cond():
