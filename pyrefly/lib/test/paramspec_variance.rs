@@ -129,7 +129,6 @@ def f(obj: A[[object]], int_: A[[int]]):
 );
 
 testcase!(
-    bug = "Declared ParamSpec variance should be checked against ParamSpec components",
     test_covariant_paramspec_used_in_paramspec_components,
     r#"
 from typing import Generic, ParamSpec
@@ -137,7 +136,7 @@ from typing import Generic, ParamSpec
 P = ParamSpec("P", covariant=True)
 
 class A(Generic[P]):
-    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> None: ...
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> None: ...  # E: `P` is covariant but is used in contravariant position
 "#,
 );
 

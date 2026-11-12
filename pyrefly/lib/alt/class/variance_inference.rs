@@ -650,18 +650,34 @@ fn check_callable_variance(
             violations,
         );
     }
-    if let Params::List(param_list) | Params::Partial(param_list) = &callable.params {
-        for param in param_list.items().iter() {
-            if let Type::Quantified(q) = param.as_type() {
-                check_typevar(
-                    q.name(),
-                    Variance::Contravariant,
-                    q.variance(),
-                    range,
-                    violations,
-                );
+    match &callable.params {
+        Params::List(param_list) | Params::Partial(param_list) => {
+            for param in param_list.items().iter() {
+                if let Type::Quantified(q) = param.as_type() {
+                    check_typevar(
+                        q.name(),
+                        Variance::Contravariant,
+                        q.variance(),
+                        range,
+                        violations,
+                    );
+                }
             }
         }
+        Params::ParamSpec(prefix, param_spec) => {
+            for ty in prefix.iter().map(|p| p.ty()).chain([param_spec]) {
+                if let Type::Quantified(q) = ty {
+                    check_typevar(
+                        q.name(),
+                        Variance::Contravariant,
+                        q.variance(),
+                        range,
+                        violations,
+                    );
+                }
+            }
+        }
+        Params::Ellipsis | Params::Materialization => {}
     }
 }
 
