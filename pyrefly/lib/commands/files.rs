@@ -29,6 +29,7 @@ use tracing::warn;
 
 use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::config_finder::apply_unconfigured_resolver_if_applicable;
+use crate::commands::config_finder::constant_config_finder;
 use crate::commands::config_finder::default_config_finder_with_overrides;
 use crate::commands::util::VersionMismatch;
 use crate::config::config::ConfigFile;
@@ -201,9 +202,16 @@ fn get_globs_and_config_for_project(
     wrapper: Option<ConfigConfigurerWrapper>,
     scope: ConfigScope,
 ) -> anyhow::Result<(Box<dyn Includes>, ConfigFinder, UpsellDecision)> {
-    let (config, mut errors) = match config {
-        Some(explicit) => get_explicit_config(&explicit, args),
-        None => get_project_config_for_current_dir(args, wrapper)?,
+    let (config, mut errors, wrapper) = match config {
+        Some(explicit) => {
+            let (config, errors) = get_explicit_config(&explicit, args.clone());
+            (config, errors, None)
+        }
+        None => {
+            let (config, errors) =
+                get_project_config_for_current_dir(args.clone(), wrapper.clone())?;
+            (config, errors, wrapper)
+        }
     };
     match &config.source {
         ConfigSource::File(path) => {
@@ -244,7 +252,7 @@ fn get_globs_and_config_for_project(
         ));
     }
 
-    let config_finder = ConfigFinder::new_constant(config.dupe());
+    let config_finder = constant_config_finder(config.dupe(), args, wrapper);
 
     debug!("Config is: {}", config);
 

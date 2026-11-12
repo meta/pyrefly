@@ -347,6 +347,11 @@ pub struct ConfigOverrideArgs {
         num_args = 0..=1
     )]
     use_ignore_files: Option<bool>,
+    /// A command that finds the Python environment of a PEP 723 script, one argument per use of
+    /// this flag. Pyrefly appends the script's path to the command, which prints the environment in
+    /// the JSON format of `uv workspace metadata --script`.
+    #[arg(long, allow_hyphen_values = true)]
+    script_command: Option<Vec<String>>,
     /// Deprecated: use --check-unannotated-defs and --infer-return-types instead.
     /// Controls how Pyrefly analyzes function definitions that lack type annotations on parameters and return values.
     #[arg(long)]
@@ -485,6 +490,7 @@ impl ConfigOverrideArgs {
             ignore_errors_in_generated_code,
             infer_with_first_use,
             use_ignore_files,
+            script_command,
             untyped_def_behavior,
             check_unannotated_defs,
             infer_return_types,
@@ -515,6 +521,7 @@ impl ConfigOverrideArgs {
             || ignore_errors_in_generated_code.is_some()
             || infer_with_first_use.is_some()
             || use_ignore_files.is_some()
+            || script_command.is_some()
             || untyped_def_behavior.is_some()
             || check_unannotated_defs.is_some()
             || infer_return_types.is_some()
@@ -613,6 +620,9 @@ impl ConfigOverrideArgs {
         // Then apply check-specific behavior overrides
         if let Some(x) = &self.use_ignore_files {
             config.use_ignore_files = *x;
+        }
+        if let Some(x) = &self.script_command {
+            config.script_command = Some(x.clone());
         }
         if let Some(x) = &self.untyped_def_behavior {
             config.root.untyped_def_behavior = Some(*x);

@@ -5,9 +5,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::SystemTime;
 
 use dupe::Dupe;
 use pyrefly_config::args::ConfigOverrideArgs;
@@ -16,14 +19,18 @@ use pyrefly_config::config::ConfigSource;
 use pyrefly_config::config::DirectoryRelativeFallbackSearchPathCache;
 use pyrefly_config::config::FallbackSearchPath;
 use pyrefly_config::config::GENERATED_FILE_CONFIG_OVERRIDE;
+use pyrefly_config::environment::script;
 use pyrefly_config::resolve_unconfigured::UnconfiguredOverride;
 use pyrefly_config::resolve_unconfigured::resolve_unconfigured_config;
+use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::lock::Mutex;
 use starlark_map::small_map::SmallMap;
+use tracing::warn;
 
 use crate::config::config::ConfigFile;
+use crate::config::finder::debug_log;
 use crate::config::config::ProjectLayout;
 use crate::config::finder::ConfigError;
 use crate::config::finder::ConfigFinder;
@@ -138,6 +145,157 @@ pub(crate) fn apply_unconfigured_resolver_if_applicable(
     *config = resolved;
 }
 
+/// Gives each PEP 723 script under a config that sets `script-command` its own config, which takes
+/// every setting from the script's directory config except the Python environment: that is the
+/// environment that the script command reports for the script.
+struct ScriptEnvironments {
+    configure: Arc<dyn ConfigConfigurer>,
+    /// Runs a script command to find the interpreter of a script's environment, or `None` if it
+    /// does not exist.
+    find_interpreter: fn(&[String], &Path) -> anyhow::Result<Option<PathBuf>>,
+    /// The config of each Python file under a config that sets `script-command`. An entry is valid
+    /// while the file's modification time and directory config are unchanged, so an edit to a
+    /// script's metadata block takes effect.
+    files: Mutex<SmallMap<PathBuf, Arc<FileEnvironment>>>,
+}
+
+struct FileEnvironment {
+    modified: SystemTime,
+    directory_config: ArcId<ConfigFile>,
+    /// Concurrent lookups of one entry wait for the first one, so the script command runs once
+    /// per entry.
+    config: OnceLock<ArcId<ConfigFile>>,
+}
+
+impl ScriptEnvironments {
+    fn new(configure: Arc<dyn ConfigConfigurer>) -> Self {
+        Self {
+            configure,
+            find_interpreter: script::interpreter,
+            files: Mutex::new(SmallMap::new()),
+        }
+    }
+
+    fn clear(&self) {
+        self.files.lock().clear();
+    }
+
+    /// The config for the Python file at `path`, whose directory config is `directory_config`.
+    fn config(&self, directory_config: ArcId<ConfigFile>, path: &ModulePath) -> ArcId<ConfigFile> {
+        let Some(command) = &directory_config.script_command else {
+            return directory_config;
+        };
+        let file = match path.details() {
+            ModulePathDetails::FileSystem(file) | ModulePathDetails::Memory(file) => file.as_path(),
+            ModulePathDetails::Namespace(_)
+            | ModulePathDetails::BundledTypeshed(_)
+            | ModulePathDetails::BundledTypeshedThirdParty(_)
+            | ModulePathDetails::BundledThirdParty(_) => return directory_config,
+        };
+        // Installed packages and the standard library are never scripts.
+        if file.extension().is_none_or(|extension| extension != "py")
+            || directory_config
+                .site_package_path()
+                .chain(&directory_config.python_environment.interpreter_stdlib_path)
+                .any(|root| file.starts_with(root))
+        {
+            return directory_config;
+        }
+        let Ok(modified) = fs::metadata(file).and_then(|metadata| metadata.modified()) else {
+            return directory_config;
+        };
+        let entry = {
+            let mut files = self.files.lock();
+            match files.get(file) {
+                Some(entry)
+                    if entry.modified == modified && entry.directory_config == directory_config =>
+                {
+                    entry.dupe()
+                }
+                _ => {
+                    let entry = Arc::new(FileEnvironment {
+                        modified,
+                        directory_config: directory_config.dupe(),
+                        config: OnceLock::new(),
+                    });
+                    files.insert(file.to_path_buf(), entry.dupe());
+                    entry
+                }
+            }
+        };
+        entry
+            .config
+            .get_or_init(|| {
+                self.script_config(&directory_config, command, file)
+                    .unwrap_or_else(|| directory_config.dupe())
+            })
+            .dupe()
+    }
+
+    /// The config for `file` if it is a PEP 723 script whose environment exists: its directory
+    /// config, loaded again with the interpreter of the script's environment.
+    fn script_config(
+        &self,
+        directory_config: &ConfigFile,
+        command: &[String],
+        file: &Path,
+    ) -> Option<ArcId<ConfigFile>> {
+        let config_path = match &directory_config.source {
+            ConfigSource::File(path)
+            | ConfigSource::FailedParse(path)
+            | ConfigSource::PythonToolMarker(path)
+            | ConfigSource::Marker(path) => path,
+            // There is no config file to load again with the script's interpreter. `uv check
+            // --script` sets `VIRTUAL_ENV` to the environment of a standalone script.
+            ConfigSource::Synthetic(_) => return None,
+        };
+        script::metadata(&fs::read_to_string(file).ok()?)?;
+        let interpreter = match (self.find_interpreter)(command, file) {
+            Ok(Some(interpreter)) => interpreter,
+            Ok(None) => {
+                warn!(
+                    "PEP 723 script `{}` has no environment, so Pyrefly checks it in its project's environment.",
+                    file.display()
+                );
+                return None;
+            }
+            Err(error) => {
+                warn!("{error:#}");
+                return None;
+            }
+        };
+        // The directory config already reported any errors in the file.
+        let (mut config, _) = ConfigFile::from_file(config_path);
+        config.interpreters.select_python_interpreter(interpreter);
+        let (config, errors) = self
+            .configure
+            .configure(config_path.parent(), config, Vec::new());
+        debug_log(errors);
+        Some(config)
+    }
+}
+
+/// A config finder that returns `config` for every Python file, except that a PEP 723 script gets
+/// its own environment when `config` sets `script-command`. `args` and `wrapper` must be the ones
+/// that produced `config`.
+pub fn constant_config_finder(
+    config: ArcId<ConfigFile>,
+    args: ConfigOverrideArgs,
+    wrapper: Option<ConfigConfigurerWrapper>,
+) -> ConfigFinder {
+    let configure: Arc<dyn ConfigConfigurer> =
+        Arc::new(DefaultConfigConfigurerWithOverrides::new(args, false));
+    let configure = match wrapper {
+        Some(wrap) => wrap(configure),
+        None => configure,
+    };
+    let scripts = ScriptEnvironments::new(configure);
+    ConfigFinder::new_constant_with_file(
+        config,
+        Box::new(move |config, path| scripts.config(config, path)),
+    )
+}
+
 pub fn default_config_finder(wrapper: Option<ConfigConfigurerWrapper>) -> ConfigFinder {
     standard_config_finder(Arc::new(DefaultConfigConfigurer {}), wrapper)
 }
@@ -203,6 +361,8 @@ pub fn standard_config_finder(
     };
     let configure2 = configure.dupe();
     let configure3 = configure.dupe();
+    let scripts = Arc::new(ScriptEnvironments::new(configure.dupe()));
+    let scripts2 = scripts.dupe();
 
     // A cache where path `p` maps to config file with `search_path = [p]`. If we can find the root.
     let cache_one: Arc<Mutex<SmallMap<PathBuf, ArcId<ConfigFile>>>> =
@@ -226,11 +386,13 @@ pub fn standard_config_finder(
     let cache_empty: Arc<Mutex<Option<ArcId<ConfigFile>>>> = Arc::new(Mutex::new(None));
 
     let clear_extra_caches = {
+        let scripts = scripts.dupe();
         let cache_one = cache_one.dupe();
         let cache_parents = cache_parents.dupe();
         let cache_ancestors = cache_ancestors.dupe();
         let cache_empty = cache_empty.dupe();
         Box::new(move || {
+            scripts.clear();
             cache_one.lock().clear();
             cache_parents.lock().clear();
             cache_ancestors.clear();
@@ -328,9 +490,9 @@ pub fn standard_config_finder(
                         (config, errors)
                     }
                 }
-            },
-        ),
-        Box::new(|config, _| config),
+            }
+        }),
+        Box::new(move |config, path| scripts2.config(config, path)),
         clear_extra_caches,
     )
 }
@@ -396,6 +558,77 @@ mod tests {
         ) -> (ArcId<ConfigFile>, Vec<ConfigError>) {
             (self.0)(root, config, errors)
         }
+    }
+
+    fn script_environments(
+        find_interpreter: fn(&[String], &Path) -> anyhow::Result<Option<PathBuf>>,
+    ) -> ScriptEnvironments {
+        ScriptEnvironments {
+            find_interpreter,
+            ..ScriptEnvironments::new(Arc::new(DefaultConfigConfigurer {}))
+        }
+    }
+
+    /// The config of a project whose `pyproject.toml` sets `script-command`.
+    fn directory_config(root: &Path) -> ArcId<ConfigFile> {
+        let pyproject = root.join("pyproject.toml");
+        fs::write(&pyproject, "[tool.pyrefly]\nscript-command = [\"uv\", \"workspace\", \"metadata\", \"--script\"]\n").unwrap();
+        let (config, _) = ConfigFile::from_file(&pyproject);
+        DefaultConfigConfigurer {}
+            .configure(Some(root), config, Vec::new())
+            .0
+    }
+
+    #[test]
+    fn test_script_environment() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let script = root.join("script.py");
+        let module = root.join("module.py");
+        fs::write(
+            &script,
+            "# /// script\n# dependencies = [\"six\"]\n# ///\nimport six\n",
+        )
+        .unwrap();
+        fs::write(&module, "import six\n").unwrap();
+        let scripts =
+            script_environments(|_, _| Ok(Some(PathBuf::from("/script-environment/bin/python"))));
+        let directory = directory_config(root);
+        assert!(directory.script_command.is_some());
+
+        let script_config =
+            scripts.config(directory.dupe(), &ModulePath::filesystem(script.clone()));
+        assert_ne!(script_config, directory, "a script gets its own config");
+        assert_eq!(
+            script_config.interpreters.to_string(),
+            "/script-environment/bin/python",
+            "a script runs in the interpreter of its uv environment",
+        );
+        assert_eq!(
+            scripts.config(directory.dupe(), &ModulePath::filesystem(script)),
+            script_config,
+            "an unchanged script reuses its config",
+        );
+        assert_eq!(
+            scripts.config(directory.dupe(), &ModulePath::filesystem(module)),
+            directory,
+            "a file without a script block uses its directory config",
+        );
+    }
+
+    #[test]
+    fn test_script_without_environment() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let script = root.join("script.py");
+        fs::write(&script, "# /// script\n# ///\n").unwrap();
+        let scripts = script_environments(|_, _| Ok(None));
+        let directory = directory_config(root);
+        assert_eq!(
+            scripts.config(directory.dupe(), &ModulePath::filesystem(script)),
+            directory,
+            "a script without an environment uses its directory config",
+        );
     }
 
     #[test]

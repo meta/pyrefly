@@ -1,0 +1,16 @@
+name: Set up WASI SDK
+description: Download a checksum-verified WASI SDK and set WASI_SDK_PATH for wasm32-wasip1 C dependencies.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        VERSION: "34"
+        SHA256: b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4
+      run: |
+        archive="$RUNNER_TEMP/wasi-sdk.tar.gz"
+        curl --fail --location --retry 3 --output "$archive" \
+          "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-$VERSION/wasi-sdk-$VERSION.0-x86_64-linux.tar.gz"
+        echo "$SHA256  $archive" | sha256sum --check
+        tar -xzf "$archive" -C "$RUNNER_TEMP"
+        echo "WASI_SDK_PATH=$RUNNER_TEMP/wasi-sdk-$VERSION.0-x86_64-linux" >> "$GITHUB_ENV"

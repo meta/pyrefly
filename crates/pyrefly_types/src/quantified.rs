@@ -26,6 +26,7 @@ use crate::class::ClassType;
 use crate::dimension::gradual_size;
 use crate::env::TypeEnv;
 use crate::heap::TypeHeap;
+use crate::param_spec::ParamSpec;
 use crate::stdlib::Stdlib;
 use crate::type_var::PreInferenceVariance;
 use crate::type_var::Restriction;
@@ -330,14 +331,14 @@ impl Quantified {
         )
     }
 
-    pub fn param_spec(name: Name, identity: QuantifiedIdentity, default: Option<Type>) -> Self {
+    pub fn from_param_spec(ps: &ParamSpec, identity: QuantifiedIdentity) -> Self {
         Self::new(
             identity,
-            name,
+            ps.qname().id().clone(),
             QuantifiedKind::ParamSpec,
-            default,
+            ps.default().cloned(),
             Restriction::Unrestricted,
-            PreInferenceVariance::Invariant,
+            ps.variance(),
         )
     }
 

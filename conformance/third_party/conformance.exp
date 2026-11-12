@@ -3975,7 +3975,19 @@
     }
   ],
   "constructors_consistency.py": [],
-  "dataclasses_descriptors.py": [],
+  "dataclasses_descriptors.py": [
+    {
+      "code": -2,
+      "column": 5,
+      "concise_description": "Cannot set field `z` to non-data descriptor `Desc2`",
+      "description": "Cannot set field `z` to non-data descriptor `Desc2`\n  Hint: add a `__set__` method to make `Desc2` a data descriptor",
+      "line": 58,
+      "name": "bad-dataclass-descriptor",
+      "severity": "error",
+      "stop_column": 6,
+      "stop_line": 58
+    }
+  ],
   "dataclasses_final.py": [
     {
       "code": -2,
@@ -6076,22 +6088,22 @@
       "column": 22,
       "concise_description": "`type[Bar]` is not assignable to `type[Bar[int]]`",
       "description": "`type[Bar]` is not assignable to `type[Bar[int]]`",
-      "line": 46,
+      "line": 48,
       "name": "bad-assignment",
       "severity": "error",
       "stop_column": 25,
-      "stop_line": 46
+      "stop_line": 48
     },
     {
       "code": -2,
       "column": 1,
       "concise_description": "Expected 0 type arguments for `Foo`, got 1",
       "description": "Expected 0 type arguments for `Foo`, got 1",
-      "line": 56,
+      "line": 58,
       "name": "bad-specialization",
       "severity": "error",
       "stop_column": 9,
-      "stop_line": 56
+      "stop_line": 58
     }
   ],
   "generics_mixed_variance_inference.py": [
@@ -6756,99 +6768,33 @@
     },
     {
       "code": -2,
-      "column": 24,
-      "concise_description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "line": 97,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 42,
-      "stop_line": 97
-    },
-    {
-      "code": -2,
-      "column": 26,
-      "concise_description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "line": 98,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 40,
-      "stop_line": 98
-    },
-    {
-      "code": -2,
-      "column": 30,
-      "concise_description": "Unexpected keyword argument `infer_variance` to ParamSpec",
-      "description": "Unexpected keyword argument `infer_variance` to ParamSpec",
-      "line": 99,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 49,
-      "stop_line": 99
-    },
-    {
-      "code": -2,
-      "column": 28,
-      "concise_description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "line": 100,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 42,
-      "stop_line": 100
-    },
-    {
-      "code": -2,
       "column": 44,
-      "concise_description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "description": "Unexpected keyword argument `contravariant` to ParamSpec",
+      "concise_description": "Contradictory variance specifications",
+      "description": "Contradictory variance specifications",
       "line": 100,
-      "name": "invalid-param-spec",
+      "name": "invalid-type-var",
       "severity": "error",
       "stop_column": 62,
       "stop_line": 100
     },
     {
       "code": -2,
-      "column": 28,
-      "concise_description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "description": "Unexpected keyword argument `covariant` to ParamSpec",
-      "line": 101,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 42,
-      "stop_line": 101
-    },
-    {
-      "code": -2,
       "column": 44,
-      "concise_description": "Unexpected keyword argument `infer_variance` to ParamSpec",
-      "description": "Unexpected keyword argument `infer_variance` to ParamSpec",
+      "concise_description": "Contradictory variance specifications",
+      "description": "Contradictory variance specifications",
       "line": 101,
-      "name": "invalid-param-spec",
+      "name": "invalid-type-var",
       "severity": "error",
       "stop_column": 63,
       "stop_line": 101
     },
     {
       "code": -2,
-      "column": 28,
-      "concise_description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "line": 102,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 46,
-      "stop_line": 102
-    },
-    {
-      "code": -2,
       "column": 48,
-      "concise_description": "Unexpected keyword argument `infer_variance` to ParamSpec",
-      "description": "Unexpected keyword argument `infer_variance` to ParamSpec",
+      "concise_description": "Contradictory variance specifications",
+      "description": "Contradictory variance specifications",
       "line": 102,
-      "name": "invalid-param-spec",
+      "name": "invalid-type-var",
       "severity": "error",
       "stop_column": 67,
       "stop_line": 102
@@ -6888,17 +6834,6 @@
     },
     {
       "code": -2,
-      "column": 46,
-      "concise_description": "`ContravariantParamSpecOld[[object]]` is not assignable to `ContravariantParamSpecOld[[int]]`",
-      "description": "`ContravariantParamSpecOld[[object]]` is not assignable to `ContravariantParamSpecOld[[int]]`",
-      "line": 122,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 81,
-      "stop_line": 122
-    },
-    {
-      "code": -2,
       "column": 43,
       "concise_description": "`CovariantParamSpecOld[[object]]` is not assignable to `CovariantParamSpecOld[[int]]`",
       "description": "`CovariantParamSpecOld[[object]]` is not assignable to `CovariantParamSpecOld[[int]]`",
@@ -6907,17 +6842,6 @@
       "severity": "error",
       "stop_column": 74,
       "stop_line": 132
-    },
-    {
-      "code": -2,
-      "column": 46,
-      "concise_description": "`CovariantParamSpecOld[[int]]` is not assignable to `CovariantParamSpecOld[[object]]`",
-      "description": "`CovariantParamSpecOld[[int]]` is not assignable to `CovariantParamSpecOld[[object]]`",
-      "line": 133,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 74,
-      "stop_line": 133
     },
     {
       "code": -2,
@@ -6932,17 +6856,6 @@
     },
     {
       "code": -2,
-      "column": 60,
-      "concise_description": "`InferredContravariantParamSpecOld[[object]]` is not assignable to `InferredContravariantParamSpecOld[[int]]`",
-      "description": "`InferredContravariantParamSpecOld[[object]]` is not assignable to `InferredContravariantParamSpecOld[[int]]`",
-      "line": 143,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 103,
-      "stop_line": 143
-    },
-    {
-      "code": -2,
       "column": 57,
       "concise_description": "`InferredCovariantParamSpecOld[[object]]` is not assignable to `InferredCovariantParamSpecOld[[int]]`",
       "description": "`InferredCovariantParamSpecOld[[object]]` is not assignable to `InferredCovariantParamSpecOld[[int]]`",
@@ -6951,17 +6864,6 @@
       "severity": "error",
       "stop_column": 96,
       "stop_line": 151
-    },
-    {
-      "code": -2,
-      "column": 60,
-      "concise_description": "`InferredCovariantParamSpecOld[[int]]` is not assignable to `InferredCovariantParamSpecOld[[object]]`",
-      "description": "`InferredCovariantParamSpecOld[[int]]` is not assignable to `InferredCovariantParamSpecOld[[object]]`",
-      "line": 152,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 96,
-      "stop_line": 152
     }
   ],
   "generics_scoping.py": [
@@ -7746,55 +7648,55 @@
       "column": 7,
       "concise_description": "`T` is uninitialized",
       "description": "`T` is uninitialized",
-      "line": 35,
+      "line": 26,
       "name": "unbound-name",
       "severity": "error",
       "stop_column": 8,
-      "stop_line": 35
+      "stop_line": 26
     },
     {
       "code": -2,
       "column": 17,
       "concise_description": "Expected a type form, got instance of `int`",
       "description": "Expected a type form, got instance of `int`",
-      "line": 44,
+      "line": 35,
       "name": "not-a-type",
       "severity": "error",
       "stop_column": 18,
-      "stop_line": 44
+      "stop_line": 35
     },
     {
       "code": -2,
       "column": 17,
       "concise_description": "Type parameter `T` shadows a type parameter of the same name from an enclosing scope",
       "description": "Type parameter `T` shadows a type parameter of the same name from an enclosing scope",
-      "line": 92,
+      "line": 83,
       "name": "invalid-type-var",
       "severity": "error",
       "stop_column": 18,
-      "stop_line": 92
+      "stop_line": 83
     },
     {
       "code": -2,
       "column": 17,
       "concise_description": "Type parameter `T` shadows a type parameter of the same name from an enclosing scope",
       "description": "Type parameter `T` shadows a type parameter of the same name from an enclosing scope",
-      "line": 95,
+      "line": 86,
       "name": "invalid-type-var",
       "severity": "error",
       "stop_column": 18,
-      "stop_line": 95
+      "stop_line": 86
     },
     {
       "code": -2,
       "column": 17,
       "concise_description": "Type parameter `T` shadows a type parameter of the same name from an enclosing scope",
       "description": "Type parameter `T` shadows a type parameter of the same name from an enclosing scope",
-      "line": 98,
+      "line": 89,
       "name": "invalid-type-var",
       "severity": "error",
       "stop_column": 18,
-      "stop_line": 98
+      "stop_line": 89
     }
   ],
   "generics_type_erasure.py": [
@@ -10784,36 +10686,36 @@
     },
     {
       "code": -2,
-      "column": 25,
-      "concise_description": "`ConcreteHasProperty2` is not assignable to `HasPropertyProto`",
-      "description": "`ConcreteHasProperty2` is not assignable to `HasPropertyProto`\n  `ConcreteHasProperty2.m` has type `(item: int, callback: (int) -> str) -> str`, which is not assignable to `[T](item: T, callback: (T) -> str) -> str`, the type of `HasPropertyProto.m`",
-      "line": 145,
+      "column": 26,
+      "concise_description": "`InvalidParentProperty` is not assignable to `HasParentProperty`",
+      "description": "`InvalidParentProperty` is not assignable to `HasParentProperty`\n  Property getter for `InvalidParentProperty.parent` has type `() -> HasParentProperty`, which is not assignable to `() -> InvalidParentProperty`, the property getter for `HasParentProperty.parent`",
+      "line": 133,
       "name": "bad-assignment",
       "severity": "error",
-      "stop_column": 47,
-      "stop_line": 145
+      "stop_column": 49,
+      "stop_line": 133
     },
     {
       "code": -2,
-      "column": 25,
-      "concise_description": "`ConcreteHasProperty3` is not assignable to `HasPropertyProto`",
-      "description": "`ConcreteHasProperty3` is not assignable to `HasPropertyProto`\n  Property getter for `ConcreteHasProperty3.f` has type `() -> int`, which is not assignable to `[T]() -> T`, the property getter for `HasPropertyProto.f`",
-      "line": 146,
+      "column": 18,
+      "concise_description": "`InvalidHasMethod` is not assignable to `HasMethod`",
+      "description": "`InvalidHasMethod` is not assignable to `HasMethod`\n  `InvalidHasMethod.m` has type `(item: int, callback: (int) -> str) -> str`, which is not assignable to `[T](item: T, callback: (T) -> str) -> str`, the type of `HasMethod.m`",
+      "line": 153,
       "name": "bad-assignment",
       "severity": "error",
-      "stop_column": 47,
-      "stop_line": 146
+      "stop_column": 36,
+      "stop_line": 153
     },
     {
       "code": -2,
-      "column": 25,
-      "concise_description": "`ConcreteHasProperty4` is not assignable to `HasPropertyProto`",
-      "description": "`ConcreteHasProperty4` is not assignable to `HasPropertyProto`\n  `ConcreteHasProperty4.m` has type `(item: str, callback: (int) -> str) -> str`, which is not assignable to `[T](item: T, callback: (T) -> str) -> str`, the type of `HasPropertyProto.m`",
-      "line": 147,
+      "column": 23,
+      "concise_description": "`InvalidGreaterThan` is not assignable to `HasGreaterThan`",
+      "description": "`InvalidGreaterThan` is not assignable to `HasGreaterThan`\n  `InvalidGreaterThan.__gt__` has type `(other: int) -> bool`, which is not assignable to `(other: InvalidGreaterThan) -> bool`, the type of `HasGreaterThan.__gt__`",
+      "line": 185,
       "name": "bad-assignment",
       "severity": "error",
-      "stop_column": 47,
-      "stop_line": 147
+      "stop_column": 43,
+      "stop_line": 185
     }
   ],
   "protocols_merging.py": [
@@ -11093,17 +10995,6 @@
   "protocols_variance.py": [
     {
       "code": -2,
-      "column": 20,
-      "concise_description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "description": "Unexpected keyword argument `contravariant` to ParamSpec",
-      "line": 15,
-      "name": "invalid-param-spec",
-      "severity": "error",
-      "stop_column": 38,
-      "stop_line": 15
-    },
-    {
-      "code": -2,
       "column": 7,
       "concise_description": "Type variable `T1` in class `AnotherBox` is declared as invariant, but could be covariant based on its usage",
       "description": "Type variable `T1` in class `AnotherBox` is declared as invariant, but could be covariant based on its usage",
@@ -11112,6 +11003,17 @@
       "severity": "warn",
       "stop_column": 17,
       "stop_line": 22
+    },
+    {
+      "code": -2,
+      "column": 7,
+      "concise_description": "Type variable `T3` in class `Protocol2` is declared as invariant, but could be contravariant based on its usage",
+      "description": "Type variable `T3` in class `Protocol2` is declared as invariant, but could be contravariant based on its usage",
+      "line": 41,
+      "name": "variance-mismatch",
+      "severity": "warn",
+      "stop_column": 16,
+      "stop_line": 41
     },
     {
       "code": -2,
@@ -13551,22 +13453,22 @@
       "column": 8,
       "concise_description": "Duplicate qualifier `Required`",
       "description": "Duplicate qualifier `Required`",
-      "line": 59,
+      "line": 60,
       "name": "invalid-annotation",
       "severity": "error",
       "stop_column": 31,
-      "stop_line": 59
+      "stop_line": 60
     },
     {
       "code": -2,
       "column": 8,
       "concise_description": "Cannot combine `Required` and `NotRequired` for a TypedDict field",
       "description": "Cannot combine `Required` and `NotRequired` for a TypedDict field",
-      "line": 60,
+      "line": 61,
       "name": "invalid-annotation",
       "severity": "error",
       "stop_column": 34,
-      "stop_line": 60
+      "stop_line": 61
     }
   ],
   "typeddicts_type_consistency.py": [

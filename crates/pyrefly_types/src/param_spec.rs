@@ -21,6 +21,7 @@ use ruff_python_ast::Identifier;
 use crate::equality::TypeEq;
 use crate::equality::TypeEqCtx;
 use crate::heap::TypeHeap;
+use crate::type_var::PreInferenceVariance;
 use crate::types::Type;
 
 /// Used to represent ParamSpec calls. Each ParamSpec is unique, so use the ArcId to separate them.
@@ -47,14 +48,21 @@ impl Display for ParamSpec {
 struct ParamSpecInner {
     qname: QName,
     default: Option<Type>,
+    variance: PreInferenceVariance,
 }
 
 impl ParamSpec {
-    pub fn new(name: Identifier, module: Module, default: Option<Type>) -> Self {
+    pub fn new(
+        name: Identifier,
+        module: Module,
+        default: Option<Type>,
+        variance: PreInferenceVariance,
+    ) -> Self {
         Self(ArcId::new(ParamSpecInner {
             // TODO: properly take parent from caller of new()
             qname: QName::new(name, NestingContext::toplevel(), module),
             default,
+            variance,
         }))
     }
 
@@ -64,6 +72,10 @@ impl ParamSpec {
 
     pub fn default(&self) -> Option<&Type> {
         self.0.default.as_ref()
+    }
+
+    pub fn variance(&self) -> PreInferenceVariance {
+        self.0.variance
     }
 
     pub fn to_type(&self, heap: &TypeHeap) -> Type {
