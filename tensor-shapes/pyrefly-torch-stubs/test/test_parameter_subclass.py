@@ -28,13 +28,13 @@ def test_parameter_keeps_exact_shapes() -> None:
 
 def test_parameter_subclass_keeps_custom_attributes() -> None:
     parameter = TaggedParameter(torch.ones((2, 3)))
-    assert_type(parameter, TaggedParameter)  # E: assert_type
-    parameter.tag = "weight"  # E: no attribute `tag`
+    assert_type(parameter, TaggedParameter)
+    parameter.tag = "weight"
     assert type(parameter) is TaggedParameter
     assert parameter.tag == "weight"
     assert tuple(parameter.shape) == (2, 3)
     empty = TaggedParameter()
-    assert_type(empty, TaggedParameter)  # E: assert_type
+    assert_type(empty, TaggedParameter)
     assert type(empty) is TaggedParameter
     assert tuple(empty.shape) == (0,)
     with assert_raises(AttributeError):
@@ -43,8 +43,8 @@ def test_parameter_subclass_keeps_custom_attributes() -> None:
 
 def test_generic_parameter_subclass_keeps_shape() -> None:
     parameter = ShapedTaggedParameter(torch.ones((2, 3)), requires_grad=False)
-    assert_type(parameter, ShapedTaggedParameter[[2, 3]])  # E: assert_type
-    parameter.tag = "bias"  # E: no attribute `tag`
+    assert_type(parameter, ShapedTaggedParameter[[2, 3]])
+    parameter.tag = "bias"
     assert type(parameter) is ShapedTaggedParameter
     assert parameter.tag == "bias"
     assert not parameter.requires_grad
