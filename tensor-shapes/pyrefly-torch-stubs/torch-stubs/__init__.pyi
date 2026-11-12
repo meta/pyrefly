@@ -4740,6 +4740,20 @@ def meshgrid(
 # above, so omitting them removes them from `torch` for every dependent target.
 def set_default_dtype(d: dtype, /) -> None: ...
 def set_default_tensor_type(t: type[Tensor] | str, /) -> None: ...
+
+# The Python binding returns its destination container, despite generated None stubs.
+@overload
+def _foreach_copy_(
+    self: list[Tensor],
+    src: tuple[Tensor, ...] | list[Tensor],
+    non_blocking: builtins.bool = False,
+) -> list[Tensor]: ...
+@overload
+def _foreach_copy_(
+    self: tuple[Tensor, ...],
+    src: tuple[Tensor, ...] | list[Tensor],
+    non_blocking: builtins.bool = False,
+) -> tuple[Tensor, ...]: ...
 @overload
 def _assert_async(input: Tensor) -> None: ...
 @overload

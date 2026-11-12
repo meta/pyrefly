@@ -13,8 +13,8 @@ def test_foreach_copy_values_and_container_identity() -> None:
     destinations = [torch.zeros(2), torch.zeros(2)]
     sources = (torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0]))
     first, second = destinations
-    result = torch._foreach_copy_(destinations, sources)  # E: No attribute
-    assert_type(result, list[torch.Tensor])  # E: assert_type
+    result = torch._foreach_copy_(destinations, sources)
+    assert_type(result, list[torch.Tensor])
     assert result is destinations
     assert destinations[0] is first
     assert destinations[1] is second
@@ -29,22 +29,20 @@ def test_foreach_copy_tuple_and_non_blocking() -> None:
     source = torch.tensor([5.0, 6.0])
     destinations = (destination,)
     sources = [source]
-    result = torch._foreach_copy_(  # E: No attribute
-        destinations, sources, non_blocking=False
-    )
-    assert_type(result, tuple[torch.Tensor, ...])  # E: assert_type
+    result = torch._foreach_copy_(destinations, sources, non_blocking=False)
+    assert_type(result, tuple[torch.Tensor, ...])
     assert result is destinations
     assert destination.tolist() == [5.0, 6.0]
     assert_shape(destination.shape, (2,))
 
 
 def test_foreach_copy_rejects_invalid_arguments() -> None:
-    with assert_raises(TypeError):
-        torch._foreach_copy_([torch.zeros(2)], "not tensors")  # E: No attribute
-    with assert_raises(TypeError):
-        torch._foreach_copy_(None, [torch.ones(2)])  # E: No attribute
-    with assert_raises(TypeError):
-        torch._foreach_copy_([torch.zeros(2)], None)  # E: No attribute
     tensor = torch.zeros(2)
     with assert_raises(TypeError):
-        torch._foreach_copy_([tensor], [tensor], "never")  # E: No attribute
+        torch._foreach_copy_([tensor], "not tensors")  # E: No matching overload
+    with assert_raises(TypeError):
+        torch._foreach_copy_(None, [tensor])  # E: No matching overload
+    with assert_raises(TypeError):
+        torch._foreach_copy_([tensor], None)  # E: No matching overload
+    with assert_raises(TypeError):
+        torch._foreach_copy_([tensor], [tensor], "never")  # E: No matching overload
