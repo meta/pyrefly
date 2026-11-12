@@ -855,6 +855,21 @@ Any explicit settings you specify override the preset.
 - Type: string (`"off"`, `"basic"`, `"legacy"`, `"default"`, `"strict"`, `"all"`)
 - Default: none (equivalent to `"default"`)
 - Flag equivalent: `-p`/`--preset`
+- Notes:
+    - `preset` can also be set in [`sub-config`](#sub-configs) sections and in
+      [build system configs](#per-target-configuration). A file uses the first preset
+      it finds, checking its build system config if it has one (see
+      [per-target configuration](#per-target-configuration)), otherwise the matching
+      sub-configs in the order they appear, then the top-level config. That preset
+      replaces the others rather than combining with them. For example, a sub-config
+      with `preset = "default"` under a top-level `preset = "basic"` restores
+      Pyrefly's default behavior for its files.
+    - Settings that any config sets explicitly take precedence over every preset.
+      If the top-level `[errors]` table sets `implicit-any = "error"`, a sub-config
+      with `preset = "off"` still reports `implicit-any` for its files unless the
+      sub-config sets it again.
+    - `--preset` replaces only the top-level preset. Sub-configs and build system
+      configs that set their own preset keep it.
 
 #### Preset: `off`
 
@@ -866,7 +881,7 @@ Silences every error kind. Other settings (scalar flags, behavior settings) are 
 
 A minimal-checking preset used when automatic configuration selection finds no migratable mypy/pyright configuration (or migration fails). It can also be selected explicitly with `preset = "basic"`, `--preset basic`, or the IDE's `"basic"` type-checking mode. It enables parse errors plus a small set of high-confidence, locally-fixable checks. Stricter checks like override validation, annotation completeness, and broader call-shape or assignment validation are disabled.
 
-- Sets [`check-unannotated-defs`](#check-unannotated-defs) `= false`, [`infer-return-types`](#infer-return-types) `= "never"`, [`infer-with-first-use`](#infer-with-first-use) `= false`, [`permissive-ignores`](#permissive-ignores) `= true`
+- Sets [`check-unannotated-defs`](#check-unannotated-defs) `= false`, [`infer-return-types`](#infer-return-types) `= "never"`, [`infer-with-first-use`](#infer-with-first-use) `= false`, and [`enabled-ignores`](#enabled-ignores) to every tool (equivalent to [`permissive-ignores`](#permissive-ignores) `= true`)
 - Enables (as errors): [`bad-class-definition`](./error-kinds.mdx#bad-class-definition), [`bad-instantiation`](./error-kinds.mdx#bad-instantiation), [`bad-keyword-argument`](./error-kinds.mdx#bad-keyword-argument), [`bad-raise`](./error-kinds.mdx#bad-raise), [`bad-unpacking`](./error-kinds.mdx#bad-unpacking), [`division-by-zero`](./error-kinds.mdx#division-by-zero), [`invalid-annotation`](./error-kinds.mdx#invalid-annotation), [`invalid-literal`](./error-kinds.mdx#invalid-literal), [`invalid-super-call`](./error-kinds.mdx#invalid-super-call), [`invalid-syntax`](./error-kinds.mdx#invalid-syntax), [`missing-import`](./error-kinds.mdx#missing-import), [`not-async`](./error-kinds.mdx#not-async), [`parse-error`](./error-kinds.mdx#parse-error), [`unexpected-keyword`](./error-kinds.mdx#unexpected-keyword), [`unexpected-positional-argument`](./error-kinds.mdx#unexpected-positional-argument), [`unknown-name`](./error-kinds.mdx#unknown-name), [`unused-coroutine`](./error-kinds.mdx#unused-coroutine)
 - Enables (as warnings): [`fallback-search-path-relative-import`](./error-kinds.mdx#fallback-search-path-relative-import)
 - Keeps as hints: [`inactive-code`](./error-kinds.mdx#inactive-code), [`unused-import`](./error-kinds.mdx#unused-import), [`unused-parameter`](./error-kinds.mdx#unused-parameter), [`unused-variable`](./error-kinds.mdx#unused-variable)
@@ -1423,26 +1438,25 @@ Pyrefly beyond selecting an entry, so a build system can choose whatever is
 convenient. Naming configs rather than spelling their settings inline lets many
 targets share settings that are sent and parsed only once.
 
-`default_config` supplies any setting a target's own config leaves unset. It also
-applies to files that belong to no target at all but are still part of the
-current config, such as a file opened in your editor that the build system does
-not know about. In the example above, `MyLib` reports `missing-import` as a
-warning and ignores errors in generated code; a target naming no config is
-checked with `repo-wide` alone.
+A file uses its target's `config` if it names one. Otherwise it uses
+`default_config`, including files that belong to no target at all but are still
+part of the current config, such as a file opened in your editor that the build
+system does not know about. The two are never combined: settings a target's
+`config` leaves unset don't come from `default_config`. In the example above,
+`MyLib` reports `missing-import` as a warning but doesn't ignore errors in
+generated code; a target naming no config is checked with `repo-wide`.
 
-Pyrefly resolves each setting to the first of these that sets a value:
+A file's build system config replaces its [sub-configs](#sub-configs), which apply
+only to files with no build system config. Pyrefly resolves each setting to the
+first of these that sets a value:
 
-1. the target's `config`
-2. `default_config`
-3. the matching [sub-config](#sub-config)
-4. the top-level config
-5. the [preset](#preset) defaults
+1. the file's build system config, or else its matching sub-configs
+2. the top-level config
+3. the [preset](#preset) from the first of the above that sets `preset`
+4. Pyrefly's built-in defaults
 
-Resolution happens one whole setting at a time. `errors` is a single setting, so
-if the config of the target that owns a file sets `errors` at all, that map is
-the entire build-system contribution for that file, and `default_config`'s
-`errors` is not consulted. That map is then merged over the sub-config and
-top-level maps, so it only has to name the error kinds it changes.
+A build system config's `errors` map is merged over the top-level map, so it only
+has to name the error kinds it changes.
 
 If a `config` or `default_config` names an entry that `configs` does not define,
 Pyrefly rejects the whole response and reports the error instead of type
@@ -1740,18 +1754,25 @@ that can apply to a given file when the `matches` glob pattern matches.
 
 We currently allow the following config options to be overridden in a SubConfig:
 
+- `preset`
 - `errors`
 - `replace-imports-with-any`
 - `replace-untyped-imports-with-any`
 - `check-unannotated-defs`
 - `infer-return-types`
 - `ignore-errors-in-generated-code`
+- `permissive-ignores`
+- `enabled-ignores`
 
 Most SubConfig overrides _replace_ the values appearing in the 'root' or top-level of the
 Pyrefly configuration. The exception is `errors`: a sub-config's error overrides are _merged_ with
 the root config's error overrides. The sub-config inherits error severities from the root for any
 error codes it doesn't explicitly set, and can override specific error codes on top of the root
 defaults.
+
+A sub-config's `preset` replaces the top-level preset for the files it matches, but explicit
+settings in the top-level config, including its `errors`, still take precedence over it. See
+[`preset`](#preset).
 
 Any configs that change the list of files we're type checking, Python environment, or where we look
 for imports cannot be included in SubConfigs. Some other configs we also do not include because
@@ -1776,6 +1797,14 @@ value that can be found in the order the SubConfigs appear in your configuration
 
 If no SubConfigs match, or there are no non-null config options present, then we take
 the value in the 'root'/top-level Pyrefly config (or Pyrefly default if no value is specified).
+
+`errors` follows the same rule: only the first matching SubConfig that sets `errors` is merged
+over the top-level `errors`, and the `errors` of later matching SubConfigs are not used. A
+`preset` is likewise taken from the first matching SubConfig that sets one, even if an earlier
+matching SubConfig sets only `errors`.
+
+When a [build system](#build-system) supplies a config for a file, SubConfigs don't apply to that
+file. See [per-target configuration](#per-target-configuration).
 
 #### **SubConfig Example**
 

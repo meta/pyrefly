@@ -14,6 +14,11 @@
     "configBase": {
       "type": "object",
       "properties": {
+        "preset": {
+          "description": "Named preset that provides default error severities and behavior settings. Settings that any config sets explicitly override the preset. In a sub-config, replaces the top-level preset for matching files.",
+          "type": "string",
+          "enum": ["off", "basic", "legacy", "default", "strict", "all"]
+        },
         "errors": {
           "description": "Configure the severity for each kind of error that Pyrefly emits. Set error code to true to enable (default severity), false to disable, or use a severity string ('ignore', 'info', 'warn', 'error'). Any valid Pyrefly error code can be used, not just the ones listed here.",
           "type": "object",
@@ -121,11 +126,6 @@
           "description": "A PEP 440 version specifier that the running version of Pyrefly must satisfy.",
           "type": "string",
           "examples": [">=1.2.0", ">=1.2.0,<2.0.0", "==1.2.0"]
-        },
-        "preset": {
-          "description": "Named preset that provides default error severities and behavior settings. User-specified settings override the preset.",
-          "type": "string",
-          "enum": ["off", "basic", "legacy", "default", "strict", "all"]
         },
         "project-includes": {
           "description": "The glob patterns used to describe which files to type check, typically understood as user-space files. This does not specify import resolution priority.",
