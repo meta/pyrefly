@@ -36,9 +36,7 @@ def test_view_mixed_fixed_and_starred_sizes() -> None:
 
 
 def partition_view(source: Tensor) -> Tensor:
-    result = source.view(  # E: Unpacked argument
-        *source.shape[:-2], 2, -1, *source.shape[-1:]
-    )
+    result = source.view(*source.shape[:-2], 2, -1, *source.shape[-1:])
     assert_type(result, Tensor)
     return result
 

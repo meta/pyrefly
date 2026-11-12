@@ -1011,6 +1011,8 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     # ratio of the byte widths, which this overlay does not track.
     @overload
     def view(self, dtype: _DType) -> Tensor: ...
+    @overload
+    def view(self, *size: builtins.int) -> Tensor: ...
     def flatten[
         Shape: IntTuple,
         StartDim: Flag[builtins.int],
