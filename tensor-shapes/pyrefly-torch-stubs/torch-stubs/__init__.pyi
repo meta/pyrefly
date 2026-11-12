@@ -1815,7 +1815,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         ...
 
     def cumsum[Shape: IntTuple](
-        self: Tensor[Shape], dim: builtins.int
+        self: Tensor[Shape], dim: builtins.int, *, dtype: _DType | None = None
     ) -> Tensor[Shape]:
         """Cumulative sum along dimension. Shape-preserving operation."""
         ...
@@ -3512,7 +3512,13 @@ def dist(
     """Compute distance between tensors. Returns scalar tensor."""
     ...
 
-def cumsum[Shape: IntTuple](input: Tensor[Shape], dim: int) -> Tensor[Shape]:
+def cumsum[Shape: IntTuple](
+    input: Tensor[Shape],
+    dim: builtins.int,
+    *,
+    dtype: dtype | None = None,
+    out: Tensor | None = None,
+) -> Tensor[Shape]:
     """Cumulative sum along dimension. Shape-preserving operation."""
     ...
 
