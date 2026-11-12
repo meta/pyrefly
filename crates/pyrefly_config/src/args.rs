@@ -794,7 +794,14 @@ impl ConfigOverrideArgs {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use pyrefly_python::module_path::ModulePath;
+    use pyrefly_util::globs::Glob;
+
     use super::*;
+    use crate::base::ConfigBase;
+    use crate::config::SubConfig;
 
     #[test]
     fn repeated_python_platform_flags_merge() {
@@ -852,5 +859,68 @@ mod tests {
 
             assert!(!config.interpreters.skip_interpreter_query);
         }
+    }
+
+    #[test]
+    fn sub_config_without_errors_does_not_shadow_later_sub_config_errors() {
+        let config = ConfigFile {
+            sub_configs: vec![
+                SubConfig {
+                    matches: Glob::new("src/**".to_owned()).unwrap(),
+                    settings: ConfigBase {
+                        check_unannotated_defs: Some(false),
+                        ..Default::default()
+                    },
+                },
+                SubConfig {
+                    matches: Glob::new("src/strict/**".to_owned()).unwrap(),
+                    settings: ConfigBase {
+                        errors: Some(ErrorDisplayConfig::new(HashMap::from([(
+                            ErrorKind::BadReturn,
+                            Severity::Warn,
+                        )]))),
+                        ..Default::default()
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+        let args = ConfigOverrideArgs::parse_from(["pyrefly", "--skip-interpreter-query"]);
+        let (config, _) = args.override_config(config);
+        let path = ModulePath::filesystem(PathBuf::from("src/strict/foo.py"));
+        // BUG: should be `Warn`. `override_config` gives every sub-config an errors map,
+        // so the first sub-config shadows the second sub-config's `[errors]`.
+        assert_eq!(
+            config.errors(&path).severity(ErrorKind::BadReturn),
+            Severity::Error
+        );
+    }
+
+    #[test]
+    fn cli_preset_replaces_only_root_preset() {
+        let config = ConfigFile::parse_config(
+            r#"
+            preset = "basic"
+            [[sub-config]]
+            matches = "sub/**"
+            preset = "default"
+            "#,
+        )
+        .unwrap();
+        let args = ConfigOverrideArgs::parse_from([
+            "pyrefly",
+            "--skip-interpreter-query",
+            "--preset",
+            "off",
+        ]);
+        let (config, _) = args.override_config(config);
+        let severity = |path: &str| {
+            config
+                .errors(&ModulePath::filesystem(PathBuf::from(path)))
+                .severity(ErrorKind::BadReturn)
+        };
+        assert_eq!(severity("other/foo.py"), Severity::Ignore);
+        // BUG: should be `Error` from the sub-config's `default` preset.
+        assert_eq!(severity("sub/foo.py"), Severity::Ignore);
     }
 }

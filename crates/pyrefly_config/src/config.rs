@@ -4601,6 +4601,232 @@ output-format = "omit-errors"
         );
     }
 
+    fn configure_toml(toml: &str) -> ConfigFile {
+        let mut config = ConfigFile::parse_config(toml).unwrap();
+        config.configure();
+        config
+    }
+
+    #[test]
+    fn test_sub_config_preset_replaces_root_preset() {
+        let config = configure_toml(
+            r#"
+            preset = "basic"
+            [[sub-config]]
+            matches = "all/**"
+            preset = "all"
+            [[sub-config]]
+            matches = "default/**"
+            preset = "default"
+            "#,
+        );
+        // BUG: sub-config presets are ignored, so every file uses the root's `basic` preset.
+        for dir in ["all", "default"] {
+            let path = test_path(&format!("{dir}/foo.py"));
+            // Should be `Error`, the built-in default.
+            assert_eq!(
+                config.errors(&path).severity(ErrorKind::BadReturn),
+                Severity::Ignore
+            );
+            // Should be `true`, the built-in default.
+            assert!(!config.check_unannotated_defs(&path));
+        }
+        // Should be `Error` from the `all` preset.
+        assert_eq!(
+            config
+                .errors(&test_path("all/foo.py"))
+                .severity(ErrorKind::ImplicitAny),
+            Severity::Ignore
+        );
+    }
+
+    #[test]
+    fn test_root_explicit_settings_beat_sub_config_preset() {
+        let config = configure_toml(
+            r#"
+            check-unannotated-defs = true
+            [errors]
+            bad-return = "warn"
+            bad-override = "error"
+            [[sub-config]]
+            matches = "off/**"
+            preset = "off"
+            [[sub-config]]
+            matches = "legacy/**"
+            preset = "legacy"
+            "#,
+        );
+        let errors = config.errors(&test_path("off/foo.py"));
+        assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Warn);
+        // BUG: should be `Ignore` from the sub-config's `off` preset.
+        assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Error);
+
+        let legacy = test_path("legacy/foo.py");
+        // The root's parent kind cascades over the `legacy` preset's child kind.
+        assert_eq!(
+            config
+                .errors(&legacy)
+                .severity(ErrorKind::BadOverrideMutableAttribute),
+            Severity::Error
+        );
+        assert!(config.check_unannotated_defs(&legacy));
+        // BUG: should be `Never` from the sub-config's `legacy` preset.
+        assert_eq!(
+            config.infer_return_types(&legacy),
+            InferReturnTypes::Checked
+        );
+    }
+
+    #[test]
+    fn test_sub_config_permissive_ignores() {
+        let config = configure_toml(
+            r#"
+            [[sub-config]]
+            matches = "basic/**"
+            preset = "basic"
+            [[sub-config]]
+            matches = "permissive/**"
+            permissive-ignores = true
+            "#,
+        );
+        // BUG: should be `Tool::all()`. Only the root applies `permissive-ignores`.
+        for dir in ["basic", "permissive"] {
+            assert_eq!(
+                *config.enabled_ignores(&test_path(&format!("{dir}/foo.py"))),
+                Tool::default_enabled()
+            );
+        }
+    }
+
+    /// Errors from several matching sub-configs don't combine, but the preset comes from
+    /// the first matching sub-config that sets one, even if an earlier one sets only errors.
+    #[test]
+    fn test_preset_from_later_matching_sub_config() {
+        let config = configure_toml(
+            r#"
+            [[sub-config]]
+            matches = "src/**"
+            [sub-config.errors]
+            bad-return = "warn"
+            [[sub-config]]
+            matches = "src/generated/**"
+            preset = "basic"
+            [[sub-config]]
+            matches = "src/generated/**"
+            preset = "legacy"
+            "#,
+        );
+        let path = test_path("src/generated/foo.py");
+        let errors = config.errors(&path);
+        assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Warn);
+        // BUG: these should all come from the second sub-config's `basic` preset.
+        assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Error);
+        assert!(config.check_unannotated_defs(&path));
+        // `legacy`, from the third sub-config, would leave this `true`.
+        assert!(config.infer_with_first_use(&path));
+    }
+
+    /// The errors come from the first matching sub-config that sets them, even if an
+    /// earlier one sets only a preset.
+    #[test]
+    fn test_errors_from_later_matching_sub_config() {
+        let config = configure_toml(
+            r#"
+            [[sub-config]]
+            matches = "src/**"
+            preset = "basic"
+            [[sub-config]]
+            matches = "src/generated/**"
+            [sub-config.errors]
+            bad-return = "warn"
+            "#,
+        );
+        let path = test_path("src/generated/foo.py");
+        let errors = config.errors(&path);
+        assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Warn);
+        // BUG: these should come from the first sub-config's `basic` preset.
+        assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Error);
+        assert!(config.check_unannotated_defs(&path));
+    }
+
+    /// Build a config with a root preset and a sub-config preset, plus build-system
+    /// `target` and `default` configs, when given, that own every file.
+    fn build_system_preset_config(
+        target: Option<serde_json::Value>,
+        default: Option<serde_json::Value>,
+    ) -> ConfigFile {
+        let mut configs = HashMap::new();
+        let mut add_config = |name: &str, config: Option<serde_json::Value>| {
+            config.map(|config| {
+                let name: ConfigName = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+                configs.insert(name.dupe(), config);
+                name
+            })
+        };
+        let target_config_name = add_config("target", target);
+        let default_config_name = add_config("default", default);
+        let mut config = ConfigFile::parse_config(
+            r#"
+            preset = "strict"
+            [errors]
+            bad-return = "warn"
+            [[sub-config]]
+            matches = "sub/**"
+            preset = "legacy"
+            "#,
+        )
+        .unwrap();
+        config.source_db = Some(ArcId::new(Box::new(TestSourceDatabase {
+            target_config_name,
+            default_config_name,
+            configs,
+        })));
+        config.configure();
+        config
+    }
+
+    /// The preset comes from the target config if there is one, otherwise from
+    /// `default_config` if there is one, otherwise from the matching sub-configs, and
+    /// finally from the root.
+    #[test]
+    fn test_build_system_preset_precedence() {
+        let path = test_path("sub/foo.py");
+
+        // Each case's presets disagree on the setting it checks.
+        let config = build_system_preset_config(
+            Some(serde_json::json!({"preset": "off"})),
+            Some(serde_json::json!({"preset": "strict"})),
+        );
+        let errors = config.errors(&path);
+        assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Warn);
+        // BUG: should be `Ignore` from the target config's `off` preset.
+        assert_eq!(errors.severity(ErrorKind::ImplicitAny), Severity::Error);
+
+        let config = build_system_preset_config(None, Some(serde_json::json!({"preset": "basic"})));
+        // BUG: should be `false` from the default config's `basic` preset.
+        assert!(config.infer_with_first_use(&path));
+
+        let config = build_system_preset_config(None, None);
+        // BUG: should be `Never` from the sub-config's `legacy` preset.
+        assert_eq!(config.infer_return_types(&path), InferReturnTypes::Checked);
+        assert_eq!(
+            config
+                .errors(&test_path("other/foo.py"))
+                .severity(ErrorKind::ImplicitAny),
+            Severity::Error
+        );
+
+        // An empty target config should still replace `default_config` and the
+        // sub-configs, leaving the root's `strict` preset. This holds trivially until
+        // build system configs can set a preset.
+        let config = build_system_preset_config(
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({"preset": "basic"})),
+        );
+        assert!(config.infer_with_first_use(&path));
+        assert_eq!(config.infer_return_types(&path), InferReturnTypes::Checked);
+    }
+
     #[test]
     fn test_preset_user_deprecated_alias_overrides_preset_canonical() {
         // The deprecated alias `bad-param-name-override` should override the
