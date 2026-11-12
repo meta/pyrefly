@@ -3795,9 +3795,9 @@ dependencies = [
 
 [[package]]
 name = "uv-cache-key"
-version = "0.0.98"
+version = "0.0.99"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb3ffa26559d80832f543b1c88286a6d4846d4c67d039895cc9725c2e616b256"
+checksum = "05711f2ea8251eaa63aba0fab9138215e5c5ba67546a8a4653de20d2859805b8"
 dependencies = [
  "hex",
  "memchr",
@@ -3808,9 +3808,9 @@ dependencies = [
 
 [[package]]
 name = "uv-pep440"
-version = "0.0.98"
+version = "0.0.99"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8421755a28fb4daa84d567efbd75f0e4f840a4e06fa4c522399a25eae8b9c25b"
+checksum = "51f9d8e9a50348bf1b799efa7e1ae577969083cd3c1e70acafb93abd60e5a31d"
 dependencies = [
  "astral-version-ranges",
  "serde",
@@ -3821,9 +3821,9 @@ dependencies = [
 
 [[package]]
 name = "uv-redacted"
-version = "0.0.98"
+version = "0.0.99"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22c7e24098ac1b47db1c3f6e7c28c06a60c408437c0311aaded00f44e356b4d2"
+checksum = "f18ba0c9924c2fc0ed59e504f9efca9cd02fda0696451b1ae95944d55d24b204"
 dependencies = [
  "ref-cast",
  "serde",
