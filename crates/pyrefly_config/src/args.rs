@@ -743,9 +743,14 @@ impl ConfigOverrideArgs {
         };
         let root_errors = config.root.errors.get_or_insert_default();
         apply_error_settings(root_errors);
-        for sub_config in config.sub_configs.iter_mut() {
-            let sub_config_errors = sub_config.settings.errors.get_or_insert_default();
-            apply_error_settings(sub_config_errors);
+        // A sub-config without `errors` inherits the root's, so it gets the overrides
+        // from there. Giving it its own map would hide a later matching sub-config's.
+        // Legacy settings are resolved first because they can give a sub-config a map.
+        for sub_config in &mut config.sub_configs {
+            sub_config.settings.resolve_legacy_settings();
+            if let Some(errors) = &mut sub_config.settings.errors {
+                apply_error_settings(errors);
+            }
         }
         let mut errors = config.configure_at(project_root);
         if let Some(names) = self.environment.module_names() {
@@ -875,24 +880,60 @@ mod tests {
                 SubConfig {
                     matches: Glob::new("src/strict/**".to_owned()).unwrap(),
                     settings: ConfigBase {
-                        errors: Some(ErrorDisplayConfig::new(HashMap::from([(
-                            ErrorKind::BadReturn,
-                            Severity::Warn,
-                        )]))),
+                        errors: Some(ErrorDisplayConfig::new(HashMap::from([
+                            (ErrorKind::BadReturn, Severity::Warn),
+                            (ErrorKind::BadAssignment, Severity::Error),
+                        ]))),
                         ..Default::default()
                     },
                 },
             ],
             ..Default::default()
         };
-        let args = ConfigOverrideArgs::parse_from(["pyrefly", "--skip-interpreter-query"]);
+        let args = ConfigOverrideArgs::parse_from([
+            "pyrefly",
+            "--skip-interpreter-query",
+            "--ignore",
+            "bad-assignment",
+        ]);
         let (config, _) = args.override_config(config);
-        let path = ModulePath::filesystem(PathBuf::from("src/strict/foo.py"));
-        // BUG: should be `Warn`. `override_config` gives every sub-config an errors map,
-        // so the first sub-config shadows the second sub-config's `[errors]`.
+        let strict = config.errors(&ModulePath::filesystem(PathBuf::from("src/strict/foo.py")));
+        assert_eq!(strict.severity(ErrorKind::BadReturn), Severity::Warn);
+        // CLI overrides reach sub-configs with and without their own `errors`, and beat
+        // their explicit settings.
+        assert_eq!(strict.severity(ErrorKind::BadAssignment), Severity::Ignore);
         assert_eq!(
-            config.errors(&path).severity(ErrorKind::BadReturn),
-            Severity::Error
+            config
+                .errors(&ModulePath::filesystem(PathBuf::from("src/foo.py")))
+                .severity(ErrorKind::BadAssignment),
+            Severity::Ignore
+        );
+    }
+
+    #[test]
+    fn cli_error_flags_beat_sub_config_pytorch_efficiency_lints() {
+        let config = ConfigFile {
+            sub_configs: vec![SubConfig {
+                matches: Glob::new("src/**".to_owned()).unwrap(),
+                settings: ConfigBase {
+                    pytorch_efficiency_lints: Some(true),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let args = ConfigOverrideArgs::parse_from([
+            "pyrefly",
+            "--skip-interpreter-query",
+            "--ignore",
+            "pytorch-efficiency-lints",
+        ]);
+        let (config, _) = args.override_config(config);
+        assert_eq!(
+            config
+                .errors(&ModulePath::filesystem(PathBuf::from("src/foo.py")))
+                .severity(ErrorKind::PytorchEfficiencyLints),
+            Severity::Ignore
         );
     }
 
