@@ -3142,9 +3142,12 @@ def zeros(
 @overload
 def ones[Shape: IntTuple](
     *size: *Shape,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create tensor filled with ones. Shape is inferred from `size`."""
     ...
@@ -3153,9 +3156,12 @@ def ones[Shape: IntTuple](
 def ones[Shape: IntTuple](
     size: Shape,
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create tensor filled with ones. Shape is inferred from `size`."""
     ...
@@ -3164,9 +3170,12 @@ def ones[Shape: IntTuple](
 def ones(
     size: Sequence[builtins.int],
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor: ...
 @overload
 def empty[Shape: IntTuple](
