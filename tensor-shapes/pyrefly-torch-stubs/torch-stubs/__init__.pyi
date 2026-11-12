@@ -1660,12 +1660,34 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Product along dimension(s). Shape inference via meta-shape: torch.prod"""
         ...
 
+    # Torch reads a positional argument after `dim` as `unbiased`, not `keepdim`.
+    @overload
+    def std(self, unbiased: builtins.bool = True) -> Tensor[[]]: ...
+    @overload
     def std[
         Shape: IntTuple,
         Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
         Keepdim: Flag[builtins.bool],
     ](
-        self: Tensor[Shape], dim: Dim = None, keepdim: Keepdim = False
+        self: Tensor[Shape],
+        dim: Dim = None,
+        *,
+        correction: builtins.float | builtins.complex | None = None,
+        keepdim: Keepdim = False,
+    ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
+        """Standard deviation along dimension(s). Shape inference via meta-shape: torch.std"""
+        ...
+
+    @overload
+    def std[
+        Shape: IntTuple,
+        Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
+        Keepdim: Flag[builtins.bool],
+    ](
+        self: Tensor[Shape],
+        dim: Dim,
+        unbiased: builtins.bool = True,
+        keepdim: Keepdim = False,
     ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
         """Standard deviation along dimension(s). Shape inference via meta-shape: torch.std"""
         ...
@@ -2895,12 +2917,34 @@ def prod[Shape: IntTuple, Dim: Flag[builtins.int | None], Keepdim: Flag[builtins
     """Product along dimension(s). Shape inference via meta-shape: torch.prod"""
     ...
 
+# Torch reads a positional argument after `dim` as `unbiased`, not `keepdim`.
+@overload
+def std(input: Tensor, unbiased: builtins.bool = True) -> Tensor[[]]: ...
+@overload
 def std[
     Shape: IntTuple,
     Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
     Keepdim: Flag[builtins.bool],
 ](
-    input: Tensor[Shape], dim: Dim = None, keepdim: Keepdim = False
+    input: Tensor[Shape],
+    dim: Dim = None,
+    *,
+    correction: builtins.float | builtins.complex | None = None,
+    keepdim: Keepdim = False,
+) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
+    """Standard deviation. Shape inference via meta-shape: torch.std"""
+    ...
+
+@overload
+def std[
+    Shape: IntTuple,
+    Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
+    Keepdim: Flag[builtins.bool],
+](
+    input: Tensor[Shape],
+    dim: Dim,
+    unbiased: builtins.bool = True,
+    keepdim: Keepdim = False,
 ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
     """Standard deviation. Shape inference via meta-shape: torch.std"""
     ...
