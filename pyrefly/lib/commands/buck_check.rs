@@ -154,7 +154,7 @@ fn compute_errors(
     config.extra_file_extensions = extra_file_extensions;
     config.interpreters.skip_interpreter_query = true;
     config.disable_search_path_heuristics = true;
-    config.preset = options.preset;
+    config.root.preset = options.preset;
     config.root.permissive_ignores = Some(true);
     config.root.ignore_errors_in_generated_code = Some(true);
 

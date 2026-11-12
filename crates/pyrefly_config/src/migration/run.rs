@@ -151,7 +151,7 @@ pub fn find_and_migrate_in_memory(
                 // basedpyright's default type checking mode migrates to the
                 // `all` preset, while an explicit mode pins no preset at all —
                 // which is what `Preset::Default` means.
-                let preset = cfg.preset.unwrap_or(Preset::Default);
+                let preset = cfg.root.preset.unwrap_or(Preset::Default);
                 Ok(Some((
                     cfg,
                     MigratedFromKind::BasedPyright(MigratedConfigSource::PyprojectToml, preset),
@@ -1108,7 +1108,7 @@ files = ["mypy.py"]
             MigratedFromKind::Mypy(MigratedConfigSource::DedicatedFile)
         );
         // Mypy migration sets the legacy preset.
-        assert_eq!(cfg.preset, Some(Preset::Legacy));
+        assert_eq!(cfg.root.preset, Some(Preset::Legacy));
         // Full migration also sets check_unannotated_defs (mypy's
         // `check_untyped_defs` maps to pyrefly's `check_unannotated_defs`).
         assert_eq!(cfg.root.check_unannotated_defs, Some(true));

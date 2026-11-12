@@ -279,6 +279,10 @@ impl Display for Preset {
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct ConfigBase {
+    /// Named preset that provides default error severities and behavior settings.
+    /// Settings that any config sets explicitly override the preset.
+    pub preset: Option<Preset>,
+
     /// Errors to silence (or not) when printing errors.
     pub errors: Option<ErrorDisplayConfig>,
 
@@ -447,6 +451,7 @@ impl ConfigBase {
     pub(crate) fn fill_unset_from(&mut self, other: &ConfigBase) {
         // Destructure so that adding a field without handling it here is a compile error.
         let ConfigBase {
+            preset,
             errors: _,
             permissive_ignores,
             enabled_ignores,
@@ -481,6 +486,7 @@ impl ConfigBase {
             };
         }
         fill!(
+            preset,
             permissive_ignores,
             enabled_ignores,
             type_ignore_unknown_tag_behavior,

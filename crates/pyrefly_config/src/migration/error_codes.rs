@@ -56,7 +56,7 @@ impl ConfigOptionMigrater for ErrorCodes {
         // Use the `legacy` preset as the base. The preset handles defaults
         // like disabling mutable-override and param-name-override. Any explicit
         // error code overrides from the mypy config are added on top.
-        pyrefly_cfg.preset = Some(Preset::Legacy);
+        pyrefly_cfg.root.preset = Some(Preset::Legacy);
         if let Some(error_config) = error_config {
             pyrefly_cfg.root.errors = Some(error_config);
         }
@@ -188,7 +188,7 @@ mod tests {
             .expect("migration should succeed");
 
         // Empty mypy config sets the `legacy` preset; no explicit error overrides
-        assert_eq!(pyrefly_cfg.preset, Some(Preset::Legacy));
+        assert_eq!(pyrefly_cfg.root.preset, Some(Preset::Legacy));
         assert!(pyrefly_cfg.root.errors.is_none());
 
         // After configure(), the preset disables mutable-override and unbound-name

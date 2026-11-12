@@ -734,10 +734,6 @@ pub struct ConfigFile {
     #[serde(flatten)]
     pub python_environment: PythonEnvironment,
 
-    /// Named preset that provides default error severities and behavior settings.
-    /// User-specified settings override the preset.
-    pub preset: Option<Preset>,
-
     /// The `ConfigBase` values for the whole project.
     #[serde(flatten)]
     pub root: ConfigBase,
@@ -874,7 +870,6 @@ impl Default for ConfigFile {
             import_root: None,
             fallback_search_path: Default::default(),
             python_environment: Default::default(),
-            preset: None,
             root: Default::default(),
             sub_configs: Default::default(),
             coverage: Default::default(),
@@ -1492,16 +1487,16 @@ impl ConfigFile {
         if let Some(resolved) = self.resolved_configs.0.read().get(&key) {
             return resolved.dupe();
         }
-        let preset = self.preset.map(Preset::apply);
 
         let mut settings = ConfigBase::default();
-        for config in layers
-            .iter()
-            .copied()
-            .chain([&self.root])
-            .chain(preset.as_ref())
-        {
+        for config in layers.iter().copied().chain([&self.root]) {
             settings.fill_unset_from(config);
+        }
+        // The preset is taken from the most specific config that sets one, and it
+        // applies beneath every config's explicit settings.
+        let preset = settings.preset.map(Preset::apply);
+        if let Some(preset) = &preset {
+            settings.fill_unset_from(preset);
         }
         settings.fill_unset_from(&ConfigBase::builtin_defaults());
 
@@ -2847,7 +2842,6 @@ mod tests {
                 enable_fallback_search_path: false,
                 disable_project_excludes_heuristics: false,
                 import_root: None,
-                preset: None,
                 build_system: Default::default(),
                 use_ignore_files: true,
                 script_command: None,
@@ -2879,6 +2873,7 @@ mod tests {
                     skip_interpreter_query: false,
                 },
                 root: ConfigBase {
+                    preset: None,
                     extras: Default::default(),
                     errors: Some(ErrorDisplayConfig::new(HashMap::from_iter([
                         (ErrorKind::BadReturn, Severity::Ignore),
@@ -2914,6 +2909,7 @@ mod tests {
                 sub_configs: vec![SubConfig {
                     matches: Glob::new("sub/project/**".to_owned()).unwrap(),
                     settings: ConfigBase {
+                        preset: None,
                         extras: Default::default(),
                         errors: Some(ErrorDisplayConfig::new(HashMap::from_iter([
                             (ErrorKind::InvalidYield, Severity::Ignore),
@@ -3265,7 +3261,6 @@ mod tests {
             enable_fallback_search_path: false,
             disable_project_excludes_heuristics: false,
             import_root: None,
-            preset: None,
             use_ignore_files: true,
             script_command: None,
             output_format: Some(OutputFormat::Json),
@@ -3363,7 +3358,6 @@ mod tests {
             script_command: None,
             output_format: Some(OutputFormat::Json),
             import_root: None,
-            preset: None,
             fallback_search_path: Default::default(),
             python_environment,
             root: Default::default(),
@@ -3659,6 +3653,7 @@ output-format = "omit-errors"
     fn test_settings_from_sub_configs() {
         let config = ConfigFile {
             root: ConfigBase {
+                preset: None,
                 errors: Some(Default::default()),
                 replace_imports_with_any: Some(vec![ModuleWildcard::new("root").unwrap()]),
                 ignore_missing_imports: None,
@@ -4156,7 +4151,10 @@ output-format = "omit-errors"
     #[test]
     fn test_preset_legacy_applies_defaults() {
         let mut config = ConfigFile {
-            preset: Some(Preset::Legacy),
+            root: ConfigBase {
+                preset: Some(Preset::Legacy),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.configure();
@@ -4182,8 +4180,8 @@ output-format = "omit-errors"
     #[test]
     fn test_preset_user_settings_override() {
         let mut config = ConfigFile {
-            preset: Some(Preset::Legacy),
             root: ConfigBase {
+                preset: Some(Preset::Legacy),
                 check_unannotated_defs: Some(true),
                 replace_untyped_imports_with_any: Some(vec![ModuleWildcard::new("!*").unwrap()]),
                 errors: Some(ErrorDisplayConfig::new(HashMap::from([(
@@ -4227,10 +4225,25 @@ output-format = "omit-errors"
         assert!(config.infer_param_types_from_docstring(&path));
     }
 
+    /// `resolved` without the name of the preset it applied, for comparing against a
+    /// config that sets the preset's values explicitly.
+    fn ignoring_preset(resolved: &ResolvedConfig) -> ResolvedConfig {
+        ResolvedConfig {
+            settings: ConfigBase {
+                preset: None,
+                ..resolved.settings.clone()
+            },
+            errors: resolved.errors.dupe(),
+        }
+    }
+
     #[test]
     fn test_preset_default_is_noop() {
         let mut with_preset = ConfigFile {
-            preset: Some(Preset::Default),
+            root: ConfigBase {
+                preset: Some(Preset::Default),
+                ..Default::default()
+            },
             ..Default::default()
         };
         with_preset.configure();
@@ -4239,13 +4252,19 @@ output-format = "omit-errors"
         without_preset.configure();
 
         let path = test_path("foo.py");
-        assert_eq!(with_preset.resolved(&path), without_preset.resolved(&path));
+        assert_eq!(
+            ignoring_preset(&with_preset.resolved(&path)),
+            *without_preset.resolved(&path)
+        );
     }
 
     #[test]
     fn test_preset_strict_enables_errors() {
         let mut config = ConfigFile {
-            preset: Some(Preset::Strict),
+            root: ConfigBase {
+                preset: Some(Preset::Strict),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.configure();
@@ -4346,7 +4365,10 @@ output-format = "omit-errors"
         // The `off` preset silences every error kind and leaves all other
         // settings at their defaults.
         let mut config = ConfigFile {
-            preset: Some(Preset::Off),
+            root: ConfigBase {
+                preset: Some(Preset::Off),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.configure();
@@ -4365,7 +4387,7 @@ output-format = "omit-errors"
         let mut default_config = ConfigFile::default();
         default_config.configure();
         assert_eq!(
-            config.resolved(&path).settings,
+            ignoring_preset(&config.resolved(&path)).settings,
             default_config.resolved(&path).settings
         );
     }
@@ -4373,7 +4395,10 @@ output-format = "omit-errors"
     #[test]
     fn test_preset_all_keeps_hints() {
         let mut config = ConfigFile {
-            preset: Some(Preset::All),
+            root: ConfigBase {
+                preset: Some(Preset::All),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.configure();
@@ -4390,7 +4415,10 @@ output-format = "omit-errors"
         // should have their configured severities; every other kind should
         // be Ignore.
         let mut config = ConfigFile {
-            preset: Some(Preset::Basic),
+            root: ConfigBase {
+                preset: Some(Preset::Basic),
+                ..Default::default()
+            },
             ..Default::default()
         };
         config.configure();
@@ -4472,7 +4500,7 @@ output-format = "omit-errors"
     fn test_preset_deserialization() {
         let config_str = r#"preset = "legacy""#;
         let config: ConfigFile = toml::from_str(config_str).unwrap();
-        assert_eq!(config.preset, Some(Preset::Legacy));
+        assert_eq!(config.root.preset, Some(Preset::Legacy));
     }
 
     #[test]
@@ -4481,7 +4509,10 @@ output-format = "omit-errors"
         // its fields explicitly.
         for preset in enum_iterator::all::<Preset>() {
             let mut via_preset = ConfigFile {
-                preset: Some(preset),
+                root: ConfigBase {
+                    preset: Some(preset),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             via_preset.configure();
@@ -4494,8 +4525,8 @@ output-format = "omit-errors"
 
             let path = test_path("foo.py");
             assert_eq!(
-                via_preset.resolved(&path),
-                via_fields.resolved(&path),
+                ignoring_preset(&via_preset.resolved(&path)),
+                *via_fields.resolved(&path),
                 "Preset `{preset:?}`: applying it via `preset = ...` resolved different \
                  settings from setting its fields directly."
             );
@@ -4509,8 +4540,8 @@ output-format = "omit-errors"
         // `Ignore` entries so the user's broader override actually takes
         // effect.
         let mut config = ConfigFile {
-            preset: Some(Preset::Legacy),
             root: ConfigBase {
+                preset: Some(Preset::Legacy),
                 errors: Some(ErrorDisplayConfig::new(HashMap::from([(
                     ErrorKind::BadOverride,
                     Severity::Error,
@@ -4540,7 +4571,10 @@ output-format = "omit-errors"
         // the sub-config sets `BadOverride = Error`. This gives sub-configs
         // the same "least surprise" behavior as root overrides.
         let mut config = ConfigFile {
-            preset: Some(Preset::Legacy),
+            root: ConfigBase {
+                preset: Some(Preset::Legacy),
+                ..Default::default()
+            },
             sub_configs: vec![SubConfig {
                 matches: Glob::new("tests/**".to_owned()).unwrap(),
                 settings: ConfigBase {
@@ -4585,22 +4619,26 @@ output-format = "omit-errors"
             preset = "default"
             "#,
         );
-        // BUG: sub-config presets are ignored, so every file uses the root's `basic` preset.
+        // The sub-config presets replace the root's `basic` preset rather than stacking
+        // on it, so settings that `basic` changes return to their built-in defaults.
         for dir in ["all", "default"] {
             let path = test_path(&format!("{dir}/foo.py"));
-            // Should be `Error`, the built-in default.
             assert_eq!(
                 config.errors(&path).severity(ErrorKind::BadReturn),
-                Severity::Ignore
+                Severity::Error
             );
-            // Should be `true`, the built-in default.
-            assert!(!config.check_unannotated_defs(&path));
+            assert!(config.check_unannotated_defs(&path));
         }
-        // Should be `Error` from the `all` preset.
         assert_eq!(
             config
                 .errors(&test_path("all/foo.py"))
                 .severity(ErrorKind::ImplicitAny),
+            Severity::Error
+        );
+        assert_eq!(
+            config
+                .errors(&test_path("other/foo.py"))
+                .severity(ErrorKind::BadReturn),
             Severity::Ignore
         );
     }
@@ -4623,8 +4661,7 @@ output-format = "omit-errors"
         );
         let errors = config.errors(&test_path("off/foo.py"));
         assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Warn);
-        // BUG: should be `Ignore` from the sub-config's `off` preset.
-        assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Error);
+        assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Ignore);
 
         let legacy = test_path("legacy/foo.py");
         // The root's parent kind cascades over the `legacy` preset's child kind.
@@ -4635,11 +4672,7 @@ output-format = "omit-errors"
             Severity::Error
         );
         assert!(config.check_unannotated_defs(&legacy));
-        // BUG: should be `Never` from the sub-config's `legacy` preset.
-        assert_eq!(
-            config.infer_return_types(&legacy),
-            InferReturnTypes::Checked
-        );
+        assert_eq!(config.infer_return_types(&legacy), InferReturnTypes::Never);
     }
 
     #[test]
@@ -4674,8 +4707,7 @@ output-format = "omit-errors"
             messages.iter().any(|m| m.contains("sub config matching")),
             "{messages:?}"
         );
-        // Sub-config presets aren't applied yet, so this comes from the root. Once they
-        // are, the root's explicit `enabled-ignores` should still beat the `basic` preset.
+        // The root's explicit `enabled-ignores` beats the sub-config's `basic` preset.
         assert_eq!(ignores("basic"), SmallSet::from_iter([Tool::Pyrefly]));
 
         let config = configure_toml(
@@ -4685,10 +4717,9 @@ output-format = "omit-errors"
             preset = "basic"
             "#,
         );
-        // BUG: should be `Tool::all()` from the sub-config's `basic` preset.
         assert_eq!(
             config.enabled_ignores(&test_path("basic/foo.py")),
-            Tool::default_enabled()
+            Tool::all()
         );
     }
 
@@ -4713,11 +4744,10 @@ output-format = "omit-errors"
         let path = test_path("src/generated/foo.py");
         let errors = config.errors(&path);
         assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Warn);
-        // BUG: these should all come from the second sub-config's `basic` preset.
-        assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Error);
-        assert!(config.check_unannotated_defs(&path));
+        assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Ignore);
+        assert!(!config.check_unannotated_defs(&path));
         // `legacy`, from the third sub-config, would leave this `true`.
-        assert!(config.infer_with_first_use(&path));
+        assert!(!config.infer_with_first_use(&path));
     }
 
     /// The errors come from the first matching sub-config that sets them, even if an
@@ -4738,9 +4768,8 @@ output-format = "omit-errors"
         let path = test_path("src/generated/foo.py");
         let errors = config.errors(&path);
         assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Warn);
-        // BUG: these should come from the first sub-config's `basic` preset.
-        assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Error);
-        assert!(config.check_unannotated_defs(&path));
+        assert_eq!(errors.severity(ErrorKind::BadAssignment), Severity::Ignore);
+        assert!(!config.check_unannotated_defs(&path));
     }
 
     /// Build a config with a root preset and a sub-config preset, plus build-system
@@ -4794,16 +4823,13 @@ output-format = "omit-errors"
         );
         let errors = config.errors(&path);
         assert_eq!(errors.severity(ErrorKind::BadReturn), Severity::Warn);
-        // BUG: should be `Ignore` from the target config's `off` preset.
-        assert_eq!(errors.severity(ErrorKind::ImplicitAny), Severity::Error);
+        assert_eq!(errors.severity(ErrorKind::ImplicitAny), Severity::Ignore);
 
         let config = build_system_preset_config(None, Some(serde_json::json!({"preset": "basic"})));
-        // BUG: should be `false` from the default config's `basic` preset.
-        assert!(config.infer_with_first_use(&path));
+        assert!(!config.infer_with_first_use(&path));
 
         let config = build_system_preset_config(None, None);
-        // BUG: should be `Never` from the sub-config's `legacy` preset.
-        assert_eq!(config.infer_return_types(&path), InferReturnTypes::Checked);
+        assert_eq!(config.infer_return_types(&path), InferReturnTypes::Never);
         assert_eq!(
             config
                 .errors(&test_path("other/foo.py"))
@@ -4812,8 +4838,7 @@ output-format = "omit-errors"
         );
 
         // An empty target config still replaces `default_config` and the sub-configs,
-        // leaving the root's `strict` preset. This holds trivially until
-        // build system configs can set a preset.
+        // leaving the root's `strict` preset.
         let config = build_system_preset_config(
             Some(serde_json::json!({})),
             Some(serde_json::json!({"preset": "basic"})),
@@ -4827,8 +4852,8 @@ output-format = "omit-errors"
         // The deprecated alias `bad-param-name-override` should override the
         // legacy preset's canonical `BadOverrideParamName` entry.
         let mut config = ConfigFile {
-            preset: Some(Preset::Legacy),
             root: ConfigBase {
+                preset: Some(Preset::Legacy),
                 errors: Some(ErrorDisplayConfig::new(HashMap::from([(
                     ErrorKind::BadParamNameOverride,
                     Severity::Error,
@@ -5323,6 +5348,7 @@ output-format = "omit-errors"
     fn test_negation_replace_imports_with_any() {
         let config = ConfigFile {
             root: ConfigBase {
+                preset: None,
                 errors: Some(Default::default()),
                 replace_imports_with_any: Some(vec![
                     ModuleWildcard::new("!example.path.specific.*").unwrap(),
@@ -5368,6 +5394,7 @@ output-format = "omit-errors"
     fn test_negation_replace_imports_with_any_reorder() {
         let config = ConfigFile {
             root: ConfigBase {
+                preset: None,
                 errors: Some(Default::default()),
                 replace_imports_with_any: Some(vec![
                     ModuleWildcard::new("example.path.*").unwrap(),
@@ -5776,7 +5803,7 @@ bad-return = false
             config.extended_config_paths,
             vec![shared.join(ConfigFile::PYPROJECT_FILE_NAME)]
         );
-        assert_eq!(config.preset, Some(Preset::Strict));
+        assert_eq!(config.root.preset, Some(Preset::Strict));
         assert_eq!(config.use_ignore_files, false);
 
         config.configure();

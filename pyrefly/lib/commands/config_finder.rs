@@ -122,7 +122,7 @@ pub(crate) fn apply_unconfigured_resolver_if_applicable(
     over: UnconfiguredOverride,
 ) {
     if matches!(config.source, ConfigSource::File(_))
-        || config.preset.is_some()
+        || config.root.preset.is_some()
         || config.synthesized_preset_reason.is_some()
     {
         return;
@@ -1092,7 +1092,7 @@ mod tests {
             config.source,
             ConfigSource::Synthetic(Some(root.to_path_buf()))
         );
-        assert_eq!(config.preset, Some(Preset::Basic));
+        assert_eq!(config.root.preset, Some(Preset::Basic));
         assert_eq!(
             config.synthesized_preset_reason,
             Some(SynthesizedPresetReason::NoNearbyConfig)
@@ -1281,7 +1281,7 @@ mod tests {
             &ModulePath::filesystem(root.join("pkg/mod.py")),
         );
 
-        assert_eq!(config.preset, Some(Preset::Legacy));
+        assert_eq!(config.root.preset, Some(Preset::Legacy));
         assert_eq!(
             config.synthesized_preset_reason,
             Some(SynthesizedPresetReason::Migrated(MigratedFromKind::Mypy(
@@ -1323,7 +1323,7 @@ mod tests {
             &ModulePath::filesystem(root.join("pkg/mod.py")),
         );
 
-        assert_eq!(config.preset, None);
+        assert_eq!(config.root.preset, None);
         assert_eq!(
             config.synthesized_preset_reason,
             Some(SynthesizedPresetReason::Migrated(
@@ -1352,14 +1352,14 @@ mod tests {
         let workspace_preset = Arc::new(Mutex::new(Preset::Strict));
         let workspace_preset_for_closure = workspace_preset.clone();
         let finder = TestConfigurer::new_standard(move |_, mut config, _| {
-            config.preset = Some(*workspace_preset_for_closure.lock().unwrap());
+            config.root.preset = Some(*workspace_preset_for_closure.lock().unwrap());
             (ArcId::new(config), Vec::new())
         });
 
         // `/` has no parent, so `python_file` routes to `empty.dupe()`.
         let path = ModulePath::filesystem(PathBuf::from("/"));
         let cfg1 = finder.python_file(ModuleNameWithKind::guaranteed(ModuleName::unknown()), &path);
-        assert_eq!(cfg1.preset, Some(Preset::Strict));
+        assert_eq!(cfg1.root.preset, Some(Preset::Strict));
 
         // Mutate the workspace state and tell the finder to reload —
         // the same sequence the LSP runs on a config-change event.
@@ -1368,7 +1368,7 @@ mod tests {
 
         let cfg2 = finder.python_file(ModuleNameWithKind::guaranteed(ModuleName::unknown()), &path);
         assert_eq!(
-            cfg2.preset,
+            cfg2.root.preset,
             Some(Preset::Basic),
             "`empty` cache should reset on `ConfigFinder::clear`",
         );

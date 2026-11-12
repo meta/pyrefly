@@ -225,7 +225,7 @@ impl EnvironmentArgs {
     /// that only flatten `EnvironmentArgs`.
     pub fn override_environment_config(&self, config: &mut ConfigFile) {
         if let Some(x) = self.preset {
-            config.preset = Some(x);
+            config.root.preset = Some(x);
             config.synthesized_preset_reason = Some(SynthesizedPresetReason::UserOverride);
         }
         if let Some(x) = &self.python_platform {
@@ -961,7 +961,6 @@ mod tests {
                 .severity(ErrorKind::BadReturn)
         };
         assert_eq!(severity("other/foo.py"), Severity::Ignore);
-        // BUG: should be `Error` from the sub-config's `default` preset.
-        assert_eq!(severity("sub/foo.py"), Severity::Ignore);
+        assert_eq!(severity("sub/foo.py"), Severity::Error);
     }
 }
