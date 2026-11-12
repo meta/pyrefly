@@ -738,6 +738,12 @@ pub struct ConfigFile {
     )]
     pub use_ignore_files: bool,
 
+    /// A command that finds the Python environment of a PEP 723 script. Pyrefly appends the
+    /// script's path to the command, which prints the environment in the JSON format of
+    /// `uv workspace metadata --script`. If unset, a script uses the configured environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_command: Option<Vec<String>>,
+
     /// Should this config use a build system? If so, which one?
     pub build_system: Option<BuildSystem>,
 
@@ -846,6 +852,7 @@ impl Default for ConfigFile {
             module_names: None,
             target_configs: ArcId::new(RwLock::new(SmallMap::new())),
             use_ignore_files: true,
+            script_command: None,
             typeshed_path: None,
             baseline: None,
             baseline_error_level: None,
@@ -2799,6 +2806,7 @@ mod tests {
                 preset: None,
                 build_system: Default::default(),
                 use_ignore_files: true,
+                script_command: None,
                 output_format: Some(OutputFormat::MinText),
                 fallback_search_path: Default::default(),
                 python_environment: PythonEnvironment {
@@ -3214,6 +3222,7 @@ mod tests {
             import_root: None,
             preset: None,
             use_ignore_files: true,
+            script_command: None,
             output_format: Some(OutputFormat::Json),
             fallback_search_path: Default::default(),
             python_environment: python_environment.clone(),
@@ -3305,6 +3314,7 @@ mod tests {
             enable_fallback_search_path: false,
             disable_project_excludes_heuristics: false,
             use_ignore_files: true,
+            script_command: None,
             output_format: Some(OutputFormat::Json),
             import_root: None,
             preset: None,

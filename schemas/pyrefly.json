@@ -240,6 +240,14 @@
           "type": "boolean",
           "default": true
         },
+        "script-command": {
+          "description": "A command that finds the Python environment of a PEP 723 script. Pyrefly appends the script's path to the command, which prints the environment in the JSON format of `uv workspace metadata --script`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
         "skip-lsp-config-indexing": {
           "description": "Should Pyrefly try to index the project's files? Disabling this may speed up LSP operations on large projects.",
           "type": "boolean",

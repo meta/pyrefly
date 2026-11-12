@@ -1221,6 +1221,35 @@ allowlist or denylist). Regular
 - Default: `true`
 - Flag equivalent: `--use-ignore-files`
 
+### `script-command`
+
+A command that finds the Python environment of each
+[PEP 723](https://peps.python.org/pep-0723/) script. A PEP 723 script declares
+its dependencies in a `# /// script` comment block, and a tool like
+[uv](https://docs.astral.sh/uv/) runs it in a separate environment that holds
+only those dependencies.
+
+For each checked file with a `# /// script` block, Pyrefly runs the command with
+the file's path appended, in the file's directory. The command prints the
+environment in the JSON format of `uv workspace metadata --script`, and Pyrefly
+checks the file with the interpreter at `environment.python.path`. Every other
+setting comes from the file's configuration as usual, and every other file uses
+the configured or discovered interpreter. If the output has no environment,
+Pyrefly warns and checks the script like any other file.
+
+To use the environments that uv creates:
+
+```toml
+script-command = ["uv", "workspace", "metadata", "--preview-features", "workspace-metadata", "--script"]
+```
+
+`uv workspace metadata` never creates or updates a script's environment. Run
+`uv sync --script <file>` to create it.
+
+- Type: list of strings
+- Default: unset
+- Flag equivalent: `--script-command`, once for each argument
+
 ### `build-system`
 
 Pyrefly supports integrating into build systems to discover targets to type
