@@ -832,7 +832,6 @@ impl ErrorBuilder<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
     use std::collections::HashMap;
     use std::path::Path;
     use std::path::PathBuf;
@@ -930,7 +929,7 @@ mod tests {
         assert_eq!(
             errors
                 .collect(&ErrorConfig::new(
-                    Cow::Owned(ErrorDisplayConfig::default()),
+                    Arc::new(ErrorDisplayConfig::default()),
                     false,
                     Tool::default_enabled(),
                     TypeIgnoreUnknownTagBehavior::NoEffect,
@@ -1049,7 +1048,7 @@ mod tests {
             (ErrorKind::NotIterable, Severity::Ignore),
         ]));
         let config = ErrorConfig::new(
-            Cow::Owned(display_config),
+            Arc::new(display_config),
             false,
             Tool::default_enabled(),
             TypeIgnoreUnknownTagBehavior::NoEffect,
@@ -1085,7 +1084,7 @@ mod tests {
         let display_config =
             ErrorDisplayConfig::new(HashMap::from([(ErrorKind::BadAssignment, Severity::Hint)]));
         let config = ErrorConfig::new(
-            Cow::Owned(display_config),
+            Arc::new(display_config),
             false,
             Tool::default_enabled(),
             TypeIgnoreUnknownTagBehavior::NoEffect,
@@ -1113,7 +1112,7 @@ mod tests {
 
         let display_config = ErrorDisplayConfig::default();
         let config0 = ErrorConfig::new(
-            Cow::Borrowed(&display_config),
+            Arc::new(display_config.clone()),
             false,
             Tool::default_enabled(),
             TypeIgnoreUnknownTagBehavior::NoEffect,
@@ -1130,7 +1129,7 @@ mod tests {
             "misplaced".to_owned(),
         );
         let config1 = ErrorConfig::new(
-            Cow::Owned(display_config),
+            Arc::new(display_config),
             true,
             Tool::default_enabled(),
             TypeIgnoreUnknownTagBehavior::NoEffect,
@@ -1161,7 +1160,7 @@ mod tests {
         assert_eq!(
             errors
                 .collect(&ErrorConfig::new(
-                    Cow::Owned(ErrorDisplayConfig::default()),
+                    Arc::new(ErrorDisplayConfig::default()),
                     false,
                     Tool::default_enabled(),
                     TypeIgnoreUnknownTagBehavior::NoEffect,

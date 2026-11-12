@@ -1985,7 +1985,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
     use std::sync::Barrier;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
@@ -2099,7 +2098,7 @@ mod tests {
         assert!(results.iter().all(|(answer, _)| *answer == winner));
         let kept = destination
             .collect(&ErrorConfig::new(
-                Cow::Owned(ErrorDisplayConfig::default()),
+                Arc::new(ErrorDisplayConfig::default()),
                 false,
                 Tool::default_enabled(),
                 TypeIgnoreUnknownTagBehavior::NoEffect,

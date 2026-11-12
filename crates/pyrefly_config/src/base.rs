@@ -530,10 +530,6 @@ impl ConfigBase {
         }
     }
 
-    pub fn get_errors(base: &Self) -> Option<&ErrorDisplayConfig> {
-        base.errors.as_ref()
-    }
-
     pub(crate) fn get_replace_imports_with_any(base: &Self) -> Option<&[ModuleWildcard]> {
         base.replace_imports_with_any.as_deref()
     }
@@ -544,36 +540,6 @@ impl ConfigBase {
 
     pub(crate) fn get_replace_untyped_imports_with_any(base: &Self) -> Option<&[ModuleWildcard]> {
         base.replace_untyped_imports_with_any.as_deref()
-    }
-
-    pub fn get_check_unannotated_defs(base: &Self) -> Option<bool> {
-        base.check_unannotated_defs
-    }
-
-    pub fn get_infer_return_types(base: &Self) -> Option<InferReturnTypes> {
-        base.infer_return_types
-    }
-
-    pub fn get_disable_type_errors_in_ide(base: &Self) -> Option<bool> {
-        base.disable_type_errors_in_ide
-    }
-
-    pub fn get_ignore_errors_in_generated_code(base: &Self) -> Option<bool> {
-        base.ignore_errors_in_generated_code
-    }
-
-    pub fn get_infer_with_first_use(base: &Self) -> Option<bool> {
-        base.infer_with_first_use
-    }
-
-    pub fn get_enabled_ignores(base: &Self) -> Option<&SmallSet<Tool>> {
-        base.enabled_ignores.as_ref()
-    }
-
-    pub fn get_type_ignore_unknown_tag_behavior(
-        base: &Self,
-    ) -> Option<TypeIgnoreUnknownTagBehavior> {
-        base.type_ignore_unknown_tag_behavior
     }
 
     /// Get the recursion limit configuration, if enabled.
@@ -591,30 +557,6 @@ impl ConfigBase {
                 })
             }
         })
-    }
-
-    pub fn get_strict_callable_subtyping(base: &Self) -> Option<bool> {
-        base.strict_callable_subtyping
-    }
-
-    pub fn get_strict_partial_subtyping(base: &Self) -> Option<bool> {
-        base.strict_partial_subtyping
-    }
-
-    pub fn get_spec_compliant_overloads(base: &Self) -> Option<bool> {
-        base.spec_compliant_overloads
-    }
-
-    pub fn get_legacy_overload_expansion(base: &Self) -> Option<bool> {
-        base.legacy_overload_expansion
-    }
-
-    pub fn get_treat_all_caps_as_final(base: &Self) -> Option<bool> {
-        base.treat_all_caps_as_final
-    }
-
-    pub fn get_infer_param_types_from_docstring(base: &Self) -> Option<bool> {
-        base.infer_param_types_from_docstring
     }
 
     /// Set `replace-imports-with-any` from module patterns such as `["pandas"]`.

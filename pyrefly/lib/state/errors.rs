@@ -421,7 +421,7 @@ impl Errors {
                 let module_unused = Self::collect_unused_ignore_errors_for_module(
                     &load.module_info,
                     module_ranges.as_deref(),
-                    config.enabled_ignores(path).as_ref(),
+                    &config.enabled_ignores(path),
                     config.type_ignore_unknown_tag_behavior(path),
                     module_errors
                         .suppressed
@@ -754,7 +754,7 @@ impl Errors {
             Self::collect_unused_ignore_errors_for_module(
                 &load.module_info,
                 module_ranges.as_deref(),
-                config.enabled_ignores(path).as_ref(),
+                &config.enabled_ignores(path),
                 config.type_ignore_unknown_tag_behavior(path),
                 affected,
             )

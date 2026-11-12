@@ -117,10 +117,19 @@ struct ResolvedConfigKey {
 
 const RESOLVED_SETTING: &str = "resolved configs set every setting that has a built-in default";
 
+/// The settings for a file. See [`ConfigFile::resolved`].
+#[derive(Debug)]
+struct ResolvedConfig {
+    /// Every setting that has a built-in default is set, except `errors`.
+    settings: ConfigBase,
+    /// Shared so that collecting errors does not copy the map for each file.
+    errors: Arc<ErrorDisplayConfig>,
+}
+
 /// Per-file settings, resolved on first use by [`ConfigFile::resolved`]. Clones share the
 /// cache, like `target_configs`, until one of them is configured again.
 #[derive(Debug, Default, Clone)]
-pub struct ResolvedConfigs(Arc<RwLock<SmallMap<ResolvedConfigKey, Arc<ConfigBase>>>>);
+pub struct ResolvedConfigs(Arc<RwLock<SmallMap<ResolvedConfigKey, Arc<ResolvedConfig>>>>);
 
 /// Config overrides for the `pyrefly coverage` commands.
 #[skip_serializing_none]
@@ -1287,22 +1296,8 @@ impl ConfigFile {
         SysInfo::new(self.python_version(), self.python_platform().clone())
     }
 
-    pub fn errors(&self, path: &ModulePath) -> Cow<'_, ErrorDisplayConfig> {
-        let inherited = self
-            .get_from_sub_configs(ConfigBase::get_errors, path.as_path())
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 self.root.errors.as_ref().unwrap());
-        if let Some(target) =
-            self.get_from_target_config(|config| ConfigBase::get_errors(config).cloned(), path)
-        {
-            let mut merged = inherited.clone();
-            merged.merge_user_overrides(&target);
-            Cow::Owned(merged)
-        } else {
-            Cow::Borrowed(inherited)
-        }
+    pub fn errors(&self, path: &ModulePath) -> Arc<ErrorDisplayConfig> {
+        self.resolved(path).errors.dupe()
     }
 
     pub fn replace_imports_with_any(&self, path: Option<&ModulePath>, module: ModuleName) -> bool {
@@ -1328,83 +1323,87 @@ impl ConfigFile {
 
     pub fn check_unannotated_defs(&self, path: &ModulePath) -> bool {
         self.resolved(path)
+            .settings
             .check_unannotated_defs
             .expect(RESOLVED_SETTING)
     }
 
     pub fn infer_return_types(&self, path: &ModulePath) -> InferReturnTypes {
         self.resolved(path)
+            .settings
             .infer_return_types
             .expect(RESOLVED_SETTING)
     }
 
     pub fn infer_with_first_use(&self, path: &ModulePath) -> bool {
         self.resolved(path)
+            .settings
             .infer_with_first_use
             .expect(RESOLVED_SETTING)
     }
 
     pub fn strict_callable_subtyping(&self, path: &ModulePath) -> bool {
         self.resolved(path)
+            .settings
             .strict_callable_subtyping
             .expect(RESOLVED_SETTING)
     }
 
     pub fn strict_partial_subtyping(&self, path: &ModulePath) -> bool {
         self.resolved(path)
+            .settings
             .strict_partial_subtyping
             .expect(RESOLVED_SETTING)
     }
 
     pub fn spec_compliant_overloads(&self, path: &ModulePath) -> bool {
         self.resolved(path)
+            .settings
             .spec_compliant_overloads
             .expect(RESOLVED_SETTING)
     }
 
     pub fn legacy_overload_expansion(&self, path: &ModulePath) -> bool {
         self.resolved(path)
+            .settings
             .legacy_overload_expansion
             .expect(RESOLVED_SETTING)
     }
 
     pub fn treat_all_caps_as_final(&self, path: &ModulePath) -> bool {
         self.resolved(path)
+            .settings
             .treat_all_caps_as_final
             .expect(RESOLVED_SETTING)
     }
 
     pub fn infer_param_types_from_docstring(&self, path: &ModulePath) -> bool {
         self.resolved(path)
+            .settings
             .infer_param_types_from_docstring
             .expect(RESOLVED_SETTING)
     }
 
     pub fn disable_type_errors_in_ide(&self, path: &ModulePath) -> bool {
         self.resolved(path)
+            .settings
             .disable_type_errors_in_ide
             .expect(RESOLVED_SETTING)
     }
 
     fn ignore_errors_in_generated_code(&self, path: &ModulePath) -> bool {
         self.resolved(path)
+            .settings
             .ignore_errors_in_generated_code
             .expect(RESOLVED_SETTING)
     }
 
-    pub fn enabled_ignores(&self, path: &ModulePath) -> Cow<'_, SmallSet<Tool>> {
-        if let Some(ignores) = self.get_from_target_config(
-            |config| ConfigBase::get_enabled_ignores(config).cloned(),
-            path,
-        ) {
-            return Cow::Owned(ignores);
-        }
-        self.get_from_sub_configs(ConfigBase::get_enabled_ignores, path.as_path())
-            .map(Cow::Borrowed)
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 Cow::Borrowed(self.root.enabled_ignores.as_ref().unwrap()))
+    pub fn enabled_ignores(&self, path: &ModulePath) -> SmallSet<Tool> {
+        self.resolved(path)
+            .settings
+            .enabled_ignores
+            .clone()
+            .expect(RESOLVED_SETTING)
     }
 
     pub fn type_ignore_unknown_tag_behavior(
@@ -1412,6 +1411,7 @@ impl ConfigFile {
         path: &ModulePath,
     ) -> TypeIgnoreUnknownTagBehavior {
         self.resolved(path)
+            .settings
             .type_ignore_unknown_tag_behavior
             .expect(RESOLVED_SETTING)
     }
@@ -1422,11 +1422,11 @@ impl ConfigFile {
         ConfigBase::get_recursion_limit_config(&self.root)
     }
 
-    pub fn get_error_config(&self, path: &ModulePath) -> ErrorConfig<'_> {
+    pub fn get_error_config(&self, path: &ModulePath) -> ErrorConfig {
         ErrorConfig::new(
             self.errors(path),
             self.ignore_errors_in_generated_code(path),
-            self.enabled_ignores(path).into_owned(),
+            self.enabled_ignores(path),
             self.type_ignore_unknown_tag_behavior(path),
         )
     }
@@ -1437,67 +1437,24 @@ impl ConfigFile {
         module: ModuleName,
         getter: for<'a> fn(&'a ConfigBase) -> Option<&'a [ModuleWildcard]>,
     ) -> bool {
-        let matches = |config: &ConfigBase| {
-            getter(config).map(|wildcards| {
-                wildcards.iter().find_map(|wildcard| {
-                    if wildcard.matches(module) == Match::Negative {
-                        Some(false)
-                    } else if wildcard.matches(module) == Match::Positive {
-                        Some(true)
-                    } else {
-                        None
-                    }
-                }) == Some(true)
-            })
-        };
-        path.and_then(|path| self.get_from_config_overrides(matches, path))
-            .or_else(|| matches(&self.root))
+        let resolved = path.map(|path| self.resolved(path));
+        let config = resolved
+            .as_ref()
+            .map_or(&self.root, |resolved| &resolved.settings);
+        getter(config)
             .expect("configure should set root module wildcard settings")
-    }
-
-    /// Look up a per-file setting from the build target config first, then matching
-    /// sub-configs. Returns `None` when none of those configs set the value.
-    fn get_from_config_overrides<T>(
-        &self,
-        getter: impl Fn(&ConfigBase) -> Option<T> + Copy,
-        path: &ModulePath,
-    ) -> Option<T> {
-        self.get_from_target_config(getter, path)
-            .or_else(|| self.get_from_sub_configs(getter, path.as_path()))
-    }
-
-    fn get_from_sub_configs<'a, T>(
-        &'a self,
-        getter: impl Fn(&'a ConfigBase) -> Option<T>,
-        path: &Path,
-    ) -> Option<T> {
-        self.sub_configs.iter().find_map(|config| {
-            if config.matches.matches(path) {
-                getter(&config.settings)
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Look up a per-file config setting from the build system, taking the
-    /// config of the target that owns the given file over the source database's
-    /// default config. Returns `None` if there is no source database, or if
-    /// neither config sets the value.
-    fn get_from_target_config<T>(
-        &self,
-        getter: impl Fn(&ConfigBase) -> Option<T>,
-        path: &ModulePath,
-    ) -> Option<T> {
-        self.target_config_names(path)
             .iter()
-            .find_map(|name| getter(self.target_config(name)?.as_ref()))
+            .find_map(|wildcard| match wildcard.matches(module) {
+                Match::Positive => Some(true),
+                Match::Negative => Some(false),
+                Match::NoMatch => None,
+            })
+            == Some(true)
     }
 
     /// The settings for `path`, layering its build system configs, then its matching
-    /// sub-configs, then the root config. Every setting that has a built-in default is
-    /// set.
-    fn resolved(&self, path: &ModulePath) -> Arc<ConfigBase> {
+    /// sub-configs, then the root config.
+    fn resolved(&self, path: &ModulePath) -> Arc<ResolvedConfig> {
         let key = ResolvedConfigKey {
             target_configs: self.target_config_names(path),
             sub_configs: self
@@ -1509,23 +1466,50 @@ impl ConfigFile {
         if let Some(resolved) = self.resolved_configs.0.read().get(&key) {
             return resolved.dupe();
         }
-        let mut resolved = ConfigBase::default();
-        for config in key
+        let target_configs = key
             .target_configs
             .iter()
             .filter_map(|name| self.target_config(name))
+            .collect::<Vec<_>>();
+        let sub_configs = key
+            .sub_configs
+            .iter()
+            .map(|&i| &self.sub_configs[i].settings)
+            .collect::<Vec<_>>();
+
+        let mut settings = ConfigBase::default();
+        for config in target_configs.iter().map(|config| config.as_ref()) {
+            settings.fill_unset_from(config);
+        }
+        for config in &sub_configs {
+            settings.fill_unset_from(config);
+        }
+        settings.fill_unset_from(&self.root);
+
+        // `configure` merges the root's errors into each sub-config's, so the first
+        // sub-config that sets `errors` already includes the root's. The build system's
+        // errors apply on top, and only the most specific config that sets them counts.
+        let mut errors = sub_configs
+            .iter()
+            .find_map(|config| config.errors.as_ref())
+            .or(self.root.errors.as_ref())
+            .expect("the value in the root config must be set in `ConfigFile::configure()`")
+            .clone();
+        if let Some(target_errors) = target_configs
+            .iter()
+            .find_map(|config| config.errors.as_ref())
         {
-            resolved.fill_unset_from(&config);
+            errors.merge_user_overrides(target_errors);
         }
-        for &i in &key.sub_configs {
-            resolved.fill_unset_from(&self.sub_configs[i].settings);
-        }
-        resolved.fill_unset_from(&self.root);
+
         self.resolved_configs
             .0
             .write()
             .entry(key)
-            .or_insert(Arc::new(resolved))
+            .or_insert(Arc::new(ResolvedConfig {
+                settings,
+                errors: Arc::new(errors),
+            }))
             .dupe()
     }
 
@@ -3713,7 +3697,7 @@ output-format = "omit-errors"
     }
 
     #[test]
-    fn test_get_from_sub_configs() {
+    fn test_settings_from_sub_configs() {
         let config = ConfigFile {
             root: ConfigBase {
                 errors: Some(Default::default()),
@@ -4739,7 +4723,7 @@ output-format = "omit-errors"
         // BUG: should be `Tool::all()`. Only the root applies `permissive-ignores`.
         for dir in ["basic", "permissive"] {
             assert_eq!(
-                *config.enabled_ignores(&test_path(&format!("{dir}/foo.py"))),
+                config.enabled_ignores(&test_path(&format!("{dir}/foo.py"))),
                 Tool::default_enabled()
             );
         }
