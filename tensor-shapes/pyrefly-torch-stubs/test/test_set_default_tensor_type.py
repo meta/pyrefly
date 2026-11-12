@@ -16,10 +16,10 @@ def test_set_default_tensor_type() -> None:
         # Torch warns about this deprecated function once per process.
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            result = torch.set_default_tensor_type(torch.FloatTensor)  # E: No attr
-            assert_type(result, None)  # E: assert_type
+            result = torch.set_default_tensor_type(torch.FloatTensor)
+            assert_type(result, None)
             assert all(issubclass(w.category, UserWarning) for w in caught)
-            torch.set_default_tensor_type("torch.DoubleTensor")  # E: No attribute
+            torch.set_default_tensor_type("torch.DoubleTensor")
         tensor = torch.tensor([1.5, 2.5])
         assert tensor.dtype == torch.float64
         assert_shape(tensor.shape, (2,))
@@ -34,9 +34,9 @@ def test_set_default_tensor_type_rejects_invalid_arguments() -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             with assert_raises(TypeError):
-                torch.set_default_tensor_type(t=torch.FloatTensor)  # E: No attribute
+                torch.set_default_tensor_type(t=torch.FloatTensor)  # E: positional
             with assert_raises(TypeError):
-                torch.set_default_tensor_type(1)  # E: No attribute
+                torch.set_default_tensor_type(1)  # E: parameter `t`
     finally:
         torch.set_default_dtype(original)
     assert torch.get_default_dtype() == original
