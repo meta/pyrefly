@@ -13,8 +13,8 @@ from torch import nn, Tensor
 def check_generic_parameter_data[Shape: IntTuple](
     parameter: nn.Parameter[Shape], replacement: Tensor[Shape]
 ) -> None:
-    assert_type(parameter.data, Tensor[Shape])  # E: assert_type
-    parameter.data = replacement  # E: not assignable
+    assert_type(parameter.data, Tensor[Shape])
+    parameter.data = replacement
 
 
 def test_tensor_data_keeps_shape_and_shares_storage() -> None:
@@ -35,14 +35,14 @@ def test_tensor_data_keeps_shape_and_shares_storage() -> None:
 def test_parameter_data_is_plain_tensor_with_same_shape_replacement() -> None:
     parameter = nn.Parameter(torch.ones((2, 3)))
     data = parameter.data
-    assert_type(data, Tensor[[2, 3]])  # E: assert_type
+    assert_type(data, Tensor[[2, 3]])
     assert type(data) is Tensor
     assert data.data_ptr() == parameter.data_ptr()
     assert not data.requires_grad
     identity = id(parameter)
     replacement = torch.zeros((2, 3))
-    parameter.data = replacement  # E: not assignable
-    parameter.data += 1.0  # E: not assignable
+    parameter.data = replacement
+    parameter.data += 1.0
     check_generic_parameter_data(parameter, replacement)
     assert id(parameter) == identity and type(parameter) is nn.Parameter
     assert parameter.data_ptr() == replacement.data_ptr()

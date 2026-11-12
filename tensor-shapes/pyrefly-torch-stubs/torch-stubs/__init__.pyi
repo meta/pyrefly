@@ -1357,7 +1357,9 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Move tensor to CPU. Shape-preserving operation."""
         ...
 
-    data: Self  # Raw data tensor (same shape)
+    # Exact shapes require shape-invariant replacement here. Native .data can
+    # reshape its receiver; that mutation and arbitrary alias tracking are not modeled.
+    data: Tensor[Shape]
 
     def copy_(self, src: Tensor, non_blocking: builtins.bool = False) -> Self:
         """Copy elements from src into self in-place. Shape-preserving."""
