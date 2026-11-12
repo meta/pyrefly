@@ -113,7 +113,6 @@ P = ParamSpec("P", covariant=True)
 );
 
 testcase!(
-    bug = "A legacy ParamSpec's declared variance should be used for assignability",
     test_legacy_paramspec_declared_variance_used_for_assignability,
     r#"
 from typing import Generic, ParamSpec
@@ -124,7 +123,7 @@ class A(Generic[P]):
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> None: ...
 
 def f(obj: A[[object]], int_: A[[int]]):
-    x: A[[int]] = obj  # E: `A[[object]]` is not assignable to `A[[int]]`
+    x: A[[int]] = obj
     y: A[[object]] = int_  # E: `A[[int]]` is not assignable to `A[[object]]`
 "#,
 );

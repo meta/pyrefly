@@ -3,7 +3,7 @@
   "pass": 143,
   "fail": 2,
   "pass_rate": 0.99,
-  "differences": 15,
+  "differences": 11,
   "passing": [
     "aliases_explicit.py",
     "aliases_implicit.py",
@@ -150,7 +150,7 @@
     "typeforms_typeform.py"
   ],
   "failing": {
-    "generics_paramspec_variance.py": 6,
+    "generics_paramspec_variance.py": 2,
     "generics_typevartuple_variance.py": 9
   },
   "comment": "@generated"

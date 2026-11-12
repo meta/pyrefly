@@ -277,11 +277,7 @@ impl LegacyTypeParamCollector {
                     AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
                     QuantifiedOrigin::ScopedLegacy,
                 );
-                let q = Quantified::param_spec(
-                    ps.qname().id().clone(),
-                    identity,
-                    ps.default().cloned(),
-                );
+                let q = Quantified::from_param_spec(ps, identity);
                 e.insert(q.clone());
                 self.tparams.push((range, q.clone()));
                 q
@@ -571,8 +567,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     AnchorIndex::first(scope_anchor),
                     QuantifiedOrigin::ScopedLegacy,
                 );
-                let q =
-                    Quantified::param_spec(x.qname().id().clone(), identity, x.default().cloned());
+                let q = Quantified::from_param_spec(x, identity);
                 LegacyTypeParameterLookup::Parameter(q)
             }
             ty => LegacyTypeParameterLookup::NotParameter(ty.clone()),

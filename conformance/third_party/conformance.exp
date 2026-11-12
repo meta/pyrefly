@@ -6822,17 +6822,6 @@
     },
     {
       "code": -2,
-      "column": 46,
-      "concise_description": "`ContravariantParamSpecOld[[object]]` is not assignable to `ContravariantParamSpecOld[[int]]`",
-      "description": "`ContravariantParamSpecOld[[object]]` is not assignable to `ContravariantParamSpecOld[[int]]`",
-      "line": 122,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 81,
-      "stop_line": 122
-    },
-    {
-      "code": -2,
       "column": 43,
       "concise_description": "`CovariantParamSpecOld[[object]]` is not assignable to `CovariantParamSpecOld[[int]]`",
       "description": "`CovariantParamSpecOld[[object]]` is not assignable to `CovariantParamSpecOld[[int]]`",
@@ -6841,17 +6830,6 @@
       "severity": "error",
       "stop_column": 74,
       "stop_line": 132
-    },
-    {
-      "code": -2,
-      "column": 46,
-      "concise_description": "`CovariantParamSpecOld[[int]]` is not assignable to `CovariantParamSpecOld[[object]]`",
-      "description": "`CovariantParamSpecOld[[int]]` is not assignable to `CovariantParamSpecOld[[object]]`",
-      "line": 133,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 74,
-      "stop_line": 133
     },
     {
       "code": -2,
@@ -6866,17 +6844,6 @@
     },
     {
       "code": -2,
-      "column": 60,
-      "concise_description": "`InferredContravariantParamSpecOld[[object]]` is not assignable to `InferredContravariantParamSpecOld[[int]]`",
-      "description": "`InferredContravariantParamSpecOld[[object]]` is not assignable to `InferredContravariantParamSpecOld[[int]]`",
-      "line": 143,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 103,
-      "stop_line": 143
-    },
-    {
-      "code": -2,
       "column": 57,
       "concise_description": "`InferredCovariantParamSpecOld[[object]]` is not assignable to `InferredCovariantParamSpecOld[[int]]`",
       "description": "`InferredCovariantParamSpecOld[[object]]` is not assignable to `InferredCovariantParamSpecOld[[int]]`",
@@ -6885,17 +6852,6 @@
       "severity": "error",
       "stop_column": 96,
       "stop_line": 151
-    },
-    {
-      "code": -2,
-      "column": 60,
-      "concise_description": "`InferredCovariantParamSpecOld[[int]]` is not assignable to `InferredCovariantParamSpecOld[[object]]`",
-      "description": "`InferredCovariantParamSpecOld[[int]]` is not assignable to `InferredCovariantParamSpecOld[[object]]`",
-      "line": 152,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 96,
-      "stop_line": 152
     }
   ],
   "generics_scoping.py": [
