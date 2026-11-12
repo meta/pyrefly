@@ -14,7 +14,16 @@ import builtins
 from collections.abc import Iterator, Sequence
 from math import e as e, nan as nan
 from types import EllipsisType
-from typing import Any, Callable, Literal, overload, Self, TYPE_CHECKING, Unpack
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    overload,
+    Self,
+    SupportsIndex,
+    TYPE_CHECKING,
+    Unpack,
+)
 
 # Torch does not require NumPy, so this import is intentionally not a package
 # dependency.
@@ -824,6 +833,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def __getitem__(
         self: Tensor,
         index: _BasicIndex
+        | SupportsIndex
         | Sequence[builtins.int]
         | Sequence[Sequence[builtins.int]]
         | Tensor
@@ -838,6 +848,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def __setitem__(
         self: Tensor,
         index: _BasicIndex
+        | SupportsIndex
         | Sequence[builtins.int]
         | Sequence[Sequence[builtins.int]]
         | Tensor

@@ -15,7 +15,7 @@ _Array = TypeVar("_Array", Tensor, np.ndarray)
 
 def _shift_active(value: _Array, offset: int) -> _Array:
     active = value >= 0
-    value[active] += offset  # E: Cannot index # E: Cannot set item
+    value[active] += offset
     return value
 
 
@@ -25,23 +25,23 @@ def test_numpy_bool_mask_reads() -> None:
     )
     assert_shape(tensor.shape, (4, 3))
     rows = np.array([True, False, True, False])
-    selected = tensor[rows]  # E: Cannot index
-    assert_type(selected, Tensor)  # E: assert_type
+    selected = tensor[rows]
+    assert_type(selected, Tensor)
     assert selected.tolist() == [[0.0, 1.0, 2.0], [6.0, 7.0, 8.0]]
     elements = np.zeros((4, 3), dtype=np.bool_)
     elements[0, 0] = elements[3, 2] = True
-    picked = tensor[elements]  # E: Cannot index
-    assert_type(picked, Tensor)  # E: assert_type
+    picked = tensor[elements]
+    assert_type(picked, Tensor)
     assert picked.tolist() == [0.0, 11.0]
 
 
 def test_numpy_bool_mask_writes() -> None:
     values = torch.tensor([3, -1, 5, -1])
     active = values.numpy() >= 0
-    values[active] += 10  # E: Cannot index # E: Cannot set item
+    values[active] += 10
     assert values.tolist() == [13, -1, 15, -1]
     filled = torch.zeros(4)
-    filled[np.array([True, False, True, False])] = 1.0  # E: Cannot set item
+    filled[np.array([True, False, True, False])] = 1.0
     assert filled.tolist() == [1.0, 0.0, 1.0, 0.0]
     assert_shape(filled.shape, (4,))
 

@@ -16,13 +16,13 @@ class Position:
 
 
 def _read(tensor: Tensor, index: SupportsIndex) -> Tensor:
-    value = tensor[index]  # E: Cannot index
-    assert_type(value, Tensor)  # E: assert_type
+    value = tensor[index]
+    assert_type(value, Tensor)
     return value
 
 
 def _write(tensor: Tensor, index: SupportsIndex, value: float) -> None:
-    tensor[index] = value  # E: Cannot set item
+    tensor[index] = value
 
 
 def test_supports_index_reads_and_writes() -> None:
