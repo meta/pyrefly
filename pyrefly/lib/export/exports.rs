@@ -383,7 +383,9 @@ impl Exports {
             .entries
             .iter()
             .find_map(|entry| match entry {
-                DunderAllEntry::Name(range, name) if range.contains_inclusive(position) => {
+                DunderAllEntry::Name(range, name) | DunderAllEntry::Remove(range, name)
+                    if range.contains_inclusive(position) =>
+                {
                     Some((*range, name.clone()))
                 }
                 _ => None,
