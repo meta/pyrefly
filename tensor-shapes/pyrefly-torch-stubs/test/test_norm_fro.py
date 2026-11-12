@@ -16,25 +16,25 @@ def _matrix() -> Tensor[[2, 3]]:
 
 def test_norm_frobenius() -> None:
     matrix = _matrix()
-    total = torch.norm(matrix, p="fro")  # E: parameter `p`
+    total = torch.norm(matrix, p="fro")
     assert_shape(total.shape, ())
     assert abs(total.item() - 55**0.5) < 1e-5
-    positional = torch.norm(matrix, "fro")  # E: parameter `p`
+    positional = torch.norm(matrix, "fro")
     assert_shape(positional.shape, ())
-    rows = torch.norm(matrix, p="fro", dim=1)  # E: parameter `p`
+    rows = torch.norm(matrix, p="fro", dim=1)
     assert_shape(rows.shape, (2,))
     assert torch.allclose(rows, torch.tensor([5**0.5, 50**0.5]))
-    kept = torch.norm(matrix, p="fro", dim=1, keepdim=True)  # E: parameter `p`
+    kept = torch.norm(matrix, p="fro", dim=1, keepdim=True)
     assert_shape(kept.shape, (2, 1))
-    method = matrix.norm(p="fro")  # E: parameter `p`
+    method = matrix.norm(p="fro")
     assert_shape(method.shape, ())
-    method_rows = matrix.norm("fro", 1)  # E: parameter `p`
+    method_rows = matrix.norm("fro", 1)
     assert_shape(method_rows.shape, (2,))
 
 
 def test_norm_frobenius_over_two_dimensions() -> None:
     cube = torch.ones((2, 3, 4))
-    kept = cube.norm(p="fro", dim=(1, 2), keepdim=True)  # E: parameter `p`
+    kept = cube.norm(p="fro", dim=(1, 2), keepdim=True)
     assert_shape(kept.shape, (2, 1, 1))
     assert torch.allclose(kept, torch.full((2, 1, 1), 12**0.5))
 
@@ -42,7 +42,7 @@ def test_norm_frobenius_over_two_dimensions() -> None:
 def test_norm_numeric_orders() -> None:
     matrix = _matrix()
     default = torch.norm(matrix)
-    frobenius = torch.norm(matrix, p="fro")  # E: parameter `p`
+    frobenius = torch.norm(matrix, p="fro")
     assert torch.equal(default, frobenius)
     assert_shape(torch.norm(matrix, p=2).shape, ())
     assert_shape(matrix.norm(p=float("inf"), dim=0).shape, (3,))
@@ -64,4 +64,4 @@ def test_norm_rejects_unsupported_orders() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         with assert_raises(RuntimeError):
-            torch.norm(cube, p="fro", dim=(0, 1, 2))  # E: parameter `p`
+            torch.norm(cube, p="fro", dim=(0, 1, 2))

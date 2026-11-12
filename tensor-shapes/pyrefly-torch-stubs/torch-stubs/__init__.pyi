@@ -1823,7 +1823,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         Keepdim: Flag[builtins.bool],
     ](
         self: Tensor[Shape],
-        p: builtins.int | builtins.float = 2,
+        p: builtins.float | Literal["fro"] = "fro",
         dim: Dim = None,
         keepdim: Keepdim = False,
     ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
@@ -3569,7 +3569,7 @@ def norm[
     Keepdim: Flag[builtins.bool],
 ](
     input: Tensor[Shape],
-    p: builtins.int | builtins.float = 2,
+    p: builtins.float | Literal["fro"] = "fro",
     dim: Dim = None,
     keepdim: Keepdim = False,
 ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
