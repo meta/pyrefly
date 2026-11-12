@@ -30,10 +30,10 @@ use starlark_map::small_map::SmallMap;
 use tracing::warn;
 
 use crate::config::config::ConfigFile;
-use crate::config::finder::debug_log;
 use crate::config::config::ProjectLayout;
 use crate::config::finder::ConfigError;
 use crate::config::finder::ConfigFinder;
+use crate::config::finder::debug_log;
 use crate::module::bundled::BundledStub;
 use crate::module::third_party::BundledThirdParty;
 use crate::module::typeshed::BundledTypeshedStdlib;
@@ -490,8 +490,8 @@ pub fn standard_config_finder(
                         (config, errors)
                     }
                 }
-            }
-        }),
+            },
+        ),
         Box::new(move |config, path| scripts2.config(config, path)),
         clear_extra_caches,
     )
@@ -503,6 +503,7 @@ mod tests {
     use std::fs;
     use std::ops::Deref as _;
 
+    use clap::Parser;
     use pretty_assertions::assert_eq;
     use pyrefly_config::args::ConfigOverrideArgs;
     use pyrefly_config::config::ConfigScope;
@@ -513,6 +514,7 @@ mod tests {
     use pyrefly_python::sys_info::PythonVersion;
     use pyrefly_util::includes::Includes;
     use pyrefly_util::test_path::TestPath;
+    use pyrefly_util::thread_pool::ThreadCount;
 
     use super::*;
     use crate::commands::check::Handles;
@@ -521,6 +523,8 @@ mod tests {
     use crate::module::finder::DirEntryCache;
     use crate::module::finder::FindImportOptions;
     use crate::module::finder::find_import;
+    use crate::state::require::Require;
+    use crate::state::state::State;
 
     struct TestConfigurer(
         Box<
@@ -1146,6 +1150,86 @@ mod tests {
                 .contains("older than the oldest version described by the bundled typeshed stubs")),
             "expected the outdated Python version warning from the synthesized config, got: {messages:?}"
         );
+    }
+
+    // Known bug: a dependency's synthetic config emits its own Python-version warning,
+    // even though the imported handle uses the checked target's Python version.
+    #[test]
+    fn test_typeshed_warning_with_external_dependency() {
+        for (version, warning_count) in [
+            (PythonVersion::new(3, 12, 0), 1),
+            (PythonVersion::new(3, 9, 0), 2),
+        ] {
+            let tempdir = tempfile::tempdir().unwrap();
+            let project = tempdir.path().join("project");
+            let site_packages = tempdir.path().join("site-packages");
+            fs::create_dir_all(&project).unwrap();
+            fs::create_dir_all(&site_packages).unwrap();
+            fs::write(
+                project.join("pyrefly.toml"),
+                format!("python-version = \"{version}\"\n"),
+            )
+            .unwrap();
+            let main = project.join("main.py");
+            fs::write(&main, "import dependency\nvalue: int = dependency.value\n").unwrap();
+            fs::write(site_packages.join("dependency.py"), "value: int = 42\n").unwrap();
+
+            let finder = TestConfigurer::new_standard(move |root, mut config, mut errors| {
+                // Model an external Python 3.9 environment without querying a real interpreter.
+                config.interpreters.skip_interpreter_query = true;
+                config
+                    .python_environment
+                    .python_version
+                    .get_or_insert(PythonVersion::new(3, 9, 0));
+                config.python_environment.site_package_path = Some(vec![site_packages.clone()]);
+                errors.extend(config.configure_at(root));
+                (ArcId::new(config), errors)
+            });
+            let state = State::new(finder, ThreadCount::Inline);
+            let (handles, _, _) = Handles::new([main]).all(state.config_finder());
+            assert_eq!(handles[0].sys_info().version(), version);
+            let mut transaction = state.new_transaction(Require::Exports, None);
+            transaction.run(&handles, Require::Errors, None);
+            assert!(
+                transaction
+                    .get_errors(&handles)
+                    .collect_errors()
+                    .ordinary
+                    .is_empty()
+            );
+            let warnings = transaction.get_config_errors();
+            assert_eq!(warnings.len(), warning_count);
+        }
+    }
+
+    #[test]
+    fn test_typeshed_warning_for_multiple_target_directories() {
+        for configured in [false, true] {
+            let tempdir = tempfile::tempdir().unwrap();
+            let mut files = Vec::new();
+            for directory in ["a", "b"] {
+                let root = tempdir.path().join(directory);
+                fs::create_dir_all(&root).unwrap();
+                let file = root.join("main.py");
+                fs::write(&file, "value: int = 42\n").unwrap();
+                files.push(file);
+                if configured {
+                    fs::write(root.join("pyrefly.toml"), "python-version = \"3.9\"\n").unwrap();
+                }
+            }
+            let args = ConfigOverrideArgs::try_parse_from([
+                "pyrefly",
+                "--python-version",
+                "3.9",
+                "--skip-interpreter-query",
+            ])
+            .unwrap();
+            let finder = default_config_finder_with_overrides(args, false, None);
+            let (_, _, sourcedb_errors) = Handles::new(files).all(&finder);
+            // Consumers of this slot treat any entry as a fatal source-database failure.
+            assert!(sourcedb_errors.is_empty());
+            assert_eq!(finder.errors().len(), if configured { 2 } else { 1 });
+        }
     }
 
     #[test]
