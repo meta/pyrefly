@@ -25,7 +25,7 @@ def test_cat_dynamic_lists_and_callback() -> None:
     tensors = [torch.as_tensor([1.0]), torch.as_tensor([2.0])]
     result = dynamic_cat(tensors)
     assert torch.equal(result, torch.tensor([1.0, 2.0]))
-    callback = use_concat(torch.cat)  # E: not assignable
+    callback = use_concat(torch.cat)
     assert_type(callback, Tensor)
     assert torch.equal(callback, torch.tensor([1.0, 2.0]))
     if not TYPE_CHECKING:
@@ -36,10 +36,8 @@ def test_cat_dynamic_lists_and_callback() -> None:
 def test_cat_starred_list_and_typed_out() -> None:
     dynamic: list[Tensor] = [torch.as_tensor([2.0, 3.0])]
     output = torch.zeros(3)
-    tensors = [torch.as_tensor([1.0]), *dynamic]
-    result = torch.cat(tensors, dim=0, out=output)
-    # The literal starred-list call exercises cardinality matching, unlike `tensors`.
-    torch.cat([torch.as_tensor([1.0]), *dynamic])  # E: Starred list
+    first = torch.as_tensor([1.0])
+    result = torch.cat([first, *dynamic], dim=0, out=output)
     assert_type(result, Tensor)
     assert result is output
     assert torch.equal(result, torch.tensor([1.0, 2.0, 3.0]))

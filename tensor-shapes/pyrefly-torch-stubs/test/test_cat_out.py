@@ -60,7 +60,7 @@ def test_cat_out_rejects_invalid_arguments() -> None:
     with assert_raises(TypeError):
         torch.cat((top, top), out="x")  # E: parameter `out`
     with assert_raises(TypeError):
-        torch.cat((top, top), 0, out)  # E: Expected 2 positional arguments
+        torch.cat((top, top), 0, out)  # E: No matching overload
     with assert_raises(RuntimeError):
         torch.cat((top, narrow), out=out)  # E: match outside the concatenated dimension
     with assert_raises(IndexError):
