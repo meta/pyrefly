@@ -1162,12 +1162,12 @@ impl GleanState<'_> {
         include_str_lit_xrefs: bool,
     ) -> Vec<(DefinitionLocation, TextRange)> {
         match expr {
-            Expr::Attribute(attr) if attr.ctx.is_load() => self
+            Expr::Attribute(attr) => self
                 .find_definition_for_expr_attribute(attr)
                 .into_iter()
                 .map(|name| (name, attr.attr.range()))
                 .collect(),
-            Expr::Name(name) if name.ctx.is_load() => self
+            Expr::Name(name) if name.ctx.is_load() || name.ctx.is_del() => self
                 .find_definition_for_expr_name(name, false)
                 .into_iter()
                 .map(|x| (x, name.range()))
