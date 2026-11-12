@@ -117,10 +117,9 @@ pub enum Preset {
 
 impl Preset {
     /// Returns a `ConfigBase` carrying this preset's defaults. Only sets fields
-    /// the preset explicitly controls — leaves others as `None` so the
-    /// per-field defaults in `configure()` still apply. Applied to
-    /// `ConfigFile::root` only; sub-configs inherit these values through the
-    /// usual root-fallback pattern in the per-field accessors.
+    /// the preset explicitly controls and leaves others as `None`, so the
+    /// built-in defaults still apply to them. Settings that a config sets
+    /// explicitly take precedence over the preset.
     pub fn apply(self) -> ConfigBase {
         match self {
             Preset::Off => {
@@ -176,7 +175,7 @@ impl Preset {
                     check_unannotated_defs: Some(false),
                     infer_return_types: Some(InferReturnTypes::Never),
                     infer_with_first_use: Some(false),
-                    permissive_ignores: Some(true),
+                    enabled_ignores: Some(Tool::all()),
                     ..Default::default()
                 }
             }

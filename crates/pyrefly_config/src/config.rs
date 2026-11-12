@@ -119,7 +119,7 @@ enum ResolvedConfigKey {
 const RESOLVED_SETTING: &str = "resolved configs set every setting that has a built-in default";
 
 /// The settings for a file. See [`ConfigFile::resolved`].
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct ResolvedConfig {
     /// Every setting that has a built-in default is set, except `errors`.
     settings: ConfigBase,
@@ -127,7 +127,7 @@ struct ResolvedConfig {
     errors: Arc<ErrorDisplayConfig>,
 }
 
-/// Per-file settings, resolved on first use by [`ConfigFile::resolved`]. Clones share the
+/// Per-file settings, resolved on first use by [`ConfigFile::resolve`]. Clones share the
 /// cache, like `target_configs`, until one of them is configured again.
 #[derive(Debug, Default, Clone)]
 pub struct ResolvedConfigs(Arc<RwLock<SmallMap<ResolvedConfigKey, Arc<ResolvedConfig>>>>);
@@ -1277,7 +1277,18 @@ impl ConfigFile {
             }
         }
 
-        let mut settings = Table::try_from(self).context("Failed to serialize config to TOML")?;
+        // Show the root's settings as resolved with the preset and built-in defaults.
+        let resolved = self.resolve(ResolvedConfigKey::SubConfigs(Vec::new()), &[]);
+        let config = ConfigFile {
+            root: ConfigBase {
+                errors: Some((*resolved.errors).clone()),
+                extras: self.root.extras.clone(),
+                ..resolved.settings.clone()
+            },
+            ..self.clone()
+        };
+        let mut settings =
+            Table::try_from(&config).context("Failed to serialize config to TOML")?;
         for key in [
             "python-interpreter-path",
             "fallback-python-interpreter-name",
@@ -1438,12 +1449,12 @@ impl ConfigFile {
         module: ModuleName,
         getter: for<'a> fn(&'a ConfigBase) -> Option<&'a [ModuleWildcard]>,
     ) -> bool {
-        let resolved = path.map(|path| self.resolved(path));
-        let config = resolved
-            .as_ref()
-            .map_or(&self.root, |resolved| &resolved.settings);
-        getter(config)
-            .expect("configure should set root module wildcard settings")
+        let resolved = match path {
+            Some(path) => self.resolved(path),
+            None => self.resolve(ResolvedConfigKey::SubConfigs(Vec::new()), &[]),
+        };
+        getter(&resolved.settings)
+            .expect(RESOLVED_SETTING)
             .iter()
             .find_map(|wildcard| match wildcard.matches(module) {
                 Match::Positive => Some(true),
@@ -1453,8 +1464,7 @@ impl ConfigFile {
             == Some(true)
     }
 
-    /// The settings for `path`, layering its build system config, or its matching
-    /// sub-configs if it has none, over the root config.
+    /// The settings for `path`. See [`ConfigFile::resolve`].
     fn resolved(&self, path: &ModulePath) -> Arc<ResolvedConfig> {
         let target_config = self.file_target_config(path);
         let (key, layers): (_, Vec<&ConfigBase>) = match &target_config {
@@ -1472,38 +1482,43 @@ impl ConfigFile {
                 (ResolvedConfigKey::SubConfigs(indices), layers)
             }
         };
+        self.resolve(key, &layers)
+    }
+
+    /// Layers `layers`, the configs that `key` names, then the root config, then the
+    /// preset, then the built-in defaults, so that a setting comes from the first of
+    /// them that sets it.
+    fn resolve(&self, key: ResolvedConfigKey, layers: &[&ConfigBase]) -> Arc<ResolvedConfig> {
         if let Some(resolved) = self.resolved_configs.0.read().get(&key) {
             return resolved.dupe();
         }
+        let preset = self.preset.map(Preset::apply);
 
         let mut settings = ConfigBase::default();
-        for config in &layers {
+        for config in layers
+            .iter()
+            .copied()
+            .chain([&self.root])
+            .chain(preset.as_ref())
+        {
             settings.fill_unset_from(config);
         }
-        settings.fill_unset_from(&self.root);
+        settings.fill_unset_from(&ConfigBase::builtin_defaults());
 
-        // `configure` merges the root's errors into each sub-config's, so the first
-        // sub-config that sets `errors` already includes the root's. A build system
-        // config's errors apply on top of the root's.
-        let root_errors = self
-            .root
-            .errors
-            .as_ref()
-            .expect("the value in the root config must be set in `ConfigFile::configure()`");
-        let errors = match &target_config {
-            Some((_, target_config)) => {
-                let mut errors = root_errors.clone();
-                if let Some(target_errors) = &target_config.errors {
-                    errors.merge_user_overrides(target_errors);
-                }
-                errors
-            }
-            None => layers
-                .iter()
-                .find_map(|config| config.errors.as_ref())
-                .unwrap_or(root_errors)
-                .clone(),
-        };
+        // Error maps merge, from least to most specific: the preset, the root, and the
+        // first config in `layers` that sets `errors`. A config's parent kinds and
+        // deprecated aliases override the child and canonical kinds in less specific
+        // maps.
+        let mut errors = preset.and_then(|preset| preset.errors).unwrap_or_default();
+        for overrides in [
+            self.root.errors.as_ref(),
+            layers.iter().find_map(|config| config.errors.as_ref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            errors.merge_user_overrides(overrides);
+        }
 
         self.resolved_configs
             .0
@@ -1874,8 +1889,8 @@ impl ConfigFile {
             self.project_excludes = self.get_full_project_excludes(project_excludes);
         }
 
-        // Resolve compatibility settings before applying presets so explicit
-        // legacy settings take precedence over preset defaults.
+        // Resolve compatibility settings within each config, so that each one's explicit
+        // settings take precedence over less specific configs and presets.
         self.root.resolve_legacy_settings();
         if let Err(error) = self.root.resolve_permissive_ignores() {
             configure_errors.push(error);
@@ -1887,51 +1902,6 @@ impl ConfigFile {
                     .push(error.context(format!("In sub config matching {}", sub.matches)));
             }
         }
-
-        // Apply preset as defaults: preset values fill in any fields the user
-        // didn't explicitly set. For errors, preset errors are the base and user
-        // errors merge on top.
-        if let Some(preset) = self.preset {
-            let mut preset_base = preset.apply();
-            preset_base
-                .resolve_permissive_ignores()
-                .expect("presets do not set `enabled-ignores`");
-            self.root.fill_unset_from(&preset_base);
-            // For errors: merge user errors on top of preset errors, dropping
-            // preset entries shadowed by a user-set parent kind or alias so
-            // broad user overrides cascade correctly.
-            match (&mut self.root.errors, preset_base.errors) {
-                (user @ None, preset_errors) => *user = preset_errors,
-                (Some(user_errors), Some(preset_errors)) => {
-                    let mut merged = preset_errors;
-                    merged.merge_user_overrides(user_errors);
-                    *user_errors = merged;
-                }
-                (Some(_), None) => {}
-            }
-        }
-
-        if self.root.errors.is_none() {
-            self.root.errors = Some(Default::default());
-        }
-
-        // Merge root errors into each sub-config's errors so sub-configs
-        // inherit root-level overrides (including any from a preset) for codes
-        // they don't set. Uses `merge_user_overrides` so that a sub-config
-        // setting a parent kind or a deprecated alias cascades through
-        // preset-derived child/canonical entries in root, matching the
-        // semantics at root.
-        if let Some(root_errors) = &self.root.errors {
-            for sub in &mut self.sub_configs {
-                if let Some(sub_errors) = &mut sub.settings.errors {
-                    let mut merged = root_errors.clone();
-                    merged.merge_user_overrides(sub_errors);
-                    *sub_errors = merged;
-                }
-            }
-        }
-
-        self.root.fill_unset_from(&ConfigBase::builtin_defaults());
 
         let mut configure_source_db = |build_system: &mut BuildSystem| {
             let root = match &self.source {
@@ -4191,19 +4161,13 @@ output-format = "omit-errors"
         };
         config.configure();
 
-        assert_eq!(config.root.check_unannotated_defs, Some(false));
-        assert_eq!(
-            config.root.infer_return_types,
-            Some(InferReturnTypes::Never)
-        );
-        // Preset leaves `infer_with_first_use` unset, so the post-preset
-        // default-fill in `configure()` provides the default value of `true`.
-        assert_eq!(config.root.infer_with_first_use, Some(true));
-        assert_eq!(
-            config.root.replace_untyped_imports_with_any,
-            Some(vec![ModuleWildcard::new("*").unwrap()])
-        );
-        let errors = config.root.errors.as_ref().unwrap();
+        let path = test_path("foo.py");
+        assert!(!config.check_unannotated_defs(&path));
+        assert_eq!(config.infer_return_types(&path), InferReturnTypes::Never);
+        // The preset leaves `infer_with_first_use` unset, so the built-in default applies.
+        assert!(config.infer_with_first_use(&path));
+        assert!(config.replace_untyped_imports_with_any(None, ModuleName::from_str("untyped")));
+        let errors = config.errors(&path);
         assert_eq!(
             errors.severity(ErrorKind::BadOverrideMutableAttribute),
             Severity::Ignore
@@ -4233,12 +4197,10 @@ output-format = "omit-errors"
         config.configure();
 
         // User setting overrides preset
-        assert_eq!(config.root.check_unannotated_defs, Some(true));
-        assert_eq!(
-            config.root.replace_untyped_imports_with_any,
-            Some(vec![ModuleWildcard::new("!*").unwrap()])
-        );
-        let errors = config.root.errors.as_ref().unwrap();
+        let path = test_path("foo.py");
+        assert!(config.check_unannotated_defs(&path));
+        assert!(!config.replace_untyped_imports_with_any(None, ModuleName::from_str("untyped")));
+        let errors = config.errors(&path);
         // Explicit user error override wins
         assert_eq!(
             errors.severity(ErrorKind::BadOverrideMutableAttribute),
@@ -4276,7 +4238,8 @@ output-format = "omit-errors"
         let mut without_preset = ConfigFile::default();
         without_preset.configure();
 
-        assert_eq!(with_preset.root, without_preset.root);
+        let path = test_path("foo.py");
+        assert_eq!(with_preset.resolved(&path), without_preset.resolved(&path));
     }
 
     #[test]
@@ -4287,7 +4250,8 @@ output-format = "omit-errors"
         };
         config.configure();
 
-        let errors = config.root.errors.as_ref().unwrap();
+        let path = test_path("foo.py");
+        let errors = config.errors(&path);
         assert_eq!(errors.severity(ErrorKind::ImplicitAny), Severity::Error);
         assert_eq!(
             errors.severity(ErrorKind::DirectAbstractBaseInstantiation),
@@ -4341,8 +4305,8 @@ output-format = "omit-errors"
             errors.severity(ErrorKind::UnannotatedReturn),
             Severity::Ignore
         );
-        assert_eq!(config.root.strict_callable_subtyping, Some(true));
-        assert_eq!(config.root.strict_partial_subtyping, Some(true));
+        assert!(config.strict_callable_subtyping(&path));
+        assert!(config.strict_partial_subtyping(&path));
     }
 
     #[test]
@@ -4363,7 +4327,7 @@ output-format = "omit-errors"
         ] {
             let mut config = ConfigFile::parse_config(source).unwrap();
             config.configure();
-            let errors = config.root.errors.as_ref().unwrap();
+            let errors = config.errors(&test_path("foo.py"));
             assert_eq!(
                 errors.severity(ErrorKind::PossiblyUninitializedAttribute),
                 possibly_initialized_attribute_severity,
@@ -4387,7 +4351,8 @@ output-format = "omit-errors"
         };
         config.configure();
 
-        let errors = config.root.errors.as_ref().unwrap();
+        let path = test_path("foo.py");
+        let errors = config.errors(&path);
         for kind in enum_iterator::all::<ErrorKind>() {
             assert_eq!(
                 errors.severity(kind),
@@ -4396,22 +4361,13 @@ output-format = "omit-errors"
             );
         }
 
-        // Scalar fields fall back to the post-preset defaults in `configure()`.
+        // Every other setting falls back to its built-in default.
         let mut default_config = ConfigFile::default();
         default_config.configure();
         assert_eq!(
-            config.root.check_unannotated_defs,
-            default_config.root.check_unannotated_defs
+            config.resolved(&path).settings,
+            default_config.resolved(&path).settings
         );
-        assert_eq!(
-            config.root.infer_return_types,
-            default_config.root.infer_return_types
-        );
-        assert_eq!(
-            config.root.infer_with_first_use,
-            default_config.root.infer_with_first_use
-        );
-        assert_eq!(config.root.permissive_ignores, None);
     }
 
     #[test]
@@ -4422,7 +4378,7 @@ output-format = "omit-errors"
         };
         config.configure();
 
-        let errors = config.root.errors.as_ref().unwrap();
+        let errors = config.errors(&test_path("foo.py"));
         assert_eq!(errors.severity(ErrorKind::UnusedIgnore), Severity::Error);
         assert_eq!(errors.severity(ErrorKind::UnusedParameter), Severity::Hint);
     }
@@ -4439,7 +4395,8 @@ output-format = "omit-errors"
         };
         config.configure();
 
-        let errors = config.root.errors.as_ref().unwrap();
+        let path = test_path("foo.py");
+        let errors = config.errors(&path);
 
         // Every enabled kind except the hints below is an error. Keeping them
         // at `Error` (rather than `Warn`) avoids the surprise of switching
@@ -4505,13 +4462,10 @@ output-format = "omit-errors"
         }
 
         // Scalar/top-level settings
-        assert_eq!(config.root.check_unannotated_defs, Some(false));
-        assert_eq!(
-            config.root.infer_return_types,
-            Some(InferReturnTypes::Never)
-        );
-        assert_eq!(config.root.infer_with_first_use, Some(false));
-        assert_eq!(config.root.permissive_ignores, Some(true));
+        assert!(!config.check_unannotated_defs(&path));
+        assert_eq!(config.infer_return_types(&path), InferReturnTypes::Never);
+        assert!(!config.infer_with_first_use(&path));
+        assert_eq!(config.enabled_ignores(&path), Tool::all());
     }
 
     #[test]
@@ -4523,7 +4477,7 @@ output-format = "omit-errors"
 
     #[test]
     fn test_preset_fields_propagate() {
-        // Applying a preset should produce the same `root` as setting each of
+        // Applying a preset should resolve the same settings as setting each of
         // its fields explicitly.
         for preset in enum_iterator::all::<Preset>() {
             let mut via_preset = ConfigFile {
@@ -4538,10 +4492,12 @@ output-format = "omit-errors"
             };
             via_fields.configure();
 
+            let path = test_path("foo.py");
             assert_eq!(
-                via_preset.root, via_fields.root,
-                "Preset `{preset:?}`: `configure()` produced a different `root` \
-                 when applied via `preset = ...` vs. setting the fields directly."
+                via_preset.resolved(&path),
+                via_fields.resolved(&path),
+                "Preset `{preset:?}`: applying it via `preset = ...` resolved different \
+                 settings from setting its fields directly."
             );
         }
     }
@@ -4565,7 +4521,7 @@ output-format = "omit-errors"
         };
         config.configure();
 
-        let errors = config.root.errors.as_ref().unwrap();
+        let errors = config.errors(&test_path("foo.py"));
         assert_eq!(
             errors.severity(ErrorKind::BadOverrideMutableAttribute),
             Severity::Error
@@ -4599,7 +4555,7 @@ output-format = "omit-errors"
         };
         config.configure();
 
-        let sub_errors = config.sub_configs[0].settings.errors.as_ref().unwrap();
+        let sub_errors = config.errors(&test_path("tests/foo.py"));
         assert_eq!(
             sub_errors.severity(ErrorKind::BadOverrideMutableAttribute),
             Severity::Error
@@ -4883,7 +4839,7 @@ output-format = "omit-errors"
         };
         config.configure();
 
-        let errors = config.root.errors.as_ref().unwrap();
+        let errors = config.errors(&test_path("foo.py"));
         assert_eq!(
             errors.severity(ErrorKind::BadOverrideParamName),
             Severity::Error
@@ -4904,11 +4860,9 @@ output-format = "omit-errors"
         // The legacy preset sets `check_unannotated_defs = false`, but the
         // deprecated field resolves to `check_unannotated_defs = true` and
         // overrides it.
-        assert_eq!(config.root.check_unannotated_defs, Some(true));
-        assert_eq!(
-            config.root.infer_return_types,
-            Some(InferReturnTypes::Checked)
-        );
+        let path = test_path("foo.py");
+        assert!(config.check_unannotated_defs(&path));
+        assert_eq!(config.infer_return_types(&path), InferReturnTypes::Checked);
     }
 
     #[test]
@@ -6284,7 +6238,7 @@ bad-override = "error"
         };
         config.configure();
 
-        let errors = config.root.errors.as_ref().unwrap();
+        let errors = config.errors(&test_path("foo.py"));
         assert_eq!(
             errors.severity(ErrorKind::PytorchEfficiencyLintItemCall),
             Severity::Warn,
@@ -6311,7 +6265,7 @@ bad-override = "error"
         };
         config.configure();
 
-        let errors = config.root.errors.as_ref().unwrap();
+        let errors = config.errors(&test_path("foo.py"));
         assert_eq!(
             errors.severity(ErrorKind::PytorchEfficiencyLintItemCall),
             Severity::Error,
@@ -6330,7 +6284,7 @@ bad-override = "error"
         };
         config.configure();
 
-        let errors = config.root.errors.as_ref().unwrap();
+        let errors = config.errors(&test_path("foo.py"));
         assert_eq!(
             errors.severity(ErrorKind::PytorchEfficiencyLintItemCall),
             Severity::Ignore,

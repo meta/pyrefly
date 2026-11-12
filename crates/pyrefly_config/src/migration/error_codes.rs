@@ -82,7 +82,10 @@ impl ConfigOptionMigrater for ErrorCodes {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use configparser::ini::IniDefault;
+    use pyrefly_python::module_path::ModulePath;
 
     use super::*;
     use crate::error_kind::ErrorKind;
@@ -190,7 +193,7 @@ mod tests {
 
         // After configure(), the preset disables mutable-override and unbound-name
         pyrefly_cfg.configure();
-        let errors = pyrefly_cfg.root.errors.as_ref().unwrap();
+        let errors = pyrefly_cfg.errors(&ModulePath::filesystem(PathBuf::from("foo.py")));
         assert_eq!(
             errors.severity(ErrorKind::BadOverrideMutableAttribute),
             Severity::Ignore
@@ -216,7 +219,7 @@ mod tests {
 
         // Explicit enable overrides the preset's default after configure()
         pyrefly_cfg.configure();
-        let errors = pyrefly_cfg.root.errors.as_ref().unwrap();
+        let errors = pyrefly_cfg.errors(&ModulePath::filesystem(PathBuf::from("foo.py")));
         assert_eq!(
             errors.severity(ErrorKind::BadOverrideMutableAttribute),
             Severity::Error
@@ -241,7 +244,7 @@ mod tests {
 
         // Explicit enable overrides the legacy preset's Ignore after configure()
         pyrefly_cfg.configure();
-        let errors = pyrefly_cfg.root.errors.as_ref().unwrap();
+        let errors = pyrefly_cfg.errors(&ModulePath::filesystem(PathBuf::from("foo.py")));
         assert_eq!(errors.severity(ErrorKind::UnboundName), Severity::Error);
     }
 
