@@ -104,6 +104,7 @@ from jax._src.sharding_impls import (
     NamedSharding as _NamedSharding,
     PartitionSpec as _PartitionSpec,
 )
+from jax._src.typing import DuckTypedArray as _DuckTypedArray
 from jax.sharding import Sharding as _Sharding
 from jax.typing import DTypeLike
 from numpy import (
@@ -316,8 +317,16 @@ def empty_like[Shape: _Shape = []](
     device: _Device | _Sharding | None = ...,
 ) -> _Array[Shape]: ...
 @overload
+def empty_like(
+    prototype: _ArrayLike[Any] | _DuckTypedArray,
+    dtype: DTypeLike | None = ...,
+    shape: None = None,
+    *,
+    device: _Device | _Sharding | None = ...,
+) -> _Array[IntTuple]: ...
+@overload
 def empty_like[N: IntVar](
-    prototype: _ArrayLike[Any],
+    prototype: _ArrayLike[Any] | _DuckTypedArray,
     dtype: DTypeLike | None = ...,
     shape: Int[N] = ...,
     *,
@@ -325,7 +334,7 @@ def empty_like[N: IntVar](
 ) -> _Array[[N]]: ...
 @overload
 def empty_like[Shape: _Shape](
-    prototype: _ArrayLike[Any],
+    prototype: _ArrayLike[Any] | _DuckTypedArray,
     dtype: DTypeLike | None = ...,
     shape: Shape = ...,
     *,
@@ -333,7 +342,7 @@ def empty_like[Shape: _Shape](
 ) -> _Array[Shape]: ...
 @overload
 def empty_like(
-    prototype: _ArrayLike[Any],
+    prototype: _ArrayLike[Any] | _DuckTypedArray,
     dtype: DTypeLike | None = ...,
     shape: Sequence[int] | int | None = None,
     *,
@@ -349,8 +358,17 @@ def zeros_like[Shape: _Shape = []](
     out_sharding: _NamedSharding | _PartitionSpec | None = ...,
 ) -> _Array[Shape]: ...
 @overload
+def zeros_like(
+    a: _ArrayLike[Any] | _DuckTypedArray,
+    dtype: DTypeLike | None = ...,
+    shape: None = None,
+    *,
+    device: _Device | _Sharding | None = ...,
+    out_sharding: _NamedSharding | _PartitionSpec | None = ...,
+) -> _Array[IntTuple]: ...
+@overload
 def zeros_like[N: IntVar](
-    a: _ArrayLike[Any],
+    a: _ArrayLike[Any] | _DuckTypedArray,
     dtype: DTypeLike | None = ...,
     shape: Int[N] = ...,
     *,
@@ -359,7 +377,7 @@ def zeros_like[N: IntVar](
 ) -> _Array[[N]]: ...
 @overload
 def zeros_like[Shape: _Shape](
-    a: _ArrayLike[Any],
+    a: _ArrayLike[Any] | _DuckTypedArray,
     dtype: DTypeLike | None = ...,
     shape: Shape = ...,
     *,
@@ -368,7 +386,7 @@ def zeros_like[Shape: _Shape](
 ) -> _Array[Shape]: ...
 @overload
 def zeros_like(
-    a: _ArrayLike[Any],
+    a: _ArrayLike[Any] | _DuckTypedArray,
     dtype: DTypeLike | None = ...,
     shape: Sequence[int] | int | None = None,
     *,
@@ -385,8 +403,17 @@ def ones_like[Shape: _Shape = []](
     out_sharding: _NamedSharding | _PartitionSpec | None = ...,
 ) -> _Array[Shape]: ...
 @overload
+def ones_like(
+    a: _ArrayLike[Any] | _DuckTypedArray,
+    dtype: DTypeLike | None = ...,
+    shape: None = None,
+    *,
+    device: _Device | _Sharding | None = ...,
+    out_sharding: _NamedSharding | _PartitionSpec | None = ...,
+) -> _Array[IntTuple]: ...
+@overload
 def ones_like[N: IntVar](
-    a: _ArrayLike[Any],
+    a: _ArrayLike[Any] | _DuckTypedArray,
     dtype: DTypeLike | None = ...,
     shape: Int[N] = ...,
     *,
@@ -395,7 +422,7 @@ def ones_like[N: IntVar](
 ) -> _Array[[N]]: ...
 @overload
 def ones_like[Shape: _Shape](
-    a: _ArrayLike[Any],
+    a: _ArrayLike[Any] | _DuckTypedArray,
     dtype: DTypeLike | None = ...,
     shape: Shape = ...,
     *,
@@ -404,7 +431,7 @@ def ones_like[Shape: _Shape](
 ) -> _Array[Shape]: ...
 @overload
 def ones_like(
-    a: _ArrayLike[Any],
+    a: _ArrayLike[Any] | _DuckTypedArray,
     dtype: DTypeLike | None = ...,
     shape: Sequence[int] | int | None = None,
     *,
@@ -422,8 +449,18 @@ def full_like[Shape: _Shape = []](
     out_sharding: _NamedSharding | _PartitionSpec | None = ...,
 ) -> _Array[Shape]: ...
 @overload
+def full_like(
+    a: _ArrayLike[Any] | _DuckTypedArray,
+    fill_value: Any,
+    dtype: DTypeLike | None = ...,
+    shape: None = None,
+    *,
+    device: _Device | _Sharding | None = ...,
+    out_sharding: _NamedSharding | _PartitionSpec | None = ...,
+) -> _Array[IntTuple]: ...
+@overload
 def full_like[N: IntVar](
-    a: _ArrayLike[Any],
+    a: _ArrayLike[Any] | _DuckTypedArray,
     fill_value: Any,
     dtype: DTypeLike | None = ...,
     shape: Int[N] = ...,
@@ -433,7 +470,7 @@ def full_like[N: IntVar](
 ) -> _Array[[N]]: ...
 @overload
 def full_like[Shape: _Shape](
-    a: _ArrayLike[Any],
+    a: _ArrayLike[Any] | _DuckTypedArray,
     fill_value: Any,
     dtype: DTypeLike | None = ...,
     shape: Shape = ...,
@@ -443,7 +480,7 @@ def full_like[Shape: _Shape](
 ) -> _Array[Shape]: ...
 @overload
 def full_like(
-    a: _ArrayLike[Any],
+    a: _ArrayLike[Any] | _DuckTypedArray,
     fill_value: Any,
     dtype: DTypeLike | None = ...,
     shape: Sequence[int] | int | None = None,
