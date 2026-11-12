@@ -1152,12 +1152,13 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Returns a contiguous tensor. Shape inference via generic fixture signature."""
         ...
 
-    def clone(self, *, memory_format: memory_format | None = None) -> Self:
-        """Returns a copy. Shape inference via generic fixture signature."""
+    # Results keep their shape, not a Parameter or custom subclass identity.
+    def clone(self, *, memory_format: memory_format | None = None) -> Tensor[Shape]:
+        """Return a copy with the same shape."""
         ...
 
-    def detach(self) -> Self:
-        """Returns detached tensor. Shape inference via generic fixture signature."""
+    def detach(self) -> Tensor[Shape]:
+        """Return a tensor with the same shape, detached from autograd."""
         ...
 
     # ==== Tensor Creation Methods ====
