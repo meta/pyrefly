@@ -1358,8 +1358,10 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Enable/disable gradient tracking in-place. Shape-preserving."""
         ...
 
-    def item(self: Tensor[[]]) -> builtins.float | builtins.int:
-        """Return a Python scalar from a rank-zero tensor."""
+    # Torch accepts any one-element tensor. The overlay does not reject known shapes
+    # with zero or several elements, which raise at runtime.
+    def item(self) -> builtins.float | builtins.int:
+        """Return a Python scalar from a one-element tensor."""
         ...
 
     def tolist(self: Tensor) -> Any:
