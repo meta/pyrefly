@@ -1591,6 +1591,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     # ==== Reduction Operations ====
     # Handled by meta-shape functions - simplified signatures
 
+    @overload
     def sum[
         Shape: IntTuple,
         Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
@@ -1605,6 +1606,14 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Sum along dimension(s). Shape inference via meta-shape: torch.Tensor.sum"""
         ...
 
+    @overload
+    def sum(
+        self,
+        dim: list[builtins.int],
+        keepdim: builtins.bool = False,
+        *,
+        dtype: _DType | None = None,
+    ) -> Tensor: ...
     @overload
     def mean[
         Shape: IntTuple,
@@ -2867,6 +2876,7 @@ def permute[Shape: IntTuple, Dims: Flag[tuple[builtins.int, ...]]](
 def permute(
     input: Tensor, dims: tuple[builtins.int, ...] | list[builtins.int]
 ) -> Tensor: ...
+@overload
 def sum[
     Shape: IntTuple,
     Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
@@ -2881,6 +2891,14 @@ def sum[
     """Sum along dimension(s). Shape inference via meta-shape: torch.sum"""
     ...
 
+@overload
+def sum(
+    input: Tensor,
+    dim: list[builtins.int],
+    keepdim: builtins.bool = False,
+    *,
+    dtype: dtype | None = None,
+) -> Tensor: ...
 @overload
 def mean[
     Shape: IntTuple,

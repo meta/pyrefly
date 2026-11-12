@@ -34,8 +34,8 @@ def test_torch_sum_dtype() -> None:
 def test_sum_rejects_invalid_dtype() -> None:
     tensor = torch.ones((2, 3))
     with assert_raises(TypeError):
-        tensor.sum(dtype="float64")  # E: parameter `dtype`
+        tensor.sum(dtype="float64")  # E: No matching overload
     with assert_raises(TypeError):
-        torch.sum(tensor, dtype="float64")  # E: parameter `dtype`
+        torch.sum(tensor, dtype="float64")  # E: No matching overload
     with assert_raises(TypeError):
-        tensor.sum(0, False, torch.float64)  # E: Expected 2 positional arguments
+        tensor.sum(0, False, torch.float64)  # E: No matching overload

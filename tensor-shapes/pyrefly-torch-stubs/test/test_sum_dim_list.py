@@ -16,15 +16,15 @@ def _data() -> Tensor[[2, 3, 4]]:
 
 def test_sum_dim_list() -> None:
     data = _data()
-    rows = data.sum(dim=[1, 2])  # E: not a valid
+    rows = data.sum(dim=[1, 2])
     assert_type(rows, Tensor)
     assert rows.tolist() == [66.0, 210.0]
-    kept = data.sum([1, 2], True)  # E: not a valid
+    kept = data.sum([1, 2], True)
     assert tuple(kept.shape) == (2, 1, 1)
-    columns = torch.sum(data, dim=[-1, 0])  # E: not a valid
+    columns = torch.sum(data, dim=[-1, 0])
     assert_type(columns, Tensor)
     assert columns.tolist() == [60.0, 92.0, 124.0]
-    total = torch.sum(data, [], dtype=torch.float64)  # E: not a valid
+    total = torch.sum(data, [], dtype=torch.float64)
     assert tuple(total.shape) == ()
     assert total.dtype == torch.float64
     assert_shape(data.sum(dim=(1, 2)).shape, (2,))
@@ -34,8 +34,8 @@ def test_sum_dim_list_rejects_invalid_dims() -> None:
     data = _data()
     assert_shape(data.sum(dim=1).shape, (2, 4))
     with assert_raises(TypeError):
-        data.sum(dim=[1.5])  # E: not a valid
+        data.sum(dim=[1.5])  # E: No matching overload
     with assert_raises(RuntimeError):
-        data.sum(dim=[1, 1])  # E: not a valid
+        data.sum(dim=[1, 1])
     with assert_raises(IndexError):
-        torch.sum(data, dim=[3])  # E: not a valid
+        torch.sum(data, dim=[3])
