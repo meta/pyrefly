@@ -3252,21 +3252,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         };
 
-        let mut try_set_variance = |kw: &Keyword, v: PreInferenceVariance| {
-            if self.literal_bool_infer(&kw.value, errors) {
-                if variance.is_some() {
-                    self.error(
-                        errors,
-                        kw.range,
-                        ErrorKind::InvalidTypeVar,
-                        "Contradictory variance specifications".to_owned(),
-                    );
-                } else {
-                    variance = Some(v);
-                }
-            }
-        };
-
         let mut iargs = x.arguments.args.iter();
         if let Some(arg) = iargs.next() {
             check_name_arg(arg);
@@ -3307,10 +3292,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     "default" => {
                         default = Some(&kw.value);
                     }
-                    "covariant" => try_set_variance(kw, PreInferenceVariance::Covariant),
-                    "contravariant" => try_set_variance(kw, PreInferenceVariance::Contravariant),
-                    "invariant" => try_set_variance(kw, PreInferenceVariance::Invariant),
-                    "infer_variance" => try_set_variance(kw, PreInferenceVariance::Undefined),
+                    "covariant" => self.try_set_variance(
+                        &mut variance,
+                        kw,
+                        PreInferenceVariance::Covariant,
+                        errors,
+                    ),
+                    "contravariant" => self.try_set_variance(
+                        &mut variance,
+                        kw,
+                        PreInferenceVariance::Contravariant,
+                        errors,
+                    ),
+                    "invariant" => self.try_set_variance(
+                        &mut variance,
+                        kw,
+                        PreInferenceVariance::Invariant,
+                        errors,
+                    ),
+                    "infer_variance" => self.try_set_variance(
+                        &mut variance,
+                        kw,
+                        PreInferenceVariance::Undefined,
+                        errors,
+                    ),
                     "name" => {
                         if arg_name {
                             self.error(
@@ -3612,6 +3617,27 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ));
         }
         TypeVarTuple::new(name, self.module().dupe(), default_value)
+    }
+
+    fn try_set_variance(
+        &self,
+        variance: &mut Option<PreInferenceVariance>,
+        kw: &Keyword,
+        new_variance: PreInferenceVariance,
+        errors: &ErrorCollector,
+    ) {
+        if self.literal_bool_infer(&kw.value, errors) {
+            if variance.is_some() {
+                self.error(
+                    errors,
+                    kw.range,
+                    ErrorKind::InvalidTypeVar,
+                    "Contradictory variance specifications".to_owned(),
+                );
+            } else {
+                *variance = Some(new_variance);
+            }
+        }
     }
 
     /// Infer an ordinary list after contextual-hint decomposition.
