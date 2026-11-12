@@ -43,7 +43,7 @@ def test_from_numpy_union_of_layouts() -> None:
 
 def test_from_numpy_union_with_any_shape_member() -> None:
     channel = torch.from_numpy(_first_channel(True))
-    assert_type(channel, Tensor)  # E: assert_type(Tensor[[int, int]], Tensor)
+    assert_type(channel, Tensor)
     assert channel.tolist() == [0.0, 2.0, 4.0]
     assert_shape(torch.from_numpy(torch.zeros(3).numpy()).shape, (3,))
 
@@ -51,7 +51,7 @@ def test_from_numpy_union_with_any_shape_member() -> None:
 def test_from_numpy_union_with_tensor_derived_array() -> None:
     def convert(synthetic: bool) -> Tensor:
         array = torch.zeros(4).numpy() if synthetic else _decoded(False)
-        return torch.from_numpy(array)  # E: not assignable to parameter `ndarray`
+        return torch.from_numpy(array)
 
     assert tuple(convert(True).shape) == (4,)
     assert tuple(convert(False).shape) == (6,)
@@ -74,6 +74,6 @@ def test_from_numpy_shares_memory_and_keeps_precise_shapes() -> None:
 def test_from_numpy_rejects_non_arrays() -> None:
     assert_shape(torch.from_numpy(torch.zeros(2).numpy()).shape, (2,))
     with assert_raises(TypeError):
-        torch.from_numpy("bad")  # E: parameter `ndarray`
+        torch.from_numpy("bad")  # E: No matching overload
     with assert_raises(TypeError):
-        torch.from_numpy(3)  # E: parameter `ndarray`
+        torch.from_numpy(3)  # E: No matching overload

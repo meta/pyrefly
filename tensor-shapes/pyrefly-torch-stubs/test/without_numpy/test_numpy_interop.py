@@ -20,5 +20,5 @@ def test_numpy_conversions_remain_available_without_numpy() -> None:
 
     unknown_array = cast(Any, None)
     converted = torch.from_numpy(unknown_array)  # E: unresolved imports
-    reveal_type(converted)  # E: revealed type: Tensor
+    reveal_type(converted)  # E: revealed type: Unknown
     assert_shape(converted.shape, IntTuple)

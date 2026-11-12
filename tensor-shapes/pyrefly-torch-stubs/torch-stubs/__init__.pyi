@@ -4633,6 +4633,7 @@ def as_tensor(
     """Create tensor from data, sharing memory with the input when possible."""
     ...
 
+@overload
 def from_numpy[Shape: IntTuple](ndarray: np.ndarray[Shape]) -> Tensor[Shape]:
     """Create a shape-preserving CPU tensor that shares memory with a NumPy array.
 
@@ -4643,6 +4644,10 @@ def from_numpy[Shape: IntTuple](ndarray: np.ndarray[Shape]) -> Tensor[Shape]:
     """
     ...
 
+# A union of arrays with different layouts may not fit a single shape; Torch accepts
+# any array.
+@overload
+def from_numpy(ndarray: np.ndarray[Any, Any]) -> Tensor: ...
 @overload
 def randint[Shape: IntTuple](
     high: int,
