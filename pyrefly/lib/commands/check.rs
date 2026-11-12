@@ -1954,11 +1954,14 @@ impl CheckArgs {
     fn get_required_levels(&self) -> RequireLevels {
         let retain = self.output.report_binding_memory.is_some()
             || self.output.debug_info.is_some()
-            || self.output.report_trace.is_some()
-            || self.output.report_glean.is_some();
+            || self.output.report_trace.is_some();
         RequireLevels {
-            // The SCIP hook needs the AST and type traces until each document is written.
-            specified: if retain || self.output.report_scip.is_some() {
+            // The SCIP and Glean reports need the AST and type traces of each checked file until
+            // it is written. The definitions they find in imported modules only need exports.
+            specified: if retain
+                || self.output.report_scip.is_some()
+                || self.output.report_glean.is_some()
+            {
                 Require::Everything
             } else {
                 Require::Errors
@@ -2922,6 +2925,62 @@ def go(w: Widget) -> int:
         assert_eq!(glean_files.len(), 1, "expected one Glean file per module");
         let facts = fs::read_to_string(&glean_files[0]).unwrap();
         assert!(facts.contains("main.Widget"));
+    }
+
+    /// The Glean report keeps only the checked files in full. An imported module that isn't
+    /// checked is kept at the exports level, which is still enough to find the definitions that
+    /// the checked files refer to.
+    #[test]
+    fn glean_report_finds_definitions_in_unchecked_imports() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        fs::write(
+            root.join("lib.py"),
+            "class Widget:\n    def apply(self, n: int) -> int:\n        return n + 1\n",
+        )
+        .unwrap();
+        let main = root.join("main.py");
+        fs::write(
+            &main,
+            "from lib import Widget\n\n\ndef go(w: Widget) -> int:\n    return w.apply(1)\n",
+        )
+        .unwrap();
+        let glean_dir = temp.path().join("glean");
+
+        let args = CheckArgs::parse_from(["check", "--report-glean", glean_dir.to_str().unwrap()]);
+        let levels = args.get_required_levels();
+        assert_eq!(levels.specified, Require::Everything);
+        assert_eq!(levels.default, Require::Exports);
+        let (_, check_result) = args
+            .run_once(
+                "test",
+                Box::new(TestIncludes {
+                    root: root.clone(),
+                    initial_files: vec![main],
+                }),
+                test_config_finder(&root),
+                UpsellDecision::Skip,
+                ThreadCount::Inline,
+            )
+            .unwrap();
+        let errors = &check_result.legacy_errors;
+        assert!(errors.is_empty(), "unexpected type errors: {errors:#?}");
+
+        let glean_files: Vec<_> = fs::read_dir(&glean_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(
+            glean_files.len(),
+            1,
+            "only the checked file should be reported"
+        );
+        let facts = fs::read_to_string(&glean_files[0]).unwrap();
+        assert!(
+            facts.contains("\"lib.Widget.apply\""),
+            "the method call should refer to the method's definition in the unchecked module"
+        );
     }
 
     #[test]
