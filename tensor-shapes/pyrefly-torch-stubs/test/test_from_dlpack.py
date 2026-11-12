@@ -29,8 +29,8 @@ class IncompleteProducer:
 
 def test_from_dlpack_tensor_shares_cpu_memory() -> None:
     source = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    result = torch.from_dlpack(source, copy=False, device="cpu")  # E: No attribute
-    assert_type(result, Tensor)  # E: assert_type
+    result = torch.from_dlpack(source, copy=False, device="cpu")
+    assert_type(result, Tensor)
     assert isinstance(result, Tensor)
     assert result is not source
     assert result.data_ptr() == source.data_ptr()
@@ -44,8 +44,8 @@ def test_from_dlpack_tensor_shares_cpu_memory() -> None:
 def test_from_dlpack_capsule_is_consumed_once() -> None:
     source = torch.tensor([1.0, 2.0])
     capsule = to_dlpack(source)
-    result = torch.from_dlpack(capsule)  # E: No attribute
-    assert_type(result, Tensor)  # E: assert_type
+    result = torch.from_dlpack(capsule)
+    assert_type(result, Tensor)
     assert result.data_ptr() == source.data_ptr()
     result[1] = 7.0
     assert source[1].item() == 7.0
@@ -56,12 +56,10 @@ def test_from_dlpack_capsule_is_consumed_once() -> None:
 def test_from_dlpack_cpu_protocol_and_copy() -> None:
     source = torch.tensor([1.0, 2.0])
     producer = CpuProducer(source)
-    shared = torch.from_dlpack(  # E: No attribute
-        producer, device=torch.device("cpu"), copy=False
-    )
-    copied = torch.from_dlpack(producer, copy=True)  # E: No attribute
-    assert_type(shared, Tensor)  # E: assert_type
-    assert_type(copied, Tensor)  # E: assert_type
+    shared = torch.from_dlpack(producer, device=torch.device("cpu"), copy=False)
+    copied = torch.from_dlpack(producer, copy=True)
+    assert_type(shared, Tensor)
+    assert_type(copied, Tensor)
     assert shared.data_ptr() == source.data_ptr()
     assert copied.data_ptr() != source.data_ptr()
     copied[0] = 11.0
@@ -74,13 +72,13 @@ def test_from_dlpack_cpu_protocol_and_copy() -> None:
 def test_from_dlpack_rejects_invalid_inputs_and_arity() -> None:
     # Opaque capsules/producers are typed Any upstream; validation is runtime-only.
     with assert_raises(RuntimeError):
-        torch.from_dlpack("not a capsule")  # E: No attribute
+        torch.from_dlpack("not a capsule")
     with assert_raises(AttributeError):
-        torch.from_dlpack(IncompleteProducer())  # E: No attribute
+        torch.from_dlpack(IncompleteProducer())
     tensor = torch.ones(2)
     with assert_raises(TypeError):
-        torch.from_dlpack(tensor, False)  # E: No attribute
+        torch.from_dlpack(tensor, False)  # E: Expected 1 positional
     with assert_raises(AssertionError):
-        torch.from_dlpack(tensor, device=object())  # E: No attribute
+        torch.from_dlpack(tensor, device=object())  # E: parameter `device`
     if TYPE_CHECKING:
-        torch.from_dlpack(tensor, copy="never")  # E: No attribute
+        torch.from_dlpack(tensor, copy="never")  # E: parameter `copy`

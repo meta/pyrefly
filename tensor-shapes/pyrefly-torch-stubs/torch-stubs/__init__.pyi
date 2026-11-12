@@ -683,6 +683,7 @@ from torch.random import (
 )
 from torch.storage import TypedStorage as TypedStorage, UntypedStorage as UntypedStorage
 from torch.types import Device
+from torch.utils.dlpack import from_dlpack as from_dlpack
 from typing_extensions import TypeIs
 
 if TYPE_CHECKING:
