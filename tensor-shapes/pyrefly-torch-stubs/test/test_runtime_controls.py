@@ -34,14 +34,14 @@ def test_float32_matmul_precision_controls() -> None:
     precision = torch.get_float32_matmul_precision()
     assert_type(precision, str)
     try:
-        result = torch.set_float32_matmul_precision("high")  # E: No attribute
-        assert_type(result, None)  # E: assert_type(Unknown, None) failed
+        result = torch.set_float32_matmul_precision("high")
+        assert_type(result, None)
         assert torch.get_float32_matmul_precision() == "high"
 
-        torch.set_float32_matmul_precision(precision="medium")  # E: No attribute
+        torch.set_float32_matmul_precision(precision="medium")
         assert torch.get_float32_matmul_precision() == "medium"
 
         with assert_raises(RuntimeError):
-            torch.set_float32_matmul_precision(3)  # E: No attribute
+            torch.set_float32_matmul_precision(3)  # E: parameter `precision`
     finally:
-        torch.set_float32_matmul_precision(precision)  # E: No attribute
+        torch.set_float32_matmul_precision(precision)
