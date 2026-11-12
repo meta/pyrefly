@@ -3781,12 +3781,21 @@ def triu_indices(
 # Note: matmul is already defined above with static typing at line 341
 # We keep it there for backward compatibility, but meta-shape handles general cases
 
+@overload
 def mm[N: IntVar, K: IntVar, M: IntVar](
-    input: Tensor[[N, K]], mat2: Tensor[[K, M]]
+    input: Tensor[[N, K]], mat2: Tensor[[K, M]], *, out: Tensor | None = None
 ) -> Tensor[[N, M]]:
     """Matrix multiplication (2D @ 2D). Output: [N, M]."""
     ...
 
+@overload
+def mm[N: IntVar, K: IntVar, M: IntVar](
+    input: Tensor[[N, K]],
+    mat2: Tensor[[K, M]],
+    out_dtype: dtype,
+    *,
+    out: Tensor | None = None,
+) -> Tensor[[N, M]]: ...
 def bmm[B: IntVar, N: IntVar, K: IntVar, M: IntVar](
     input: Tensor[[B, N, K]], mat2: Tensor[[B, K, M]]
 ) -> Tensor[[B, N, M]]:
