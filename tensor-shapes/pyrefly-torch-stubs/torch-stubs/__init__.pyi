@@ -3070,9 +3070,13 @@ def ones(
 @overload
 def empty[Shape: IntTuple](
     *size: *Shape,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    memory_format: memory_format | None = None,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create uninitialized tensor. Shape is inferred from `size`."""
     ...
@@ -3081,13 +3085,31 @@ def empty[Shape: IntTuple](
 def empty[Shape: IntTuple](
     size: Shape,
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    memory_format: memory_format | None = None,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create uninitialized tensor. Shape is inferred from `size`."""
     ...
 
+# Tuples and `torch.Size` use the shaped overloads. A list fallback keeps those
+# calls precise even when other arguments are `Any`.
+@overload
+def empty(
+    size: list[builtins.int],
+    *,
+    memory_format: memory_format | None = None,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
+) -> Tensor: ...
 @overload
 def full[Shape: IntTuple](
     size: Shape,
