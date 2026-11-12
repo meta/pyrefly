@@ -634,53 +634,6 @@ fn check_typevar(
     }
 }
 
-/// Check a single callable signature for variance violations at `range`.
-/// The return type is a covariant position; parameters are contravariant.
-fn check_callable_variance(
-    callable: &Callable,
-    range: TextRange,
-    violations: &mut Vec<VarianceViolation>,
-) {
-    if let Type::Quantified(q) = &callable.ret {
-        check_typevar(
-            q.name(),
-            Variance::Covariant,
-            q.variance(),
-            range,
-            violations,
-        );
-    }
-    match &callable.params {
-        Params::List(param_list) | Params::Partial(param_list) => {
-            for param in param_list.items().iter() {
-                if let Type::Quantified(q) = param.as_type() {
-                    check_typevar(
-                        q.name(),
-                        Variance::Contravariant,
-                        q.variance(),
-                        range,
-                        violations,
-                    );
-                }
-            }
-        }
-        Params::ParamSpec(prefix, param_spec) => {
-            for ty in prefix.iter().map(|p| p.ty()).chain([param_spec]) {
-                if let Type::Quantified(q) = ty {
-                    check_typevar(
-                        q.name(),
-                        Variance::Contravariant,
-                        q.variance(),
-                        range,
-                        violations,
-                    );
-                }
-            }
-        }
-        Params::Ellipsis | Params::Materialization => {}
-    }
-}
-
 fn initial_inference_map(tparams: Option<&TParams>) -> InferenceMap {
     tparams
         .iter()
@@ -920,12 +873,60 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     OverloadType::Forall(forall) => (&forall.body.signature, &forall.body.metadata),
                 };
                 let range = self.func_def_range(metadata).unwrap_or(field_range);
-                check_callable_variance(callable, range, violations);
+                self.check_callable_variance(callable, range, violations);
             }
             return;
         }
         for (callable, _) in ty.toplevel_callable_signatures() {
-            check_callable_variance(callable, field_range, violations);
+            self.check_callable_variance(callable, field_range, violations);
+        }
+    }
+
+    /// Check a single callable signature for variance violations at `range`.
+    /// The return type is a covariant position; parameters are contravariant.
+    fn check_callable_variance(
+        &self,
+        callable: &Callable,
+        range: TextRange,
+        violations: &mut Vec<VarianceViolation>,
+    ) {
+        if let Type::Quantified(q) = &callable.ret {
+            check_typevar(
+                q.name(),
+                Variance::Covariant,
+                q.variance(),
+                range,
+                violations,
+            );
+        }
+        match &callable.params {
+            Params::List(param_list) | Params::Partial(param_list) => {
+                for param in param_list.items().iter() {
+                    if let Type::Quantified(q) = param.as_type() {
+                        check_typevar(
+                            q.name(),
+                            Variance::Contravariant,
+                            q.variance(),
+                            range,
+                            violations,
+                        );
+                    }
+                }
+            }
+            Params::ParamSpec(prefix, param_spec) => {
+                for ty in prefix.iter().map(|p| p.ty()).chain([param_spec]) {
+                    if let Type::Quantified(q) = ty {
+                        check_typevar(
+                            q.name(),
+                            Variance::Contravariant,
+                            q.variance(),
+                            range,
+                            violations,
+                        );
+                    }
+                }
+            }
+            Params::Ellipsis | Params::Materialization => {}
         }
     }
 }
