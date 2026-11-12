@@ -1652,6 +1652,14 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         keepdim: builtins.bool = False,
         dtype: Any = None,
     ) -> Tensor: ...
+    @overload
+    def mean(
+        self,
+        dim: list[builtins.int],
+        keepdim: builtins.bool = False,
+        *,
+        dtype: _DType | None = None,
+    ) -> Tensor: ...
     def all[
         Shape: IntTuple,
         Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
@@ -2936,6 +2944,14 @@ def mean(
     axis: list[builtins.int],
     keepdim: builtins.bool = False,
     dtype: Any = None,
+) -> Tensor: ...
+@overload
+def mean(
+    input: Tensor,
+    dim: list[builtins.int],
+    keepdim: builtins.bool = False,
+    *,
+    dtype: dtype | None = None,
 ) -> Tensor: ...
 @overload
 def max[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[[]]:

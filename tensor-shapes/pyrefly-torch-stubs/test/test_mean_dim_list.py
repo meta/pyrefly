@@ -16,13 +16,13 @@ def _data() -> Tensor[[2, 3, 4]]:
 
 def test_mean_dim_list() -> None:
     data = _data()
-    rows = data.mean(dim=[1, 2])  # E: No matching overload
-    assert_type(rows, Tensor)  # E: assert_type
+    rows = data.mean(dim=[1, 2])
+    assert_type(rows, Tensor)
     assert rows.tolist() == [5.5, 17.5]
-    kept = torch.mean(data, [-1, 0], keepdim=True)  # E: not a valid
+    kept = torch.mean(data, [-1, 0], keepdim=True)
     assert_type(kept, Tensor)
     assert tuple(kept.shape) == (1, 3, 1)
-    total = data.mean([], dtype=torch.float64)  # E: not a valid
+    total = data.mean([], dtype=torch.float64)
     assert tuple(total.shape) == ()
     assert total.dtype == torch.float64
     assert_shape(data.mean(dim=(1, 2)).shape, (2,))
@@ -34,6 +34,6 @@ def test_mean_dim_list_rejects_invalid_dims() -> None:
     with assert_raises(TypeError):
         data.mean(dim=[1.5])  # E: No matching overload
     with assert_raises(RuntimeError):
-        torch.mean(data, dim=[1, 1])  # E: No matching overload
+        torch.mean(data, dim=[1, 1])
     with assert_raises(IndexError):
-        data.mean(dim=[3])  # E: No matching overload
+        data.mean(dim=[3])
