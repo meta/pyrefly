@@ -606,6 +606,17 @@ class Foo(Generic[T_co]):
 );
 
 testcase!(
+    test_shallow_receiver_not_checked,
+    r#"
+from typing import TypeVar, Generic
+T_co = TypeVar("T_co", covariant=True)
+
+class Foo(Generic[T_co]):
+    def f(self: T_co) -> None: ...
+"#,
+);
+
+testcase!(
     test_constrained_typevar_protocol_variance_mismatch,
     r#"
 from typing import Protocol, TypeVar
