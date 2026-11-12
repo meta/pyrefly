@@ -2726,7 +2726,10 @@ def unique(
     dim: builtins.int | None = None,
 ) -> Tensor | tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor]: ...
 def cat[Shapes: IntTuples, Dim: Flag[builtins.int]](
-    tensors: MapIntTuples[lambda S: Tensor[S], Shapes], dim: Dim = 0
+    tensors: MapIntTuples[lambda S: Tensor[S], Shapes],
+    dim: Dim = 0,
+    *,
+    out: Tensor | None = None,
 ) -> Tensor[cat_shape(Shapes, Dim)]:
     """Concatenate tensors. Shape inference via meta-shape: torch.cat"""
     ...
