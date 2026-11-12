@@ -882,6 +882,18 @@ pub struct SourceDbQueryOutcome {
     pub error: Option<String>,
 }
 
+/// The oldest Python version for which the bundled typeshed stubs are accurate.
+///
+/// Typeshed publishes this as `[tool.typeshed] oldest-supported-python` in its
+/// `pyproject.toml`. We mirror it here because Pyrefly only bundles typeshed's `stdlib/`
+/// and `stubs/` trees, not its `pyproject.toml`. Update this whenever the vendored
+/// typeshed is updated and drops support for an older version.
+const TYPESHED_OLDEST_SUPPORTED_PYTHON: PythonVersion = PythonVersion {
+    major: 3,
+    minor: 10,
+    micro: 0,
+};
+
 impl ConfigFile {
     /// Gets a ConfigFile for a project directory. `fallback` indicates whether this is a guessed
     /// project root that we're falling back to after failing to otherwise find an import.
@@ -2021,6 +2033,21 @@ impl ConfigFile {
         }
         configure_errors.extend(validate(&self.search_path_from_file, "search-path"));
 
+        // Typeshed removes the version-specific branches and guards for Python versions it no
+        // longer supports, so the bundled stubs only describe the standard library accurately for
+        // versions >= the oldest supported one. A custom `typeshed-path` replaces the bundled
+        // stdlib and may describe older versions, so only warn for the bundled typeshed.
+        // Warn instead of failing, because the user's own code may still legitimately target an
+        // older version.
+        if self.typeshed_path.is_none() {
+            let python_version = self.python_version();
+            if python_version < TYPESHED_OLDEST_SUPPORTED_PYTHON {
+                configure_errors.push(anyhow!(
+                    "Python version {python_version} is older than the oldest version described by the bundled typeshed stubs ({TYPESHED_OLDEST_SUPPORTED_PYTHON}). The bundled stubs no longer include the version-specific branches and guards for older versions, so the standard library may be modeled inaccurately for this target. If the project must keep targeting {python_version}, provide compatible custom stubs with `typeshed-path`; otherwise raise `python-version` to {TYPESHED_OLDEST_SUPPORTED_PYTHON} or newer."
+                ));
+            }
+        }
+
         if let ConfigSource::File(path) = &self.source {
             configure_errors
                 .into_map(|e| ConfigError::warn(e.context(format!("{}", path.display()))))
@@ -2742,6 +2769,74 @@ mod tests {
         assert!(!settings.contains_key("required-version"));
         assert!(!settings.contains_key("disable-search-path-heuristics"));
         assert!(!settings.contains_key("use-ignore-files"));
+    }
+
+    #[test]
+    fn test_configure_warns_when_python_version_is_older_than_typeshed() {
+        let mut config = ConfigFile::default();
+        config.interpreters.skip_interpreter_query = true;
+        config.python_environment.python_version = Some(PythonVersion::new(3, 9, 0));
+
+        let messages: Vec<String> = config
+            .configure()
+            .iter()
+            .filter(|error| error.severity() == Severity::Warn)
+            .map(|error| error.get_message())
+            .collect();
+
+        assert!(
+            messages.iter().any(|message| message
+                .contains("older than the oldest version described by the bundled typeshed stubs")),
+            "expected a warning about an outdated Python version, got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn test_configure_does_not_warn_when_custom_typeshed_is_configured() {
+        let mut config = ConfigFile::default();
+        config.interpreters.skip_interpreter_query = true;
+        config.python_environment.python_version = Some(PythonVersion::new(3, 9, 0));
+        // A custom typeshed replaces the bundled stdlib and may describe older versions.
+        config.typeshed_path = Some(PathBuf::from("/custom/typeshed"));
+
+        let messages: Vec<String> = config
+            .configure()
+            .iter()
+            .map(|error| error.get_message())
+            .collect();
+
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.contains("bundled typeshed stubs")),
+            "unexpected bundled-typeshed warning when a custom typeshed is configured: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn test_configure_does_not_warn_when_python_version_is_typeshed_supported() {
+        for version in [
+            PythonVersion::new(3, 10, 0),
+            PythonVersion::new(3, 11, 0),
+            PythonVersion::new(3, 13, 0),
+        ] {
+            let mut config = ConfigFile::default();
+            config.interpreters.skip_interpreter_query = true;
+            config.python_environment.python_version = Some(version);
+
+            let messages: Vec<String> = config
+                .configure()
+                .iter()
+                .map(|error| error.get_message())
+                .collect();
+
+            assert!(
+                !messages.iter().any(|message| message.contains(
+                    "older than the oldest version described by the bundled typeshed stubs"
+                )),
+                "unexpected outdated-Python warning for {version}: {messages:?}"
+            );
+        }
     }
 
     #[test]

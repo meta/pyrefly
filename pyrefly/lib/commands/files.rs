@@ -40,7 +40,6 @@ use crate::config::config::SynthesizedPresetReason;
 use crate::config::error_kind::Severity;
 use crate::config::finder::ConfigError;
 use crate::config::finder::ConfigFinder;
-use crate::config::finder::debug_log;
 
 /// Whether (and how) to emit the "no `pyrefly.toml` found" upsell after
 /// a CLI check. Computed once during file resolution so the hot path
@@ -140,28 +139,32 @@ pub fn get_project_config_for_current_dir(
 ) -> anyhow::Result<(ArcId<ConfigFile>, Vec<ConfigError>)> {
     let current_dir = std::env::current_dir().context("cannot identify current dir")?;
     let config_finder = default_config_finder_with_overrides(args.clone(), false, wrapper);
-    let config = config_finder.directory(&current_dir).unwrap_or_else(|| {
-        // No marker found upward. Run the synthesized config through the
-        // same unconfigured resolver wiring that the file-mode path uses
-        // (via `DefaultConfigConfigurerWithOverrides`); without this,
-        // `pyrefly check` (project mode) and `pyrefly check <file>` (file
-        // mode) produce divergent configs in unconfigured repos — the
-        // file-mode upsell would never fire for project-mode checks, and
-        // a nearby mypy.ini / pyrightconfig.json would be migrated for
-        // file mode but ignored here.
-        let mut synthesized =
-            ConfigFile::init_at_root(&current_dir, &ProjectLayout::new(&current_dir), false);
-        apply_unconfigured_resolver_if_applicable(
-            &mut synthesized,
-            Some(&current_dir),
-            UnconfiguredOverride::Auto,
-        );
-        let (config, errors) = args.override_config_at(synthesized, Some(&current_dir));
-        // Since this is a config we generated, these are likely internal errors.
-        debug_log(errors);
-        config
-    });
-    Ok((config, config_finder.errors()))
+    let (config, mut errors) = match config_finder.directory(&current_dir) {
+        Some(config) => (config, Vec::new()),
+        None => {
+            // No marker found upward. Run the synthesized config through the
+            // same unconfigured resolver wiring that the file-mode path uses
+            // (via `DefaultConfigConfigurerWithOverrides`); without this,
+            // `pyrefly check` (project mode) and `pyrefly check <file>` (file
+            // mode) produce divergent configs in unconfigured repos — the
+            // file-mode upsell would never fire for project-mode checks, and
+            // a nearby mypy.ini / pyrightconfig.json would be migrated for
+            // file mode but ignored here.
+            let mut synthesized =
+                ConfigFile::init_at_root(&current_dir, &ProjectLayout::new(&current_dir), false);
+            apply_unconfigured_resolver_if_applicable(
+                &mut synthesized,
+                Some(&current_dir),
+                UnconfiguredOverride::Auto,
+            );
+            // Keep any warnings produced while configuring the synthesized config: they are
+            // user-facing (for example, an unsupported `python-version`), unlike the parse
+            // errors that only a real config file can produce.
+            args.override_config_at(synthesized, Some(&current_dir))
+        }
+    };
+    errors.append(&mut config_finder.errors());
+    Ok((config, errors))
 }
 
 pub fn get_config_finder_for_snippet(

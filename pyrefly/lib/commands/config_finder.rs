@@ -30,10 +30,10 @@ use starlark_map::small_map::SmallMap;
 use tracing::warn;
 
 use crate::config::config::ConfigFile;
+use crate::config::finder::debug_log;
 use crate::config::config::ProjectLayout;
 use crate::config::finder::ConfigError;
 use crate::config::finder::ConfigFinder;
-use crate::config::finder::debug_log;
 use crate::module::bundled::BundledStub;
 use crate::module::third_party::BundledThirdParty;
 use crate::module::typeshed::BundledTypeshedStdlib;
@@ -401,16 +401,14 @@ pub fn standard_config_finder(
         })
     };
 
-    let empty = move || {
-        cache_empty
-            .lock()
-            .get_or_insert_with(|| {
-                let (config, errors) = configure3.configure(None, ConfigFile::default(), vec![]);
-                // Since this is a config we generated, these are likely internal errors.
-                debug_log(errors);
-                config
-            })
-            .dupe()
+    let empty = move || -> (ArcId<ConfigFile>, Vec<ConfigError>) {
+        let mut cache = cache_empty.lock();
+        if let Some(config) = cache.as_ref() {
+            return (config.dupe(), Vec::new());
+        }
+        let (config, errors) = configure3.configure(None, ConfigFile::default(), vec![]);
+        *cache = Some(config.dupe());
+        (config, errors)
     };
 
     ConfigFinder::new_custom(
@@ -428,72 +426,69 @@ pub fn standard_config_finder(
         }),
         // Fall back to using a default config, but let's see if we can make the `search_path` somewhat useful
         // based on a few heuristics.
-        Box::new(move |module_kind, path| {
-            let name = module_kind.name();
-            let is_fallback = module_kind.is_fallback();
-            match path.root_of(name) {
-                // We were able to walk up `path` and match each component of `name` to a directory until we ran out.
-                // That means the resulting path is likely the root of the 'project', and should therefore be its `search_path`.
-                Some(path) if !is_fallback => cache_one
-                    .lock()
-                    .entry(path.clone())
-                    .or_insert_with(|| {
+        Box::new(
+            move |module_kind, path| -> (ArcId<ConfigFile>, Vec<ConfigError>) {
+                let name = module_kind.name();
+                let is_fallback = module_kind.is_fallback();
+                match path.root_of(name) {
+                    // We were able to walk up `path` and match each component of `name` to a directory until we ran out.
+                    // That means the resulting path is likely the root of the 'project', and should therefore be its `search_path`.
+                    Some(path) if !is_fallback => {
+                        let mut cache = cache_one.lock();
+                        if let Some(config) = cache.get(&path) {
+                            return (config.dupe(), Vec::new());
+                        }
                         let (config, errors) = configure2.configure(
                             Some(&path),
                             ConfigFile::init_at_root(&path, &ProjectLayout::Flat, true),
                             vec![],
                         );
-                        // Since this is a config we generated, these are likely internal errors.
-                        debug_log(errors);
-                        config
-                    })
-                    .dupe(),
+                        cache.insert(path, config.dupe());
+                        (config, errors)
+                    }
 
-                // We couldn't walk up and find a possible root of the project, so let's try to create a search
-                // path that is still useful for this import by including all of its parents.
-                _ => {
-                    let parent = match path.details() {
-                        ModulePathDetails::FileSystem(x) | ModulePathDetails::Memory(x) => {
-                            if let Some(path) = x.parent() {
-                                path
-                            } else {
-                                return empty();
+                    // We couldn't walk up and find a possible root of the project, so let's try to create a search
+                    // path that is still useful for this import by including all of its parents.
+                    _ => {
+                        let parent = match path.details() {
+                            ModulePathDetails::FileSystem(x) | ModulePathDetails::Memory(x) => {
+                                if let Some(path) = x.parent() {
+                                    path
+                                } else {
+                                    return empty();
+                                }
                             }
+                            ModulePathDetails::Namespace(x) => x.as_path(),
+                            ModulePathDetails::BundledTypeshed(_) => {
+                                return (BundledTypeshedStdlib::config(), Vec::new());
+                            }
+                            ModulePathDetails::BundledTypeshedThirdParty(_) => {
+                                return (BundledTypeshedThirdParty::config(), Vec::new());
+                            }
+                            ModulePathDetails::BundledThirdParty(_) => {
+                                return (BundledThirdParty::config(), Vec::new());
+                            }
+                        };
+                        let mut cache = cache_parents.lock();
+                        if let Some(config) = cache.get(parent) {
+                            return (config.dupe(), Vec::new());
                         }
-                        ModulePathDetails::Namespace(x) => x.as_path(),
-                        ModulePathDetails::BundledTypeshed(_) => {
-                            return BundledTypeshedStdlib::config();
-                        }
-                        ModulePathDetails::BundledTypeshedThirdParty(_) => {
-                            return BundledTypeshedThirdParty::config();
-                        }
-                        ModulePathDetails::BundledThirdParty(_) => {
-                            return BundledThirdParty::config();
-                        }
-                    };
-                    cache_parents
-                        .lock()
-                        .entry(parent.to_owned())
-                        .or_insert_with(|| {
-                            let fallback_search_path =
-                                FallbackSearchPath::Explicit(cache_ancestors.get_ancestors(parent));
-                            let mut config = ConfigFile {
-                                source: ConfigSource::Synthetic(Some(parent.to_owned())),
-                                project_includes: ConfigFile::default_project_includes(),
-                                // We use `fallback_search_path` because otherwise a user with `/sys` on their
-                                // computer (all of them) will override `sys.version` in preference to typeshed.
-                                fallback_search_path,
-                                root: ConfigBase::default_for_ide_without_config(),
-                                ..Default::default()
-                            };
-                            config.rewrite_with_path_to_config(parent);
-                            let (config, errors) =
-                                configure2.configure(Some(parent), config, vec![]);
-                            // Since this is a config we generated, these are likely internal errors.
-                            debug_log(errors);
-                            config
-                        })
-                        .dupe()
+                        let fallback_search_path =
+                            FallbackSearchPath::Explicit(cache_ancestors.get_ancestors(parent));
+                        let mut config = ConfigFile {
+                            source: ConfigSource::Synthetic(Some(parent.to_owned())),
+                            project_includes: ConfigFile::default_project_includes(),
+                            // We use `fallback_search_path` because otherwise a user with `/sys` on their
+                            // computer (all of them) will override `sys.version` in preference to typeshed.
+                            fallback_search_path,
+                            root: ConfigBase::default_for_ide_without_config(),
+                            ..Default::default()
+                        };
+                        config.rewrite_with_path_to_config(parent);
+                        let (config, errors) = configure2.configure(Some(parent), config, vec![]);
+                        cache.insert(parent.to_owned(), config.dupe());
+                        (config, errors)
+                    }
                 }
             }
         }),
@@ -515,6 +510,7 @@ mod tests {
     use pyrefly_python::module_name::ModuleNameWithKind;
     use pyrefly_python::module_path::ModulePath;
     use pyrefly_python::module_path::ModulePathDetails;
+    use pyrefly_python::sys_info::PythonVersion;
     use pyrefly_util::includes::Includes;
     use pyrefly_util::test_path::TestPath;
 
@@ -1109,6 +1105,46 @@ mod tests {
             matches!(config.fallback_search_path, FallbackSearchPath::Explicit(_)),
             "carry-over lost `fallback_search_path` from input config; got {:?}",
             config.fallback_search_path,
+        );
+    }
+
+    /// A synthesized config still has to deliver config warnings to the user: the config
+    /// finder's fallback used to debug-log them, so `--python-version 3.9` on an unconfigured
+    /// project warned about nothing.
+    #[test]
+    fn test_unconfigured_project_reports_outdated_python_version_warning() {
+        use clap::Parser;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir("pkg", vec![TestPath::file("mod.py")])],
+        );
+
+        let args = ConfigOverrideArgs::try_parse_from([
+            "pyrefly",
+            "--python-version",
+            "3.9",
+            "--skip-interpreter-query",
+        ])
+        .unwrap();
+        let finder = default_config_finder_with_overrides(args, false, None);
+        let config = finder.python_file(
+            ModuleNameWithKind::guaranteed(ModuleName::from_str("pkg.mod")),
+            &ModulePath::filesystem(root.join("pkg/mod.py")),
+        );
+
+        assert_eq!(config.python_version(), PythonVersion::new(3, 9, 0));
+        let messages: Vec<String> = finder
+            .errors()
+            .iter()
+            .map(|error| error.get_message())
+            .collect();
+        assert!(
+            messages.iter().any(|message| message
+                .contains("older than the oldest version described by the bundled typeshed stubs")),
+            "expected the outdated Python version warning from the synthesized config, got: {messages:?}"
         );
     }
 

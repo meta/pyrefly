@@ -118,8 +118,14 @@ type BeforeCallback =
 type LoadCallback = Box<dyn Fn(&Path) -> (ArcId<ConfigFile>, Vec<ConfigError>) + Send + Sync>;
 
 /// Fallback function when no config file exists or loading fails.
-type FallbackCallback =
-    Box<dyn Fn(ModuleNameWithKind, &ModulePath) -> ArcId<ConfigFile> + Send + Sync>;
+///
+/// Returns the config along with any user-facing warnings produced while configuring it (for
+/// example, a warning that the resolved `python-version` predates the bundled typeshed). Those
+/// warnings are accumulated so callers surface them like config-file errors; a synthesized config
+/// must not silently swallow them.
+type FallbackCallback = Box<
+    dyn Fn(ModuleNameWithKind, &ModulePath) -> (ArcId<ConfigFile>, Vec<ConfigError>) + Send + Sync,
+>;
 
 /// Function that replaces the config found for a Python file with one for that file alone, such
 /// as a PEP 723 script that runs in its own environment.
@@ -174,7 +180,7 @@ impl ConfigFinder {
         Self::new_custom(
             Box::new(move |_, _| Ok(Some(c1.dupe()))),
             Box::new(move |_| (c2.dupe(), Vec::new())),
-            Box::new(move |_, _| c3.dupe()),
+            Box::new(move |_, _| (c3.dupe(), Vec::new())),
             file,
             Box::new(|| {}),
         )
@@ -298,15 +304,17 @@ impl ConfigFinder {
             }
         }
 
-        let f = |dir: Option<&Path>| match dir {
-            Some(parent) => self
-                .search
-                .directory_absolute(parent)
-                .unwrap_or_else(|| (self.fallback)(name, path)),
-            None => (self.fallback)(name, path),
+        let f = |dir: Option<&Path>| -> (ArcId<ConfigFile>, Vec<ConfigError>) {
+            match dir {
+                Some(parent) => match self.search.directory_absolute(parent) {
+                    Some(config) => (config, Vec::new()),
+                    None => (self.fallback)(name, path),
+                },
+                None => (self.fallback)(name, path),
+            }
         };
 
-        let config = match path.details() {
+        let (config, errors) = match path.details() {
             ModulePathDetails::FileSystem(x) | ModulePathDetails::Memory(x) => {
                 let absolute = x.absolutize();
                 f(absolute.parent())
@@ -316,6 +324,19 @@ impl ConfigFinder {
             ModulePathDetails::BundledTypeshedThirdParty(_) => f(None),
             ModulePathDetails::BundledThirdParty(_) => f(None),
         };
+        // One run can synthesize configs for several module paths, and the same user-facing
+        // warning may be produced for more than one of them; report it once.
+        {
+            let mut accumulated = self.errors.lock();
+            for error in errors {
+                if !accumulated
+                    .iter()
+                    .any(|existing| existing.get_message() == error.get_message())
+                {
+                    accumulated.push(error);
+                }
+            }
+        }
         (self.file)(config, path)
     }
 
