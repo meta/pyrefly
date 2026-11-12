@@ -1549,6 +1549,9 @@ impl ConfigFile {
                 serde_json::from_value(raw)
                     .map(|mut config: ConfigBase| {
                         config.resolve_legacy_settings();
+                        if let Err(e) = config.resolve_permissive_ignores() {
+                            error!("In config `{name}` in build system response: {e}");
+                        }
                         config
                     })
                     .inspect_err(|e| {
@@ -1874,15 +1877,25 @@ impl ConfigFile {
         // Resolve compatibility settings before applying presets so explicit
         // legacy settings take precedence over preset defaults.
         self.root.resolve_legacy_settings();
+        if let Err(error) = self.root.resolve_permissive_ignores() {
+            configure_errors.push(error);
+        }
         for sub in &mut self.sub_configs {
             sub.settings.resolve_legacy_settings();
+            if let Err(error) = sub.settings.resolve_permissive_ignores() {
+                configure_errors
+                    .push(error.context(format!("In sub config matching {}", sub.matches)));
+            }
         }
 
         // Apply preset as defaults: preset values fill in any fields the user
         // didn't explicitly set. For errors, preset errors are the base and user
         // errors merge on top.
         if let Some(preset) = self.preset {
-            let preset_base = preset.apply();
+            let mut preset_base = preset.apply();
+            preset_base
+                .resolve_permissive_ignores()
+                .expect("presets do not set `enabled-ignores`");
             self.root.fill_unset_from(&preset_base);
             // For errors: merge user errors on top of preset errors, dropping
             // preset entries shadowed by a user-set parent kind or alias so
@@ -1919,25 +1932,6 @@ impl ConfigFile {
         }
 
         self.root.fill_unset_from(&ConfigBase::builtin_defaults());
-
-        let tools_from_permissive_ignores = match self.root.permissive_ignores {
-            Some(true) => Some(Tool::all()),
-            Some(false) => Some(Tool::default_enabled()),
-            None => None,
-        };
-
-        let enabled_ignores = match (
-            tools_from_permissive_ignores,
-            self.root.enabled_ignores.clone(),
-        ) {
-            (None, None) => Tool::default_enabled(),
-            (None, Some(tools)) | (Some(tools), None) => tools,
-            (Some(_), Some(tools)) => {
-                configure_errors.push(anyhow!("Cannot use both `permissive-ignores` and `enabled-ignores`: `permissive-ignores` will be ignored."));
-                tools
-            }
-        };
-        self.root.enabled_ignores = Some(enabled_ignores);
 
         let mut configure_source_db = |build_system: &mut BuildSystem| {
             let root = match &self.source {
@@ -4694,23 +4688,52 @@ output-format = "omit-errors"
 
     #[test]
     fn test_sub_config_permissive_ignores() {
-        let config = configure_toml(
+        let mut config = ConfigFile::parse_config(
             r#"
+            enabled-ignores = ["pyrefly"]
             [[sub-config]]
             matches = "basic/**"
             preset = "basic"
             [[sub-config]]
             matches = "permissive/**"
             permissive-ignores = true
+            [[sub-config]]
+            matches = "both/**"
+            permissive-ignores = true
+            enabled-ignores = ["mypy"]
+            "#,
+        )
+        .unwrap();
+        let errors = config.configure();
+        let ignores = |dir: &str| config.enabled_ignores(&test_path(&format!("{dir}/foo.py")));
+        assert_eq!(ignores("other"), SmallSet::from_iter([Tool::Pyrefly]));
+        assert_eq!(ignores("permissive"), Tool::all());
+        // `enabled-ignores` wins over `permissive-ignores` in the same config.
+        assert_eq!(ignores("both"), SmallSet::from_iter([Tool::Mypy]));
+        let messages = errors
+            .iter()
+            .map(ConfigError::get_message)
+            .collect::<Vec<_>>();
+        assert!(
+            messages.iter().any(|m| m.contains("sub config matching")),
+            "{messages:?}"
+        );
+        // Sub-config presets aren't applied yet, so this comes from the root. Once they
+        // are, the root's explicit `enabled-ignores` should still beat the `basic` preset.
+        assert_eq!(ignores("basic"), SmallSet::from_iter([Tool::Pyrefly]));
+
+        let config = configure_toml(
+            r#"
+            [[sub-config]]
+            matches = "basic/**"
+            preset = "basic"
             "#,
         );
-        // BUG: should be `Tool::all()`. Only the root applies `permissive-ignores`.
-        for dir in ["basic", "permissive"] {
-            assert_eq!(
-                config.enabled_ignores(&test_path(&format!("{dir}/foo.py"))),
-                Tool::default_enabled()
-            );
-        }
+        // BUG: should be `Tool::all()` from the sub-config's `basic` preset.
+        assert_eq!(
+            config.enabled_ignores(&test_path("basic/foo.py")),
+            Tool::default_enabled()
+        );
     }
 
     /// Errors from several matching sub-configs don't combine, but the preset comes from

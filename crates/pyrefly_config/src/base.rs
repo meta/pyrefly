@@ -10,6 +10,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::fmt::Formatter;
 
+use anyhow::anyhow;
 use clap::ValueEnum;
 use enum_iterator::Sequence;
 use enum_iterator::all;
@@ -419,10 +420,10 @@ impl ConfigBase {
         }
     }
 
-    /// The values Pyrefly uses for settings that no config or preset sets. Settings
-    /// that are derived from other settings, like `enabled-ignores`, are left unset.
+    /// The values Pyrefly uses for settings that no config or preset sets.
     pub(crate) fn builtin_defaults() -> Self {
         Self {
+            enabled_ignores: Some(Tool::default_enabled()),
             replace_imports_with_any: Some(Vec::new()),
             ignore_missing_imports: Some(Vec::new()),
             replace_untyped_imports_with_any: Some(Vec::new()),
@@ -503,6 +504,26 @@ impl ConfigBase {
             treat_all_caps_as_final,
             infer_param_types_from_docstring,
         );
+    }
+
+    /// Records `permissive-ignores` as the equivalent `enabled-ignores`, the setting
+    /// that per-file lookups read. Returns an error if both are set, in which case
+    /// `enabled-ignores` wins.
+    pub(crate) fn resolve_permissive_ignores(&mut self) -> anyhow::Result<()> {
+        match (self.permissive_ignores, &self.enabled_ignores) {
+            (None, _) => Ok(()),
+            (Some(_), Some(_)) => Err(anyhow!(
+                "Cannot use both `permissive-ignores` and `enabled-ignores`: `permissive-ignores` will be ignored."
+            )),
+            (Some(permissive), None) => {
+                self.enabled_ignores = Some(if permissive {
+                    Tool::all()
+                } else {
+                    Tool::default_enabled()
+                });
+                Ok(())
+            }
+        }
     }
 
     /// Resolve deprecated compatibility settings into their canonical fields.
