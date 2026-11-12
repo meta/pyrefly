@@ -39,8 +39,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/2.0.0/clipboard.min.js"></script>
 <script src="/js/code-block-buttons.js"></script>
 <script src="/js/gtag-fragment-tracking.js"></script><link rel="stylesheet" href="/assets/css/styles.519bb944.css">
-<script src="/assets/js/runtime~main.d7d6db94.js" defer="defer"></script>
-<script src="/assets/js/main.c24572e3.js" defer="defer"></script>
+<script src="/assets/js/runtime~main.3e3af81a.js" defer="defer"></script>
+<script src="/assets/js/main.43a691d5.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
 <script>!function(){function t(t){document.documentElement.setAttribute("data-theme",t)}var e=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();t(null!==e?e:"dark")}(),function(){try{const n=new URLSearchParams(window.location.search).entries();for(var[t,e]of n)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script>
@@ -67,9 +67,10 @@ annotation).</p>
 stub is also analyzed (<code>--prefer-stubs=false</code> disables this). With <code>--public-only</code>, only symbols
 reachable from public modules via re-export chains count: the library&#x27;s public API.</p>
 <p>A simple unannotated assignment to a module-level variable only counts as a typable if the value is
-a call, since a call hides the type at the assignment site. Three kinds of call are exempt:</p>
+a call, since a call hides the type at the assignment site. Four kinds of call are exempt:</p>
 <ul>
-<li>Some builtin constructors, like <code>list()</code>.</li>
+<li>Constructors of non-generic classes that return an instance of that class, like <code>Path(&quot;.&quot;)</code>.</li>
+<li>Constructors of some generic builtins, like <code>list()</code>.</li>
 <li>Explicitly specialized classes, like <code>Spam[int]()</code>.</li>
 <li>Anything that returns a <code>logging.Logger</code> or <code>re.Pattern</code>, since those are conventionally left
 unannotated.</li>

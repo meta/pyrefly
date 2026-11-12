@@ -2736,10 +2736,11 @@ baseline-format = "minimal"
 
 ### `baseline-error-level`
 
-The severity assigned to diagnostics that match the baseline. The default value,
-`"ignore"`, suppresses them from CLI output. Set this to `"hint"`, `"info"`, `"warn"`,
-or `"error"` to report matched diagnostics at that severity. Reported matches follow
-the normal [`min-severity`](#min-severity) filtering and exit-status behaviour.
+The maximum severity of diagnostics that match the baseline. When unset, matched
+diagnostics are suppressed from CLI output. Set this to `"hint"`, `"info"`, `"warn"`,
+or `"error"` to report matched diagnostics at the lower of their own severity and this
+level. Reported matches follow the normal [`min-severity`](#min-severity) filtering and
+exit-status behaviour.
 
 ```toml
 baseline = "baseline.json"
@@ -2747,14 +2748,14 @@ baseline-error-level = "warn"
 ```
 
 - Type: `"ignore"` | `"hint"` | `"info"` | `"warn"` | `"error"`
-- Default: `"ignore"`
+- Default: unset
 - Flag equivalent: `--baseline-error-level`
 - Notes:
     - `baseline-error-level` is a **project-level setting** and cannot be overridden
       in [`sub-config`](#sub-configs) sections.
     - A CLI flag takes precedence over the configuration value.
-    - This setting affects `pyrefly check` output only. The IDE displays baselined
-      diagnostics as hints.
+    - The IDE also applies this setting, but displays matched diagnostics as hints
+      when it is unset.
 
 ### `baseline-auto-update`
 
@@ -3291,6 +3292,35 @@ allowlist or denylist). Regular
 - Type: `bool`
 - Default: `true`
 - Flag equivalent: `--use-ignore-files`
+
+### `script-command`
+
+A command that finds the Python environment of each
+[PEP 723](https://peps.python.org/pep-0723/) script. A PEP 723 script declares
+its dependencies in a `# /// script` comment block, and a tool like
+[uv](https://docs.astral.sh/uv/) runs it in a separate environment that holds
+only those dependencies.
+
+For each checked file with a `# /// script` block, Pyrefly runs the command with
+the file's path appended, in the file's directory. The command prints the
+environment in the JSON format of `uv workspace metadata --script`, and Pyrefly
+checks the file with the interpreter at `environment.python.path`. Every other
+setting comes from the file's configuration as usual, and every other file uses
+the configured or discovered interpreter. If the output has no environment,
+Pyrefly warns and checks the script like any other file.
+
+To use the environments that uv creates:
+
+```toml
+script-command = ["uv", "workspace", "metadata", "--preview-features", "workspace-metadata", "--script"]
+```
+
+`uv workspace metadata` never creates or updates a script's environment. Run
+`uv sync --script <file>` to create it.
+
+- Type: list of strings
+- Default: unset
+- Flag equivalent: `--script-command`, once for each argument
 
 ### `build-system`
 
@@ -7584,6 +7614,44 @@ __all__ = generate_all()
 # `__all__` could not be statically analyzed [unresolvable-dunder-all]
 ```
 
+## unresolved-import-signature
+
+Default severity: `warn`
+
+For example, when `missing_backend` cannot be resolved:
+
+```python
+from missing_backend import Array
+
+
+def consume(value: Array) -> None: ...
+
+
+value = object()
+consume(value)  # unresolved-import-signature
+```
+
+This warning is emitted when a call needs input types recovered from unresolved
+imports. Known alternatives such as `int` in `int | missing.Array` remain usable,
+and an omitted optional parameter does not make the call unavailable. The warning
+is reported for the signature, not separately for each affected parameter.
+
+In overloaded functions, each signature is checked independently. Unavailable
+candidates do not prevent another overload from matching. If only one overload has
+compatible arity, it can still supply recovery information while this warning is
+reported. When no overload matches, `no-matching-overload` may also be reported.
+Configuring this warning to `ignore` hides it without restoring skipped candidates.
+
+Explicit `Any` and imports intentionally replaced with `Any` are unaffected.
+Passing an unknown value to a well-defined generic API does not make its signature
+unavailable.
+
+This check does not validate every imported annotation. Return-only and nested
+contravariant dependencies can still weaken inference or shadow a usable overload.
+In non-overloaded calls, arguments containing calls or contextual
+lambda/comprehension bindings are not checked for this warning and retain their
+normal contextual typing.
+
 ## unsafe-overlap
 
 Protocols decorated with `@runtime_checkable` may be used in `isinstance` and `issubclass` checks, but the runtime will only check that all the required attributes are present, without looking at their types.
@@ -8029,12 +8097,11 @@ baseline-format = "minimal"
 Both settings are configuration-only so all users interpret and update the
 checked-in baseline consistently.
 
-Note that errors suppressed by the baseline file are still shown in the IDE.
-
 `--baseline-error-level=<ignore|hint|info|warn|error>` and the project-level
-`baseline-error-level` setting control how matching errors are reported. The
-default is `ignore`, which omits them from CLI output; the other levels emit them
-at a reduced or unchanged severity:
+`baseline-error-level` setting control how matching errors are reported. By
+default, they are omitted from CLI output and shown as hints in the IDE. `ignore`
+omits them everywhere, and the other levels emit them at a reduced or unchanged
+severity:
 
 ```toml
 baseline = "baseline.json"
@@ -12115,9 +12182,10 @@ stub is also analyzed (`--prefer-stubs=false` disables this). With `--public-onl
 reachable from public modules via re-export chains count: the library's public API.
 
 A simple unannotated assignment to a module-level variable only counts as a typable if the value is
-a call, since a call hides the type at the assignment site. Three kinds of call are exempt:
+a call, since a call hides the type at the assignment site. Four kinds of call are exempt:
 
-- Some builtin constructors, like `list()`.
+- Constructors of non-generic classes that return an instance of that class, like `Path(".")`.
+- Constructors of some generic builtins, like `list()`.
 - Explicitly specialized classes, like `Spam[int]()`.
 - Anything that returns a `logging.Logger` or `re.Pattern`, since those are conventionally left
   unannotated.
@@ -12733,15 +12801,16 @@ library APIs. Application authors normally need only the
 
 ## How shape DSL rules run
 
-A shape rule is a function decorated with `@type_shape_dsl_function`. A public
-stub calls that function in its return annotation:
+A shape rule is a function decorated with `@shape_transform`. The legacy
+`@type_shape_dsl_function` name remains a supported alias. A public stub calls
+that function in its return annotation:
 
 ```python
 import shape_extensions.dsl as dsl
-from shape_extensions import IntTuple, type_shape_dsl_function
+from shape_extensions import IntTuple, shape_transform
 from torch import Tensor
 
-@type_shape_dsl_function
+@shape_transform
 def repeat_shape(shape: IntTuple, repeats: IntTuple) -> IntTuple:
     if len(repeats) < len(shape):
         return dsl.Invalid("repeat dimensions cannot be shorter than the input rank")
@@ -14428,7 +14497,7 @@ chosen by the caller:
 
 ```python
 # Abridged from pyrefly-numpy-stubs/numpy-stubs/_shapes.pyi
-@type_shape_dsl_function
+@shape_transform
 def expand_dims_shape(shape: IntTuple, axis: int) -> IntTuple:
     output_rank = len(shape) + 1
     if axis < 0 - output_rank or axis >= output_rank:
