@@ -4169,7 +4169,10 @@ def maximum[Shape: IntTuple, OtherShape: IntTuple = []](
     ...
 
 def minimum[Shape: IntTuple, OtherShape: IntTuple = []](
-    input: Tensor[Shape], other: Tensor[OtherShape]
+    input: Tensor[Shape],
+    other: Tensor[OtherShape],
+    *,
+    out: Tensor | None = None,
 ) -> Tensor[broadcast(Shape, OtherShape)]:
     """Element-wise minimum. Shape inference via generic fixture signature."""
     ...
