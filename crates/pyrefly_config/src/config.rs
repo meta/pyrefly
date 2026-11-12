@@ -1838,6 +1838,7 @@ impl ConfigFile {
         // errors merge on top.
         if let Some(preset) = self.preset {
             let preset_base = preset.apply();
+            self.root.fill_unset_from(&preset_base);
             // For errors: merge user errors on top of preset errors, dropping
             // preset entries shadowed by a user-set parent kind or alias so
             // broad user overrides cascade correctly.
@@ -1850,30 +1851,6 @@ impl ConfigFile {
                 }
                 (Some(_), None) => {}
             }
-            // The preset fills in None values. Any preset field not listed here
-            // is silently dropped, so new fields added to
-            // `Preset::apply()` must be added here as well — `test_preset_fields_propagate`
-            // guards against accidental omissions.
-            macro_rules! apply_preset_default {
-                ($field:ident) => {
-                    if self.root.$field.is_none() {
-                        self.root.$field = preset_base.$field;
-                    }
-                };
-            }
-            apply_preset_default!(check_unannotated_defs);
-            apply_preset_default!(infer_return_types);
-            apply_preset_default!(infer_with_first_use);
-            apply_preset_default!(strict_callable_subtyping);
-            apply_preset_default!(strict_partial_subtyping);
-            apply_preset_default!(spec_compliant_overloads);
-            apply_preset_default!(legacy_overload_expansion);
-            apply_preset_default!(ignore_errors_in_generated_code);
-            apply_preset_default!(permissive_ignores);
-            apply_preset_default!(type_ignore_unknown_tag_behavior);
-            apply_preset_default!(replace_untyped_imports_with_any);
-            apply_preset_default!(treat_all_caps_as_final);
-            apply_preset_default!(infer_param_types_from_docstring);
         }
 
         if self.root.errors.is_none() {
@@ -1896,62 +1873,7 @@ impl ConfigFile {
             }
         }
 
-        if self.root.replace_imports_with_any.is_none() {
-            self.root.replace_imports_with_any = Some(Default::default());
-        }
-
-        if self.root.ignore_missing_imports.is_none() {
-            self.root.ignore_missing_imports = Some(Default::default());
-        }
-
-        if self.root.replace_untyped_imports_with_any.is_none() {
-            self.root.replace_untyped_imports_with_any = Some(Default::default());
-        }
-
-        if self.root.check_unannotated_defs.is_none() {
-            self.root.check_unannotated_defs = Some(true);
-        }
-
-        if self.root.infer_return_types.is_none() {
-            self.root.infer_return_types = Some(InferReturnTypes::Checked);
-        }
-
-        if self.root.ignore_errors_in_generated_code.is_none() {
-            self.root.ignore_errors_in_generated_code = Some(Default::default());
-        }
-
-        if self.root.infer_with_first_use.is_none() {
-            self.root.infer_with_first_use = Some(true);
-        }
-
-        if self.root.strict_callable_subtyping.is_none() {
-            self.root.strict_callable_subtyping = Some(false);
-        }
-
-        if self.root.strict_partial_subtyping.is_none() {
-            self.root.strict_partial_subtyping = Some(false);
-        }
-
-        if self.root.spec_compliant_overloads.is_none() {
-            self.root.spec_compliant_overloads = Some(false);
-        }
-
-        if self.root.legacy_overload_expansion.is_none() {
-            self.root.legacy_overload_expansion = Some(false);
-        }
-
-        if self.root.treat_all_caps_as_final.is_none() {
-            self.root.treat_all_caps_as_final = Some(false);
-        }
-
-        if self.root.infer_param_types_from_docstring.is_none() {
-            self.root.infer_param_types_from_docstring = Some(false);
-        }
-
-        if self.root.type_ignore_unknown_tag_behavior.is_none() {
-            self.root.type_ignore_unknown_tag_behavior =
-                Some(TypeIgnoreUnknownTagBehavior::Suppress);
-        }
+        self.root.fill_unset_from(&ConfigBase::builtin_defaults());
 
         let tools_from_permissive_ignores = match self.root.permissive_ignores {
             Some(true) => Some(Tool::all()),
@@ -4512,9 +4434,7 @@ output-format = "omit-errors"
     #[test]
     fn test_preset_fields_propagate() {
         // Applying a preset should produce the same `root` as setting each of
-        // its fields explicitly. If `configure()` forgets to handle a new
-        // field added to `Preset::apply()`, the preset value would silently
-        // be dropped — this test catches that.
+        // its fields explicitly.
         for preset in enum_iterator::all::<Preset>() {
             let mut via_preset = ConfigFile {
                 preset: Some(preset),
@@ -4531,8 +4451,7 @@ output-format = "omit-errors"
             assert_eq!(
                 via_preset.root, via_fields.root,
                 "Preset `{preset:?}`: `configure()` produced a different `root` \
-                 when applied via `preset = ...` vs. setting the fields directly. \
-                 A preset field is probably not handled by `apply_preset_default!`."
+                 when applied via `preset = ...` vs. setting the fields directly."
             );
         }
     }

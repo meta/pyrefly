@@ -419,6 +419,91 @@ impl ConfigBase {
         }
     }
 
+    /// The values Pyrefly uses for settings that no config or preset sets. Settings
+    /// that are derived from other settings, like `enabled-ignores`, are left unset.
+    pub(crate) fn builtin_defaults() -> Self {
+        Self {
+            replace_imports_with_any: Some(Vec::new()),
+            ignore_missing_imports: Some(Vec::new()),
+            replace_untyped_imports_with_any: Some(Vec::new()),
+            check_unannotated_defs: Some(true),
+            infer_return_types: Some(InferReturnTypes::Checked),
+            ignore_errors_in_generated_code: Some(false),
+            infer_with_first_use: Some(true),
+            strict_callable_subtyping: Some(false),
+            strict_partial_subtyping: Some(false),
+            spec_compliant_overloads: Some(false),
+            legacy_overload_expansion: Some(false),
+            treat_all_caps_as_final: Some(false),
+            infer_param_types_from_docstring: Some(false),
+            type_ignore_unknown_tag_behavior: Some(TypeIgnoreUnknownTagBehavior::Suppress),
+            ..Default::default()
+        }
+    }
+
+    /// Fills each setting that `self` leaves unset with the value from `other`.
+    /// `errors` is skipped because error maps are merged rather than replaced.
+    pub(crate) fn fill_unset_from(&mut self, other: &ConfigBase) {
+        // Destructure so that adding a field without handling it here is a compile error.
+        let ConfigBase {
+            errors: _,
+            permissive_ignores,
+            enabled_ignores,
+            type_ignore_unknown_tag_behavior,
+            replace_imports_with_any,
+            ignore_missing_imports,
+            replace_untyped_imports_with_any,
+            untyped_def_behavior,
+            check_unannotated_defs,
+            infer_return_types,
+            disable_type_errors_in_ide,
+            ignore_errors_in_generated_code,
+            infer_with_first_use,
+            pytorch_efficiency_lints,
+            recursion_depth_limit,
+            recursion_overflow_handler,
+            strict_callable_subtyping,
+            strict_partial_subtyping,
+            spec_compliant_overloads,
+            legacy_overload_expansion,
+            treat_all_caps_as_final,
+            infer_param_types_from_docstring,
+            extras: _,
+        } = other;
+        macro_rules! fill {
+            ($($field:ident),* $(,)?) => {
+                $(
+                    if self.$field.is_none() {
+                        self.$field.clone_from($field);
+                    }
+                )*
+            };
+        }
+        fill!(
+            permissive_ignores,
+            enabled_ignores,
+            type_ignore_unknown_tag_behavior,
+            replace_imports_with_any,
+            ignore_missing_imports,
+            replace_untyped_imports_with_any,
+            untyped_def_behavior,
+            check_unannotated_defs,
+            infer_return_types,
+            disable_type_errors_in_ide,
+            ignore_errors_in_generated_code,
+            infer_with_first_use,
+            pytorch_efficiency_lints,
+            recursion_depth_limit,
+            recursion_overflow_handler,
+            strict_callable_subtyping,
+            strict_partial_subtyping,
+            spec_compliant_overloads,
+            legacy_overload_expansion,
+            treat_all_caps_as_final,
+            infer_param_types_from_docstring,
+        );
+    }
+
     /// Resolve deprecated compatibility settings into their canonical fields.
     pub fn resolve_legacy_settings(&mut self) {
         if let Some(behavior) = self.untyped_def_behavior {
