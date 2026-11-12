@@ -12,7 +12,7 @@ from shape_extensions import assert_raises, assert_shape
 
 def test_numpy_force_converts_tensor_requiring_grad() -> None:
     tensor = torch.ones((2, 3), requires_grad=True)
-    array = tensor.numpy(force=True)  # E: Unexpected keyword
+    array = tensor.numpy(force=True)
     assert_type(array, np.ndarray[[2, 3]])
     assert_shape(array.shape, (2, 3))
     assert array.dtype == np.float32
@@ -22,7 +22,7 @@ def test_numpy_force_converts_tensor_requiring_grad() -> None:
 
 def test_numpy_without_force_shares_memory() -> None:
     tensor = torch.zeros((2, 3))
-    array = tensor.numpy(force=False)  # E: Unexpected keyword
+    array = tensor.numpy(force=False)
     assert_type(array, np.ndarray[[2, 3]])
     array[0, 0] = 5.0
     assert tensor[0, 0].item() == 5.0
@@ -37,6 +37,6 @@ def test_numpy_force_rejects_invalid_arguments() -> None:
     with assert_raises(TypeError):
         tensor.numpy(True)  # E: Expected 0 positional arguments
     with assert_raises(TypeError):
-        tensor.numpy(force="yes")  # E: Unexpected keyword
+        tensor.numpy(force="yes")  # E: parameter `force`
     with assert_raises(TypeError):
-        tensor.numpy(force=1)  # E: Unexpected keyword
+        tensor.numpy(force=1)  # E: parameter `force`

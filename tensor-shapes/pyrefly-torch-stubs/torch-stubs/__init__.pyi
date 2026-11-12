@@ -1385,7 +1385,9 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Returns tensor as a nested Python list."""
         ...
 
-    def numpy[Shape: IntTuple](self: Tensor[Shape]) -> np.ndarray[Shape]:
+    def numpy[Shape: IntTuple](
+        self: Tensor[Shape], *, force: builtins.bool = False
+    ) -> np.ndarray[Shape]:
         """Return a NumPy array with the same shape.
 
         NumPy is an optional dependency of this stub package. Installing
