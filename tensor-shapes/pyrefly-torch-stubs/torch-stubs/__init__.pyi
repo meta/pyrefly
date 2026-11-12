@@ -710,6 +710,9 @@ float8_e4m3fn: dtype
 float8_e5m2: dtype
 float8_e8m0fnu: dtype
 float4_e2m1fn_x2: dtype
+double: dtype
+cfloat: dtype
+cdouble: dtype
 int: Any
 bool: Any
 contiguous_format: memory_format

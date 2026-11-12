@@ -54,12 +54,12 @@ def test_dtype_itemsize() -> None:
 
 
 def test_double_and_complex_dtype_aliases() -> None:
-    double = torch.double  # E: No attribute `double`
-    cfloat = torch.cfloat  # E: No attribute `cfloat`
-    cdouble = torch.cdouble  # E: No attribute `cdouble`
-    assert_type(double, torch.dtype)  # E: assert_type(Unknown, dtype) failed
-    assert_type(cfloat, torch.dtype)  # E: assert_type(Unknown, dtype) failed
-    assert_type(cdouble, torch.dtype)  # E: assert_type(Unknown, dtype) failed
+    double = torch.double
+    cfloat = torch.cfloat
+    cdouble = torch.cdouble
+    assert_type(double, torch.dtype)
+    assert_type(cfloat, torch.dtype)
+    assert_type(cdouble, torch.dtype)
     assert double is torch.float64
     assert cfloat is torch.complex64
     assert cdouble is torch.complex128
