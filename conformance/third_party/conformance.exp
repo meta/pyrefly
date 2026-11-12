@@ -6823,6 +6823,17 @@
     },
     {
       "code": -2,
+      "column": 9,
+      "concise_description": "Type variable `InP` is contravariant but is used in covariant position",
+      "description": "Type variable `InP` is contravariant but is used in covariant position",
+      "line": 117,
+      "name": "invalid-variance",
+      "severity": "error",
+      "stop_column": 14,
+      "stop_line": 117
+    },
+    {
+      "code": -2,
       "column": 49,
       "concise_description": "`ContravariantParamSpecOld[[int]]` is not assignable to `ContravariantParamSpecOld[[object]]`",
       "description": "`ContravariantParamSpecOld[[int]]` is not assignable to `ContravariantParamSpecOld[[object]]`",
@@ -6831,6 +6842,17 @@
       "severity": "error",
       "stop_column": 81,
       "stop_line": 121
+    },
+    {
+      "code": -2,
+      "column": 9,
+      "concise_description": "Type variable `OutP` is covariant but is used in contravariant position",
+      "description": "Type variable `OutP` is covariant but is used in contravariant position",
+      "line": 126,
+      "name": "invalid-variance",
+      "severity": "error",
+      "stop_column": 13,
+      "stop_line": 126
     },
     {
       "code": -2,

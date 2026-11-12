@@ -797,7 +797,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ///
     /// Checking behavior:
     /// - Base classes: DEEP checking (recurse into all nested generics)
-    /// - Methods: SHALLOW checking (only direct TypeVar usage, not nested Callables)
+    /// - Methods: SHALLOW checking (see `check_annotation_variance`)
     /// - Fields: NO checking (mutable fields constrain variance during inference only)
     pub fn check_variance_violations(
         &self,
@@ -853,8 +853,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.bindings().function_def_range(func_id.def_index)
     }
 
-    /// Check a method's signatures for variance violations (shallow: direct
-    /// TypeVars in params/return only, not nested Callables).
+    /// Check a method's signatures for variance violations (shallow: see
+    /// `check_annotation_variance`).
     ///
     /// Each overload arm is reported at its own `def` range, taken from that arm's
     /// own metadata — not the merged group metadata, which points at the
@@ -901,44 +901,74 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         range: TextRange,
         violations: &mut Vec<VarianceViolation>,
     ) {
-        if let Type::Quantified(q) = &callable.ret {
-            check_typevar(
-                q.name(),
-                Variance::Covariant,
-                q.variance(),
-                range,
-                violations,
-            );
-        }
+        self.check_annotation_variance(&callable.ret, Variance::Covariant, range, violations);
         let skip = usize::from(skip_receiver);
         match &callable.params {
             Params::List(param_list) | Params::Partial(param_list) => {
                 for param in param_list.items().iter().skip(skip) {
-                    if let Type::Quantified(q) = param.as_type() {
-                        check_typevar(
-                            q.name(),
-                            Variance::Contravariant,
-                            q.variance(),
-                            range,
-                            violations,
-                        );
-                    }
+                    self.check_annotation_variance(
+                        param.as_type(),
+                        Variance::Contravariant,
+                        range,
+                        violations,
+                    );
                 }
             }
             Params::ParamSpec(prefix, param_spec) => {
                 for ty in prefix.iter().skip(skip).map(|p| p.ty()).chain([param_spec]) {
-                    if let Type::Quantified(q) = ty {
-                        check_typevar(
-                            q.name(),
-                            Variance::Contravariant,
-                            q.variance(),
-                            range,
-                            violations,
-                        );
-                    }
+                    self.check_annotation_variance(ty, Variance::Contravariant, range, violations);
                 }
             }
             Params::Ellipsis | Params::Materialization => {}
+        }
+    }
+
+    /// Check a parameter or return annotation that appears at `position`.
+    ///
+    /// The check is shallow: a TypeVar or ParamSpec is checked when it fills the entire
+    /// position. A ParamSpec is also checked when it is a direct argument of the
+    /// annotation's top-level callable or class.
+    fn check_annotation_variance(
+        &self,
+        ty: &Type,
+        position: Variance,
+        range: TextRange,
+        violations: &mut Vec<VarianceViolation>,
+    ) {
+        match ty {
+            Type::Quantified(q) => {
+                check_typevar(q.name(), position, q.variance(), range, violations);
+            }
+            Type::ClassType(cls) => {
+                let variances = self
+                    .type_order()
+                    .get_variance_from_class(cls.class_object());
+                for (param, targ) in cls.targs().iter_paired() {
+                    let q = match targ {
+                        Type::Quantified(q) => q,
+                        Type::Concatenate(_, t) if let Type::Quantified(q) = &**t => q,
+                        _ => continue,
+                    };
+                    if q.is_param_spec() {
+                        check_typevar(
+                            q.name(),
+                            position.compose(variances.get(param.name())),
+                            q.variance(),
+                            range,
+                            violations,
+                        )
+                    }
+                }
+            }
+            _ => {
+                // A callable's parameters are contravariant, so a ParamSpec that supplies
+                // them sits in the inverse of the callable's position.
+                for (callable, _) in ty.toplevel_callable_signatures() {
+                    if let Params::ParamSpec(_, Type::Quantified(q)) = &callable.params {
+                        check_typevar(q.name(), position.inv(), q.variance(), range, violations);
+                    }
+                }
+            }
         }
     }
 }

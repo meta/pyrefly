@@ -71,10 +71,7 @@
   "generics_paramspec_components.py": [],
   "generics_paramspec_semantics.py": [],
   "generics_paramspec_specialization.py": [],
-  "generics_paramspec_variance.py": [
-    "Line 117: Expected 1 errors",
-    "Line 126: Expected 1 errors"
-  ],
+  "generics_paramspec_variance.py": [],
   "generics_scoping.py": [],
   "generics_self_advanced.py": [],
   "generics_self_attributes.py": [],

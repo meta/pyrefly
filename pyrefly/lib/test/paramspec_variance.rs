@@ -141,7 +141,6 @@ class A(Generic[P]):
 );
 
 testcase!(
-    bug = "Declared ParamSpec variance should be checked against Callable parameters",
     test_contravariant_paramspec_used_in_callable_parameter,
     r#"
 from typing import Callable, Generic, ParamSpec
@@ -149,6 +148,58 @@ from typing import Callable, Generic, ParamSpec
 P = ParamSpec("P", contravariant=True)
 
 class A(Generic[P]):
-    def accept(self, fn: Callable[P, None]) -> None: ...
+    def accept(self, fn: Callable[P, None]) -> None: ...  # E: `P` is contravariant but is used in covariant position
 "#,
+);
+
+testcase!(
+    test_covariant_paramspec_used_in_callable_parameter_in_return,
+    r#"
+from typing import Callable, Generic, ParamSpec
+
+P_co = ParamSpec("P_co", covariant=True)
+
+class C(Generic[P_co]):
+    def f(self) -> Callable[P_co, int]: ...  # E: `P_co` is covariant but is used in contravariant position
+    "#,
+);
+
+testcase!(
+    test_user_defined_paramspec_class,
+    r#"
+from typing import Generic, ParamSpec
+
+P_co = ParamSpec("P_co", covariant=True)
+P_contra = ParamSpec("P_contra", contravariant=True)
+
+class C_co(Generic[P_co]):
+    pass
+
+class C_contra(Generic[P_contra]):
+    pass
+
+class D_co(Generic[P_co]):
+    def f(self, c: C_co[P_co]):  # E: `P_co` is covariant but is used in contravariant position
+        pass
+    def g(self, c: C_contra[P_co]):
+        pass
+
+class D_contra(Generic[P_contra]):
+    def f(self, c: C_co[P_contra]):
+        pass
+    def g(self, c: C_contra[P_contra]):  # E: `P_contra` is contravariant but is used in covariant position
+        pass
+    "#,
+);
+
+testcase!(
+    test_concatenate_in_user_defined_class,
+    r#"
+from typing import Concatenate, Generic, ParamSpec
+
+P_co = ParamSpec("P_co", covariant=True)
+
+class C(Generic[P_co]):
+    def f(self, c: C[Concatenate[int, P_co]]): ...  # E: `P_co` is covariant but is used in contravariant position
+    "#,
 );

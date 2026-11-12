@@ -1,9 +1,9 @@
 {
   "total": 145,
-  "pass": 142,
-  "fail": 3,
-  "pass_rate": 0.98,
-  "differences": 12,
+  "pass": 143,
+  "fail": 2,
+  "pass_rate": 0.99,
+  "differences": 10,
   "passing": [
     "aliases_explicit.py",
     "aliases_implicit.py",
@@ -73,6 +73,7 @@
     "generics_paramspec_components.py",
     "generics_paramspec_semantics.py",
     "generics_paramspec_specialization.py",
+    "generics_paramspec_variance.py",
     "generics_scoping.py",
     "generics_self_advanced.py",
     "generics_self_attributes.py",
@@ -150,7 +151,6 @@
   ],
   "failing": {
     "dataclasses_descriptors.py": 1,
-    "generics_paramspec_variance.py": 2,
     "generics_typevartuple_variance.py": 9
   },
   "comment": "@generated"
