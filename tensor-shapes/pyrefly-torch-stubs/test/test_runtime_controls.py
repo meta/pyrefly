@@ -6,7 +6,7 @@
 from typing import assert_type
 
 import torch
-from shape_extensions import assert_raises
+from shape_extensions import assert_raises, assert_shape
 
 
 def test_deterministic_algorithm_controls() -> None:
@@ -45,3 +45,28 @@ def test_float32_matmul_precision_controls() -> None:
             torch.set_float32_matmul_precision(3)  # E: parameter `precision`
     finally:
         torch.set_float32_matmul_precision(precision)
+
+
+def test_default_device_controls() -> None:
+    original = torch.get_default_device()  # E: No attribute `get_default_device`
+    assert_type(original, torch.device)  # E: assert_type(Unknown, device) failed
+    try:
+        result = torch.set_default_device("meta")  # E: No attribute
+        assert_type(result, None)  # E: assert_type(Unknown, None) failed
+        assert torch.get_default_device() == torch.device("meta")  # E: No attribute
+        tensor = torch.empty((2, 3))
+        assert tensor.device == torch.device("meta")
+        assert_shape(tensor.shape, (2, 3))
+
+        torch.set_default_device(device=torch.device("cpu"))  # E: No attribute
+        assert torch.get_default_device() == torch.device("cpu")  # E: No attribute
+        torch.set_default_device(None)  # E: No attribute
+        assert torch.empty(1).device == torch.device("cpu")
+
+        with assert_raises(TypeError):
+            torch.set_default_device(object())  # E: No attribute
+        with assert_raises(TypeError):
+            torch.set_default_device("cpu", "meta")  # E: No attribute
+    finally:
+        cpu = torch.device("cpu")
+        torch.set_default_device(None if original == cpu else original)  # E: No attr
