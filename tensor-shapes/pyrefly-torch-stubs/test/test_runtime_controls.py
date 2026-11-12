@@ -28,3 +28,20 @@ def test_deterministic_algorithm_controls() -> None:
             torch.use_deterministic_algorithms(True, True)  # E: positional
     finally:
         torch.use_deterministic_algorithms(mode, warn_only=warn_only)
+
+
+def test_float32_matmul_precision_controls() -> None:
+    precision = torch.get_float32_matmul_precision()
+    assert_type(precision, str)
+    try:
+        result = torch.set_float32_matmul_precision("high")  # E: No attribute
+        assert_type(result, None)  # E: assert_type(Unknown, None) failed
+        assert torch.get_float32_matmul_precision() == "high"
+
+        torch.set_float32_matmul_precision(precision="medium")  # E: No attribute
+        assert torch.get_float32_matmul_precision() == "medium"
+
+        with assert_raises(RuntimeError):
+            torch.set_float32_matmul_precision(3)  # E: No attribute
+    finally:
+        torch.set_float32_matmul_precision(precision)  # E: No attribute
