@@ -1461,6 +1461,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Gather elements along dimension. Output shape matches index shape."""
         ...
 
+    @overload
     def scatter[
         Shape: IntTuple,
         Dim: Flag[builtins.int],
@@ -1473,6 +1474,22 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         src: Tensor[SourceShape],
     ) -> Tensor[scatter_shape(Shape, Dim, IndexShape, SourceShape)]:
         """Scatter elements along dimension. Shape-preserving operation."""
+        ...
+
+    # A scalar value fills every indexed position, so the index stands in for the
+    # source in the shape check.
+    @overload
+    def scatter[
+        Shape: IntTuple,
+        Dim: Flag[builtins.int],
+        IndexShape: IntTuple,
+    ](
+        self: Tensor[Shape],
+        dim: Dim,
+        index: Tensor[IndexShape],
+        value: builtins.float | builtins.complex,
+    ) -> Tensor[scatter_shape(Shape, Dim, IndexShape, IndexShape)]:
+        """Scatter a scalar value along dimension. Shape-preserving operation."""
         ...
 
     def masked_select(self: Tensor, mask: Tensor) -> Tensor[[Any]]:
