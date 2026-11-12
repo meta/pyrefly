@@ -3299,7 +3299,14 @@ def full(
 ) -> Tensor: ...
 @overload
 def arange[End: IntVar](
-    end: _Int[End], *, dtype: int | None = None, device: Any = None
+    end: _Int[End],
+    *,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[[arange_extent(_Int[End])]]:
     """Create 1D tensor with range [0, end). Shape inference via meta-shape: torch.arange"""
     ...
@@ -3310,29 +3317,41 @@ def arange[Start: IntVar, End: IntVar, Step: Flag[builtins.int]](
     end: _Int[End],
     step: Step = 1,
     *,
-    dtype: int | None = None,
-    device: Any = None,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[[arange_step_extent(_Int[Start], _Int[End], Step)]]:
     """Create 1D tensor with range [start, end) with step. Shape inference via meta-shape: torch.arange"""
     ...
 
-@overload
-def arange(end: int, *, dtype: int | None = None, device: Any = None) -> Tensor[[int]]:
-    """Create 1D tensor with a gradual bound."""
-    ...
-
+# Real-valued bounds keep rank one; floating extents are not evaluated by the DSL.
 @overload
 def arange(
-    start: int,
-    end: int,
-    step: int = 1,
+    end: builtins.float,
     *,
-    dtype: int | None = None,
-    device: Any = None,
-) -> Tensor[[int]]:
-    """Create 1D tensor with gradual bounds or step."""
-    ...
-
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
+) -> Tensor[[int]]: ...
+@overload
+def arange(
+    start: builtins.float,
+    end: builtins.float,
+    step: builtins.float = 1,
+    *,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
+) -> Tensor[[int]]: ...
 def linspace[Steps: IntVar](
     start: builtins.float,
     end: builtins.float,
