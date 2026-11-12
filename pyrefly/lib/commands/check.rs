@@ -42,6 +42,7 @@ use pyrefly_config::base::Preset;
 use pyrefly_config::config::BaselineFormat;
 use pyrefly_config::config::BaselineMatchingMode;
 use pyrefly_config::config::ConfigFile;
+use pyrefly_config::config::ConfigSource;
 use pyrefly_config::config::OutputFormat;
 use pyrefly_config::config::SynthesizedPresetReason;
 use pyrefly_config::error_kind::ErrorKind;
@@ -1319,6 +1320,24 @@ impl Handles {
                 .insert(path.dupe());
         }
 
+        let mut warned_targets = HashSet::new();
+        let warnings: Vec<_> = configs
+            .keys()
+            .filter_map(|config| {
+                let warning = config.bundled_typeshed_version_warning()?;
+                // Synthetic configs have no path prefix, so repeated versions share one warning.
+                let origin = match &config.source {
+                    ConfigSource::File(path) => Some(path.clone()),
+                    _ => None,
+                };
+                warned_targets
+                    .insert((config.python_version(), origin))
+                    .then_some(warning)
+            })
+            .collect();
+        if !warnings.is_empty() {
+            config_finder.add_errors(warnings);
+        }
         // TODO(connernilsen): wire in force logic
         let reloaded_source_dbs = ConfigFile::query_source_db(&configs, false, None).reloaded;
         let result = configs
@@ -1895,6 +1914,9 @@ impl CheckArgs {
             .as_ref()
             .config_finder()
             .python_file(ModuleNameWithKind::guaranteed(module_name), &module_path);
+        if let Some(warning) = config.bundled_typeshed_version_warning() {
+            holder.as_ref().config_finder().add_errors(vec![warning]);
+        }
         let sys_info = config.get_sys_info();
         let handle = Handle::new(module_name, module_path.clone(), sys_info);
 

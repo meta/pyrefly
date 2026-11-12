@@ -1112,9 +1112,7 @@ mod tests {
         );
     }
 
-    /// A synthesized config still has to deliver config warnings to the user: the config
-    /// finder's fallback used to debug-log them, so `--python-version 3.9` on an unconfigured
-    /// project warned about nothing.
+    /// A checked target with synthesized configuration still reports the typeshed warning.
     #[test]
     fn test_unconfigured_project_reports_outdated_python_version_warning() {
         use clap::Parser;
@@ -1140,6 +1138,8 @@ mod tests {
         );
 
         assert_eq!(config.python_version(), PythonVersion::new(3, 9, 0));
+        let (_, _, sourcedb_errors) = Handles::new([root.join("pkg/mod.py")]).all(&finder);
+        assert!(sourcedb_errors.is_empty());
         let messages: Vec<String> = finder
             .errors()
             .iter()
@@ -1152,13 +1152,11 @@ mod tests {
         );
     }
 
-    // Known bug: a dependency's synthetic config emits its own Python-version warning,
-    // even though the imported handle uses the checked target's Python version.
     #[test]
     fn test_typeshed_warning_with_external_dependency() {
         for (version, warning_count) in [
-            (PythonVersion::new(3, 12, 0), 1),
-            (PythonVersion::new(3, 9, 0), 2),
+            (PythonVersion::new(3, 12, 0), 0),
+            (PythonVersion::new(3, 9, 0), 1),
         ] {
             let tempdir = tempfile::tempdir().unwrap();
             let project = tempdir.path().join("project");
@@ -1186,7 +1184,8 @@ mod tests {
                 (ArcId::new(config), errors)
             });
             let state = State::new(finder, ThreadCount::Inline);
-            let (handles, _, _) = Handles::new([main]).all(state.config_finder());
+            let (handles, _, sourcedb_errors) = Handles::new([main]).all(state.config_finder());
+            assert!(sourcedb_errors.is_empty());
             assert_eq!(handles[0].sys_info().version(), version);
             let mut transaction = state.new_transaction(Require::Exports, None);
             transaction.run(&handles, Require::Errors, None);

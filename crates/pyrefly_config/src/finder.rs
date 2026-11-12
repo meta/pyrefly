@@ -119,10 +119,8 @@ type LoadCallback = Box<dyn Fn(&Path) -> (ArcId<ConfigFile>, Vec<ConfigError>) +
 
 /// Fallback function when no config file exists or loading fails.
 ///
-/// Returns the config along with any user-facing warnings produced while configuring it (for
-/// example, a warning that the resolved `python-version` predates the bundled typeshed). Those
-/// warnings are accumulated so callers surface them like config-file errors; a synthesized config
-/// must not silently swallow them.
+/// Returns the config along with any user-facing warnings produced while configuring it,
+/// such as an interpreter-discovery failure. Callers accumulate these like config-file errors.
 type FallbackCallback = Box<
     dyn Fn(ModuleNameWithKind, &ModulePath) -> (ArcId<ConfigFile>, Vec<ConfigError>) + Send + Sync,
 >;

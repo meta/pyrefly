@@ -2033,27 +2033,28 @@ impl ConfigFile {
         }
         configure_errors.extend(validate(&self.search_path_from_file, "search-path"));
 
-        // Typeshed removes the version-specific branches and guards for Python versions it no
-        // longer supports, so the bundled stubs only describe the standard library accurately for
-        // versions >= the oldest supported one. A custom `typeshed-path` replaces the bundled
-        // stdlib and may describe older versions, so only warn for the bundled typeshed.
-        // Warn instead of failing, because the user's own code may still legitimately target an
-        // older version.
-        if self.typeshed_path.is_none() {
-            let python_version = self.python_version();
-            if python_version < TYPESHED_OLDEST_SUPPORTED_PYTHON {
-                configure_errors.push(anyhow!(
-                    "Python version {python_version} is older than the oldest version described by the bundled typeshed stubs ({TYPESHED_OLDEST_SUPPORTED_PYTHON}). The bundled stubs no longer include the version-specific branches and guards for older versions, so the standard library may be modeled inaccurately for this target. If the project must keep targeting {python_version}, provide compatible custom stubs with `typeshed-path`; otherwise raise `python-version` to {TYPESHED_OLDEST_SUPPORTED_PYTHON} or newer."
-                ));
-            }
-        }
-
         if let ConfigSource::File(path) = &self.source {
             configure_errors
                 .into_map(|e| ConfigError::warn(e.context(format!("{}", path.display()))))
         } else {
             configure_errors.into_map(ConfigError::warn)
         }
+    }
+
+    /// Warn when a checked target is not accurately modeled by the bundled stdlib stubs.
+    /// A dependency's independently discovered config may not supply its checking version.
+    pub fn bundled_typeshed_version_warning(&self) -> Option<ConfigError> {
+        let python_version = self.python_version();
+        if self.typeshed_path.is_some() || python_version >= TYPESHED_OLDEST_SUPPORTED_PYTHON {
+            return None;
+        }
+        let warning = ConfigError::warn(anyhow!(
+            "Python version {python_version} is older than the oldest version described by the bundled typeshed stubs ({TYPESHED_OLDEST_SUPPORTED_PYTHON}). The bundled stubs no longer include the version-specific branches and guards for older versions, so the standard library may be modeled inaccurately for this target. If the project must keep targeting {python_version}, provide compatible custom stubs with `typeshed-path`; otherwise raise `python-version` to {TYPESHED_OLDEST_SUPPORTED_PYTHON} or newer."
+        ));
+        Some(match &self.source {
+            ConfigSource::File(path) => warning.context(format!("{}", path.display())),
+            _ => warning,
+        })
     }
 
     /// Rewrites any config values that must be updated *before* applying CLI flag values, namely
@@ -2777,9 +2778,10 @@ mod tests {
         config.interpreters.skip_interpreter_query = true;
         config.python_environment.python_version = Some(PythonVersion::new(3, 9, 0));
 
+        config.configure();
         let messages: Vec<String> = config
-            .configure()
-            .iter()
+            .bundled_typeshed_version_warning()
+            .into_iter()
             .filter(|error| error.severity() == Severity::Warn)
             .map(|error| error.get_message())
             .collect();
@@ -2799,9 +2801,10 @@ mod tests {
         // A custom typeshed replaces the bundled stdlib and may describe older versions.
         config.typeshed_path = Some(PathBuf::from("/custom/typeshed"));
 
+        config.configure();
         let messages: Vec<String> = config
-            .configure()
-            .iter()
+            .bundled_typeshed_version_warning()
+            .into_iter()
             .map(|error| error.get_message())
             .collect();
 
@@ -2824,9 +2827,10 @@ mod tests {
             config.interpreters.skip_interpreter_query = true;
             config.python_environment.python_version = Some(version);
 
+            config.configure();
             let messages: Vec<String> = config
-                .configure()
-                .iter()
+                .bundled_typeshed_version_warning()
+                .into_iter()
                 .map(|error| error.get_message())
                 .collect();
 

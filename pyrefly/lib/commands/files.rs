@@ -157,9 +157,7 @@ pub fn get_project_config_for_current_dir(
                 Some(&current_dir),
                 UnconfiguredOverride::Auto,
             );
-            // Keep any warnings produced while configuring the synthesized config: they are
-            // user-facing (for example, an unsupported `python-version`), unlike the parse
-            // errors that only a real config file can produce.
+            // Keep configuration warnings, such as interpreter-discovery failures, user-facing.
             args.override_config_at(synthesized, Some(&current_dir))
         }
     };
