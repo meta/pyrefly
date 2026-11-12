@@ -11,30 +11,30 @@ from torch import Tensor
 
 
 def test_full_pinning_options() -> None:
-    matrix = torch.full((2, 3), 7.0, pin_memory=False)  # E: No matching
-    assert_type(matrix, Tensor[[2, 3]])  # E: assert_type
-    assert_shape(matrix.shape, (2, 3))  # E: assert_shape
+    matrix = torch.full((2, 3), 7.0, pin_memory=False)
+    assert_type(matrix, Tensor[[2, 3]])
+    assert_shape(matrix.shape, (2, 3))
     assert not matrix.is_pinned()
-    unset = torch.full((2, 3), 7, pin_memory=None, requires_grad=None)  # E: No match
-    assert_shape(unset.shape, (2, 3))  # E: assert_shape
+    unset = torch.full((2, 3), 7, pin_memory=None, requires_grad=None)
+    assert_shape(unset.shape, (2, 3))
     assert not unset.requires_grad
     sizes: list[int] = [2, 3]
-    gradual = torch.full(sizes, 7.0, pin_memory=False)  # E: No matching
-    assert_type(gradual, Tensor)  # E: assert_type
+    gradual = torch.full(sizes, 7.0, pin_memory=False)
+    assert_type(gradual, Tensor)
     assert tuple(gradual.shape) == (2, 3)
 
 
 def test_full_layout_and_output() -> None:
-    result = torch.full((2, 3), 7.0, layout=torch.strided)  # E: No matching
+    result = torch.full((2, 3), 7.0, layout=torch.strided)
     assert result.layout == torch.strided
-    assert_shape(result.shape, (2, 3))  # E: assert_shape
+    assert_shape(result.shape, (2, 3))
     out = torch.empty((2, 3))
-    result = torch.full((2, 3), 7.0, out=out)  # E: No matching
+    result = torch.full((2, 3), 7.0, out=out)
     assert result is out
     assert torch.equal(result, torch.tensor([[7.0] * 3, [7.0] * 3]))
     assert_shape(result.shape, (2, 3))
-    resized = torch.full((2, 3), 7.0, out=torch.empty(0))  # E: No matching
-    assert_shape(resized.shape, (2, 3))  # E: assert_shape
+    resized = torch.full((2, 3), 7.0, out=torch.empty(0))
+    assert_shape(resized.shape, (2, 3))
     dtype: torch.dtype = torch.float64
     result = torch.full((2, 3), 7, dtype=dtype, device=torch.device("cpu"))
     assert result.dtype == torch.float64
@@ -47,23 +47,23 @@ def test_full_fill_values() -> None:
     assert integers.dtype == torch.int64
     flags = torch.full((2,), True)
     assert flags.dtype == torch.bool
-    complex_values = torch.full((2,), 1 + 2j)  # E: No matching
+    complex_values = torch.full((2,), 1 + 2j)
     assert complex_values.dtype == torch.complex64
-    assert_shape(complex_values.shape, (2,))  # E: assert_shape
+    assert_shape(complex_values.shape, (2,))
 
 
 def test_full_rejects_invalid_options() -> None:
     with assert_raises(TypeError):
-        torch.full((2, 3), 7.0, dtype="float64")
+        torch.full((2, 3), 7.0, dtype="float64")  # E: parameter `dtype`
     with assert_raises(TypeError):
-        torch.full((2, 3), 7.0, device=object())
+        torch.full((2, 3), 7.0, device=object())  # E: parameter `device`
     with assert_raises(TypeError):
-        torch.full((2, 3), 7.0, out=object())  # E: No matching
+        torch.full((2, 3), 7.0, out=object())  # E: parameter `out`
     with assert_raises(TypeError):
-        torch.full((2, 3), 7.0, layout="strided")  # E: No matching
+        torch.full((2, 3), 7.0, layout="strided")  # E: parameter `layout`
     with assert_raises(TypeError):
-        torch.full((2, 3), 7.0, pin_memory="yes")  # E: No matching
+        torch.full((2, 3), 7.0, pin_memory="yes")  # E: parameter `pin_memory`
     with assert_raises(TypeError):
-        torch.full((2, 3), "seven")  # E: No matching
+        torch.full((2, 3), "seven")  # E: No matching overload
     with assert_raises(TypeError):
-        torch.full(2, 3, 7.0)  # E: No matching
+        torch.full(2, 3, 7.0)  # E: No matching overload

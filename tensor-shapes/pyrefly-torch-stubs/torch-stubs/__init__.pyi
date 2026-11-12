@@ -3223,11 +3223,14 @@ def empty(
 @overload
 def full[Shape: IntTuple](
     size: Shape,
-    fill_value: builtins.float,
+    fill_value: builtins.float | builtins.complex,
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create tensor filled with a value. Shape is inferred from `size`."""
     ...
@@ -3235,11 +3238,14 @@ def full[Shape: IntTuple](
 @overload
 def full(
     size: Sequence[builtins.int],
-    fill_value: builtins.float,
+    fill_value: builtins.float | builtins.complex,
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor: ...
 @overload
 def arange[End: IntVar](
