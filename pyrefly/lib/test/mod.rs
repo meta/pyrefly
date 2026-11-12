@@ -67,6 +67,7 @@ mod operators;
 mod overload;
 mod pandas;
 mod paramspec;
+mod paramspec_variance;
 mod pattern_match;
 mod perf;
 mod polars;
