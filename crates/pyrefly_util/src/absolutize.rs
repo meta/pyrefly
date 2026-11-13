@@ -46,10 +46,7 @@ impl Absolutize for Path {
             };
             Cow::Owned(base.into_owned())
         };
-        if let Ok(absolutized) = PathAbsolutize::absolutize_from(self, base.as_ref()) {
-            return absolutized.into_owned();
-        }
-        base.join(self)
+        PathAbsolutize::absolutize_from(self, base.as_ref()).into_owned()
     }
 
     /// Compute a relative path from `base` to `self`.

@@ -28,7 +28,7 @@ lsp_types = { package = "gen-lsp-types", version = "0.11.0", features = ["url"] 
 memory-stats = "1.2.0"
 notify = "9.0.0-rc.6"
 parse-display = "0.8.2"
-path-absolutize = { version = "3.1.1", features = ["once_cell_cache", "use_unix_paths_on_wasm"] }
+path-absolutize = "4.0.1"
 pathdiff = "0.2"
 rayon = "1.11.0"
 ruff_notebook = "0.0.21"
