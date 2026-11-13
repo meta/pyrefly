@@ -39,9 +39,7 @@ use ruff_python_ast::ExprAttribute;
 use ruff_python_ast::ExprBinOp;
 use ruff_python_ast::ExprBoolOp;
 use ruff_python_ast::ExprCall;
-use ruff_python_ast::ExprList;
 use ruff_python_ast::ExprName;
-use ruff_python_ast::ExprSet;
 use ruff_python_ast::ExprSubscript;
 use ruff_python_ast::ExprUnaryOp;
 use ruff_python_ast::Identifier;
@@ -5536,80 +5534,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// Iterate over displays before mutable-container inference promotes their literal elements.
-    fn iterate_expr(&self, e: &Expr, errors: &ErrorCollector) -> Vec<Iterable> {
-        let promote_element = |ty: Type| {
-            self.distribute_over_union(&ty, |ty| match ty {
-                // String and bytes literals carry the length of the value being unpacked.
-                Type::Literal(lit) if matches!(lit.value, Lit::Str(_) | Lit::Bytes(_)) => {
-                    ty.clone()
-                }
-                _ => ty.clone().promote(self.stdlib),
-            })
-        };
-        match e {
-            Expr::List(ExprList { elts, .. }) | Expr::Set(ExprSet { elts, .. })
-                if !elts.is_empty() =>
-            {
-                let types = elts
-                    .iter()
-                    .map(|elt| {
-                        promote_element(match elt {
-                            Expr::Starred(star) => {
-                                self.get_produced_type(self.iterate_expr(&star.value, errors))
-                            }
-                            _ => self.expr_infer(elt, errors),
-                        })
-                    })
-                    .collect();
-                let element = self.unions(types);
-                let container = match e {
-                    Expr::List(_) => self.stdlib.list(element.clone().promote(self.stdlib)),
-                    Expr::Set(_) => self.stdlib.set(element.clone().promote(self.stdlib)),
-                    _ => unreachable!("Only list and set displays match this branch"),
-                };
-                self.record_type_trace(e.range(), &self.heap.mk_class_type(container));
-                vec![Iterable::OfType(element)]
-            }
-            Expr::Dict(dict) if !dict.items.is_empty() => {
-                let mut keys = Vec::new();
-                let mut values = Vec::new();
-                for item in Ast::flatten_dict_items(&dict.items) {
-                    if let Some(key) = &item.key {
-                        keys.push(promote_element(self.expr_infer(key, errors)));
-                        values.push(self.expr_infer(&item.value, errors));
-                    } else {
-                        let ty = self.expr_infer(&item.value, errors);
-                        if let Some((key, value)) = self.unwrap_mapping_for_unpacking(&ty) {
-                            keys.push(key);
-                            values.push(value);
-                        } else {
-                            keys.push(self.error(
-                                errors,
-                                item.value.range(),
-                                ErrorKind::InvalidArgument,
-                                format!("Expected a mapping, got {}", self.for_display(ty)),
-                            ));
-                        }
-                    }
-                }
-                let key = self.unions(keys);
-                self.record_type_trace(
-                    e.range(),
-                    &self.heap.mk_class_type(self.stdlib.dict(
-                        key.clone().promote(self.stdlib),
-                        self.unions(values).promote(self.stdlib),
-                    )),
-                );
-                vec![Iterable::OfType(key)]
-            }
-            _ => {
-                let (iterable, _) = self.expr_infer_for_iteration(e, errors);
-                self.iterate(&iterable, e.range(), errors, None)
-            }
-        }
-    }
-
     /// Handle `Binding::IterableValue` - extract value type from an iterable.
     /// The `#[inline(never)]` annotation is intentional to reduce stack frame size.
     #[inline(never)]
@@ -5656,7 +5580,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.expr_infer_with_hint(e, infer_hint.as_ref().map(HintRef::soft), errors);
             self.async_iterate(&iterable, e.range(), errors)
         } else if is_unpacking {
-            self.iterate_expr(e, errors)
+            let (iterable, element) = self.expr_infer_for_iteration(e, errors);
+            match element {
+                Some(element) => vec![Iterable::OfType(element)],
+                None => self.iterate(&iterable, e.range(), errors, None),
+            }
         } else {
             let infer_hint = ann.and_then(|x| {
                 x.ty(self.heap, self.stdlib)
