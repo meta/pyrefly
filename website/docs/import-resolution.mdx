@@ -146,9 +146,11 @@ example of this includes the popular library [`pandas`](https://github.com/panda
 and its stub package, [`pandas-stubs`](https://github.com/pandas-dev/pandas-stubs).
 
 When importing from a non-stubs package, Pyrefly loads typing information from
-imports by first searching for a relevant `-stubs` package, then by looking at
-the non-stubs package's `.pyi` files, then falls back to a `.py` file. A `-stubs`
-directory only overrides modules it provides: a stub package without a top-level
+imports by first searching for a relevant `-shape-stubs` package, then a `-stubs`
+package, then the non-stubs package's `.pyi` files, and finally a `.py` file.
+`-shape-stubs` packages are specific to Pyrefly and are ignored when
+[`use-shape-comments-and-stubs`](./configuration.mdx#use-shape-comments-and-stubs) is `false`.
+A stub directory only overrides modules it provides: a stub package without a top-level
 `__init__.pyi` does not hide the runtime package's `__init__.py`. See
 [Absolute Imports](#absolute-imports) for details on when non-stubs packages
 are allowed to be used for types, and how you can override that behavior.

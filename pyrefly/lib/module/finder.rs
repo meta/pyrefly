@@ -260,6 +260,8 @@ struct FindModuleOptions<'a> {
     /// Paths that were checked but did not exist are appended here.
     /// Mutually exclusive with `style_filter`.
     phantom_paths: Option<&'a mut Vec<PathBuf>>,
+    /// Whether `{package}-shape-stubs` packages are searched ahead of `{package}-stubs`.
+    include_shape_stubs: bool,
     /// Directory listings cached across one resolution transaction.
     dir_cache: &'a DirEntryCache,
     timing: Option<&'a TransactionTimingCounters>,
@@ -272,6 +274,7 @@ impl<'a> FindModuleOptions<'a> {
             site_package_policy: None,
             namespaces_found: None,
             phantom_paths: None,
+            include_shape_stubs: false,
             dir_cache,
             timing: None,
         }
@@ -295,6 +298,7 @@ where
         module,
         include,
         options.style_filter,
+        options.include_shape_stubs,
         &mut options.phantom_paths,
         options.dir_cache,
         observer(options.timing),
@@ -518,10 +522,12 @@ impl<'a> FindImportOptions<'a> {
     fn module_options<'b>(
         &'b mut self,
         style_filter: Option<ModuleStyle>,
+        include_shape_stubs: bool,
         namespaces_found: &'b mut Vec<PathBuf>,
     ) -> FindModuleOptions<'b> {
         FindModuleOptions {
             style_filter,
+            include_shape_stubs,
             namespaces_found: Some(namespaces_found),
             phantom_paths: self.phantom_paths.as_deref_mut(),
             timing: self.timing,
@@ -604,6 +610,7 @@ fn find_directory_relative_fallback_import(
     module: ModuleName,
     origin_path: Option<&Path>,
     style_filter: Option<ModuleStyle>,
+    include_shape_stubs: bool,
     options: &mut FindImportOptions<'_>,
 ) -> Option<FindingOrError<ModulePath>> {
     let FallbackSearchPath::DirectoryRelative(ancestors) = &config.fallback_search_path else {
@@ -621,7 +628,7 @@ fn find_directory_relative_fallback_import(
                 .iter()
                 .any(|init| dir_cache.file_exists(&root.join(init)))
         }),
-        options.module_options(style_filter, &mut namespaces),
+        options.module_options(style_filter, include_shape_stubs, &mut namespaces),
     )
     .or_else(|| {
         let namespace = namespaces
@@ -666,6 +673,10 @@ pub(crate) fn find_import_with_mode(
     let style_filter = lookup_mode.style_filter();
     let mut namespaces_found = vec![];
     let origin = options.origin;
+    // Shape stubs describe interfaces only, so a source-style lookup never selects them.
+    // Source database mappings are explicit, so shape stub discovery does not apply to them.
+    let include_shape_stubs =
+        style_filter != Some(ModuleStyle::Executable) && config.use_shape_comments_and_stubs();
     let bundled_typeshed_origin =
         origin.is_some_and(|path| matches!(path.details(), ModulePathDetails::BundledTypeshed(_)));
     let origin_path = origin.map(|p| p.as_path());
@@ -687,7 +698,7 @@ pub(crate) fn find_import_with_mode(
         && let Some(path) = find_module(
             module,
             build_system.search_path_prefix.iter(),
-            options.module_options(style_filter, &mut namespaces_found),
+            options.module_options(style_filter, include_shape_stubs, &mut namespaces_found),
         )
     {
         path
@@ -698,7 +709,7 @@ pub(crate) fn find_import_with_mode(
     } else if let Some(path) = find_module(
         module,
         config.search_path(),
-        options.module_options(style_filter, &mut namespaces_found),
+        options.module_options(style_filter, include_shape_stubs, &mut namespaces_found),
     ) {
         path
     } else if !custom_typeshed_excluded
@@ -706,7 +717,7 @@ pub(crate) fn find_import_with_mode(
         && let Some(path) = find_module(
             module,
             std::iter::once(custom_typeshed_stdlib),
-            options.module_options(style_filter, &mut namespaces_found),
+            options.module_options(style_filter, include_shape_stubs, &mut namespaces_found),
         )
     {
         path
@@ -750,7 +761,7 @@ pub(crate) fn find_import_with_mode(
                     .site_package_path()
                     .any(|site_package| path.starts_with(site_package))
             }),
-            options.module_options(style_filter, &mut namespaces_found),
+            options.module_options(style_filter, include_shape_stubs, &mut namespaces_found),
         )
     {
         path
@@ -759,7 +770,7 @@ pub(crate) fn find_import_with_mode(
         && let Some(path) = find_module(
             module,
             config.python_environment.interpreter_stdlib_path.iter(),
-            options.module_options(style_filter, &mut namespaces_found),
+            options.module_options(style_filter, include_shape_stubs, &mut namespaces_found),
         )
     {
         path
@@ -776,7 +787,7 @@ pub(crate) fn find_import_with_mode(
                 replace_untyped: style_filter.is_none()
                     && config.replace_untyped_imports_with_any(origin, module),
             }),
-            ..options.module_options(style_filter, &mut namespaces_found)
+            ..options.module_options(style_filter, include_shape_stubs, &mut namespaces_found)
         },
     ) {
         path
@@ -821,6 +832,7 @@ pub(crate) fn find_import_with_mode(
             module,
             origin_path,
             style_filter,
+            include_shape_stubs,
             &mut options,
         )
     {
@@ -853,6 +865,9 @@ pub fn find_import_prefixes(config: &ConfigFile, module: ModuleName) -> Vec<Modu
         module,
         config.search_path().chain(config.site_package_path()),
     );
+    if !config.use_shape_comments_and_stubs() {
+        results.retain(|name| !name.as_str().ends_with("-shape-stubs"));
+    }
 
     if let Ok(ts) = typeshed() {
         let module_str = module.as_str();
@@ -2302,11 +2317,11 @@ mod tests {
 
         assert_eq!(
             find(&config, "foo", ImportLookupMode::TypeChecking),
-            found("foo-stubs/__init__.pyi"),
+            found("foo-shape-stubs/__init__.pyi"),
         );
         assert_eq!(
             find(&config, "foo.bar", ImportLookupMode::TypeChecking),
-            found("foo-stubs/bar.pyi"),
+            found("foo-shape-stubs/bar.pyi"),
         );
         assert_eq!(
             find(
@@ -2314,7 +2329,7 @@ mod tests {
                 "foo.bar",
                 ImportLookupMode::style(ModuleStyle::Interface)
             ),
-            found("foo-stubs/bar.pyi"),
+            found("foo-shape-stubs/bar.pyi"),
         );
         // Like `-stubs` directories, shape stub directories are listed under their own name.
         assert!(lists_shape_stubs(&config));
@@ -2327,7 +2342,7 @@ mod tests {
             find(&opted_out, "foo.bar", ImportLookupMode::TypeChecking),
             found("foo-stubs/bar.pyi"),
         );
-        assert!(lists_shape_stubs(&opted_out));
+        assert!(!lists_shape_stubs(&opted_out));
     }
 
     #[test]
@@ -2361,7 +2376,7 @@ mod tests {
 
         assert_eq!(
             find("spam", ImportLookupMode::TypeChecking),
-            found("spam/__init__.py"),
+            found("spam-shape-stubs/__init__.pyi"),
         );
         // A source-style lookup looks for the runtime implementation, which shape
         // stubs never provide.
@@ -2437,13 +2452,13 @@ mod tests {
 
         // Partial shape stubs over regular stubs.
         assert_eq!(find("foo"), found("foo-stubs/__init__.pyi"));
-        assert_eq!(find("foo.bar"), found("foo-stubs/bar.pyi"));
+        assert_eq!(find("foo.bar"), found("foo-shape-stubs/bar.pyi"));
         assert_eq!(find("foo.baz"), found("foo-stubs/baz.pyi"));
         assert_eq!(find("foo.qux"), found("foo/qux.py"));
 
         // Partial shape stubs directly over the runtime package.
         assert_eq!(find("spam"), found("spam/__init__.py"));
-        assert_eq!(find("spam.eggs"), found("spam/eggs.py"));
+        assert_eq!(find("spam.eggs"), found("spam-shape-stubs/eggs.pyi"));
         assert_eq!(find("spam.ham"), found("spam/ham.py"));
 
         // A bare shape stub namespace does not hide a concrete regular stub package.
@@ -4517,12 +4532,11 @@ mod tests {
             ModuleName::from_str("requests"),
             FindImportOptions::new(&DirEntryCache::new()),
         );
-        assert!(
-            result.finding().is_some_and(|path| matches!(
-                path.details(),
-                ModulePathDetails::BundledTypeshedThirdParty(_)
+        assert_eq!(
+            result,
+            FindingOrError::new_finding(ModulePath::filesystem(
+                root.join("site_packages/requests-shape-stubs/__init__.pyi")
             )),
-            "Expected the bundled typeshed stub for `requests`"
         );
     }
 
@@ -4644,9 +4658,19 @@ mod tests {
             },
         );
 
-        // find_import first checks for -stubs package, then the regular package
-        // Should have checked paths for both nonexistent-stubs and nonexistent
+        // find_import checks the -shape-stubs and -stubs packages before the regular package
         let expected_paths = vec![
+            // -shape-stubs package check
+            root.join("nonexistent-shape-stubs/__init__.pyi"),
+            root.join("nonexistent-shape-stubs/__init__.py"),
+            root.join("nonexistent-shape-stubs.pyi"),
+            root.join("nonexistent-shape-stubs.py"),
+            root.join("nonexistent-shape-stubs.pyc"),
+            root.join("nonexistent-shape-stubs.pyx"),
+            root.join("nonexistent-shape-stubs.pyd"),
+            root.join("nonexistent-shape-stubs.so"),
+            root.join("nonexistent-shape-stubs.dll"),
+            root.join("nonexistent-shape-stubs"),
             // -stubs package check
             root.join("nonexistent-stubs/__init__.pyi"),
             root.join("nonexistent-stubs/__init__.py"),
@@ -4680,7 +4704,7 @@ mod tests {
     #[test]
     fn test_phantom_paths_regular_package_found_immediately() {
         // When a regular package is found with __init__.pyi, phantom paths are collected
-        // for the -stubs package that was checked first
+        // for the stub packages that were checked first
         let tempdir = tempfile::tempdir().unwrap();
         let root = tempdir.path();
 
@@ -4705,8 +4729,18 @@ mod tests {
         );
 
         assert!(result.finding().is_some(), "Should find the package");
-        // find_import checks -stubs first, so we have phantom paths from that check
+        // find_import checks stub packages first, so we have phantom paths from those checks
         let expected = vec![
+            root.join("mypackage-shape-stubs/__init__.pyi"),
+            root.join("mypackage-shape-stubs/__init__.py"),
+            root.join("mypackage-shape-stubs.pyi"),
+            root.join("mypackage-shape-stubs.py"),
+            root.join("mypackage-shape-stubs.pyc"),
+            root.join("mypackage-shape-stubs.pyx"),
+            root.join("mypackage-shape-stubs.pyd"),
+            root.join("mypackage-shape-stubs.so"),
+            root.join("mypackage-shape-stubs.dll"),
+            root.join("mypackage-shape-stubs"),
             root.join("mypackage-stubs/__init__.pyi"),
             root.join("mypackage-stubs/__init__.py"),
             root.join("mypackage-stubs.pyi"),
@@ -4720,7 +4754,7 @@ mod tests {
         ];
         assert_eq!(
             phantom_paths, expected,
-            "Should collect -stubs phantom paths before finding regular package"
+            "Should collect stub package phantom paths before finding regular package"
         );
     }
 
@@ -4751,8 +4785,19 @@ mod tests {
         );
 
         assert!(result.finding().is_some(), "Should find the package");
-        // Phantom paths from -stubs check + __init__.pyi before __init__.py
+        // Phantom paths from stub package checks + __init__.pyi before __init__.py
         let expected = vec![
+            // -shape-stubs check
+            root.join("mypackage-shape-stubs/__init__.pyi"),
+            root.join("mypackage-shape-stubs/__init__.py"),
+            root.join("mypackage-shape-stubs.pyi"),
+            root.join("mypackage-shape-stubs.py"),
+            root.join("mypackage-shape-stubs.pyc"),
+            root.join("mypackage-shape-stubs.pyx"),
+            root.join("mypackage-shape-stubs.pyd"),
+            root.join("mypackage-shape-stubs.so"),
+            root.join("mypackage-shape-stubs.dll"),
+            root.join("mypackage-shape-stubs"),
             // -stubs check
             root.join("mypackage-stubs/__init__.pyi"),
             root.join("mypackage-stubs/__init__.py"),
@@ -4769,7 +4814,7 @@ mod tests {
         ];
         assert_eq!(
             phantom_paths, expected,
-            "Should collect -stubs and __init__.pyi phantom paths"
+            "Should collect stub package and __init__.pyi phantom paths"
         );
     }
 
@@ -4794,8 +4839,19 @@ mod tests {
         );
 
         assert!(result.finding().is_some(), "Should find the module");
-        // Phantom paths from -stubs check + init files before .pyi
+        // Phantom paths from stub package checks + init files before .pyi
         let expected = vec![
+            // -shape-stubs check
+            root.join("mymodule-shape-stubs/__init__.pyi"),
+            root.join("mymodule-shape-stubs/__init__.py"),
+            root.join("mymodule-shape-stubs.pyi"),
+            root.join("mymodule-shape-stubs.py"),
+            root.join("mymodule-shape-stubs.pyc"),
+            root.join("mymodule-shape-stubs.pyx"),
+            root.join("mymodule-shape-stubs.pyd"),
+            root.join("mymodule-shape-stubs.so"),
+            root.join("mymodule-shape-stubs.dll"),
+            root.join("mymodule-shape-stubs"),
             // -stubs check
             root.join("mymodule-stubs/__init__.pyi"),
             root.join("mymodule-stubs/__init__.py"),
@@ -4813,7 +4869,7 @@ mod tests {
         ];
         assert_eq!(
             phantom_paths, expected,
-            "Should collect -stubs and init phantom paths before finding .pyi"
+            "Should collect stub package and init phantom paths before finding .pyi"
         );
     }
 
@@ -4838,8 +4894,19 @@ mod tests {
         );
 
         assert!(result.finding().is_some(), "Should find the module");
-        // Phantom paths from -stubs check + paths before .py
+        // Phantom paths from stub package checks + paths before .py
         let expected = vec![
+            // -shape-stubs check
+            root.join("mymodule-shape-stubs/__init__.pyi"),
+            root.join("mymodule-shape-stubs/__init__.py"),
+            root.join("mymodule-shape-stubs.pyi"),
+            root.join("mymodule-shape-stubs.py"),
+            root.join("mymodule-shape-stubs.pyc"),
+            root.join("mymodule-shape-stubs.pyx"),
+            root.join("mymodule-shape-stubs.pyd"),
+            root.join("mymodule-shape-stubs.so"),
+            root.join("mymodule-shape-stubs.dll"),
+            root.join("mymodule-shape-stubs"),
             // -stubs check
             root.join("mymodule-stubs/__init__.pyi"),
             root.join("mymodule-stubs/__init__.py"),
@@ -4888,8 +4955,19 @@ mod tests {
             result.finding().is_none(),
             "Compiled modules are ignored for type checking"
         );
-        // Phantom paths from -stubs check + paths checked before finding .pyc
+        // Phantom paths from stub package checks + paths checked before finding .pyc
         let expected = vec![
+            // -shape-stubs check
+            root.join("mymodule-shape-stubs/__init__.pyi"),
+            root.join("mymodule-shape-stubs/__init__.py"),
+            root.join("mymodule-shape-stubs.pyi"),
+            root.join("mymodule-shape-stubs.py"),
+            root.join("mymodule-shape-stubs.pyc"),
+            root.join("mymodule-shape-stubs.pyx"),
+            root.join("mymodule-shape-stubs.pyd"),
+            root.join("mymodule-shape-stubs.so"),
+            root.join("mymodule-shape-stubs.dll"),
+            root.join("mymodule-shape-stubs"),
             // -stubs check
             root.join("mymodule-stubs/__init__.pyi"),
             root.join("mymodule-stubs/__init__.py"),
@@ -4945,10 +5023,21 @@ mod tests {
         assert!(result.finding().is_some(), "Should find parent.child");
 
         // Phantom paths from:
-        // 1. parent-stubs check (all paths since not found)
+        // 1. parent-shape-stubs and parent-stubs checks (all paths since not found)
         // 2. parent check (__init__.pyi before __init__.py)
         // 3. child check (__init__.pyi, __init__.py, .pyi before .py)
         let expected = vec![
+            // parent-shape-stubs check
+            root.join("parent-shape-stubs/__init__.pyi"),
+            root.join("parent-shape-stubs/__init__.py"),
+            root.join("parent-shape-stubs.pyi"),
+            root.join("parent-shape-stubs.py"),
+            root.join("parent-shape-stubs.pyc"),
+            root.join("parent-shape-stubs.pyx"),
+            root.join("parent-shape-stubs.pyd"),
+            root.join("parent-shape-stubs.so"),
+            root.join("parent-shape-stubs.dll"),
+            root.join("parent-shape-stubs"),
             // parent-stubs check
             root.join("parent-stubs/__init__.pyi"),
             root.join("parent-stubs/__init__.py"),
@@ -5009,9 +5098,31 @@ mod tests {
         );
 
         // Phantom paths from:
-        // 1. mymodule-stubs check across both roots
+        // 1. mymodule-shape-stubs and mymodule-stubs checks across both roots
         // 2. mymodule check (root1 all, root2 until .py found)
         let expected = vec![
+            // -shape-stubs check in root1 (all paths)
+            root.join("root1/mymodule-shape-stubs/__init__.pyi"),
+            root.join("root1/mymodule-shape-stubs/__init__.py"),
+            root.join("root1/mymodule-shape-stubs.pyi"),
+            root.join("root1/mymodule-shape-stubs.py"),
+            root.join("root1/mymodule-shape-stubs.pyc"),
+            root.join("root1/mymodule-shape-stubs.pyx"),
+            root.join("root1/mymodule-shape-stubs.pyd"),
+            root.join("root1/mymodule-shape-stubs.so"),
+            root.join("root1/mymodule-shape-stubs.dll"),
+            root.join("root1/mymodule-shape-stubs"),
+            // -shape-stubs check in root2 (all paths)
+            root.join("root2/mymodule-shape-stubs/__init__.pyi"),
+            root.join("root2/mymodule-shape-stubs/__init__.py"),
+            root.join("root2/mymodule-shape-stubs.pyi"),
+            root.join("root2/mymodule-shape-stubs.py"),
+            root.join("root2/mymodule-shape-stubs.pyc"),
+            root.join("root2/mymodule-shape-stubs.pyx"),
+            root.join("root2/mymodule-shape-stubs.pyd"),
+            root.join("root2/mymodule-shape-stubs.so"),
+            root.join("root2/mymodule-shape-stubs.dll"),
+            root.join("root2/mymodule-shape-stubs"),
             // -stubs check in root1 (all paths)
             root.join("root1/mymodule-stubs/__init__.pyi"),
             root.join("root1/mymodule-stubs/__init__.py"),
@@ -5098,12 +5209,23 @@ mod tests {
         assert!(result.finding().is_some(), "Should find a.b.c.d");
 
         // Phantom paths from:
-        // 1. a-stubs check (all paths)
+        // 1. a-shape-stubs and a-stubs checks (all paths)
         // 2. a check (__init__.pyi)
         // 3. b check (__init__.pyi)
         // 4. c check (__init__.pyi)
         // 5. d check (init files, .pyi before .py)
         let expected = vec![
+            // a-shape-stubs check
+            root.join("a-shape-stubs/__init__.pyi"),
+            root.join("a-shape-stubs/__init__.py"),
+            root.join("a-shape-stubs.pyi"),
+            root.join("a-shape-stubs.py"),
+            root.join("a-shape-stubs.pyc"),
+            root.join("a-shape-stubs.pyx"),
+            root.join("a-shape-stubs.pyd"),
+            root.join("a-shape-stubs.so"),
+            root.join("a-shape-stubs.dll"),
+            root.join("a-shape-stubs"),
             // a-stubs check
             root.join("a-stubs/__init__.pyi"),
             root.join("a-stubs/__init__.py"),

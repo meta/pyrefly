@@ -211,8 +211,8 @@ impl ModulePath {
     /// Attempt to match the given [`ModuleName`]'s components to this `ModulePath`,
     /// returning the directory that is the import root for the `ModuleName`, if
     /// *all* module components could be matched to directories. `ModulePath`s
-    /// with `-stubs` components are matched iff the *first* `ModuleName` component
-    /// prefix matches the directory it's being compared to.
+    /// with `-stubs` or `-shape-stubs` components are matched iff the *first*
+    /// `ModuleName` component prefix matches the directory it's being compared to.
     ///
     /// Example:
     /// - `/some/path/to/root/a/b/c/d.py`, `a.b.c.d` -> `Some(/some/path/to/root)`
@@ -241,9 +241,12 @@ impl ModulePath {
             // does this `part` match the next part of the `path`?
             let direct_match = file_name == Some(part.as_str().as_ref());
             // if we're looking at the first component (import root) of the
-            // `ModuleName`, does it match the `part` if we postfix `-stubs`?
+            // `ModuleName`, does it match the `part` if we postfix `-stubs` or
+            // `-shape-stubs`?
             let stubs_match = components.peek().is_none()
-                && file_name == Some(OsStr::new(&(part.to_string() + "-stubs")));
+                && ["-stubs", "-shape-stubs"]
+                    .iter()
+                    .any(|suffix| file_name == Some(OsStr::new(&format!("{part}{suffix}"))));
 
             if !(direct_match || stubs_match) {
                 return None;
@@ -370,6 +373,9 @@ mod tests {
     #[test]
     fn test_root_of_shape_stubs() {
         let path = ModulePath::filesystem(PathBuf::from("hello/foo-shape-stubs/bar/baz.pyi"));
-        assert_eq!(path.root_of(ModuleName::from_str("foo.bar.baz")), None);
+        assert_eq!(
+            path.root_of(ModuleName::from_str("foo.bar.baz")),
+            Some(PathBuf::from("hello")),
+        );
     }
 }

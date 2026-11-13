@@ -585,26 +585,37 @@ mod tests {
                 TestPath::dir("requests-shape-stubs", vec![TestPath::file("__init__.pyi")]),
             ],
         );
-        let mut config = ConfigFile::parse_config(
-            "[[sub-config]]\nmatches = '**/opted-out/**'\nuse-shape-comments-and-stubs = false\n",
-        )
-        .unwrap();
-        config.python_environment.set_empty_to_default();
-        config.python_environment.site_package_path = Some(vec![root.to_path_buf()]);
-        config.disable_search_path_heuristics = true;
-        config.configure();
-        let loader = LoaderFindCache::new(ArcId::new(config));
-        let enabled = ModulePath::memory(root.join("enabled/main.py"));
-        let disabled = ModulePath::memory(root.join("opted-out/main.py"));
-        for origin in [&disabled, &enabled, &enabled, &disabled] {
-            let path = loader
-                .find_import(ModuleName::from_str("requests"), Some(origin), None)
-                .finding()
-                .unwrap();
-            assert!(
-                path.is_bundled(),
-                "bundled promotion currently hides shape stubs"
-            );
+        let first = ModulePath::memory(root.join("first/main.py"));
+        let second = ModulePath::memory(root.join("second/main.py"));
+        for compatibility in [false, true] {
+            let mut config = ConfigFile::parse_config(&format!(
+                "use-shape-comments-and-stubs = {compatibility}\n\
+                 [[sub-config]]\n\
+                 matches = '**/second/**'\n",
+            ))
+            .unwrap();
+            config.python_environment.set_empty_to_default();
+            config.python_environment.site_package_path = Some(vec![root.to_path_buf()]);
+            config.disable_search_path_heuristics = true;
+            config.configure();
+            let config = ArcId::new(config);
+            for origins in [[&first, &second, &first], [&second, &first, &second]] {
+                let loader = LoaderFindCache::new(config.dupe());
+                for origin in origins {
+                    let path = loader
+                        .find_import(ModuleName::from_str("requests"), Some(origin), None)
+                        .finding()
+                        .unwrap();
+                    if compatibility {
+                        assert_eq!(
+                            path,
+                            ModulePath::filesystem(root.join("requests-shape-stubs/__init__.pyi"))
+                        );
+                    } else {
+                        assert!(path.is_bundled(), "opt-out must restore the bundled stub");
+                    }
+                }
+            }
         }
     }
 

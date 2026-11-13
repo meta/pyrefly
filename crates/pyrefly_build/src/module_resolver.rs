@@ -707,8 +707,8 @@ pub enum StubSearchResult {
     /// normal `.pyi`-before-`.py` precedence.
     Provides(FindResult),
     /// A stub lookup that landed on a bare namespace directory, either in a
-    /// partial stub or while the runtime has a concrete module: it does not
-    /// itself provide this module, so the runtime package is preferred. The
+    /// partial stub or while a lower-precedence package has a concrete module: it
+    /// does not itself provide this module, so that package is preferred. The
     /// namespace roots are retained as a fallback for when no runtime module
     /// exists, and to merge with a runtime namespace of the same name.
     Transparent(Vec1<PathBuf>),
@@ -725,10 +725,15 @@ impl StubSearchResult {
     }
 }
 
+/// Search `include` for `module` in its runtime package and in its `-stubs` package
+/// and, when `include_shape_stubs` is set, its `-shape-stubs` package. A shape stub
+/// package takes precedence over the regular stub package in the same way that the
+/// regular stub package takes precedence over the runtime package.
 pub fn find_module_results<'a, I>(
     module: ModuleName,
     include: I,
     style_filter: Option<ModuleStyle>,
+    include_shape_stubs: bool,
     phantom_paths: &mut Option<&mut Vec<PathBuf>>,
     dir_cache: &DirEntryCache,
     observer: Option<&dyn ModuleResolutionObserver>,
@@ -738,40 +743,40 @@ where
 {
     let module = module.as_str();
     let (first, rest) = module.split_once('.').unwrap_or((module, ""));
+    let shape_stub_first = format!("{first}-shape-stubs");
     let stub_first = format!("{first}-stubs");
-    let stub_result = find_module_components(
-        &stub_first,
-        rest,
-        include.clone(),
-        style_filter,
-        phantom_paths,
-        dir_cache,
-        observer,
-    );
-    let normal_result = find_module_components(
-        first,
-        rest,
-        include.clone(),
-        style_filter,
-        phantom_paths,
-        dir_cache,
-        observer,
-    );
-    let runtime_is_concrete = normal_result
-        .as_ref()
-        .is_some_and(|normal| !matches!(normal, FindResult::ImplicitNamespacePackage(_)));
-    let stub_result = stub_result.map(|result| match result {
-        // A bare namespace directory in a stub package provides no module of its own,
-        // so it never hides a concrete runtime module. Otherwise it shadows the runtime
-        // unless the stub package is incomplete: a namespace package below the
-        // top-level stub package always is, and otherwise the top-level stub package's
-        // `py.typed` decides. The top-level lookup is only performed when the cheaper
-        // checks do not already settle it, and it reuses the populated directory cache.
+    let mut find = |first: &str| {
+        find_module_components(
+            first,
+            rest,
+            include.clone(),
+            style_filter,
+            phantom_paths,
+            dir_cache,
+            observer,
+        )
+    };
+    let shape_stub_result = if include_shape_stubs {
+        find(&shape_stub_first)
+    } else {
+        None
+    };
+    let stub_result = find(&stub_first);
+    let normal_result = find(first);
+
+    // A bare namespace directory in a stub package provides no module of its own,
+    // so it never hides a concrete module in a lower-precedence package. Otherwise it
+    // shadows the lower-precedence packages unless the stub package is incomplete: a
+    // namespace package below the top-level stub package always is, and otherwise the
+    // top-level stub package's `py.typed` decides. The top-level lookup is only
+    // performed when the cheaper checks do not already settle it, and it reuses the
+    // populated directory cache.
+    let classify = |stub_first: &str, result: FindResult, lower_is_concrete: bool| match result {
         FindResult::ImplicitNamespacePackage(namespaces)
-            if runtime_is_concrete
+            if lower_is_concrete
                 || !rest.is_empty()
                 || find_one_part(
-                    &stub_first,
+                    stub_first,
                     include.clone(),
                     style_filter,
                     &mut None,
@@ -785,7 +790,28 @@ where
             StubSearchResult::Transparent(namespaces)
         }
         result => StubSearchResult::Provides(result),
-    });
+    };
+    let is_concrete =
+        |result: &FindResult| !matches!(result, FindResult::ImplicitNamespacePackage(_));
+    let runtime_is_concrete = normal_result.as_ref().is_some_and(is_concrete);
+    let stub_result = stub_result.map(|result| classify(&stub_first, result, runtime_is_concrete));
+    let stubs_are_concrete = runtime_is_concrete
+        || matches!(&stub_result, Some(StubSearchResult::Provides(result)) if is_concrete(result));
+    let shape_stub_result =
+        shape_stub_result.map(|result| classify(&shape_stub_first, result, stubs_are_concrete));
+
+    let stub_result = match (shape_stub_result, stub_result) {
+        (
+            Some(StubSearchResult::Transparent(mut shape_namespaces)),
+            Some(StubSearchResult::Transparent(namespaces)),
+        ) => {
+            shape_namespaces.extend(namespaces);
+            Some(StubSearchResult::Transparent(shape_namespaces))
+        }
+        (Some(StubSearchResult::Transparent(_)), Some(stub_result)) => Some(stub_result),
+        (Some(shape_stub_result), _) => Some(shape_stub_result),
+        (None, stub_result) => stub_result,
+    };
     ModuleSearchResult {
         stub_result,
         normal_result,
@@ -813,10 +839,13 @@ impl ModuleResolver {
     }
 
     pub fn resolve(&self, module: ModuleName, style: Option<ModuleStyle>) -> Option<ModulePath> {
+        // Shape-stub discovery is a type-checker setting, so build-system resolution
+        // leaves them out rather than overriding that choice.
         let result = find_module_results(
             module,
             self.roots.iter(),
             style,
+            false,
             &mut None,
             &self.dir_cache,
             None,
@@ -1136,10 +1165,17 @@ mod tests {
         let dir_cache = DirEntryCache::new();
         let has_py_typed = |module: &str| {
             let module = ModuleName::from_str(module);
-            let result =
-                find_module_results(module, roots.iter(), None, &mut None, &dir_cache, None)
-                    .normal_result
-                    .expect("test module should resolve");
+            let result = find_module_results(
+                module,
+                roots.iter(),
+                None,
+                false,
+                &mut None,
+                &dir_cache,
+                None,
+            )
+            .normal_result
+            .expect("test module should resolve");
             package_has_py_typed(module, &result, &dir_cache)
         };
 

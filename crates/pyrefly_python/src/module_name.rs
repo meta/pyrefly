@@ -544,9 +544,12 @@ impl ModuleName {
                     out.push(x.to_string_lossy());
                 }
             }
-            // strip `-stubs` from the top-level directory (e.g. `scipy-stubs/` -> `scipy`)
+            // strip `-shape-stubs` or `-stubs` from the top-level directory
+            // (e.g. `scipy-stubs/` -> `scipy`)
             if let Some(first) = out.first_mut()
-                && let Some(stripped) = first.strip_suffix("-stubs")
+                && let Some(stripped) = ["-shape-stubs", "-stubs"]
+                    .iter()
+                    .find_map(|suffix| first.strip_suffix(*suffix))
             {
                 *first = stripped.to_owned().into();
             }
@@ -1034,7 +1037,13 @@ mod tests {
         let includes = [PathBuf::from("/sp")];
         let module_name = |path: &str| ModuleName::from_path(Path::new(path), includes.iter(), &[]);
 
-        assert_eq!(module_name("/sp/torch-shape-stubs/nn/functional.pyi"), None);
-        assert_eq!(module_name("/sp/torch-shape-stubs/__init__.pyi"), None);
+        assert_eq!(
+            module_name("/sp/torch-shape-stubs/nn/functional.pyi"),
+            Some(ModuleName::from_str("torch.nn.functional"))
+        );
+        assert_eq!(
+            module_name("/sp/torch-shape-stubs/__init__.pyi"),
+            Some(ModuleName::from_str("torch"))
+        );
     }
 }
