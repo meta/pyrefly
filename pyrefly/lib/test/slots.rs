@@ -910,6 +910,7 @@ def f(c: C):
 testcase!(
     test_slots_conflict_with_class_variable,
     r#"
+from abc import ABC
 from typing import Final
 
 class A:
@@ -927,6 +928,10 @@ class C:
 class D:
     attr = "baz"  # E: `attr` in `__slots__` conflicts with a class variable
     __slots__ = ("f", "attr", "__dict__")
+
+class F(ABC):
+    __slots__ = ("x",)
+    x = 1  # E: `x` in `__slots__` conflicts with a class variable
 
 class E:
     __slots__ = ("m", "Inner", "k")
@@ -961,6 +966,15 @@ class D:
     __slots__ = ("x",)
     if flag():
         x: int
+
+class Meta(type):
+    def __new__(mcs, name, bases, namespace):
+        namespace.pop("x", None)
+        return super().__new__(mcs, name, bases, namespace)
+
+class E(metaclass=Meta):
+    __slots__ = ("x",)
+    x = 1
 "#,
 );
 

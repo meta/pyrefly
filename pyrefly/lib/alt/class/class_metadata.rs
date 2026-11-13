@@ -473,7 +473,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .iter()
             .find_map(|(decorator, _)| decorator.deprecation.clone());
 
-        let explicit_slots = self.explicit_slots(cls, errors);
+        let explicit_slots = self.explicit_slots(cls, metaclass, errors);
         let has_nonempty_explicit_slots = explicit_slots
             .slots_info()
             .is_some_and(|slots| !slots.names.is_empty());
@@ -712,7 +712,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .find_map(|base| self.find_inherited_init_subclass(base, seen))
     }
 
-    fn explicit_slots(&self, cls: &Class, errors: &ErrorCollector) -> ExplicitSlots {
+    fn explicit_slots(
+        &self,
+        cls: &Class,
+        metaclass: Option<&ClassType>,
+        errors: &ErrorCollector,
+    ) -> ExplicitSlots {
         let key = KeyClassField(cls.index(), dunder::SLOTS.clone());
         let Some(idx) = self.bindings().key_to_idx_hashed_opt(Hashed::new(&key)) else {
             return ExplicitSlots::Absent;
@@ -745,7 +750,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let Some(names) = names else {
             return ExplicitSlots::Unknown;
         };
-        if cls.module().path().is_interface() {
+        // A metaclass other than `type` or `ABCMeta` may remove names from the namespace before it
+        // creates the class.
+        if cls.module().path().is_interface()
+            || metaclass.is_some_and(|m| !m.class_object().is(KnownClass::AbcMeta))
+        {
             return ExplicitSlots::Known(SlotsInfo { names });
         }
         for name in &names {
