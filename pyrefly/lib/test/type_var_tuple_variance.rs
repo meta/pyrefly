@@ -143,7 +143,6 @@ Ts = TypeVarTuple("Ts", infer_variance=True)
 );
 
 testcase!(
-    bug = "A legacy TypeVarTuple's declared variance should be used for assignability",
     test_legacy_type_var_tuple_declared_variance_used_for_assignability,
     r#"
 from typing import Generic, TypeVarTuple
@@ -154,13 +153,12 @@ class A(Generic[*Ts]):
     def put(self, t: tuple[*Ts]) -> None: ...
 
 def f(obj: A[object], int_: A[int]):
-    x: A[int] = obj  # E: `A[object]` is not assignable to `A[int]`
+    x: A[int] = obj
     y: A[object] = int_  # E: `A[int]` is not assignable to `A[object]`
 "#,
 );
 
 testcase!(
-    bug = "A legacy TypeVarTuple with `infer_variance` should have its variance inferred",
     test_legacy_type_var_tuple_infer_variance,
     r#"
 from typing import Generic, TypeVarTuple
@@ -172,7 +170,7 @@ class A(Generic[*Ts]):
 
 def f(obj: A[object], int_: A[int]):
     x: A[int] = obj  # E: `A[object]` is not assignable to `A[int]`
-    y: A[object] = int_  # E: `A[int]` is not assignable to `A[object]`
+    y: A[object] = int_
 "#,
 );
 

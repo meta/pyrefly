@@ -72,7 +72,7 @@ impl TypeVarLike for TypeVarTuple {
     }
 
     fn variance(&self) -> PreInferenceVariance {
-        PreInferenceVariance::Invariant
+        self.0.variance
     }
 }
 

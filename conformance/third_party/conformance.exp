@@ -8387,17 +8387,6 @@
     },
     {
       "code": -2,
-      "column": 49,
-      "concise_description": "`ContravariantTypeVarTupleOld[object]` is not assignable to `ContravariantTypeVarTupleOld[int]`",
-      "description": "`ContravariantTypeVarTupleOld[object]` is not assignable to `ContravariantTypeVarTupleOld[int]`",
-      "line": 84,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 87,
-      "stop_line": 84
-    },
-    {
-      "code": -2,
       "column": 46,
       "concise_description": "`CovariantTypeVarTupleOld[object]` is not assignable to `CovariantTypeVarTupleOld[int]`",
       "description": "`CovariantTypeVarTupleOld[object]` is not assignable to `CovariantTypeVarTupleOld[int]`",
@@ -8406,17 +8395,6 @@
       "severity": "error",
       "stop_column": 80,
       "stop_line": 97
-    },
-    {
-      "code": -2,
-      "column": 49,
-      "concise_description": "`CovariantTypeVarTupleOld[int]` is not assignable to `CovariantTypeVarTupleOld[object]`",
-      "description": "`CovariantTypeVarTupleOld[int]` is not assignable to `CovariantTypeVarTupleOld[object]`",
-      "line": 98,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 80,
-      "stop_line": 98
     },
     {
       "code": -2,
@@ -8450,17 +8428,6 @@
       "severity": "error",
       "stop_column": 102,
       "stop_line": 116
-    },
-    {
-      "code": -2,
-      "column": 63,
-      "concise_description": "`InferredCovariantTypeVarTupleOld[int]` is not assignable to `InferredCovariantTypeVarTupleOld[object]`",
-      "description": "`InferredCovariantTypeVarTupleOld[int]` is not assignable to `InferredCovariantTypeVarTupleOld[object]`",
-      "line": 117,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 102,
-      "stop_line": 117
     }
   ],
   "generics_upper_bound.py": [

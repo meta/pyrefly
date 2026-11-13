@@ -93,10 +93,7 @@
   "generics_typevartuple_variance.py": [
     "Line 79: Expected 1 errors",
     "Line 90: Expected 1 errors",
-    "Line 84: Unexpected errors ['`ContravariantTypeVarTupleOld[object]` is not assignable to `ContravariantTypeVarTupleOld[int]`']",
-    "Line 98: Unexpected errors ['`CovariantTypeVarTupleOld[int]` is not assignable to `CovariantTypeVarTupleOld[object]`']",
-    "Line 108: Unexpected errors ['`InferredContravariantTypeVarTupleOld[object]` is not assignable to `InferredContravariantTypeVarTupleOld[int]`']",
-    "Line 117: Unexpected errors ['`InferredCovariantTypeVarTupleOld[int]` is not assignable to `InferredCovariantTypeVarTupleOld[object]`']"
+    "Line 108: Unexpected errors ['`InferredContravariantTypeVarTupleOld[object]` is not assignable to `InferredContravariantTypeVarTupleOld[int]`']"
   ],
   "generics_upper_bound.py": [],
   "generics_variance.py": [],
