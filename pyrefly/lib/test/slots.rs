@@ -908,32 +908,31 @@ def f(c: C):
 // CPython raises `ValueError` when it creates a class whose `__slots__` names something that the
 // class body also binds.
 testcase!(
-    bug = "Each class variable that conflicts with `__slots__` should be reported",
     test_slots_conflict_with_class_variable,
     r#"
 from typing import Final
 
 class A:
     __slots__ = "foo"
-    foo = 1
+    foo = 1  # E: `foo` in `__slots__` conflicts with a class variable
 
 class B:
     __slots__ = ["foo", "bar"]
-    foo: int = 1
+    foo: int = 1  # E: `foo` in `__slots__` conflicts with a class variable
 
 class C:
-    attr = "baz"
+    attr = "baz"  # E: `attr` in `__slots__` conflicts with a class variable
     __slots__ = ("attr", "bar")
 
 class D:
-    attr = "baz"
+    attr = "baz"  # E: `attr` in `__slots__` conflicts with a class variable
     __slots__ = ("f", "attr", "__dict__")
 
 class E:
     __slots__ = ("m", "Inner", "k")
-    def m(self) -> None: ...
-    class Inner: ...
-    k: Final = 1
+    def m(self) -> None: ...  # E: `m` in `__slots__` conflicts with a class variable
+    class Inner: ...  # E: `Inner` in `__slots__` conflicts with a class variable
+    k: Final = 1  # E: `k` in `__slots__` conflicts with a class variable
 "#,
 );
 
@@ -988,17 +987,16 @@ class A:
 );
 
 testcase!(
-    bug = "A value bound before or after a bare annotation should be reported",
     test_slots_conflict_after_annotation,
     r#"
 class A:
     __slots__ = ("x",)
-    x = 1
+    x = 1  # E: `x` in `__slots__` conflicts with a class variable
     x: int
 
 class B:
     __slots__ = ("x",)
-    def x(self) -> None: ...
+    def x(self) -> None: ...  # E: `x` in `__slots__` conflicts with a class variable
     x: object
 
 class C:
@@ -1008,6 +1006,6 @@ class C:
 class D:
     __slots__ = ("x",)
     x: int
-    x = 1
+    x = 1  # E: `x` in `__slots__` conflicts with a class variable
 "#,
 );
