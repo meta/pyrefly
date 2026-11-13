@@ -14,6 +14,12 @@ import Sandbox from '../sandbox/Sandbox';
 import { SANDBOX_FILE_NAME } from '../pages/sandbox';
 import { DEFAULT_SANDBOX_PROGRAM } from '../sandbox/DefaultSandboxProgram';
 
+// The version selector would fetch the version list from the network; the
+// snapshot pins the sandbox while the list is still loading.
+jest.mock('../sandbox/pyreflyVersions', () => ({
+    fetchPyreflyVersions: () => new Promise(() => {}),
+}));
+
 describe('Sandbox Component', () => {
     const pyreflyCommit = '123456789abcdef';
 
