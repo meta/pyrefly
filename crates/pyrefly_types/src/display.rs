@@ -3728,6 +3728,7 @@ def overloaded_func[T](
             Identifier::new(Name::new("Ts"), TextRange::empty(TextSize::new(70))),
             mi,
             None,
+            PreInferenceVariance::Invariant,
         );
         let t = Type::TypeVarTuple(tv_tuple);
         let parts = get_parts(&t);

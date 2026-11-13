@@ -8321,31 +8321,9 @@
     },
     {
       "code": -2,
-      "column": 35,
-      "concise_description": "Unexpected keyword argument `infer_variance` to TypeVarTuple",
-      "description": "Unexpected keyword argument `infer_variance` to TypeVarTuple",
-      "line": 55,
-      "name": "invalid-type-var-tuple",
-      "severity": "error",
-      "stop_column": 54,
-      "stop_line": 55
-    },
-    {
-      "code": -2,
-      "column": 33,
-      "concise_description": "Unexpected keyword argument `covariant` to TypeVarTuple",
-      "description": "Unexpected keyword argument `covariant` to TypeVarTuple",
-      "line": 56,
-      "name": "invalid-type-var-tuple",
-      "severity": "error",
-      "stop_column": 47,
-      "stop_line": 56
-    },
-    {
-      "code": -2,
       "column": 49,
-      "concise_description": "Unexpected keyword argument `contravariant` to TypeVarTuple",
-      "description": "Unexpected keyword argument `contravariant` to TypeVarTuple",
+      "concise_description": "Contradictory variance specifications",
+      "description": "Contradictory variance specifications",
       "line": 56,
       "name": "invalid-type-var-tuple",
       "severity": "error",
@@ -8354,20 +8332,9 @@
     },
     {
       "code": -2,
-      "column": 33,
-      "concise_description": "Unexpected keyword argument `covariant` to TypeVarTuple",
-      "description": "Unexpected keyword argument `covariant` to TypeVarTuple",
-      "line": 57,
-      "name": "invalid-type-var-tuple",
-      "severity": "error",
-      "stop_column": 47,
-      "stop_line": 57
-    },
-    {
-      "code": -2,
       "column": 49,
-      "concise_description": "Unexpected keyword argument `infer_variance` to TypeVarTuple",
-      "description": "Unexpected keyword argument `infer_variance` to TypeVarTuple",
+      "concise_description": "Contradictory variance specifications",
+      "description": "Contradictory variance specifications",
       "line": 57,
       "name": "invalid-type-var-tuple",
       "severity": "error",
@@ -8376,20 +8343,9 @@
     },
     {
       "code": -2,
-      "column": 33,
-      "concise_description": "Unexpected keyword argument `contravariant` to TypeVarTuple",
-      "description": "Unexpected keyword argument `contravariant` to TypeVarTuple",
-      "line": 58,
-      "name": "invalid-type-var-tuple",
-      "severity": "error",
-      "stop_column": 51,
-      "stop_line": 58
-    },
-    {
-      "code": -2,
       "column": 53,
-      "concise_description": "Unexpected keyword argument `infer_variance` to TypeVarTuple",
-      "description": "Unexpected keyword argument `infer_variance` to TypeVarTuple",
+      "concise_description": "Contradictory variance specifications",
+      "description": "Contradictory variance specifications",
       "line": 58,
       "name": "invalid-type-var-tuple",
       "severity": "error",
@@ -8420,17 +8376,6 @@
     },
     {
       "code": -2,
-      "column": 29,
-      "concise_description": "Unexpected keyword argument `contravariant` to TypeVarTuple",
-      "description": "Unexpected keyword argument `contravariant` to TypeVarTuple",
-      "line": 73,
-      "name": "invalid-type-var-tuple",
-      "severity": "error",
-      "stop_column": 47,
-      "stop_line": 73
-    },
-    {
-      "code": -2,
       "column": 52,
       "concise_description": "`ContravariantTypeVarTupleOld[int]` is not assignable to `ContravariantTypeVarTupleOld[object]`",
       "description": "`ContravariantTypeVarTupleOld[int]` is not assignable to `ContravariantTypeVarTupleOld[object]`",
@@ -8450,17 +8395,6 @@
       "severity": "error",
       "stop_column": 87,
       "stop_line": 84
-    },
-    {
-      "code": -2,
-      "column": 31,
-      "concise_description": "Unexpected keyword argument `covariant` to TypeVarTuple",
-      "description": "Unexpected keyword argument `covariant` to TypeVarTuple",
-      "line": 87,
-      "name": "invalid-type-var-tuple",
-      "severity": "error",
-      "stop_column": 45,
-      "stop_line": 87
     },
     {
       "code": -2,

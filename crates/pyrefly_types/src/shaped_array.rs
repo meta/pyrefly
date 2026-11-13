@@ -1550,6 +1550,7 @@ mod tests {
             Identifier::new(Name::new(name), TextRange::empty(TextSize::new(0))),
             fake_module("__test__"),
             None,
+            PreInferenceVariance::Invariant,
         )
     }
 

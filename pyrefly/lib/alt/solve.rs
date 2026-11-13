@@ -5995,8 +5995,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) -> Type {
         let args = self.type_var_like_args_from_call(name, x, QuantifiedKind::TypeVarTuple, errors);
-        let ty =
-            TypeVarTuple::new(name.clone(), self.module().dupe(), args.default).to_type(self.heap);
+        let ty = TypeVarTuple::new(
+            name.clone(),
+            self.module().dupe(),
+            args.default,
+            args.variance,
+        )
+        .to_type(self.heap);
         if let Some(k) = ann
             && let AnnotationWithTarget {
                 target,

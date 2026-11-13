@@ -582,6 +582,7 @@ mod tests {
     use ruff_text_size::TextSize;
 
     use super::*;
+    use crate::type_var::PreInferenceVariance;
     use crate::type_var_tuple::TypeVarTuple;
     use crate::types::Type;
 
@@ -628,6 +629,7 @@ mod tests {
                 Arc::new("fake module contents".to_owned()),
             ),
             None,
+            PreInferenceVariance::Invariant,
         ))
     }
 

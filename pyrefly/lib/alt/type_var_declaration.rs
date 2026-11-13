@@ -144,10 +144,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     "default" => {
                         default = Some(&kw.value);
                     }
-                    keyword
-                        if kind != QuantifiedKind::TypeVarTuple
-                            && let Some(new_variance) = keyword_variance(keyword) =>
-                    {
+                    keyword if let Some(new_variance) = keyword_variance(keyword) => {
                         if self.literal_bool_infer(&kw.value, errors) {
                             if variance.is_some() {
                                 self.error(

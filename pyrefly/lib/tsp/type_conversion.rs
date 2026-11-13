@@ -1371,6 +1371,7 @@ mod tests {
             Identifier::new(Name::new("Ts"), TextRange::default()),
             module,
             None,
+            PreInferenceVariance::Invariant,
         ));
         let tuple = tuple_json(Tuple::unpacked(
             vec![PyreflyType::ClassType(test_class(

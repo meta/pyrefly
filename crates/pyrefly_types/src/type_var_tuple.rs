@@ -51,6 +51,7 @@ impl Display for TypeVarTuple {
 struct TypeVarTupleInner {
     qname: QName,
     default: Option<Type>,
+    variance: PreInferenceVariance,
 }
 
 impl TypeVarLike for TypeVarTuple {
@@ -76,11 +77,17 @@ impl TypeVarLike for TypeVarTuple {
 }
 
 impl TypeVarTuple {
-    pub fn new(name: Identifier, module: Module, default: Option<Type>) -> Self {
+    pub fn new(
+        name: Identifier,
+        module: Module,
+        default: Option<Type>,
+        variance: PreInferenceVariance,
+    ) -> Self {
         Self(ArcId::new(TypeVarTupleInner {
             // TODO: properly take parent from caller of new()
             qname: QName::new(name, NestingContext::toplevel(), module),
             default,
+            variance,
         }))
     }
 

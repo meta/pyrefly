@@ -3,7 +3,7 @@
   "pass": 143,
   "fail": 2,
   "pass_rate": 0.99,
-  "differences": 10,
+  "differences": 7,
   "passing": [
     "aliases_explicit.py",
     "aliases_implicit.py",
@@ -151,7 +151,7 @@
   ],
   "failing": {
     "dataclasses_descriptors.py": 1,
-    "generics_typevartuple_variance.py": 9
+    "generics_typevartuple_variance.py": 6
   },
   "comment": "@generated"
 }

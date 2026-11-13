@@ -125,22 +125,20 @@ def f(obj: A[object], int_: A[int]):
 );
 
 testcase!(
-    bug = "A legacy TypeVarTuple should accept a variance keyword",
     test_legacy_type_var_tuple_accepts_variance_keyword,
     r#"
 from typing import TypeVarTuple
 
-Ts = TypeVarTuple("Ts", covariant=True)  # E: Unexpected keyword argument `covariant` to TypeVarTuple
+Ts = TypeVarTuple("Ts", covariant=True)
 "#,
 );
 
 testcase!(
-    bug = "A legacy TypeVarTuple should accept `infer_variance`",
     test_legacy_type_var_tuple_accepts_infer_variance_keyword,
     r#"
 from typing import TypeVarTuple
 
-Ts = TypeVarTuple("Ts", infer_variance=True)  # E: Unexpected keyword argument `infer_variance` to TypeVarTuple
+Ts = TypeVarTuple("Ts", infer_variance=True)
 "#,
 );
 
@@ -150,7 +148,7 @@ testcase!(
     r#"
 from typing import Generic, TypeVarTuple
 
-Ts = TypeVarTuple("Ts", contravariant=True)  # E: Unexpected keyword argument `contravariant` to TypeVarTuple
+Ts = TypeVarTuple("Ts", contravariant=True)
 
 class A(Generic[*Ts]):
     def put(self, t: tuple[*Ts]) -> None: ...
@@ -167,7 +165,7 @@ testcase!(
     r#"
 from typing import Generic, TypeVarTuple
 
-Ts = TypeVarTuple("Ts", infer_variance=True)  # E: Unexpected keyword argument `infer_variance` to TypeVarTuple
+Ts = TypeVarTuple("Ts", infer_variance=True)
 
 class A(Generic[*Ts]):
     def get(self) -> tuple[*Ts]: ...
@@ -212,7 +210,7 @@ testcase!(
     r#"
 from typing import Generic, TypeVarTuple
 
-Ts_co = TypeVarTuple("Ts_co", covariant=True)  # E: Unexpected keyword argument `covariant` to TypeVarTuple
+Ts_co = TypeVarTuple("Ts_co", covariant=True)
 
 class A(Generic[*Ts_co]):
     def put(self, *args: *Ts_co) -> None: ...
@@ -225,7 +223,7 @@ testcase!(
     r#"
 from typing import Generic, TypeVarTuple
 
-Ts_contra = TypeVarTuple("Ts_contra", contravariant=True)  # E: Unexpected keyword argument `contravariant` to TypeVarTuple
+Ts_contra = TypeVarTuple("Ts_contra", contravariant=True)
 
 class A(Generic[*Ts_contra]):
     def get(self) -> tuple[*Ts_contra]: ...
