@@ -84,14 +84,6 @@ impl TypeVarTuple {
         }))
     }
 
-    pub fn qname(&self) -> &QName {
-        &self.0.qname
-    }
-
-    pub fn default(&self) -> Option<&Type> {
-        self.0.default.as_ref()
-    }
-
     pub fn to_type(&self, heap: &TypeHeap) -> Type {
         heap.mk_type_var_tuple(self.dupe())
     }

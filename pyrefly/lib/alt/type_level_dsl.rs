@@ -17,6 +17,7 @@ use pyrefly_types::function::FuncDefId;
 use pyrefly_types::function::FunctionKind;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::QuantifiedKind;
+use pyrefly_types::quantified::TypeVarLike;
 use pyrefly_types::shaped_array::is_int_tuples_type;
 use pyrefly_types::type_level_dsl::ParsedTypeShapeDslFunction;
 use pyrefly_types::type_level_dsl::ResolvedTypeShapeDslFunction;

@@ -183,6 +183,7 @@ use crate::types::quantified::Quantified;
 use crate::types::quantified::QuantifiedIdentity;
 use crate::types::quantified::QuantifiedKind;
 use crate::types::quantified::QuantifiedOrigin;
+use crate::types::quantified::TypeVarLike;
 use crate::types::special_form::SpecialForm;
 use crate::types::tuple::Tuple;
 use crate::types::type_alias::TypeAlias;

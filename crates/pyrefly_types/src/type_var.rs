@@ -241,26 +241,6 @@ impl TypeVar {
         }))
     }
 
-    pub fn qname(&self) -> &QName {
-        &self.0.qname
-    }
-
-    pub fn restriction(&self) -> &Restriction {
-        &self.0.restriction
-    }
-
-    pub fn kind(&self) -> QuantifiedKind {
-        self.0.kind
-    }
-
-    pub fn default(&self) -> Option<&Type> {
-        self.0.default.as_ref()
-    }
-
-    pub fn variance(&self) -> PreInferenceVariance {
-        self.0.variance
-    }
-
     pub fn to_type(&self, heap: &TypeHeap) -> Type {
         heap.mk_type_var(self.dupe())
     }

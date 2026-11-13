@@ -22,6 +22,7 @@ use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::types::literal::Lit;
 use crate::types::quantified::QuantifiedKind;
+use crate::types::quantified::TypeVarLike;
 use crate::types::type_var::PreInferenceVariance;
 use crate::types::type_var::Restriction;
 use crate::types::types::Type;

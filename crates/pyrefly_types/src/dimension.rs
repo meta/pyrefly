@@ -21,6 +21,7 @@ use crate::equality::TypeEq;
 use crate::known_class::KnownClass;
 use crate::literal::Lit;
 use crate::quantified::QuantifiedKind;
+use crate::quantified::TypeVarLike;
 use crate::type_level_dsl::TypeShapeDslDomain;
 use crate::type_var::Restriction;
 use crate::types::AnyStyle;

@@ -124,6 +124,7 @@ use crate::types::facet::FacetKind;
 use crate::types::literal::Lit;
 use crate::types::quantified::Quantified;
 use crate::types::quantified::QuantifiedKind;
+use crate::types::quantified::TypeVarLike;
 use crate::types::sentinel::Sentinel;
 use crate::types::special_form::SpecialForm;
 use crate::types::tuple::Tuple;

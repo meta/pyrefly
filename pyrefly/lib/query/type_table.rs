@@ -16,6 +16,7 @@ use pyrefly_types::callable::PrefixParam;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedKind;
+use pyrefly_types::quantified::TypeVarLike;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_types::type_var::Restriction;

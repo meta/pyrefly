@@ -51,6 +51,7 @@ use pyrefly_types::literal::Lit;
 use pyrefly_types::module::ModuleType as PyreflyModuleType;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedOrigin;
+use pyrefly_types::quantified::TypeVarLike;
 use pyrefly_types::sentinel::Sentinel;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::type_alias::TypeAliasData;

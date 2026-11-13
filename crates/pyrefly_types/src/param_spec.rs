@@ -91,18 +91,6 @@ impl ParamSpec {
         }))
     }
 
-    pub fn qname(&self) -> &QName {
-        &self.0.qname
-    }
-
-    pub fn default(&self) -> Option<&Type> {
-        self.0.default.as_ref()
-    }
-
-    pub fn variance(&self) -> PreInferenceVariance {
-        self.0.variance
-    }
-
     pub fn to_type(&self, heap: &TypeHeap) -> Type {
         heap.mk_param_spec(self.dupe())
     }

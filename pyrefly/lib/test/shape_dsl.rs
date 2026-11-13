@@ -10,6 +10,7 @@ use pyrefly_types::dimension::is_gradual_size;
 use pyrefly_types::function::FunctionKind;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::QuantifiedKind;
+use pyrefly_types::quantified::TypeVarLike;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::type_level_dsl::MAX_HELPER_GRAPH_EDGES;
 use pyrefly_types::type_level_dsl::MAX_HELPER_GRAPH_NODES;

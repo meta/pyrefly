@@ -40,6 +40,7 @@ use crate::literal::Lit;
 use crate::quantified::Quantified;
 use crate::quantified::QuantifiedIdentity;
 use crate::quantified::QuantifiedKind;
+use crate::quantified::TypeVarLike;
 use crate::shaped_array::IntTuple;
 use crate::shaped_array::IntTupleView;
 use crate::shaped_array::is_tuple_carrier_shape_middle;

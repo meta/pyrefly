@@ -19,6 +19,7 @@ use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedKind;
+use pyrefly_types::quantified::TypeVarLike;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::is_int_tuples_type;
 use pyrefly_types::shaped_array::tuple_carrier_to_shape;

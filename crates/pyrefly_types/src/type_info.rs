@@ -25,6 +25,7 @@ use vec1::Vec1;
 
 use crate::display::TypeDisplayContext;
 use crate::facet::FacetKind;
+use crate::quantified::TypeVarLike;
 use crate::type_var::TypeVar;
 use crate::types::AnyStyle;
 use crate::types::Type;
