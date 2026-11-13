@@ -781,6 +781,13 @@ impl VisitTrait<Type> for DjangoReverseRelationIndex {
 pub struct ProtocolMetadata {
     /// All members of the protocol, excluding ones defined on `object` and not overridden in a subclass.
     pub members: SmallSet<Name>,
+    /// The runtime attribute names CPython's protocol checks inspect, used by the
+    /// runtime `isinstance`/`issubclass` checks. This includes non-excluded slot
+    /// names and inherited protocol members, and is version-aware; it never
+    /// contains the literal `__slots__`. Whether a name is a method depends on which
+    /// class in the MRO binds it, so `is_data_protocol` decides that at the check
+    /// site.
+    pub runtime_members: SmallSet<Name>,
     /// Whether this protocol is decorated with @runtime_checkable
     pub is_runtime_checkable: bool,
 }
