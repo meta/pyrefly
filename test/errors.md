@@ -60,7 +60,7 @@ $ touch $TMPDIR/pyrefly.toml && \
 ```scrut {output_stream: stderr}
 $ $PYREFLY check --python-version 3.13.0 "$TMPDIR/*" --project-excludes="$TMPDIR/*"
 `project-excludes`: * (glob)
-No Python files matched pattern `*` (glob)
+No Python files matched patterns `*/empty.py`, * (glob)
 [1]
 ```
 

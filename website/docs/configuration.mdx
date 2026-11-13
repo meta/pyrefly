@@ -122,6 +122,11 @@ correspond to different but useful ways we expect most people to interact with P
   file listed. `project-includes` and `project-excludes` are ignored from the config file,
   but it is used for all remaining config options.
 
+Pyrefly expands a glob, such as `pyrefly check 'packages/*'`, to the directories and Python
+files that it matches, the same as a shell does. Each directory and file is then checked as if
+it was given on its own, so quotes around a glob do not change the result, except that a glob
+matches no files that are not Python files, and a shell passes them to Pyrefly.
+
 ## Configuration Finding
 
 In both project checking mode and single-file checking mode (see [Type Checking Modes](#type-checking-modes)

@@ -68,6 +68,8 @@ pub struct FilesArgs {
     /// Files to check (glob supported).
     /// If no file is specified, switch to project-checking mode where the files to
     /// check are determined from the closest configuration file.
+    /// A glob is expanded to the directories and Python files that it matches, as a shell expands
+    /// it, and each of them is checked as if it was given on its own.
     /// When supplied, `project_excludes` in any config files loaded for these files to check
     /// are ignored, and we use the default excludes unless overridden with the `--project-excludes` flag.
     files: Vec<String>,
@@ -423,7 +425,7 @@ impl FilesArgs {
             None
         };
         let extend_project_excludes = absolutize(Globs::new(self.extend_project_excludes)?);
-        let files_to_check = absolutize(Globs::new(self.files)?);
+        let files_to_check = absolutize(Globs::new_expanded(self.files)?);
         let explicit_files = files_to_check
             .explicit_files()
             .map(Path::to_path_buf)

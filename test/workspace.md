@@ -278,14 +278,13 @@ ERROR sub/m.py:1:* (glob)
 given explicitly. A glob gives the files that it matches, as a shell does, so
 it checks a script that it matches.
 
-Bug: a quoted glob skips the script, but an unquoted glob checks it.
-
 ```scrut
 $ mkdir -p $TMPDIR/scripts && cd $TMPDIR/scripts && touch pyrefly.toml && \
 > printf '# /// script\n# dependencies = []\n# ///\nx: int = ""\n' > tool.py && \
 > echo "x: int = ''" > m.py && \
 > $PYREFLY check --exclude-scripts '*.py' --python-version 3.13.0 --output-format=min-text
 ERROR m.py:1:* (glob)
+ERROR tool.py:4:* (glob)
 [1]
 ```
 
