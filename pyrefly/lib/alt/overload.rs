@@ -41,6 +41,7 @@ use crate::alt::callable::CallKeyword;
 use crate::alt::callable::CallValue;
 use crate::alt::callable::CallWithTypes;
 use crate::alt::callable::ReturnTypeResolutionError;
+use crate::alt::callable::contains_argument_bindings;
 use crate::alt::expr::TypeOrExpr;
 use crate::alt::unwrap::HintRef;
 use crate::config::error_kind::ErrorKind;
@@ -150,24 +151,21 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
                 return None;
             }
         };
-        // These expressions need parameter context and cannot produce an expandable type.
+        // Expressions with bindings retain their syntax for contextual checks, including
+        // lambdas nested in conditional expressions or calls.
+        let inference_errors = self.solver.error_collector();
         let expanded_types = match value.as_type_or_expr() {
-            TypeOrExpr::Expr(
-                Expr::Lambda(_)
-                | Expr::List(_)
-                | Expr::Dict(_)
-                | Expr::Set(_)
-                | Expr::ListComp(_)
-                | Expr::DictComp(_)
-                | Expr::SetComp(_)
-                | Expr::Generator(_),
-            ) => Vec::new(),
-            _ => self.expand_type(value.infer(self.solver, errors)),
+            TypeOrExpr::Expr(expr) if contains_argument_bindings(expr) => Vec::new(),
+            TypeOrExpr::Expr(Expr::List(_) | Expr::Dict(_) | Expr::Set(_)) => Vec::new(),
+            _ => self.expand_type(value.infer(self.solver, &inference_errors)),
         };
         if expanded_types.is_empty() {
-            // Nothing to expand here, try the next argument.
+            // Unchanged expressions are checked with each candidate's context. Their probe
+            // diagnostics are not authoritative, particularly for nested lambdas.
             self.expand(errors, owner)
         } else {
+            // Expanded expressions become types and will not be checked again.
+            errors.extend(inference_errors);
             let expanded_types = expanded_types.into_map(|t| owner.push(t));
             let mut new_arg_lists = Vec::new();
             for (posargs, keywords) in self.arg_lists.iter() {

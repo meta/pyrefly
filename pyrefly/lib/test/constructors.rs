@@ -5,8 +5,408 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use pyrefly_util::thread_pool::ThreadCount;
+
 use crate::test::util::TestEnv;
+use crate::test::util::testcase_for_macro;
 use crate::testcase;
+
+// Regression tests for https://github.com/facebook/pyrefly/issues/1134.
+testcase!(
+    test_constructor_union_distribution,
+    r#"
+from typing import assert_type
+
+class A[T]:
+    def __init__(self, value: T) -> None: ...
+
+class Pair[T, U]:
+    def __init__(self, x: T, y: U) -> None: ...
+
+class Same[T]:
+    def __init__(self, x: T, y: T) -> None: ...
+
+def f(value: int | str, other: int | str) -> None:
+    positional: A[int] | A[str] = A(value)
+    keyword: A[int] | A[str] = A(value=value)
+    independent: Pair[int, int] | Pair[int, str] | Pair[str, int] | Pair[str, str] = Pair(value, other)
+    mixed_keywords: Pair[int, int] | Pair[int, str] | Pair[str, int] | Pair[str, str] = Pair(value, y=other)
+    # Independent arguments include mixed pairs, not just (int, int) and (str, str).
+    invalid: Same[int] | Same[str] = Same(value, other)  # E: `Same[int | str]` is not assignable to `Same[int] | Same[str]`
+    assert_type(positional, A[int] | A[str])
+    assert_type(keyword, A[int] | A[str])
+
+def unpacked(args: tuple[int | str]) -> None:
+    result: A[int] | A[str] = A(*args)
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_bool_and_enum,
+    r#"
+from enum import Enum
+from typing import Literal
+
+class A[T]:
+    def __init__(self, value: T) -> None: ...
+
+class Choice(Enum):
+    INT = 1
+    STR = "s"
+
+def f(flag: bool, choice: Choice) -> None:
+    boolean: A[Literal[True]] | A[Literal[False]] = A(flag)
+    enumeration: A[Literal[Choice.INT]] | A[Literal[Choice.STR]] = A(choice)
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_limit,
+    r#"
+from typing import Literal
+
+class Pair[T, U]:
+    def __init__(self, x: T, y: U) -> None: ...
+
+type Low = Literal[0, 1, 2, 3, 4]
+type High = Literal[5, 6, 7, 8, 9]
+type Hints = Pair[Low, Low] | Pair[Low, High] | Pair[High, Low] | Pair[High, High]
+type Eight = Literal[0, 1, 2, 3, 4, 5, 6, 7]
+
+def within_limit(x: Eight, y: Eight) -> None:
+    result: Hints = Pair(x, y)
+
+def exceeds_limit(x: Low | High, y: Low | High) -> None:
+    # The expansion budget counts partial batches as well as complete combinations.
+    result: Hints = Pair(x, y)  # E: is not assignable
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_diagnostics,
+    TestEnv::new().enable_deprecated_error(),
+    r#"
+from typing import cast
+from typing_extensions import deprecated
+
+class A[T]:
+    @deprecated("old constructor")
+    def __init__(self, value: T) -> None: ...
+
+class B[T]:
+    def __init__(self, value: T, other: object = None) -> None: ...
+
+@deprecated("old factory")
+def old_factory() -> int | str: ...
+
+def requires_int(value: int) -> object: ...
+
+def f(value: int | str) -> None:
+    constructor: A[int] | A[str] = A(value)  # E: `A.__init__` is deprecated
+    factory: B[int] | B[str] = B(old_factory())  # E: `old_factory` is deprecated
+    redundant_cast: B[int] | B[str] = B(cast(int | str, value))  # E: Redundant cast
+    keyword_factory: B[int] | B[str] = B(value=old_factory())  # E: `old_factory` is deprecated
+    keyword_cast: B[int] | B[str] = B(value=cast(int | str, value))  # E: Redundant cast
+    untouched: B[int] | B[str] = B(value, old_factory())  # E: `old_factory` is deprecated
+    invalid: B[int] | B[str] = B(value, requires_int("bad"))  # E: `B[int | str]` is not assignable # E: is not assignable to parameter `value`
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_rejected_batches,
+    TestEnv::new().enable_deprecated_error(),
+    r#"
+from typing_extensions import deprecated
+
+class Pair[T, U]:
+    @deprecated("old constructor")
+    def __init__(self, x: T, y: U) -> None: ...
+
+def f(x: int | str, y: int | str) -> None:
+    # Expanding x alone fails. Expanding y as well accepts all four combinations.
+    pair: Pair[int, int | str] | Pair[str, int] | Pair[str, str] = Pair(x, y)  # E: `Pair.__init__` is deprecated
+
+class A[T]:
+    def __init__(self, value: T) -> None: ...
+
+def g(value: int | str | bytes) -> None:
+    # The bytes expansion must fail without retaining errors from rejected hints.
+    result: A[int] | A[str] = A(value)  # E: `A[bytes | int | str]` is not assignable to `A[int] | A[str]`
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_lambda_context,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable
+
+class A[T]:
+    def __init__(self, callback: Callable[[T], None], value: T) -> None: ...
+
+class Box[T]:
+    def __init__(self, value: T) -> None: ...
+
+class Wrapped[T]:
+    def __init__(self, callback: Box[Callable[[T], None]], value: T) -> None: ...
+
+def f(value: int | str) -> None:
+    positional: A[int] | A[str] = A(lambda arg: None, value)
+    keyword: A[int] | A[str] = A(value=value, callback=lambda arg: None)
+    nested: Wrapped[int] | Wrapped[str] = Wrapped(Box(lambda arg: None), value)
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_conditional_lambda,
+    r#"
+from typing import Callable
+
+class A[T]:
+    def __init__(self, cb: Callable[[T], None] | None, value: T) -> None: ...
+
+def f(value: int | str, condition: bool) -> None:
+    valid: A[int] | A[str] = A((lambda arg: None) if condition else None, value)
+    invalid: A[int] | A[str] = A((lambda arg: arg.upper()) if condition else None, value)  # E: is not assignable
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_contextual_cast,
+    TestEnv::new().enable_deprecated_error(),
+    r#"
+from typing import Callable, cast
+from typing_extensions import deprecated
+
+class A[T]:
+    def __init__(self, callback: Callable[[T], int], value: T) -> None: ...
+
+@deprecated("old callback")
+def old() -> int: ...
+
+def f(value: int | str, fixed: int) -> None:
+    necessary: A[int] | A[str] = A(lambda arg: cast(int, arg), value)
+    keyword: A[int] | A[str] = A(value=value, callback=lambda arg: cast(int, arg))
+    redundant: A[int] | A[str] = A(lambda arg: cast(int, fixed), value)  # E: Redundant cast
+    deprecated: A[int] | A[str] = A(lambda arg: cast(int, arg) + old(), value)  # E: `old` is deprecated
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_contextual_nested,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable
+
+class Node[T]:
+    def __init__(self, cb: Callable[[T], None], value: T,
+                 child: Node[int] | Node[str] | None = None) -> None: ...
+
+def f(value: int | str) -> None:
+    result: Node[int] | Node[str] = Node(lambda arg: None, value, Node(lambda arg: None, value, Node(lambda arg: None, value)))
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_rejected_nested,
+    r#"
+class Node[T]:
+    def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+
+def f(value: int | str | bytes) -> None:
+    result: Node[int] | Node[str] = Node(value, Node(value, Node(value)))  # E: is not assignable # E: is not assignable # E: is not assignable
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_caller_bounds,
+    r#"
+class A[T]:
+    def __init__(self, x: T) -> None:
+        self.x: T = x
+
+def bounded[T: int](item: A[T] | A[str]) -> T: ...
+def constrained[T: (int, str)](item: A[T] | A[float]) -> None: ...
+
+def f(x: int | str | bytes) -> None:
+    bounded(A(x))  # E: upper bound
+
+def g(x: int | str | float | bytes) -> None:
+    constrained(A(x))  # E: constraints
+
+def valid(x: int | str, y: int | float) -> None:
+    bounded(A(x))
+    constrained(A(y))
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_later_hint,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable
+
+class A[T, U]:
+    def __init__(self, value: T, callback: Callable[[U], str]) -> None: ...
+
+def f(value: int | str) -> None:
+    original: A[int, str] | A[str, str] = A(value, lambda x: x.upper())
+    extended: A[int, int] | A[int, str] | A[str, str] = A(value, lambda x: x.upper())
+    keyword: A[int, int] | A[int, str] | A[str, str] = A(callback=lambda x: x.upper(), value=value)
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_caller_mixed_arguments,
+    r#"
+from typing import assert_type
+
+class Pair[T, U]:
+    def __init__(self, x: T, y: U) -> None: ...
+
+def same[T: int](item: Pair[T, T] | Pair[str, str]) -> None: ...
+def mixed[T: int, U: str](item: Pair[T, U] | Pair[str, int]) -> None: ...
+def infer[T](item: Pair[T, int] | Pair[T, str]) -> T: ...
+
+def invalid(x: int | str, y: int | str) -> None:
+    same(Pair(x, y))  # E: upper bound
+    mixed(Pair(x, y))  # E: upper bound # E: upper bound
+
+def valid(x: int | bytes, y: int | str) -> None:
+    assert_type(infer(Pair(x, y)), int | bytes)
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_contextual_conversion,
+    TestEnv::new().enable_deprecated_error(),
+    r#"
+from typing import Callable
+from typing_extensions import deprecated
+
+class A[T]:
+    def __init__(self, cb: Callable[[T], object], value: T) -> None: ...
+
+@deprecated("old callback")
+def old(value: object) -> object: ...
+
+def f(value: int | str, fixed: str) -> None:
+    necessary: A[int] | A[str] = A(lambda arg: str(arg), value)
+    redundant: A[int] | A[str] = A(lambda arg: str(fixed), value)  # E: Unnecessary `str()` call
+    deprecated: A[int] | A[str] = A(lambda arg: old(str(arg)), value)  # E: `old` is deprecated
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_binding_budget,
+    TestEnv::new().with_thread_count(ThreadCount::Inline),
+    r#"
+class A[T]:
+    def __init__(self, value: T) -> None: ...
+class Node[T]:
+    def __init__(self, value: T,
+                 child: Node[int] | Node[str] | None = None) -> None: ...
+class Wrap:
+    def __init__(self, a: Node[int] | Node[str], b: object) -> None: ...
+def need(x: A[int] | A[str]) -> int: ...
+
+def f(w: int | str | bytes, v: int | str) -> None:
+    Wrap(Node(w, Node(w, Node(w, Node(w, Node(w))))), helper(v))  # type: ignore
+
+def helper(v: int | str):
+    return need(A(v))
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_sibling_budget,
+    TestEnv::new().with_thread_count(ThreadCount::Inline),
+    r#"
+class A[T]:
+    def __init__(self, value: T) -> None: ...
+class Node[T]:
+    def __init__(self, value: T,
+                 child: Node[int] | Node[str] | None = None) -> None: ...
+class Wrap:
+    def __init__(self, a: object, b: object) -> None: ...
+def need(x: A[int] | A[str]) -> int: ...
+
+def f(w: int | str | bytes, v: int | str) -> None:
+    Wrap(
+        Node(w, Node(w, Node(w, Node(w, Node(w))))),  # type: ignore
+        need(A(v)),
+    )
+    Wrap(
+        need(A(v)),
+        Node(w, Node(w, Node(w, Node(w, Node(w))))),  # type: ignore
+    )
+"#,
+);
+
+#[test]
+fn test_constructor_union_distribution_plain_calls_budget() -> anyhow::Result<()> {
+    let calls = "P(), ".repeat(1001);
+    let source = format!(
+        r#"
+class P: ...
+class Wrap:
+    def __init__(self, value: object) -> None: ...
+class A[T]:
+    def __init__(self, value: T) -> None: ...
+def need(value: A[int] | A[str]) -> int: ...
+def f(value: int | str) -> None:
+    Wrap(({calls}need(A(value))))
+"#
+    );
+    testcase_for_macro(
+        TestEnv::new().with_thread_count(ThreadCount::Inline),
+        &source,
+        file!(),
+        line!(),
+    )
+}
+
+testcase!(
+    test_constructor_union_distribution_new_and_init,
+    r#"
+from typing import Self
+
+class New[T]:
+    def __new__(cls, value: T) -> Self: ...
+
+class Both[T]:
+    def __new__(cls, value: T) -> Self: ...
+    def __init__(self, value: T) -> None: ...
+
+def f(value: int | str) -> None:
+    new: New[int] | New[str] = New(value)
+    both: Both[int] | Both[str] = Both(value)
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_typed_dict,
+    r#"
+from typing import TypedDict
+
+class Fields[T](TypedDict):
+    value: T
+
+def f(value: int | str) -> None:
+    fields: Fields[int] | Fields[str] = Fields(value=value)
+"#,
+);
+
+testcase!(
+    test_constructor_union_distribution_nested,
+    r#"
+class Node[T]:
+    def __init__(self, value: T, child: Node[int] | Node[str] | None = None) -> None: ...
+
+def f(value: int | str) -> None:
+    root: Node[int] | Node[str] = Node(value, Node(value, Node(value, Node(value, Node(value, Node(value, Node(value, Node(value))))))))
+"#,
+);
 
 testcase!(
     test_constructor_prepared_argument_contexts,

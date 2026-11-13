@@ -19,6 +19,7 @@ use pyrefly_util::lock::Mutex;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
+use starlark_map::small_set::SmallSet;
 
 use crate::config::error::ErrorConfig;
 use crate::config::error_kind::Severity;
@@ -53,12 +54,52 @@ impl ModuleDiagnostics {
 
     /// Replay finalized diagnostics into an inference attempt while retaining the snapshot.
     pub(crate) fn replay(&self, errors: &ErrorCollector) {
+        self.replay_filtered(errors, |_| true);
+    }
+
+    /// Replay diagnostics that remain valid in the receiving context.
+    pub(crate) fn replay_filtered(
+        &self,
+        errors: &ErrorCollector,
+        mut keep: impl FnMut(&Error) -> bool,
+    ) {
         if errors.is_active() {
             let replayed = ModuleErrors {
                 clean: true,
-                items: self.0.to_vec(),
+                items: self.0.iter().filter(|error| keep(error)).cloned().collect(),
             };
             errors.errors.lock().extend(replayed);
+        }
+    }
+
+    /// Merge mutually exclusive contexts while preserving each collector's diagnostic role.
+    pub(crate) fn replay_alternatives<const N: usize>(
+        alternatives: &[[Self; N]],
+        destinations: [&ErrorCollector; N],
+    ) {
+        let required = |diagnostics: &[Self; N]| {
+            diagnostics
+                .iter()
+                .flat_map(Self::iter)
+                .filter(|error| error.error_kind().requires_all_contexts())
+                .map(|error| (error.range(), error.error_kind()))
+                .collect::<SmallSet<_>>()
+        };
+        let Some((first, rest)) = alternatives.split_first() else {
+            return;
+        };
+        let mut common = required(first);
+        for alternative in rest {
+            let current = required(alternative);
+            common.retain(|key| current.contains(key));
+        }
+        for alternative in alternatives {
+            for (diagnostics, destination) in alternative.iter().zip(destinations) {
+                diagnostics.replay_filtered(destination, |error| {
+                    !error.error_kind().requires_all_contexts()
+                        || common.contains(&(error.range(), error.error_kind()))
+                });
+            }
         }
     }
 }

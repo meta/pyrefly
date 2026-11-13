@@ -1939,6 +1939,60 @@ struct LambdaBindingFrame {
     generation: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ConstructorBudgetState {
+    scope: usize,
+    remaining: usize,
+    speculative: bool,
+}
+
+/// Shares speculative work within a constructor tree, not across independent binding solves.
+pub(crate) struct ConstructorBudget<'a> {
+    remaining: &'a Cell<Option<ConstructorBudgetState>>,
+    scope: usize,
+    previous: Option<ConstructorBudgetState>,
+    owner: bool,
+}
+
+impl ConstructorBudget<'_> {
+    pub(crate) fn spend(&self) {
+        if let Some(mut state) = self.remaining.get()
+            && state.scope == self.scope
+            && state.speculative
+        {
+            state.remaining = state.remaining.saturating_sub(1);
+            self.remaining.set(Some(state));
+        }
+    }
+
+    pub(crate) fn exhausted(&self) -> bool {
+        self.remaining
+            .get()
+            .is_some_and(|state| state.scope == self.scope && state.remaining == 0)
+    }
+
+    /// Failed probes keep their cost charged, but ordinary argument inference spends no fuel.
+    pub(crate) fn speculate<T>(&self, f: impl FnOnce() -> T) -> T {
+        let mut state = self.remaining.get().expect("Expansion owns a budget");
+        let previous = state.speculative;
+        state.speculative = true;
+        self.remaining.set(Some(state));
+        let result = f();
+        let mut state = self.remaining.get().expect("Expansion retains its budget");
+        state.speculative = previous;
+        self.remaining.set(Some(state));
+        result
+    }
+}
+
+impl Drop for ConstructorBudget<'_> {
+    fn drop(&mut self) {
+        if self.owner {
+            self.remaining.set(self.previous);
+        }
+    }
+}
+
 pub(crate) struct LambdaBindingContext<'a> {
     state: &'a ThreadState,
     depth: usize,
@@ -1971,6 +2025,8 @@ impl Drop for LambdaBindingContext<'_> {
 /// we always pass the current `ThreadState`.
 pub struct ThreadState {
     stack: CalcStack,
+    /// Nested constructors share this budget until the outer constructor returns.
+    constructor_budget: Cell<Option<ConstructorBudgetState>>,
     /// For debugging only: thread-global that allows us to control debug logging across components.
     debug: RefCell<bool>,
     /// Configuration for recursion depth limiting. None means disabled.
@@ -2018,6 +2074,7 @@ impl ThreadState {
     pub fn new(recursion_limit_config: Option<RecursionLimitConfig>) -> Self {
         Self {
             stack: CalcStack::new(),
+            constructor_budget: Cell::new(None),
             debug: RefCell::new(false),
             recursion_limit_config,
             partial_answers: RefCell::new(FxHashMap::default()),
@@ -2062,15 +2119,21 @@ impl ThreadState {
 
     /// Captures expression traces and also retains them in the current calculation.
     pub(crate) fn capture_traces<T>(&self, f: impl FnOnce() -> T) -> (T, Option<TraceSideEffects>) {
+        let (result, traces) = self.defer_traces(f);
+        if let Some(traces) = &traces {
+            self.replay_traces(traces);
+        }
+        (result, traces)
+    }
+
+    /// Capture a speculative outcome without publishing its expression traces.
+    pub(crate) fn defer_traces<T>(&self, f: impl FnOnce() -> T) -> (T, Option<TraceSideEffects>) {
         if self.trace_sink.borrow().is_none() {
             return (f(), None);
         }
         self.install_trace_sink();
         let result = f();
         let traces = self.take_trace_sink();
-        if let Some(traces) = &traces {
-            self.replay_traces(traces);
-        }
         (result, traces)
     }
 
@@ -2366,6 +2429,27 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return Some(&self.bindings().metadata().get_class(cls.index()).fields);
         }
         self.answers.get_class_fields(cls)
+    }
+
+    /// Only expandable constructors own a budget. Independent bindings receive fresh fuel.
+    pub(crate) fn enter_constructor_budget(&self, expandable: bool) -> ConstructorBudget<'_> {
+        let remaining = &self.thread_state.constructor_budget;
+        let scope = self.stack().len();
+        let previous = remaining.get();
+        let owner = expandable && previous.is_none_or(|state| state.scope != scope);
+        if owner {
+            remaining.set(Some(ConstructorBudgetState {
+                scope,
+                remaining: 1000,
+                speculative: false,
+            }));
+        }
+        ConstructorBudget {
+            remaining,
+            scope,
+            previous,
+            owner,
+        }
     }
 
     /// Start an independent lambda-hint or speculative-call inference attempt.
