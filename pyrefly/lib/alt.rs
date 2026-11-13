@@ -39,5 +39,6 @@ pub mod sqlalchemy;
 pub mod subscript;
 pub mod traits;
 pub mod type_level_dsl;
+pub mod type_var_declaration;
 pub mod types;
 pub mod unwrap;
