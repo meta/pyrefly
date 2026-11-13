@@ -298,28 +298,20 @@ fn get_globs_and_config_for_files(
     wrapper: Option<ConfigConfigurerWrapper>,
 ) -> anyhow::Result<(Box<dyn Includes>, ConfigFinder, UpsellDecision)> {
     let args_disable_excludes_heuristics = args.disable_project_excludes_heuristics();
-    let get_project_excludes_and_heuristics = move |config: Option<&ConfigFile>| {
-        let mut project_excludes = project_excludes.unwrap_or_default();
-        project_excludes.append(extend_project_excludes.globs());
-        let disable = args_disable_excludes_heuristics
-            .or_else(|| Some(config?.disable_project_excludes_heuristics))
-            .unwrap_or(false);
-        if !disable {
-            project_excludes.append(ConfigFile::required_project_excludes().globs());
-        }
-        (project_excludes, !disable)
-    };
-    let (config_finder, errors, project_excludes, use_heuristics, upsell) = match config {
+    let (config_finder, errors, globs, upsell) = match config {
         Some(explicit) => {
             let (config, errors) = get_explicit_config(&explicit, args);
-            let (project_excludes, use_heuristics) =
-                get_project_excludes_and_heuristics(Some(&config));
-            let config_finder = ConfigFinder::new_constant(config);
-            (
-                config_finder,
-                errors,
+            let globs = filter_files(
+                files_to_check,
                 project_excludes,
-                use_heuristics,
+                extend_project_excludes,
+                args_disable_excludes_heuristics,
+                Some(&config),
+            );
+            (
+                ConfigFinder::new_constant(config),
+                errors,
+                globs,
                 UpsellDecision::Skip,
             )
         }
@@ -333,37 +325,55 @@ fn get_globs_and_config_for_files(
             } else {
                 None
             };
-            let (project_excludes, use_heuristics) = get_project_excludes_and_heuristics(None);
-            let (config_finder, errors) = if let Some(root) = solo_root {
+            let errors = if let Some(root) = solo_root {
                 // We don't care about the contents of the config, only if we generated any errors while parsing it.
                 config_finder.directory(&root);
-                let errors = config_finder.errors();
-                (config_finder, errors)
+                config_finder.errors()
             } else {
-                (config_finder, Vec::new())
+                Vec::new()
             };
-            (
-                config_finder,
-                errors,
+            let globs = filter_files(
+                files_to_check,
                 project_excludes,
-                use_heuristics,
-                UpsellDecision::Determine,
-            )
+                extend_project_excludes,
+                args_disable_excludes_heuristics,
+                None,
+            );
+            (config_finder, errors, globs, UpsellDecision::Determine)
         }
     };
     add_config_errors(&config_finder, errors)?;
-    let hidden_dir_filter = if use_heuristics {
+    Ok((Box::new(globs), config_finder, upsell))
+}
+
+/// The files of `files_to_check` without the excludes of single-file mode: `project_excludes`
+/// (empty if `None`) and `extend_project_excludes`, plus the required excludes and hidden
+/// directories unless `args_disable_excludes_heuristics`, or else the explicit `config`, disables
+/// those heuristics.
+fn filter_files(
+    files_to_check: Globs,
+    project_excludes: Option<Globs>,
+    extend_project_excludes: &Globs,
+    args_disable_excludes_heuristics: Option<bool>,
+    config: Option<&ConfigFile>,
+) -> FilteredGlobs {
+    let mut excludes = project_excludes.unwrap_or_default();
+    excludes.append(extend_project_excludes.globs());
+    let disable_heuristics = args_disable_excludes_heuristics
+        .or_else(|| Some(config?.disable_project_excludes_heuristics))
+        .unwrap_or(false);
+    let hidden_dir_filter = if disable_heuristics {
+        HiddenDirFilter::Disabled
+    } else {
+        excludes.append(ConfigFile::required_project_excludes().globs());
         let roots = files_to_check.roots();
         if roots.is_empty() {
             HiddenDirFilter::All
         } else {
             HiddenDirFilter::RelativeTo(roots)
         }
-    } else {
-        HiddenDirFilter::Disabled
     };
-    let globs = FilteredGlobs::new(files_to_check, project_excludes, None, hidden_dir_filter);
-    Ok((Box::new(globs), config_finder, upsell))
+    FilteredGlobs::new(files_to_check, excludes, None, hidden_dir_filter)
 }
 
 /// Skips the PEP 723 scripts among the files of `inner`, except the `explicit_files` that the user
