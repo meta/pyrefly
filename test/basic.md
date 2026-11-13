@@ -34,7 +34,7 @@ $ touch $TMPDIR/pyrefly.toml && \
 ## No errors on our Python code
 
 ```scrut {output_stream: stderr}
-$ touch $(dirname $PYREFLY_PY)/pyrefly.toml && $PYREFLY check $PYREFLY_PY
+$ touch $(dirname $PYREFLY_PY)/pyrefly.toml && $PYREFLY check "$PYREFLY_PY/**"
  INFO 0 errors
 [0]
 ```

@@ -43,12 +43,9 @@ ERROR m.py:1:* (glob)
 
 The root config governs `packages/a`, so its `vendor` directory is excluded.
 
-Bug: a directory runs single-file mode, so `packages/a/vendor` is checked.
-
 ```scrut
 $ cd $TMPDIR/workspace && $PYREFLY check packages/a --python-version 3.13.0 --output-format=min-text
 ERROR packages/a/m.py:1:* (glob)
-ERROR packages/a/vendor/m.py:1:* (glob)
 [1]
 ```
 
@@ -76,16 +73,11 @@ $ cd $TMPDIR/workspace && $PYREFLY check packages/b/vendor --python-version 3.13
 `packages/b` is below `.`, so the root config governs it, the same as in
 `pyrefly check`: the config of `packages/b` is not used.
 
-Bug: `.` runs single-file mode, so `vendor` is checked, and `packages/b` is
-checked with its own config.
-
 ```scrut
 $ cd $TMPDIR/workspace && $PYREFLY check . --python-version 3.13.0 --output-format=min-text
 ERROR m.py:1:* (glob)
- WARN packages/b/m.py:1:* (glob)
 ERROR packages/a/m.py:1:* (glob)
-ERROR packages/a/vendor/m.py:1:* (glob)
- WARN packages/b/vendor/m.py:1:* (glob)
+ERROR packages/b/m.py:1:* (glob)
 [1]
 ```
 
@@ -99,30 +91,26 @@ ERROR packages/b/m.py:1:* (glob)
 
 ## `--config` gives every directory the same config
 
-Bug: the directory runs single-file mode, so `packages/b/vendor` is checked.
-
 ```scrut
 $ cd $TMPDIR/workspace && $PYREFLY check --config pyproject.toml packages/b --python-version 3.13.0 --output-format=min-text
 ERROR packages/b/m.py:1:* (glob)
-ERROR packages/b/vendor/m.py:1:* (glob)
 [1]
 ```
 
-## Directories with different configs are checked in separate runs
+## Directories with different configs are different projects
 
-`packages/b` has its own config, so it is a different project from `.`. The
-error lists every directory with its config.
-
-Bug: the directories run single-file mode, so there is no error.
+`packages/b` has its own config, so it is a different project from `.`. A file
+belongs to the project whose config is nearest to it, so the files of
+`packages/b` are checked with the config of `packages/b`, which does not
+exclude `vendor`.
 
 ```scrut
-$ cd $TMPDIR/workspace && $PYREFLY check . packages/b --python-version 3.13.0 --output-format=min-text 2>&1 | grep -v INFO
+$ cd $TMPDIR/workspace && $PYREFLY check . packages/b --python-version 3.13.0 --output-format=min-text
 ERROR m.py:1:* (glob)
  WARN packages/b/m.py:1:* (glob)
 ERROR packages/a/m.py:1:* (glob)
-ERROR packages/a/vendor/m.py:1:* (glob)
  WARN packages/b/vendor/m.py:1:* (glob)
-[0]
+[1]
 ```
 
 ## A file runs single-file mode
@@ -157,13 +145,10 @@ ERROR packages/a/vendor/m.py:1:* (glob)
 
 The file keeps the config that an upward search finds from it.
 
-Bug: the directory runs single-file mode, so `packages/a/vendor` is checked.
-
 ```scrut
 $ cd $TMPDIR/workspace && $PYREFLY check packages/a packages/b/m.py --python-version 3.13.0 --output-format=min-text
  WARN packages/b/m.py:1:* (glob)
 ERROR packages/a/m.py:1:* (glob)
-ERROR packages/a/vendor/m.py:1:* (glob)
 [1]
 ```
 
@@ -172,19 +157,15 @@ ERROR packages/a/vendor/m.py:1:* (glob)
 Pyrefly expands a glob as a shell does, so a quoted glob and an unquoted glob
 give the same result. A glob that matches a directory runs project mode for it:
 
-Bug: a glob runs single-file mode, so `packages/a/vendor` is checked.
-
 ```scrut
 $ cd $TMPDIR/workspace && $PYREFLY check 'packages/a*' --python-version 3.13.0 --output-format=min-text
 ERROR packages/a/m.py:1:* (glob)
-ERROR packages/a/vendor/m.py:1:* (glob)
 [1]
 ```
 
 ```scrut
 $ cd $TMPDIR/workspace && $PYREFLY check packages/a* --python-version 3.13.0 --output-format=min-text
 ERROR packages/a/m.py:1:* (glob)
-ERROR packages/a/vendor/m.py:1:* (glob)
 [1]
 ```
 
@@ -203,26 +184,23 @@ ERROR packages/a/vendor/m.py:1:* (glob)
 [1]
 ```
 
-A glob that matches directories with different configs is an error:
-
-Bug: a glob runs single-file mode, so there is no error.
+A glob that matches directories with different configs checks each directory
+with its own config:
 
 ```scrut
-$ cd $TMPDIR/workspace && $PYREFLY check 'packages/*' --python-version 3.13.0 --output-format=min-text 2>&1 | grep -v INFO
+$ cd $TMPDIR/workspace && $PYREFLY check 'packages/*' --python-version 3.13.0 --output-format=min-text
  WARN packages/b/m.py:1:* (glob)
 ERROR packages/a/m.py:1:* (glob)
-ERROR packages/a/vendor/m.py:1:* (glob)
  WARN packages/b/vendor/m.py:1:* (glob)
-[0]
+[1]
 ```
 
 ```scrut
-$ cd $TMPDIR/workspace && $PYREFLY check packages/* --python-version 3.13.0 --output-format=min-text 2>&1 | grep -v INFO
+$ cd $TMPDIR/workspace && $PYREFLY check packages/* --python-version 3.13.0 --output-format=min-text
  WARN packages/b/m.py:1:* (glob)
 ERROR packages/a/m.py:1:* (glob)
-ERROR packages/a/vendor/m.py:1:* (glob)
  WARN packages/b/vendor/m.py:1:* (glob)
-[0]
+[1]
 ```
 
 A recursive glob matches every file under a directory, so each file is checked
@@ -237,13 +215,9 @@ ERROR packages/a/vendor/m.py:1:* (glob)
 
 A glob matches no files that are not Python files, but a shell passes them:
 
-Bug: `packages/a/vendor` runs single-file mode, so `packages/a/vendor/m.py` is
-checked.
-
 ```scrut
 $ cd $TMPDIR/workspace && $PYREFLY check 'packages/a/*' --python-version 3.13.0 --output-format=min-text
 ERROR packages/a/m.py:1:* (glob)
-ERROR packages/a/vendor/m.py:1:* (glob)
 [1]
 ```
 
@@ -251,7 +225,6 @@ ERROR packages/a/vendor/m.py:1:* (glob)
 $ cd $TMPDIR/workspace && $PYREFLY check packages/a/* --python-version 3.13.0 --output-format=min-text
 ERROR packages/a/m.py:1:* (glob)
 ERROR packages/a/pyproject.toml:1:* (glob)
-ERROR packages/a/vendor/m.py:1:* (glob)
 [1]
 ```
 

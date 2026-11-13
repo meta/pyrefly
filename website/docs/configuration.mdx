@@ -116,11 +116,19 @@ correspond to different but useful ways we expect most people to interact with P
   none can be found, and type check using that one config. This involves getting the
   [`project-includes`](#project-includes) and [`project-excludes`](#project-excludes) from the file, expanding the patterns,
   and type checking on those files.
-    - Project mode is used whenever no files are provided with the CLI invocation.
-- **Per-file** or **Single-file** mode: when given [`FILES...`](#project-includes) (and optionally [`--project-excludes`](#project-excludes))
-  during a CLI invocation, expand the patterns and find the relevant config file for each
-  file listed. `project-includes` and `project-excludes` are ignored from the config file,
-  but it is used for all remaining config options.
+    - Project mode is used whenever no paths to a file are provided with the CLI invocation.
+    - A directory given in the CLI invocation, such as `pyrefly check packages/a`, also runs
+      project mode, limited to that directory: Pyrefly finds the config from the directory
+      instead of the current working directory, and checks only the files in that project,
+      filtered to that directory. Directories with different configs are different projects,
+      and one run checks all of them: each file belongs to the given project whose config root
+      is its nearest ancestor, and is checked once, with that config.
+- **Per-file** or **Single-file** mode: when given files (and optionally [`--project-excludes`](#project-excludes))
+  during a CLI invocation, find the relevant config file for each file listed.
+  `project-includes` and `project-excludes` are ignored from the config file, but it is used
+  for all remaining config options. Files given with a directory also run single-file mode.
+    - A directory with no config, or whose config uses a [build system](#build-system), is
+      checked in single-file mode.
 
 Pyrefly expands a glob, such as `pyrefly check 'packages/*'`, to the directories and Python
 files that it matches, the same as a shell does. Each directory and file is then checked as if

@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -16,6 +17,9 @@ use dupe::Dupe;
 use pyrefly_config::args::ConfigOverrideArgs;
 use pyrefly_config::environment::script;
 use pyrefly_config::resolve_unconfigured::UnconfiguredOverride;
+use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::module_name::ModuleNameWithKind;
+use pyrefly_python::module_path::ModulePath;
 use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::args::clap_env;
@@ -23,10 +27,12 @@ use pyrefly_util::globs::FilteredGlobs;
 use pyrefly_util::globs::Globs;
 use pyrefly_util::globs::HiddenDirFilter;
 use pyrefly_util::includes::Includes;
+use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
+use vec1::Vec1;
 
 use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::config_finder::apply_unconfigured_resolver_if_applicable;
@@ -41,6 +47,7 @@ use crate::config::config::SynthesizedPresetReason;
 use crate::config::error_kind::Severity;
 use crate::config::finder::ConfigError;
 use crate::config::finder::ConfigFinder;
+use crate::config::finder::LookupCallback;
 
 /// Whether (and how) to emit the "no `pyrefly.toml` found" upsell after
 /// a CLI check. Computed once during file resolution so the hot path
@@ -66,19 +73,25 @@ pub enum UpsellDecision {
 #[deny(clippy::missing_docs_in_private_items)]
 #[derive(Debug, Clone, Parser)]
 pub struct FilesArgs {
-    /// Files to check (glob supported).
-    /// If no file is specified, switch to project-checking mode where the files to
+    /// Files, directories, or globs to check.
+    /// If no path is specified, switch to project-checking mode where the files to
     /// check are determined from the closest configuration file.
     /// A glob is expanded to the directories and Python files that it matches, as a shell expands
     /// it, and each of them is checked as if it was given on its own.
-    /// When supplied, `project_excludes` in any config files loaded for these files to check
-    /// are ignored, and we use the default excludes unless overridden with the `--project-excludes` flag.
+    /// A directory with a configuration file is checked in project-checking mode, limited to the
+    /// directory: the files under it that the config includes are checked. Directories with
+    /// different configs are different projects, and each file is checked with the config of the
+    /// given project whose config root is its nearest ancestor.
+    /// A file, or a directory with no config or with a config that uses a build system, is checked
+    /// in single-file checking mode: `project_excludes` in any config files loaded for these
+    /// files to check are ignored, and we use the default excludes unless overridden with the
+    /// `--project-excludes` flag.
     files: Vec<String>,
     /// Files to exclude when type checking.
     #[arg(long)]
     project_excludes: Option<Vec<String>>,
     /// Files to exclude when type checking, in addition to the `project-excludes` of the config
-    /// in project mode, or to `--project-excludes` and the default excludes when files are given.
+    /// in project mode, or to `--project-excludes` and the default excludes in single-file mode.
     #[arg(long)]
     extend_project_excludes: Vec<String>,
     /// Skip the PEP 723 scripts that Pyrefly finds in the project or in the given directories.
@@ -281,6 +294,232 @@ fn get_globs_and_config_for_project(
     Ok((Box::new(filtered_globs), config_finder, upsell))
 }
 
+/// Get inputs for a check of the given paths. A directory with a config runs project mode for that
+/// config: it gets the files that `pyrefly check` gives the config, limited to the files under the
+/// directory. Directories with the same config are one project. A file belongs to the project
+/// whose config root is its nearest ancestor, so each file is checked once, with the config of its
+/// project. The other paths are checked as in [`get_globs_and_config_for_files`], and each file
+/// keeps the config that an upward search finds for it. `paths` must be absolute, expanded, and
+/// not empty.
+fn get_globs_and_config_for_paths(
+    config: Option<PathBuf>,
+    paths: Globs,
+    project_excludes: Option<Globs>,
+    extend_project_excludes: &Globs,
+    args: ConfigOverrideArgs,
+    wrapper: Option<ConfigConfigurerWrapper>,
+    scope: ConfigScope,
+) -> anyhow::Result<(Box<dyn Includes>, ConfigFinder, UpsellDecision)> {
+    let (dir_globs, mut files) = paths.clone().partition_explicit_dirs();
+    let mut errors = Vec::new();
+    let explicit_config = config.as_ref().map(|path| {
+        let (config, explicit_errors) = get_explicit_config(path, args.clone());
+        errors.extend(explicit_errors);
+        config
+    });
+    let finder = default_config_finder_with_overrides(args.clone(), false, wrapper.clone());
+    let mut project_dirs: SmallMap<ArcId<ConfigFile>, Globs> = SmallMap::new();
+    for glob in dir_globs {
+        match explicit_config
+            .dupe()
+            .or_else(|| finder.directory(glob.as_path()))
+        {
+            // A build system only builds the files that it is given, so it has no project mode.
+            Some(dir_config) if dir_config.build_system.is_none() => project_dirs
+                .entry(dir_config)
+                .or_insert_with(Globs::empty)
+                .append(&[glob]),
+            _ => files.append(&[glob]),
+        }
+    }
+    let projects = project_dirs
+        .into_iter()
+        .map(|(config, dirs)| {
+            debug!("Directories {} have config: {}", dirs, config);
+            let mut includes = config.get_filtered_globs(project_excludes.clone(), scope);
+            includes.add_excludes(extend_project_excludes.globs());
+            errors.extend(includes.errors().into_iter().map(ConfigError::warn));
+            Project {
+                config,
+                dirs,
+                includes,
+            }
+        })
+        .collect::<Vec<_>>();
+    let Ok(projects) = Vec1::try_from_vec(projects) else {
+        let (files, config_finder, upsell) = get_globs_and_config_for_files(
+            config,
+            files,
+            project_excludes,
+            extend_project_excludes,
+            args,
+            wrapper,
+        )?;
+        return Ok((Box::new(files), config_finder, upsell));
+    };
+    // With an explicit config, all directories are one project with that config, so
+    // `project_config` already gives every path, given files included, the explicit config.
+    let file_configs: SmallMap<PathBuf, ArcId<ConfigFile>> = match explicit_config {
+        Some(_) => SmallMap::new(),
+        None => files
+            .explicit_files()
+            .map(|file| {
+                let file = file.to_path_buf();
+                let file_config = finder.python_file(
+                    ModuleNameWithKind::guaranteed(ModuleName::unknown()),
+                    &ModulePath::filesystem(file.clone()),
+                );
+                (file, file_config)
+            })
+            .collect(),
+    };
+    errors.extend(finder.errors());
+    let project_configs = projects.mapped_ref(|project| project.config.dupe());
+    // Paths are not canonicalized, so a file matches a key of `file_configs` only when its path is
+    // spelled the same way as the key.
+    let lookup: LookupCallback = Arc::new(move |path| match file_configs.get(path) {
+        Some(file_config) => file_config.dupe(),
+        None => project_config(&project_configs, path).dupe(),
+    });
+    // An explicit config is not found by a config finder, so the wrapper does not apply to it.
+    let config_wrapper = if explicit_config.is_some() {
+        None
+    } else {
+        wrapper.clone()
+    };
+    let config_finder = project_config_finder(lookup.dupe(), args.clone(), config_wrapper);
+    add_config_errors(&config_finder, errors)?;
+    // The config finder of the run already gives each of `files` its config.
+    let files = if files.is_empty() {
+        None
+    } else {
+        Some(filter_files(
+            files,
+            project_excludes,
+            extend_project_excludes,
+            args.disable_project_excludes_heuristics(),
+            explicit_config.as_deref(),
+        ))
+    };
+    let upsell = match projects
+        .iter()
+        .find_map(|project| project.config.synthesized_preset_reason)
+    {
+        Some(reason) => UpsellDecision::Show(reason),
+        None => UpsellDecision::Skip,
+    };
+    Ok((
+        Box::new(PathIncludes {
+            paths,
+            projects,
+            lookup,
+            files,
+        }),
+        config_finder,
+        upsell,
+    ))
+}
+
+/// The config of the project that `path` belongs to: the project whose config root is the nearest
+/// ancestor of `path`, or the first project if no config root is an ancestor of `path`.
+fn project_config<'a>(
+    project_configs: &'a Vec1<ArcId<ConfigFile>>,
+    path: &Path,
+) -> &'a ArcId<ConfigFile> {
+    project_configs
+        .iter()
+        .filter_map(|config| Some((config, config.source.root_from_file()?)))
+        .filter(|(_, root)| path.starts_with(root))
+        .max_by_key(|(_, root)| root.components().count())
+        .map_or(project_configs.first(), |(config, _)| config)
+}
+
+/// A project that directories given to `pyrefly check` run in project mode.
+struct Project {
+    config: ArcId<ConfigFile>,
+    /// The directories given for this project.
+    dirs: Globs,
+    /// The includes of `config`.
+    includes: FilteredGlobs,
+}
+
+impl Project {
+    /// Whether `path` is under `dirs`, and gets `config`, so that no other project checks it.
+    fn owns(&self, lookup: &LookupCallback, path: &Path) -> bool {
+        self.dirs.covers(path) && lookup(path) == self.config
+    }
+}
+
+/// The files of the paths given to `pyrefly check` when at least one directory runs project mode.
+struct PathIncludes {
+    /// The paths as given, for the error when no file matches.
+    paths: Globs,
+    /// The projects of the directories that run project mode.
+    projects: Vec1<Project>,
+    /// The config of each path, as the config finder of the check gives it.
+    lookup: LookupCallback,
+    /// The other paths, checked as in single-file mode.
+    files: Option<FilteredGlobs>,
+}
+
+impl Includes for PathIncludes {
+    fn roots(&self) -> Vec<PathBuf> {
+        self.projects
+            .iter()
+            .flat_map(|project| project.dirs.roots())
+            .chain(self.files.iter().flat_map(|files| files.roots()))
+            .collect()
+    }
+
+    fn files_iter(&self) -> anyhow::Result<Box<dyn Iterator<Item = PathBuf> + '_>> {
+        let mut files = BTreeSet::new();
+        for project in &self.projects {
+            files.extend(
+                project
+                    .includes
+                    .matched_files_under(&project.dirs)?
+                    .into_iter()
+                    .filter(|path| (self.lookup)(path) == project.config),
+            );
+        }
+        if let Some(explicit) = &self.files {
+            files.extend(explicit.matched_files()?);
+        }
+        if files.is_empty() {
+            return Err(self.paths.no_matched_files_error());
+        }
+        Ok(Box::new(files.into_iter()))
+    }
+
+    fn covers(&self, path: &Path) -> bool {
+        self.projects
+            .iter()
+            .any(|project| project.owns(&self.lookup, path) && project.includes.covers(path))
+            || self.files.as_ref().is_some_and(|files| files.covers(path))
+    }
+
+    fn covers_ignoring_excludes(&self, path: &Path) -> bool {
+        self.projects.iter().any(|project| {
+            project.owns(&self.lookup, path) && project.includes.covers_ignoring_excludes(path)
+        }) || self
+            .files
+            .as_ref()
+            .is_some_and(|files| files.covers_ignoring_excludes(path))
+    }
+
+    fn errors(&mut self) -> Vec<anyhow::Error> {
+        let mut errors = self
+            .projects
+            .iter_mut()
+            .flat_map(|project| project.includes.errors())
+            .collect::<Vec<_>>();
+        if let Some(files) = &mut self.files {
+            errors.extend(files.errors());
+        }
+        errors
+    }
+}
+
 /// Get inputs for a per-file check. If an explicit config is passed in, we use it; otherwise, we
 /// find configs via upward search from each file. `files_to_check` must be absolute.
 ///
@@ -296,7 +535,7 @@ fn get_globs_and_config_for_files(
     extend_project_excludes: &Globs,
     args: ConfigOverrideArgs,
     wrapper: Option<ConfigConfigurerWrapper>,
-) -> anyhow::Result<(Box<dyn Includes>, ConfigFinder, UpsellDecision)> {
+) -> anyhow::Result<(FilteredGlobs, ConfigFinder, UpsellDecision)> {
     let args_disable_excludes_heuristics = args.disable_project_excludes_heuristics();
     let (config_finder, errors, globs, upsell) = match config {
         Some(explicit) => {
@@ -343,7 +582,7 @@ fn get_globs_and_config_for_files(
         }
     };
     add_config_errors(&config_finder, errors)?;
-    Ok((Box::new(globs), config_finder, upsell))
+    Ok((globs, config_finder, upsell))
 }
 
 /// The files of `files_to_check` without the excludes of single-file mode: `project_excludes`
@@ -458,14 +697,14 @@ impl FilesArgs {
                 scope,
             )?
         } else {
-            // File mode bypasses the config's globs, so `scope` is intentionally unused.
-            get_globs_and_config_for_files(
+            get_globs_and_config_for_paths(
                 self.config,
                 files_to_check,
                 project_excludes,
                 &extend_project_excludes,
                 config_override,
                 wrapper,
+                scope,
             )?
         };
         let includes = if self.exclude_scripts {
