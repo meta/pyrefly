@@ -2675,12 +2675,14 @@ pub enum Binding {
     ReturnType(Box<ReturnType>),
     /// A value in an iterable expression from a comprehension.
     /// The `TextRange` is the position of the comprehension target, used for go-to-def.
-    IterableValueComprehension(Box<Expr>, IsAsync, TextRange),
+    /// The boolean indicates whether the target unpacks the iteration value.
+    IterableValueComprehension(Box<Expr>, IsAsync, TextRange, bool),
     /// A value in an iterable expression from a for-loop,
     /// e.g. `for x in items`. Keeps the optional annotation from the loop target.
+    /// The fourth argument indicates whether the target unpacks the iteration value.
     /// The last argument is whether the loop is in a class body, where the target defines a
     /// class attribute.
-    IterableValueLoop(Option<Idx<KeyAnnotation>>, Box<Expr>, IsAsync, bool),
+    IterableValueLoop(Option<Idx<KeyAnnotation>>, Box<Expr>, IsAsync, bool, bool),
     /// A value produced by entering a context manager.
     /// The second argument is the expression of the context manager and its range.
     /// The fourth argument indicates whether the context manager is async or not.
@@ -2931,10 +2933,10 @@ impl DisplayWith<Bindings> for Binding {
             }
             Self::ReturnImplicit(_) => write!(f, "ReturnImplicit(_)"),
             Self::ReturnType(_) => write!(f, "ReturnType(_)"),
-            Self::IterableValueComprehension(x, sync, _) => {
+            Self::IterableValueComprehension(x, sync, _, _) => {
                 write!(f, "IterableValueComprehension({}, {sync:?})", m.display(x))
             }
-            Self::IterableValueLoop(a, x, sync, _) => {
+            Self::IterableValueLoop(a, x, sync, _, _) => {
                 write!(
                     f,
                     "IterableValueLoop({}, {}, {sync:?})",
@@ -3287,8 +3289,9 @@ impl Binding {
             | Binding::TypeLevelLambdaParameter(_)
             | Binding::FunctionParameter(_) => Some(SymbolKind::Parameter),
             Binding::PatternCapture(_) => Some(SymbolKind::Variable),
-            Binding::IterableValueComprehension(_, _, _)
-            | Binding::IterableValueLoop(_, _, _, _) => Some(SymbolKind::Variable),
+            Binding::IterableValueComprehension(..) | Binding::IterableValueLoop(..) => {
+                Some(SymbolKind::Variable)
+            }
             Binding::ContextValue(_, _, _, _, _) | Binding::ExceptionHandler(_, _, _) => {
                 Some(SymbolKind::Variable)
             }

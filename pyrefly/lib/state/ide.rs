@@ -232,7 +232,7 @@ fn create_intermediate_definition_from(
                     })),
                 };
             }
-            Binding::IterableValueComprehension(_, _, target_range) => {
+            Binding::IterableValueComprehension(_, _, target_range, _) => {
                 return Some(IntermediateDefinition::Local(Export {
                     location: *target_range,
                     symbol_kind: Some(SymbolKind::Variable),

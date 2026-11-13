@@ -583,6 +583,7 @@ impl<'a> BindingsBuilder<'a> {
                     Box::new(comp.iter.clone()),
                     IsAsync::new(comp.is_async),
                     comp.target.range(),
+                    matches!(&comp.target, Expr::Tuple(_) | Expr::List(_)),
                 ),
             );
             self.scopes.add_lvalue_to_current_static(&comp.target);

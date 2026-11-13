@@ -3699,7 +3699,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ),
                 Type::Type(f) if matches!(&*f, Type::Quantified(q) if q.is_type_var()) => {
                     // Repeated match because pattern guards cannot move out of bindings.
-                    let Type::Quantified(quantified) = *f else { unreachable!("guarded by matches! above") };
+                    let Type::Quantified(quantified) = *f else {
+                        unreachable!("guarded by matches! above")
+                    };
                     let quantified = *quantified;
                     let base_display_ty =
                         self.heap.mk_type_of(self.heap.mk_quantified(quantified.clone()));
