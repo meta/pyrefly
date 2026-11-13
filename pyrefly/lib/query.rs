@@ -985,7 +985,7 @@ impl<'a> CalleesWithLocation<'a> {
                     self.module_info.display_range(callee_range)
                 ),
             },
-            Type::Never(_) => vec![],
+            Type::Never(_) | Type::None => vec![],
             Type::Union(u) => {
                 // get callee for each type
                 u.members

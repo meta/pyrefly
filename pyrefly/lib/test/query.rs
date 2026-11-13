@@ -617,6 +617,35 @@ def construct[K: Flag[int]](source: K, cls: type[K]) -> K:
 }
 
 #[test]
+fn test_callees_optional_class_type() {
+    let tdir = TempDir::new().unwrap();
+    let file_path = tdir.path().join("main.py");
+    let code = r#"
+class Foo: ...
+
+def f(cls: type[Foo] | None) -> None:
+    cls()
+"#;
+    fs_anyhow::write(&file_path, code).unwrap();
+
+    let query = create_query();
+    let module_name = ModuleName::from_str("main");
+    let path = ModulePath::filesystem(file_path.clone());
+    query.add_files(vec![(module_name, path.clone())]);
+
+    // get_callees_with_location must not panic on the `None` member of the union.
+    let callees = query
+        .get_callees_with_location(module_name, path, None)
+        .unwrap();
+    assert!(
+        callees
+            .iter()
+            .any(|(_, c)| c.target == "builtins.object.__init__"),
+        "{callees:?}"
+    );
+}
+
+#[test]
 fn test_callees_flag_union_class_names() {
     let tdir = TempDir::new().unwrap();
     let file_path = tdir.path().join("main.py");
