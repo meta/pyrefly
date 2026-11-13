@@ -785,14 +785,10 @@ pub struct ProtocolMetadata {
     /// The runtime attribute names CPython's protocol checks inspect, used by the
     /// runtime `isinstance`/`issubclass` checks. This includes non-excluded slot
     /// names and inherited protocol members, and is version-aware; it never
-    /// contains the literal `__slots__`.
+    /// contains the literal `__slots__`. Whether a name is a method depends on which
+    /// class in the MRO binds it, so `is_data_protocol` decides that at the check
+    /// site.
     pub runtime_members: SmallSet<Name>,
-    /// Whether this protocol or an inherited protocol base declares at least one
-    /// `__slots__` name that CPython's runtime attribute filter keeps. An
-    /// unresolvable declaration does not count as data because no runtime
-    /// `TypeError` can be established for it. A child method that shadows an
-    /// inherited slot is still reported as data (a known gap).
-    pub has_data_slots: bool,
     /// Whether this protocol is decorated with @runtime_checkable
     pub is_runtime_checkable: bool,
 }

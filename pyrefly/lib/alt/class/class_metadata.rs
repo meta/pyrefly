@@ -812,7 +812,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // names as runtime attributes. An unresolvable declaration cannot prove
             // data slots, so no error is reported for it.
             let version = self.bindings().sys_info().version();
-            let slot_runtime_members: SmallSet<Name> = explicit_slots
+            let mut members = SmallSet::new();
+            let mut runtime_members: SmallSet<Name> = explicit_slots
                 .slots_info()
                 .map(|slots| {
                     slots
@@ -823,9 +824,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let has_data_slots = !slot_runtime_members.is_empty();
-            let mut members = SmallSet::new();
-            let mut runtime_members = slot_runtime_members;
             if let Some(fields) = self.get_class_fields(cls) {
                 for name in fields.class_body_fields() {
                     members.insert(name.clone());
@@ -837,7 +835,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Some(ProtocolMetadata {
                 members,
                 runtime_members,
-                has_data_slots,
                 is_runtime_checkable: false,
             })
         } else {
@@ -866,7 +863,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         proto
                             .runtime_members
                             .extend(base_proto.runtime_members.iter().cloned());
-                        proto.has_data_slots |= base_proto.has_data_slots;
                         if base_proto.is_runtime_checkable {
                             proto.is_runtime_checkable = true;
                         }

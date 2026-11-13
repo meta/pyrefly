@@ -11,6 +11,8 @@
  * file contains the implementations of a few special calls that need to be hard-coded.
  */
 
+use std::iter;
+
 use pyrefly_python::dunder;
 use pyrefly_types::display::TypeDisplayContext;
 use pyrefly_types::known_class::KnownClass;
@@ -796,33 +798,55 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// Check if a protocol is a data protocol (has non-method members)
+    /// Check if a protocol is a data protocol (has non-method members).
+    ///
+    /// CPython classifies a runtime member with `callable(getattr(cls, name))`, so the
+    /// nearest class in the MRO that binds the name to a value decides whether it is a
+    /// method. A class body that only annotates the name creates no class attribute, so
+    /// it does not shadow a slot. Attribute lookup does not model `__slots__`
+    /// descriptors, which are never callable, so an unshadowed slot name is data.
     fn is_data_protocol(&self, cls: &Class, range: TextRange) -> bool {
-        let metadata = self.get_metadata_for_class(cls);
-        if let Some(protocol_metadata) = metadata.protocol_metadata() {
-            // A slot name can resolve to an inherited callable attribute, so the
-            // member types alone cannot prove data-ness; the flag records the slot
-            // declaration.
-            if protocol_metadata.has_data_slots {
-                return true;
-            }
-            let class_type = self.as_class_type_unchecked(cls);
-            let class_type = self.heap.mk_class_type(class_type);
-            for field_name in &protocol_metadata.runtime_members {
-                let ty = self.type_of_attr_get(
-                    &class_type,
-                    field_name,
-                    range,
-                    &self.error_swallower(),
-                    ErrorKind::MissingAttribute,
-                    None,
-                    "is_data_protocol",
-                );
-
-                // If it's not a callable type, it's a data member
-                if !ty.is_toplevel_callable() {
+        let Some(protocol_metadata) = self.get_metadata_for_class(cls).protocol_metadata() else {
+            return false;
+        };
+        let class_type = self.heap.mk_class_type(self.as_class_type_unchecked(cls));
+        // `ancestors_no_object` omits `cls` itself, `Protocol`, `Generic`, and
+        // `object`, which CPython also skips when it collects protocol members.
+        let ancestors = self.get_mro_for_class(cls).ancestors_no_object();
+        for field_name in &protocol_metadata.runtime_members {
+            for ancestor in
+                iter::once(cls).chain(ancestors.iter().map(|ancestor| ancestor.class_object()))
+            {
+                if self.get_class_fields(ancestor).is_some_and(|fields| {
+                    fields.class_body_fields().any(|name| name == field_name)
+                        && fields.is_field_initialized_on_class(field_name)
+                }) {
+                    // The nearest binding is in a class body, so its type decides.
+                    break;
+                }
+                if self
+                    .get_metadata_for_class(ancestor)
+                    .slots_info()
+                    .is_some_and(|slots| slots.names.contains(field_name))
+                {
+                    // A slot descriptor is never callable, and attribute lookup does
+                    // not model it, so an unshadowed slot name is a data member.
                     return true;
                 }
+            }
+            let ty = self.type_of_attr_get(
+                &class_type,
+                field_name,
+                range,
+                &self.error_swallower(),
+                ErrorKind::MissingAttribute,
+                None,
+                "is_data_protocol",
+            );
+
+            // If it's not a callable type, it's a data member
+            if !ty.is_toplevel_callable() {
+                return true;
             }
         }
         false
