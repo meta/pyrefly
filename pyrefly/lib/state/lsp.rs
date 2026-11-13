@@ -5758,17 +5758,11 @@ fn find_global_references_from_definition_impl<T: RdepTransaction>(
                 true,
             )
         })
-        .chain(overridden_definitions.into_iter().map(|definition| {
-            (
-                definition,
-                ReferenceOptions {
-                    include_declaration: false,
-                    include_constructor_call_sites: false,
-                    ..options
-                },
-                false,
-            )
-        }))
+        .chain(
+            overridden_definitions
+                .into_iter()
+                .map(|definition| (definition, options.for_overridden(), false)),
+        )
         .chain(iter::once((definition, options, true)));
     let mut results = Vec::new();
     for (definition, options, include_child_implementations) in definitions {
