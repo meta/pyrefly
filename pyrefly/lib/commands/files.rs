@@ -8,6 +8,7 @@
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser;
@@ -29,8 +30,8 @@ use tracing::warn;
 
 use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::config_finder::apply_unconfigured_resolver_if_applicable;
-use crate::commands::config_finder::constant_config_finder;
 use crate::commands::config_finder::default_config_finder_with_overrides;
+use crate::commands::config_finder::project_config_finder;
 use crate::commands::util::VersionMismatch;
 use crate::config::config::ConfigFile;
 use crate::config::config::ConfigScope;
@@ -252,7 +253,14 @@ fn get_globs_and_config_for_project(
         ));
     }
 
-    let config_finder = constant_config_finder(config.dupe(), args, wrapper);
+    let config_finder = project_config_finder(
+        Arc::new({
+            let config = config.dupe();
+            move |_| config.dupe()
+        }),
+        args,
+        wrapper,
+    );
 
     debug!("Config is: {}", config);
 

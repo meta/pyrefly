@@ -125,6 +125,9 @@ type FallbackCallback = Box<
     dyn Fn(ModuleNameWithKind, &ModulePath) -> (ArcId<ConfigFile>, Vec<ConfigError>) + Send + Sync,
 >;
 
+/// Function that gives the config of a path.
+pub type LookupCallback = Arc<dyn Fn(&Path) -> ArcId<ConfigFile> + Send + Sync>;
+
 /// Function that replaces the config found for a Python file with one for that file alone, such
 /// as a PEP 723 script that runs in its own environment.
 pub type FileCallback =
@@ -165,20 +168,21 @@ impl ConfigFinder {
 
     /// Create a new ConfigFinder that always returns the same constant.
     pub fn new_constant(constant: ArcId<ConfigFile>) -> Self {
-        Self::new_constant_with_file(constant, Box::new(|config, _| config))
+        Self::new_lookup(
+            Arc::new(move |_| constant.dupe()),
+            Box::new(|config, _| config),
+        )
     }
 
-    /// Create a new ConfigFinder that returns the same constant, passed through `file` for each
-    /// Python file.
-    pub fn new_constant_with_file(constant: ArcId<ConfigFile>, file: FileCallback) -> Self {
-        let c1 = constant.dupe();
-        let c2 = constant.dupe();
-        let c3 = constant;
-
+    /// Create a new ConfigFinder that returns `lookup(path)` for each path, without an upward
+    /// search, passed through `file` for each Python file.
+    pub fn new_lookup(lookup: LookupCallback, file: FileCallback) -> Self {
+        let lookup2 = lookup.dupe();
+        let lookup3 = lookup.dupe();
         Self::new_custom(
-            Box::new(move |_, _| Ok(Some(c1.dupe()))),
-            Box::new(move |_| (c2.dupe(), Vec::new())),
-            Box::new(move |_, _| (c3.dupe(), Vec::new())),
+            Box::new(move |_, path| Ok(Some(lookup(path.as_path())))),
+            Box::new(move |config_file| (lookup2(config_file), Vec::new())),
+            Box::new(move |_, path| (lookup3(path.as_path()), Vec::new())),
             file,
             Box::new(|| {}),
         )

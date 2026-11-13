@@ -33,6 +33,7 @@ use crate::config::config::ConfigFile;
 use crate::config::config::ProjectLayout;
 use crate::config::finder::ConfigError;
 use crate::config::finder::ConfigFinder;
+use crate::config::finder::LookupCallback;
 use crate::config::finder::debug_log;
 use crate::module::bundled::BundledStub;
 use crate::module::third_party::BundledThirdParty;
@@ -275,11 +276,12 @@ impl ScriptEnvironments {
     }
 }
 
-/// A config finder that returns `config` for every Python file, except that a PEP 723 script gets
-/// its own environment when `config` sets `script-command`. `args` and `wrapper` must be the ones
-/// that produced `config`.
-pub fn constant_config_finder(
-    config: ArcId<ConfigFile>,
+/// A config finder for project mode, which returns `lookup(path)` for each path instead of the
+/// config that an upward search finds, except that a PEP 723 script gets its own environment when
+/// its config sets `script-command`. `args` and `wrapper` must be the ones that produced the
+/// configs that `lookup` returns.
+pub fn project_config_finder(
+    lookup: LookupCallback,
     args: ConfigOverrideArgs,
     wrapper: Option<ConfigConfigurerWrapper>,
 ) -> ConfigFinder {
@@ -290,8 +292,8 @@ pub fn constant_config_finder(
         None => configure,
     };
     let scripts = ScriptEnvironments::new(configure);
-    ConfigFinder::new_constant_with_file(
-        config,
+    ConfigFinder::new_lookup(
+        lookup,
         Box::new(move |config, path| scripts.config(config, path)),
     )
 }
