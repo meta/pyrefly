@@ -12,7 +12,7 @@
 // DO NOT EDIT.
 // source: pyrefly/lib/report/pysa/pysa_report.capnp
 // capnp binary version: 0.10.2
-// capnpc crate version: 0.26.0
+// capnpc crate version: 0.27.0
 
 
 pub mod source_path {
@@ -20,7 +20,7 @@ pub mod source_path {
 
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -42,7 +42,7 @@ pub mod source_path {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -66,7 +66,7 @@ pub mod source_path {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -161,13 +161,13 @@ pub mod source_path {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -497,7 +497,7 @@ pub mod source_path {
 pub mod pysa_location {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -519,7 +519,7 @@ pub mod pysa_location {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -543,7 +543,7 @@ pub mod pysa_location {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -588,13 +588,13 @@ pub mod pysa_location {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -780,7 +780,7 @@ pub mod pysa_location {
 pub mod class_ref {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -802,7 +802,7 @@ pub mod class_ref {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -826,7 +826,7 @@ pub mod class_ref {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -863,13 +863,13 @@ pub mod class_ref {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -1008,7 +1008,7 @@ pub mod class_ref {
 pub mod function_ref {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -1030,7 +1030,7 @@ pub mod function_ref {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -1054,7 +1054,7 @@ pub mod function_ref {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -1095,13 +1095,13 @@ pub mod function_ref {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -1249,7 +1249,7 @@ pub mod function_ref {
 pub mod global_variable_ref {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -1271,7 +1271,7 @@ pub mod global_variable_ref {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -1295,7 +1295,7 @@ pub mod global_variable_ref {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -1336,13 +1336,13 @@ pub mod global_variable_ref {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -1589,7 +1589,7 @@ pub(crate) static ARENA: ::capnp::private::arena::GeneratedCodeArena = ::capnp::
 pub mod class_with_modifiers {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -1611,7 +1611,7 @@ pub mod class_with_modifiers {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -1635,7 +1635,7 @@ pub mod class_with_modifiers {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -1680,13 +1680,13 @@ pub mod class_with_modifiers {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -1849,7 +1849,7 @@ pub mod class_with_modifiers {
 pub mod class_names_from_type {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -1871,7 +1871,7 @@ pub mod class_names_from_type {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -1895,7 +1895,7 @@ pub mod class_names_from_type {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -1936,13 +1936,13 @@ pub mod class_names_from_type {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -2094,7 +2094,7 @@ pub mod class_names_from_type {
 pub mod scalar_type_properties {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -2116,7 +2116,7 @@ pub mod scalar_type_properties {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -2140,7 +2140,7 @@ pub mod scalar_type_properties {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -2185,13 +2185,13 @@ pub mod scalar_type_properties {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -2378,7 +2378,7 @@ pub mod scalar_type_properties {
 pub mod pysa_type {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -2400,7 +2400,7 @@ pub mod pysa_type {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -2424,7 +2424,7 @@ pub mod pysa_type {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -2477,13 +2477,13 @@ pub mod pysa_type {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -2680,7 +2680,7 @@ pub mod scope_parent {
 
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -2702,7 +2702,7 @@ pub mod scope_parent {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -2726,7 +2726,7 @@ pub mod scope_parent {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -2776,13 +2776,13 @@ pub mod scope_parent {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -2966,7 +2966,7 @@ pub mod function_parameter {
 
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -2988,7 +2988,7 @@ pub mod function_parameter {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -3012,7 +3012,7 @@ pub mod function_parameter {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -3097,13 +3097,13 @@ pub mod function_parameter {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -3408,7 +3408,7 @@ pub mod function_parameter {
     pub mod pos_only_param {
         #[derive(Copy, Clone)]
         pub struct Owned(());
-        impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+        impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
         impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
         impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
         impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -3430,7 +3430,7 @@ pub mod function_parameter {
 
         impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
             fn from(reader: Reader<'a,>) -> Self {
-                Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+                Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
             }
         }
 
@@ -3454,7 +3454,7 @@ pub mod function_parameter {
 
         impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
             fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-                self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+                self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
             }
         }
 
@@ -3503,13 +3503,13 @@ pub mod function_parameter {
 
         impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
             fn from(builder: Builder<'a,>) -> Self {
-                Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+                Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
             }
         }
 
         impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
             fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-                self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+                self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
             }
         }
 
@@ -3695,7 +3695,7 @@ pub mod function_parameter {
     pub mod pos_param {
         #[derive(Copy, Clone)]
         pub struct Owned(());
-        impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+        impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
         impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
         impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
         impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -3717,7 +3717,7 @@ pub mod function_parameter {
 
         impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
             fn from(reader: Reader<'a,>) -> Self {
-                Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+                Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
             }
         }
 
@@ -3741,7 +3741,7 @@ pub mod function_parameter {
 
         impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
             fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-                self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+                self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
             }
         }
 
@@ -3790,13 +3790,13 @@ pub mod function_parameter {
 
         impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
             fn from(builder: Builder<'a,>) -> Self {
-                Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+                Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
             }
         }
 
         impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
             fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-                self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+                self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
             }
         }
 
@@ -3981,7 +3981,7 @@ pub mod function_parameter {
     pub mod var_arg_param {
         #[derive(Copy, Clone)]
         pub struct Owned(());
-        impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+        impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
         impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
         impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
         impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -4003,7 +4003,7 @@ pub mod function_parameter {
 
         impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
             fn from(reader: Reader<'a,>) -> Self {
-                Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+                Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
             }
         }
 
@@ -4027,7 +4027,7 @@ pub mod function_parameter {
 
         impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
             fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-                self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+                self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
             }
         }
 
@@ -4072,13 +4072,13 @@ pub mod function_parameter {
 
         impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
             fn from(builder: Builder<'a,>) -> Self {
-                Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+                Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
             }
         }
 
         impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
             fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-                self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+                self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
             }
         }
 
@@ -4238,7 +4238,7 @@ pub mod function_parameter {
     pub mod kw_only_param {
         #[derive(Copy, Clone)]
         pub struct Owned(());
-        impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+        impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
         impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
         impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
         impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -4260,7 +4260,7 @@ pub mod function_parameter {
 
         impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
             fn from(reader: Reader<'a,>) -> Self {
-                Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+                Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
             }
         }
 
@@ -4284,7 +4284,7 @@ pub mod function_parameter {
 
         impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
             fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-                self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+                self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
             }
         }
 
@@ -4333,13 +4333,13 @@ pub mod function_parameter {
 
         impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
             fn from(builder: Builder<'a,>) -> Self {
-                Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+                Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
             }
         }
 
         impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
             fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-                self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+                self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
             }
         }
 
@@ -4524,7 +4524,7 @@ pub mod function_parameter {
     pub mod kwargs_param {
         #[derive(Copy, Clone)]
         pub struct Owned(());
-        impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+        impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
         impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
         impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
         impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -4546,7 +4546,7 @@ pub mod function_parameter {
 
         impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
             fn from(reader: Reader<'a,>) -> Self {
-                Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+                Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
             }
         }
 
@@ -4570,7 +4570,7 @@ pub mod function_parameter {
 
         impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
             fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-                self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+                self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
             }
         }
 
@@ -4615,13 +4615,13 @@ pub mod function_parameter {
 
         impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
             fn from(builder: Builder<'a,>) -> Self {
-                Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+                Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
             }
         }
 
         impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
             fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-                self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+                self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
             }
         }
 
@@ -4784,7 +4784,7 @@ pub mod function_parameters {
 
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -4806,7 +4806,7 @@ pub mod function_parameters {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -4830,7 +4830,7 @@ pub mod function_parameters {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -4885,13 +4885,13 @@ pub mod function_parameters {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -5087,7 +5087,7 @@ pub mod function_parameters {
 pub mod function_signature {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -5109,7 +5109,7 @@ pub mod function_signature {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -5133,7 +5133,7 @@ pub mod function_signature {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -5178,13 +5178,13 @@ pub mod function_signature {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -5348,7 +5348,7 @@ pub mod function_signature {
 pub mod function_base_definition {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -5370,7 +5370,7 @@ pub mod function_base_definition {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -5394,7 +5394,7 @@ pub mod function_base_definition {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -5475,13 +5475,13 @@ pub mod function_base_definition {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -5852,7 +5852,7 @@ pub mod function_base_definition {
 pub mod captured_variable_ref {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -5874,7 +5874,7 @@ pub mod captured_variable_ref {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -5898,7 +5898,7 @@ pub mod captured_variable_ref {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -5943,13 +5943,13 @@ pub mod captured_variable_ref {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -6110,7 +6110,7 @@ pub mod target {
 
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -6132,7 +6132,7 @@ pub mod target {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -6156,7 +6156,7 @@ pub mod target {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -6216,13 +6216,13 @@ pub mod target {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -6504,7 +6504,7 @@ pub(crate) static ARENA: ::capnp::private::arena::GeneratedCodeArena = ::capnp::
 pub mod pysa_call_target {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -6526,7 +6526,7 @@ pub mod pysa_call_target {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -6550,7 +6550,7 @@ pub mod pysa_call_target {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -6619,13 +6619,13 @@ pub mod pysa_call_target {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -6925,7 +6925,7 @@ pub mod pysa_call_target {
 pub mod decorator_callee {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -6947,7 +6947,7 @@ pub mod decorator_callee {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -6971,7 +6971,7 @@ pub mod decorator_callee {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -7016,13 +7016,13 @@ pub mod decorator_callee {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -7185,7 +7185,7 @@ pub mod decorator_callee {
 pub mod function_definition {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -7207,7 +7207,7 @@ pub mod function_definition {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -7231,7 +7231,7 @@ pub mod function_definition {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -7360,13 +7360,13 @@ pub mod function_definition {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -8060,7 +8060,7 @@ pub(crate) static ARENA: ::capnp::private::arena::GeneratedCodeArena = ::capnp::
 pub mod pysa_class_field {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -8082,7 +8082,7 @@ pub mod pysa_class_field {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -8106,7 +8106,7 @@ pub mod pysa_class_field {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -8171,13 +8171,13 @@ pub mod pysa_class_field {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -8432,7 +8432,7 @@ pub mod pysa_class_mro {
 
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -8454,7 +8454,7 @@ pub mod pysa_class_mro {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -8478,7 +8478,7 @@ pub mod pysa_class_mro {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -8528,13 +8528,13 @@ pub mod pysa_class_mro {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -8702,7 +8702,7 @@ pub mod pysa_class_mro {
 pub mod class_definition {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -8724,7 +8724,7 @@ pub mod class_definition {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -8748,7 +8748,7 @@ pub mod class_definition {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -8853,13 +8853,13 @@ pub mod class_definition {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -9322,7 +9322,7 @@ pub mod class_definition {
 pub mod global_variable {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -9344,7 +9344,7 @@ pub mod global_variable {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -9368,7 +9368,7 @@ pub mod global_variable {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -9421,13 +9421,13 @@ pub mod global_variable {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -9798,7 +9798,7 @@ pub mod unresolved {
 
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -9820,7 +9820,7 @@ pub mod unresolved {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -9844,7 +9844,7 @@ pub mod unresolved {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -9889,13 +9889,13 @@ pub mod unresolved {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -10048,7 +10048,7 @@ pub mod unresolved {
 pub mod higher_order_parameter {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -10070,7 +10070,7 @@ pub mod higher_order_parameter {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -10094,7 +10094,7 @@ pub mod higher_order_parameter {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -10143,13 +10143,13 @@ pub mod higher_order_parameter {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -10337,7 +10337,7 @@ pub mod higher_order_parameter {
 pub mod call_callees {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -10359,7 +10359,7 @@ pub mod call_callees {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -10383,7 +10383,7 @@ pub mod call_callees {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -10452,13 +10452,13 @@ pub mod call_callees {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -10733,7 +10733,7 @@ pub mod call_callees {
 pub mod attribute_access_callees {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -10755,7 +10755,7 @@ pub mod attribute_access_callees {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -10779,7 +10779,7 @@ pub mod attribute_access_callees {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -10844,13 +10844,13 @@ pub mod attribute_access_callees {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -11114,7 +11114,7 @@ pub mod attribute_access_callees {
 pub mod identifier_callees {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -11136,7 +11136,7 @@ pub mod identifier_callees {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -11160,7 +11160,7 @@ pub mod identifier_callees {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -11213,13 +11213,13 @@ pub mod identifier_callees {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -11421,7 +11421,7 @@ pub mod identifier_callees {
 pub mod define_callees {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -11443,7 +11443,7 @@ pub mod define_callees {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -11467,7 +11467,7 @@ pub mod define_callees {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -11504,13 +11504,13 @@ pub mod define_callees {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -11637,7 +11637,7 @@ pub mod define_callees {
 pub mod format_string_artificial_callees {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -11659,7 +11659,7 @@ pub mod format_string_artificial_callees {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -11683,7 +11683,7 @@ pub mod format_string_artificial_callees {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -11720,13 +11720,13 @@ pub mod format_string_artificial_callees {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -11854,7 +11854,7 @@ pub mod format_string_artificial_callees {
 pub mod format_string_stringify_callees {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -11876,7 +11876,7 @@ pub mod format_string_stringify_callees {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -11900,7 +11900,7 @@ pub mod format_string_stringify_callees {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -11945,13 +11945,13 @@ pub mod format_string_stringify_callees {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -12189,7 +12189,7 @@ pub(crate) static ARENA: ::capnp::private::arena::GeneratedCodeArena = ::capnp::
 pub mod return_shim_callees {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -12211,7 +12211,7 @@ pub mod return_shim_callees {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -12235,7 +12235,7 @@ pub mod return_shim_callees {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -12280,13 +12280,13 @@ pub mod return_shim_callees {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -12452,7 +12452,7 @@ pub mod expression_callees {
 
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -12474,7 +12474,7 @@ pub mod expression_callees {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -12498,7 +12498,7 @@ pub mod expression_callees {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -12603,13 +12603,13 @@ pub mod expression_callees {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -12975,7 +12975,7 @@ pub mod expression_callees {
 pub mod call_graph_entry {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -12997,7 +12997,7 @@ pub mod call_graph_entry {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -13021,7 +13021,7 @@ pub mod call_graph_entry {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -13066,13 +13066,13 @@ pub mod call_graph_entry {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -13231,7 +13231,7 @@ pub mod call_graph_entry {
 pub mod function_call_graph {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -13253,7 +13253,7 @@ pub mod function_call_graph {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -13277,7 +13277,7 @@ pub mod function_call_graph {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -13322,13 +13322,13 @@ pub mod function_call_graph {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -13488,7 +13488,7 @@ pub mod function_call_graph {
 pub mod pysa_project_module {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -13510,7 +13510,7 @@ pub mod pysa_project_module {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -13534,7 +13534,7 @@ pub mod pysa_project_module {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -13635,13 +13635,13 @@ pub mod pysa_project_module {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -14082,7 +14082,7 @@ pub mod pysa_project_module {
 pub mod project_file {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -14104,7 +14104,7 @@ pub mod project_file {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -14128,7 +14128,7 @@ pub mod project_file {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -14205,13 +14205,13 @@ pub mod project_file {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -14524,7 +14524,7 @@ pub mod project_file {
 pub mod module_definitions {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -14546,7 +14546,7 @@ pub mod module_definitions {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -14570,7 +14570,7 @@ pub mod module_definitions {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -14643,13 +14643,13 @@ pub mod module_definitions {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -14947,7 +14947,7 @@ pub mod module_definitions {
 pub mod location_type_id_entry {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -14969,7 +14969,7 @@ pub mod location_type_id_entry {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -14993,7 +14993,7 @@ pub mod location_type_id_entry {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -15034,13 +15034,13 @@ pub mod location_type_id_entry {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -15191,7 +15191,7 @@ pub mod location_type_id_entry {
 pub mod function_type_of_expressions {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -15213,7 +15213,7 @@ pub mod function_type_of_expressions {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -15237,7 +15237,7 @@ pub mod function_type_of_expressions {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -15290,13 +15290,13 @@ pub mod function_type_of_expressions {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -15494,7 +15494,7 @@ pub mod function_type_of_expressions {
 pub mod module_type_of_expressions {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -15516,7 +15516,7 @@ pub mod module_type_of_expressions {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -15540,7 +15540,7 @@ pub mod module_type_of_expressions {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -15597,13 +15597,13 @@ pub mod module_type_of_expressions {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -15826,7 +15826,7 @@ pub mod module_type_of_expressions {
 pub mod module_call_graphs {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -15848,7 +15848,7 @@ pub mod module_call_graphs {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -15872,7 +15872,7 @@ pub mod module_call_graphs {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -15929,13 +15929,13 @@ pub mod module_call_graphs {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -16157,7 +16157,7 @@ pub mod module_call_graphs {
 pub mod type_error {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -16179,7 +16179,7 @@ pub mod type_error {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -16203,7 +16203,7 @@ pub mod type_error {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -16272,13 +16272,13 @@ pub mod type_error {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
@@ -16537,7 +16537,7 @@ pub mod type_error {
 pub mod type_errors {
     #[derive(Copy, Clone)]
     pub struct Owned(());
-    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types }).into() } }
+    impl ::capnp::introspect::Introspect for Owned { fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Struct(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types, annotation_types: _private::get_annotation_types, type_id: ::core::any::TypeId::of::<Owned>() }).into() } }
     impl ::capnp::traits::Owned for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::OwnedStruct for Owned { type Reader<'a> = Reader<'a>; type Builder<'a> = Builder<'a>; }
     impl ::capnp::traits::Pipelined for Owned { type Pipeline = Pipeline; }
@@ -16559,7 +16559,7 @@ pub mod type_errors {
 
     impl <'a,> ::core::convert::From<Reader<'a,>> for ::capnp::dynamic_value::Reader<'a>  {
         fn from(reader: Reader<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Reader::new(reader.reader, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
@@ -16583,7 +16583,7 @@ pub mod type_errors {
 
     impl <'a,> ::capnp::traits::Imbue<'a> for Reader<'a,>  {
         fn imbue(&mut self, cap_table: &'a ::capnp::private::layout::CapTable) {
-            self.reader.imbue(::capnp::private::layout::CapTableReader::Plain(cap_table))
+            self.reader.imbue(::capnp::private::layout::CapTableReader::from_ref(cap_table))
         }
     }
 
@@ -16620,13 +16620,13 @@ pub mod type_errors {
 
     impl <'a,> ::core::convert::From<Builder<'a,>> for ::capnp::dynamic_value::Builder<'a>  {
         fn from(builder: Builder<'a,>) -> Self {
-            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>})))
+            Self::Struct(::capnp::dynamic_struct::Builder::new(builder.builder, ::capnp::schema::StructSchema::new(::capnp::introspect::RawBrandedStructSchema { generic: &_private::RAW_SCHEMA, field_types: _private::get_field_types::<>, annotation_types: _private::get_annotation_types::<>, type_id: ::core::any::TypeId::of::<Owned<>>()})))
         }
     }
 
     impl <'a,> ::capnp::traits::ImbueMut<'a> for Builder<'a,>  {
         fn imbue_mut(&mut self, cap_table: &'a mut ::capnp::private::layout::CapTable) {
-            self.builder.imbue(::capnp::private::layout::CapTableBuilder::Plain(cap_table))
+            self.builder.imbue(::capnp::private::layout::CapTableBuilder::from_ref(cap_table))
         }
     }
 
