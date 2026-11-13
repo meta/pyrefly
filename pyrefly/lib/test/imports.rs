@@ -3432,3 +3432,22 @@ assert_type(Node().clone(), Node)
 assert_type(Node().copy(), Node)
 "#,
 );
+
+// One file can be imported under two module names, e.g. when two import roots overlap.
+// Each name is a distinct module with its own classes.
+testcase!(
+    test_one_file_two_module_names,
+    {
+        let mut env = TestEnv::new().enable_reveal_type_qualified_names();
+        env.add_with_path("foo", "shared.py", "class C: ...");
+        env.add_with_path("bar", "shared.py", "class C: ...");
+        env
+    },
+    r#"
+from typing import reveal_type
+import foo
+import bar
+reveal_type(foo.C())  # E: revealed type: foo.C
+reveal_type(bar.C())  # E: revealed type: bar.C
+"#,
+);

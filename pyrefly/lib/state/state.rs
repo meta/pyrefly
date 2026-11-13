@@ -2921,12 +2921,12 @@ pub(crate) struct TransactionHandle<'a> {
     module_data: &'a ArcId<ModuleDataMut>,
     /// Locally accumulated deps, flushed to `module_data.deps` on drop.
     /// This batches N lock acquisitions per handle lifetime into 1.
-    /// Keyed by ModulePath (cheap to hash — discriminant + interned u64) rather
-    /// than Handle, since ModulePath uniquely identifies the target module within
-    /// a TransactionHandle (module name is derivable, sys_info is invariant).
+    /// Keyed by module name and path, which identify the target module within a
+    /// TransactionHandle because sys_info is invariant. Both are needed: one file can
+    /// be imported under several module names, and each name is a distinct module.
     /// Each entry also remembers the target module, so that repeated lookups of
     /// the same module skip the transaction's shared module map.
-    deferred_deps: RefCell<FxHashMap<ModulePath, DeferredDeps<'a>>>,
+    deferred_deps: RefCell<FxHashMap<(ModuleName, ModulePath), DeferredDeps<'a>>>,
     /// Cache of cross-module `BindingsMetadata` for class field lookups.
     /// Keyed by `ArcId::id()` (pointer-as-usize) to avoid atomic refcount
     /// operations and to get a cheap 8-byte hash key.
@@ -2976,19 +2976,21 @@ impl<'a> TransactionHandle<'a> {
     ) -> FindingOrError<&'a ArcId<ModuleDataMut>> {
         let resolve = move |path: &ModulePath| {
             let mut deferred_deps = self.deferred_deps.borrow_mut();
-            let deferred = deferred_deps.entry(path.dupe()).or_insert_with(|| {
-                let handle = Handle::new(
-                    module,
-                    path.dupe(),
-                    self.module_data.handle.sys_info().dupe(),
-                );
-                let module_data = self.transaction.get_imported_module(&handle);
-                DeferredDeps {
-                    handle,
-                    module_data,
-                    deps: ModuleDeps::default(),
-                }
-            });
+            let deferred = deferred_deps
+                .entry((module, path.dupe()))
+                .or_insert_with(|| {
+                    let handle = Handle::new(
+                        module,
+                        path.dupe(),
+                        self.module_data.handle.sys_info().dupe(),
+                    );
+                    let module_data = self.transaction.get_imported_module(&handle);
+                    DeferredDeps {
+                        handle,
+                        module_data,
+                        deps: ModuleDeps::default(),
+                    }
+                });
             deferred.deps.add_dep(dep);
             deferred.module_data
         };
@@ -3128,7 +3130,7 @@ impl Drop for TransactionHandle<'_> {
         // Detach from the frozen snapshot on first write, if still shared.
         let deps = Arc::make_mut(&mut deps_lock);
         for (
-            _path,
+            _,
             DeferredDeps {
                 handle: target_handle,
                 module_data: target,
