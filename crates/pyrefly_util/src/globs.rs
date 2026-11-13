@@ -14,10 +14,13 @@ use std::num::NonZeroUsize;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::path::is_separator;
 use std::thread::available_parallelism;
 
 use anyhow::Context;
+use glob::MatchOptions;
 use glob::Pattern;
+use glob::glob_with;
 use ignore::Match;
 use ignore::WalkBuilder;
 use ignore::WalkState;
@@ -30,6 +33,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de;
 use serde::de::Visitor;
+use tracing::warn;
 
 use crate::absolutize::Absolutize as _;
 use crate::includes::Includes;
@@ -132,7 +136,23 @@ impl Glob {
         Ok(Self::from_base_pattern(Self::base_pattern(pattern)?))
     }
 
-    fn base_pattern(mut pattern: String) -> anyhow::Result<Pattern> {
+    fn base_pattern(pattern: String) -> anyhow::Result<Pattern> {
+        // The `glob` crate accepts `**` only as a whole path component. Like Pyright and
+        // gitignore, we treat any other run of `*` as a single `*`. Components are split on the
+        // platform's separators, because an absolutized pattern uses `\` on Windows.
+        let mut pattern: String = pattern
+            .split_inclusive(is_separator)
+            .map(|piece| {
+                if piece.trim_end_matches(is_separator) == "**" {
+                    piece.to_owned()
+                } else {
+                    piece
+                        .chars()
+                        .dedup_by(|a, b| *a == '*' && *b == '*')
+                        .collect()
+                }
+            })
+            .collect();
         if pattern.ends_with("**") {
             pattern.push_str("/*");
         } else if pattern.ends_with("**/") {
@@ -188,7 +208,11 @@ impl Glob {
     /// named a concrete path rather than a pattern. Says nothing about whether
     /// the path exists on disk.
     fn has_no_wildcards(&self) -> bool {
-        self.as_path().components().all(|comp| match comp {
+        Self::path_has_no_wildcards(self.as_path())
+    }
+
+    fn path_has_no_wildcards(path: &Path) -> bool {
+        path.components().all(|comp| match comp {
             Component::Normal(part) => !Self::contains_glob_char(part),
             _ => true,
         })
@@ -441,6 +465,41 @@ impl Globs {
             .into_iter()
             .partition(|pattern| pattern.has_no_wildcards() && pattern.as_path().is_dir());
         (dirs, Globs(rest))
+    }
+
+    /// Parses `patterns` after it expands each pattern with wildcards to the directories and
+    /// Python files that it matches, as a shell expands a glob, so that a glob is checked the same
+    /// as the paths that it matches. A pattern that matches nothing is kept, so that the check
+    /// reports it.
+    pub fn new_expanded(patterns: Vec<String>) -> anyhow::Result<Self> {
+        let options = MatchOptions {
+            require_literal_leading_dot: true,
+            ..MatchOptions::new()
+        };
+        let mut expanded = Vec::new();
+        for pattern in patterns {
+            if Glob::path_has_no_wildcards(Path::new(&pattern)) {
+                expanded.push(pattern);
+                continue;
+            }
+            let pattern = Glob::base_pattern(pattern)?;
+            let matched_before = expanded.len();
+            let entries = glob_with(pattern.as_str(), options)
+                .with_context(|| format!("While constructing glob pattern from {pattern}"))?;
+            for entry in entries {
+                match entry {
+                    Ok(path) if path.is_dir() || Glob::is_python_extension(path.extension()) => {
+                        expanded.push(Pattern::escape(&path.to_string_lossy()));
+                    }
+                    Ok(_) => {}
+                    Err(error) => warn!("While expanding `{pattern}`: {error}"),
+                }
+            }
+            if expanded.len() == matched_before {
+                expanded.push(pattern.as_str().to_owned());
+            }
+        }
+        Self::new(expanded)
     }
 
     pub fn append(&mut self, patterns: &[Glob]) {
@@ -1357,6 +1416,8 @@ mod tests {
         glob_matches("path/to/my/", true);
         glob_matches("path/to/m", false);
         glob_matches("path/to/m*", true);
+        glob_matches("path/to/m**", true);
+        glob_matches("path/to/x**", false);
 
         glob_matches("path/to/my/file.py", true);
         glob_matches("path/to/my/file.py/", true);
@@ -1379,6 +1440,26 @@ mod tests {
         glob_matches("**/*", true);
         glob_matches("**/*.py", true);
         glob_matches("**/*.pyi", false);
+    }
+
+    // Pyright and gitignore treat a `**` that is not a whole path component as `*`.
+    // https://github.com/facebook/pyrefly/issues/1471
+    #[test]
+    fn test_recursive_wildcard_within_component() {
+        let normalized = |pattern: &str| Glob::new(pattern.to_owned()).unwrap().to_string();
+        assert_eq!(normalized("env-**"), "env-*");
+        assert_eq!(normalized("a**b/***/c"), "a*b/*/c");
+        assert_eq!(normalized("**/x**/**"), "**/x*/**/*");
+    }
+
+    // On Windows, `\` is also a path separator, so a `**` component bounded by `\` is kept.
+    #[cfg(windows)]
+    #[test]
+    fn test_recursive_wildcard_with_windows_separator() {
+        let normalized = |pattern: &str| Glob::new(pattern.to_owned()).unwrap().to_string();
+        assert_eq!(normalized(r"C:\a\**/*.py"), r"C:\a\**/*.py");
+        assert_eq!(normalized(r"C:\a\**\*.py"), r"C:\a\**\*.py");
+        assert_eq!(normalized(r"C:\a\x**\*.py"), r"C:\a\x*\*.py");
     }
 
     #[test]
@@ -2030,6 +2111,25 @@ mod tests {
         // Should not include files without extensions when using wildcard
         assert!(!files.contains(&root.join("myscript")));
         assert!(!files.contains(&root.join("another_script")));
+    }
+
+    #[test]
+    fn test_expand_matches_paths_with_glob_characters() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::file("a1.py"), TestPath::file("a[1].py")],
+        );
+        let pattern = root.join("*.py").to_string_lossy().into_owned();
+        let mut files = Globs::new_expanded(vec![pattern])
+            .unwrap()
+            .files_iter()
+            .unwrap()
+            .collect::<Vec<_>>();
+        files.sort();
+        files.dedup();
+        assert_eq!(files, vec![root.join("a1.py"), root.join("a[1].py")]);
     }
 
     #[test]

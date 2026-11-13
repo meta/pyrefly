@@ -2569,9 +2569,10 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             }
             // Constructors as callables
             (Type::Type(inner), Type::BoundMethod(_) | Type::Callable(_) | Type::Function(_))
-                if let Type::ClassType(got_cls) = &**inner =>
+                if let Some(constructor) =
+                    self.type_order.constructor_to_callable_for_type_of(inner) =>
             {
-                self.is_subset_eq(&self.type_order.constructor_to_callable(got_cls), want)
+                self.is_subset_eq(&constructor, want)
             }
             (Type::ClassDef(got), Type::BoundMethod(_) | Type::Callable(_) | Type::Function(_)) => {
                 let constructor = self.type_order.constructor_to_callable_for_class_def(got);

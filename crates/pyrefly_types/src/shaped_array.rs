@@ -23,6 +23,7 @@ use crate::known_class::KnownClass;
 use crate::lit_int::LitInt;
 use crate::literal::Lit;
 use crate::quantified::QuantifiedKind;
+use crate::quantified::TypeVarLike;
 use crate::tuple::Tuple;
 use crate::type_level_dsl::TypeShapeDslDomain;
 use crate::types::Type;
@@ -1549,6 +1550,7 @@ mod tests {
             Identifier::new(Name::new(name), TextRange::empty(TextSize::new(0))),
             fake_module("__test__"),
             None,
+            PreInferenceVariance::Invariant,
         )
     }
 

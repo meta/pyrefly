@@ -68,10 +68,6 @@ type _IntegerSequence = (
     | tuple[SupportsIndex | _IntegerSequence, ...]
 )
 type _BasicIndex = SupportsIndex | slice | _IntegerSequence | None | EllipsisType
-# The trailing `None` is not a legal argument to `reshape`. It is present because
-# an `int | tuple[int, ...]` parameter cannot be iterated inside a DSL function
-# after narrowing with `is_int_value` alone. See `reshape_shape`, which rejects it.
-type _NewShape = int | tuple[int, ...] | None
 
 class Array[Shape: _Shape = _Shape]:
     shape: Shape
@@ -325,10 +321,8 @@ class Array[Shape: _Shape = _Shape]:
     # `reshape` below: an argument list cannot be captured as a `Flag`.
     @overload
     def transpose(self, *axes: int) -> Array[IntTuple]: ...
-    # Positional-only: JAX's signature is `reshape(self, *args, order=...)`, so
-    # there is no `shape` keyword to bind.
     @overload
-    def reshape[NewShape: Flag[_NewShape]](
+    def reshape[NewShape: _Shape](
         self,
         shape: NewShape,
         /,
@@ -337,15 +331,12 @@ class Array[Shape: _Shape = _Shape]:
         out_sharding: _NamedSharding | _PartitionSpec | None = ...,
     ) -> Array[reshape_shape(Shape, NewShape)]: ...
     @overload
-    def reshape[NewShape: IntTuple](self, *shape: *NewShape) -> Array[NewShape]: ...
-    # JAX's variadic spelling is accepted but intentionally not modeled: an
-    # argument list cannot be captured as a `Flag`, so the shape is gradual and
-    # `reshape_shape` never runs, which leaves the `-1` and negative-size checks
-    # to runtime. Accepting it unvalidated is the intended behavior rather than a
-    # gap to close: rejecting it would flag valid and very common JAX, and
-    # modeling it needs a Pyrefly capability that does not exist. The tuple
-    # spelling, `a.reshape((2, 6))`, is both exact and validated. Only the method
-    # is variadic; `jnp.reshape(a, 2, 6)` is an error in JAX itself.
+    def reshape[NewShape: _Shape](
+        self,
+        *shape: *NewShape,
+        order: str = ...,
+        out_sharding: _NamedSharding | _PartitionSpec | None = ...,
+    ) -> Array[reshape_shape(Shape, NewShape)]: ...
     @overload
     def reshape(
         self,

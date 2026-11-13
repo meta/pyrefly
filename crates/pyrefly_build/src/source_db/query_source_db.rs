@@ -1828,8 +1828,8 @@ mod tests {
             serde_json::json!("warn"),
         );
 
-        // A target naming a config still reports it; the default supplies
-        // whatever that config leaves unset.
+        // A target naming a config still reports it, and that config is used
+        // instead of the default.
         assert_eq!(
             db.get_target_config_name(Some(Path::new("/repo/core.py")))
                 .map(|name| name.to_string())

@@ -2198,7 +2198,13 @@ impl<'a> Transaction<'a> {
         let ast = self
             .get_ast(handle)
             .unwrap_or_else(|| Ast::parse(module.contents(), module.source_type()).0.into());
-        let (range, docstring_range) = definition_from_ast(ast.as_ref(), context, name)?;
+        let (range, docstring_range) = definition_from_ast(
+            ast.as_ref(),
+            context,
+            name,
+            *handle.sys_info(),
+            handle.path().style(),
+        )?;
         Some((module, range, docstring_range))
     }
 

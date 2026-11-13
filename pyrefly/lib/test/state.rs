@@ -51,7 +51,6 @@ use crate::config::error_kind::Severity;
 use crate::config::finder::ConfigFinder;
 use crate::error::error::Error;
 use crate::error::error::print_errors;
-use crate::lsp::non_wasm::server::resolve_export_location;
 use crate::module::bundled::BundledStub;
 use crate::module::bundled::set_readonly;
 use crate::module::finder::DirEntryCache;
@@ -63,6 +62,7 @@ use crate::state::require::Require;
 use crate::state::require::RequireLevels;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
+use crate::tsp::type_conversion::resolve_export_location;
 use crate::types::class::Class;
 use crate::types::types::Type;
 

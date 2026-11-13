@@ -449,6 +449,10 @@ fn export_class_fields(
                     definition: ClassFieldDefinition::DefinedInMethod { annotation, .. },
                     ..
                 }) => *annotation,
+                Some(BindingClassField {
+                    definition: ClassFieldDefinition::DefinedWithoutAssign { annotation, .. },
+                    ..
+                }) => *annotation,
                 _ => None,
             }
             .map(|idx| context.answers_context.bindings().idx_to_key(idx))

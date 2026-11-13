@@ -5,9 +5,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::SystemTime;
 
 use dupe::Dupe;
 use pyrefly_config::args::ConfigOverrideArgs;
@@ -16,17 +19,21 @@ use pyrefly_config::config::ConfigSource;
 use pyrefly_config::config::DirectoryRelativeFallbackSearchPathCache;
 use pyrefly_config::config::FallbackSearchPath;
 use pyrefly_config::config::GENERATED_FILE_CONFIG_OVERRIDE;
+use pyrefly_config::environment::script;
 use pyrefly_config::resolve_unconfigured::UnconfiguredOverride;
 use pyrefly_config::resolve_unconfigured::resolve_unconfigured_config;
+use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::lock::Mutex;
 use starlark_map::small_map::SmallMap;
+use tracing::warn;
 
 use crate::config::config::ConfigFile;
 use crate::config::config::ProjectLayout;
 use crate::config::finder::ConfigError;
 use crate::config::finder::ConfigFinder;
+use crate::config::finder::LookupCallback;
 use crate::config::finder::debug_log;
 use crate::module::bundled::BundledStub;
 use crate::module::third_party::BundledThirdParty;
@@ -116,7 +123,7 @@ pub(crate) fn apply_unconfigured_resolver_if_applicable(
     over: UnconfiguredOverride,
 ) {
     if matches!(config.source, ConfigSource::File(_))
-        || config.preset.is_some()
+        || config.root.preset.is_some()
         || config.synthesized_preset_reason.is_some()
     {
         return;
@@ -137,6 +144,158 @@ pub(crate) fn apply_unconfigured_resolver_if_applicable(
     // absolute so the helper is a no-op for them.
     resolved.rewrite_with_path_to_config(root_dir);
     *config = resolved;
+}
+
+/// Gives each PEP 723 script under a config that sets `script-command` its own config, which takes
+/// every setting from the script's directory config except the Python environment: that is the
+/// environment that the script command reports for the script.
+struct ScriptEnvironments {
+    configure: Arc<dyn ConfigConfigurer>,
+    /// Runs a script command to find the interpreter of a script's environment, or `None` if it
+    /// does not exist.
+    find_interpreter: fn(&[String], &Path) -> anyhow::Result<Option<PathBuf>>,
+    /// The config of each Python file under a config that sets `script-command`. An entry is valid
+    /// while the file's modification time and directory config are unchanged, so an edit to a
+    /// script's metadata block takes effect.
+    files: Mutex<SmallMap<PathBuf, Arc<FileEnvironment>>>,
+}
+
+struct FileEnvironment {
+    modified: SystemTime,
+    directory_config: ArcId<ConfigFile>,
+    /// Concurrent lookups of one entry wait for the first one, so the script command runs once
+    /// per entry.
+    config: OnceLock<ArcId<ConfigFile>>,
+}
+
+impl ScriptEnvironments {
+    fn new(configure: Arc<dyn ConfigConfigurer>) -> Self {
+        Self {
+            configure,
+            find_interpreter: script::interpreter,
+            files: Mutex::new(SmallMap::new()),
+        }
+    }
+
+    fn clear(&self) {
+        self.files.lock().clear();
+    }
+
+    /// The config for the Python file at `path`, whose directory config is `directory_config`.
+    fn config(&self, directory_config: ArcId<ConfigFile>, path: &ModulePath) -> ArcId<ConfigFile> {
+        let Some(command) = &directory_config.script_command else {
+            return directory_config;
+        };
+        let file = match path.details() {
+            ModulePathDetails::FileSystem(file) | ModulePathDetails::Memory(file) => file.as_path(),
+            ModulePathDetails::Namespace(_)
+            | ModulePathDetails::BundledTypeshed(_)
+            | ModulePathDetails::BundledTypeshedThirdParty(_)
+            | ModulePathDetails::BundledThirdParty(_) => return directory_config,
+        };
+        // Installed packages and the standard library are never scripts.
+        if file.extension().is_none_or(|extension| extension != "py")
+            || directory_config
+                .site_package_path()
+                .chain(&directory_config.python_environment.interpreter_stdlib_path)
+                .any(|root| file.starts_with(root))
+        {
+            return directory_config;
+        }
+        let Ok(modified) = fs::metadata(file).and_then(|metadata| metadata.modified()) else {
+            return directory_config;
+        };
+        let entry = {
+            let mut files = self.files.lock();
+            match files.get(file) {
+                Some(entry)
+                    if entry.modified == modified && entry.directory_config == directory_config =>
+                {
+                    entry.dupe()
+                }
+                _ => {
+                    let entry = Arc::new(FileEnvironment {
+                        modified,
+                        directory_config: directory_config.dupe(),
+                        config: OnceLock::new(),
+                    });
+                    files.insert(file.to_path_buf(), entry.dupe());
+                    entry
+                }
+            }
+        };
+        entry
+            .config
+            .get_or_init(|| {
+                self.script_config(&directory_config, command, file)
+                    .unwrap_or_else(|| directory_config.dupe())
+            })
+            .dupe()
+    }
+
+    /// The config for `file` if it is a PEP 723 script whose environment exists: its directory
+    /// config, loaded again with the interpreter of the script's environment.
+    fn script_config(
+        &self,
+        directory_config: &ConfigFile,
+        command: &[String],
+        file: &Path,
+    ) -> Option<ArcId<ConfigFile>> {
+        let config_path = match &directory_config.source {
+            ConfigSource::File(path)
+            | ConfigSource::FailedParse(path)
+            | ConfigSource::PythonToolMarker(path)
+            | ConfigSource::Marker(path) => path,
+            // There is no config file to load again with the script's interpreter. `uv check
+            // --script` sets `VIRTUAL_ENV` to the environment of a standalone script.
+            ConfigSource::Synthetic(_) => return None,
+        };
+        script::metadata(&fs::read_to_string(file).ok()?)?;
+        let interpreter = match (self.find_interpreter)(command, file) {
+            Ok(Some(interpreter)) => interpreter,
+            Ok(None) => {
+                warn!(
+                    "PEP 723 script `{}` has no environment, so Pyrefly checks it in its project's environment.",
+                    file.display()
+                );
+                return None;
+            }
+            Err(error) => {
+                warn!("{error:#}");
+                return None;
+            }
+        };
+        // The directory config already reported any errors in the file.
+        let (mut config, _) = ConfigFile::from_file(config_path);
+        config.interpreters.select_python_interpreter(interpreter);
+        let (config, errors) = self
+            .configure
+            .configure(config_path.parent(), config, Vec::new());
+        debug_log(errors);
+        Some(config)
+    }
+}
+
+/// A config finder for project mode, which returns `lookup(path)` for each path instead of the
+/// config that an upward search finds, except that a PEP 723 script gets its own environment when
+/// its config sets `script-command`. `args` and `wrapper` must be the ones that produced the
+/// configs that `lookup` returns.
+pub fn project_config_finder(
+    lookup: LookupCallback,
+    args: ConfigOverrideArgs,
+    wrapper: Option<ConfigConfigurerWrapper>,
+) -> ConfigFinder {
+    let configure: Arc<dyn ConfigConfigurer> =
+        Arc::new(DefaultConfigConfigurerWithOverrides::new(args, false));
+    let configure = match wrapper {
+        Some(wrap) => wrap(configure),
+        None => configure,
+    };
+    let scripts = ScriptEnvironments::new(configure);
+    ConfigFinder::new_lookup(
+        lookup,
+        Box::new(move |config, path| scripts.config(config, path)),
+    )
 }
 
 pub fn default_config_finder(wrapper: Option<ConfigConfigurerWrapper>) -> ConfigFinder {
@@ -204,6 +363,8 @@ pub fn standard_config_finder(
     };
     let configure2 = configure.dupe();
     let configure3 = configure.dupe();
+    let scripts = Arc::new(ScriptEnvironments::new(configure.dupe()));
+    let scripts2 = scripts.dupe();
 
     // A cache where path `p` maps to config file with `search_path = [p]`. If we can find the root.
     let cache_one: Arc<Mutex<SmallMap<PathBuf, ArcId<ConfigFile>>>> =
@@ -227,11 +388,13 @@ pub fn standard_config_finder(
     let cache_empty: Arc<Mutex<Option<ArcId<ConfigFile>>>> = Arc::new(Mutex::new(None));
 
     let clear_extra_caches = {
+        let scripts = scripts.dupe();
         let cache_one = cache_one.dupe();
         let cache_parents = cache_parents.dupe();
         let cache_ancestors = cache_ancestors.dupe();
         let cache_empty = cache_empty.dupe();
         Box::new(move || {
+            scripts.clear();
             cache_one.lock().clear();
             cache_parents.lock().clear();
             cache_ancestors.clear();
@@ -240,16 +403,14 @@ pub fn standard_config_finder(
         })
     };
 
-    let empty = move || {
-        cache_empty
-            .lock()
-            .get_or_insert_with(|| {
-                let (config, errors) = configure3.configure(None, ConfigFile::default(), vec![]);
-                // Since this is a config we generated, these are likely internal errors.
-                debug_log(errors);
-                config
-            })
-            .dupe()
+    let empty = move || -> (ArcId<ConfigFile>, Vec<ConfigError>) {
+        let mut cache = cache_empty.lock();
+        if let Some(config) = cache.as_ref() {
+            return (config.dupe(), Vec::new());
+        }
+        let (config, errors) = configure3.configure(None, ConfigFile::default(), vec![]);
+        *cache = Some(config.dupe());
+        (config, errors)
     };
 
     ConfigFinder::new_custom(
@@ -267,76 +428,73 @@ pub fn standard_config_finder(
         }),
         // Fall back to using a default config, but let's see if we can make the `search_path` somewhat useful
         // based on a few heuristics.
-        Box::new(move |module_kind, path| {
-            let name = module_kind.name();
-            let is_fallback = module_kind.is_fallback();
-            match path.root_of(name) {
-                // We were able to walk up `path` and match each component of `name` to a directory until we ran out.
-                // That means the resulting path is likely the root of the 'project', and should therefore be its `search_path`.
-                Some(path) if !is_fallback => cache_one
-                    .lock()
-                    .entry(path.clone())
-                    .or_insert_with(|| {
+        Box::new(
+            move |module_kind, path| -> (ArcId<ConfigFile>, Vec<ConfigError>) {
+                let name = module_kind.name();
+                let is_fallback = module_kind.is_fallback();
+                match path.root_of(name) {
+                    // We were able to walk up `path` and match each component of `name` to a directory until we ran out.
+                    // That means the resulting path is likely the root of the 'project', and should therefore be its `search_path`.
+                    Some(path) if !is_fallback => {
+                        let mut cache = cache_one.lock();
+                        if let Some(config) = cache.get(&path) {
+                            return (config.dupe(), Vec::new());
+                        }
                         let (config, errors) = configure2.configure(
                             Some(&path),
                             ConfigFile::init_at_root(&path, &ProjectLayout::Flat, true),
                             vec![],
                         );
-                        // Since this is a config we generated, these are likely internal errors.
-                        debug_log(errors);
-                        config
-                    })
-                    .dupe(),
+                        cache.insert(path, config.dupe());
+                        (config, errors)
+                    }
 
-                // We couldn't walk up and find a possible root of the project, so let's try to create a search
-                // path that is still useful for this import by including all of its parents.
-                _ => {
-                    let parent = match path.details() {
-                        ModulePathDetails::FileSystem(x) | ModulePathDetails::Memory(x) => {
-                            if let Some(path) = x.parent() {
-                                path
-                            } else {
-                                return empty();
+                    // We couldn't walk up and find a possible root of the project, so let's try to create a search
+                    // path that is still useful for this import by including all of its parents.
+                    _ => {
+                        let parent = match path.details() {
+                            ModulePathDetails::FileSystem(x) | ModulePathDetails::Memory(x) => {
+                                if let Some(path) = x.parent() {
+                                    path
+                                } else {
+                                    return empty();
+                                }
                             }
+                            ModulePathDetails::Namespace(x) => x.as_path(),
+                            ModulePathDetails::BundledTypeshed(_) => {
+                                return (BundledTypeshedStdlib::config(), Vec::new());
+                            }
+                            ModulePathDetails::BundledTypeshedThirdParty(_) => {
+                                return (BundledTypeshedThirdParty::config(), Vec::new());
+                            }
+                            ModulePathDetails::BundledThirdParty(_) => {
+                                return (BundledThirdParty::config(), Vec::new());
+                            }
+                        };
+                        let mut cache = cache_parents.lock();
+                        if let Some(config) = cache.get(parent) {
+                            return (config.dupe(), Vec::new());
                         }
-                        ModulePathDetails::Namespace(x) => x.as_path(),
-                        ModulePathDetails::BundledTypeshed(_) => {
-                            return BundledTypeshedStdlib::config();
-                        }
-                        ModulePathDetails::BundledTypeshedThirdParty(_) => {
-                            return BundledTypeshedThirdParty::config();
-                        }
-                        ModulePathDetails::BundledThirdParty(_) => {
-                            return BundledThirdParty::config();
-                        }
-                    };
-                    cache_parents
-                        .lock()
-                        .entry(parent.to_owned())
-                        .or_insert_with(|| {
-                            let fallback_search_path =
-                                FallbackSearchPath::Explicit(cache_ancestors.get_ancestors(parent));
-                            let mut config = ConfigFile {
-                                source: ConfigSource::Synthetic(Some(parent.to_owned())),
-                                project_includes: ConfigFile::default_project_includes(),
-                                // We use `fallback_search_path` because otherwise a user with `/sys` on their
-                                // computer (all of them) will override `sys.version` in preference to typeshed.
-                                fallback_search_path,
-                                root: ConfigBase::default_for_ide_without_config(),
-                                ..Default::default()
-                            };
-                            config.rewrite_with_path_to_config(parent);
-                            let (config, errors) =
-                                configure2.configure(Some(parent), config, vec![]);
-                            // Since this is a config we generated, these are likely internal errors.
-                            debug_log(errors);
-                            config
-                        })
-                        .dupe()
+                        let fallback_search_path =
+                            FallbackSearchPath::Explicit(cache_ancestors.get_ancestors(parent));
+                        let mut config = ConfigFile {
+                            source: ConfigSource::Synthetic(Some(parent.to_owned())),
+                            project_includes: ConfigFile::default_project_includes(),
+                            // We use `fallback_search_path` because otherwise a user with `/sys` on their
+                            // computer (all of them) will override `sys.version` in preference to typeshed.
+                            fallback_search_path,
+                            root: ConfigBase::default_for_ide_without_config(),
+                            ..Default::default()
+                        };
+                        config.rewrite_with_path_to_config(parent);
+                        let (config, errors) = configure2.configure(Some(parent), config, vec![]);
+                        cache.insert(parent.to_owned(), config.dupe());
+                        (config, errors)
+                    }
                 }
-            }
-        }),
-        Box::new(|config, _| config),
+            },
+        ),
+        Box::new(move |config, path| scripts2.config(config, path)),
         clear_extra_caches,
     )
 }
@@ -347,6 +505,7 @@ mod tests {
     use std::fs;
     use std::ops::Deref as _;
 
+    use clap::Parser;
     use pretty_assertions::assert_eq;
     use pyrefly_config::args::ConfigOverrideArgs;
     use pyrefly_config::config::ConfigScope;
@@ -354,8 +513,10 @@ mod tests {
     use pyrefly_python::module_name::ModuleNameWithKind;
     use pyrefly_python::module_path::ModulePath;
     use pyrefly_python::module_path::ModulePathDetails;
+    use pyrefly_python::sys_info::PythonVersion;
     use pyrefly_util::includes::Includes;
     use pyrefly_util::test_path::TestPath;
+    use pyrefly_util::thread_pool::ThreadCount;
 
     use super::*;
     use crate::commands::check::Handles;
@@ -364,6 +525,8 @@ mod tests {
     use crate::module::finder::DirEntryCache;
     use crate::module::finder::FindImportOptions;
     use crate::module::finder::find_import;
+    use crate::state::require::Require;
+    use crate::state::state::State;
 
     struct TestConfigurer(
         Box<
@@ -401,6 +564,77 @@ mod tests {
         ) -> (ArcId<ConfigFile>, Vec<ConfigError>) {
             (self.0)(root, config, errors)
         }
+    }
+
+    fn script_environments(
+        find_interpreter: fn(&[String], &Path) -> anyhow::Result<Option<PathBuf>>,
+    ) -> ScriptEnvironments {
+        ScriptEnvironments {
+            find_interpreter,
+            ..ScriptEnvironments::new(Arc::new(DefaultConfigConfigurer {}))
+        }
+    }
+
+    /// The config of a project whose `pyproject.toml` sets `script-command`.
+    fn directory_config(root: &Path) -> ArcId<ConfigFile> {
+        let pyproject = root.join("pyproject.toml");
+        fs::write(&pyproject, "[tool.pyrefly]\nscript-command = [\"uv\", \"workspace\", \"metadata\", \"--script\"]\n").unwrap();
+        let (config, _) = ConfigFile::from_file(&pyproject);
+        DefaultConfigConfigurer {}
+            .configure(Some(root), config, Vec::new())
+            .0
+    }
+
+    #[test]
+    fn test_script_environment() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let script = root.join("script.py");
+        let module = root.join("module.py");
+        fs::write(
+            &script,
+            "# /// script\n# dependencies = [\"six\"]\n# ///\nimport six\n",
+        )
+        .unwrap();
+        fs::write(&module, "import six\n").unwrap();
+        let scripts =
+            script_environments(|_, _| Ok(Some(PathBuf::from("/script-environment/bin/python"))));
+        let directory = directory_config(root);
+        assert!(directory.script_command.is_some());
+
+        let script_config =
+            scripts.config(directory.dupe(), &ModulePath::filesystem(script.clone()));
+        assert_ne!(script_config, directory, "a script gets its own config");
+        assert_eq!(
+            script_config.interpreters.to_string(),
+            "/script-environment/bin/python",
+            "a script runs in the interpreter of its uv environment",
+        );
+        assert_eq!(
+            scripts.config(directory.dupe(), &ModulePath::filesystem(script)),
+            script_config,
+            "an unchanged script reuses its config",
+        );
+        assert_eq!(
+            scripts.config(directory.dupe(), &ModulePath::filesystem(module)),
+            directory,
+            "a file without a script block uses its directory config",
+        );
+    }
+
+    #[test]
+    fn test_script_without_environment() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let script = root.join("script.py");
+        fs::write(&script, "# /// script\n# ///\n").unwrap();
+        let scripts = script_environments(|_, _| Ok(None));
+        let directory = directory_config(root);
+        assert_eq!(
+            scripts.config(directory.dupe(), &ModulePath::filesystem(script)),
+            directory,
+            "a script without an environment uses its directory config",
+        );
     }
 
     #[test]
@@ -860,7 +1094,7 @@ mod tests {
             config.source,
             ConfigSource::Synthetic(Some(root.to_path_buf()))
         );
-        assert_eq!(config.preset, Some(Preset::Basic));
+        assert_eq!(config.root.preset, Some(Preset::Basic));
         assert_eq!(
             config.synthesized_preset_reason,
             Some(SynthesizedPresetReason::NoNearbyConfig)
@@ -878,6 +1112,125 @@ mod tests {
             "carry-over lost `fallback_search_path` from input config; got {:?}",
             config.fallback_search_path,
         );
+    }
+
+    /// A checked target with synthesized configuration still reports the typeshed warning.
+    #[test]
+    fn test_unconfigured_project_reports_outdated_python_version_warning() {
+        use clap::Parser;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir("pkg", vec![TestPath::file("mod.py")])],
+        );
+
+        let args = ConfigOverrideArgs::try_parse_from([
+            "pyrefly",
+            "--python-version",
+            "3.9",
+            "--skip-interpreter-query",
+        ])
+        .unwrap();
+        let finder = default_config_finder_with_overrides(args, false, None);
+        let config = finder.python_file(
+            ModuleNameWithKind::guaranteed(ModuleName::from_str("pkg.mod")),
+            &ModulePath::filesystem(root.join("pkg/mod.py")),
+        );
+
+        assert_eq!(config.python_version(), PythonVersion::new(3, 9, 0));
+        let (_, _, sourcedb_errors) = Handles::new([root.join("pkg/mod.py")]).all(&finder);
+        assert!(sourcedb_errors.is_empty());
+        let messages: Vec<String> = finder
+            .errors()
+            .iter()
+            .map(|error| error.get_message())
+            .collect();
+        assert!(
+            messages.iter().any(|message| message
+                .contains("older than the oldest version described by the bundled typeshed stubs")),
+            "expected the outdated Python version warning from the synthesized config, got: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn test_typeshed_warning_with_external_dependency() {
+        for (version, warning_count) in [
+            (PythonVersion::new(3, 12, 0), 0),
+            (PythonVersion::new(3, 9, 0), 1),
+        ] {
+            let tempdir = tempfile::tempdir().unwrap();
+            let project = tempdir.path().join("project");
+            let site_packages = tempdir.path().join("site-packages");
+            fs::create_dir_all(&project).unwrap();
+            fs::create_dir_all(&site_packages).unwrap();
+            fs::write(
+                project.join("pyrefly.toml"),
+                format!("python-version = \"{version}\"\n"),
+            )
+            .unwrap();
+            let main = project.join("main.py");
+            fs::write(&main, "import dependency\nvalue: int = dependency.value\n").unwrap();
+            fs::write(site_packages.join("dependency.py"), "value: int = 42\n").unwrap();
+
+            let finder = TestConfigurer::new_standard(move |root, mut config, mut errors| {
+                // Model an external Python 3.9 environment without querying a real interpreter.
+                config.interpreters.skip_interpreter_query = true;
+                config
+                    .python_environment
+                    .python_version
+                    .get_or_insert(PythonVersion::new(3, 9, 0));
+                config.python_environment.site_package_path = Some(vec![site_packages.clone()]);
+                errors.extend(config.configure_at(root));
+                (ArcId::new(config), errors)
+            });
+            let state = State::new(finder, ThreadCount::Inline);
+            let (handles, _, sourcedb_errors) = Handles::new([main]).all(state.config_finder());
+            assert!(sourcedb_errors.is_empty());
+            assert_eq!(handles[0].sys_info().version(), version);
+            let mut transaction = state.new_transaction(Require::Exports, None);
+            transaction.run(&handles, Require::Errors, None);
+            assert!(
+                transaction
+                    .get_errors(&handles)
+                    .collect_errors()
+                    .ordinary
+                    .is_empty()
+            );
+            let warnings = transaction.get_config_errors();
+            assert_eq!(warnings.len(), warning_count);
+        }
+    }
+
+    #[test]
+    fn test_typeshed_warning_for_multiple_target_directories() {
+        for configured in [false, true] {
+            let tempdir = tempfile::tempdir().unwrap();
+            let mut files = Vec::new();
+            for directory in ["a", "b"] {
+                let root = tempdir.path().join(directory);
+                fs::create_dir_all(&root).unwrap();
+                let file = root.join("main.py");
+                fs::write(&file, "value: int = 42\n").unwrap();
+                files.push(file);
+                if configured {
+                    fs::write(root.join("pyrefly.toml"), "python-version = \"3.9\"\n").unwrap();
+                }
+            }
+            let args = ConfigOverrideArgs::try_parse_from([
+                "pyrefly",
+                "--python-version",
+                "3.9",
+                "--skip-interpreter-query",
+            ])
+            .unwrap();
+            let finder = default_config_finder_with_overrides(args, false, None);
+            let (_, _, sourcedb_errors) = Handles::new(files).all(&finder);
+            // Consumers of this slot treat any entry as a fatal source-database failure.
+            assert!(sourcedb_errors.is_empty());
+            assert_eq!(finder.errors().len(), if configured { 2 } else { 1 });
+        }
     }
 
     #[test]
@@ -930,7 +1283,7 @@ mod tests {
             &ModulePath::filesystem(root.join("pkg/mod.py")),
         );
 
-        assert_eq!(config.preset, Some(Preset::Legacy));
+        assert_eq!(config.root.preset, Some(Preset::Legacy));
         assert_eq!(
             config.synthesized_preset_reason,
             Some(SynthesizedPresetReason::Migrated(MigratedFromKind::Mypy(
@@ -972,7 +1325,7 @@ mod tests {
             &ModulePath::filesystem(root.join("pkg/mod.py")),
         );
 
-        assert_eq!(config.preset, None);
+        assert_eq!(config.root.preset, None);
         assert_eq!(
             config.synthesized_preset_reason,
             Some(SynthesizedPresetReason::Migrated(
@@ -1001,14 +1354,14 @@ mod tests {
         let workspace_preset = Arc::new(Mutex::new(Preset::Strict));
         let workspace_preset_for_closure = workspace_preset.clone();
         let finder = TestConfigurer::new_standard(move |_, mut config, _| {
-            config.preset = Some(*workspace_preset_for_closure.lock().unwrap());
+            config.root.preset = Some(*workspace_preset_for_closure.lock().unwrap());
             (ArcId::new(config), Vec::new())
         });
 
         // `/` has no parent, so `python_file` routes to `empty.dupe()`.
         let path = ModulePath::filesystem(PathBuf::from("/"));
         let cfg1 = finder.python_file(ModuleNameWithKind::guaranteed(ModuleName::unknown()), &path);
-        assert_eq!(cfg1.preset, Some(Preset::Strict));
+        assert_eq!(cfg1.root.preset, Some(Preset::Strict));
 
         // Mutate the workspace state and tell the finder to reload —
         // the same sequence the LSP runs on a config-change event.
@@ -1017,7 +1370,7 @@ mod tests {
 
         let cfg2 = finder.python_file(ModuleNameWithKind::guaranteed(ModuleName::unknown()), &path);
         assert_eq!(
-            cfg2.preset,
+            cfg2.root.preset,
             Some(Preset::Basic),
             "`empty` cache should reset on `ConfigFinder::clear`",
         );

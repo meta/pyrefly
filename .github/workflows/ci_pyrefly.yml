@@ -21,6 +21,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check_wasi:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: stable
+        targets: wasm32-wasip1
+    - name: set up rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: pyrefly-wasi
+    - uses: ./.github/actions/setup-wasi-sdk
+    - name: Build the WASI sandbox
+      run: cargo build -p pyrefly_wasm --lib --target wasm32-wasip1 --locked
+
   test:
     runs-on: ${{ matrix.os }}
 

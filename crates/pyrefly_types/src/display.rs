@@ -40,6 +40,7 @@ use crate::literal::Lit;
 use crate::quantified::Quantified;
 use crate::quantified::QuantifiedIdentity;
 use crate::quantified::QuantifiedKind;
+use crate::quantified::TypeVarLike;
 use crate::shaped_array::IntTuple;
 use crate::shaped_array::IntTupleView;
 use crate::shaped_array::is_tuple_carrier_shape_middle;
@@ -3727,6 +3728,7 @@ def overloaded_func[T](
             Identifier::new(Name::new("Ts"), TextRange::empty(TextSize::new(70))),
             mi,
             None,
+            PreInferenceVariance::Invariant,
         );
         let t = Type::TypeVarTuple(tv_tuple);
         let parts = get_parts(&t);
@@ -3768,6 +3770,7 @@ def overloaded_func[T](
             Identifier::new(Name::new("P"), TextRange::empty(TextSize::new(75))),
             mi,
             None,
+            PreInferenceVariance::Invariant,
         );
         let t = Type::ParamSpec(param_spec);
         let parts = get_parts(&t);

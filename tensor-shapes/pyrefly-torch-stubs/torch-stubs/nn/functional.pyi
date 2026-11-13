@@ -1303,7 +1303,7 @@ def interpolate(
 @overload
 def interpolate(
     self: Tensor,
-    size: int | tuple[int, ...] | None = None,
+    size: int | tuple[int, ...] | list[builtins.int] | None = None,
     scale_factor: int | float | tuple[int | float, ...] | None = None,
     mode: str = "nearest",
     align_corners: bool | None = None,

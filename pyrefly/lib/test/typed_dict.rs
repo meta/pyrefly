@@ -1972,7 +1972,7 @@ testcase!(
     r#"
 def test(xs: list[str]):
     dict(*{"a": 2})  # E:
-    dict(*xs)  # E:
+    dict(*xs)
     dict()
     dict(a=1)
     dict({"a": 1})

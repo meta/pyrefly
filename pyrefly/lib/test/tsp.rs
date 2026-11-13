@@ -7,3 +7,4 @@
 
 #![cfg(test)]
 pub mod tsp_interaction;
+mod type_conversion;

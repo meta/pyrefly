@@ -67,7 +67,6 @@ use ruff_python_ast::FStringPartRef;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::InterpolatedStringElement;
 use ruff_python_ast::InterpolatedStringElements;
-use ruff_python_ast::Keyword;
 use ruff_python_ast::Number;
 use ruff_python_ast::Operator;
 use ruff_python_ast::StringLiteralValue;
@@ -123,17 +122,14 @@ use crate::types::class::Class;
 use crate::types::class::ClassType;
 use crate::types::facet::FacetKind;
 use crate::types::literal::Lit;
-use crate::types::param_spec::ParamSpec;
 use crate::types::quantified::Quantified;
 use crate::types::quantified::QuantifiedKind;
+use crate::types::quantified::TypeVarLike;
 use crate::types::sentinel::Sentinel;
 use crate::types::special_form::SpecialForm;
 use crate::types::tuple::Tuple;
 use crate::types::type_info::TypeInfo;
-use crate::types::type_var::PreInferenceVariance;
 use crate::types::type_var::Restriction;
-use crate::types::type_var::TypeVar;
-use crate::types::type_var_tuple::TypeVarTuple;
 use crate::types::types::AnyStyle;
 use crate::types::types::Type;
 
@@ -2867,13 +2863,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let attr_errors = self.error_collector();
         let result = self.attr_infer(base, &x.attr.id, x.range, &attr_errors, None);
         // An error `Any` is reported where it arises, not at every access it flows through: a
-        // failed access, such as a missing attribute, is itself the cause, and an access on a base
-        // that is already an error `Any` only propagates it.
-        let from_error_here = !attr_errors.has_hard()
-            && !matches!(
-                base.ty(),
-                Type::Any(AnyStyle::Error | AnyStyle::MissingImport)
-            );
+        // failed access, such as a missing attribute, is itself the cause. Reading a base that is
+        // already an error `Any`, or a narrowed facet that stands in for a missing attribute, only
+        // propagates an error that was already reported. A declared attribute whose own type is an
+        // error is not missing, so reading it keeps reporting even once it has been narrowed.
+        let from_error_here = result.ty().is_error()
+            && !attr_errors.has_hard()
+            && !base.ty().is_error()
+            && !(base
+                .type_at_facet(&FacetKind::Attribute(x.attr.id.clone()))
+                .is_some_and(Type::is_error)
+                && self.attr_error_from_missing(base.ty(), &x.attr.id));
         errors.extend(attr_errors);
         match result.ty() {
             // Like pyright, every access whose type is an implicit `Any` is reported, including
@@ -3090,25 +3090,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
-    fn literal_bool_infer(&self, x: &Expr, errors: &ErrorCollector) -> bool {
-        let ty = self.expr_infer(x, errors);
-        match ty {
-            Type::Literal(lit) if let Lit::Bool(b) = lit.value => b,
-            _ => {
-                self.error(
-                    errors,
-                    x.range(),
-                    ErrorKind::InvalidLiteral,
-                    format!(
-                        "Expected literal `True` or `False`, got `{}`",
-                        self.for_display(ty)
-                    ),
-                );
-                false
-            }
-        }
-    }
-
     pub fn sentinel_from_call(
         &self,
         assignment_name: Identifier,
@@ -3173,10 +3154,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             match &kw.arg {
                 Some(id) => match id.id.as_str() {
                     "repr" => {
+                        // The `Sentinel` constructor accepts `repr: str | None`.
                         let got = self.expr_infer(&kw.value, errors);
-                        if !self
-                            .is_subset_eq(&got, &self.heap.mk_class_type(self.stdlib.str().clone()))
-                        {
+                        if !self.is_subset_eq(
+                            &got,
+                            &self
+                                .heap
+                                .mk_optional(self.heap.mk_class_type(self.stdlib.str().clone())),
+                        ) {
                             self.error(
                                 errors,
                                 kw.range,
@@ -3206,404 +3191,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
 
         Sentinel::new(sentinel_name, nesting_context, self.module().dupe())
-    }
-
-    pub fn typevar_from_call(
-        &self,
-        name: Identifier,
-        x: &ExprCall,
-        kind: QuantifiedKind,
-        errors: &ErrorCollector,
-    ) -> TypeVar {
-        let construct = kind.to_string();
-        let mut arg_name = false;
-        let mut restriction = None;
-        let mut default: Option<&Expr> = None;
-        let mut variance = None;
-
-        let check_name_arg = |arg: &Expr| {
-            if let Expr::StringLiteral(lit) = arg {
-                if lit.value.to_str() != name.id.as_str() {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::InvalidTypeVar,
-                        format!(
-                            "{construct} must be assigned to a variable named `{}`",
-                            lit.value.to_str()
-                        ),
-                    );
-                }
-            } else {
-                self.error(
-                    errors,
-                    arg.range(),
-                    ErrorKind::InvalidTypeVar,
-                    format!("Expected first argument of {construct} to be a string literal"),
-                );
-            }
-        };
-
-        let mut try_set_variance = |kw: &Keyword, v: PreInferenceVariance| {
-            if self.literal_bool_infer(&kw.value, errors) {
-                if variance.is_some() {
-                    self.error(
-                        errors,
-                        kw.range,
-                        ErrorKind::InvalidTypeVar,
-                        "Contradictory variance specifications".to_owned(),
-                    );
-                } else {
-                    variance = Some(v);
-                }
-            }
-        };
-
-        let mut iargs = x.arguments.args.iter();
-        if let Some(arg) = iargs.next() {
-            check_name_arg(arg);
-            arg_name = true;
-        }
-
-        let constraints: Vec<Type> = iargs
-            .map(|arg| self.expr_untype(arg, TypeFormContext::TypeVarConstraint, errors))
-            .collect();
-        if !constraints.is_empty() {
-            restriction = Some(Restriction::Constraints(constraints));
-        }
-
-        for kw in &x.arguments.keywords {
-            match &kw.arg {
-                Some(id) => match id.id.as_str() {
-                    "bound" => {
-                        let bound =
-                            self.expr_untype(&kw.value, TypeFormContext::TypeVarConstraint, errors);
-                        if restriction.is_some() {
-                            self.error(
-                                errors,
-                                kw.range,
-                                ErrorKind::InvalidTypeVar,
-                                format!("{construct} cannot have both constraints and bound"),
-                            );
-                            restriction = Some(Restriction::Unrestricted);
-                        } else if self.reject_legacy_shape_extension_bound(
-                            &bound,
-                            kw.value.range(),
-                            errors,
-                        ) {
-                            restriction = Some(Restriction::Unrestricted);
-                        } else {
-                            restriction = Some(Restriction::Bound(bound));
-                        }
-                    }
-                    "default" => {
-                        default = Some(&kw.value);
-                    }
-                    "covariant" => try_set_variance(kw, PreInferenceVariance::Covariant),
-                    "contravariant" => try_set_variance(kw, PreInferenceVariance::Contravariant),
-                    "invariant" => try_set_variance(kw, PreInferenceVariance::Invariant),
-                    "infer_variance" => try_set_variance(kw, PreInferenceVariance::Undefined),
-                    "name" => {
-                        if arg_name {
-                            self.error(
-                                errors,
-                                kw.range,
-                                ErrorKind::InvalidTypeVar,
-                                "Multiple values for argument `name`".to_owned(),
-                            );
-                        } else {
-                            check_name_arg(&kw.value);
-                            arg_name = true;
-                        }
-                    }
-                    _ => {
-                        self.error(
-                            errors,
-                            kw.range,
-                            ErrorKind::InvalidTypeVar,
-                            format!("Unexpected keyword argument `{}` to {construct}", id.id),
-                        );
-                    }
-                },
-                _ => {
-                    self.error(
-                        errors,
-                        kw.range,
-                        ErrorKind::InvalidTypeVar,
-                        format!("Cannot pass unpacked keyword arguments to {construct}"),
-                    );
-                }
-            }
-        }
-
-        if !arg_name {
-            self.error(
-                errors,
-                x.range(),
-                ErrorKind::InvalidTypeVar,
-                "Missing `name` argument".to_owned(),
-            );
-        }
-        // If we ended up with a single constraint, emit an error and treat as unrestricted.
-        if let Some(Restriction::Constraints(cs)) = &restriction
-            && cs.len() < 2
-        {
-            self.error(
-                errors,
-                x.range(),
-                ErrorKind::InvalidTypeVar,
-                format!(
-                    "Expected at least 2 constraints in {construct} `{}`, got {}",
-                    name.id,
-                    cs.len(),
-                ),
-            );
-            restriction = Some(Restriction::Unrestricted);
-        }
-        let restriction = restriction.unwrap_or(Restriction::Unrestricted);
-        let mut default_value = None;
-        if let Some(default_expr) = default {
-            let default_ty = if let Some(default) =
-                self.parse_int_tuple_type_var_default(default_expr, &restriction, errors)
-            {
-                default
-            } else {
-                self.expr_untype(
-                    default_expr,
-                    TypeFormContext::quantified_kind_default(kind),
-                    errors,
-                )
-            };
-            default_value = Some(self.validate_type_var_default(
-                &name.id,
-                kind,
-                &default_ty,
-                default_expr.range(),
-                &restriction,
-                errors,
-            ));
-        }
-
-        let variance = variance.unwrap_or(PreInferenceVariance::Invariant);
-
-        TypeVar::new_with_kind(
-            name,
-            self.module().dupe(),
-            kind,
-            restriction,
-            default_value,
-            variance,
-        )
-    }
-
-    pub fn paramspec_from_call(
-        &self,
-        name: Identifier,
-        x: &ExprCall,
-        errors: &ErrorCollector,
-    ) -> ParamSpec {
-        // TODO: check and complain on extra args, keywords
-        let mut arg_name = false;
-
-        let check_name_arg = |arg: &Expr| {
-            if let Expr::StringLiteral(lit) = arg {
-                if lit.value.to_str() != name.id.as_str() {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::InvalidParamSpec,
-                        format!(
-                            "ParamSpec must be assigned to a variable named `{}`",
-                            lit.value.to_str()
-                        ),
-                    );
-                }
-            } else {
-                self.error(
-                    errors,
-                    arg.range(),
-                    ErrorKind::InvalidParamSpec,
-                    "Expected first argument of ParamSpec to be a string literal".to_owned(),
-                );
-            }
-        };
-
-        if let Some(arg) = x.arguments.args.first() {
-            check_name_arg(arg);
-            arg_name = true;
-        }
-        let mut default = None;
-        for kw in &x.arguments.keywords {
-            match &kw.arg {
-                Some(id) => match id.id.as_str() {
-                    "name" => {
-                        if arg_name {
-                            self.error(
-                                errors,
-                                kw.range,
-                                ErrorKind::InvalidParamSpec,
-                                "Multiple values for argument `name`".to_owned(),
-                            );
-                        } else {
-                            check_name_arg(&kw.value);
-                            arg_name = true;
-                        }
-                    }
-                    "default" => {
-                        default = Some((
-                            self.expr_untype(&kw.value, TypeFormContext::ParamSpecDefault, errors),
-                            kw.range(),
-                        ));
-                    }
-                    _ => {
-                        self.error(
-                            errors,
-                            kw.range,
-                            ErrorKind::InvalidParamSpec,
-                            format!("Unexpected keyword argument `{}` to ParamSpec", id.id),
-                        );
-                    }
-                },
-                _ => {
-                    self.error(
-                        errors,
-                        kw.range,
-                        ErrorKind::InvalidParamSpec,
-                        "Cannot pass unpacked keyword arguments to ParamSpec".to_owned(),
-                    );
-                }
-            }
-        }
-
-        if !arg_name {
-            self.error(
-                errors,
-                x.range(),
-                ErrorKind::InvalidParamSpec,
-                "Missing `name` argument".to_owned(),
-            );
-        }
-        let mut default_value = None;
-        if let Some((default_ty, default_range)) = default {
-            default_value = Some(self.validate_type_var_default(
-                &name.id,
-                QuantifiedKind::ParamSpec,
-                &default_ty,
-                default_range,
-                &Restriction::Unrestricted,
-                errors,
-            ));
-        }
-        ParamSpec::new(name, self.module().dupe(), default_value)
-    }
-
-    pub fn typevartuple_from_call(
-        &self,
-        name: Identifier,
-        x: &ExprCall,
-        errors: &ErrorCollector,
-    ) -> TypeVarTuple {
-        let mut arg_name = false;
-        let check_name_arg = |arg: &Expr| {
-            if let Expr::StringLiteral(lit) = arg {
-                if lit.value.to_str() != name.id.as_str() {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::InvalidTypeVarTuple,
-                        format!(
-                            "TypeVarTuple must be assigned to a variable named `{}`",
-                            lit.value.to_str()
-                        ),
-                    );
-                }
-            } else {
-                self.error(
-                    errors,
-                    arg.range(),
-                    ErrorKind::InvalidTypeVarTuple,
-                    "Expected first argument of TypeVarTuple to be a string literal".to_owned(),
-                );
-            }
-        };
-        if let Some(arg) = x.arguments.args.first() {
-            check_name_arg(arg);
-            arg_name = true;
-        }
-        if let Some(arg) = x.arguments.args.get(1) {
-            self.error(
-                errors,
-                arg.range(),
-                ErrorKind::InvalidTypeVarTuple,
-                "Unexpected positional argument to TypeVarTuple".to_owned(),
-            );
-        }
-        let mut default = None;
-        for kw in &x.arguments.keywords {
-            match &kw.arg {
-                Some(id) => match id.id.as_str() {
-                    "name" => {
-                        if arg_name {
-                            self.error(
-                                errors,
-                                kw.range,
-                                ErrorKind::InvalidTypeVarTuple,
-                                "Multiple values for argument `name`".to_owned(),
-                            );
-                        } else {
-                            check_name_arg(&kw.value);
-                            arg_name = true;
-                        }
-                    }
-                    "default" => {
-                        default = Some((
-                            self.expr_untype(
-                                &kw.value,
-                                TypeFormContext::TypeVarTupleDefault,
-                                errors,
-                            ),
-                            kw.range(),
-                        ));
-                    }
-                    _ => {
-                        self.error(
-                            errors,
-                            kw.range,
-                            ErrorKind::InvalidTypeVarTuple,
-                            format!("Unexpected keyword argument `{}` to TypeVarTuple", id.id),
-                        );
-                    }
-                },
-                _ => {
-                    self.error(
-                        errors,
-                        kw.range,
-                        ErrorKind::InvalidTypeVarTuple,
-                        "Cannot pass unpacked keyword arguments to TypeVarTuple".to_owned(),
-                    );
-                }
-            }
-        }
-        if !arg_name {
-            self.error(
-                errors,
-                x.range(),
-                ErrorKind::InvalidTypeVarTuple,
-                "Missing `name` argument".to_owned(),
-            );
-        }
-        let mut default_value = None;
-        if let Some((default_ty, default_range)) = default {
-            default_value = Some(self.validate_type_var_default(
-                &name.id,
-                QuantifiedKind::TypeVarTuple,
-                &default_ty,
-                default_range,
-                &Restriction::Unrestricted,
-                errors,
-            ));
-        }
-        TypeVarTuple::new(name, self.module().dupe(), default_value)
     }
 
     /// Infer an ordinary list after contextual-hint decomposition.

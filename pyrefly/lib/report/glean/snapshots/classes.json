@@ -1660,6 +1660,33 @@
           "spans": [
             {
               "length": 4,
+              "start": 122
+            },
+            {
+              "length": 4,
+              "start": 186
+            },
+            {
+              "length": 4,
+              "start": 278
+            }
+          ],
+          "target": {
+            "id": 0,
+            "key": "classes.Animal.name"
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "classes.py"
+          },
+          "spans": [
+            {
+              "length": 4,
               "start": 129
             }
           ],
@@ -1685,29 +1712,6 @@
           "target": {
             "id": 0,
             "key": "classes.Animal.speak.<locals>.self"
-          }
-        }
-      },
-      {
-        "id": 0,
-        "key": {
-          "file": {
-            "id": 0,
-            "key": "classes.py"
-          },
-          "spans": [
-            {
-              "length": 4,
-              "start": 186
-            },
-            {
-              "length": 4,
-              "start": 278
-            }
-          ],
-          "target": {
-            "id": 0,
-            "key": "classes.Animal.name"
           }
         }
       },
@@ -2058,6 +2062,44 @@
           "spans": [
             {
               "length": 4,
+              "start": 122
+            },
+            {
+              "length": 4,
+              "start": 186
+            },
+            {
+              "length": 4,
+              "start": 278
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "classes.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "classes.Animal.name"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "classes.py"
+          },
+          "spans": [
+            {
+              "length": 4,
               "start": 129
             }
           ],
@@ -2102,40 +2144,6 @@
                 "name": {
                   "id": 0,
                   "key": "classes.Animal.speak.<locals>.self"
-                }
-              }
-            }
-          }
-        }
-      },
-      {
-        "id": 0,
-        "key": {
-          "file": {
-            "id": 0,
-            "key": "classes.py"
-          },
-          "spans": [
-            {
-              "length": 4,
-              "start": 186
-            },
-            {
-              "length": 4,
-              "start": 278
-            }
-          ],
-          "target": {
-            "local": {
-              "id": 0,
-              "key": {
-                "file": {
-                  "id": 0,
-                  "key": "classes.py"
-                },
-                "name": {
-                  "id": 0,
-                  "key": "classes.Animal.name"
                 }
               }
             }
@@ -2513,6 +2521,22 @@
             {
               "source": {
                 "length": 4,
+                "start": 122
+              },
+              "target": {
+                "file": {
+                  "id": 0,
+                  "key": "classes.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "classes.Animal.name"
+                }
+              }
+            },
+            {
+              "source": {
+                "length": 4,
                 "start": 129
               },
               "target": {
@@ -2830,6 +2854,16 @@
               "target": {
                 "id": 0,
                 "key": "classes.Animal.__init__.<locals>.self"
+              }
+            },
+            {
+              "source": {
+                "length": 4,
+                "start": 122
+              },
+              "target": {
+                "id": 0,
+                "key": "classes.Animal.name"
               }
             },
             {

@@ -183,6 +183,7 @@ use crate::types::quantified::Quantified;
 use crate::types::quantified::QuantifiedIdentity;
 use crate::types::quantified::QuantifiedKind;
 use crate::types::quantified::QuantifiedOrigin;
+use crate::types::quantified::TypeVarLike;
 use crate::types::special_form::SpecialForm;
 use crate::types::tuple::Tuple;
 use crate::types::type_alias::TypeAlias;
@@ -209,9 +210,7 @@ use crate::types::types::Type;
 struct LegacyTypeParamCollector {
     module: ModuleName,
     alias_anchor: TextRange,
-    seen_type_vars: SmallMap<TypeVar, Quantified>,
-    seen_type_var_tuples: SmallMap<TypeVarTuple, Quantified>,
-    seen_param_specs: SmallMap<ParamSpec, Quantified>,
+    seen: SmallMap<Type, Quantified>,
     tparams: Vec<(TextRange, Quantified)>,
 }
 
@@ -220,82 +219,27 @@ impl LegacyTypeParamCollector {
         Self {
             module,
             alias_anchor,
-            seen_type_vars: SmallMap::new(),
-            seen_type_var_tuples: SmallMap::new(),
-            seen_param_specs: SmallMap::new(),
+            seen: SmallMap::new(),
             tparams: Vec::new(),
         }
     }
 
-    fn quantify_type_var(&mut self, tv: &TypeVar) -> Quantified {
-        match self.seen_type_vars.entry(tv.dupe()) {
-            Entry::Occupied(e) => e.get().clone(),
-            Entry::Vacant(e) => {
-                let range = tv.qname().range();
-                let identity = QuantifiedIdentity::new(
-                    self.module,
-                    AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
-                    QuantifiedOrigin::ScopedLegacy,
-                );
-                let q = Quantified::from_type_var(tv, identity);
-                e.insert(q.clone());
-                self.tparams.push((range, q.clone()));
-                q
-            }
-        }
-    }
-
-    fn quantify_type_var_tuple(&mut self, tvt: &TypeVarTuple) -> Quantified {
-        match self.seen_type_var_tuples.entry(tvt.dupe()) {
-            Entry::Occupied(e) => e.get().clone(),
-            Entry::Vacant(e) => {
-                let range = tvt.qname().range();
-                let identity = QuantifiedIdentity::new(
-                    self.module,
-                    AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
-                    QuantifiedOrigin::ScopedLegacy,
-                );
-                let q = Quantified::type_var_tuple(
-                    tvt.qname().id().clone(),
-                    identity,
-                    tvt.default().cloned(),
-                );
-                e.insert(q.clone());
-                self.tparams.push((range, q.clone()));
-                q
-            }
-        }
-    }
-
-    fn quantify_param_spec(&mut self, ps: &ParamSpec) -> Quantified {
-        match self.seen_param_specs.entry(ps.dupe()) {
-            Entry::Occupied(e) => e.get().clone(),
-            Entry::Vacant(e) => {
-                let range = ps.qname().range();
-                let identity = QuantifiedIdentity::new(
-                    self.module,
-                    AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
-                    QuantifiedOrigin::ScopedLegacy,
-                );
-                let q = Quantified::param_spec(
-                    ps.qname().id().clone(),
-                    identity,
-                    ps.default().cloned(),
-                );
-                e.insert(q.clone());
-                self.tparams.push((range, q.clone()));
-                q
-            }
-        }
-    }
-
     fn quantify_type(&mut self, ty: &Type) -> Option<Quantified> {
-        match ty {
-            Type::TypeVar(tv) => Some(self.quantify_type_var(tv)),
-            Type::TypeVarTuple(tvt) => Some(self.quantify_type_var_tuple(tvt)),
-            Type::ParamSpec(ps) => Some(self.quantify_param_spec(ps)),
-            _ => None,
-        }
+        let x = ty.as_type_var_like()?;
+        Some(match self.seen.entry(ty.clone()) {
+            Entry::Occupied(e) => e.get().clone(),
+            Entry::Vacant(e) => {
+                let identity = QuantifiedIdentity::new(
+                    self.module,
+                    AnchorIndex::new(self.alias_anchor, self.tparams.len() as u32),
+                    QuantifiedOrigin::ScopedLegacy,
+                );
+                let q = Quantified::from_type_var_like(x, identity);
+                e.insert(q.clone());
+                self.tparams.push((x.qname().range(), q.clone()));
+                q
+            }
+        })
     }
 }
 
@@ -542,40 +486,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // anchor. This gives each (scope, TypeVar) pair a distinct Quantified even when multiple
         // scopes import and reuse the same module-level TypeVar declaration.
         let module = self.module().name();
-        match maybe_parameter.ty() {
-            Type::TypeVar(x) => {
+        let ty = maybe_parameter.ty();
+        match ty.as_type_var_like() {
+            Some(x) => {
                 let identity = QuantifiedIdentity::new(
                     module,
                     AnchorIndex::first(scope_anchor),
                     QuantifiedOrigin::ScopedLegacy,
                 );
-                let q = Quantified::from_type_var(x, identity);
-                LegacyTypeParameterLookup::Parameter(q)
+                LegacyTypeParameterLookup::Parameter(Quantified::from_type_var_like(x, identity))
             }
-            Type::TypeVarTuple(x) => {
-                let identity = QuantifiedIdentity::new(
-                    module,
-                    AnchorIndex::first(scope_anchor),
-                    QuantifiedOrigin::ScopedLegacy,
-                );
-                let q = Quantified::type_var_tuple(
-                    x.qname().id().clone(),
-                    identity,
-                    x.default().cloned(),
-                );
-                LegacyTypeParameterLookup::Parameter(q)
-            }
-            Type::ParamSpec(x) => {
-                let identity = QuantifiedIdentity::new(
-                    module,
-                    AnchorIndex::first(scope_anchor),
-                    QuantifiedOrigin::ScopedLegacy,
-                );
-                let q =
-                    Quantified::param_spec(x.qname().id().clone(), identity, x.default().cloned());
-                LegacyTypeParameterLookup::Parameter(q)
-            }
-            ty => LegacyTypeParameterLookup::NotParameter(ty.clone()),
+            None => LegacyTypeParameterLookup::NotParameter(ty.clone()),
         }
     }
 
@@ -2395,7 +2316,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Validates `tparams` and returns a validated `TParams`.
-    /// References to out-of-scope legacy type variables are replaced with gradual fallbacks.
+    /// Free type variable references in defaults must belong to earlier parameters in `tparams`.
+    /// Out-of-scope references are reported and replaced with gradual fallbacks.
     pub fn validated_tparams(
         &self,
         range: TextRange,
@@ -2428,6 +2350,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             if let Some(default) = &mut tparam.default {
                 let mut out_of_scope_names = Vec::new();
+                // Legacy references are resolved by name; quantified references below use identity.
                 default.transform_types_in_type_variable_positions(&mut |ty| {
                     let (name, kind) = match &*ty {
                         Type::TypeVar(t) => (t.qname().id(), QuantifiedKind::TypeVar),
@@ -2443,6 +2366,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         }
                     };
                 });
+                // Select written dependencies without inspecting implicit `Self` or class metadata.
+                let mut quantified_replacements = SmallMap::new();
+                default.for_each_free_quantified(&mut |q| {
+                    let replacement = match seen.get(q.name()) {
+                        Some(previous) if *previous == q => (**previous).clone().to_type(self.heap),
+                        _ => {
+                            out_of_scope_names.push(q.name().clone());
+                            Quantified::as_gradual_type_helper(q.kind(), None)
+                        }
+                    };
+                    quantified_replacements.insert(q.clone(), replacement);
+                });
+                if !quantified_replacements.is_empty() {
+                    default.subst_mut_fn(&mut |q| quantified_replacements.get(q).cloned());
+                }
                 if !out_of_scope_names.is_empty() {
                     self.error(
                         errors,
@@ -3868,14 +3806,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if reflected_of_generated_on_cls.is_empty() {
             return;
         }
-        let base_generators = class_bases.iter_with_ranges().filter_map(|(base, range)| {
-            let base = base.class_object();
-            self.get_metadata_for_class(base).dataclass_metadata()?;
-            let generator = reflected_of_generated_on_cls
-                .iter()
-                .find_map(|reflected| generator_for(base, reflected))?;
-            Some((generator, range))
-        });
+        let base_generators = class_bases
+            .iter_with_positions()
+            .filter_map(|(base, position)| {
+                let base = base.class_object();
+                self.get_metadata_for_class(base).dataclass_metadata()?;
+                let generator = reflected_of_generated_on_cls
+                    .iter()
+                    .find_map(|reflected| generator_for(base, reflected))?;
+                Some((generator, self.class_base_range(cls, position)))
+            });
         for (generator, range) in base_generators {
             errors
                 .error_builder(
@@ -4148,24 +4088,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // with a narrower variance. We only check invariant TypeVars here
         // because wrong variance on covariant/contravariant TypeVars is
         // already caught by InvalidVariance at the usage site.
-        // Constraints often enumerate unrelated alternatives, making narrower-variance
-        // suggestions noisy. Explicit variance still matters for overlapping constraints
-        // and is validated above. This exemption intentionally differs from the
-        // constrained protocol case in protocols_variance.py.
         let metadata = self.get_metadata_for_class(class);
         if metadata.is_protocol()
-            && tparams.as_vec().iter().any(|p| {
-                p.is_type_var()
-                    && p.variance() == PreInferenceVariance::Invariant
-                    && !matches!(p.restriction(), Restriction::Constraints(_))
-            })
+            && tparams
+                .as_vec()
+                .iter()
+                .any(|p| p.is_type_var() && p.variance() == PreInferenceVariance::Invariant)
         {
             let inferred = self.infer_variance_ignoring_declared(class);
             for tparam in tparams.as_vec() {
-                if !tparam.is_type_var()
-                    || tparam.variance() != PreInferenceVariance::Invariant
-                    || matches!(tparam.restriction(), Restriction::Constraints(_))
-                {
+                if !tparam.is_type_var() || tparam.variance() != PreInferenceVariance::Invariant {
                     continue;
                 }
                 let inferred_v = inferred.get(tparam.name());
@@ -4337,151 +4269,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             SuperStyle::Any => self.heap.mk_any_implicit(),
-        }
-    }
-
-    pub fn validate_type_var_default(
-        &self,
-        name: &Name,
-        kind: QuantifiedKind,
-        default: &Type,
-        range: TextRange,
-        restriction: &Restriction,
-        errors: &ErrorCollector,
-    ) -> Type {
-        fn quantified_error(kind: QuantifiedKind) -> ErrorKind {
-            match kind {
-                QuantifiedKind::TypeVar | QuantifiedKind::IntVar => ErrorKind::InvalidTypeVar,
-                QuantifiedKind::ParamSpec => ErrorKind::InvalidParamSpec,
-                QuantifiedKind::TypeVarTuple => ErrorKind::InvalidTypeVarTuple,
-            }
-        }
-
-        if default.is_error() {
-            return default.clone();
-        }
-        if let Some(default) = self.validate_shape_extension_type_parameter_default(
-            name,
-            default,
-            range,
-            restriction,
-            errors,
-        ) {
-            return default;
-        }
-        // A shape extension may apply specialized validation above. Extensions without one use
-        // the same safe fallback as an ordinary bound.
-        let upper_bound = match restriction {
-            Restriction::Bound(bound) => Some(bound.clone()),
-            Restriction::ShapeExtension(extension) => {
-                Some(extension.upper_bound(self.stdlib, self.heap))
-            }
-            Restriction::Constraints(_) | Restriction::Unrestricted => None,
-        };
-        if let Some(bound_ty) = upper_bound {
-            // Default must be a subtype of the upper bound.
-            // Per PEP 696: when default is a TypeVar, "T1's bound must be a subtype of T2's bound"
-            let default_for_check = match default {
-                Type::TypeVar(tv) => tv.upper_bound(self.stdlib, self.heap),
-                Type::Quantified(q) if q.is_type_var() => q.upper_bound(self.stdlib, self.heap),
-                _ => default.clone(),
-            };
-            if !self.is_subset_eq(&default_for_check, &bound_ty) {
-                self.error(
-                    errors,
-                    range,
-                    quantified_error(kind),
-                    format!(
-                        "Expected default `{default}` of `{name}` to be assignable to the upper bound of `{bound_ty}`",
-                    ),
-                );
-                return self.heap.mk_any_error();
-            }
-        } else if let Restriction::Constraints(constraints) = restriction {
-            // Per PEP 696: when default is a TypeVar, "the constraints of T2 must be a
-            // superset of the constraints of T1". A bounded or unrestricted TypeVar cannot
-            // be a valid default for a constrained TypeVar since it can't guarantee an
-            // exact constraint match.
-            let valid = match default {
-                Type::TypeVar(tv) => match tv.restriction() {
-                    Restriction::Constraints(default_constraints) => default_constraints
-                        .iter()
-                        .all(|dc| constraints.iter().any(|c| self.is_consistent(c, dc))),
-                    Restriction::Bound(_)
-                    | Restriction::ShapeExtension(_)
-                    | Restriction::Unrestricted => false,
-                },
-                Type::Quantified(q) if q.is_type_var() => match q.restriction() {
-                    Restriction::Constraints(default_constraints) => default_constraints
-                        .iter()
-                        .all(|dc| constraints.iter().any(|c| self.is_consistent(c, dc))),
-                    Restriction::Bound(_)
-                    | Restriction::ShapeExtension(_)
-                    | Restriction::Unrestricted => false,
-                },
-                _ => constraints.iter().any(|c| self.is_consistent(c, default)),
-            };
-            if !valid {
-                let formatted_constraints = constraints
-                    .iter()
-                    .map(|x| format!("`{x}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.error(
-                    errors,
-                    range,
-                    quantified_error(kind),
-                    format!(
-                        "Expected default `{default}` of `{name}` to be one of the following constraints: {formatted_constraints}"
-                    ),
-                );
-                return self.heap.mk_any_error();
-            }
-        }
-        match kind {
-            QuantifiedKind::ParamSpec => {
-                if default.is_kind_param_spec() {
-                    default.clone()
-                } else {
-                    self.error(
-                        errors,
-                        range,
-                        ErrorKind::InvalidParamSpec,
-                        format!("Default for `ParamSpec` must be a parameter list, `...`, or another `ParamSpec`, got `{default}`"),
-                    );
-                    self.heap.mk_any_error()
-                }
-            }
-            QuantifiedKind::TypeVarTuple => {
-                if let Type::Unpack(inner) = default
-                    && (matches!(&**inner, Type::Tuple(_)) || inner.is_kind_type_var_tuple())
-                {
-                    (**inner).clone()
-                } else {
-                    self.error(
-                        errors,
-                        range,
-                        ErrorKind::InvalidTypeVarTuple,
-                        format!("Default for `TypeVarTuple` must be an unpacked tuple form or another `TypeVarTuple`, got `{default}`"),
-                    );
-                    self.heap.mk_any_error()
-                }
-            }
-            QuantifiedKind::TypeVar | QuantifiedKind::IntVar => {
-                if default.is_kind_param_spec() || default.is_kind_type_var_tuple() {
-                    self.error(
-                        errors,
-                        range,
-                        ErrorKind::InvalidTypeVar,
-                        format!(
-                            "Default for `{kind}` may not be a `TypeVarTuple` or `ParamSpec`, got `{default}`"
-                        ),
-                    );
-                    self.heap.mk_any_error()
-                } else {
-                    default.clone()
-                }
-            }
         }
     }
 
@@ -6207,9 +5994,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         x: &ExprCall,
         errors: &ErrorCollector,
     ) -> Type {
-        let ty = self
-            .typevartuple_from_call(name.clone(), x, errors)
-            .to_type(self.heap);
+        let args = self.type_var_like_args_from_call(name, x, QuantifiedKind::TypeVarTuple, errors);
+        let ty = TypeVarTuple::new(
+            name.clone(),
+            self.module().dupe(),
+            args.default,
+            args.variance,
+        )
+        .to_type(self.heap);
         if let Some(k) = ann
             && let AnnotationWithTarget {
                 target,
@@ -6407,13 +6199,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         self.solve_import_missing(name, m, fallback, submodule_error, errors)
     }
 
-    /// Final missing-attribute step of `solve_import`'s cascade. Emits
-    /// `MissingModuleAttribute` (suppressed in dead code) and returns
-    /// `Any(Error)`. The other failure mode — `m` itself can't be
-    /// found — is handled out-of-band by the per-statement
-    /// `Binding::Module` that `bind_module_exports` inserts; this
-    /// method stays silent in that case (returns `Any(Error)`) so we
-    /// don't double-emit.
+    /// Final missing-attribute step of `solve_import`'s cascade. Actual missing modules
+    /// and imported names retain `Any(MissingImport)` provenance. Other find failures
+    /// recover with ordinary `Any`. The per-statement `Binding::Module` reports a
+    /// missing-module diagnostic, so this step reports only missing exported names.
     fn solve_import_missing(
         &self,
         name: &Name,
@@ -7188,7 +6977,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 AnchorIndex::first(tv.qname().range()),
                                 QuantifiedOrigin::ScopedLegacy,
                             );
-                            let q = Quantified::from_type_var(tv, identity);
+                            let q = Quantified::from_type_var_like(tv, identity);
                             tparams.push(q.clone());
                             q
                         })
@@ -7489,9 +7278,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ),
             Binding::TypeVar(x) => {
                 let (ann, name, call, kind) = x.as_ref();
-                let ty = self
-                    .typevar_from_call(name.clone(), call, *kind, errors)
-                    .to_type(self.heap);
+                let args = self.type_var_like_args_from_call(name, call, *kind, errors);
+                let ty = TypeVar::new_with_kind(
+                    name.clone(),
+                    self.module().dupe(),
+                    *kind,
+                    args.restriction,
+                    args.default,
+                    args.variance,
+                )
+                .to_type(self.heap);
                 if let Some(k) = ann
                     && let AnnotationWithTarget {
                         target,
@@ -7512,9 +7308,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             Binding::ParamSpec(x) => {
                 let (ann, name, call) = x.as_ref();
-                let ty = self
-                    .paramspec_from_call(name.clone(), call, errors)
-                    .to_type(self.heap);
+                let args = self.type_var_like_args_from_call(
+                    name,
+                    call,
+                    QuantifiedKind::ParamSpec,
+                    errors,
+                );
+                let ty = ParamSpec::new(
+                    name.clone(),
+                    self.module().dupe(),
+                    args.default,
+                    args.variance,
+                )
+                .to_type(self.heap);
                 if let Some(k) = ann
                     && let AnnotationWithTarget {
                         target,
@@ -7767,7 +7573,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Type {
         let b = self.bindings().get(x.undecorated_idx);
         let def = self.get_idx(x.undecorated_idx);
-        self.decorated_function_type(def, &b.def, errors)
+        self.decorated_function_type(def, b, errors)
     }
 
     pub fn solve_undecorated_function(

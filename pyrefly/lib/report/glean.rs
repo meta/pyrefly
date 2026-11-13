@@ -422,6 +422,50 @@ fn ownership_test() {
 }
 
 #[test]
+fn attribute_writes_and_deletions_have_references() {
+    use crate::state::require::Require;
+    use crate::test::util::mk_multi_file_state_assert_no_errors;
+
+    let source = "class Widget:\n    value: int = 0\nwidget = Widget()\nwidget.value = 1\ndel widget.value\ndef clear():\n    local = 1\n    del local\n";
+    let (handles, state) =
+        mk_multi_file_state_assert_no_errors(&[("simple", source)], Require::Everything);
+    let report = glean(
+        &state.transaction(),
+        handles.get("simple").unwrap(),
+        false,
+        &GleanNaming::default(),
+    );
+    let facts: serde_json::Value = serde_json::from_str(&report).unwrap();
+    let xrefs = facts
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["predicate"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("python.XRefsViaNameByFile."))
+        })
+        .unwrap()["facts"][0]["key"]["xrefs"]
+        .as_array()
+        .unwrap();
+    for (statement, local_name, target) in [
+        ("widget.value = 1", "value", "simple.Widget.value"),
+        ("del widget.value", "value", "simple.Widget.value"),
+        ("del local", "local", "simple.clear.<locals>.local"),
+    ] {
+        let start = source.find(statement).unwrap() + statement.find(local_name).unwrap();
+        assert!(
+            xrefs.iter().any(|xref| {
+                xref["source"]["start"] == start
+                    && xref["source"]["length"] == local_name.len()
+                    && xref["target"]["key"] == target
+            }),
+            "Missing reference for {statement}: {xrefs:?}",
+        );
+    }
+}
+
+#[test]
 fn module_names_only_change_reported_names() {
     use std::collections::HashMap;
     use std::path::Path;

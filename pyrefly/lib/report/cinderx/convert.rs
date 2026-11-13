@@ -13,6 +13,7 @@ use pyrefly_types::class::Class;
 use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::quantified::Quantified;
+use pyrefly_types::quantified::TypeVarLike;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_types::typed_dict::TypedDict;

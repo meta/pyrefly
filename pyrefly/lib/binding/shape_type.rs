@@ -594,7 +594,7 @@ impl BindingsBuilder<'_> {
                     self.error(
                         error.range,
                         ErrorKind::InvalidArgument,
-                        format!("@type_shape_dsl_function {}", error.message),
+                        format!("@shape_transform {}", error.message),
                     );
                     None
                 }

@@ -14,7 +14,16 @@ import builtins
 from collections.abc import Iterator, Sequence
 from math import e as e, nan as nan
 from types import EllipsisType
-from typing import Any, Callable, Literal, overload, Self, TYPE_CHECKING, Unpack
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    overload,
+    Self,
+    SupportsIndex,
+    TYPE_CHECKING,
+    Unpack,
+)
 
 # Torch does not require NumPy, so this import is intentionally not a package
 # dependency.
@@ -55,6 +64,7 @@ from torch._C import (
     BenchmarkConfig as BenchmarkConfig,
     BenchmarkExecutionStats as BenchmarkExecutionStats,
     Block as Block,
+    BoolTensor as BoolTensor,
     BoolType as BoolType,
     BufferDict as BufferDict,
     CallStack as CallStack,
@@ -115,6 +125,7 @@ from torch._C import (
     ListType as ListType,
     LiteScriptModule as LiteScriptModule,
     LockingLogger as LockingLogger,
+    LongTensor as LongTensor,
     memory_format as memory_format,
     merge_type_from_type_comment as merge_type_from_type_comment,
     ModuleDict as ModuleDict,
@@ -671,6 +682,8 @@ from torch.random import (
     thread_safe_generator as thread_safe_generator,
 )
 from torch.storage import TypedStorage as TypedStorage, UntypedStorage as UntypedStorage
+from torch.types import Device
+from torch.utils.dlpack import from_dlpack as from_dlpack
 from typing_extensions import TypeIs
 
 if TYPE_CHECKING:
@@ -710,6 +723,9 @@ float8_e4m3fn: dtype
 float8_e5m2: dtype
 float8_e8m0fnu: dtype
 float4_e2m1fn_x2: dtype
+double: dtype
+cfloat: dtype
+cdouble: dtype
 int: Any
 bool: Any
 contiguous_format: memory_format
@@ -820,6 +836,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def __getitem__(
         self: Tensor,
         index: _BasicIndex
+        | SupportsIndex
         | Sequence[builtins.int]
         | Sequence[Sequence[builtins.int]]
         | Tensor
@@ -834,6 +851,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def __setitem__(
         self: Tensor,
         index: _BasicIndex
+        | SupportsIndex
         | Sequence[builtins.int]
         | Sequence[Sequence[builtins.int]]
         | Tensor
@@ -954,6 +972,12 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     def __rxor__(self, other: bool | int) -> Self: ...
     def __invert__(self) -> Self: ...
 
+    # Torch declares floating-point shift amounts, though integer kernels reject them.
+    def __rshift__[OtherShape: _Shape = []](
+        self, other: _TensorLike[OtherShape]
+    ) -> Tensor[broadcast(Shape, OtherShape)]: ...
+    def __rrshift__(self: Tensor[Shape], other: _Scalar) -> Tensor[Shape]: ...
+
     # ==== Shape Manipulation Operations ====
     # Handled by meta-shape functions - simplified signatures
 
@@ -993,6 +1017,8 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     # ratio of the byte widths, which this overlay does not track.
     @overload
     def view(self, dtype: _DType) -> Tensor: ...
+    @overload
+    def view(self, *size: builtins.int) -> Tensor: ...
     def flatten[
         Shape: IntTuple,
         StartDim: Flag[builtins.int],
@@ -1134,12 +1160,13 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Returns a contiguous tensor. Shape inference via generic fixture signature."""
         ...
 
-    def clone(self) -> Self:
-        """Returns a copy. Shape inference via generic fixture signature."""
+    # Results keep their shape, not a Parameter or custom subclass identity.
+    def clone(self, *, memory_format: memory_format | None = None) -> Tensor[Shape]:
+        """Return a copy with the same shape."""
         ...
 
-    def detach(self) -> Self:
-        """Returns detached tensor. Shape inference via generic fixture signature."""
+    def detach(self) -> Tensor[Shape]:
+        """Return a tensor with the same shape, detached from autograd."""
         ...
 
     # ==== Tensor Creation Methods ====
@@ -1338,7 +1365,9 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Move tensor to CPU. Shape-preserving operation."""
         ...
 
-    data: Self  # Raw data tensor (same shape)
+    # Exact shapes require shape-invariant replacement here. Native .data can
+    # reshape its receiver; that mutation and arbitrary alias tracking are not modeled.
+    data: Tensor[Shape]
 
     def copy_(self, src: Tensor, non_blocking: builtins.bool = False) -> Self:
         """Copy elements from src into self in-place. Shape-preserving."""
@@ -1358,15 +1387,19 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Enable/disable gradient tracking in-place. Shape-preserving."""
         ...
 
-    def item(self: Tensor[[]]) -> builtins.float | builtins.int:
-        """Return a Python scalar from a rank-zero tensor."""
+    # Torch accepts any one-element tensor. The overlay does not reject known shapes
+    # with zero or several elements, which raise at runtime.
+    def item(self) -> builtins.float | builtins.int:
+        """Return a Python scalar from a one-element tensor."""
         ...
 
     def tolist(self: Tensor) -> Any:
         """Returns tensor as a nested Python list."""
         ...
 
-    def numpy[Shape: IntTuple](self: Tensor[Shape]) -> np.ndarray[Shape]:
+    def numpy[Shape: IntTuple](
+        self: Tensor[Shape], *, force: builtins.bool = False
+    ) -> np.ndarray[Shape]:
         """Return a NumPy array with the same shape.
 
         NumPy is an optional dependency of this stub package. Installing
@@ -1455,6 +1488,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Gather elements along dimension. Output shape matches index shape."""
         ...
 
+    @overload
     def scatter[
         Shape: IntTuple,
         Dim: Flag[builtins.int],
@@ -1467,6 +1501,22 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         src: Tensor[SourceShape],
     ) -> Tensor[scatter_shape(Shape, Dim, IndexShape, SourceShape)]:
         """Scatter elements along dimension. Shape-preserving operation."""
+        ...
+
+    # A scalar value fills every indexed position, so the index stands in for the
+    # source in the shape check.
+    @overload
+    def scatter[
+        Shape: IntTuple,
+        Dim: Flag[builtins.int],
+        IndexShape: IntTuple,
+    ](
+        self: Tensor[Shape],
+        dim: Dim,
+        index: Tensor[IndexShape],
+        value: builtins.float | builtins.complex,
+    ) -> Tensor[scatter_shape(Shape, Dim, IndexShape, IndexShape)]:
+        """Scatter a scalar value along dimension. Shape-preserving operation."""
         ...
 
     def masked_select(self: Tensor, mask: Tensor) -> Tensor[[Any]]:
@@ -1552,6 +1602,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
     # ==== Reduction Operations ====
     # Handled by meta-shape functions - simplified signatures
 
+    @overload
     def sum[
         Shape: IntTuple,
         Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
@@ -1561,11 +1612,19 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         dim: Dim = None,
         keepdim: Keepdim = False,
         *,
-        dtype: Any = None,
+        dtype: _DType | None = None,
     ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
         """Sum along dimension(s). Shape inference via meta-shape: torch.Tensor.sum"""
         ...
 
+    @overload
+    def sum(
+        self,
+        dim: list[builtins.int],
+        keepdim: builtins.bool = False,
+        *,
+        dtype: _DType | None = None,
+    ) -> Tensor: ...
     @overload
     def mean[
         Shape: IntTuple,
@@ -1603,6 +1662,14 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         axis: list[builtins.int],
         keepdim: builtins.bool = False,
         dtype: Any = None,
+    ) -> Tensor: ...
+    @overload
+    def mean(
+        self,
+        dim: list[builtins.int],
+        keepdim: builtins.bool = False,
+        *,
+        dtype: _DType | None = None,
     ) -> Tensor: ...
     def all[
         Shape: IntTuple,
@@ -1658,12 +1725,34 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Product along dimension(s). Shape inference via meta-shape: torch.prod"""
         ...
 
+    # Torch reads a positional argument after `dim` as `unbiased`, not `keepdim`.
+    @overload
+    def std(self, unbiased: builtins.bool = True) -> Tensor[[]]: ...
+    @overload
     def std[
         Shape: IntTuple,
         Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
         Keepdim: Flag[builtins.bool],
     ](
-        self: Tensor[Shape], dim: Dim = None, keepdim: Keepdim = False
+        self: Tensor[Shape],
+        dim: Dim = None,
+        *,
+        correction: builtins.float | builtins.complex | None = None,
+        keepdim: Keepdim = False,
+    ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
+        """Standard deviation along dimension(s). Shape inference via meta-shape: torch.std"""
+        ...
+
+    @overload
+    def std[
+        Shape: IntTuple,
+        Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
+        Keepdim: Flag[builtins.bool],
+    ](
+        self: Tensor[Shape],
+        dim: Dim,
+        unbiased: builtins.bool = True,
+        keepdim: Keepdim = False,
     ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
         """Standard deviation along dimension(s). Shape inference via meta-shape: torch.std"""
         ...
@@ -1745,7 +1834,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         Keepdim: Flag[builtins.bool],
     ](
         self: Tensor[Shape],
-        p: builtins.int | builtins.float = 2,
+        p: builtins.float | Literal["fro"] = "fro",
         dim: Dim = None,
         keepdim: Keepdim = False,
     ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
@@ -1759,7 +1848,7 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         ...
 
     def cumsum[Shape: IntTuple](
-        self: Tensor[Shape], dim: builtins.int
+        self: Tensor[Shape], dim: builtins.int, *, dtype: _DType | None = None
     ) -> Tensor[Shape]:
         """Cumulative sum along dimension. Shape-preserving operation."""
         ...
@@ -2538,7 +2627,13 @@ class Tensor[Shape: _Shape = _Shape](_TensorBase):
         """Sample from multinomial distribution. Shape inference via meta-shape: torch.Tensor.multinomial"""
         ...
 
-    def normal_(self, mean: builtins.float = 0.0, std: builtins.float = 1.0) -> Self:
+    def normal_(
+        self,
+        mean: builtins.float = 0.0,
+        std: builtins.float = 1.0,
+        *,
+        generator: Generator | None = None,
+    ) -> Self:
         """Fill with normal distribution in-place. Shape inference via generic fixture signature."""
         ...
 
@@ -2658,12 +2753,20 @@ def unique(
     return_counts: builtins.bool = False,
     dim: builtins.int | None = None,
 ) -> Tensor | tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor]: ...
+@overload
 def cat[Shapes: IntTuples, Dim: Flag[builtins.int]](
-    tensors: MapIntTuples[lambda S: Tensor[S], Shapes], dim: Dim = 0
+    tensors: MapIntTuples[lambda S: Tensor[S], Shapes],
+    dim: Dim = 0,
+    *,
+    out: Tensor | None = None,
 ) -> Tensor[cat_shape(Shapes, Dim)]:
     """Concatenate tensors. Shape inference via meta-shape: torch.cat"""
     ...
 
+@overload
+def cat(
+    tensors: list[Tensor], dim: builtins.int = 0, *, out: Tensor | None = None
+) -> Tensor: ...
 def concat[Shapes: IntTuples, Dim: Flag[builtins.int]](
     tensors: MapIntTuples[lambda S: Tensor[S], Shapes], dim: Dim = 0
 ) -> Tensor[cat_shape(Shapes, Dim)]:
@@ -2797,6 +2900,7 @@ def permute[Shape: IntTuple, Dims: Flag[tuple[builtins.int, ...]]](
 def permute(
     input: Tensor, dims: tuple[builtins.int, ...] | list[builtins.int]
 ) -> Tensor: ...
+@overload
 def sum[
     Shape: IntTuple,
     Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
@@ -2806,11 +2910,19 @@ def sum[
     dim: Dim = None,
     keepdim: Keepdim = False,
     *,
-    dtype: Any = None,
+    dtype: dtype | None = None,
 ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
     """Sum along dimension(s). Shape inference via meta-shape: torch.sum"""
     ...
 
+@overload
+def sum(
+    input: Tensor,
+    dim: list[builtins.int],
+    keepdim: builtins.bool = False,
+    *,
+    dtype: dtype | None = None,
+) -> Tensor: ...
 @overload
 def mean[
     Shape: IntTuple,
@@ -2848,6 +2960,14 @@ def mean(
     axis: list[builtins.int],
     keepdim: builtins.bool = False,
     dtype: Any = None,
+) -> Tensor: ...
+@overload
+def mean(
+    input: Tensor,
+    dim: list[builtins.int],
+    keepdim: builtins.bool = False,
+    *,
+    dtype: dtype | None = None,
 ) -> Tensor: ...
 @overload
 def max[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[[]]:
@@ -2893,12 +3013,34 @@ def prod[Shape: IntTuple, Dim: Flag[builtins.int | None], Keepdim: Flag[builtins
     """Product along dimension(s). Shape inference via meta-shape: torch.prod"""
     ...
 
+# Torch reads a positional argument after `dim` as `unbiased`, not `keepdim`.
+@overload
+def std(input: Tensor, unbiased: builtins.bool = True) -> Tensor[[]]: ...
+@overload
 def std[
     Shape: IntTuple,
     Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
     Keepdim: Flag[builtins.bool],
 ](
-    input: Tensor[Shape], dim: Dim = None, keepdim: Keepdim = False
+    input: Tensor[Shape],
+    dim: Dim = None,
+    *,
+    correction: builtins.float | builtins.complex | None = None,
+    keepdim: Keepdim = False,
+) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
+    """Standard deviation. Shape inference via meta-shape: torch.std"""
+    ...
+
+@overload
+def std[
+    Shape: IntTuple,
+    Dim: Flag[builtins.int | tuple[builtins.int, ...] | None],
+    Keepdim: Flag[builtins.bool],
+](
+    input: Tensor[Shape],
+    dim: Dim,
+    unbiased: builtins.bool = True,
+    keepdim: Keepdim = False,
 ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
     """Standard deviation. Shape inference via meta-shape: torch.std"""
     ...
@@ -3012,9 +3154,12 @@ def rand(
 @overload
 def zeros[Shape: IntTuple](
     *size: *Shape,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create tensor filled with zeros. Shape is inferred from `size`."""
     ...
@@ -3023,9 +3168,12 @@ def zeros[Shape: IntTuple](
 def zeros[Shape: IntTuple](
     size: Shape,
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create tensor filled with zeros. Shape is inferred from `size`."""
     ...
@@ -3034,16 +3182,22 @@ def zeros[Shape: IntTuple](
 def zeros(
     size: Sequence[builtins.int],
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor: ...
 @overload
 def ones[Shape: IntTuple](
     *size: *Shape,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create tensor filled with ones. Shape is inferred from `size`."""
     ...
@@ -3052,9 +3206,12 @@ def ones[Shape: IntTuple](
 def ones[Shape: IntTuple](
     size: Shape,
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create tensor filled with ones. Shape is inferred from `size`."""
     ...
@@ -3063,16 +3220,23 @@ def ones[Shape: IntTuple](
 def ones(
     size: Sequence[builtins.int],
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor: ...
 @overload
 def empty[Shape: IntTuple](
     *size: *Shape,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    memory_format: memory_format | None = None,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create uninitialized tensor. Shape is inferred from `size`."""
     ...
@@ -3081,21 +3245,42 @@ def empty[Shape: IntTuple](
 def empty[Shape: IntTuple](
     size: Shape,
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    memory_format: memory_format | None = None,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create uninitialized tensor. Shape is inferred from `size`."""
     ...
 
+# Tuples and `torch.Size` use the shaped overloads. A list fallback keeps those
+# calls precise even when other arguments are `Any`.
+@overload
+def empty(
+    size: list[builtins.int],
+    *,
+    memory_format: memory_format | None = None,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
+) -> Tensor: ...
 @overload
 def full[Shape: IntTuple](
     size: Shape,
-    fill_value: builtins.float,
+    fill_value: builtins.float | builtins.complex,
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[Shape]:
     """Create tensor filled with a value. Shape is inferred from `size`."""
     ...
@@ -3103,15 +3288,25 @@ def full[Shape: IntTuple](
 @overload
 def full(
     size: Sequence[builtins.int],
-    fill_value: builtins.float,
+    fill_value: builtins.float | builtins.complex,
     *,
-    dtype: Any = None,
-    device: Any = None,
-    requires_grad: builtins.bool = False,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor: ...
 @overload
 def arange[End: IntVar](
-    end: _Int[End], *, dtype: int | None = None, device: Any = None
+    end: _Int[End],
+    *,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[[arange_extent(_Int[End])]]:
     """Create 1D tensor with range [0, end). Shape inference via meta-shape: torch.arange"""
     ...
@@ -3122,29 +3317,41 @@ def arange[Start: IntVar, End: IntVar, Step: Flag[builtins.int]](
     end: _Int[End],
     step: Step = 1,
     *,
-    dtype: int | None = None,
-    device: Any = None,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
 ) -> Tensor[[arange_step_extent(_Int[Start], _Int[End], Step)]]:
     """Create 1D tensor with range [start, end) with step. Shape inference via meta-shape: torch.arange"""
     ...
 
-@overload
-def arange(end: int, *, dtype: int | None = None, device: Any = None) -> Tensor[[int]]:
-    """Create 1D tensor with a gradual bound."""
-    ...
-
+# Real-valued bounds keep rank one; floating extents are not evaluated by the DSL.
 @overload
 def arange(
-    start: int,
-    end: int,
-    step: int = 1,
+    end: builtins.float,
     *,
-    dtype: int | None = None,
-    device: Any = None,
-) -> Tensor[[int]]:
-    """Create 1D tensor with gradual bounds or step."""
-    ...
-
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
+) -> Tensor[[int]]: ...
+@overload
+def arange(
+    start: builtins.float,
+    end: builtins.float,
+    step: builtins.float = 1,
+    *,
+    out: Tensor | None = None,
+    dtype: dtype | None = None,
+    layout: layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: builtins.bool | None = False,
+    requires_grad: builtins.bool | None = False,
+) -> Tensor[[int]]: ...
 def linspace[Steps: IntVar](
     start: builtins.float,
     end: builtins.float,
@@ -3251,7 +3458,11 @@ def index_select[
     Dim: Flag[builtins.int],
     IndexShape: IntTuple,
 ](
-    self: Tensor[Shape], dim: Dim, index: Tensor[IndexShape]
+    input: Tensor[Shape],
+    dim: Dim,
+    index: Tensor[IndexShape],
+    *,
+    out: Tensor | None = None,
 ) -> Tensor[index_select_shape(Shape, Dim, IndexShape)]:
     """Select elements along dimension. Shape inference via meta-shape: torch.index_select"""
     ...
@@ -3393,7 +3604,7 @@ def norm[
     Keepdim: Flag[builtins.bool],
 ](
     input: Tensor[Shape],
-    p: builtins.int | builtins.float = 2,
+    p: builtins.float | Literal["fro"] = "fro",
     dim: Dim = None,
     keepdim: Keepdim = False,
 ) -> Tensor[reduce_shape(Shape, Dim, Keepdim)]:
@@ -3406,7 +3617,13 @@ def dist(
     """Compute distance between tensors. Returns scalar tensor."""
     ...
 
-def cumsum[Shape: IntTuple](input: Tensor[Shape], dim: int) -> Tensor[Shape]:
+def cumsum[Shape: IntTuple](
+    input: Tensor[Shape],
+    dim: builtins.int,
+    *,
+    dtype: dtype | None = None,
+    out: Tensor | None = None,
+) -> Tensor[Shape]:
     """Cumulative sum along dimension. Shape-preserving operation."""
     ...
 
@@ -3633,12 +3850,21 @@ def triu_indices(
 # Note: matmul is already defined above with static typing at line 341
 # We keep it there for backward compatibility, but meta-shape handles general cases
 
+@overload
 def mm[N: IntVar, K: IntVar, M: IntVar](
-    input: Tensor[[N, K]], mat2: Tensor[[K, M]]
+    input: Tensor[[N, K]], mat2: Tensor[[K, M]], *, out: Tensor | None = None
 ) -> Tensor[[N, M]]:
     """Matrix multiplication (2D @ 2D). Output: [N, M]."""
     ...
 
+@overload
+def mm[N: IntVar, K: IntVar, M: IntVar](
+    input: Tensor[[N, K]],
+    mat2: Tensor[[K, M]],
+    out_dtype: dtype,
+    *,
+    out: Tensor | None = None,
+) -> Tensor[[N, M]]: ...
 def bmm[B: IntVar, N: IntVar, K: IntVar, M: IntVar](
     input: Tensor[[B, N, K]], mat2: Tensor[[B, K, M]]
 ) -> Tensor[[B, N, M]]:
@@ -3658,7 +3884,10 @@ def dot[N: IntVar](input: Tensor[[N]], other: Tensor[[N]]) -> Tensor[[]]:
 
 # Arithmetic operations (element-wise)
 def add[Shape: IntTuple, OtherShape: IntTuple = []](
-    input: Tensor[Shape], other: _TensorLike[OtherShape]
+    input: Tensor[Shape],
+    other: _TensorLike[OtherShape],
+    *,
+    out: Tensor | None = None,
 ) -> Tensor[broadcast(Shape, OtherShape)]:
     """Element-wise addition. Shape inference via generic fixture signature."""
     ...
@@ -4037,7 +4266,10 @@ def maximum[Shape: IntTuple, OtherShape: IntTuple = []](
     ...
 
 def minimum[Shape: IntTuple, OtherShape: IntTuple = []](
-    input: Tensor[Shape], other: Tensor[OtherShape]
+    input: Tensor[Shape],
+    other: Tensor[OtherShape],
+    *,
+    out: Tensor | None = None,
 ) -> Tensor[broadcast(Shape, OtherShape)]:
     """Element-wise minimum. Shape inference via generic fixture signature."""
     ...
@@ -4433,6 +4665,7 @@ def as_tensor(
     """Create tensor from data, sharing memory with the input when possible."""
     ...
 
+@overload
 def from_numpy[Shape: IntTuple](ndarray: np.ndarray[Shape]) -> Tensor[Shape]:
     """Create a shape-preserving CPU tensor that shares memory with a NumPy array.
 
@@ -4443,6 +4676,10 @@ def from_numpy[Shape: IntTuple](ndarray: np.ndarray[Shape]) -> Tensor[Shape]:
     """
     ...
 
+# A union of arrays with different layouts may not fit a single shape; Torch accepts
+# any array.
+@overload
+def from_numpy(ndarray: np.ndarray[Any, Any]) -> Tensor: ...
 @overload
 def randint[Shape: IntTuple](
     high: int,
@@ -4623,8 +4860,31 @@ def meshgrid(
 # module shadows torch's own `__init__`, as described at the `torch._C` import
 # above, so omitting them removes them from `torch` for every dependent target.
 def set_default_dtype(d: dtype, /) -> None: ...
+def set_default_tensor_type(t: type[Tensor] | str, /) -> None: ...
+
+# The Python binding returns its destination container, despite generated None stubs.
+@overload
+def _foreach_copy_(
+    self: list[Tensor],
+    src: tuple[Tensor, ...] | list[Tensor],
+    non_blocking: builtins.bool = False,
+) -> list[Tensor]: ...
+@overload
+def _foreach_copy_(
+    self: tuple[Tensor, ...],
+    src: tuple[Tensor, ...] | list[Tensor],
+    non_blocking: builtins.bool = False,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _assert_async(input: Tensor) -> None: ...
+@overload
+def _assert_async(input: Tensor, assert_msg: str) -> None: ...
 def get_num_threads() -> builtins.int: ...
+def compiled_with_cxx11_abi() -> builtins.bool: ...
+def get_default_device() -> device: ...
+def set_default_device(device: Device) -> None: ...
 def get_float32_matmul_precision() -> str: ...
+def set_float32_matmul_precision(precision: str) -> None: ...
 def are_deterministic_algorithms_enabled() -> builtins.bool: ...
 def is_deterministic_algorithms_warn_only_enabled() -> builtins.bool: ...
 def use_deterministic_algorithms(

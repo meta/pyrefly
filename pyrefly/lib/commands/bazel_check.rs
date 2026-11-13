@@ -838,7 +838,7 @@ fn compute_bazel_errors(
     config.source_db = Some(ArcId::new(Box::new(source_db)));
     config.interpreters.skip_interpreter_query = true;
     config.disable_search_path_heuristics = true;
-    config.preset = parsed_config.preset;
+    config.root.preset = parsed_config.preset;
     if let Some(errors) = &parsed_config.errors {
         config.root.errors = Some(errors.clone());
     }

@@ -1616,3 +1616,25 @@ class Decorated(Base):
         return 1
     "#,
 );
+
+// The error for a descriptor whose `__get__` cannot be called is reported where the attribute is
+// read, not where the descriptor is defined.
+testcase!(
+    test_descriptor_getter_error_at_access,
+    TestEnv::one(
+        "foo",
+        r#"
+class D:
+    @property
+    def __get__(self, extra: int) -> int: ...  # E: Property getter cannot take extra required parameter `extra`
+
+class C:
+    d = D()
+"#,
+    ),
+    r#"
+from foo import C
+
+v = C().d  # E: Missing argument `extra` in function `foo.D.__get__`  # E: Expected a callable, got `int`
+"#,
+);

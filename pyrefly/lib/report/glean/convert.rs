@@ -199,8 +199,8 @@ impl GleanNaming {
     /// The module name written to Glean for a module that Pyrefly resolves as `resolved`, given
     /// its source file, if it is a source file of the repository:
     /// - the file's entry in `module_names`, if it has one;
-    /// - otherwise, if `resolved` is also the name of a module in `module_names` or of a stdlib
-    ///   module, the name made from the file's path. Pyrefly can name a file that no import root
+    /// - otherwise, if `resolved` is unknown, a mapped name, or a stdlib name, the name made
+    ///   from the file's path. Pyrefly can name a file that no import root
     ///   covers after its file name alone, so a vendored copy `vendor/cpython/Lib/typing.py`
     ///   resolves as `typing`. Its declaration of `typing.Optional` would then match every
     ///   reference to the stdlib's `typing.Optional`, so it is named `vendor.cpython.Lib.typing`
@@ -213,6 +213,9 @@ impl GleanNaming {
         let module_names = self.module_names.as_deref();
         if let Some(name) = module_names.and_then(|names| names.module_of_file(&file.key)) {
             return name;
+        }
+        if resolved == ModuleName::unknown() {
+            return path_module_name(&file.key);
         }
         let is_stdlib_source = self
             .stdlib_root
@@ -1159,12 +1162,12 @@ impl GleanState<'_> {
         include_str_lit_xrefs: bool,
     ) -> Vec<(DefinitionLocation, TextRange)> {
         match expr {
-            Expr::Attribute(attr) if attr.ctx.is_load() => self
+            Expr::Attribute(attr) => self
                 .find_definition_for_expr_attribute(attr)
                 .into_iter()
                 .map(|name| (name, attr.attr.range()))
                 .collect(),
-            Expr::Name(name) if name.ctx.is_load() => self
+            Expr::Name(name) if name.ctx.is_load() || name.ctx.is_del() => self
                 .find_definition_for_expr_name(name, false)
                 .into_iter()
                 .map(|x| (x, name.range()))
@@ -2386,9 +2389,34 @@ mod tests {
             "A file in the module map takes its name from the map"
         );
         assert_eq!(
+            emitted(Some("fbcode/base/foo.py"), "__unknown__"),
+            "foo",
+            "An explicit module mapping takes precedence over an unknown name"
+        );
+        assert_eq!(
             emitted(Some("fbcode/scripts/bar.py"), "bar"),
             "bar",
             "A free name is kept"
+        );
+        assert_eq!(
+            emitted(Some("arvr/vendor/a/__init__.py"), "__unknown__"),
+            "arvr.vendor.a",
+            "An unknown module uses its source path"
+        );
+        assert_eq!(
+            emitted(Some("arvr/vendor/b.py"), "__unknown__"),
+            "arvr.vendor.b",
+            "Unknown modules in different files have different names"
+        );
+        assert_eq!(
+            GleanNaming::default()
+                .emitted_module_name(
+                    Some(&src::File::new("arvr/vendor/b.py".to_owned())),
+                    ModuleName::unknown(),
+                )
+                .to_string(),
+            "arvr.vendor.b",
+            "Unknown modules use their source path without a module map"
         );
         assert_eq!(
             emitted(Some("fbcode/vendor/Lib/typing.py"), "typing"),

@@ -51,3 +51,22 @@ def test_dtype_itemsize() -> None:
     assert_type(itemsize, int)
     assert itemsize == tensor.element_size() == 4
     assert_shape(tensor.shape, (2, 3))
+
+
+def test_double_and_complex_dtype_aliases() -> None:
+    double = torch.double
+    cfloat = torch.cfloat
+    cdouble = torch.cdouble
+    assert_type(double, torch.dtype)
+    assert_type(cfloat, torch.dtype)
+    assert_type(cdouble, torch.dtype)
+    assert double is torch.float64
+    assert cfloat is torch.complex64
+    assert cdouble is torch.complex128
+    for dtype in (double, cfloat, cdouble):
+        tensor = torch.zeros((2, 3), dtype=dtype)
+        assert tensor.dtype == dtype
+        assert_shape(tensor.shape, (2, 3))
+    viewed = torch.ones((2, 4)).view(double)
+    assert viewed.dtype == torch.float64
+    assert tuple(viewed.shape) == (2, 2)

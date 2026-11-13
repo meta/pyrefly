@@ -94,6 +94,65 @@ def check_standard_normal_and_standard_exponential_symbolic_size[N: IntVar, M: I
     )
 
 
+def check_normal_returns_float_without_size() -> None:
+    rng = np.random.default_rng(0)
+    assert_type(rng.normal(), float)
+    assert_type(rng.normal(1.0, 2.0), float)
+
+
+def test_normal_int_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.normal(size=5)
+    assert_type(result, np.ndarray[[5], np.dtype[np.float64]])
+    assert_shape(result.shape, (5,))
+    assert_shape(rng.normal(0.0, 1.0, 5).shape, (5,))
+
+
+def test_normal_tuple_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.normal(0.0, 1.0, (2, 3))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.normal(size=(2, 3)).shape, (2, 3))
+
+
+def test_normal_array_parameters_with_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.normal(np.zeros(3), 1.0, size=(2, 3))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.normal(np.zeros((10, 1)), size=(10, 5)).shape, (10, 5))
+
+
+def test_normal_array_parameters_without_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.normal(np.zeros(3), np.ones((2, 1)))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.normal(np.zeros(3)).shape, (3,))
+    assert_shape(rng.normal(scale=np.ones((2, 1))).shape, (2, 1))
+
+
+def test_normal_list_size_and_parameters() -> None:
+    rng = np.random.default_rng(0)
+    assert_shape(rng.normal(size=[2, 3]).shape, IntTuple, runtime=(2, 3))
+    assert_shape(rng.normal([0.0, 1.0, 2.0]).shape, IntTuple, runtime=(3,))
+
+
+def test_normal_mismatched_parameters() -> None:
+    rng = np.random.default_rng(0)
+    with assert_raises(ValueError):
+        rng.normal(np.zeros(3), np.ones(2))  # E: Cannot broadcast
+
+
+def check_normal_symbolic_shapes[N: IntVar, M: IntVar](
+    n: Int[N], loc: np.ndarray[[N, 1]], scale: np.ndarray[[M]]
+) -> None:
+    rng = np.random.default_rng(0)
+    assert_type(rng.normal(size=n), np.ndarray[[N], np.dtype[np.float64]])
+    assert_type(rng.normal(loc, scale), np.ndarray[[N, M], np.dtype[np.float64]])
+
+
 def test_multivariate_normal_without_size() -> None:
     rng = np.random.default_rng(0)
     result = rng.multivariate_normal(np.zeros(3), np.eye(3))

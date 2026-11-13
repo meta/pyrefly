@@ -565,6 +565,25 @@ class ContraToContraToContra_WithTA(
 "#,
 );
 
+// The error is at the base it is about. A `Generic[...]` base is not a base type, so it must not
+// shift the bases after it.
+testcase!(
+    test_variance_enforcement_in_base_after_generic,
+    r#"
+from typing import TypeVar, Generic
+
+T = TypeVar("T")
+T_co = TypeVar("T_co", covariant=True)
+
+class Inv(Generic[T]): ...
+
+class C(
+    Generic[T_co],
+    Inv[T_co],  # E: Type variable `T_co` is covariant but is used in invariant position
+): ...
+"#,
+);
+
 testcase!(
     test_protocols_variance_conformance,
     r#"
@@ -606,16 +625,27 @@ class Foo(Generic[T_co]):
 );
 
 testcase!(
+    test_shallow_receiver_not_checked,
+    r#"
+from typing import TypeVar, Generic
+T_co = TypeVar("T_co", covariant=True)
+
+class Foo(Generic[T_co]):
+    def f(self: T_co) -> None: ...
+"#,
+);
+
+testcase!(
     test_constrained_typevar_protocol_variance_mismatch,
     r#"
 from typing import Protocol, TypeVar
 
 T = TypeVar("T", str, bytes)
 
-class Foo(Protocol[T]):
+class Foo(Protocol[T]):  # E: could be covariant
     def value(self) -> T: ...
 
-class Bar(Protocol[T]):
+class Bar(Protocol[T]):  # E: could be contravariant
     def consume(self, x: T) -> None: ...
 "#,
 );
@@ -630,13 +660,13 @@ B = TypeVar("B", bound=float)
 U = TypeVar("U")
 
 # Eligible siblings force the diagnostic loop to run, but only those siblings warn.
-class Producer(Protocol[T, B]):  # E: Type variable `B` in class `Producer` is declared as invariant, but could be covariant based on its usage
+class Producer(Protocol[T, B]):  # E: `T` in class `Producer` is declared as invariant, but could be covariant  # E: `B` in class `Producer` is declared as invariant, but could be covariant
     def value(self) -> tuple[T, B]: ...
 
-class Consumer(Protocol[T, B]):  # E: Type variable `B` in class `Consumer` is declared as invariant, but could be contravariant based on its usage
+class Consumer(Protocol[T, B]):  # E: `T` in class `Consumer` is declared as invariant, but could be contravariant  # E: `B` in class `Consumer` is declared as invariant, but could be contravariant
     def consume(self, x: T, y: B) -> None: ...
 
-class UnconstrainedProducer(Protocol[T, U]):  # E: Type variable `U` in class `UnconstrainedProducer` is declared as invariant, but could be covariant based on its usage
+class UnconstrainedProducer(Protocol[T, U]):  # E: `T` in class `UnconstrainedProducer` is declared as invariant, but could be covariant  # E: `U` in class `UnconstrainedProducer` is declared as invariant, but could be covariant
     def value(self) -> tuple[T, U]: ...
 "#,
 );
@@ -650,7 +680,7 @@ T = TypeVar("T", int, float)
 T_co = TypeVar("T_co", int, float, covariant=True)
 T_contra = TypeVar("T_contra", int, float, contravariant=True)
 
-class InvariantProducer(Protocol[T]):
+class InvariantProducer(Protocol[T]):  # E: could be covariant
     def value(self) -> T: ...
 
 class Producer(Protocol[T_co]):

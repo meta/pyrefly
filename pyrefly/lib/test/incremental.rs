@@ -200,6 +200,26 @@ impl Incremental {
         res
     }
 
+    /// Run a check, and expect the same errors, at the same locations, as a check of the same files
+    /// from scratch.
+    fn check_matches_fresh_check(&mut self, want: &[&str]) {
+        let incremental = self.unchecked(want);
+        let mut fresh = Incremental::with_files(self.files.clone());
+        for (module, contents) in self.data.0.lock().iter() {
+            fresh.set(module.as_str(), contents);
+        }
+        let fresh = fresh.unchecked(want);
+        let show = |result: &IncrementalResult| {
+            result
+                .errors
+                .collect_display_errors()
+                .iter()
+                .map(|e| format!("{} {}: {}", e.path(), e.display_range(), e.msg()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(show(&incremental), show(&fresh));
+    }
+
     /// Run a check. Expect to recompute things to have changed, but ignore error comments.
     fn check_ignoring_expectations(
         &mut self,
@@ -1463,6 +1483,73 @@ fn test_inferred_type_changes_trigger_recompute() {
         "from bar import instance\ny = instance.x + 1 # E: `+` is not supported",
     );
     i.check(&["main"], &["foo", "bar", "main"]);
+}
+
+/// A property defined through a descriptor class moves when an edit above it changes the length
+/// of the file. Its answer does not record its location, so a module that reads the property is
+/// not recomputed.
+#[test]
+fn test_edit_above_descriptor() {
+    let mut i = Incremental::new();
+    let foo = |value: &str| {
+        format!(
+            r#"
+from typing import Callable, Generic, TypeVar
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+class lazy_property(Generic[T, R]):
+    def __init__(self, fget: Callable[[type[T]], R]) -> None: ...
+    def __get__(self, obj: object, owner: type[T]) -> R: ...
+
+class A:
+    def f(self) -> int:
+        return {value}
+
+    @lazy_property
+    def p(cls: type["A"]) -> int:
+        return 1
+"#
+        )
+    };
+    i.set("foo", &foo("1"));
+    i.set("main", "from foo import A\nx: int = A.p");
+    i.check(&["main", "foo"], &["main", "foo"]);
+
+    i.set("foo", &foo("100000"));
+    i.check(&["main", "foo"], &["foo"]);
+}
+
+/// The location of a class's `@total_ordering` decorator moves when an edit above the class changes
+/// the length of the file. It only says where to report errors, so a module that uses the class is
+/// not recomputed.
+#[test]
+fn test_edit_above_total_ordering() {
+    let mut i = Incremental::new();
+    let foo = |value: &str| {
+        format!(
+            r#"
+from functools import total_ordering
+
+def f() -> int:
+    return {value}
+
+@total_ordering
+class A:
+    def __eq__(self, other: object) -> bool:
+        return True
+    def __lt__(self, other: "A") -> bool:
+        return True
+"#
+        )
+    };
+    i.set("foo", &foo("1"));
+    i.set("main", "from foo import A\nx: bool = A() <= A()");
+    i.check(&["main", "foo"], &["main", "foo"]);
+
+    i.set("foo", &foo("100000"));
+    i.check(&["main", "foo"], &["foo"]);
 }
 
 /// Test that when a function's return type changes, callers that import only
@@ -3969,7 +4056,7 @@ g("x")  # E: `str` is not assignable to upper bound `int` of type variable `T`
             }))
         }),
         Box::new(move |_| (main_load.dupe(), Vec::new())),
-        Box::new(move |_, _| main_fallback.dupe()),
+        Box::new(move |_, _| (main_fallback.dupe(), Vec::new())),
         Box::new(|config, _| config),
         Box::new(|| {}),
     );
@@ -4225,4 +4312,61 @@ def f(c: bool):
         .unwrap();
 
     assert_ne!(exported(&incremental), exported(&expected));
+}
+
+/// The error for a descriptor whose `__get__` cannot be called is reported at the read in `main`,
+/// so it moves with `main`, not with the file that defines the descriptor.
+#[test]
+fn test_descriptor_error_location_after_edit_in_defining_module() {
+    let mut i = Incremental::new();
+    let foo = |padding: &str| {
+        format!(
+            r#"{padding}
+class D:
+    @property
+    def __get__(self, extra: int) -> int: ...
+
+class C:
+    d = D()
+"#
+        )
+    };
+    let main = format!("from foo import C\nv = C().d\n{}", "x = 1\n".repeat(40));
+    i.set("foo", &foo(""));
+    i.set("main", &main);
+    i.check_matches_fresh_check(&["main", "foo"]);
+
+    i.set("foo", &foo("# a\n# b\n# c"));
+    i.check_matches_fresh_check(&["main", "foo"]);
+}
+
+/// A dataclass reports the descriptors of its own fields only, so an edit to the module of its
+/// base class does not leave an error at a stale location in the subclass's module.
+#[test]
+fn test_dataclass_descriptor_error_location_after_edit_in_base_module() {
+    let mut i = Incremental::new();
+    let foo = |padding: &str| {
+        format!(
+            r#"{padding}
+from dataclasses import dataclass
+
+class NonData:
+    def __get__(self, obj: object, objtype: object) -> int: ...
+
+@dataclass
+class Base:
+    x: NonData = NonData()
+"#
+        )
+    };
+    let main = format!(
+        "from dataclasses import dataclass\nfrom foo import Base\n@dataclass\nclass Child(Base):\n    y: int = 0\n{}",
+        "z = 1\n".repeat(40)
+    );
+    i.set("foo", &foo(""));
+    i.set("main", &main);
+    i.check_matches_fresh_check(&["main", "foo"]);
+
+    i.set("foo", &foo("# a\n# b\n# c"));
+    i.check_matches_fresh_check(&["main", "foo"]);
 }

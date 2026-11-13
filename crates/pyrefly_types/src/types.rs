@@ -59,6 +59,7 @@ use crate::module::ModuleType;
 use crate::named_ints::NamedInts;
 use crate::param_spec::ParamSpec;
 use crate::quantified::Quantified;
+use crate::quantified::TypeVarLike;
 use crate::sentinel::Sentinel;
 use crate::series::SeriesSchema;
 use crate::shaped_array::IntTuple;
@@ -765,7 +766,10 @@ pub enum Forallable {
 }
 
 impl Forallable {
-    pub fn forall(self, tparams: Arc<TParams>) -> Type {
+    pub fn forall(mut self, tparams: Arc<TParams>) -> Type {
+        if let Self::Function(func) = &mut self {
+            func.initialize_unresolved_imports(Some(tparams.as_ref()));
+        }
         if tparams.is_empty() {
             self.as_type()
         } else {
@@ -786,7 +790,10 @@ impl Forallable {
 
     pub fn as_type(self) -> Type {
         match self {
-            Self::Function(func) => Type::Function(Box::new(func)),
+            Self::Function(mut func) => {
+                func.initialize_unresolved_imports(None);
+                Type::Function(Box::new(func))
+            }
             Self::Callable(callable) => Type::Callable(Box::new(callable)),
             Self::TypeAlias(ta) => Type::TypeAlias(Box::new(ta)),
         }
@@ -1347,11 +1354,21 @@ impl Type {
     /// Whether an implicit `Any` appears anywhere within this type, including the
     /// type itself. Used to report a partially unknown type such as `list[Unknown]`.
     pub fn contains_implicit_any(&self) -> bool {
-        fn walk(ty: &Type, found: &mut bool) {
+        self.contains_any_style(AnyStyle::Implicit)
+    }
+
+    /// Whether unresolved-import recovery appears in this type's annotations, excluding
+    /// the metadata of a wrapped function whose signature is not exposed to callers.
+    pub fn contains_missing_import(&self) -> bool {
+        self.contains_any_style(AnyStyle::MissingImport)
+    }
+
+    fn contains_any_style(&self, style: AnyStyle) -> bool {
+        fn walk(ty: &Type, style: AnyStyle, found: &mut bool) {
             if *found {
                 return;
             }
-            if matches!(ty, Type::Any(AnyStyle::Implicit)) {
+            if matches!(ty, Type::Any(any_style) if *any_style == style) {
                 *found = true;
                 return;
             }
@@ -1361,14 +1378,14 @@ impl Type {
                 .is_some_and(|metadata| metadata.flags.wrapped.is_some())
             {
                 for (signature, _) in ty.toplevel_callable_signatures() {
-                    signature.visit(&mut |child| walk(child, found));
+                    signature.visit(&mut |child| walk(child, style, found));
                 }
             } else {
-                ty.recurse(&mut |child| walk(child, found));
+                ty.recurse(&mut |child| walk(child, style, found));
             }
         }
         let mut found = false;
-        walk(self, &mut found);
+        walk(self, style, &mut found);
         found
     }
 
@@ -2362,6 +2379,17 @@ impl Type {
                 Ordering::Less => Type::union(vec![x, Type::None]),
                 Ordering::Greater => Type::union(vec![Type::None, x]),
             }
+        }
+    }
+
+    /// The legacy type variable that this type refers to, if it is a `TypeVar`, `ParamSpec`, or
+    /// `TypeVarTuple` that has not been resolved to a `Quantified`.
+    pub fn as_type_var_like(&self) -> Option<&dyn TypeVarLike> {
+        match self {
+            Type::TypeVar(t) => Some(t),
+            Type::ParamSpec(p) => Some(p),
+            Type::TypeVarTuple(t) => Some(t),
+            _ => None,
         }
     }
 

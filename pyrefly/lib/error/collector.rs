@@ -214,6 +214,10 @@ pub(crate) struct CollectedDiagnostic<'a> {
     error: &'a Error,
     severity: Severity,
     baseline_status: BaselineStatus,
+    /// The match's `baseline-error-level` is unset. An open file shows it as an
+    /// LSP hint, which `to_diagnostic_with_severity` does not produce for an
+    /// untagged hint.
+    unconfigured_baseline_hint: bool,
 }
 
 impl<'a> CollectedDiagnostic<'a> {
@@ -222,6 +226,7 @@ impl<'a> CollectedDiagnostic<'a> {
             error,
             severity,
             baseline_status: error.baseline_status(),
+            unconfigured_baseline_hint: false,
         }
     }
 
@@ -242,6 +247,17 @@ impl<'a> CollectedDiagnostic<'a> {
             baseline_status,
             ..self
         }
+    }
+
+    pub(crate) fn with_unconfigured_baseline_hint(self) -> Self {
+        Self {
+            unconfigured_baseline_hint: true,
+            ..self
+        }
+    }
+
+    pub(crate) fn unconfigured_baseline_hint(self) -> bool {
+        self.unconfigured_baseline_hint
     }
 
     pub(crate) fn into_error(self) -> Error {
@@ -816,7 +832,6 @@ impl ErrorBuilder<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
     use std::collections::HashMap;
     use std::path::Path;
     use std::path::PathBuf;
@@ -914,7 +929,7 @@ mod tests {
         assert_eq!(
             errors
                 .collect(&ErrorConfig::new(
-                    Cow::Owned(ErrorDisplayConfig::default()),
+                    Arc::new(ErrorDisplayConfig::default()),
                     false,
                     Tool::default_enabled(),
                     TypeIgnoreUnknownTagBehavior::NoEffect,
@@ -1033,7 +1048,7 @@ mod tests {
             (ErrorKind::NotIterable, Severity::Ignore),
         ]));
         let config = ErrorConfig::new(
-            Cow::Owned(display_config),
+            Arc::new(display_config),
             false,
             Tool::default_enabled(),
             TypeIgnoreUnknownTagBehavior::NoEffect,
@@ -1069,7 +1084,7 @@ mod tests {
         let display_config =
             ErrorDisplayConfig::new(HashMap::from([(ErrorKind::BadAssignment, Severity::Hint)]));
         let config = ErrorConfig::new(
-            Cow::Owned(display_config),
+            Arc::new(display_config),
             false,
             Tool::default_enabled(),
             TypeIgnoreUnknownTagBehavior::NoEffect,
@@ -1097,7 +1112,7 @@ mod tests {
 
         let display_config = ErrorDisplayConfig::default();
         let config0 = ErrorConfig::new(
-            Cow::Borrowed(&display_config),
+            Arc::new(display_config.clone()),
             false,
             Tool::default_enabled(),
             TypeIgnoreUnknownTagBehavior::NoEffect,
@@ -1114,7 +1129,7 @@ mod tests {
             "misplaced".to_owned(),
         );
         let config1 = ErrorConfig::new(
-            Cow::Owned(display_config),
+            Arc::new(display_config),
             true,
             Tool::default_enabled(),
             TypeIgnoreUnknownTagBehavior::NoEffect,
@@ -1145,7 +1160,7 @@ mod tests {
         assert_eq!(
             errors
                 .collect(&ErrorConfig::new(
-                    Cow::Owned(ErrorDisplayConfig::default()),
+                    Arc::new(ErrorDisplayConfig::default()),
                     false,
                     Tool::default_enabled(),
                     TypeIgnoreUnknownTagBehavior::NoEffect,

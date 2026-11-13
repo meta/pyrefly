@@ -4811,6 +4811,17 @@ def cut_off_later(c: bool, d: bool) -> None:
         stop()
     print(x)
 
+def cut_off_by_trailing_call(c: bool, d: bool) -> None:
+    if c:
+        if d:
+            x = 1
+        else:
+            pass
+        stop()
+    else:
+        x = 2
+    print(x)
+
 def cut_off_earlier(c: bool, d: bool) -> None:
     if c:
         x = 1

@@ -30,6 +30,7 @@ use crate::quantified::Quantified;
 use crate::type_output::DisplayOutput;
 use crate::type_output::TypeOutput;
 use crate::types::AnyStyle;
+use crate::types::TParams;
 use crate::types::Type;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -40,6 +41,18 @@ pub struct Callable {
 }
 
 impl Callable {
+    /// Whether a signature's parameter, return, or type-parameter types contain unresolved
+    /// import recovery. Check before substituting types inferred from call arguments.
+    pub fn contains_unresolved_imports(&self, tparams: Option<&TParams>) -> bool {
+        let mut found = false;
+        let mut check_type = |ty: &Type| found = found || ty.contains_missing_import();
+        self.visit(&mut check_type);
+        if let Some(tparams) = tparams {
+            tparams.visit(&mut check_type);
+        }
+        found
+    }
+
     /// Returns true if this callable has the `*args: Any, **kwargs: Any -> Any`
     /// signature (plus an optional unannotated self/cls at index 0).
     /// Used as a heuristic in decorator type resolution for union-typed

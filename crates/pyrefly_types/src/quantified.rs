@@ -16,6 +16,7 @@ use pyrefly_derive::TypeEq;
 use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::qname::QName;
 use pyrefly_util::display::Fmt;
 use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
@@ -29,7 +30,6 @@ use crate::heap::TypeHeap;
 use crate::stdlib::Stdlib;
 use crate::type_var::PreInferenceVariance;
 use crate::type_var::Restriction;
-use crate::type_var::TypeVar;
 use crate::types::Type;
 
 /// Discriminator for the origin of a `Quantified`, making collisions structurally impossible
@@ -269,6 +269,15 @@ impl Display for QuantifiedIdentity {
     }
 }
 
+/// A legacy type variable, declared with `TypeVar(...)`, `ParamSpec(...)`, or `TypeVarTuple(...)`.
+pub trait TypeVarLike {
+    fn qname(&self) -> &QName;
+    fn kind(&self) -> QuantifiedKind;
+    fn default(&self) -> Option<&Type>;
+    fn restriction(&self) -> &Restriction;
+    fn variance(&self) -> PreInferenceVariance;
+}
+
 impl Display for Quantified {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.name)
@@ -318,37 +327,14 @@ impl Quantified {
         )
     }
 
-    /// Creates a Quantified from a TypeVar, extracting all relevant fields.
-    pub fn from_type_var(tv: &TypeVar, identity: QuantifiedIdentity) -> Self {
+    pub fn from_type_var_like(x: &dyn TypeVarLike, identity: QuantifiedIdentity) -> Self {
         Self::new(
             identity,
-            tv.qname().id().clone(),
-            tv.kind(),
-            tv.default().cloned(),
-            tv.restriction().clone(),
-            tv.variance(),
-        )
-    }
-
-    pub fn param_spec(name: Name, identity: QuantifiedIdentity, default: Option<Type>) -> Self {
-        Self::new(
-            identity,
-            name,
-            QuantifiedKind::ParamSpec,
-            default,
-            Restriction::Unrestricted,
-            PreInferenceVariance::Invariant,
-        )
-    }
-
-    pub fn type_var_tuple(name: Name, identity: QuantifiedIdentity, default: Option<Type>) -> Self {
-        Self::new(
-            identity,
-            name,
-            QuantifiedKind::TypeVarTuple,
-            default,
-            Restriction::Unrestricted,
-            PreInferenceVariance::Invariant,
+            x.qname().id().clone(),
+            x.kind(),
+            x.default().cloned(),
+            x.restriction().clone(),
+            x.variance(),
         )
     }
 

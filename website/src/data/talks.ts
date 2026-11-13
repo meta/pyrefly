@@ -32,6 +32,18 @@ export interface Talk {
 
 export const talks: Talk[] = [
     {
+        title: 'Static Tensor Shape Checking for PyTorch with Pyrefly',
+        type: 'talk',
+        url: 'https://www.youtube.com/watch?v=K5WLGsHwGg4',
+        subtitle: 'PyTorch Conference 2026',
+    },
+    {
+        title: 'Stop Annoying Shape Bugs in PyTorch, JAX and NumPy With This One Tool',
+        type: 'video',
+        url: 'https://www.youtube.com/watch?v=2dABb24Q-v0',
+        subtitle: 'Meta Open Source YouTube',
+    },
+    {
         title: 'How to get your agent to use Pyrefly for type checking',
         type: 'video',
         url: 'https://www.youtube.com/watch?v=YHJ6tUPnKhY',
@@ -66,6 +78,12 @@ export const talks: Talk[] = [
         type: 'video',
         url: 'https://www.youtube.com/watch?v=4o0RLJJ-FAo',
         subtitle: 'Meta Open Source YouTube',
+    },
+    {
+        title: 'Increasing Types in Large Codebases with Pyrefly and AI Tooling',
+        type: 'talk',
+        url: 'https://www.youtube.com/watch?v=4GotlL94kTA',
+        subtitle: 'PyBay 2025',
     },
     {
         title: 'Pyrefly: A Scalable Type Checker for a Unified IDE Experience',

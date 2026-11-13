@@ -1210,6 +1210,23 @@ impl<'a> BindingsBuilder<'a> {
                                 }
                                 return;
                             }
+                            // Only bare qualifiers (`Final`, `ClassVar`) leave the type to the
+                            // sentinel itself, so that it can be used in type expressions.
+                            SpecialExport::Sentinel | SpecialExport::BuiltinsSentinel
+                                if matches!(
+                                    self.as_special_export(&x.annotation),
+                                    Some(SpecialExport::Final | SpecialExport::ClassVar)
+                                ) =>
+                            {
+                                let ident = Ast::expr_name_identifier(name.clone());
+                                self.bind_annotation(
+                                    &ident,
+                                    &mut x.annotation,
+                                    AnnAssignHasValue::Yes,
+                                );
+                                self.assign_sentinel(&name, call);
+                                return;
+                            }
                             _ => {}
                         }
                     }

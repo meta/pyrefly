@@ -21,6 +21,10 @@ use ruff_python_ast::Identifier;
 use crate::equality::TypeEq;
 use crate::equality::TypeEqCtx;
 use crate::heap::TypeHeap;
+use crate::quantified::QuantifiedKind;
+use crate::quantified::TypeVarLike;
+use crate::type_var::PreInferenceVariance;
+use crate::type_var::Restriction;
 use crate::types::Type;
 
 /// Used to represent ParamSpec calls. Each ParamSpec is unique, so use the ArcId to separate them.
@@ -47,23 +51,44 @@ impl Display for ParamSpec {
 struct ParamSpecInner {
     qname: QName,
     default: Option<Type>,
+    variance: PreInferenceVariance,
+}
+
+impl TypeVarLike for ParamSpec {
+    fn qname(&self) -> &QName {
+        &self.0.qname
+    }
+
+    fn kind(&self) -> QuantifiedKind {
+        QuantifiedKind::ParamSpec
+    }
+
+    fn default(&self) -> Option<&Type> {
+        self.0.default.as_ref()
+    }
+
+    fn restriction(&self) -> &Restriction {
+        &Restriction::Unrestricted
+    }
+
+    fn variance(&self) -> PreInferenceVariance {
+        self.0.variance
+    }
 }
 
 impl ParamSpec {
-    pub fn new(name: Identifier, module: Module, default: Option<Type>) -> Self {
+    pub fn new(
+        name: Identifier,
+        module: Module,
+        default: Option<Type>,
+        variance: PreInferenceVariance,
+    ) -> Self {
         Self(ArcId::new(ParamSpecInner {
             // TODO: properly take parent from caller of new()
             qname: QName::new(name, NestingContext::toplevel(), module),
             default,
+            variance,
         }))
-    }
-
-    pub fn qname(&self) -> &QName {
-        &self.0.qname
-    }
-
-    pub fn default(&self) -> Option<&Type> {
-        self.0.default.as_ref()
     }
 
     pub fn to_type(&self, heap: &TypeHeap) -> Type {

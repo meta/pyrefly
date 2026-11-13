@@ -13,6 +13,7 @@ use crate::dimension::Int;
 use crate::dimension::ShapeError;
 use crate::known_class::KnownClass;
 use crate::quantified::QuantifiedKind;
+use crate::quantified::TypeVarLike;
 use crate::shaped_array::IntTuple;
 use crate::shaped_array::IntTupleView;
 use crate::shaped_array::broadcast_shapes;

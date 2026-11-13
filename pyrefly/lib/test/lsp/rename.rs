@@ -184,6 +184,40 @@ fn test_rename_source_updates_stub_and_consumers() {
 }
 
 #[test]
+fn test_references_repeated_live_conditional_stub() {
+    let source = "class C:\n    def f(self) -> int:\n        return 1\n";
+    let stub = "import sys\nclass C:\n    if sys.version_info >= (3, 8):\n        def f(self) -> int: ...\n    if sys.version_info >= (3, 10):\n        def f(self) -> int: ...\n";
+    let consumer = "from lib import C\nC().f()\n";
+    for options in [
+        ReferenceOptions::textual_only(true),
+        ReferenceOptions::all(true),
+    ] {
+        let references = replace_paired_references(
+            source,
+            stub,
+            consumer,
+            None,
+            source.find("f(").unwrap(),
+            options,
+        );
+        assert_eq!(
+            references.iter().find(|(path, _)| path == "consumer.py"),
+            Some(&(
+                "consumer.py".to_owned(),
+                consumer.replace(".f()", ".renamed()"),
+            )),
+        );
+        assert_eq!(
+            references.iter().find(|(path, _)| path == "lib.py"),
+            Some(&(
+                "lib.py".to_owned(),
+                source.replace("def f(", "def renamed("),
+            )),
+        );
+    }
+}
+
+#[test]
 fn test_references_ignore_docstring_types_in_other_modules() {
     let source = "class Item:\n    pass\n";
     let stub = "class Item: ...\n";

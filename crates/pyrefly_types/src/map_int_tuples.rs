@@ -504,6 +504,7 @@ mod tests {
     use crate::lit_int::LitInt;
     use crate::quantified::AnchorIndex;
     use crate::quantified::QuantifiedIdentity;
+    use crate::quantified::QuantifiedKind;
     use crate::quantified::QuantifiedOrigin;
     use crate::type_level_dsl::TypeLevelDslCall;
     use crate::type_var::PreInferenceVariance;
@@ -667,14 +668,17 @@ mod tests {
 
     #[test]
     fn rejects_unresolved_type_var_tuple() {
-        let middle = Type::Quantified(Box::new(Quantified::type_var_tuple(
-            Name::new_static("Ts"),
+        let middle = Type::Quantified(Box::new(Quantified::new(
             QuantifiedIdentity::new(
                 ModuleName::from_str("__test__"),
                 AnchorIndex::new(TextRange::default(), 1),
                 QuantifiedOrigin::synthetic(),
             ),
+            Name::new_static("Ts"),
+            QuantifiedKind::TypeVarTuple,
             None,
+            Restriction::Unrestricted,
+            PreInferenceVariance::Invariant,
         )));
         let source = Tuple::unpacked(vec![int_tuple(&[1])], middle, Vec::new());
 

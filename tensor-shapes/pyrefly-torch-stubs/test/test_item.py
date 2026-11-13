@@ -24,20 +24,51 @@ def test_item_rejects_multiple_elements() -> None:
     assert_shape(vector.shape, (2,))
 
     with assert_raises(RuntimeError):
-        vector.item()  # E: not assignable
+        vector.item()
 
     matrix = torch.ones((5, 7))
     assert_shape(matrix.shape, (5, 7))
 
     with assert_raises(RuntimeError):
-        matrix.item()  # E: not assignable
+        matrix.item()
+
+    empty = torch.ones(0)
+    assert_shape(empty.shape, (0,))
+
+    with assert_raises(RuntimeError):
+        empty.item()
 
 
 def test_item_accepts_single_element_non_scalar() -> None:
     vector = torch.ones(1)
     assert_shape(vector.shape, (1,))
-    # TODO: BUG: Accept any tensor with exactly one element, regardless of rank.
-    vector.item()  # E: not assignable
+    value = vector.item()
+    assert_type(value, float | int)
+    assert value == 1.0
+
+    cube = torch.ones((1, 1, 1))
+    assert_shape(cube.shape, (1, 1, 1))
+    value = cube.item()
+    assert value == 1.0
+
+    count = len([0])
+    sized = torch.ones(count)
+    assert tuple(sized.shape) == (1,)
+    value = sized.item()
+    assert value == 1.0
+
+
+def test_item_value_kinds() -> None:
+    integer = torch.tensor([3])
+    assert_shape(integer.shape, (1,))
+    value = integer.item()
+    assert_type(value, float | int)
+    assert isinstance(value, int) and value == 3
+
+    flag = torch.tensor([True])
+    assert_shape(flag.shape, (1,))
+    value = flag.item()
+    assert value is True
 
 
 if TYPE_CHECKING:

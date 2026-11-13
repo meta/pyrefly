@@ -336,7 +336,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
         fields.insert(
             dunder::REPLACE,
-            self.get_dataclass_replace(cls, dataclass, &kw_only_by_class, errors),
+            self.get_dataclass_replace(cls, dataclass, &kw_only_by_class),
         );
         Some(ClassSynthesizedFields::new(fields))
     }
@@ -412,15 +412,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// dataclass __init__ writes there, shadowing the class-level descriptor.
     ///
     /// Exception: a __get__ returning Self or the descriptor's own class is sound.
+    ///
+    /// Only the class's own fields are checked: a base class reports its fields in its own module.
     fn check_dataclass_non_data_descriptors(
         &self,
         cls: &Class,
         dataclass: &DataclassMetadata,
         errors: &ErrorCollector,
     ) {
+        let Some(class_fields) = self.get_class_fields(cls) else {
+            return;
+        };
         for name in dataclass.fields.keys() {
             if let DataclassMember::Field(field, _) = self.get_dataclass_member(cls, name)
-                && let Some((range, descriptor_cls)) = field.value.non_data_descriptor_info()
+                && field.defining_class == *cls
+                && let Some(descriptor_cls) = field.value.non_data_descriptor_info()
+                && let Some(range) = class_fields.field_decl_range(name)
             {
                 let get_return_ty = self.descriptor_instance_get_return_type(cls, &descriptor_cls);
 
@@ -452,15 +459,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Reading the field returns the `__get__` return type, but setting the field
     /// expects the `__set__` value parameter type. For the default to be type-safe,
     /// the `__get__` return type must be assignable to the `__set__` value type.
+    ///
+    /// Only the class's own fields are checked: a base class reports its fields in its own module.
     fn check_dataclass_data_descriptor_defaults(
         &self,
         cls: &Class,
         dataclass: &DataclassMetadata,
         errors: &ErrorCollector,
     ) {
+        let Some(class_fields) = self.get_class_fields(cls) else {
+            return;
+        };
         for name in dataclass.fields.keys() {
             if let DataclassMember::Field(field, _) = self.get_dataclass_member(cls, name)
-                && let Some((range, descriptor_cls)) = field.value.data_descriptor_info()
+                && field.defining_class == *cls
+                && let Some(descriptor_cls) = field.value.data_descriptor_info()
+                && let Some(range) = class_fields.field_decl_range(name)
             {
                 let get_return_ty = self.descriptor_instance_get_return_type(cls, &descriptor_cls);
 
@@ -683,7 +697,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         cls: &Class,
         dataclass_metadata: &DataclassMetadata,
         kw_only_by_class: &SmallMap<Class, SmallSet<Name>>,
-        errors: &ErrorCollector,
     ) -> ClassSynthesizedField {
         let mut params = vec![self.class_self_param(cls, true)];
 
@@ -710,7 +723,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     strict,
                     field_flags.converter_param.clone(),
                     &|t| t,
-                    errors,
                 ));
             }
             if let Some(alias) = &field_flags.init_by_alias {
@@ -722,7 +734,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     strict,
                     field_flags.converter_param.clone(),
                     &|t| t,
-                    errors,
                 ));
             }
         }
@@ -808,16 +819,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut params = Vec::new();
         for (name, field, _) in self.iter_fields(cls, dataclass_metadata, true, &kw_only_by_class) {
             if field.is_init_var() {
-                params.push(self.as_param(
-                    &field,
-                    &name,
-                    false,
-                    false,
-                    true,
-                    None,
-                    &|ty| ty,
-                    errors,
-                ));
+                params.push(self.as_param(&field, &name, false, false, true, None, &|ty| ty));
             }
         }
         let want = self.heap.mk_callable_from(Callable::list(
@@ -1417,7 +1419,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         strict,
                         converter_param.clone(),
                         param_type_transform,
-                        errors,
                     ));
                 }
                 if let Some(alias) = &field_flags.init_by_alias {
@@ -1429,7 +1430,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         strict,
                         converter_param,
                         param_type_transform,
-                        errors,
                     ));
                 }
             }

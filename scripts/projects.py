@@ -270,7 +270,9 @@ def get_mypy_primer_projects() -> list[Project]:
             location="https://github.com/we-like-parsers/pegen",
             mypy_cmd="{mypy} src/pegen",
             pyright_cmd="{pyright} src/pegen",
-            pyrefly_cmd="{pyrefly} src/pegen",
+            # The mypy `files` (`pegen`, `scripts`, `tests`) do not include
+            # `src/pegen`, so a project-mode check of `src/pegen` finds no files.
+            pyrefly_cmd="{pyrefly} 'src/pegen/**'",
             expected_mypy_success=True,
         ),
         Project(

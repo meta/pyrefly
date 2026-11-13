@@ -59,6 +59,7 @@ __all__ = [
     "defines_assert_shape",
     "gufunc_broadcast",
     "index_shape",
+    "shape_transform",
     "shape_vars",
     "static_jaxtyping",
     "type_shape_dsl_function",
@@ -554,10 +555,16 @@ class MapIntTuples:
 _F = typing.TypeVar("_F", bound=typing.Callable)
 
 
-def type_shape_dsl_function(fn: _F) -> _F:
-    """Runtime no-op for a user-defined type-level shape DSL function."""
+def shape_transform(fn: _F) -> _F:
+    """Runtime no-op for a user-defined type-level shape DSL function.
+
+    ``type_shape_dsl_function`` is a backward-compatible alias.
+    """
 
     return fn
+
+
+type_shape_dsl_function = shape_transform
 
 
 def _shape_declaration(tokens: typing.Iterable[str]) -> typing.Callable[[_F], _F]:
@@ -675,14 +682,14 @@ def shape_vars(
 from . import dsl as _dsl
 
 
-@type_shape_dsl_function
+@shape_transform
 def gufunc_broadcast(spec: str, shapes: IntTuples) -> IntTuple:
     """Compute the output shape described by a generalized ufunc signature."""
 
     return _dsl._gufunc_broadcast(spec, shapes)
 
 
-@type_shape_dsl_function
+@shape_transform
 def broadcast(left: IntTuple, right: IntTuple) -> IntTuple:
     spec = "(),()->()"
     shapes = _dsl.IntTuples((left, right))

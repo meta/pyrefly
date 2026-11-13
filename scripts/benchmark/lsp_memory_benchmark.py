@@ -770,7 +770,11 @@ def build_summary(results_dir: Path) -> dict[str, Any]:
                 checkpoints[name] = {
                     key: _stats([c[field] for c in points])
                     for key, field, _ in SUMMARY_TABLES
-                } | {"all_steady": all(c["steady"] for c in points)}
+                } | {
+                    "all_steady": all(  # pyrefly: ignore [bad-assignment]
+                        c["steady"] for c in points
+                    )  # pyrefly: ignore [bad-assignment]
+                }  # pyrefly: ignore [bad-assignment]
             config_summary: dict[str, Any] = {"repetitions": len(config_runs)}
             if CONFIGS[config][0] == "basedpyright":
                 config_summary["cache_clears"] = [

@@ -13,6 +13,7 @@ use std::path::Path;
 
 use tracing::debug;
 
+use crate::base::ConfigBase;
 use crate::base::Preset;
 use crate::config::ConfigFile;
 use crate::config::SynthesizedPresetReason;
@@ -91,7 +92,10 @@ impl From<Option<Preset>> for UnconfiguredOverride {
 pub fn resolve_unconfigured_config(start: &Path, over: UnconfiguredOverride) -> ConfigFile {
     if let Some(preset) = over.explicit_preset() {
         return ConfigFile {
-            preset: Some(preset),
+            root: ConfigBase {
+                preset: Some(preset),
+                ..Default::default()
+            },
             project_includes: ConfigFile::default_project_includes(),
             synthesized_preset_reason: Some(SynthesizedPresetReason::UserOverride),
             ..Default::default()
@@ -122,7 +126,10 @@ pub fn resolve_unconfigured_config(start: &Path, over: UnconfiguredOverride) -> 
 
 fn basic_fallback() -> ConfigFile {
     ConfigFile {
-        preset: Some(Preset::Basic),
+        root: ConfigBase {
+            preset: Some(Preset::Basic),
+            ..Default::default()
+        },
         project_includes: ConfigFile::default_project_includes(),
         synthesized_preset_reason: Some(SynthesizedPresetReason::NoNearbyConfig),
         ..Default::default()
@@ -149,7 +156,7 @@ mod tests {
         )?;
 
         let cfg = resolve_unconfigured_config(tmp.path(), UnconfiguredOverride::Strict);
-        assert_eq!(cfg.preset, Some(Preset::Strict));
+        assert_eq!(cfg.root.preset, Some(Preset::Strict));
         assert_eq!(
             cfg.synthesized_preset_reason,
             Some(SynthesizedPresetReason::UserOverride)
@@ -167,7 +174,7 @@ mod tests {
     fn test_off_override() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = resolve_unconfigured_config(tmp.path(), UnconfiguredOverride::Off);
-        assert_eq!(cfg.preset, Some(Preset::Off));
+        assert_eq!(cfg.root.preset, Some(Preset::Off));
         assert_eq!(
             cfg.synthesized_preset_reason,
             Some(SynthesizedPresetReason::UserOverride)
@@ -179,7 +186,7 @@ mod tests {
     fn test_auto_no_nearby_config_falls_back_to_basic() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = resolve_unconfigured_config(tmp.path(), UnconfiguredOverride::Auto);
-        assert_eq!(cfg.preset, Some(Preset::Basic));
+        assert_eq!(cfg.root.preset, Some(Preset::Basic));
         assert_eq!(
             cfg.synthesized_preset_reason,
             Some(SynthesizedPresetReason::NoNearbyConfig)
@@ -202,7 +209,7 @@ mod tests {
         )?;
 
         let cfg = resolve_unconfigured_config(tmp.path(), UnconfiguredOverride::Auto);
-        assert_eq!(cfg.preset, Some(Preset::Legacy));
+        assert_eq!(cfg.root.preset, Some(Preset::Legacy));
         assert_eq!(
             cfg.synthesized_preset_reason,
             Some(SynthesizedPresetReason::Migrated(MigratedFromKind::Mypy(
@@ -258,7 +265,7 @@ mod tests {
 
         let cfg = resolve_unconfigured_config(tmp.path(), UnconfiguredOverride::Auto);
         // Pyright migration leaves preset as None (== Default behavior).
-        assert_eq!(cfg.preset, None);
+        assert_eq!(cfg.root.preset, None);
         assert_eq!(
             cfg.synthesized_preset_reason,
             Some(SynthesizedPresetReason::Migrated(
@@ -291,7 +298,7 @@ mod tests {
         )?;
 
         let cfg = resolve_unconfigured_config(tmp.path(), UnconfiguredOverride::Auto);
-        assert_eq!(cfg.preset, Some(Preset::Basic));
+        assert_eq!(cfg.root.preset, Some(Preset::Basic));
         assert_eq!(
             cfg.synthesized_preset_reason,
             Some(SynthesizedPresetReason::NoNearbyConfig)

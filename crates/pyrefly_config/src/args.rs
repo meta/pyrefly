@@ -225,7 +225,7 @@ impl EnvironmentArgs {
     /// that only flatten `EnvironmentArgs`.
     pub fn override_environment_config(&self, config: &mut ConfigFile) {
         if let Some(x) = self.preset {
-            config.preset = Some(x);
+            config.root.preset = Some(x);
             config.synthesized_preset_reason = Some(SynthesizedPresetReason::UserOverride);
         }
         if let Some(x) = &self.python_platform {
@@ -347,6 +347,11 @@ pub struct ConfigOverrideArgs {
         num_args = 0..=1
     )]
     use_ignore_files: Option<bool>,
+    /// A command that finds the Python environment of a PEP 723 script, one argument per use of
+    /// this flag. Pyrefly appends the script's path to the command, which prints the environment in
+    /// the JSON format of `uv workspace metadata --script`.
+    #[arg(long, allow_hyphen_values = true)]
+    script_command: Option<Vec<String>>,
     /// Deprecated: use --check-unannotated-defs and --infer-return-types instead.
     /// Controls how Pyrefly analyzes function definitions that lack type annotations on parameters and return values.
     #[arg(long)]
@@ -485,6 +490,7 @@ impl ConfigOverrideArgs {
             ignore_errors_in_generated_code,
             infer_with_first_use,
             use_ignore_files,
+            script_command,
             untyped_def_behavior,
             check_unannotated_defs,
             infer_return_types,
@@ -515,6 +521,7 @@ impl ConfigOverrideArgs {
             || ignore_errors_in_generated_code.is_some()
             || infer_with_first_use.is_some()
             || use_ignore_files.is_some()
+            || script_command.is_some()
             || untyped_def_behavior.is_some()
             || check_unannotated_defs.is_some()
             || infer_return_types.is_some()
@@ -613,6 +620,9 @@ impl ConfigOverrideArgs {
         // Then apply check-specific behavior overrides
         if let Some(x) = &self.use_ignore_files {
             config.use_ignore_files = *x;
+        }
+        if let Some(x) = &self.script_command {
+            config.script_command = Some(x.clone());
         }
         if let Some(x) = &self.untyped_def_behavior {
             config.root.untyped_def_behavior = Some(*x);
@@ -733,9 +743,14 @@ impl ConfigOverrideArgs {
         };
         let root_errors = config.root.errors.get_or_insert_default();
         apply_error_settings(root_errors);
-        for sub_config in config.sub_configs.iter_mut() {
-            let sub_config_errors = sub_config.settings.errors.get_or_insert_default();
-            apply_error_settings(sub_config_errors);
+        // A sub-config without `errors` inherits the root's, so it gets the overrides
+        // from there. Giving it its own map would hide a later matching sub-config's.
+        // Legacy settings are resolved first because they can give a sub-config a map.
+        for sub_config in &mut config.sub_configs {
+            sub_config.settings.resolve_legacy_settings();
+            if let Some(errors) = &mut sub_config.settings.errors {
+                apply_error_settings(errors);
+            }
         }
         let mut errors = config.configure_at(project_root);
         if let Some(names) = self.environment.module_names() {
@@ -784,7 +799,14 @@ impl ConfigOverrideArgs {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use pyrefly_python::module_path::ModulePath;
+    use pyrefly_util::globs::Glob;
+
     use super::*;
+    use crate::base::ConfigBase;
+    use crate::config::SubConfig;
 
     #[test]
     fn repeated_python_platform_flags_merge() {
@@ -842,5 +864,103 @@ mod tests {
 
             assert!(!config.interpreters.skip_interpreter_query);
         }
+    }
+
+    #[test]
+    fn sub_config_without_errors_does_not_shadow_later_sub_config_errors() {
+        let config = ConfigFile {
+            sub_configs: vec![
+                SubConfig {
+                    matches: Glob::new("src/**".to_owned()).unwrap(),
+                    settings: ConfigBase {
+                        check_unannotated_defs: Some(false),
+                        ..Default::default()
+                    },
+                },
+                SubConfig {
+                    matches: Glob::new("src/strict/**".to_owned()).unwrap(),
+                    settings: ConfigBase {
+                        errors: Some(ErrorDisplayConfig::new(HashMap::from([
+                            (ErrorKind::BadReturn, Severity::Warn),
+                            (ErrorKind::BadAssignment, Severity::Error),
+                        ]))),
+                        ..Default::default()
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+        let args = ConfigOverrideArgs::parse_from([
+            "pyrefly",
+            "--skip-interpreter-query",
+            "--ignore",
+            "bad-assignment",
+        ]);
+        let (config, _) = args.override_config(config);
+        let strict = config.errors(&ModulePath::filesystem(PathBuf::from("src/strict/foo.py")));
+        assert_eq!(strict.severity(ErrorKind::BadReturn), Severity::Warn);
+        // CLI overrides reach sub-configs with and without their own `errors`, and beat
+        // their explicit settings.
+        assert_eq!(strict.severity(ErrorKind::BadAssignment), Severity::Ignore);
+        assert_eq!(
+            config
+                .errors(&ModulePath::filesystem(PathBuf::from("src/foo.py")))
+                .severity(ErrorKind::BadAssignment),
+            Severity::Ignore
+        );
+    }
+
+    #[test]
+    fn cli_error_flags_beat_sub_config_pytorch_efficiency_lints() {
+        let config = ConfigFile {
+            sub_configs: vec![SubConfig {
+                matches: Glob::new("src/**".to_owned()).unwrap(),
+                settings: ConfigBase {
+                    pytorch_efficiency_lints: Some(true),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        let args = ConfigOverrideArgs::parse_from([
+            "pyrefly",
+            "--skip-interpreter-query",
+            "--ignore",
+            "pytorch-efficiency-lints",
+        ]);
+        let (config, _) = args.override_config(config);
+        assert_eq!(
+            config
+                .errors(&ModulePath::filesystem(PathBuf::from("src/foo.py")))
+                .severity(ErrorKind::PytorchEfficiencyLints),
+            Severity::Ignore
+        );
+    }
+
+    #[test]
+    fn cli_preset_replaces_only_root_preset() {
+        let config = ConfigFile::parse_config(
+            r#"
+            preset = "basic"
+            [[sub-config]]
+            matches = "sub/**"
+            preset = "default"
+            "#,
+        )
+        .unwrap();
+        let args = ConfigOverrideArgs::parse_from([
+            "pyrefly",
+            "--skip-interpreter-query",
+            "--preset",
+            "off",
+        ]);
+        let (config, _) = args.override_config(config);
+        let severity = |path: &str| {
+            config
+                .errors(&ModulePath::filesystem(PathBuf::from(path)))
+                .severity(ErrorKind::BadReturn)
+        };
+        assert_eq!(severity("other/foo.py"), Severity::Ignore);
+        assert_eq!(severity("sub/foo.py"), Severity::Error);
     }
 }

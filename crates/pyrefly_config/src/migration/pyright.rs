@@ -812,7 +812,7 @@ executionEnvironments = [
 ]
 "#;
         let result = parse_pyproject_toml(src).unwrap().convert();
-        assert_eq!(result.preset, None);
+        assert_eq!(result.root.preset, None);
     }
 
     #[test]
@@ -820,7 +820,7 @@ executionEnvironments = [
         let src = r#"[tool.basedpyright]
 "#;
         let result = parse_pyproject_toml(src).unwrap().convert();
-        assert_eq!(result.preset, Some(Preset::All));
+        assert_eq!(result.root.preset, Some(Preset::All));
     }
 
     #[test]
@@ -829,7 +829,7 @@ executionEnvironments = [
 typeCheckingMode = "basic"
 "#;
         let result = parse_pyproject_toml(src).unwrap().convert();
-        assert_eq!(result.preset, None);
+        assert_eq!(result.root.preset, None);
     }
 
     #[test]

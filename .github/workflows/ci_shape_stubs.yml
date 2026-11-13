@@ -82,7 +82,12 @@ jobs:
           )
           stamp(
               "EINOPS_STUBS_BUILD_DIR",
-              ("pyrefly-shape-extensions", "pyrefly-torch-stubs"),
+              (
+                  "pyrefly-shape-extensions",
+                  "pyrefly-torch-stubs",
+                  "jax-pyrefly-stubs",
+                  "pyrefly-numpy-stubs",
+              ),
           )
           PY
 

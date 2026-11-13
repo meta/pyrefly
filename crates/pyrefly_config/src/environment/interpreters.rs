@@ -158,6 +158,17 @@ impl Interpreters {
         self.python_interpreter_path = Some(ConfigOrigin::lsp(interpreter));
     }
 
+    /// Replaces every interpreter selection with `interpreter`, which Pyrefly found for the
+    /// file that this config applies to. Keeping any other selection would discard
+    /// `interpreter`: `find_interpreter` prefers a configured interpreter path, find command, or
+    /// Conda environment to an `Auto` interpreter, and `skip-interpreter-query` skips the query.
+    pub fn select_python_interpreter(&mut self, interpreter: PathBuf) {
+        *self = Self {
+            python_interpreter_path: Some(ConfigOrigin::auto(interpreter)),
+            ..Self::default()
+        };
+    }
+
     /// Finds interpreters by searching in prioritized locations for the given project
     /// and interpreter settings.
     ///

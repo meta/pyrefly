@@ -1,9 +1,9 @@
 {
   "total": 145,
-  "pass": 142,
-  "fail": 3,
-  "pass_rate": 0.98,
-  "differences": 20,
+  "pass": 144,
+  "fail": 1,
+  "pass_rate": 0.99,
+  "differences": 1,
   "passing": [
     "aliases_explicit.py",
     "aliases_implicit.py",
@@ -30,7 +30,6 @@
     "constructors_call_type.py",
     "constructors_callable.py",
     "constructors_consistency.py",
-    "dataclasses_descriptors.py",
     "dataclasses_final.py",
     "dataclasses_frozen.py",
     "dataclasses_hash.py",
@@ -74,6 +73,7 @@
     "generics_paramspec_components.py",
     "generics_paramspec_semantics.py",
     "generics_paramspec_specialization.py",
+    "generics_paramspec_variance.py",
     "generics_scoping.py",
     "generics_self_advanced.py",
     "generics_self_attributes.py",
@@ -92,6 +92,7 @@
     "generics_typevartuple_overloads.py",
     "generics_typevartuple_specialization.py",
     "generics_typevartuple_unpack.py",
+    "generics_typevartuple_variance.py",
     "generics_upper_bound.py",
     "generics_variance.py",
     "generics_variance_inference.py",
@@ -120,6 +121,7 @@
     "protocols_runtime_checkable.py",
     "protocols_self.py",
     "protocols_subtyping.py",
+    "protocols_variance.py",
     "qualifiers_annotated.py",
     "qualifiers_final_annotation.py",
     "qualifiers_final_decorator.py",
@@ -149,9 +151,7 @@
     "typeforms_typeform.py"
   ],
   "failing": {
-    "generics_paramspec_variance.py": 9,
-    "generics_typevartuple_variance.py": 9,
-    "protocols_variance.py": 2
+    "dataclasses_descriptors.py": 1
   },
   "comment": "@generated"
 }

@@ -421,7 +421,7 @@ impl Errors {
                 let module_unused = Self::collect_unused_ignore_errors_for_module(
                     &load.module_info,
                     module_ranges.as_deref(),
-                    config.enabled_ignores(path).as_ref(),
+                    &config.enabled_ignores(path),
                     config.type_ignore_unknown_tag_behavior(path),
                     module_errors
                         .suppressed
@@ -611,7 +611,17 @@ impl Errors {
             // An unreadable or invalid baseline suppresses nothing; the language server
             // surfaces every diagnostic rather than failing the request.
             if let Some(processor) = processor {
+                let start = baselined.len();
                 processor.process_errors(&mut group, &mut baselined);
+                // `baseline-error-level` caps a match here, where this config is already
+                // in hand. An unset level leaves the severity alone and asks the IDE to
+                // draw the open-file match as a hint.
+                for error in &mut baselined[start..] {
+                    *error = match config.baseline_error_level {
+                        Some(level) => error.with_severity(error.severity().min(level)),
+                        None => error.with_unconfigured_baseline_hint(),
+                    };
+                }
             }
             normal.extend(group);
         }
@@ -744,7 +754,7 @@ impl Errors {
             Self::collect_unused_ignore_errors_for_module(
                 &load.module_info,
                 module_ranges.as_deref(),
-                config.enabled_ignores(path).as_ref(),
+                &config.enabled_ignores(path),
                 config.type_ignore_unknown_tag_behavior(path),
                 affected,
             )

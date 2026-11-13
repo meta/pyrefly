@@ -87,15 +87,15 @@ open(path, "w").write(txt)
 PY
 
 echo ""
-echo "==> Uploading tarball to Manifold pyrefly_resources/tree/$TARBALL"
+echo "==> Uploading tarball to Manifold pyrefly_pytorch_src/tree/$TARBALL"
 if command -v manifold >/dev/null 2>&1; then
-  if manifold put "$OUTPATH" "pyrefly_resources/tree/$TARBALL" --overwrite 2>&1 | tee /tmp/manifold-put.log; then
+  if manifold put "$OUTPATH" "pyrefly_pytorch_src/tree/$TARBALL" --overwrite 2>&1 | tee /tmp/manifold-put.log; then
     echo "Manifold upload succeeded."
   else
     echo "" >&2
     echo "Manifold upload failed. Tarball is ready at $OUTPATH — retry:" >&2
-    echo "  manifold put $TARBALL pyrefly_resources/tree/$TARBALL --overwrite" >&2
-    echo "  # or UI: https://www.internalfb.com/manifold/bucket/pyrefly_resources/tree" >&2
+    echo "  manifold put $TARBALL pyrefly_pytorch_src/tree/$TARBALL --overwrite" >&2
+    echo "  # or UI: https://www.internalfb.com/manifold/bucket/pyrefly_pytorch_src/tree" >&2
   fi
 else
   echo "manifold CLI not found — skipping upload. Install via 'dnf install fb-manifold' or use the web UI."

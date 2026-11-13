@@ -677,6 +677,44 @@
           },
           "spans": [
             {
+              "length": 1,
+              "start": 110
+            }
+          ],
+          "target": {
+            "id": 0,
+            "key": "attr_annotation.Container.x"
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "attr_annotation.py"
+          },
+          "spans": [
+            {
+              "length": 1,
+              "start": 140
+            }
+          ],
+          "target": {
+            "id": 0,
+            "key": "attr_annotation.Container.y"
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "attr_annotation.py"
+          },
+          "spans": [
+            {
               "length": 4,
               "start": 105
             },
@@ -807,6 +845,66 @@
   },
   {
     "facts": [
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "attr_annotation.py"
+          },
+          "spans": [
+            {
+              "length": 1,
+              "start": 110
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "attr_annotation.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "attr_annotation.Container.x"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "file": {
+            "id": 0,
+            "key": "attr_annotation.py"
+          },
+          "spans": [
+            {
+              "length": 1,
+              "start": 140
+            }
+          ],
+          "target": {
+            "local": {
+              "id": 0,
+              "key": {
+                "file": {
+                  "id": 0,
+                  "key": "attr_annotation.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "attr_annotation.Container.y"
+                }
+              }
+            }
+          }
+        }
+      },
       {
         "id": 0,
         "key": {
@@ -995,6 +1093,38 @@
           "xrefs": [
             {
               "source": {
+                "length": 1,
+                "start": 110
+              },
+              "target": {
+                "file": {
+                  "id": 0,
+                  "key": "attr_annotation.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "attr_annotation.Container.x"
+                }
+              }
+            },
+            {
+              "source": {
+                "length": 1,
+                "start": 140
+              },
+              "target": {
+                "file": {
+                  "id": 0,
+                  "key": "attr_annotation.py"
+                },
+                "name": {
+                  "id": 0,
+                  "key": "attr_annotation.Container.y"
+                }
+              }
+            },
+            {
+              "source": {
                 "length": 4,
                 "start": 105
               },
@@ -1165,6 +1295,26 @@
             "key": "attr_annotation.py"
           },
           "xrefs": [
+            {
+              "source": {
+                "length": 1,
+                "start": 110
+              },
+              "target": {
+                "id": 0,
+                "key": "attr_annotation.Container.x"
+              }
+            },
+            {
+              "source": {
+                "length": 1,
+                "start": 140
+              },
+              "target": {
+                "id": 0,
+                "key": "attr_annotation.Container.y"
+              }
+            },
             {
               "source": {
                 "length": 4,

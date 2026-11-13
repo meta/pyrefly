@@ -85,6 +85,7 @@ assert-type = true
 # SubConfig example 2: Generated code
 [[sub-config]]
 matches = "**/*_pb2.py"
+preset = "basic"
 ignore-errors-in-generated-code = true
 replace-imports-with-any = ["google.protobuf.*"]
 

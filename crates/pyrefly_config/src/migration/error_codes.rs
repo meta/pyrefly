@@ -56,7 +56,7 @@ impl ConfigOptionMigrater for ErrorCodes {
         // Use the `legacy` preset as the base. The preset handles defaults
         // like disabling mutable-override and param-name-override. Any explicit
         // error code overrides from the mypy config are added on top.
-        pyrefly_cfg.preset = Some(Preset::Legacy);
+        pyrefly_cfg.root.preset = Some(Preset::Legacy);
         if let Some(error_config) = error_config {
             pyrefly_cfg.root.errors = Some(error_config);
         }
@@ -82,7 +82,10 @@ impl ConfigOptionMigrater for ErrorCodes {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use configparser::ini::IniDefault;
+    use pyrefly_python::module_path::ModulePath;
 
     use super::*;
     use crate::error_kind::ErrorKind;
@@ -185,12 +188,12 @@ mod tests {
             .expect("migration should succeed");
 
         // Empty mypy config sets the `legacy` preset; no explicit error overrides
-        assert_eq!(pyrefly_cfg.preset, Some(Preset::Legacy));
+        assert_eq!(pyrefly_cfg.root.preset, Some(Preset::Legacy));
         assert!(pyrefly_cfg.root.errors.is_none());
 
         // After configure(), the preset disables mutable-override and unbound-name
         pyrefly_cfg.configure();
-        let errors = pyrefly_cfg.root.errors.as_ref().unwrap();
+        let errors = pyrefly_cfg.errors(&ModulePath::filesystem(PathBuf::from("foo.py")));
         assert_eq!(
             errors.severity(ErrorKind::BadOverrideMutableAttribute),
             Severity::Ignore
@@ -216,7 +219,7 @@ mod tests {
 
         // Explicit enable overrides the preset's default after configure()
         pyrefly_cfg.configure();
-        let errors = pyrefly_cfg.root.errors.as_ref().unwrap();
+        let errors = pyrefly_cfg.errors(&ModulePath::filesystem(PathBuf::from("foo.py")));
         assert_eq!(
             errors.severity(ErrorKind::BadOverrideMutableAttribute),
             Severity::Error
@@ -241,7 +244,7 @@ mod tests {
 
         // Explicit enable overrides the legacy preset's Ignore after configure()
         pyrefly_cfg.configure();
-        let errors = pyrefly_cfg.root.errors.as_ref().unwrap();
+        let errors = pyrefly_cfg.errors(&ModulePath::filesystem(PathBuf::from("foo.py")));
         assert_eq!(errors.severity(ErrorKind::UnboundName), Severity::Error);
     }
 

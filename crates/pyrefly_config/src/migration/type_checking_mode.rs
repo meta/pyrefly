@@ -29,7 +29,7 @@ impl ConfigOptionMigrater for TypeCheckingMode {
         pyright_cfg: &PyrightConfig,
         pyrefly_cfg: &mut ConfigFile,
     ) -> anyhow::Result<()> {
-        pyrefly_cfg.preset = match pyright_cfg.type_checking_mode {
+        pyrefly_cfg.root.preset = match pyright_cfg.type_checking_mode {
             // TODO: "recommended" in basedpyright does enable all rules, but sets the severity to warning
             // and turns on failOnWarnings. we could do the same here, but for now we just treat both "All"
             // and "recommended" the same way.

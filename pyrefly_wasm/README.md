@@ -20,6 +20,15 @@ Pyrefly's WASM build is used in browser-based applications like the
 
 Run `./build.sh`
 
+## Shared TSP type conversion
+
+Native and WASI library hosts can call
+`pyrefly::tsp::convert_type_in_transaction` after computing a type in a
+transaction. Pass that same transaction and its source handle so declaration
+ranges, imports, and builtin types use the already-computed Python environment.
+The Rust interface is internal and unstable; the native TSP transports are not
+part of the WASI interface.
+
 ## Benchmarking the WASM build
 
 After `./build.sh`, run `node bench.mjs`. It prints the module size, the time

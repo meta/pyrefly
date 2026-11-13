@@ -36,6 +36,7 @@ use pyrefly_types::function::Function;
 use pyrefly_types::function::FunctionKind;
 use pyrefly_types::function::PropertyRole;
 use pyrefly_types::literal::Lit;
+use pyrefly_types::quantified::TypeVarLike;
 use pyrefly_types::type_alias::TypeAliasData;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_types::typed_dict::TypedDict;
@@ -1209,7 +1210,10 @@ impl Query {
                         ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => {
                             Some(*annotation)
                         }
-                        ClassFieldDefinition::AssignedInBody { annotation, .. } => *annotation,
+                        ClassFieldDefinition::AssignedInBody { annotation, .. }
+                        | ClassFieldDefinition::DefinedWithoutAssign { annotation, .. } => {
+                            *annotation
+                        }
                         _ => None,
                     }
                     .and_then(|idx| answers.get_idx(idx))

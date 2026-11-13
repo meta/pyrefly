@@ -54,8 +54,9 @@ pub mod state;
 mod stubgen;
 #[cfg(test)]
 mod test;
-#[cfg(not(target_arch = "wasm32"))]
-mod tsp;
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+#[doc(hidden)]
+pub mod tsp;
 
 pub(crate) use compat::*;
 
@@ -77,12 +78,15 @@ pub mod library {
                 pub use crate::commands::check::CheckArgs;
                 pub use crate::commands::check::CheckResult;
                 pub use crate::commands::check::FullCheckArgs;
+                pub use crate::commands::check::IncrementalCheckResult;
+                pub use crate::commands::check::IncrementalChecker;
                 pub use crate::commands::check::write_serializable_errors_to_console;
                 pub use crate::commands::config_finder::ConfigConfigurer;
                 pub use crate::commands::config_finder::ConfigConfigurerWrapper;
                 pub use crate::commands::config_finder::default_config_finder;
                 pub use crate::commands::config_finder::default_config_finder_with_overrides;
                 pub use crate::commands::files::UpsellDecision;
+                pub use crate::commands::lsp::filter_unrecognized_lsp_args;
                 pub use crate::commands::util;
                 pub use crate::error::error::SerializableError;
                 pub use crate::error::legacy::LegacyError;
@@ -90,6 +94,18 @@ pub mod library {
                 pub use crate::lsp::non_wasm::external_provider::NoExternalProvider;
                 pub use crate::lsp::non_wasm::module_helpers::PathRemapper;
                 pub use crate::lsp::non_wasm::module_helpers::ThriftRemapper;
+                pub use crate::query::Query;
+                pub use crate::query::ResolveTargetError;
+                pub use crate::query::TypeQueryDecorator;
+                pub use crate::query::TypeQueryExpr;
+                pub use crate::query::TypeQueryExprVisitor;
+                pub use crate::query::TypeQueryStmt;
+                pub use crate::query::TypeQueryStmtClassDef;
+                pub use crate::query::TypeQueryStmtFunctionDef;
+                pub use crate::query::TypeQueryStmtWalker;
+                pub use crate::query::TypeTableResponseData;
+                pub use crate::state::require::Require;
+                pub use crate::state::require::RequireLevels;
             }
         }
     }

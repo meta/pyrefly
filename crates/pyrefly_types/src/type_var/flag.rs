@@ -31,6 +31,7 @@ use pyrefly_util::visit::VisitMut;
 use crate::heap::TypeHeap;
 use crate::known_class::KnownClass;
 use crate::literal::Lit;
+use crate::quantified::TypeVarLike;
 use crate::simplify::unions;
 use crate::stdlib::Stdlib;
 use crate::tuple::Tuple;
