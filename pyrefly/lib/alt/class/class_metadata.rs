@@ -14,6 +14,7 @@ use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
 use pyrefly_python::short_identifier::ShortIdentifier;
+use pyrefly_python::sys_info::PythonVersion;
 use pyrefly_types::annotation::Annotation;
 use pyrefly_types::callable::Params;
 use pyrefly_types::known_class::KnownClass;
@@ -93,6 +94,58 @@ use crate::types::keywords::TypeMap;
 use crate::types::literal::Lit;
 use crate::types::types::CalleeKind;
 use crate::types::types::Type;
+
+/// Names that CPython's `typing._get_protocol_attrs` excludes from the runtime
+/// attribute set of a protocol on every version that provides `typing.Protocol`.
+/// Names whose exclusion depends on the version or on a prefix are handled in
+/// `is_excluded_runtime_attribute`.
+///
+/// Static membership is a separate question: see `ProtocolMetadata::members`.
+const RUNTIME_EXCLUDED_ATTRIBUTES: &[&str] = &[
+    "_MutableMapping__marker",
+    "_is_protocol",
+    "_is_runtime_protocol",
+    "__abstractmethods__",
+    "__annotations__",
+    "__dict__",
+    "__doc__",
+    "__init__",
+    "__module__",
+    "__new__",
+    "__orig_bases__",
+    "__orig_class__",
+    "__parameters__",
+    "__slots__",
+    "__subclasshook__",
+    "__weakref__",
+];
+
+/// Whether CPython's `typing._get_protocol_attrs` excludes `name` from the runtime
+/// attribute set of a protocol on `version`.
+///
+/// The match arms cover the names a class body can declare directly. Names that
+/// are injected by the runtime, the compiler, or a decorator, such as
+/// `__static_attributes__`, `__non_callable_proto_members__`, and `__final__`,
+/// are omitted: gating them would add micro-version windows for names that
+/// ordinary code does not write. An explicit write therefore keeps the name in
+/// the runtime set and produces a residual false positive, which is accepted.
+fn is_excluded_runtime_attribute(name: &Name, version: PythonVersion) -> bool {
+    let name = name.as_str();
+    if RUNTIME_EXCLUDED_ATTRIBUTES.contains(&name) {
+        return true;
+    }
+    // CPython skips `_abc_*` when collecting runtime protocol attributes; ABCMeta
+    // injects those names into class dictionaries.
+    if name.starts_with("_abc_") {
+        return true;
+    }
+    match name {
+        "__class_getitem__" => version.at_least(3, 9),
+        "__match_args__" => version.at_least(3, 13),
+        "__annotate__" | "__annotate_func__" | "__annotations_cache__" => version.at_least(3, 14),
+        _ => false,
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ParsedBaseClass<'a> {
@@ -203,8 +256,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             )
         });
 
+        let explicit_slots = self.explicit_slots(cls);
+
         // Compute data that depends on the `BaseClass` representation of base classes.
-        let initial_protocol_metadata = self.initial_protocol_metadata(cls, bases);
+        let initial_protocol_metadata = self.initial_protocol_metadata(cls, bases, &explicit_slots);
         let has_generic_base_class = bases.iter().any(|x| x.is_generic());
         let has_typed_dict_base_class = bases.iter().any(|x| x.is_typed_dict());
 
@@ -472,7 +527,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .iter()
             .find_map(|(decorator, _)| decorator.deprecation.clone());
 
-        let explicit_slots = self.explicit_slots(cls);
         let has_nonempty_explicit_slots = explicit_slots
             .slots_info()
             .is_some_and(|slots| !slots.names.is_empty());
@@ -755,6 +809,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         cls: &Class,
         bases: &[BaseClass],
+        explicit_slots: &ExplicitSlots,
     ) -> Option<ProtocolMetadata> {
         if bases.iter().any(|x| {
             matches!(
@@ -765,11 +820,36 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 })
             )
         }) {
+            // CPython excludes the literal `__slots__` but exposes non-excluded slot
+            // names as runtime attributes. An unresolvable declaration cannot prove
+            // data slots, so no error is reported for it.
+            let version = self.bindings().sys_info().version();
+            let slot_runtime_members: SmallSet<Name> = explicit_slots
+                .slots_info()
+                .map(|slots| {
+                    slots
+                        .names
+                        .iter()
+                        .filter(|name| !is_excluded_runtime_attribute(name, version))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let has_data_slots = !slot_runtime_members.is_empty();
+            let mut members = SmallSet::new();
+            let mut runtime_members = slot_runtime_members;
+            if let Some(fields) = self.get_class_fields(cls) {
+                for name in fields.class_body_fields() {
+                    members.insert(name.clone());
+                    if !is_excluded_runtime_attribute(name, version) {
+                        runtime_members.insert(name.clone());
+                    }
+                }
+            }
             Some(ProtocolMetadata {
-                members: self
-                    .get_class_fields(cls)
-                    .map(|f| f.class_body_fields().cloned().collect())
-                    .unwrap_or_default(),
+                members,
+                runtime_members,
+                has_data_slots,
                 is_runtime_checkable: false,
             })
         } else {
@@ -795,6 +875,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     if let Some(base_proto) = metadata.protocol_metadata() {
                         proto.members.extend(base_proto.members.iter().cloned());
+                        proto
+                            .runtime_members
+                            .extend(base_proto.runtime_members.iter().cloned());
+                        proto.has_data_slots |= base_proto.has_data_slots;
                         if base_proto.is_runtime_checkable {
                             proto.is_runtime_checkable = true;
                         }

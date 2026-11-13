@@ -695,10 +695,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         {
                             let mut all_members_present = true;
                             let mut unsafe_overlap_errors = vec![];
-                            for field_name in &class_info_protocol.members {
+                            for field_name in &class_info_protocol.runtime_members {
                                 if !self.has_attr(object_type, field_name) {
                                     all_members_present = false;
                                     break;
+                                }
+                                // Unsafe overlap requires the class to be statically
+                                // incompatible with the protocol. A name outside `members`
+                                // is not part of the protocol's static contract, so it
+                                // cannot contribute to an incompatibility. Slot-only names
+                                // land here because the runtime member set carries
+                                // presence, not a protocol-side type.
+                                if !class_info_protocol.members.contains(field_name) {
+                                    continue;
                                 }
                                 if let Err(subset_err) = self.is_protocol_subset_at_attr(
                                     object_type,
@@ -791,15 +800,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Check if a protocol is a data protocol (has non-method members)
     fn is_data_protocol(&self, cls: &Class, range: TextRange) -> bool {
-        // A data protocol has at least one non-method member
-        // Use protocol metadata to get the member names
         let metadata = self.get_metadata_for_class(cls);
         if let Some(protocol_metadata) = metadata.protocol_metadata() {
-            for field_name in &protocol_metadata.members {
-                // Use the class type to access the field
-                let class_type = self.as_class_type_unchecked(cls);
+            // A slot name can resolve to an inherited callable attribute, so the
+            // member types alone cannot prove data-ness; the flag records the slot
+            // declaration.
+            if protocol_metadata.has_data_slots {
+                return true;
+            }
+            let class_type = self.as_class_type_unchecked(cls);
+            let class_type = self.heap.mk_class_type(class_type);
+            for field_name in &protocol_metadata.runtime_members {
                 let ty = self.type_of_attr_get(
-                    &self.heap.mk_class_type(class_type),
+                    &class_type,
                     field_name,
                     range,
                     &self.error_swallower(),

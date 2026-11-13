@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use pyrefly_python::sys_info::PythonVersion;
+
 use crate::test::util::TestEnv;
 use crate::testcase;
 
@@ -1526,6 +1528,530 @@ isinstance(Implementation(), DataOnlyProtocol)
 issubclass(Implementation, MethodOnlyProtocol)  # OK - only methods
 issubclass(Implementation, MixedDataProtocol)   # E: Protocol `MixedDataProtocol` has non-method members and cannot be used with issubclass()
 issubclass(Implementation, DataOnlyProtocol)   # E: Protocol `DataOnlyProtocol` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+testcase!(
+    test_runtime_checkable_protocol_slots,
+    r#"
+from collections.abc import Buffer
+from typing import Protocol, SupportsInt, runtime_checkable
+
+@runtime_checkable
+class BufferProtocol(Protocol):
+    __slots__ = ()
+
+    def __buffer__(self, flags: int, /) -> memoryview: ...
+
+class BytesLike:
+    def __buffer__(self, flags: int, /) -> memoryview: ...
+
+# An empty `__slots__` declaration is not a protocol member.
+issubclass(BytesLike, BufferProtocol)
+issubclass(bytes, BufferProtocol)
+
+# typeshed declares these runtime-checkable protocols with `__slots__ = ()`.
+issubclass(int, SupportsInt)
+issubclass(bytes, Buffer)
+
+# The unsafe-overlap check inspects runtime members, so the wrong-typed
+# `__buffer__` is reported here.
+class WrongBuffer:
+    def __buffer__(self, flags: int, /) -> bytes: ...
+isinstance(WrongBuffer(), BufferProtocol)  # E: Runtime checkable protocol `BufferProtocol` has an unsafe overlap with type `WrongBuffer`
+
+@runtime_checkable
+class DataWithEmptySlots(Protocol):
+    __slots__ = ()
+    name: str
+
+issubclass(BytesLike, DataWithEmptySlots)  # E: Protocol `DataWithEmptySlots` has non-method members and cannot be used with issubclass()
+
+# Non-empty slots declare data attributes, so the protocol is a data protocol.
+@runtime_checkable
+class NonEmptySlots(Protocol):
+    __slots__ = ("name",)
+
+    def __buffer__(self, flags: int, /) -> memoryview: ...
+
+issubclass(BytesLike, NonEmptySlots)  # E: Protocol `NonEmptySlots` has non-method members and cannot be used with issubclass()
+
+# A dict `__slots__` contributes its keys as slot names.
+@runtime_checkable
+class DictSlots(Protocol):
+    __slots__ = {"name": "doc"}
+
+    def __buffer__(self, flags: int, /) -> memoryview: ...
+
+issubclass(BytesLike, DictSlots)  # E: Protocol `DictSlots` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+// Unresolved `__slots__` is not treated as data. The runtime value may be
+// non-empty, but static analysis cannot prove it, so the diagnostic is suppressed.
+testcase!(
+    bug = "Unresolved `__slots__` is treated as non-data, so these runtime TypeErrors are not reported",
+    test_runtime_checkable_protocol_unknown_slots,
+    r#"
+from typing import Protocol, runtime_checkable
+
+def get_slots() -> tuple[str, ...]:
+    return ("name",)
+
+SLOTS = ("name",)
+
+@runtime_checkable
+class UnknownSlots(Protocol):
+    __slots__ = get_slots()
+
+    def m(self) -> None: ...
+
+@runtime_checkable
+class ConstantSlots(Protocol):
+    __slots__ = SLOTS
+
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, UnknownSlots)
+issubclass(Impl, ConstantSlots)
+"#,
+);
+
+// A string `__slots__` declares one slot.
+testcase!(
+    test_runtime_checkable_protocol_string_slots,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class OneStringSlot(Protocol):
+    __slots__ = "name"
+
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, OneStringSlot)  # E: Protocol `OneStringSlot` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+testcase!(
+    test_runtime_checkable_protocol_excluded_attributes,
+    r#"
+from typing import Any, Protocol, runtime_checkable
+
+# CPython's `typing.EXCLUDED_ATTRIBUTES` names are not protocol members even when
+# the protocol declares them explicitly.
+@runtime_checkable
+class ProtocolWithDunders(Protocol):
+    __doc__: str | None
+    __module__: str
+    __annotations__: dict[str, Any]
+    __match_args__: tuple[str, ...]
+
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, ProtocolWithDunders)
+"#,
+);
+
+// CPython filters slot descriptor names through EXCLUDED_ATTRIBUTES before
+// deciding whether a protocol has non-method members.
+testcase!(
+    test_runtime_checkable_protocol_slots_excluded_names,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class DictSlot(Protocol):
+    __slots__ = ("__dict__",)
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, DictSlot)
+"#,
+);
+
+// CPython skips `_abc_*` when collecting runtime protocol members, for both
+// annotations and slot names. The names remain static protocol members.
+testcase!(
+    test_runtime_checkable_protocol_abc_marker,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class Annotated(Protocol):
+    _abc_marker: int
+    def m(self) -> None: ...
+
+@runtime_checkable
+class SlotNamed(Protocol):
+    __slots__ = ("_abc_marker",)
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, Annotated)
+issubclass(Impl, SlotNamed)
+"#,
+);
+
+// An annotation-only `__slots__` declares no slot descriptors and no data.
+testcase!(
+    test_runtime_checkable_protocol_annotated_slots,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class AnnotatedOnly(Protocol):
+    __slots__: tuple[str, ...]
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, AnnotatedOnly)
+"#,
+);
+
+// A PEP 695 generic protocol with empty slots is not a data protocol.
+testcase!(
+    test_runtime_checkable_protocol_generic_empty_slots,
+    TestEnv::new_with_version(PythonVersion::new(3, 12, 0)),
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class P[T](Protocol):
+    __slots__ = ()
+    def m(self, value: T) -> T: ...
+
+class Impl:
+    def m(self, value: int) -> int: ...
+
+issubclass(Impl, P)
+"#,
+);
+
+// Data slots inherited from a base protocol still make the child a data protocol;
+// excluded slot names do not.
+testcase!(
+    test_runtime_checkable_protocol_slots_inheritance,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class DataBase(Protocol):
+    __slots__ = ("value",)
+    def m(self) -> None: ...
+
+@runtime_checkable
+class DataChild(DataBase, Protocol):
+    __slots__ = ()
+    def m(self) -> None: ...
+
+@runtime_checkable
+class ExcludedBase(Protocol):
+    __slots__ = ("__weakref__",)
+    def m(self) -> None: ...
+
+@runtime_checkable
+class EmptyChild(ExcludedBase, Protocol):
+    __slots__ = ()
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+# A slotted implementation exercises the implementation-side `__slots__`
+# attribute, which is not a protocol member.
+class SlottedImpl:
+    __slots__ = ("value", "__weakref__")
+    def m(self) -> None: ...
+
+issubclass(Impl, DataChild)  # E: Protocol `DataChild` has non-method members and cannot be used with issubclass()
+issubclass(Impl, EmptyChild)
+issubclass(SlottedImpl, DataChild)  # E: Protocol `DataChild` has non-method members and cannot be used with issubclass()
+issubclass(SlottedImpl, EmptyChild)
+"#,
+);
+
+// A slot in the child shadows an inherited method at runtime. The member type
+// alone resolves to the inherited callable, so the slot declaration must mark
+// the child as a data protocol.
+testcase!(
+    test_runtime_checkable_protocol_child_slot_shadows_inherited_method,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class Base(Protocol):
+    def value(self) -> None: ...
+
+@runtime_checkable
+class Child(Base, Protocol):
+    __slots__ = ("value",)
+
+class Impl:
+    def value(self) -> None: ...
+
+issubclass(Impl, Child)  # E: Protocol `Child` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+// A method in the child shadows an inherited slot at runtime, so CPython accepts
+// the check. The inherited flag still marks the child as data.
+testcase!(
+    bug = "A child method shadowing an inherited slot reports despite runtime acceptance",
+    test_runtime_checkable_protocol_inherited_slot_shadowed_by_method,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class SlotBase(Protocol):
+    __slots__ = ("value",)
+
+@runtime_checkable
+class MethodChild(SlotBase, Protocol):
+    def value(self) -> None: ...
+
+class Impl:
+    def value(self) -> None: ...
+
+issubclass(Impl, MethodChild)  # E: Protocol `MethodChild` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+// `__match_args__` is a real protocol member on 3.12 and excluded on 3.13+.
+// The slot and annotation forms share the same runtime predicate; the 3.13 side
+// is covered by `test_runtime_checkable_protocol_excluded_attributes`.
+testcase!(
+    test_runtime_checkable_excluded_match_args_3_12,
+    TestEnv::new_with_version(PythonVersion::new(3, 12, 0)),
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class SlotForm(Protocol):
+    __slots__ = ("__match_args__",)
+    def m(self) -> None: ...
+
+@runtime_checkable
+class AnnotationForm(Protocol):
+    __match_args__: tuple[str, ...]
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, SlotForm)  # E: Protocol `SlotForm` has non-method members and cannot be used with issubclass()
+issubclass(Impl, AnnotationForm)  # E: Protocol `AnnotationForm` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+// On 3.8 `__class_getitem__` is not excluded from the runtime attribute set.
+// An explicit non-callable binding shadows the inherited
+// `Generic.__class_getitem__` and makes the protocol a data protocol.
+testcase!(
+    test_runtime_checkable_class_getitem_3_8_assignment,
+    TestEnv::new_with_version(PythonVersion::new(3, 8, 0)),
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class P(Protocol):
+    __class_getitem__ = 1
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, P)  # E: Protocol `P` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+// On 3.9+, CPython excludes the name, so the same assignment does not report.
+testcase!(
+    test_runtime_checkable_excluded_class_getitem_3_9,
+    TestEnv::new_with_version(PythonVersion::new(3, 9, 0)),
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class P(Protocol):
+    __class_getitem__ = 1
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, P)
+"#,
+);
+
+// On 3.8 `__class_getitem__` is not reserved, so an annotation-only declaration
+// is a protocol data member under the declaration-based model. CPython resolves
+// the inherited `Generic.__class_getitem__` and accepts it, so this is a
+// deliberate false positive.
+testcase!(
+    bug = "3.8 annotation-only form reports even though CPython resolves the inherited method",
+    test_runtime_checkable_protocol_annotated_class_getitem_3_8,
+    TestEnv::new_with_version(PythonVersion::new(3, 8, 0)),
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class P(Protocol):
+    __class_getitem__: object
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, P)  # E: Protocol `P` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+// `__annotate__` is excluded starting in 3.14.
+testcase!(
+    test_runtime_checkable_excluded_annotate_3_13,
+    TestEnv::new_with_version(PythonVersion::new(3, 13, 0)),
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class P(Protocol):
+    __annotate__: object
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, P)  # E: Protocol `P` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+testcase!(
+    test_runtime_checkable_excluded_annotate_3_14,
+    TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class P(Protocol):
+    __annotate__: object
+    def m(self) -> None: ...
+
+class Impl:
+    def m(self) -> None: ...
+
+issubclass(Impl, P)
+"#,
+);
+
+// Slot names participate in the runtime member-presence check, while real data
+// members are still type-checked when they are present.
+testcase!(
+    test_runtime_checkable_unsafe_overlap_nonempty_slots,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class P(Protocol):
+    __slots__ = ("name",)
+    name: int
+    def m(self) -> int: ...
+
+class Mismatched:
+    name: str = "x"
+    def m(self) -> int: ...
+
+isinstance(Mismatched(), P)  # E: Runtime checkable protocol `P` has an unsafe overlap with type `Mismatched`
+
+class DifferentSlots:
+    __slots__ = ("x", "name")
+    def m(self) -> int: ...
+
+isinstance(DifferentSlots(), P)
+
+class DifferentSlotsNoName:
+    __slots__ = ("x",)
+    def m(self) -> int: ...
+
+isinstance(DifferentSlotsNoName(), P)
+
+@runtime_checkable
+class SlotOnly(Protocol):
+    __slots__ = ("name",)
+    def m(self) -> int: ...
+
+class MissingSlotBadMethod:
+    def m(self) -> str: ...
+
+isinstance(MissingSlotBadMethod(), SlotOnly)
+"#,
+);
+
+// A slot-only name participates in the presence check but has no
+// protocol-side type, so it must not be compared; other members still are.
+testcase!(
+    test_runtime_checkable_unsafe_overlap_slot_only_members,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class SlotOnly(Protocol):
+    __slots__ = ("name",)
+    def m(self) -> int: ...
+
+class Annotated:
+    name: str
+    def m(self) -> int: ...
+
+class Assigned:
+    name: int = 1
+    def m(self) -> int: ...
+
+isinstance(Annotated(), SlotOnly)
+isinstance(Assigned(), SlotOnly)
+
+class BadMethod:
+    name: int = 1
+    def m(self) -> str: ...
+
+isinstance(BadMethod(), SlotOnly)  # E: Runtime checkable protocol `SlotOnly` has an unsafe overlap with type `BadMethod`
+"#,
+);
+
+// Private slot names are mangled at runtime, but the runtime member set stores
+// the literal name. The presence check therefore looks for `__x` and misses
+// `_P__x`, which suppresses the unsafe-overlap diagnostic.
+testcase!(
+    bug = "Private slot names are not mangled, so the presence check misses `_P__x`",
+    test_runtime_checkable_protocol_private_slot_name,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class P(Protocol):
+    __slots__ = ("__x",)
+    def m(self) -> None: ...
+
+class Impl:
+    __slots__ = ("_P__x",)
+    def m(self) -> str: ...
+
+isinstance(Impl(), P)
 "#,
 );
 
