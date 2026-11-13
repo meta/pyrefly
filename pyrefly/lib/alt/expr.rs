@@ -67,7 +67,6 @@ use ruff_python_ast::FStringPartRef;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::InterpolatedStringElement;
 use ruff_python_ast::InterpolatedStringElements;
-use ruff_python_ast::Keyword;
 use ruff_python_ast::Number;
 use ruff_python_ast::Operator;
 use ruff_python_ast::StringLiteralValue;
@@ -96,6 +95,7 @@ use crate::alt::regex::validate_pattern;
 use crate::alt::shape_extension::is_int_tuple_bound;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::solve::UntypeContext;
+use crate::alt::solve::quantified_kind_error;
 use crate::alt::unwrap::HintRef;
 use crate::alt::unwrap::MAX_HINT_WIDTH;
 use crate::binding::binding::Binding;
@@ -123,7 +123,6 @@ use crate::types::class::Class;
 use crate::types::class::ClassType;
 use crate::types::facet::FacetKind;
 use crate::types::literal::Lit;
-use crate::types::param_spec::ParamSpec;
 use crate::types::quantified::Quantified;
 use crate::types::quantified::QuantifiedKind;
 use crate::types::sentinel::Sentinel;
@@ -132,8 +131,6 @@ use crate::types::tuple::Tuple;
 use crate::types::type_info::TypeInfo;
 use crate::types::type_var::PreInferenceVariance;
 use crate::types::type_var::Restriction;
-use crate::types::type_var::TypeVar;
-use crate::types::type_var_tuple::TypeVarTuple;
 use crate::types::types::AnyStyle;
 use crate::types::types::Type;
 
@@ -448,6 +445,24 @@ impl Display for ConditionRedundantReason {
 }
 
 pub(crate) const MAX_TUPLE_LENGTH: usize = 256;
+
+/// The arguments to a legacy `TypeVar`, `ParamSpec`, or `TypeVarTuple` call.
+pub struct TypeVarLikeArgs {
+    pub restriction: Restriction,
+    pub default: Option<Type>,
+    pub variance: PreInferenceVariance,
+}
+
+/// The variance declared by a variance keyword argument to a legacy type variable.
+fn keyword_variance(keyword: &str) -> Option<PreInferenceVariance> {
+    match keyword {
+        "covariant" => Some(PreInferenceVariance::Covariant),
+        "contravariant" => Some(PreInferenceVariance::Contravariant),
+        "invariant" => Some(PreInferenceVariance::Invariant),
+        "infer_variance" => Some(PreInferenceVariance::Undefined),
+        _ => None,
+    }
+}
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     fn synthesized_functional_class_type(&self, call: &ExprCall) -> Option<Type> {
@@ -3216,14 +3231,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         Sentinel::new(sentinel_name, nesting_context, self.module().dupe())
     }
 
-    pub fn typevar_from_call(
+    /// Parse the arguments to a legacy `TypeVar`, `ParamSpec`, or `TypeVarTuple` call.
+    pub fn type_var_like_args_from_call(
         &self,
-        name: Identifier,
+        name: &Identifier,
         x: &ExprCall,
         kind: QuantifiedKind,
         errors: &ErrorCollector,
-    ) -> TypeVar {
-        let construct = kind.to_string();
+    ) -> TypeVarLikeArgs {
+        let error_kind = quantified_kind_error(kind);
+        let accepts_restriction = matches!(kind, QuantifiedKind::TypeVar | QuantifiedKind::IntVar);
         let mut arg_name = false;
         let mut restriction = None;
         let mut default: Option<&Expr> = None;
@@ -3235,9 +3252,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.error(
                         errors,
                         x.range(),
-                        ErrorKind::InvalidTypeVar,
+                        error_kind,
                         format!(
-                            "{construct} must be assigned to a variable named `{}`",
+                            "{kind} must be assigned to a variable named `{}`",
                             lit.value.to_str()
                         ),
                     );
@@ -3246,8 +3263,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.error(
                     errors,
                     arg.range(),
-                    ErrorKind::InvalidTypeVar,
-                    format!("Expected first argument of {construct} to be a string literal"),
+                    error_kind,
+                    format!("Expected first argument of {kind} to be a string literal"),
                 );
             }
         };
@@ -3258,25 +3275,36 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             arg_name = true;
         }
 
-        let constraints: Vec<Type> = iargs
-            .map(|arg| self.expr_untype(arg, TypeFormContext::TypeVarConstraint, errors))
-            .collect();
-        if !constraints.is_empty() {
-            restriction = Some(Restriction::Constraints(constraints));
+        if accepts_restriction {
+            let constraints: Vec<Type> = iargs
+                .map(|arg| self.expr_untype(arg, TypeFormContext::TypeVarConstraint, errors))
+                .collect();
+            if !constraints.is_empty() {
+                restriction = Some(Restriction::Constraints(constraints));
+            }
+        } else {
+            for arg in iargs {
+                self.error(
+                    errors,
+                    arg.range(),
+                    error_kind,
+                    format!("Unexpected positional argument to {kind}"),
+                );
+            }
         }
 
         for kw in &x.arguments.keywords {
             match &kw.arg {
                 Some(id) => match id.id.as_str() {
-                    "bound" => {
+                    "bound" if accepts_restriction => {
                         let bound =
                             self.expr_untype(&kw.value, TypeFormContext::TypeVarConstraint, errors);
                         if restriction.is_some() {
                             self.error(
                                 errors,
                                 kw.range,
-                                ErrorKind::InvalidTypeVar,
-                                format!("{construct} cannot have both constraints and bound"),
+                                error_kind,
+                                format!("{kind} cannot have both constraints and bound"),
                             );
                             restriction = Some(Restriction::Unrestricted);
                         } else if self.reject_legacy_shape_extension_bound(
@@ -3292,36 +3320,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     "default" => {
                         default = Some(&kw.value);
                     }
-                    "covariant" => self.try_set_variance(
-                        &mut variance,
-                        kw,
-                        PreInferenceVariance::Covariant,
-                        errors,
-                    ),
-                    "contravariant" => self.try_set_variance(
-                        &mut variance,
-                        kw,
-                        PreInferenceVariance::Contravariant,
-                        errors,
-                    ),
-                    "invariant" => self.try_set_variance(
-                        &mut variance,
-                        kw,
-                        PreInferenceVariance::Invariant,
-                        errors,
-                    ),
-                    "infer_variance" => self.try_set_variance(
-                        &mut variance,
-                        kw,
-                        PreInferenceVariance::Undefined,
-                        errors,
-                    ),
+                    keyword
+                        if kind != QuantifiedKind::TypeVarTuple
+                            && let Some(new_variance) = keyword_variance(keyword) =>
+                    {
+                        if self.literal_bool_infer(&kw.value, errors) {
+                            if variance.is_some() {
+                                self.error(
+                                    errors,
+                                    kw.range,
+                                    error_kind,
+                                    "Contradictory variance specifications".to_owned(),
+                                );
+                            } else {
+                                variance = Some(new_variance);
+                            }
+                        }
+                    }
                     "name" => {
                         if arg_name {
                             self.error(
                                 errors,
                                 kw.range,
-                                ErrorKind::InvalidTypeVar,
+                                error_kind,
                                 "Multiple values for argument `name`".to_owned(),
                             );
                         } else {
@@ -3333,8 +3354,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         self.error(
                             errors,
                             kw.range,
-                            ErrorKind::InvalidTypeVar,
-                            format!("Unexpected keyword argument `{}` to {construct}", id.id),
+                            error_kind,
+                            format!("Unexpected keyword argument `{}` to {kind}", id.id),
                         );
                     }
                 },
@@ -3342,8 +3363,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.error(
                         errors,
                         kw.range,
-                        ErrorKind::InvalidTypeVar,
-                        format!("Cannot pass unpacked keyword arguments to {construct}"),
+                        error_kind,
+                        format!("Cannot pass unpacked keyword arguments to {kind}"),
                     );
                 }
             }
@@ -3353,7 +3374,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self.error(
                 errors,
                 x.range(),
-                ErrorKind::InvalidTypeVar,
+                error_kind,
                 "Missing `name` argument".to_owned(),
             );
         }
@@ -3364,9 +3385,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self.error(
                 errors,
                 x.range(),
-                ErrorKind::InvalidTypeVar,
+                error_kind,
                 format!(
-                    "Expected at least 2 constraints in {construct} `{}`, got {}",
+                    "Expected at least 2 constraints in {kind} `{}`, got {}",
                     name.id,
                     cs.len(),
                 ),
@@ -3374,8 +3395,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             restriction = Some(Restriction::Unrestricted);
         }
         let restriction = restriction.unwrap_or(Restriction::Unrestricted);
-        let mut default_value = None;
-        if let Some(default_expr) = default {
+        let default = default.map(|default_expr| {
             let default_ty = if let Some(default) =
                 self.parse_int_tuple_type_var_default(default_expr, &restriction, errors)
             {
@@ -3387,286 +3407,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     errors,
                 )
             };
-            default_value = Some(self.validate_type_var_default(
+            self.validate_type_var_default(
                 &name.id,
                 kind,
                 &default_ty,
                 default_expr.range(),
                 &restriction,
                 errors,
-            ));
-        }
-
-        let variance = variance.unwrap_or(PreInferenceVariance::Invariant);
-
-        TypeVar::new_with_kind(
-            name,
-            self.module().dupe(),
-            kind,
+            )
+        });
+        TypeVarLikeArgs {
             restriction,
-            default_value,
-            variance,
-        )
-    }
-
-    pub fn paramspec_from_call(
-        &self,
-        name: Identifier,
-        x: &ExprCall,
-        errors: &ErrorCollector,
-    ) -> ParamSpec {
-        // TODO: check and complain on extra args, keywords
-        let mut arg_name = false;
-        let mut variance = None;
-
-        let check_name_arg = |arg: &Expr| {
-            if let Expr::StringLiteral(lit) = arg {
-                if lit.value.to_str() != name.id.as_str() {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::InvalidParamSpec,
-                        format!(
-                            "ParamSpec must be assigned to a variable named `{}`",
-                            lit.value.to_str()
-                        ),
-                    );
-                }
-            } else {
-                self.error(
-                    errors,
-                    arg.range(),
-                    ErrorKind::InvalidParamSpec,
-                    "Expected first argument of ParamSpec to be a string literal".to_owned(),
-                );
-            }
-        };
-
-        if let Some(arg) = x.arguments.args.first() {
-            check_name_arg(arg);
-            arg_name = true;
-        }
-        let mut default = None;
-        for kw in &x.arguments.keywords {
-            match &kw.arg {
-                Some(id) => match id.id.as_str() {
-                    "name" => {
-                        if arg_name {
-                            self.error(
-                                errors,
-                                kw.range,
-                                ErrorKind::InvalidParamSpec,
-                                "Multiple values for argument `name`".to_owned(),
-                            );
-                        } else {
-                            check_name_arg(&kw.value);
-                            arg_name = true;
-                        }
-                    }
-                    "default" => {
-                        default = Some((
-                            self.expr_untype(&kw.value, TypeFormContext::ParamSpecDefault, errors),
-                            kw.range(),
-                        ));
-                    }
-                    "covariant" => self.try_set_variance(
-                        &mut variance,
-                        kw,
-                        PreInferenceVariance::Covariant,
-                        errors,
-                    ),
-                    "contravariant" => self.try_set_variance(
-                        &mut variance,
-                        kw,
-                        PreInferenceVariance::Contravariant,
-                        errors,
-                    ),
-                    "invariant" => self.try_set_variance(
-                        &mut variance,
-                        kw,
-                        PreInferenceVariance::Invariant,
-                        errors,
-                    ),
-                    "infer_variance" => self.try_set_variance(
-                        &mut variance,
-                        kw,
-                        PreInferenceVariance::Undefined,
-                        errors,
-                    ),
-                    _ => {
-                        self.error(
-                            errors,
-                            kw.range,
-                            ErrorKind::InvalidParamSpec,
-                            format!("Unexpected keyword argument `{}` to ParamSpec", id.id),
-                        );
-                    }
-                },
-                _ => {
-                    self.error(
-                        errors,
-                        kw.range,
-                        ErrorKind::InvalidParamSpec,
-                        "Cannot pass unpacked keyword arguments to ParamSpec".to_owned(),
-                    );
-                }
-            }
-        }
-
-        if !arg_name {
-            self.error(
-                errors,
-                x.range(),
-                ErrorKind::InvalidParamSpec,
-                "Missing `name` argument".to_owned(),
-            );
-        }
-        let mut default_value = None;
-        if let Some((default_ty, default_range)) = default {
-            default_value = Some(self.validate_type_var_default(
-                &name.id,
-                QuantifiedKind::ParamSpec,
-                &default_ty,
-                default_range,
-                &Restriction::Unrestricted,
-                errors,
-            ));
-        }
-        ParamSpec::new(
-            name,
-            self.module().dupe(),
-            default_value,
-            variance.unwrap_or(PreInferenceVariance::Invariant),
-        )
-    }
-
-    pub fn typevartuple_from_call(
-        &self,
-        name: Identifier,
-        x: &ExprCall,
-        errors: &ErrorCollector,
-    ) -> TypeVarTuple {
-        let mut arg_name = false;
-        let check_name_arg = |arg: &Expr| {
-            if let Expr::StringLiteral(lit) = arg {
-                if lit.value.to_str() != name.id.as_str() {
-                    self.error(
-                        errors,
-                        x.range(),
-                        ErrorKind::InvalidTypeVarTuple,
-                        format!(
-                            "TypeVarTuple must be assigned to a variable named `{}`",
-                            lit.value.to_str()
-                        ),
-                    );
-                }
-            } else {
-                self.error(
-                    errors,
-                    arg.range(),
-                    ErrorKind::InvalidTypeVarTuple,
-                    "Expected first argument of TypeVarTuple to be a string literal".to_owned(),
-                );
-            }
-        };
-        if let Some(arg) = x.arguments.args.first() {
-            check_name_arg(arg);
-            arg_name = true;
-        }
-        if let Some(arg) = x.arguments.args.get(1) {
-            self.error(
-                errors,
-                arg.range(),
-                ErrorKind::InvalidTypeVarTuple,
-                "Unexpected positional argument to TypeVarTuple".to_owned(),
-            );
-        }
-        let mut default = None;
-        for kw in &x.arguments.keywords {
-            match &kw.arg {
-                Some(id) => match id.id.as_str() {
-                    "name" => {
-                        if arg_name {
-                            self.error(
-                                errors,
-                                kw.range,
-                                ErrorKind::InvalidTypeVarTuple,
-                                "Multiple values for argument `name`".to_owned(),
-                            );
-                        } else {
-                            check_name_arg(&kw.value);
-                            arg_name = true;
-                        }
-                    }
-                    "default" => {
-                        default = Some((
-                            self.expr_untype(
-                                &kw.value,
-                                TypeFormContext::TypeVarTupleDefault,
-                                errors,
-                            ),
-                            kw.range(),
-                        ));
-                    }
-                    _ => {
-                        self.error(
-                            errors,
-                            kw.range,
-                            ErrorKind::InvalidTypeVarTuple,
-                            format!("Unexpected keyword argument `{}` to TypeVarTuple", id.id),
-                        );
-                    }
-                },
-                _ => {
-                    self.error(
-                        errors,
-                        kw.range,
-                        ErrorKind::InvalidTypeVarTuple,
-                        "Cannot pass unpacked keyword arguments to TypeVarTuple".to_owned(),
-                    );
-                }
-            }
-        }
-        if !arg_name {
-            self.error(
-                errors,
-                x.range(),
-                ErrorKind::InvalidTypeVarTuple,
-                "Missing `name` argument".to_owned(),
-            );
-        }
-        let mut default_value = None;
-        if let Some((default_ty, default_range)) = default {
-            default_value = Some(self.validate_type_var_default(
-                &name.id,
-                QuantifiedKind::TypeVarTuple,
-                &default_ty,
-                default_range,
-                &Restriction::Unrestricted,
-                errors,
-            ));
-        }
-        TypeVarTuple::new(name, self.module().dupe(), default_value)
-    }
-
-    fn try_set_variance(
-        &self,
-        variance: &mut Option<PreInferenceVariance>,
-        kw: &Keyword,
-        new_variance: PreInferenceVariance,
-        errors: &ErrorCollector,
-    ) {
-        if self.literal_bool_infer(&kw.value, errors) {
-            if variance.is_some() {
-                self.error(
-                    errors,
-                    kw.range,
-                    ErrorKind::InvalidTypeVar,
-                    "Contradictory variance specifications".to_owned(),
-                );
-            } else {
-                *variance = Some(new_variance);
-            }
+            default,
+            variance: variance.unwrap_or(PreInferenceVariance::Invariant),
         }
     }
 

@@ -1063,3 +1063,11 @@ reveal_type(add_int(g))   # E: revealed type: A[Concatenate[int, ...]]
 reveal_type(drop_int(g))  # E: revealed type: A[@_]
 "#,
 );
+
+testcase!(
+    test_illegal_posargs,
+    r#"
+from typing import ParamSpec
+P = ParamSpec("P", int, str)  # E: Unexpected positional argument  # E: Unexpected positional argument
+    "#,
+);

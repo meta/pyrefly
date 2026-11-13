@@ -446,6 +446,15 @@ enum DivergenceQuestion {
     DeadCode,
 }
 
+/// The error kind for problems with the declaration of a type variable of the given kind.
+pub fn quantified_kind_error(kind: QuantifiedKind) -> ErrorKind {
+    match kind {
+        QuantifiedKind::TypeVar | QuantifiedKind::IntVar => ErrorKind::InvalidTypeVar,
+        QuantifiedKind::ParamSpec => ErrorKind::InvalidParamSpec,
+        QuantifiedKind::TypeVarTuple => ErrorKind::InvalidTypeVarTuple,
+    }
+}
+
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub(crate) fn int_tuple_unpacked_element_type(
         &self,
@@ -4355,14 +4364,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         restriction: &Restriction,
         errors: &ErrorCollector,
     ) -> Type {
-        fn quantified_error(kind: QuantifiedKind) -> ErrorKind {
-            match kind {
-                QuantifiedKind::TypeVar | QuantifiedKind::IntVar => ErrorKind::InvalidTypeVar,
-                QuantifiedKind::ParamSpec => ErrorKind::InvalidParamSpec,
-                QuantifiedKind::TypeVarTuple => ErrorKind::InvalidTypeVarTuple,
-            }
-        }
-
         if default.is_error() {
             return default.clone();
         }
@@ -4396,7 +4397,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.error(
                     errors,
                     range,
-                    quantified_error(kind),
+                    quantified_kind_error(kind),
                     format!(
                         "Expected default `{default}` of `{name}` to be assignable to the upper bound of `{bound_ty}`",
                     ),
@@ -4436,7 +4437,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.error(
                     errors,
                     range,
-                    quantified_error(kind),
+                    quantified_kind_error(kind),
                     format!(
                         "Expected default `{default}` of `{name}` to be one of the following constraints: {formatted_constraints}"
                     ),
@@ -6213,9 +6214,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         x: &ExprCall,
         errors: &ErrorCollector,
     ) -> Type {
-        let ty = self
-            .typevartuple_from_call(name.clone(), x, errors)
-            .to_type(self.heap);
+        let args = self.type_var_like_args_from_call(name, x, QuantifiedKind::TypeVarTuple, errors);
+        let ty =
+            TypeVarTuple::new(name.clone(), self.module().dupe(), args.default).to_type(self.heap);
         if let Some(k) = ann
             && let AnnotationWithTarget {
                 target,
@@ -7492,9 +7493,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ),
             Binding::TypeVar(x) => {
                 let (ann, name, call, kind) = x.as_ref();
-                let ty = self
-                    .typevar_from_call(name.clone(), call, *kind, errors)
-                    .to_type(self.heap);
+                let args = self.type_var_like_args_from_call(name, call, *kind, errors);
+                let ty = TypeVar::new_with_kind(
+                    name.clone(),
+                    self.module().dupe(),
+                    *kind,
+                    args.restriction,
+                    args.default,
+                    args.variance,
+                )
+                .to_type(self.heap);
                 if let Some(k) = ann
                     && let AnnotationWithTarget {
                         target,
@@ -7515,9 +7523,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             Binding::ParamSpec(x) => {
                 let (ann, name, call) = x.as_ref();
-                let ty = self
-                    .paramspec_from_call(name.clone(), call, errors)
-                    .to_type(self.heap);
+                let args = self.type_var_like_args_from_call(
+                    name,
+                    call,
+                    QuantifiedKind::ParamSpec,
+                    errors,
+                );
+                let ty = ParamSpec::new(
+                    name.clone(),
+                    self.module().dupe(),
+                    args.default,
+                    args.variance,
+                )
+                .to_type(self.heap);
                 if let Some(k) = ann
                     && let AnnotationWithTarget {
                         target,

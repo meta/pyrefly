@@ -647,3 +647,11 @@ def func(*args: tuple[*Ts]): ...
 func((0,), (1, 2))  # E: `tuple[Literal[1], Literal[2]]` is not assignable to parameter `*args` with type `tuple[int]`
     "#,
 );
+
+testcase!(
+    test_illegal_posargs,
+    r#"
+from typing import TypeVarTuple
+Ts = TypeVarTuple("Ts", int, str)  # E: Unexpected positional argument  # E: Unexpected positional argument
+    "#,
+);

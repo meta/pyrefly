@@ -6772,7 +6772,7 @@
       "concise_description": "Contradictory variance specifications",
       "description": "Contradictory variance specifications",
       "line": 100,
-      "name": "invalid-type-var",
+      "name": "invalid-param-spec",
       "severity": "error",
       "stop_column": 62,
       "stop_line": 100
@@ -6783,7 +6783,7 @@
       "concise_description": "Contradictory variance specifications",
       "description": "Contradictory variance specifications",
       "line": 101,
-      "name": "invalid-type-var",
+      "name": "invalid-param-spec",
       "severity": "error",
       "stop_column": 63,
       "stop_line": 101
@@ -6794,7 +6794,7 @@
       "concise_description": "Contradictory variance specifications",
       "description": "Contradictory variance specifications",
       "line": 102,
-      "name": "invalid-type-var",
+      "name": "invalid-param-spec",
       "severity": "error",
       "stop_column": 67,
       "stop_line": 102
@@ -7977,6 +7977,17 @@
       "name": "invalid-type-var-tuple",
       "severity": "error",
       "stop_column": 30,
+      "stop_line": 66
+    },
+    {
+      "code": -2,
+      "column": 32,
+      "concise_description": "Unexpected positional argument to TypeVarTuple",
+      "description": "Unexpected positional argument to TypeVarTuple",
+      "line": 66,
+      "name": "invalid-type-var-tuple",
+      "severity": "error",
+      "stop_column": 37,
       "stop_line": 66
     },
     {
