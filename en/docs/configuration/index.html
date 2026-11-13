@@ -39,8 +39,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/clipboard.js/2.0.0/clipboard.min.js"></script>
 <script src="/js/code-block-buttons.js"></script>
 <script src="/js/gtag-fragment-tracking.js"></script><link rel="stylesheet" href="/assets/css/styles.519bb944.css">
-<script src="/assets/js/runtime~main.3e3af81a.js" defer="defer"></script>
-<script src="/assets/js/main.43a691d5.js" defer="defer"></script>
+<script src="/assets/js/runtime~main.67a594be.js" defer="defer"></script>
+<script src="/assets/js/main.681fef49.js" defer="defer"></script>
 </head>
 <body class="navigation-with-keyboard">
 <script>!function(){function t(t){document.documentElement.setAttribute("data-theme",t)}var e=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();t(null!==e?e:"dark")}(),function(){try{const n=new URLSearchParams(window.location.search).entries();for(var[t,e]of n)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script>
@@ -117,14 +117,29 @@ none can be found, and type check using that one config. This involves getting t
 <a href="#project-includes"><code>project-includes</code></a> and <a href="#project-excludes"><code>project-excludes</code></a> from the file, expanding the patterns,
 and type checking on those files.<!-- -->
 <ul>
-<li>Project mode is used whenever no files are provided with the CLI invocation.</li>
+<li>Project mode is used whenever no paths to a file are provided with the CLI invocation.</li>
+<li>A directory given in the CLI invocation, such as <code>pyrefly check packages/a</code>, also runs
+project mode, limited to that directory: Pyrefly finds the config from the directory
+instead of the current working directory, and checks only the files in that project,
+filtered to that directory. Directories with different configs are different projects,
+and one run checks all of them: each file belongs to the given project whose config root
+is its nearest ancestor, and is checked once, with that config.</li>
 </ul>
 </li>
-<li><strong>Per-file</strong> or <strong>Single-file</strong> mode: when given <a href="#project-includes"><code>FILES...</code></a> (and optionally <a href="#project-excludes"><code>--project-excludes</code></a>)
-during a CLI invocation, expand the patterns and find the relevant config file for each
-file listed. <code>project-includes</code> and <code>project-excludes</code> are ignored from the config file,
-but it is used for all remaining config options.</li>
+<li><strong>Per-file</strong> or <strong>Single-file</strong> mode: when given files (and optionally <a href="#project-excludes"><code>--project-excludes</code></a>)
+during a CLI invocation, find the relevant config file for each file listed.
+<code>project-includes</code> and <code>project-excludes</code> are ignored from the config file, but it is used
+for all remaining config options. Files given with a directory also run single-file mode.<!-- -->
+<ul>
+<li>A directory with no config, or whose config uses a <a href="#build-system">build system</a>, is
+checked in single-file mode.</li>
 </ul>
+</li>
+</ul>
+<p>Pyrefly expands a glob, such as <code>pyrefly check &#x27;packages/*&#x27;</code>, to the directories and Python
+files that it matches, the same as a shell does. Each directory and file is then checked as if
+it was given on its own, so quotes around a glob do not change the result, except that a glob
+matches no files that are not Python files, and a shell passes them to Pyrefly.</p>
 <h2 class="anchor anchorWithStickyNavbar_LWe7" id="configuration-finding">Configuration Finding<a href="#configuration-finding" class="hash-link" aria-label="Direct link to Configuration Finding" title="Direct link to Configuration Finding">​</a></h2>
 <p>In both project checking mode and single-file checking mode (see <a href="#type-checking-modes">Type Checking Modes</a>
 for more info), we attempt to find a <em>project root</em> from which to check each file, both for reading
@@ -815,6 +830,24 @@ Any explicit settings you specify override the preset.</p>
 <li>Type: string (<code>&quot;off&quot;</code>, <code>&quot;basic&quot;</code>, <code>&quot;legacy&quot;</code>, <code>&quot;default&quot;</code>, <code>&quot;strict&quot;</code>, <code>&quot;all&quot;</code>)</li>
 <li>Default: none (equivalent to <code>&quot;default&quot;</code>)</li>
 <li>Flag equivalent: <code>-p</code>/<code>--preset</code></li>
+<li>Notes:<!-- -->
+<ul>
+<li><code>preset</code> can also be set in <a href="#sub-configs"><code>sub-config</code></a> sections and in
+<a href="#per-target-configuration">build system configs</a>. A file uses the first preset
+it finds, checking its build system config if it has one (see
+<a href="#per-target-configuration">per-target configuration</a>), otherwise the matching
+sub-configs in the order they appear, then the top-level config. That preset
+replaces the others rather than combining with them. For example, a sub-config
+with <code>preset = &quot;default&quot;</code> under a top-level <code>preset = &quot;basic&quot;</code> restores
+Pyrefly&#x27;s default behavior for its files.</li>
+<li>Settings that any config sets explicitly take precedence over every preset.
+If the top-level <code>[errors]</code> table sets <code>implicit-any = &quot;error&quot;</code>, a sub-config
+with <code>preset = &quot;off&quot;</code> still reports <code>implicit-any</code> for its files unless the
+sub-config sets it again.</li>
+<li><code>--preset</code> replaces only the top-level preset. Sub-configs and build system
+configs that set their own preset keep it.</li>
+</ul>
+</li>
 </ul>
 <h4 class="anchor anchorWithStickyNavbar_LWe7" id="preset-off">Preset: <code>off</code><a href="#preset-off" class="hash-link" aria-label="Direct link to preset-off" title="Direct link to preset-off">​</a></h4>
 <p>Silences every error kind. Other settings (scalar flags, behavior settings) are left at their defaults. Useful when Pyrefly is running only for IDE features like hover and go-to-definition, without diagnostics.</p>
@@ -824,7 +857,7 @@ Any explicit settings you specify override the preset.</p>
 <h4 class="anchor anchorWithStickyNavbar_LWe7" id="preset-basic">Preset: <code>basic</code><a href="#preset-basic" class="hash-link" aria-label="Direct link to preset-basic" title="Direct link to preset-basic">​</a></h4>
 <p>A minimal-checking preset used when automatic configuration selection finds no migratable mypy/pyright configuration (or migration fails). It can also be selected explicitly with <code>preset = &quot;basic&quot;</code>, <code>--preset basic</code>, or the IDE&#x27;s <code>&quot;basic&quot;</code> type-checking mode. It enables parse errors plus a small set of high-confidence, locally-fixable checks. Stricter checks like override validation, annotation completeness, and broader call-shape or assignment validation are disabled.</p>
 <ul>
-<li>Sets <a href="#check-unannotated-defs"><code>check-unannotated-defs</code></a> <code>= false</code>, <a href="#infer-return-types"><code>infer-return-types</code></a> <code>= &quot;never&quot;</code>, <a href="#infer-with-first-use"><code>infer-with-first-use</code></a> <code>= false</code>, <a href="#permissive-ignores"><code>permissive-ignores</code></a> <code>= true</code></li>
+<li>Sets <a href="#check-unannotated-defs"><code>check-unannotated-defs</code></a> <code>= false</code>, <a href="#infer-return-types"><code>infer-return-types</code></a> <code>= &quot;never&quot;</code>, <a href="#infer-with-first-use"><code>infer-with-first-use</code></a> <code>= false</code>, and <a href="#enabled-ignores"><code>enabled-ignores</code></a> to every tool (equivalent to <a href="#permissive-ignores"><code>permissive-ignores</code></a> <code>= true</code>)</li>
 <li>Enables (as errors): <a href="/en/docs/error-kinds/#bad-class-definition"><code>bad-class-definition</code></a>, <a href="/en/docs/error-kinds/#bad-instantiation"><code>bad-instantiation</code></a>, <a href="/en/docs/error-kinds/#bad-keyword-argument"><code>bad-keyword-argument</code></a>, <a href="/en/docs/error-kinds/#bad-raise"><code>bad-raise</code></a>, <a href="/en/docs/error-kinds/#bad-unpacking"><code>bad-unpacking</code></a>, <a href="/en/docs/error-kinds/#division-by-zero"><code>division-by-zero</code></a>, <a href="/en/docs/error-kinds/#invalid-annotation"><code>invalid-annotation</code></a>, <a href="/en/docs/error-kinds/#invalid-literal"><code>invalid-literal</code></a>, <a href="/en/docs/error-kinds/#invalid-super-call"><code>invalid-super-call</code></a>, <a href="/en/docs/error-kinds/#invalid-syntax"><code>invalid-syntax</code></a>, <a href="/en/docs/error-kinds/#missing-import"><code>missing-import</code></a>, <a href="/en/docs/error-kinds/#not-async"><code>not-async</code></a>, <a href="/en/docs/error-kinds/#parse-error"><code>parse-error</code></a>, <a href="/en/docs/error-kinds/#unexpected-keyword"><code>unexpected-keyword</code></a>, <a href="/en/docs/error-kinds/#unexpected-positional-argument"><code>unexpected-positional-argument</code></a>, <a href="/en/docs/error-kinds/#unknown-name"><code>unknown-name</code></a>, <a href="/en/docs/error-kinds/#unused-coroutine"><code>unused-coroutine</code></a></li>
 <li>Enables (as warnings): <a href="/en/docs/error-kinds/#fallback-search-path-relative-import"><code>fallback-search-path-relative-import</code></a></li>
 <li>Keeps as hints: <a href="/en/docs/error-kinds/#inactive-code"><code>inactive-code</code></a>, <a href="/en/docs/error-kinds/#unused-import"><code>unused-import</code></a>, <a href="/en/docs/error-kinds/#unused-parameter"><code>unused-parameter</code></a>, <a href="/en/docs/error-kinds/#unused-variable"><code>unused-variable</code></a></li>
@@ -1209,25 +1242,24 @@ override, such as <a href="#errors"><code>errors</code></a> and
 Pyrefly beyond selecting an entry, so a build system can choose whatever is
 convenient. Naming configs rather than spelling their settings inline lets many
 targets share settings that are sent and parsed only once.</p>
-<p><code>default_config</code> supplies any setting a target&#x27;s own config leaves unset. It also
-applies to files that belong to no target at all but are still part of the
-current config, such as a file opened in your editor that the build system does
-not know about. In the example above, <code>MyLib</code> reports <code>missing-import</code> as a
-warning and ignores errors in generated code; a target naming no config is
-checked with <code>repo-wide</code> alone.</p>
-<p>Pyrefly resolves each setting to the first of these that sets a value:</p>
+<p>A file uses its target&#x27;s <code>config</code> if it names one. Otherwise it uses
+<code>default_config</code>, including files that belong to no target at all but are still
+part of the current config, such as a file opened in your editor that the build
+system does not know about. The two are never combined: settings a target&#x27;s
+<code>config</code> leaves unset don&#x27;t come from <code>default_config</code>. In the example above,
+<code>MyLib</code> reports <code>missing-import</code> as a warning but doesn&#x27;t ignore errors in
+generated code; a target naming no config is checked with <code>repo-wide</code>.</p>
+<p>A file&#x27;s build system config replaces its <a href="#sub-configs">sub-configs</a>, which apply
+only to files with no build system config. Pyrefly resolves each setting to the
+first of these that sets a value:</p>
 <ol>
-<li>the target&#x27;s <code>config</code></li>
-<li><code>default_config</code></li>
-<li>the matching <a href="#sub-config">sub-config</a></li>
+<li>the file&#x27;s build system config, or else its matching sub-configs</li>
 <li>the top-level config</li>
-<li>the <a href="#preset">preset</a> defaults</li>
+<li>the <a href="#preset">preset</a> from the first of the above that sets <code>preset</code></li>
+<li>Pyrefly&#x27;s built-in defaults</li>
 </ol>
-<p>Resolution happens one whole setting at a time. <code>errors</code> is a single setting, so
-if the config of the target that owns a file sets <code>errors</code> at all, that map is
-the entire build-system contribution for that file, and <code>default_config</code>&#x27;s
-<code>errors</code> is not consulted. That map is then merged over the sub-config and
-top-level maps, so it only has to name the error kinds it changes.</p>
+<p>A build system config&#x27;s <code>errors</code> map is merged over the top-level map, so it only
+has to name the error kinds it changes.</p>
 <p>If a <code>config</code> or <code>default_config</code> names an entry that <code>configs</code> does not define,
 Pyrefly rejects the whole response and reports the error instead of type
 checking. An undefined name supplies no settings, which is indistinguishable
@@ -1527,18 +1559,24 @@ that can apply to a given file when the <code>matches</code> glob pattern matche
 <h4 class="anchor anchorWithStickyNavbar_LWe7" id="subconfig-allowed-overrides"><strong>SubConfig Allowed Overrides</strong><a href="#subconfig-allowed-overrides" class="hash-link" aria-label="Direct link to subconfig-allowed-overrides" title="Direct link to subconfig-allowed-overrides">​</a></h4>
 <p>We currently allow the following config options to be overridden in a SubConfig:</p>
 <ul>
+<li><code>preset</code></li>
 <li><code>errors</code></li>
 <li><code>replace-imports-with-any</code></li>
 <li><code>replace-untyped-imports-with-any</code></li>
 <li><code>check-unannotated-defs</code></li>
 <li><code>infer-return-types</code></li>
 <li><code>ignore-errors-in-generated-code</code></li>
+<li><code>permissive-ignores</code></li>
+<li><code>enabled-ignores</code></li>
 </ul>
 <p>Most SubConfig overrides <em>replace</em> the values appearing in the &#x27;root&#x27; or top-level of the
 Pyrefly configuration. The exception is <code>errors</code>: a sub-config&#x27;s error overrides are <em>merged</em> with
 the root config&#x27;s error overrides. The sub-config inherits error severities from the root for any
 error codes it doesn&#x27;t explicitly set, and can override specific error codes on top of the root
 defaults.</p>
+<p>A sub-config&#x27;s <code>preset</code> replaces the top-level preset for the files it matches, but explicit
+settings in the top-level config, including its <code>errors</code>, still take precedence over it. See
+<a href="#preset"><code>preset</code></a>.</p>
 <p>Any configs that change the list of files we&#x27;re type checking, Python environment, or where we look
 for imports cannot be included in SubConfigs. Some other configs we also do not include because
 we think they make it difficult to reason about your project type checks, but you can
@@ -1558,6 +1596,12 @@ SubConfigs whose <code>matches</code> does not match the given file, then takes 
 value that can be found in the order the SubConfigs appear in your configuration.</p>
 <p>If no SubConfigs match, or there are no non-null config options present, then we take
 the value in the &#x27;root&#x27;/top-level Pyrefly config (or Pyrefly default if no value is specified).</p>
+<p><code>errors</code> follows the same rule: only the first matching SubConfig that sets <code>errors</code> is merged
+over the top-level <code>errors</code>, and the <code>errors</code> of later matching SubConfigs are not used. A
+<code>preset</code> is likewise taken from the first matching SubConfig that sets one, even if an earlier
+matching SubConfig sets only <code>errors</code>.</p>
+<p>When a <a href="#build-system">build system</a> supplies a config for a file, SubConfigs don&#x27;t apply to that
+file. See <a href="#per-target-configuration">per-target configuration</a>.</p>
 <h4 class="anchor anchorWithStickyNavbar_LWe7" id="subconfig-example"><strong>SubConfig Example</strong><a href="#subconfig-example" class="hash-link" aria-label="Direct link to subconfig-example" title="Direct link to subconfig-example">​</a></h4>
 <p>For the following config, this how options would be resolved.</p>
 <div class="language-toml codeBlockContainer_Ckt0 theme-code-block" style="--prism-color:#F8F8F2;--prism-background-color:#282A36"><div class="codeBlockContent_biex"><pre tabindex="0" class="prism-code language-toml codeBlock_bY9V thin-scrollbar" style="color:#F8F8F2;background-color:#282A36"><code class="codeBlockLines_e6Vv"><span class="token-line" style="color:#F8F8F2"><span class="token key property">replace-imports-with-any</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">  </span><span class="token string" style="color:rgb(255, 121, 198)">&quot;sympy.*&quot;</span><span class="token punctuation" style="color:rgb(248, 248, 242)">,</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain">  </span><span class="token string" style="color:rgb(255, 121, 198)">&quot;*.series&quot;</span><span class="token punctuation" style="color:rgb(248, 248, 242)">,</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">ignore-errors-in-generated-code</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token boolean">true</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain" style="display:inline-block"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token comment" style="color:rgb(98, 114, 164)"># disable `bad-assignment` and `invalid-argument` for the whole project</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token table class-name">errors</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">bad-assignment</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token boolean">false</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">invalid-argument</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token boolean">false</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain" style="display:inline-block"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token table class-name">sub-config</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token comment" style="color:rgb(98, 114, 164)"># apply this to `sub/project/tests/file.py`</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">matches</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token string" style="color:rgb(255, 121, 198)">&quot;sub/project/tests/file.py&quot;</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain" style="display:inline-block"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token comment" style="color:rgb(98, 114, 164)"># any unittest imports will by typed as `typing.Any`</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">replace-imports-with-any</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token string" style="color:rgb(255, 121, 198)">&quot;unittest.*&quot;</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain" style="display:inline-block"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token table class-name">sub-config</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token comment" style="color:rgb(98, 114, 164)"># apply this config to all files in `sub/project`</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">matches</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token string" style="color:rgb(255, 121, 198)">&quot;sub/project/**&quot;</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain" style="display:inline-block"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token comment" style="color:rgb(98, 114, 164)"># enable `assert-type` errors in `sub/project`</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token table class-name">sub-config.errors</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">assert-type</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token boolean">true</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain" style="display:inline-block"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token table class-name">sub-config</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token comment" style="color:rgb(98, 114, 164)"># apply this config to all files in `sub`</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">matches</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token string" style="color:rgb(255, 121, 198)">&quot;sub/**&quot;</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain" style="display:inline-block"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token comment" style="color:rgb(98, 114, 164)"># disable `assert-type` errors in `sub`</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token table class-name">sub-config.errors</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">assert-type</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token boolean">false</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain" style="display:inline-block"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token table class-name">sub-config</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token comment" style="color:rgb(98, 114, 164)"># apply this config to all files under `tests` dirs in `sub/`</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">matches</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token string" style="color:rgb(255, 121, 198)">&quot;sub/**/tests/**&quot;</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain" style="display:inline-block"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token comment" style="color:rgb(98, 114, 164)"># any pytest imports will be typed as `typing.Any`</span><span class="token plain"></span><br></span><span class="token-line" style="color:#F8F8F2"><span class="token plain"></span><span class="token key property">replace-imports-with-any</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">=</span><span class="token plain"> </span><span class="token punctuation" style="color:rgb(248, 248, 242)">[</span><span class="token string" style="color:rgb(255, 121, 198)">&quot;pytest.*&quot;</span><span class="token punctuation" style="color:rgb(248, 248, 242)">]</span><br></span></code></pre><div class="buttonGroup__atx"><button type="button" aria-label="Copy code to clipboard" title="Copy" class="clean-btn"><span class="copyButtonIcons_eSgA" aria-hidden="true"><svg viewBox="0 0 24 24" class="copyButtonIcon_y97N"><path fill="currentColor" d="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"></path></svg><svg viewBox="0 0 24 24" class="copyButtonSuccessIcon_LjdS"><path fill="currentColor" d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"></path></svg></span></button></div></div></div>
