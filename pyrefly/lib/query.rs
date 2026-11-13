@@ -935,17 +935,17 @@ impl<'a> CalleesWithLocation<'a> {
                     .class_object(),
             ),
             Type::SelfType(c) | Type::ClassType(c) => self.find_init_or_new(c.class_object()),
+            Type::TypedDict(TypedDict::TypedDict(inner)) => {
+                self.find_init_or_new(inner.class_object())
+            }
             Type::Quantified(q) => match &q.restriction {
-                Restriction::Bound(Type::ClassType(c)) => self.find_init_or_new(c.class_object()),
+                Restriction::Bound(bound) => self.init_or_new_from_type(bound, callee_range),
                 Restriction::Constraints(tys) => self.init_or_new_from_union(tys, callee_range),
                 Restriction::ShapeExtension(extension) => self.init_or_new_from_union(
                     &extension.upper_bound_members(&self.transaction.get_stdlib(&self.handle)),
                     callee_range,
                 ),
-                x => panic!(
-                    "unexpected restriction {}: {x:?}",
-                    self.module_info.display_range(callee_range)
-                ),
+                Restriction::Unrestricted => vec![],
             },
             Type::Union(u) => self.init_or_new_from_union(&u.members, callee_range),
             Type::Intersect(intersection) => {
@@ -953,13 +953,24 @@ impl<'a> CalleesWithLocation<'a> {
                 self.init_or_new_from_type(fallback, callee_range)
             }
             Type::Any(_) => vec![],
-            x => {
-                panic!(
-                    "unexpected type at [{}]: {x:?}",
-                    self.module_info.display_range(callee_range)
-                );
-            }
+            // Instantiating any other type, such as `type[None]`, has no `__init__` or
+            // `__new__` to report.
+            _ => vec![],
         }
+    }
+    fn callees_from_union(
+        &self,
+        tys: &[Type],
+        call_target: Option<&Expr>,
+        callee_range: TextRange,
+        call_arguments: Option<&Arguments>,
+    ) -> Vec<Callee> {
+        tys.iter()
+            .flat_map(|t| self.callee_from_type(t, call_target, callee_range, call_arguments))
+            .unique()
+            // return sorted by target
+            .sorted_by(|a, b| a.target.cmp(&b.target))
+            .collect_vec()
     }
     pub fn callee_from_type(
         &self,
@@ -980,23 +991,14 @@ impl<'a> CalleesWithLocation<'a> {
                         self.callee_from_type(ty, call_target, callee_range, call_arguments)
                     })
                     .collect(),
-                x => panic!(
-                    "unexpected restriction {}: {x:?}",
-                    self.module_info.display_range(callee_range)
-                ),
+                Restriction::Constraints(tys) => {
+                    self.callees_from_union(tys, call_target, callee_range, call_arguments)
+                }
+                Restriction::Unrestricted => vec![],
             },
             Type::Never(_) | Type::None => vec![],
             Type::Union(u) => {
-                // get callee for each type
-                u.members
-                    .iter()
-                    .flat_map(|t| {
-                        self.callee_from_type(t, call_target, callee_range, call_arguments)
-                    })
-                    .unique()
-                    // return sorted by target
-                    .sorted_by(|a, b| a.target.cmp(&b.target))
-                    .collect_vec()
+                self.callees_from_union(&u.members, call_target, callee_range, call_arguments)
             }
             Type::Intersect(intersection) => {
                 let (_members, fallback) = &**intersection;
@@ -1069,10 +1071,9 @@ impl<'a> CalleesWithLocation<'a> {
                 }
                 TypeAliasData::Ref(_) => vec![],
             },
-            _ => panic!(
-                "unexpected type at [{}]: {ty:?}",
-                self.module_info.display_range(callee_range)
-            ),
+            // Any other type, such as a tuple, a `TypedDict` instance or a literal string, has
+            // no call target. Calling one is reported as `not-callable`, so there is no callee.
+            _ => vec![],
         }
     }
 }

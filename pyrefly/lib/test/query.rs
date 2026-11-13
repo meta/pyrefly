@@ -646,6 +646,50 @@ def f(cls: type[Foo] | None) -> None:
 }
 
 #[test]
+fn test_callees_non_class_and_type_variable_types() {
+    let tdir = TempDir::new().unwrap();
+    let file_path = tdir.path().join("main.py");
+    // Each call's callee type is either not a class, or is a type variable whose
+    // restriction must be resolved to find the callee.
+    let code = r#"
+from typing import Callable, LiteralString, TypedDict
+
+class TD(TypedDict):
+    x: int
+
+def f[T, C: (int, str), U: int | str, K: Callable[[], int]](
+    tup: tuple[int, str], td: TD, s: LiteralString, none_t: type[None], td_t: type[TD],
+    t: T, c: C, t_t: type[T], u_t: type[U], k_t: type[K],
+) -> None:
+    tup()
+    td()
+    s()
+    none_t()
+    td_t(x=1)
+    t()
+    c()
+    t_t()
+    u_t()
+    k_t()
+"#;
+    fs_anyhow::write(&file_path, code).unwrap();
+
+    let query = create_query();
+    let module_name = ModuleName::from_str("main");
+    let path = ModulePath::filesystem(file_path.clone());
+    query.add_files(vec![(module_name, path.clone())]);
+
+    let callees = query
+        .get_callees_with_location(module_name, path, None)
+        .unwrap();
+    // `type[TD]` resolves to the TypedDict's constructor, as a direct `TD(...)` call does.
+    assert!(
+        callees.iter().any(|(_, c)| c.target == "main.TD.__init__"),
+        "{callees:?}"
+    );
+}
+
+#[test]
 fn test_callees_flag_union_class_names() {
     let tdir = TempDir::new().unwrap();
     let file_path = tdir.path().join("main.py");
