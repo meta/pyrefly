@@ -1485,6 +1485,74 @@ fn test_inferred_type_changes_trigger_recompute() {
     i.check(&["main"], &["foo", "bar", "main"]);
 }
 
+/// A property defined through a descriptor class moves when an edit above it changes the length
+/// of the file. Its answer does not record its location, so a module that reads the property is
+/// not recomputed.
+#[test]
+fn test_edit_above_descriptor() {
+    let mut i = Incremental::new();
+    let foo = |value: &str| {
+        format!(
+            r#"
+from typing import Callable, Generic, TypeVar
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+class lazy_property(Generic[T, R]):
+    def __init__(self, fget: Callable[[type[T]], R]) -> None: ...
+    def __get__(self, obj: object, owner: type[T]) -> R: ...
+
+class A:
+    def f(self) -> int:
+        return {value}
+
+    @lazy_property
+    def p(cls: type["A"]) -> int:
+        return 1
+"#
+        )
+    };
+    i.set("foo", &foo("1"));
+    i.set("main", "from foo import A\nx: int = A.p");
+    i.check(&["main", "foo"], &["main", "foo"]);
+
+    i.set("foo", &foo("100000"));
+    i.check(&["main", "foo"], &["foo"]);
+}
+
+/// The location of a class's `@total_ordering` decorator moves when an edit above the class changes
+/// the length of the file. It only says where to report errors, but the move recomputes a module
+/// that uses the class.
+#[test]
+fn test_edit_above_total_ordering() {
+    let mut i = Incremental::new();
+    let foo = |value: &str| {
+        format!(
+            r#"
+from functools import total_ordering
+
+def f() -> int:
+    return {value}
+
+@total_ordering
+class A:
+    def __eq__(self, other: object) -> bool:
+        return True
+    def __lt__(self, other: "A") -> bool:
+        return True
+"#
+        )
+    };
+    i.set("foo", &foo("1"));
+    i.set("main", "from foo import A\nx: bool = A() <= A()");
+    i.check(&["main", "foo"], &["main", "foo"]);
+
+    i.set("foo", &foo("100000"));
+    // `main` reads nothing that changed.
+    i.check(&["main", "foo"], &["foo", "main"]);
+}
+
 /// Test that when a function's return type changes, callers that import only
 /// the function (not the return type) still see the update.
 ///
