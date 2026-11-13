@@ -1052,11 +1052,12 @@ testcase!(
     TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
     r#"
 from functools import partial, Placeholder
-from typing import Callable, Concatenate, ParamSpec
+from typing import Callable, Concatenate, ParamSpec, reveal_type
 
 P = ParamSpec("P")
 def run(f: Callable[Concatenate[int, str, P], bool]) -> None:
     p = partial(f, Placeholder, "hi")
+    reveal_type(p)  # E: revealed type: partial[bool]
 "#,
 );
 
@@ -1162,5 +1163,119 @@ def add2(x: int, y: int) -> int:
     return x + y
 
 partial(add2, Placeholder, 1, 2)  # E: Expected 2 positional arguments, got 3
+"#,
+);
+
+testcase!(
+    test_partial_placeholder_no_unknown_argument_type,
+    TestEnv::new_with_version(PythonVersion::new(3, 14, 0)).enable_unknown_argument_type_error(),
+    r#"
+from functools import partial, Placeholder
+
+def untyped(v):
+    return v
+
+def f(x: int, y: int) -> int: ...
+
+partial(f, Placeholder, 2)
+partial(f, Placeholder, untyped(1))  # E: The type of this argument is unknown
+"#,
+);
+
+testcase!(
+    test_partial_placeholder_expressions,
+    TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
+    r#"
+from functools import partial, Placeholder
+from typing import reveal_type
+
+def f(x: int, y: int) -> int: ...
+
+holes = [Placeholder]
+def get_placeholder():
+    return Placeholder
+
+reveal_type(partial(f, holes[0], 2))  # E: revealed type: (x: int, /) -> int
+reveal_type(partial(f, (hole := Placeholder), 2))  # E: revealed type: (x: int, /) -> int
+reveal_type(partial(f, get_placeholder(), 2))  # E: revealed type: (x: int, /) -> int
+flag = True
+reveal_type(partial(f, Placeholder if flag else Placeholder, 2))  # E: revealed type: (x: int, /) -> int
+"#,
+);
+
+testcase!(
+    test_partial_placeholder_keyword_early_rejection,
+    TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
+    r#"
+from functools import partial, Placeholder
+from typing import Callable
+
+def f(x: int, y: int) -> int: ...
+
+extra: dict[str, int] = {}
+targets: list[Callable[..., int]] = [f]
+
+partial(f, y=Placeholder, **extra)  # E: cannot use functools.Placeholder as keyword argument
+partial(*targets, y=Placeholder)    # E: cannot use functools.Placeholder as keyword argument
+"#,
+);
+
+testcase!(
+    bug = "a Placeholder hole plus **kwargs does not forbid a colliding keyword at call time",
+    test_partial_placeholder_hole_with_kwargs_collision,
+    TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
+    r#"
+from functools import partial, Placeholder
+
+def f(x: int, y: int, **kw: int) -> int: ...
+
+p = partial(f, Placeholder, 2)
+p(1, x=3)  # WANT: error, `x` is given twice (TypeError at runtime)
+"#,
+);
+
+testcase!(
+    bug = "trailing placeholder in partial(...) is rejected at runtime in Python 3.14 but currently accepted",
+    test_partial_placeholder_trailing_not_rejected,
+    TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
+    r#"
+from functools import partial, Placeholder
+
+def f(x: int, y: int) -> int: ...
+
+partial(f, Placeholder, y=2)  # WANT: error, trailing Placeholder (TypeError at runtime)
+"#,
+);
+
+testcase!(
+    test_partial_placeholder_generic_overload_fallback,
+    TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
+    r#"
+from functools import partial, Placeholder
+from typing import overload, reveal_type
+
+@overload
+def g[T](x: T, y: int) -> T: ...
+@overload
+def g(x: str, y: str) -> str: ...
+def g(x: object, y: object) -> object: ...
+
+p = partial(g, Placeholder, 1)
+reveal_type(p)  # E: revealed type: (x: Any, /) -> Any
+"#,
+);
+
+testcase!(
+    test_partial_placeholder_nested_fallback,
+    TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
+    r#"
+from functools import partial, Placeholder
+from typing import reveal_type
+
+def f(x: int, y: int, z: int) -> int: ...
+
+p1 = partial(f, Placeholder, 2)
+p2 = partial(p1, 1)
+reveal_type(p2)  # E: revealed type: partial[int]
 "#,
 );

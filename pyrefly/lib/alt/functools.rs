@@ -58,13 +58,32 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let Type::ClassDef(partial_cls) = partial_ty else {
             unreachable!("call_functools_partial dispatched on a non-class callee");
         };
+        let any_explicit = self.heap.mk_any_explicit();
+        let mut kws_for_check = Vec::with_capacity(kws.len());
+        for kw in kws {
+            if is_placeholder_arg(self, &kw.value) {
+                self.error(
+                    errors,
+                    kw.range(),
+                    ErrorKind::BadKeywordArgument,
+                    "cannot use functools.Placeholder as keyword argument".to_owned(),
+                );
+                kws_for_check.push(CallKeyword {
+                    range: kw.range,
+                    arg: kw.arg,
+                    value: CallValue::Plain(TypeOrExpr::Type(&any_explicit, kw.value.range())),
+                });
+            } else {
+                kws_for_check.push(kw.clone());
+            }
+        }
         let Some(CallArg::Arg(target)) = args.first() else {
             // No inspectable callable target (e.g. a `*args` splat); defer to the stub.
             return self
                 .freeform_call_infer(
                     partial_ty.clone(),
                     args,
-                    kws,
+                    &kws_for_check,
                     callee_range,
                     arg_range,
                     hint,
@@ -186,7 +205,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let result = me.freeform_call_infer(
                 partial_ty.clone(),
                 &args_with_ty,
-                kws,
+                &kws_for_check,
                 callee_range,
                 arg_range,
                 hint,
@@ -216,25 +235,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let Some(bound_kw_names) = self.partial_bound_kw_names(kws) else {
             return fallback(self);
         };
-        let any_implicit = self.heap.mk_any_implicit();
-        let mut kws_for_check = Vec::with_capacity(kws.len());
-        for kw in kws {
-            if is_placeholder_arg(self, &kw.value) {
-                self.error(
-                    errors,
-                    kw.range(),
-                    ErrorKind::BadKeywordArgument,
-                    "cannot use functools.Placeholder as keyword argument".to_owned(),
-                );
-                kws_for_check.push(CallKeyword {
-                    range: kw.range,
-                    arg: kw.arg,
-                    value: CallValue::Plain(TypeOrExpr::Type(&any_implicit, kw.value.range())),
-                });
-            } else {
-                kws_for_check.push(kw.clone());
-            }
-        }
         let is_placeholder: Vec<bool> = args[1..]
             .iter()
             .map(|arg| match arg {
@@ -247,7 +247,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .zip(is_placeholder.iter())
             .map(|(arg, &is_ph)| {
                 if is_ph {
-                    CallArg::ty(&any_implicit, arg.range())
+                    CallArg::ty(&any_explicit, arg.range())
                 } else {
                     arg.clone()
                 }
@@ -733,7 +733,14 @@ fn partial_params(
 fn is_placeholder_arg<Ans: LookupAnswer>(solver: &AnswersSolver<Ans>, x: &CallValue) -> bool {
     match x.as_type_or_expr() {
         TypeOrExpr::Type(ty, _) => is_functools_placeholder(solver, ty),
-        TypeOrExpr::Expr(Expr::Name(_) | Expr::Attribute(_)) => {
+        TypeOrExpr::Expr(
+            Expr::Name(_)
+            | Expr::Attribute(_)
+            | Expr::Subscript(_)
+            | Expr::Named(_)
+            | Expr::Call(_)
+            | Expr::If(_),
+        ) => {
             let ty = x.infer(solver, &solver.error_collector());
             let ty = solver.solver().expand(ty);
             is_functools_placeholder(solver, &ty)
