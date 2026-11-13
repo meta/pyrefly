@@ -8,6 +8,10 @@
 
 [Full output from checklist step 3]
 
+### Findings
+
+[Classify findings as blocking, non-blocking, or unresolved, separately from the scores. For each blocker, identify the violated specification, intended support contract, or architectural requirement, concrete user or maintenance impact, and why it must be fixed in this change.]
+
 ## Detailed Scorecard
 
 ### Design (40%)

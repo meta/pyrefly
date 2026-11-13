@@ -6,6 +6,11 @@ disable-model-invocation: true
 
 Evaluate this change, executing the following checklist in this exact order.
 
+## Review principles
+
+- Prefer simple, consistent static typing rules over increasingly precise simulation of runtime behavior. Consistency improves user predictability and limits implementation complexity. Typing rules still apply inside `TYPE_CHECKING` blocks unless the specification or intended support contract requires different behavior. Runtime success alone does not show that a diagnostic is incorrect.
+- Justify exceptions by their practical benefit, conceptual cost, and maintenance burden. Finding an uncommon counterexample does not require supporting it. Distinguish a violated contract from a reasonable support boundary or an unresolved semantic choice.
+
 ## 1. Explain the change
 
 Record the exact change you are evaluating, and explain what problem it solves and how in plain language. Briefly describe the core building blocks, using full relative paths.
@@ -35,7 +40,7 @@ Ask each sub-agent to determine:
 2. What the correct behavior should be on the minimal reproducer and 1 additional representative example for the root cause.
 3. The core idea that a principled fix should use, independent of specific implementation strategy.
 4. Where in the type checker/language server life cycle the fix should live.
-Give each sub-agent the same prompt, and record that exact prompt.
+Give each sub-agent the same prompt, including the review principles above, and record that exact prompt. Ask them to identify the specification or intended support contract that justifies their expected behavior, and state uncertainty when it is unclear.
 
 Map the sub-agents' responses to 1-4 to D2-D5, respectively. Score UNKNOWN for any design dimension on which the sub-agents disagree.
 
@@ -49,7 +54,7 @@ Map the sub-agents' responses to 1-4 to D2-D5, respectively. Score UNKNOWN for a
 
 If the change modifies code, review the change adversarially.
 - Do not assume the description, tests, or apparent local correctness prove the approach.
-- Identify the change's central invariant, derive a matrix of expected behaviors, and actively try to falsify it with minimal counterexamples.
+- Identify the change's central invariant and its basis in the specification or intended support contract, derive a matrix of expected behaviors, and actively try to falsify it with minimal counterexamples.
 - If sub-agents were used, include their additional representative examples here.
 Record all counterexamples discovered.
 
@@ -58,6 +63,7 @@ Always score I1 and I2. For non-code changes, interpret I1 as whether the change
 - **I1**: Does the change implement its chosen semantics correctly?
   - Consider only counterexamples that demonstrate an incorrect behavior or side effect of changed or added code.
   - Distinguish incorrect from imprecise: score YES if the change faithfully implements what it claims to, even if more precise semantics are possible.
+  - If the intended semantics are unclear, score UNKNOWN rather than assuming a counterexample violates them.
 - **I2**: Does the change fully implement its intended scope?
   - Consider only counterexamples that demonstrate an unintentionally incomplete implementation of the change description.
 - **I3**: Is the change's mypy_primer delta free of regressions?
@@ -93,6 +99,8 @@ Always score I1 and I2. For non-code changes, interpret I1 as whether the change
 ## 3. Summarize
 
 Use scripts/score.py to compute per-section and overall quality scores. Report the scores, and briefly describe what the change does well and what can be improved.
+
+Separately classify findings as blocking, non-blocking, or unresolved. A counterexample, a NO score, or agreement between reviewers does not automatically justify blocking. For each blocker, explain the violated specification, intended support contract, or architectural requirement, its concrete user or maintenance impact, and why correction is required in this change rather than documentation or follow-up. Present semantic uncertainty and optional precision improvements as non-blocking or unresolved, not as established correctness blockers.
 
 ## 4. Present
 
