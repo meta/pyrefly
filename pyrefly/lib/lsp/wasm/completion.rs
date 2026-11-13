@@ -1283,12 +1283,63 @@ impl Transaction<'_> {
         if let Some(nodes) = covering_nodes.as_deref() {
             self.add_match_class_keyword_completions(handle, nodes, position, &mut result);
         }
-        // Because of parser error recovery, `from x impo...` looks like `from x import impo...`
-        // If the user might be typing the `import` keyword, add that as an autocomplete option.
-        match covering_nodes
+        let mut at_statement_keyword = false;
+        let identifier_with_context = covering_nodes
             .as_deref()
             .and_then(Self::identifier_from_covering_nodes)
-        {
+            .or_else(|| {
+                // Parser recovery can discard a keyword such as `as` at statement start.
+                // Recover its prefix so filtering and deferred auto-imports use the normal path.
+                let tokens = self.get_parsed_module(handle)?.tokens()?;
+                let keyword = tokens
+                    .at_offset(position)
+                    .find(|token| token.kind().is_keyword() && token.start() < position)?;
+                let previous = tokens.before(keyword.start()).iter().rev().find(|token| {
+                    !token.kind().is_trivia()
+                        && !matches!(token.kind(), TokenKind::Indent | TokenKind::Dedent)
+                });
+                let at_statement_start = match previous {
+                    None => true,
+                    Some(token) if matches!(token.kind(), TokenKind::Newline | TokenKind::Semi) => {
+                        true
+                    }
+                    Some(colon) if colon.kind() == TokenKind::Colon => {
+                        // Only a compound-statement colon can introduce an inline suite.
+                        // Exclude child nodes that end immediately before the colon.
+                        matches!(
+                            Ast::locate_node(ast.as_ref()?.as_ref(), colon.start())
+                                .into_iter()
+                                .find(|node| node.range().contains(colon.start())),
+                            Some(
+                                AnyNodeRef::StmtFunctionDef(_)
+                                    | AnyNodeRef::StmtClassDef(_)
+                                    | AnyNodeRef::StmtIf(_)
+                                    | AnyNodeRef::StmtWhile(_)
+                                    | AnyNodeRef::StmtFor(_)
+                                    | AnyNodeRef::StmtWith(_)
+                                    | AnyNodeRef::StmtTry(_)
+                                    | AnyNodeRef::ElifElseClause(_)
+                                    | AnyNodeRef::ExceptHandlerExceptHandler(_)
+                                    | AnyNodeRef::MatchCase(_)
+                            )
+                        )
+                    }
+                    _ => false,
+                };
+                if !at_statement_start {
+                    return None;
+                }
+                let module_info = self.get_module_info(handle)?;
+                let range = TextRange::new(keyword.start(), position);
+                at_statement_keyword = true;
+                Some(IdentifierWithContext {
+                    identifier: Identifier::new(Name::new(module_info.code_at(range)), range),
+                    context: IdentifierContext::Expr(ExprContext::Load),
+                })
+            });
+        // Because of parser error recovery, `from x impo...` looks like `from x import impo...`
+        // If the user might be typing the `import` keyword, add that as an autocomplete option.
+        match identifier_with_context {
             Some(IdentifierWithContext {
                 context: IdentifierContext::AliasDefinition,
                 ..
@@ -1477,10 +1528,11 @@ impl Transaction<'_> {
                     .as_deref()
                     .is_some_and(|nodes| Self::is_typing_keyword_argument_name(nodes, position));
                 if !skip_value_completions && !is_method_def {
-                    let at_statement_start = matches!(
-                        covering_nodes.as_deref().and_then(|nodes| nodes.get(1)),
-                        Some(AnyNodeRef::StmtExpr(_))
-                    );
+                    let at_statement_start = at_statement_keyword
+                        || matches!(
+                            covering_nodes.as_deref().and_then(|nodes| nodes.get(1)),
+                            Some(AnyNodeRef::StmtExpr(_))
+                        );
                     let expression_only =
                         matches!(context, IdentifierContext::Expr(_)) && !at_statement_start;
                     Self::add_keyword_completions(handle, expression_only, &mut result);
