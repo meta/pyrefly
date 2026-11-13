@@ -1853,13 +1853,10 @@ issubclass(Impl, AnnotatedChild)  # E: Protocol `AnnotatedChild` has non-method 
 "#,
 );
 
-// A property is read as its getter's return type, so a callable return type counts
-// as a method. CPython instead sees the non-callable `property` object in the class
-// body and rejects the call. Members are classified by their declared read type,
-// which matches the type an implementation must provide; the same shape without
-// slots behaves the same way.
+// A `property` object is not callable, so the nearest runtime binding is a data
+// member even though the property's read type is the getter's return type.
 testcase!(
-    test_runtime_checkable_protocol_property_does_not_shadow_slot,
+    test_runtime_checkable_protocol_property_shadows_inherited_slot,
     r#"
 from typing import Callable, Protocol, runtime_checkable
 
@@ -1875,14 +1872,63 @@ class PropertyChild(SlotBase, Protocol):
 class Impl:
     def value(self) -> None: ...
 
-issubclass(Impl, PropertyChild)
+issubclass(Impl, PropertyChild)  # E: Protocol `PropertyChild` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+// A property is a data member even when no slot declares the name.
+testcase!(
+    test_runtime_checkable_protocol_property_member,
+    r#"
+from typing import Callable, Protocol, runtime_checkable
+
+@runtime_checkable
+class P(Protocol):
+    @property
+    def value(self) -> Callable[[], None]: ...
+
+class Impl:
+    def value(self) -> None: ...
+
+issubclass(Impl, P)  # E: Protocol `P` has non-method members and cannot be used with issubclass()
+"#,
+);
+
+// Decorated methods are class-body bindings whose runtime value is callable, so
+// they shadow an inherited slot like a plain method does.
+testcase!(
+    test_runtime_checkable_protocol_decorated_methods_shadow_slot,
+    r#"
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class SlotBase(Protocol):
+    __slots__ = ("value",)
+
+@runtime_checkable
+class ClassMethodChild(SlotBase, Protocol):
+    @classmethod
+    def value(cls) -> None: ...
+
+@runtime_checkable
+class StaticMethodChild(SlotBase, Protocol):
+    @staticmethod
+    def value() -> None: ...
+
+class Impl:
+    def value(self) -> None: ...
+
+issubclass(Impl, ClassMethodChild)
+issubclass(Impl, StaticMethodChild)
 "#,
 );
 
 // An annotation-only member typed callable is classified by its declared read type,
 // so it counts as a method. CPython instead finds no class attribute and rejects the
-// call; the checker follows the declaration.
+// call; the checker follows the declaration, which is the type an implementation
+// must provide.
 testcase!(
+    bug = "CPython rejects an annotation-only member, which has no class attribute",
     test_runtime_checkable_protocol_callable_annotation_member,
     r#"
 from typing import Callable, Protocol, runtime_checkable
@@ -1898,6 +1944,29 @@ class Impl:
     def m(self) -> None: ...
 
 issubclass(Impl, P)
+"#,
+);
+
+// A class-body value whose declared read type is callable counts as a method even
+// when the value bound at runtime is not callable.
+testcase!(
+    bug = "CPython rejects the non-callable value bound in the class body",
+    test_runtime_checkable_protocol_non_callable_value_with_callable_type,
+    r#"
+from typing import Callable, Protocol, runtime_checkable, cast
+
+@runtime_checkable
+class SlotBase(Protocol):
+    __slots__ = ("value",)
+
+@runtime_checkable
+class AssignedChild(SlotBase, Protocol):
+    value: Callable[[], None] = cast(Callable[[], None], None)
+
+class Impl:
+    def value(self) -> None: ...
+
+issubclass(Impl, AssignedChild)
 "#,
 );
 

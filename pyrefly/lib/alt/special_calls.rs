@@ -803,8 +803,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// CPython classifies a runtime member with `callable(getattr(cls, name))`, so the
     /// nearest class in the MRO that binds the name to a value decides whether it is a
     /// method. A class body that only annotates the name creates no class attribute, so
-    /// it does not shadow a slot. Attribute lookup does not model `__slots__`
-    /// descriptors, which are never callable, so an unshadowed slot name is data.
+    /// it does not shadow a slot. A `property` object is not callable, so a property
+    /// binding is a data member. Any other binding, and a member with no binding at all,
+    /// is classified by its declared read type, which is the type an implementation must
+    /// provide. A slot declaration with no nearer binding is a data member because the
+    /// slot descriptor is never callable and attribute lookup reports the declared type
+    /// rather than that descriptor.
     fn is_data_protocol(&self, cls: &Class, range: TextRange) -> bool {
         let Some(protocol_metadata) = self.get_metadata_for_class(cls).protocol_metadata() else {
             return false;
@@ -821,7 +825,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     fields.class_body_fields().any(|name| name == field_name)
                         && fields.is_field_initialized_on_class(field_name)
                 }) {
-                    // The nearest binding is in a class body, so its type decides.
+                    // The nearest binding is in a class body. A `property` object is not
+                    // callable, so it is a data member regardless of its read type.
+                    if self
+                        .get_field_from_current_class_only(ancestor, field_name)
+                        .is_some_and(|field| field.is_property())
+                    {
+                        return true;
+                    }
+                    // Otherwise the declared read type decides.
                     break;
                 }
                 if self
@@ -829,8 +841,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     .slots_info()
                     .is_some_and(|slots| slots.names.contains(field_name))
                 {
-                    // A slot descriptor is never callable, and attribute lookup does
-                    // not model it, so an unshadowed slot name is a data member.
+                    // A slot descriptor is never callable, and attribute lookup reports
+                    // the declared type rather than that descriptor, so an unshadowed
+                    // slot name is a data member.
                     return true;
                 }
             }
