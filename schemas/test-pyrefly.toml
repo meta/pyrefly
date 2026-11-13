@@ -33,6 +33,7 @@ typeshed-path = "/path/to/typeshed"
 # Type checking behavior
 untyped-def-behavior = "check-and-infer-return-type"
 infer-with-first-use = true
+use-shape-comments-and-stubs = false
 ignore-errors-in-generated-code = false
 disable-type-errors-in-ide = false
 strict-callable-subtyping = false
@@ -78,6 +79,7 @@ excludes = ["src/vendored/**"]
 [[sub-config]]
 matches = "**/tests/**"
 untyped-def-behavior = "skip-and-infer-return-any"
+use-shape-comments-and-stubs = true
 
 [sub-config.errors]
 assert-type = true

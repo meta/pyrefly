@@ -366,4 +366,10 @@ mod tests {
             None,
         );
     }
+
+    #[test]
+    fn test_root_of_shape_stubs() {
+        let path = ModulePath::filesystem(PathBuf::from("hello/foo-shape-stubs/bar/baz.pyi"));
+        assert_eq!(path.root_of(ModuleName::from_str("foo.bar.baz")), None);
+    }
 }

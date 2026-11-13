@@ -11,6 +11,72 @@ use crate::test::util::shape_extensions_env;
 use crate::test::util::testcase_for_macro;
 use crate::testcase;
 
+testcase!(
+    bug = "Shape comment compatibility cannot yet be disabled",
+    test_shaped_comments_compatibility_opt_out,
+    shaped_env(),
+    r#"
+# enable-shape-type-comments
+from typing import assert_type
+from arrays import ndarray
+from shape_extensions import Int, IntVar, Shaped, shape_vars
+
+# shapes: N
+def commented(
+    n: int,  # shaped: N
+) -> int:  # shaped: N + 1
+    ...
+
+def native[N: IntVar](n: Int[N]) -> Int[N + 1]: ...
+
+@shape_vars("N")
+def wrapped(x: Shaped[ndarray, "[N]"]) -> Shaped[ndarray, "[N + 1]"]: ...
+
+def check(x: ndarray[[3]]) -> None:
+    assert_type(commented(3), Int[4])
+    assert_type(native(3), Int[4])
+    assert_type(wrapped(x), ndarray[[4]])
+"#,
+);
+
+testcase!(
+    bug = "Shape comment diagnostics cannot yet be disabled",
+    test_shaped_comments_compatibility_opt_out_diagnostics,
+    shaped_env(),
+    r#"
+# enable-shape-type-comments
+from typing import assert_type
+
+def f(
+    x: int,  # shaped: [3  # E: Could not parse
+    y: int,  # shaped: .args[-1] = 3  # E: Invalid `# shaped:` selector
+) -> None:
+    assert_type(x, int)
+    assert_type(y, int)
+    bad: str = x  # E: `int` is not assignable to `str`
+"#,
+);
+
+testcase!(
+    bug = "Dependency shape comments cannot yet be disabled",
+    test_shaped_comments_compatibility_opt_out_dependency,
+    {
+        let mut env = shaped_env();
+        env.add_with_path(
+            "library",
+            "library.pyi",
+            "# enable-shape-type-comments\ndef f() -> int: ...  # shaped: = str\n",
+        );
+        env
+    },
+    r#"
+from typing import assert_type
+from library import f
+
+assert_type(f(), str)
+"#,
+);
+
 #[test]
 fn test_shaped_comments_expression_depth_limit() {
     let payload = std::iter::repeat_n("1", 1200)

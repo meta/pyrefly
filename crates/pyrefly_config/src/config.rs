@@ -4212,6 +4212,20 @@ output-format = "omit-errors"
     }
 
     #[test]
+    fn test_use_shape_comments_and_stubs() {
+        let mut config = ConfigFile::parse_config("use-shape-comments-and-stubs = false").unwrap();
+        assert!(config.configure().is_empty());
+        assert!(
+            config
+                .root
+                .extras
+                .0
+                .contains_key("use-shape-comments-and-stubs"),
+            "the compatibility option is not yet recognized"
+        );
+    }
+
+    #[test]
     fn test_infer_param_types_from_docstring() {
         let path = ModulePath::filesystem(PathBuf::from("/project/foo.py"));
 

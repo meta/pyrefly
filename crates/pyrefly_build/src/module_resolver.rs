@@ -1185,6 +1185,28 @@ mod tests {
     }
 
     #[test]
+    fn test_module_resolver_ignores_shape_stubs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![
+                TestPath::dir("foo", vec![TestPath::file("__init__.py")]),
+                TestPath::dir("foo-stubs", vec![TestPath::file("__init__.pyi")]),
+                TestPath::dir("foo-shape-stubs", vec![TestPath::file("__init__.pyi")]),
+            ],
+        );
+
+        // Shape-stub discovery is a type-checker setting, so build-system
+        // resolution never selects them.
+        let resolver = ModuleResolver::new([root.to_path_buf()]);
+        assert_eq!(
+            resolver.resolve(ModuleName::from_str("foo"), None),
+            Some(ModulePath::filesystem(root.join("foo-stubs/__init__.pyi"))),
+        );
+    }
+
+    #[test]
     fn test_find_precedence_in_all_roots() {
         let tempdir = tempfile::tempdir().unwrap();
         let root = tempdir.path();

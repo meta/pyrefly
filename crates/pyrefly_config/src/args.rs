@@ -809,6 +809,14 @@ mod tests {
     use crate::config::SubConfig;
 
     #[test]
+    fn use_shape_comments_and_stubs_flag() {
+        assert!(
+            ConfigOverrideArgs::try_parse_from(["pyrefly", "--use-shape-comments-and-stubs=false"])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn repeated_python_platform_flags_merge() {
         let args = ConfigOverrideArgs::parse_from([
             "pyrefly",

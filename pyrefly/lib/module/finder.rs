@@ -2256,6 +2256,201 @@ mod tests {
     }
 
     #[test]
+    fn test_shape_stubs_precede_regular_stubs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let stub_package = |name: &str| {
+            TestPath::dir(
+                name,
+                vec![TestPath::file("__init__.pyi"), TestPath::file("bar.pyi")],
+            )
+        };
+        TestPath::setup_test_directory(
+            root,
+            vec![
+                TestPath::dir(
+                    "foo",
+                    vec![TestPath::file("__init__.py"), TestPath::file("bar.py")],
+                ),
+                stub_package("foo-stubs"),
+                stub_package("foo-shape-stubs"),
+            ],
+        );
+        let config = get_config_with_search_path(vec![root.to_path_buf()]);
+        let mut opted_out = ConfigFile::parse_config("use-shape-comments-and-stubs = false")
+            .expect("test configuration should parse");
+        opted_out.source = ConfigSource::Synthetic(None);
+        opted_out.interpreters.skip_interpreter_query = true;
+        opted_out.python_environment.site_package_path = Some(vec![]);
+        opted_out.search_path_from_file = vec![root.to_path_buf()];
+        opted_out.disable_search_path_heuristics = true;
+        opted_out.configure();
+        let find = |config: &ConfigFile, module, lookup_mode| {
+            find_import_with_mode(
+                config,
+                ModuleName::from_str(module),
+                lookup_mode,
+                FindImportOptions::new(&DirEntryCache::new()),
+            )
+            .finding()
+        };
+        let found = |path: &str| Some(ModulePath::filesystem(root.join(path)));
+        let lists_shape_stubs = |config: &ConfigFile| {
+            find_import_prefixes(config, ModuleName::from_str(""))
+                .contains(&ModuleName::from_str("foo-shape-stubs"))
+        };
+
+        assert_eq!(
+            find(&config, "foo", ImportLookupMode::TypeChecking),
+            found("foo-stubs/__init__.pyi"),
+        );
+        assert_eq!(
+            find(&config, "foo.bar", ImportLookupMode::TypeChecking),
+            found("foo-stubs/bar.pyi"),
+        );
+        assert_eq!(
+            find(
+                &config,
+                "foo.bar",
+                ImportLookupMode::style(ModuleStyle::Interface)
+            ),
+            found("foo-stubs/bar.pyi"),
+        );
+        // Like `-stubs` directories, shape stub directories are listed under their own name.
+        assert!(lists_shape_stubs(&config));
+
+        assert_eq!(
+            find(&opted_out, "foo", ImportLookupMode::TypeChecking),
+            found("foo-stubs/__init__.pyi"),
+        );
+        assert_eq!(
+            find(&opted_out, "foo.bar", ImportLookupMode::TypeChecking),
+            found("foo-stubs/bar.pyi"),
+        );
+        assert!(lists_shape_stubs(&opted_out));
+    }
+
+    #[test]
+    fn test_executable_lookup_ignores_shape_stubs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![
+                TestPath::dir(
+                    "spam",
+                    vec![TestPath::file("__init__.py"), TestPath::file("eggs.py")],
+                ),
+                TestPath::dir(
+                    "spam-shape-stubs",
+                    vec![TestPath::file("__init__.pyi"), TestPath::file("eggs.pyi")],
+                ),
+            ],
+        );
+        let config = get_config_with_search_path(vec![root.to_path_buf()]);
+        let find = |module, lookup_mode| {
+            find_import_with_mode(
+                &config,
+                ModuleName::from_str(module),
+                lookup_mode,
+                FindImportOptions::new(&DirEntryCache::new()),
+            )
+            .finding()
+        };
+        let found = |path: &str| Some(ModulePath::filesystem(root.join(path)));
+
+        assert_eq!(
+            find("spam", ImportLookupMode::TypeChecking),
+            found("spam/__init__.py"),
+        );
+        // A source-style lookup looks for the runtime implementation, which shape
+        // stubs never provide.
+        assert_eq!(
+            find("spam", ImportLookupMode::style(ModuleStyle::Executable)),
+            found("spam/__init__.py"),
+        );
+        assert_eq!(
+            find(
+                "spam.eggs",
+                ImportLookupMode::style(ModuleStyle::Executable)
+            ),
+            found("spam/eggs.py"),
+        );
+    }
+
+    #[test]
+    fn test_incomplete_shape_stubs_fall_through() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        let partial_py_typed = || TestPath::file_with_contents("py.typed", "partial\n");
+        TestPath::setup_test_directory(
+            root,
+            vec![
+                TestPath::dir(
+                    "foo",
+                    vec![
+                        TestPath::file("__init__.py"),
+                        TestPath::file("bar.py"),
+                        TestPath::file("baz.py"),
+                        TestPath::file("qux.py"),
+                    ],
+                ),
+                TestPath::dir(
+                    "foo-stubs",
+                    vec![
+                        TestPath::file("__init__.pyi"),
+                        TestPath::file("bar.pyi"),
+                        TestPath::file("baz.pyi"),
+                    ],
+                ),
+                TestPath::dir(
+                    "foo-shape-stubs",
+                    vec![partial_py_typed(), TestPath::file("bar.pyi")],
+                ),
+                TestPath::dir(
+                    "spam",
+                    vec![
+                        TestPath::file("__init__.py"),
+                        TestPath::file("eggs.py"),
+                        TestPath::file("ham.py"),
+                    ],
+                ),
+                TestPath::dir(
+                    "spam-shape-stubs",
+                    vec![partial_py_typed(), TestPath::file("eggs.pyi")],
+                ),
+                // An unmarked shape stub namespace without a runtime package.
+                TestPath::dir("shapens-stubs", vec![TestPath::file("__init__.pyi")]),
+                TestPath::dir("shapens-shape-stubs", vec![TestPath::file("mod.pyi")]),
+            ],
+        );
+        let config = get_config_with_search_path(vec![root.to_path_buf()]);
+        let find = |module| {
+            find_import(
+                &config,
+                ModuleName::from_str(module),
+                FindImportOptions::new(&DirEntryCache::new()),
+            )
+            .finding()
+        };
+        let found = |path: &str| Some(ModulePath::filesystem(root.join(path)));
+
+        // Partial shape stubs over regular stubs.
+        assert_eq!(find("foo"), found("foo-stubs/__init__.pyi"));
+        assert_eq!(find("foo.bar"), found("foo-stubs/bar.pyi"));
+        assert_eq!(find("foo.baz"), found("foo-stubs/baz.pyi"));
+        assert_eq!(find("foo.qux"), found("foo/qux.py"));
+
+        // Partial shape stubs directly over the runtime package.
+        assert_eq!(find("spam"), found("spam/__init__.py"));
+        assert_eq!(find("spam.eggs"), found("spam/eggs.py"));
+        assert_eq!(find("spam.ham"), found("spam/ham.py"));
+
+        // A bare shape stub namespace does not hide a concrete regular stub package.
+        assert_eq!(find("shapens"), found("shapens-stubs/__init__.pyi"));
+    }
+
+    #[test]
     fn test_find_site_package_path_no_stubs_with_py_typed() {
         let tempdir = tempfile::tempdir().unwrap();
         let root = tempdir.path();
@@ -4296,6 +4491,39 @@ mod tests {
         } else {
             panic!("Expected to find typeshed stub, got: {:?}", result);
         }
+    }
+
+    #[test]
+    fn test_installed_shape_stubs_and_bundled_stub() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir(
+                "site_packages",
+                vec![
+                    TestPath::dir("requests", vec![TestPath::file("__init__.py")]),
+                    TestPath::dir("requests-shape-stubs", vec![TestPath::file("__init__.pyi")]),
+                ],
+            )],
+        );
+
+        let mut config = get_config(ConfigSource::Synthetic(None));
+        config.python_environment.site_package_path = Some(vec![root.join("site_packages")]);
+        config.configure();
+
+        let result = find_import(
+            &config,
+            ModuleName::from_str("requests"),
+            FindImportOptions::new(&DirEntryCache::new()),
+        );
+        assert!(
+            result.finding().is_some_and(|path| matches!(
+                path.details(),
+                ModulePathDetails::BundledTypeshedThirdParty(_)
+            )),
+            "Expected the bundled typeshed stub for `requests`"
+        );
     }
 
     #[test]

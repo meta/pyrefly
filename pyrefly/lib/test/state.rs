@@ -67,6 +67,54 @@ use crate::types::class::Class;
 use crate::types::types::Type;
 
 #[test]
+fn test_use_shape_comments_and_stubs_config_reload() {
+    let root = TempDir::new().unwrap();
+    let config_path = root.path().join(ConfigFile::PYREFLY_FILE_NAME);
+    let source_path = root.path().join("main.py");
+    fs::write(&config_path, "skip-interpreter-query = true\n").unwrap();
+    fs::write(
+        &source_path,
+        "# enable-shape-type-comments\nx: int = 0  # shaped: [3\nbad: str = 1\n",
+    )
+    .unwrap();
+    let state = State::new(default_config_finder(None), TEST_THREAD_COUNT);
+    let handle = Handle::new(
+        ModuleName::from_str("main"),
+        ModulePath::filesystem(source_path),
+        SysInfo::default(),
+    );
+
+    for setting in [None, Some(false), Some(true)] {
+        if let Some(enabled) = setting {
+            fs::write(
+                &config_path,
+                format!(
+                    "skip-interpreter-query = true\nuse-shape-comments-and-stubs = {enabled}\n"
+                ),
+            )
+            .unwrap();
+        }
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        if setting.is_some() {
+            transaction.as_mut().invalidate_config();
+        }
+        transaction
+            .as_mut()
+            .run(&[handle.dupe()], Require::Everything, None);
+        let errors = transaction
+            .as_mut()
+            .get_errors([&handle])
+            .collect_display_errors();
+        assert_eq!(
+            errors.len(),
+            2,
+            "shape comments cannot yet be disabled: {errors:?}"
+        );
+        state.commit_transaction(transaction, None);
+    }
+}
+
+#[test]
 fn test_fallback_search_path_relative_import_emits_dedicated_diagnostic() {
     let tdir = TempDir::new().unwrap();
     let root = tdir.path();

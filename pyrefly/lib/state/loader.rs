@@ -575,6 +575,40 @@ mod tests {
     }
 
     #[test]
+    fn test_use_shape_comments_and_stubs_bundled_cache() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+        TestPath::setup_test_directory(
+            root,
+            vec![
+                TestPath::dir("requests", vec![TestPath::file("__init__.py")]),
+                TestPath::dir("requests-shape-stubs", vec![TestPath::file("__init__.pyi")]),
+            ],
+        );
+        let mut config = ConfigFile::parse_config(
+            "[[sub-config]]\nmatches = '**/opted-out/**'\nuse-shape-comments-and-stubs = false\n",
+        )
+        .unwrap();
+        config.python_environment.set_empty_to_default();
+        config.python_environment.site_package_path = Some(vec![root.to_path_buf()]);
+        config.disable_search_path_heuristics = true;
+        config.configure();
+        let loader = LoaderFindCache::new(ArcId::new(config));
+        let enabled = ModulePath::memory(root.join("enabled/main.py"));
+        let disabled = ModulePath::memory(root.join("opted-out/main.py"));
+        for origin in [&disabled, &enabled, &enabled, &disabled] {
+            let path = loader
+                .find_import(ModuleName::from_str("requests"), Some(origin), None)
+                .finding()
+                .unwrap();
+            assert!(
+                path.is_bundled(),
+                "bundled promotion currently hides shape stubs"
+            );
+        }
+    }
+
+    #[test]
     fn test_tensor_shapes_missing_marker_uses_origin_independent_cache_entry() {
         let mut config = ConfigFile::default();
         config.python_environment.set_empty_to_default();

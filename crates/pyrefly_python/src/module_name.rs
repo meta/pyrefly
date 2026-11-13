@@ -1028,4 +1028,13 @@ mod tests {
         // Plain package without `-stubs` is unchanged.
         assert_module_name("/sp/scipy/stats/foo.py", "scipy.stats.foo");
     }
+
+    #[test]
+    fn test_module_from_path_shape_stubs_suffix() {
+        let includes = [PathBuf::from("/sp")];
+        let module_name = |path: &str| ModuleName::from_path(Path::new(path), includes.iter(), &[]);
+
+        assert_eq!(module_name("/sp/torch-shape-stubs/nn/functional.pyi"), None);
+        assert_eq!(module_name("/sp/torch-shape-stubs/__init__.pyi"), None);
+    }
 }
