@@ -123,18 +123,27 @@ fn find_preference_glean() -> FindPreference {
     }
 }
 
+/// Each prefix of `module_name`, from its top-level package to the module itself, with the
+/// range of the prefix's last component when the name starts at `position`.
+///
+/// For example, `a.b.c` gives `a`, `a.b` and `a.b.c`. Empty components are kept, so `a..c`
+/// gives `a`, `a.` and `a..c`.
 fn all_modules_with_range(
     module_name: ModuleName,
     position: TextSize,
 ) -> impl Iterator<Item = (String, TextRange)> {
     module_name.components().into_iter().scan(
-        ("".to_owned(), position),
+        (None::<String>, position),
         |(module, start), component| {
             let name = component.as_str();
             let range = TextRange::at(*start, TextSize::try_from(name.len()).unwrap());
-            *module = join_names(module, name);
+            let prefix = match module {
+                Some(parent) => format!("{parent}.{name}"),
+                None => name.to_owned(),
+            };
+            *module = Some(prefix.clone());
             *start = range.end() + TextSize::from(1);
-            Some((module.to_owned(), range))
+            Some((prefix, range))
         },
     )
 }
@@ -2216,6 +2225,29 @@ mod tests {
             ModulePath::filesystem(PathBuf::from(path)),
             Arc::new(String::new()),
         )
+    }
+
+    #[test]
+    fn test_module_prefixes_name_the_parents_of_names_with_empty_components() {
+        let prefixes: Vec<String> =
+            all_modules_with_range(ModuleName::from_str("pkg..config.settings"), TextSize::ZERO)
+                .map(|(prefix, _)| prefix)
+                .collect();
+        assert_eq!(
+            prefixes,
+            ["pkg", "pkg.", "pkg..config", "pkg..config.settings"],
+            "the empty component between the two dots should be kept in every prefix"
+        );
+        for pair in prefixes.windows(2) {
+            assert_eq!(
+                create_sname(&pair[1]).key.parent,
+                Some(create_sname(&pair[0])),
+                "the parent SName of {:?} should be the SName of {:?}, so that \
+                 SNameToName can find the parent's name",
+                pair[1],
+                pair[0],
+            );
+        }
     }
 
     #[test]
