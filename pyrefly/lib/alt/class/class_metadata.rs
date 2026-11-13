@@ -67,6 +67,7 @@ use crate::binding::base_class::BaseClass;
 use crate::binding::base_class::BaseClassExpr;
 use crate::binding::base_class::BaseClassGeneric;
 use crate::binding::base_class::BaseClassGenericKind;
+use crate::binding::binding::Binding;
 use crate::binding::binding::ClassFieldDefinition;
 use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::Key;
@@ -459,7 +460,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .iter()
             .find_map(|(decorator, _)| decorator.deprecation.clone());
 
-        let explicit_slots = self.explicit_slots(cls);
+        let explicit_slots = self.explicit_slots(cls, metaclass, errors);
         let has_nonempty_explicit_slots = explicit_slots
             .slots_info()
             .is_some_and(|slots| !slots.names.is_empty());
@@ -698,7 +699,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .find_map(|base| self.find_inherited_init_subclass(base, seen))
     }
 
-    fn explicit_slots(&self, cls: &Class) -> ExplicitSlots {
+    fn explicit_slots(
+        &self,
+        cls: &Class,
+        metaclass: Option<&ClassType>,
+        errors: &ErrorCollector,
+    ) -> ExplicitSlots {
         let key = KeyClassField(cls.index(), dunder::SLOTS.clone());
         let Some(idx) = self.bindings().key_to_idx_hashed_opt(Hashed::new(&key)) else {
             return ExplicitSlots::Absent;
@@ -728,10 +734,68 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Expr::StringLiteral(s) => Some(iter::once(Name::new(s.value.to_str())).collect()),
             _ => return ExplicitSlots::Unknown,
         };
-        match names {
-            Some(names) => ExplicitSlots::Known(SlotsInfo { names }),
-            None => ExplicitSlots::Unknown,
+        let Some(names) = names else {
+            return ExplicitSlots::Unknown;
+        };
+        // A metaclass other than `type` or `ABCMeta` may remove names from the namespace before it
+        // creates the class.
+        if cls.module().path().is_interface()
+            || metaclass.is_some_and(|m| !m.class_object().is(KnownClass::AbcMeta))
+        {
+            return ExplicitSlots::Known(SlotsInfo { names });
         }
+        for name in &names {
+            // CPython handles these names separately from ordinary slot descriptors.
+            if matches!(name.as_str(), "__dict__" | "__weakref__" | "__qualname__") {
+                continue;
+            }
+            let key = KeyClassField(cls.index(), name.clone());
+            let Some(idx) = self.bindings().key_to_idx_hashed_opt(Hashed::new(&key)) else {
+                continue;
+            };
+            let field = self.bindings().get::<KeyClassField>(idx);
+            // Only a name defined more than once in the body has an `Anywhere` binding. Report the
+            // first of its definitions that binds a value: a bare annotation neither binds one nor
+            // removes one.
+            let binds_value =
+                |key: Idx<Key>| !matches!(self.bindings().get(key), Binding::AnnotatedType(..));
+            let anywhere = Key::Anywhere(Box::new((name.clone(), field.range)));
+            let conflict_range = match self
+                .bindings()
+                .key_to_idx_hashed_opt(Hashed::new(&anywhere))
+            {
+                Some(idx) => {
+                    let Binding::Phi(_, branches) = self.bindings().get(idx) else {
+                        unreachable!("Anywhere bindings merge definitions with Phi")
+                    };
+                    branches
+                        .iter()
+                        .map(|branch| branch.value_key)
+                        .find(|key| binds_value(*key))
+                        .map(|key| self.bindings().idx_to_key(key).range())
+                }
+                None => match &field.definition {
+                    ClassFieldDefinition::AssignedInBody { .. }
+                    | ClassFieldDefinition::MethodLike { .. }
+                    | ClassFieldDefinition::NestedClass { .. } => Some(field.range),
+                    ClassFieldDefinition::DefinedWithoutAssign { definition, .. } => {
+                        binds_value(*definition).then_some(field.range)
+                    }
+                    ClassFieldDefinition::DeclaredByAnnotation { .. }
+                    | ClassFieldDefinition::DeclaredWithoutAnnotation
+                    | ClassFieldDefinition::DefinedInMethod { .. } => None,
+                },
+            };
+            if let Some(range) = conflict_range {
+                self.error(
+                    errors,
+                    range,
+                    ErrorKind::BadClassDefinition,
+                    format!("`{name}` in `__slots__` conflicts with a class variable"),
+                );
+            }
+        }
+        ExplicitSlots::Known(SlotsInfo { names })
     }
 
     fn initial_protocol_metadata(
