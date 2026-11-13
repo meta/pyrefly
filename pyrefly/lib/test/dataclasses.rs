@@ -2950,3 +2950,48 @@ c = C(self="test")
 assert_type(c.self, str)
 "#,
 );
+
+// A dataclass checks the descriptors of its own fields. A base class reports its own fields in its
+// own module.
+testcase!(
+    test_dataclass_does_not_check_inherited_descriptor_fields,
+    TestEnv::one(
+        "foo",
+        r#"
+from dataclasses import dataclass
+
+class NonData:
+    def __get__(self, obj: object, objtype: object) -> int: ...
+
+@dataclass
+class Base:
+    x: NonData = NonData()  # E: Cannot set field `x` to non-data descriptor `NonData`
+"#,
+    ),
+    r#"
+from dataclasses import dataclass
+from foo import Base
+
+@dataclass
+class Child(Base):
+    y: int = 0
+"#,
+);
+
+// Building `__init__` resolves a descriptor's `__set__` only for its type. A `__set__` that cannot
+// be resolved is reported where it is defined, not again at the field.
+testcase!(
+    test_dataclass_init_does_not_report_descriptor_setter,
+    r#"
+from dataclasses import dataclass
+
+class D:
+    def __get__(self, obj: object, objtype: object) -> int: ...
+    @property
+    def __set__(self, extra: int) -> None: ...  # E: Property getter cannot take extra required parameter `extra`
+
+@dataclass
+class C:
+    x: D = D()
+"#,
+);

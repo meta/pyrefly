@@ -1969,7 +1969,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     pub fn record_property_getter(&self, loc: TextRange, getter_ty: &Type) {
-        if self.current().trace.is_some() {
+        if self.current().trace.is_some() && !loc.is_empty() {
             self.trace_state()
                 .record_property_getter_trace(loc, Arc::new(getter_ty.clone()));
         }

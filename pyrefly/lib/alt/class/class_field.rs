@@ -156,7 +156,6 @@ pub enum ClassAttribute {
     /// class-body-declared instance variables so writes via the class are flagged.
     DescriptorRead {
         union: Box<Union>,
-        range: TextRange,
         base: DescriptorBase,
         read_only_reason: Option<ReadOnlyReason>,
         is_instance_var: bool,
@@ -236,13 +235,11 @@ impl ClassAttribute {
             ),
             Self::DescriptorRead {
                 union,
-                range,
                 base,
                 read_only_reason,
                 is_instance_var,
             } => Self::DescriptorRead {
                 union,
-                range,
                 base,
                 read_only_reason: read_only_reason.or(Some(reason)),
                 is_instance_var,
@@ -284,9 +281,6 @@ impl ClassAttribute {
 
 #[derive(Debug, Clone, TypeEq, PartialEq, Eq, Visit, VisitMut)]
 pub struct Descriptor {
-    /// The location of the property where the descriptor is bound, where we should raise
-    /// errors attempting to access the getter/setter.
-    range: TextRange,
     /// This is the descriptor class, which is needed both for attribute subtyping
     /// checks in structural types and in the case where there is no getter method.
     cls: ClassType,
@@ -434,7 +428,9 @@ enum ClassFieldInner {
         annotation: Option<Annotation>,
         initialization: ClassFieldInitialization,
         read_only_reason: Option<ReadOnlyReason>,
-        descriptor_range: Option<TextRange>,
+        /// Whether the declared type is a union with members that define `__get__`, so that a read
+        /// applies `__get__` to those members.
+        descriptor_union: bool,
         /// ClassVar: can read from instance, but cannot write/shadow from instance
         is_classvar: bool,
         /// Whether this declaration is eligible for the `instance-var-assign` diagnostic.
@@ -510,7 +506,7 @@ impl ClassField {
                 annotation,
                 initialization,
                 read_only_reason,
-                descriptor_range: None,
+                descriptor_union: false,
                 is_classvar: false,
                 is_instance_var,
                 is_staticmethod: false,
@@ -621,7 +617,7 @@ impl ClassField {
                     annotation: None,
                     initialization: ClassFieldInitialization::ClassBody(None),
                     read_only_reason: None,
-                    descriptor_range: None,
+                    descriptor_union: false,
                     is_classvar,
                     is_instance_var: false,
                     is_staticmethod: false,
@@ -638,7 +634,7 @@ impl ClassField {
                 annotation: None,
                 initialization: ClassFieldInitialization::recursive(),
                 read_only_reason: None,
-                descriptor_range: None,
+                descriptor_union: false,
                 is_classvar: false,
                 is_instance_var: false,
                 is_staticmethod: false,
@@ -730,7 +726,7 @@ impl ClassField {
                 annotation,
                 initialization,
                 read_only_reason,
-                descriptor_range,
+                descriptor_union,
                 is_classvar,
                 is_instance_var,
                 is_staticmethod,
@@ -743,7 +739,7 @@ impl ClassField {
                         annotation: annotation.clone(),
                         initialization: initialization.clone(),
                         read_only_reason: read_only_reason.clone(),
-                        descriptor_range: *descriptor_range,
+                        descriptor_union: *descriptor_union,
                         is_classvar: *is_classvar,
                         is_instance_var: *is_instance_var,
                         is_staticmethod: *is_staticmethod,
@@ -1170,11 +1166,11 @@ impl ClassField {
     }
 
     /// For a non-data descriptor (`__get__` but neither `__set__` nor `__delete__`), get the
-    /// descriptor range and type. Used for
+    /// descriptor class. Used for
     /// dataclass validation, where we typically disallow non-data descriptors but certain
     /// edge cases (where instance shadows are assignable to the `__get__` return type) are ok.
     /// Descriptors excluded from the generated `__init__` cannot be shadowed by its writes.
-    pub fn non_data_descriptor_info(&self) -> Option<(TextRange, ClassType)> {
+    pub fn non_data_descriptor_info(&self) -> Option<ClassType> {
         match &self.0 {
             ClassFieldInner::Descriptor { descriptor, .. }
                 if !descriptor.setter
@@ -1188,18 +1184,17 @@ impl ClassField {
                         | ClassFieldInitialization::Magic => false,
                     } =>
             {
-                Some((descriptor.range, descriptor.cls.clone()))
+                Some(descriptor.cls.clone())
             }
             _ => None,
         }
     }
 
-    /// For a data descriptor with a `__set__`, get the descriptor range
-    /// and class type. Used for dataclass validation to check that the class-level `__get__`
-    /// return type is compatible with `__set__`. Only ordinary descriptor assignments use
-    /// the class-level descriptor value as an implicit default; field specifiers provide their
-    /// own default semantics.
-    pub fn data_descriptor_info(&self) -> Option<(TextRange, ClassType)> {
+    /// For a data descriptor with a `__set__`, get the descriptor class. Used for dataclass
+    /// validation to check that the class-level `__get__` return type is compatible with `__set__`.
+    /// Only ordinary descriptor assignments use the class-level descriptor value as an implicit
+    /// default; field specifiers provide their own default semantics.
+    pub fn data_descriptor_info(&self) -> Option<ClassType> {
         match &self.0 {
             ClassFieldInner::Descriptor { descriptor, .. }
                 if descriptor.setter
@@ -1208,7 +1203,7 @@ impl ClassField {
                         ClassFieldInitialization::ClassBody(None)
                     ) =>
             {
-                Some((descriptor.range, descriptor.cls.clone()))
+                Some(descriptor.cls.clone())
             }
             _ => None,
         }
@@ -2094,6 +2089,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                     .resolve_descriptor_setter(
                                         name,
                                         descriptor,
+                                        TextRange::default(),
                                         &self.error_swallower(),
                                     )
                                     .is_some_and(|setter| {
@@ -2390,7 +2386,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // Identify whether this is a descriptor. Construct the stored descriptor only after
         // forcing the field type so its class cannot retain solver variables.
         let mut descriptor_info = None;
-        let mut descriptor_range = None;
+        let mut descriptor_union = false;
         let is_annotation_initialized_in_method = match field_definition {
             ClassFieldDefinition::DeclaredByAnnotation {
                 initialized_in_recognized_method,
@@ -2435,7 +2431,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 if self.get_class_member(cls.class_object(), &dunder::GET).is_some())
                         }) =>
                 {
-                    descriptor_range = Some(range);
+                    descriptor_union = true;
                 }
                 _ => {}
             };
@@ -2447,7 +2443,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             &ty,
             unpromoted_ty.as_ref(),
             field_definition,
-            descriptor_info.is_some() || descriptor_range.is_some(),
+            descriptor_info.is_some() || descriptor_union,
             range,
             errors,
         ) {
@@ -2462,7 +2458,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 None
             };
             if !matches!(special_ty, Type::Union(_)) {
-                descriptor_range = None;
+                descriptor_union = false;
             }
             special_ty
         } else {
@@ -2480,7 +2476,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 unreachable!("a detected descriptor must have a class type")
             };
             Descriptor {
-                range,
                 cls,
                 getter,
                 setter,
@@ -2688,7 +2683,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             annotation,
                             initialization,
                             read_only_reason,
-                            descriptor_range,
+                            descriptor_union,
                             is_classvar: is_class_var,
                             is_instance_var,
                             is_staticmethod,
@@ -3962,7 +3957,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 mut ty,
                 is_classvar,
                 read_only_reason,
-                descriptor_range,
+                descriptor_union,
                 ..
             } => {
                 ty = self.normalize_attr_ty(ty);
@@ -3986,8 +3981,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         },
                     };
                 }
-                match (descriptor_range, ty) {
-                    (Some(range), Type::Union(union)) => {
+                match (descriptor_union, ty) {
+                    (true, Type::Union(union)) => {
                         let Some(base) = instance.to_descriptor_base() else {
                             // Unreachable because only TypedDicts can hit this, and we never construct
                             // descriptor reads for typed dicts.
@@ -3997,7 +3992,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         };
                         ClassAttribute::DescriptorRead {
                             union,
-                            range,
                             base,
                             read_only_reason,
                             is_instance_var: false,
@@ -4119,7 +4113,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 mut ty,
                 is_instance_var,
                 read_only_reason,
-                descriptor_range,
+                descriptor_union,
                 ..
             } => {
                 ty = self.normalize_attr_ty(ty);
@@ -4128,12 +4122,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         cls.class_object().dupe(),
                     ))
                 } else {
-                    match (descriptor_range, ty) {
+                    match (descriptor_union, ty) {
                         // Unions with bindable functions are classified as methods before this
                         // branch, so descriptor unions need no classmethod binding here.
-                        (Some(range), Type::Union(union)) => ClassAttribute::DescriptorRead {
+                        (true, Type::Union(union)) => ClassAttribute::DescriptorRead {
                             union,
-                            range,
                             base: DescriptorBase::ClassDef(cls.clone()),
                             read_only_reason,
                             is_instance_var,
@@ -4180,7 +4173,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         strict: bool,
         converter_param: Option<Type>,
         param_type_transform: &dyn Fn(Type) -> Type,
-        errors: &ErrorCollector,
     ) -> Param {
         let (ty, descriptor) = match &field.0 {
             ClassFieldInner::Property { ty, .. } => (ty, None),
@@ -4198,7 +4190,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else if !strict {
             self.heap.mk_any_explicit()
         } else if let Some(x) = descriptor
-            && let Some(setter) = self.resolve_descriptor_setter(name, x, errors)
+            && let Some(setter) = self.resolve_descriptor_setter(
+                name,
+                x,
+                TextRange::default(),
+                &self.error_swallower(),
+            )
         {
             self.get_descriptor_setter_value(&setter)
         } else {
@@ -6060,7 +6057,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     )
                 }
                 DescriptorBase::Instance(_) | DescriptorBase::SelfInstance(_)
-                    if let Some(setter) = self.resolve_descriptor_setter(attr_name, &x, errors) =>
+                    if let Some(setter) =
+                        self.resolve_descriptor_setter(attr_name, &x, range, errors) =>
                 {
                     // TODO(mfish33) we allow uninitialized descriptors in this case. This
                     // is to have better compatibility with other type checkers and support
@@ -6582,7 +6580,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ) => {
                 let (got_read_ty, _) = self.resolve_descriptor_types(got_d, got_base);
                 let got_setter = self
-                    .resolve_descriptor_setter(&dunder::SET, got_d, &self.error_swallower())
+                    .resolve_descriptor_setter(
+                        &dunder::SET,
+                        got_d,
+                        TextRange::default(),
+                        &self.error_swallower(),
+                    )
                     .map(|setter| self.get_descriptor_setter_value(&setter));
                 is_subset(
                     &self.heap.mk_callable_ellipsis(got_read_ty.clone()),
@@ -6730,7 +6733,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 Ok(self.call_property_getter(getter, range, errors, context))
             }
             ClassAttribute::Descriptor(x, base) => {
-                if let Some(getter) = self.resolve_descriptor_getter(attr_name, &x, errors) {
+                if let Some(getter) = self.resolve_descriptor_getter(attr_name, &x, range, errors) {
                     // Reading a descriptor with a getter resolves to a method call
                     //
                     // TODO(stroxler): Once we have more complex error traces, it would be good to pass
@@ -6746,21 +6749,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     Ok(self.heap.mk_class_type(x.cls.clone()))
                 }
             }
-            ClassAttribute::DescriptorRead {
-                union,
-                range: descriptor_range,
-                base,
-                ..
-            } => {
+            ClassAttribute::DescriptorRead { union, base, .. } => {
                 let ty = Type::Union(union);
                 Ok(self.distribute_over_union(&ty, |member| {
                     if let Type::ClassType(cls) = member
-                        && let Some(getter) = self.resolve_descriptor_getter_for_class(
-                            attr_name,
-                            cls,
-                            descriptor_range,
-                            errors,
-                        )
+                        && let Some(getter) =
+                            self.resolve_descriptor_getter_for_class(attr_name, cls, range, errors)
                     {
                         self.call_descriptor_getter(getter, base.clone(), range, errors, context)
                     } else {
@@ -6773,7 +6767,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Project a generated storage descriptor into its instance attribute contract.
     pub(crate) fn descriptor_as_attribute(&self, desc: &Descriptor) -> Option<ClassAttribute> {
-        let setter = self.resolve_descriptor_setter(&dunder::SET, desc, &self.error_swallower())?;
+        let setter = self.resolve_descriptor_setter(
+            &dunder::SET,
+            desc,
+            TextRange::default(),
+            &self.error_swallower(),
+        )?;
         let contract = setter
             .toplevel_func_metadata()?
             .flags
@@ -6792,16 +6791,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         desc: &Descriptor,
         base: &DescriptorBase,
     ) -> (Type, Option<Type>) {
+        // Errors are swallowed, so no location is reported.
+        let range = TextRange::default();
         let error_swallower = self.error_swallower();
         let read_ty = if let Some(getter) =
-            self.resolve_descriptor_getter(&dunder::GET, desc, &error_swallower)
+            self.resolve_descriptor_getter(&dunder::GET, desc, range, &error_swallower)
         {
-            self.call_descriptor_getter(getter, base.clone(), desc.range, &error_swallower, None)
+            self.call_descriptor_getter(getter, base.clone(), range, &error_swallower, None)
         } else {
             self.heap.mk_class_type(desc.cls.clone())
         };
         let setter_val = self
-            .resolve_descriptor_setter(&dunder::SET, desc, &error_swallower)
+            .resolve_descriptor_setter(&dunder::SET, desc, range, &error_swallower)
             .map(|setter| {
                 setter
                     .toplevel_func_metadata()
@@ -6814,16 +6815,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         (read_ty, setter_val)
     }
 
+    /// Resolve the descriptor's `__get__`, reporting a failure at `range`, the access in the module
+    /// being checked.
     fn resolve_descriptor_getter(
         &self,
         attr_name: &Name,
         x: &Descriptor,
+        range: TextRange,
         errors: &ErrorCollector,
     ) -> Option<Type> {
         if !x.getter {
             return None;
         }
-        self.resolve_descriptor_getter_for_class(attr_name, &x.cls, x.range, errors)
+        self.resolve_descriptor_getter_for_class(attr_name, &x.cls, range, errors)
     }
 
     fn resolve_descriptor_getter_for_class(
@@ -6860,21 +6864,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    /// Resolve the descriptor's `__set__`, reporting a failure at `range`, the access in the module
+    /// being checked.
     fn resolve_descriptor_setter(
         &self,
         attr_name: &Name,
         x: &Descriptor,
+        range: TextRange,
         errors: &ErrorCollector,
     ) -> Option<Type> {
         if x.setter
             && let Some(attr) = self.get_instance_attribute(&x.cls, &dunder::SET)
         {
             Some(
-                self.resolve_get_class_attr(attr_name, attr, x.range, errors, None)
+                self.resolve_get_class_attr(attr_name, attr, range, errors, None)
                     .unwrap_or_else(|e| {
                         self.error_with_context(
                             errors,
-                            x.range,
+                            range,
                             ErrorKind::NoAccess,
                             e.to_error_msg(&dunder::SET),
                             None,

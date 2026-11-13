@@ -347,7 +347,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     flags.strict.unwrap_or(strict_default),
                     flags.converter_param.clone(),
                     &|t| sub.substitute_into(t),
-                    errors,
                 )
             })
             .collect();
