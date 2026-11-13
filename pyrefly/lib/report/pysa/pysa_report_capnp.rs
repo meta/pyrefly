@@ -12,7 +12,7 @@
 // DO NOT EDIT.
 // source: pyrefly/lib/report/pysa/pysa_report.capnp
 // capnp binary version: 0.10.2
-// capnpc crate version: 0.25.3
+// capnpc crate version: 0.26.0
 
 
 pub mod source_path {
@@ -1499,10 +1499,10 @@ pub enum TypeModifier {
 }
 
 impl ::capnp::introspect::Introspect for TypeModifier {
-    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema { encoded_node: &type_modifier::ENCODED_NODE, annotation_types: type_modifier::get_annotation_types }).into() }
+    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema::new(&type_modifier::ARENA, type_modifier::get_annotation_types)).into() }
 }
 impl ::core::convert::From<TypeModifier> for ::capnp::dynamic_value::Reader<'_> {
-    fn from(e: TypeModifier) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema { encoded_node: &type_modifier::ENCODED_NODE, annotation_types: type_modifier::get_annotation_types }.into()).into() }
+    fn from(e: TypeModifier) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema::new(&type_modifier::ARENA, type_modifier::get_annotation_types).into()).into() }
 }
 impl ::core::convert::TryFrom<u16> for TypeModifier {
     type Error = ::capnp::NotInSchema;
@@ -1583,6 +1583,7 @@ pub(crate) static ENCODED_NODE: [::capnp::Word; 52] = [
 pub(crate) fn get_annotation_types(child_index: Option<u16>, index: u32) -> ::capnp::introspect::Type {
     ::capnp::introspect::panic_invalid_annotation_indices(child_index, index)
 }
+pub(crate) static ARENA: ::capnp::private::arena::GeneratedCodeArena = ::capnp::private::arena::GeneratedCodeArena::new(&ENCODED_NODE);
 }
 
 pub mod class_with_modifiers {
@@ -6430,10 +6431,10 @@ pub enum ImplicitReceiver {
 }
 
 impl ::capnp::introspect::Introspect for ImplicitReceiver {
-    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema { encoded_node: &implicit_receiver::ENCODED_NODE, annotation_types: implicit_receiver::get_annotation_types }).into() }
+    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema::new(&implicit_receiver::ARENA, implicit_receiver::get_annotation_types)).into() }
 }
 impl ::core::convert::From<ImplicitReceiver> for ::capnp::dynamic_value::Reader<'_> {
-    fn from(e: ImplicitReceiver) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema { encoded_node: &implicit_receiver::ENCODED_NODE, annotation_types: implicit_receiver::get_annotation_types }.into()).into() }
+    fn from(e: ImplicitReceiver) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema::new(&implicit_receiver::ARENA, implicit_receiver::get_annotation_types).into()).into() }
 }
 impl ::core::convert::TryFrom<u16> for ImplicitReceiver {
     type Error = ::capnp::NotInSchema;
@@ -6497,6 +6498,7 @@ pub(crate) static ENCODED_NODE: [::capnp::Word; 38] = [
 pub(crate) fn get_annotation_types(child_index: Option<u16>, index: u32) -> ::capnp::introspect::Type {
     ::capnp::introspect::panic_invalid_annotation_indices(child_index, index)
 }
+pub(crate) static ARENA: ::capnp::private::arena::GeneratedCodeArena = ::capnp::private::arena::GeneratedCodeArena::new(&ENCODED_NODE);
 }
 
 pub mod pysa_call_target {
@@ -7964,10 +7966,10 @@ pub enum PysaClassFieldDeclaration {
 }
 
 impl ::capnp::introspect::Introspect for PysaClassFieldDeclaration {
-    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema { encoded_node: &pysa_class_field_declaration::ENCODED_NODE, annotation_types: pysa_class_field_declaration::get_annotation_types }).into() }
+    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema::new(&pysa_class_field_declaration::ARENA, pysa_class_field_declaration::get_annotation_types)).into() }
 }
 impl ::core::convert::From<PysaClassFieldDeclaration> for ::capnp::dynamic_value::Reader<'_> {
-    fn from(e: PysaClassFieldDeclaration) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema { encoded_node: &pysa_class_field_declaration::ENCODED_NODE, annotation_types: pysa_class_field_declaration::get_annotation_types }.into()).into() }
+    fn from(e: PysaClassFieldDeclaration) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema::new(&pysa_class_field_declaration::ARENA, pysa_class_field_declaration::get_annotation_types).into()).into() }
 }
 impl ::core::convert::TryFrom<u16> for PysaClassFieldDeclaration {
     type Error = ::capnp::NotInSchema;
@@ -8052,6 +8054,7 @@ pub(crate) static ENCODED_NODE: [::capnp::Word; 56] = [
 pub(crate) fn get_annotation_types(child_index: Option<u16>, index: u32) -> ::capnp::introspect::Type {
     ::capnp::introspect::panic_invalid_annotation_indices(child_index, index)
 }
+pub(crate) static ARENA: ::capnp::private::arena::GeneratedCodeArena = ::capnp::private::arena::GeneratedCodeArena::new(&ENCODED_NODE);
 }
 
 pub mod pysa_class_field {
@@ -9635,10 +9638,10 @@ pub enum UnresolvedReason {
 }
 
 impl ::capnp::introspect::Introspect for UnresolvedReason {
-    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema { encoded_node: &unresolved_reason::ENCODED_NODE, annotation_types: unresolved_reason::get_annotation_types }).into() }
+    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema::new(&unresolved_reason::ARENA, unresolved_reason::get_annotation_types)).into() }
 }
 impl ::core::convert::From<UnresolvedReason> for ::capnp::dynamic_value::Reader<'_> {
-    fn from(e: UnresolvedReason) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema { encoded_node: &unresolved_reason::ENCODED_NODE, annotation_types: unresolved_reason::get_annotation_types }.into()).into() }
+    fn from(e: UnresolvedReason) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema::new(&unresolved_reason::ARENA, unresolved_reason::get_annotation_types).into()).into() }
 }
 impl ::core::convert::TryFrom<u16> for UnresolvedReason {
     type Error = ::capnp::NotInSchema;
@@ -9787,6 +9790,7 @@ pub(crate) static ENCODED_NODE: [::capnp::Word; 112] = [
 pub(crate) fn get_annotation_types(child_index: Option<u16>, index: u32) -> ::capnp::introspect::Type {
     ::capnp::introspect::panic_invalid_annotation_indices(child_index, index)
 }
+pub(crate) static ARENA: ::capnp::private::arena::GeneratedCodeArena = ::capnp::private::arena::GeneratedCodeArena::new(&ENCODED_NODE);
 }
 
 pub mod unresolved {
@@ -12116,10 +12120,10 @@ pub enum ReturnShimArgumentMapping {
 }
 
 impl ::capnp::introspect::Introspect for ReturnShimArgumentMapping {
-    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema { encoded_node: &return_shim_argument_mapping::ENCODED_NODE, annotation_types: return_shim_argument_mapping::get_annotation_types }).into() }
+    fn introspect() -> ::capnp::introspect::Type { ::capnp::introspect::TypeVariant::Enum(::capnp::introspect::RawEnumSchema::new(&return_shim_argument_mapping::ARENA, return_shim_argument_mapping::get_annotation_types)).into() }
 }
 impl ::core::convert::From<ReturnShimArgumentMapping> for ::capnp::dynamic_value::Reader<'_> {
-    fn from(e: ReturnShimArgumentMapping) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema { encoded_node: &return_shim_argument_mapping::ENCODED_NODE, annotation_types: return_shim_argument_mapping::get_annotation_types }.into()).into() }
+    fn from(e: ReturnShimArgumentMapping) -> Self { ::capnp::dynamic_value::Enum::new(e.into(), ::capnp::introspect::RawEnumSchema::new(&return_shim_argument_mapping::ARENA, return_shim_argument_mapping::get_annotation_types).into()).into() }
 }
 impl ::core::convert::TryFrom<u16> for ReturnShimArgumentMapping {
     type Error = ::capnp::NotInSchema;
@@ -12179,6 +12183,7 @@ pub(crate) static ENCODED_NODE: [::capnp::Word; 35] = [
 pub(crate) fn get_annotation_types(child_index: Option<u16>, index: u32) -> ::capnp::introspect::Type {
     ::capnp::introspect::panic_invalid_annotation_indices(child_index, index)
 }
+pub(crate) static ARENA: ::capnp::private::arena::GeneratedCodeArena = ::capnp::private::arena::GeneratedCodeArena::new(&ENCODED_NODE);
 }
 
 pub mod return_shim_callees {

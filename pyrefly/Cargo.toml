@@ -46,7 +46,7 @@ anyhow = "1.0.104"
 append-only-vec = "0.1.10"
 arc-swap = { version = "1.9.4", features = ["weak"] }
 blake3 = { version = "=1.8.6", features = ["mmap", "rayon", "traits-preview"] }
-capnp = "0.25.6"
+capnp = "0.26.2"
 clap = { version = "4.6.2", features = ["cargo", "derive", "env", "string", "unicode", "wrap_help"] }
 clap_complete = { version = "4.6.11", features = ["unstable-dynamic"] }
 crossbeam-channel = "0.5.17"
