@@ -5703,21 +5703,24 @@ fn process_candidate_handles_with_definition_impl<T: RdepTransaction, R>(
     results
 }
 
-/// The declarations that the class member at `definition` overrides. Calls through them may
-/// dispatch to the override, so they are references to it. Empty unless `options` asks for them.
-fn overridden_definitions_impl<T: RdepTransaction>(
+/// The definitions to search for references to `definition`, with the options for each and
+/// whether to include the child implementations of its references: the corresponding interface
+/// definition, the declarations that the class member at `definition` overrides (calls through
+/// them may dispatch to the override, so they are references to it), and `definition` itself.
+fn definitions_to_search_impl<T: RdepTransaction>(
     transaction: &T,
     sys_info: SysInfo,
     definition_kind: &DefinitionMetadata,
-    definition: &TextRangeWithModule,
+    definition: TextRangeWithModule,
     options: ReferenceOptions,
-) -> Vec<TextRangeWithModule> {
-    if options.include_overridden_references
+) -> Vec<(TextRangeWithModule, ReferenceOptions, bool)> {
+    let interface_definition =
+        transaction.find_corresponding_interface_definition(sys_info, &definition);
+    let overridden_definitions = if options.include_overridden_references
         && matches!(
             definition_kind,
             DefinitionMetadata::Attribute | DefinitionMetadata::VariableOrAttribute(_)
-        )
-    {
+        ) {
         let handle = Handle::new(
             definition.module.name(),
             definition.module.path().dupe(),
@@ -5726,26 +5729,8 @@ fn overridden_definitions_impl<T: RdepTransaction>(
         transaction.parent_declarations(&handle, definition.range)
     } else {
         Vec::new()
-    }
-}
-
-fn find_global_references_from_definition_impl<T: RdepTransaction>(
-    transaction: &mut T,
-    sys_info: SysInfo,
-    definition_kind: DefinitionMetadata,
-    definition: TextRangeWithModule,
-    options: ReferenceOptions,
-) -> Result<Vec<(Module, Vec<TextRange>)>, Cancelled> {
-    let interface_definition =
-        transaction.find_corresponding_interface_definition(sys_info, &definition);
-    let overridden_definitions = overridden_definitions_impl(
-        transaction,
-        sys_info,
-        &definition_kind,
-        &definition,
-        options,
-    );
-    let definitions = interface_definition
+    };
+    interface_definition
         .into_iter()
         .map(|definition| {
             (
@@ -5763,7 +5748,19 @@ fn find_global_references_from_definition_impl<T: RdepTransaction>(
                 .into_iter()
                 .map(|definition| (definition, options.for_overridden(), false)),
         )
-        .chain(iter::once((definition, options, true)));
+        .chain(iter::once((definition, options, true)))
+        .collect()
+}
+
+fn find_global_references_from_definition_impl<T: RdepTransaction>(
+    transaction: &mut T,
+    sys_info: SysInfo,
+    definition_kind: DefinitionMetadata,
+    definition: TextRangeWithModule,
+    options: ReferenceOptions,
+) -> Result<Vec<(Module, Vec<TextRange>)>, Cancelled> {
+    let definitions =
+        definitions_to_search_impl(transaction, sys_info, &definition_kind, definition, options);
     let mut results = Vec::new();
     for (definition, options, include_child_implementations) in definitions {
         let candidate_handles =
@@ -5871,15 +5868,15 @@ pub struct OverrideTargets {
 }
 
 impl<'a> CancellableTransaction<'a> {
-    /// See `overridden_definitions_impl`.
-    pub(crate) fn overridden_definitions(
+    /// See `definitions_to_search_impl`.
+    pub(crate) fn definitions_to_search(
         &self,
         sys_info: SysInfo,
         definition_kind: &DefinitionMetadata,
-        definition: &TextRangeWithModule,
+        definition: TextRangeWithModule,
         options: ReferenceOptions,
-    ) -> Vec<TextRangeWithModule> {
-        overridden_definitions_impl(self, sys_info, definition_kind, definition, options)
+    ) -> Vec<(TextRangeWithModule, ReferenceOptions, bool)> {
+        definitions_to_search_impl(self, sys_info, definition_kind, definition, options)
     }
 
     /// Batches override navigation for one document into one reverse-dependency search.

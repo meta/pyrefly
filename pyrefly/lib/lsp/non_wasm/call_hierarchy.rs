@@ -5,7 +5,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::iter;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -360,15 +359,14 @@ impl CancellableTransaction<'_> {
         // the index, which every rdep carries at `Require::Indexing`, so a file that never
         // mentions the target costs nothing beyond the lookup.
         let options = ReferenceOptions::all(true);
-        let overridden =
-            self.overridden_definitions(sys_info, &definition_kind, target_definition, options);
-        let definitions = iter::once((target_definition.clone(), options)).chain(
-            overridden
-                .into_iter()
-                .map(|definition| (definition, options.for_overridden())),
+        let definitions = self.definitions_to_search(
+            sys_info,
+            &definition_kind,
+            target_definition.clone(),
+            options,
         );
         let mut references_by_handle: SmallMap<Handle, Vec<TextRange>> = SmallMap::new();
-        for (definition, options) in definitions {
+        for (definition, options, _) in definitions {
             for (handle, references) in self.process_rdeps_with_definition(
                 sys_info,
                 &definition,
