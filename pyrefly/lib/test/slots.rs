@@ -904,3 +904,110 @@ def f(c: C):
     c.y = 1 + "oops"  # E: no attribute `y`  # E: `+` is not supported
     "#,
 );
+
+// CPython raises `ValueError` when it creates a class whose `__slots__` names something that the
+// class body also binds.
+testcase!(
+    bug = "Each class variable that conflicts with `__slots__` should be reported",
+    test_slots_conflict_with_class_variable,
+    r#"
+from typing import Final
+
+class A:
+    __slots__ = "foo"
+    foo = 1
+
+class B:
+    __slots__ = ["foo", "bar"]
+    foo: int = 1
+
+class C:
+    attr = "baz"
+    __slots__ = ("attr", "bar")
+
+class D:
+    attr = "baz"
+    __slots__ = ("f", "attr", "__dict__")
+
+class E:
+    __slots__ = ("m", "Inner", "k")
+    def m(self) -> None: ...
+    class Inner: ...
+    k: Final = 1
+"#,
+);
+
+testcase!(
+    test_slots_no_conflict_with_class_variable,
+    r#"
+from typing import ClassVar
+
+def names() -> tuple[str, ...]: ...
+
+class A:
+    __slots__ = ("a", "b")
+    a: int
+    b: ClassVar[int]
+
+class B(A):
+    a = 1
+
+class C:
+    __slots__ = names()
+    x = 1
+"#,
+);
+
+// Stubs are never executed, and stubs for extension modules commonly declare a slot as a property.
+testcase!(
+    test_slots_no_conflict_in_stub,
+    TestEnv::one_with_path(
+        "foo",
+        "foo.pyi",
+        r#"
+class Waiter:
+    __slots__ = ("value",)
+    @property
+    def value(self) -> int: ...
+"#,
+    ),
+    r#"
+from foo import Waiter
+"#,
+);
+
+testcase!(
+    test_slots_no_conflict_special_names,
+    r#"
+class A:
+    __slots__ = ("__dict__", "__weakref__", "__qualname__")
+    __dict__ = {}
+    __weakref__ = 1
+    __qualname__ = "A"
+"#,
+);
+
+testcase!(
+    bug = "A value bound before or after a bare annotation should be reported",
+    test_slots_conflict_after_annotation,
+    r#"
+class A:
+    __slots__ = ("x",)
+    x = 1
+    x: int
+
+class B:
+    __slots__ = ("x",)
+    def x(self) -> None: ...
+    x: object
+
+class C:
+    __slots__ = ("x",)
+    x: int # ok
+
+class D:
+    __slots__ = ("x",)
+    x: int
+    x = 1
+"#,
+);
