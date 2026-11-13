@@ -11,6 +11,7 @@ import {execFile} from 'child_process';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import {ExtensionContext} from 'vscode';
+import type {Location as ProtocolLocation} from 'vscode-languageclient/node';
 import {PythonEnvironment} from './python-environment';
 
 type CodeLensPosition = {
@@ -323,6 +324,34 @@ export function registerCodeLensCommands(
   context: ExtensionContext,
   pythonEnv: PythonEnvironment,
 ): void {
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'pyrefly.showReferences',
+      async (
+        uri: string,
+        position: CodeLensPosition,
+        locations: ProtocolLocation[],
+      ) => {
+        await vscode.commands.executeCommand(
+          'editor.action.showReferences',
+          vscode.Uri.parse(uri),
+          new vscode.Position(position.line, position.character),
+          locations.map(location =>
+            new vscode.Location(
+              vscode.Uri.parse(location.uri),
+              new vscode.Range(
+                location.range.start.line,
+                location.range.start.character,
+                location.range.end.line,
+                location.range.end.character,
+              ),
+            ),
+          ),
+        );
+      },
+    ),
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand('pyrefly.runTest', async args => {
       const parsedArgs = parseRunTestArgs(args);

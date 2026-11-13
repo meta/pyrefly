@@ -2618,6 +2618,11 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// Return whether this transaction has editor contents for the path.
+    pub(crate) fn has_memory(&self, path: &Path) -> bool {
+        self.memory_lookup().get(path).is_some()
+    }
+
     /// Called if the `load_from_memory` portion of loading might have changed.
     /// Specify which in-memory files might have changed, use None to say they don't exist anymore.
     pub fn set_memory(&mut self, files: Vec<(PathBuf, Option<Arc<FileContents>>)>) {

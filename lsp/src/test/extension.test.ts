@@ -47,4 +47,38 @@ suite('Extension Test Suite', () => {
       await fs.rm(directory, {recursive: true, force: true});
     }
   });
+
+  test('Show reference CodeLens arguments through the VS Code command', async function () {
+    this.timeout(30000);
+    assert.ok(extension);
+    await extension.activate();
+
+    const directory = await fs.mkdtemp(join(tmpdir(), 'pyrefly-references-'));
+    const uri = vscode.Uri.file(join(directory, 'references.py'));
+    try {
+      await vscode.workspace.fs.writeFile(
+        uri,
+        Buffer.from('def foo(): pass\nfoo()\n'),
+      );
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document);
+      // The built-in command rejects the serialized URI and position without conversion.
+      await vscode.commands.executeCommand(
+        'pyrefly.showReferences',
+        uri.toString(),
+        {line: 0, character: 4},
+        [{
+          uri: uri.toString(),
+          range: {
+            start: {line: 1, character: 0},
+            end: {line: 1, character: 3},
+          },
+        }],
+      );
+    } finally {
+      await vscode.commands.executeCommand('closeReferenceSearch');
+      await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+      await fs.rm(directory, {recursive: true, force: true});
+    }
+  });
 });

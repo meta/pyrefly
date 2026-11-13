@@ -71,6 +71,7 @@ use pretty_assertions::assert_eq;
 use pyrefly::commands::lsp::IndexingMode;
 use pyrefly::commands::lsp::LspArgs;
 use pyrefly::commands::lsp::run_lsp;
+pub use pyrefly::lsp::non_wasm::external_provider::ExternalProvider;
 use pyrefly::lsp::non_wasm::external_provider::NoExternalProvider;
 use pyrefly::lsp::non_wasm::module_helpers::ThriftRemapper;
 use pyrefly::lsp::non_wasm::protocol::JsonRpcMessage;
@@ -1438,6 +1439,7 @@ pub struct LspInteractionArgs {
     pub telemetry: Box<dyn Telemetry>,
     pub thread_count: ThreadCount,
     pub thrift_remapper: Option<ThriftRemapper>,
+    pub external_references: Arc<dyn ExternalProvider>,
 }
 
 impl Default for LspInteractionArgs {
@@ -1451,6 +1453,7 @@ impl Default for LspInteractionArgs {
             telemetry: Box::new(NoTelemetry),
             thread_count: TEST_THREAD_COUNT,
             thrift_remapper: None,
+            external_references: Arc::new(NoExternalProvider),
         }
     }
 }
@@ -1472,6 +1475,7 @@ impl LspInteraction {
             telemetry,
             thread_count,
             thrift_remapper,
+            external_references,
         } = args;
 
         let ((conn_client, _client_reader), (conn_server, server_reader)) = Connection::memory();
@@ -1489,7 +1493,7 @@ impl LspInteraction {
                 None,
                 thrift_remapper,
                 &*telemetry,
-                Arc::new(NoExternalProvider),
+                external_references,
                 None,
                 thread_count,
             );

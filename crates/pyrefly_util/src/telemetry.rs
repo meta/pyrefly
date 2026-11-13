@@ -44,6 +44,7 @@ pub enum QueueName {
     LspQueue,
     RecheckQueue,
     FindReferenceQueue,
+    CodeLensQueue,
     SourceDbQueue,
 }
 
@@ -59,6 +60,7 @@ impl QueueName {
             Self::LspQueue => "lsp_queue",
             Self::RecheckQueue => "recheck_queue",
             Self::FindReferenceQueue => "find_reference_queue",
+            Self::CodeLensQueue => "code_lens_queue",
             Self::SourceDbQueue => "sourcedb_queue",
         }
     }

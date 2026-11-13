@@ -10,6 +10,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::iter;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -5648,6 +5649,7 @@ fn reduce_symbol_matches(results: &mut Vec<SymbolMatch>, memory_paths: &HashSet<
 }
 
 trait RdepTransaction {
+    fn has_memory(&self, path: &Path) -> bool;
     fn solutions_index(&self, handle: &Handle) -> Option<Arc<Mutex<Index>>>;
     fn bindings_metadata(&self, handle: &Handle) -> Option<Arc<BindingsMetadata>>;
     fn module_info(&self, handle: &Handle) -> Option<Module>;
@@ -5669,6 +5671,10 @@ trait RdepTransaction {
 }
 
 impl<'a> RdepTransaction for Transaction<'a> {
+    fn has_memory(&self, path: &Path) -> bool {
+        Transaction::has_memory(self, path)
+    }
+
     fn solutions_index(&self, handle: &Handle) -> Option<Arc<Mutex<Index>>> {
         self.get_solutions(handle)
             .and_then(|solutions| solutions.get_index())
@@ -5712,6 +5718,10 @@ impl<'a> RdepTransaction for Transaction<'a> {
 }
 
 impl<'a> RdepTransaction for CancellableTransaction<'a> {
+    fn has_memory(&self, path: &Path) -> bool {
+        self.as_ref().has_memory(path)
+    }
+
     fn solutions_index(&self, handle: &Handle) -> Option<Arc<Mutex<Index>>> {
         self.as_ref()
             .get_solutions(handle)
@@ -5796,7 +5806,7 @@ fn compute_transitive_rdeps_for_definition_impl<T: RdepTransaction>(
     sys_info: SysInfo,
     definition: &TextRangeWithModule,
 ) -> Result<Vec<Handle>, Cancelled> {
-    let mut transitive_rdeps = match definition.module.path().details() {
+    let transitive_rdeps = match definition.module.path().details() {
         ModulePathDetails::Memory(path_buf) => {
             let handle_of_filesystem_counterpart = Handle::new(
                 definition.module.name(),
@@ -5825,20 +5835,20 @@ fn compute_transitive_rdeps_for_definition_impl<T: RdepTransaction>(
             rdeps
         }
     };
-    for fs_counterpart_of_in_memory_handles in transitive_rdeps
-        .iter()
-        .filter_map(|handle| match handle.path().details() {
-            ModulePathDetails::Memory(path_buf) => Some(handle.for_module(
-                handle.module(),
-                ModulePath::filesystem((**path_buf).clone()),
-            )),
-            _ => None,
+    // Keep the definition's module identity for local reference lookup. Other
+    // candidates use editor contents even if an edit removed their last dependency.
+    let candidate_handles: HashSet<Handle> = transitive_rdeps
+        .into_iter()
+        .map(|handle| match handle.path().details() {
+            ModulePathDetails::FileSystem(path)
+                if handle.path() != definition.module.path() && transaction.has_memory(path) =>
+            {
+                handle.for_module(handle.module(), ModulePath::memory((**path).clone()))
+            }
+            _ => handle,
         })
-        .collect::<Vec<_>>()
-    {
-        transitive_rdeps.remove(&fs_counterpart_of_in_memory_handles);
-    }
-    let candidate_handles: Vec<Handle> = transitive_rdeps
+        .collect();
+    let candidate_handles: Vec<Handle> = candidate_handles
         .into_iter()
         .sorted_by_key(|h| h.path().dupe())
         .collect();

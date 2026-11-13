@@ -81,5 +81,6 @@ pub(super) fn run(
     info!("waiting for connection to close");
     server.recheck_queue.stop();
     server.find_reference_queue.stop();
+    server.code_lens_queue.stop();
     server.sourcedb_queue.stop();
 }

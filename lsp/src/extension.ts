@@ -297,6 +297,7 @@ export async function activate(
       customHoverProvider: supportsHoverVerbosity,
       findFileUsages: true,
       pushTypeErrorDisplayStatus: true,
+      supportsReferencesCodeLens: true,
     },
   };
 
