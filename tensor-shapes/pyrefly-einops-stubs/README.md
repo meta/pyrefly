@@ -1,8 +1,12 @@
 # Pyrefly einops shape stubs
 
-This package is a PEP 561 stub-only distribution for `einops`. It provides
-shape-aware annotations for `rearrange`, `reduce`, `repeat`, and `einsum` using
-Pyrefly's type-level shape DSL. The `einops.layers.torch` `Rearrange` and `Reduce`
+This package installs `einops-shape-stubs`, a Pyrefly-specific stub package for
+runtime `einops`. Pyrefly discovers it by default; set
+`use-shape-comments-and-stubs = false` to opt out. Other type checkers ignore these
+stubs and continue using einops's ordinary types.
+
+It provides shape-aware annotations for `rearrange`, `reduce`, `repeat`, and
+`einsum` using Pyrefly's type-level shape DSL. The `einops.layers.torch` `Rearrange` and `Reduce`
 modules preserve the constructor pattern and axis lengths across calls.
 
 The precise annotations target PyTorch, NumPy, and JAX. Shape computations are

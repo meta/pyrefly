@@ -29,5 +29,8 @@ documentation = "https://pyrefly.org/en/docs/"
 [tool.hatch.build.targets.wheel]
 only-include = ["numpy-stubs"]
 
+[tool.hatch.build.targets.wheel.sources]
+"numpy-stubs" = "numpy-shape-stubs"
+
 [tool.hatch.build.targets.sdist]
 include = ["numpy-stubs/", "README.md", "LICENSE"]

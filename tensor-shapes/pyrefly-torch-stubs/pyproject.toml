@@ -29,5 +29,8 @@ documentation = "https://pyrefly.org/en/docs/"
 [tool.hatch.build.targets.wheel]
 only-include = ["torch-stubs"]
 
+[tool.hatch.build.targets.wheel.sources]
+"torch-stubs" = "torch-shape-stubs"
+
 [tool.hatch.build.targets.sdist]
 include = ["torch-stubs/", "README.md", "LICENSE"]

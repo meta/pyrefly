@@ -91,12 +91,14 @@ jobs:
           )
           PY
 
-          python -m pip install --upgrade build
+          python -m pip install --upgrade build hatchling
           python -m build --outdir shape-stubs-dist "$SHAPE_EXT_BUILD_DIR"
           python -m build --outdir shape-stubs-dist "$TORCH_STUBS_BUILD_DIR"
           python -m build --outdir shape-stubs-dist "$NUMPY_STUBS_BUILD_DIR"
           python -m build --outdir shape-stubs-dist "$JAX_STUBS_BUILD_DIR"
           python -m build --outdir shape-stubs-dist "$EINOPS_STUBS_BUILD_DIR"
+      - name: Verify wheel namespaces and sdist rebuilds
+        run: python -m unittest discover -s tensor-shapes -p test_packaging.py -v
       - name: Smoke test shape extension wheel
         run: |
           set -euo pipefail
@@ -251,9 +253,10 @@ jobs:
 
           with zipfile.ZipFile(torch_stubs_wheels[0]) as z:
               names = set(z.namelist())
-              assert "torch-stubs/__init__.pyi" in names
-              assert "torch-stubs/nn/__init__.pyi" in names
-              assert "torch-stubs/py.typed" in names
+              assert "torch-shape-stubs/__init__.pyi" in names
+              assert "torch-shape-stubs/nn/__init__.pyi" in names
+              assert "torch-shape-stubs/py.typed" in names
+              assert not any(name.startswith("torch-stubs/") for name in names)
               metadata_name = next(
                   name
                   for name in names
@@ -274,9 +277,10 @@ jobs:
 
           with zipfile.ZipFile(numpy_stubs_wheels[0]) as z:
               names = set(z.namelist())
-              assert "numpy-stubs/__init__.pyi" in names
-              assert "numpy-stubs/linalg/__init__.pyi" in names
-              assert "numpy-stubs/py.typed" in names
+              assert "numpy-shape-stubs/__init__.pyi" in names
+              assert "numpy-shape-stubs/linalg/__init__.pyi" in names
+              assert "numpy-shape-stubs/py.typed" in names
+              assert not any(name.startswith("numpy-stubs/") for name in names)
               metadata_name = next(
                   name
                   for name in names
@@ -297,9 +301,10 @@ jobs:
 
           with zipfile.ZipFile(jax_stubs_wheels[0]) as z:
               names = set(z.namelist())
-              assert "jax-stubs/__init__.pyi" in names
-              assert "jax-stubs/numpy/__init__.pyi" in names
-              assert "jax-stubs/py.typed" in names
+              assert "jax-shape-stubs/__init__.pyi" in names
+              assert "jax-shape-stubs/numpy/__init__.pyi" in names
+              assert "jax-shape-stubs/py.typed" in names
+              assert not any(name.startswith("jax-stubs/") for name in names)
               metadata_name = next(
                   name
                   for name in names
@@ -324,8 +329,9 @@ jobs:
 
           with zipfile.ZipFile(einops_stubs_wheels[0]) as z:
               names = set(z.namelist())
-              assert "einops-stubs/__init__.pyi" in names
-              assert "einops-stubs/py.typed" in names
+              assert "einops-shape-stubs/__init__.pyi" in names
+              assert "einops-shape-stubs/py.typed" in names
+              assert not any(name.startswith("einops-stubs/") for name in names)
               metadata_name = next(
                   name
                   for name in names

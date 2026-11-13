@@ -30,5 +30,8 @@ documentation = "https://pyrefly.org/en/docs/"
 [tool.hatch.build.targets.wheel]
 only-include = ["jax-stubs"]
 
+[tool.hatch.build.targets.wheel.sources]
+"jax-stubs" = "jax-shape-stubs"
+
 [tool.hatch.build.targets.sdist]
 include = ["jax-stubs/", "README.md", "LICENSE"]

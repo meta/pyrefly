@@ -75,8 +75,7 @@ class ShapeStubPackagingTest(unittest.TestCase):
                 projects = list(unpacked.iterdir())
                 self.assertEqual(len(projects), 1, projects)
                 rebuilt = self.build(projects[0], work / "rebuilt", "wheel")
-                # Ordinary stub namespaces expose Pyrefly-specific stubs to other checkers.
-                root = f"{module}-stubs"
+                root = f"{module}-shape-stubs"
                 self.assertEqual(
                     self.stub_files(wheel, root, representative),
                     self.stub_files(rebuilt, root, representative),

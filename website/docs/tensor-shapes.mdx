@@ -171,7 +171,15 @@ without touching Pyrefly's internals — see the
 ## Comment-only shape annotations
 
 Shared stubs can keep their ordinary annotations for other type checkers and add
-Pyrefly shape information in comments. Enable this experimental syntax with
+Pyrefly shape information in comments. Shape-stub dependencies such as
+`pyrefly-numpy-stubs` and `pyrefly-torch-stubs` install `{package}-shape-stubs`
+directories, which Pyrefly recognizes without replacing other checkers' stubs.
+Both compatibility mechanisms are enabled by default. Users can set
+[`use-shape-comments-and-stubs = false`](./configuration.mdx#use-shape-comments-and-stubs)
+to ignore shape comments and shape-stub packages; native shape annotations are
+unaffected.
+
+Enable this experimental comment syntax with
 `# enable-shape-type-comments` in the module header, before any statement other
 than the module docstring:
 
