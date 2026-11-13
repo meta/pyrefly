@@ -101,6 +101,8 @@ pub enum SpecialExport {
     AttrsNothing,
     FunctoolsWraps,
     FunctoolsUpdateWrapper,
+    TritonJit,
+    TritonConstexpr,
 }
 
 impl SpecialExport {
@@ -193,6 +195,8 @@ impl SpecialExport {
             "NOTHING" => Some(Self::AttrsNothing),
             "wraps" => Some(Self::FunctoolsWraps),
             "update_wrapper" => Some(Self::FunctoolsUpdateWrapper),
+            "jit" => Some(Self::TritonJit),
+            "constexpr" => Some(Self::TritonConstexpr),
             _ => None,
         }
     }
@@ -294,6 +298,13 @@ impl SpecialExport {
             Self::BuiltinsSentinel => matches!(m.as_str(), "builtins" | "typing_extensions"),
             Self::AttrsLegacyAttrib | Self::AttrsNextGenField | Self::AttrsNothing => {
                 matches!(m.as_str(), "attr" | "attrs")
+            }
+            Self::TritonJit => matches!(
+                m.as_str(),
+                "triton" | "triton.runtime" | "triton.runtime.jit"
+            ),
+            Self::TritonConstexpr => {
+                matches!(m.as_str(), "triton.language" | "triton.language.core")
             }
         }
     }

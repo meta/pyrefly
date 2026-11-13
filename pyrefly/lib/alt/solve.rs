@@ -691,11 +691,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             | TypeFormContext::ReturnAnnotation
                     );
                 let ann_errors = may_exempt.then(|| self.error_collector());
-                let mut ann = self.expr_annotation(
-                    x,
-                    type_form_context,
-                    ann_errors.as_ref().unwrap_or(errors),
-                );
+                let mut ann = if matches!(target, AnnotationTarget::TritonConstexprParam(_)) {
+                    // Triton supplies the compile-time value, which need not be a constexpr object.
+                    self.expr_infer(x, errors);
+                    Annotation::new_type(self.heap.mk_any_implicit())
+                } else {
+                    self.expr_annotation(
+                        x,
+                        type_form_context,
+                        ann_errors.as_ref().unwrap_or(errors),
+                    )
+                };
                 if let Some(class_key) = class_key
                     && let Some(ty) = &mut ann.ty
                 {
