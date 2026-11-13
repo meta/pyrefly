@@ -1111,6 +1111,40 @@ def known(xs: list[Literal["x", "xy"]]) -> None:
 );
 
 testcase!(
+    test_for_loop_unpack_unknown_element_length,
+    r#"
+from typing import assert_type
+
+# Literal promotion and union simplification erase the short element's length.
+# Retaining it could improve precision, but whether unpacking should do so is
+# undecided; strings remain ordinary iterables with potentially unknown lengths.
+def f(s: str) -> None:
+    for a, b in ["x", s]:
+        assert_type(a, str)
+        assert_type(b, str)
+    pairs = [(a, b) for a, b in ["x", s]]
+    assert_type(pairs, list[tuple[str, str]])
+"#,
+);
+
+testcase!(
+    test_for_loop_unpack_display_observation,
+    r#"
+from typing import assert_type
+
+for a, b in [["x", "y"]]:
+    assert_type(a, str)
+    assert_type(b, str)
+for a, b in [*[*["x"]]]:  # E: Cannot unpack
+    pass
+for a, b in [*1]:  # E: iterable
+    pass
+for a, b in {"x": 1, **1}:  # E: Cannot unpack  # E: Expected a mapping
+    pass
+"#,
+);
+
+testcase!(
     test_for_loop_unpack_tuple_annotation,
     r#"
 from __future__ import annotations
