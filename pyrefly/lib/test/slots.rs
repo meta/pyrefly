@@ -954,6 +954,13 @@ class B(A):
 class C:
     __slots__ = names()
     x = 1
+
+def flag() -> bool: ...
+
+class D:
+    __slots__ = ("x",)
+    if flag():
+        x: int
 "#,
 );
 

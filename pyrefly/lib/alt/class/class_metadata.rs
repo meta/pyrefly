@@ -761,6 +761,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Only a name defined more than once in the body has an `Anywhere` binding. Report the
             // first of its definitions that binds a value: a bare annotation neither binds one nor
             // removes one.
+            let binds_value =
+                |key: Idx<Key>| !matches!(self.bindings().get(key), Binding::AnnotatedType(..));
             let anywhere = Key::Anywhere(Box::new((name.clone(), field.range)));
             let conflict_range = match self
                 .bindings()
@@ -773,16 +775,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     branches
                         .iter()
                         .map(|branch| branch.value_key)
-                        .find(|key| {
-                            !matches!(self.bindings().get(*key), Binding::AnnotatedType(..))
-                        })
+                        .find(|key| binds_value(*key))
                         .map(|key| self.bindings().idx_to_key(key).range())
                 }
                 None => match &field.definition {
                     ClassFieldDefinition::AssignedInBody { .. }
                     | ClassFieldDefinition::MethodLike { .. }
-                    | ClassFieldDefinition::NestedClass { .. }
-                    | ClassFieldDefinition::DefinedWithoutAssign { .. } => Some(field.range),
+                    | ClassFieldDefinition::NestedClass { .. } => Some(field.range),
+                    ClassFieldDefinition::DefinedWithoutAssign { definition, .. } => {
+                        binds_value(*definition).then_some(field.range)
+                    }
                     ClassFieldDefinition::DeclaredByAnnotation { .. }
                     | ClassFieldDefinition::DeclaredWithoutAnnotation
                     | ClassFieldDefinition::DefinedInMethod { .. } => None,
