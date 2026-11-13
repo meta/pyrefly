@@ -296,6 +296,7 @@ pub struct TestEnv {
     legacy_overload_expansion: bool,
     treat_all_caps_as_final: bool,
     infer_param_types_from_docstring: bool,
+    use_shape_comments_and_stubs: bool,
     reveal_type_qualified_names: bool,
     type_ignore_unknown_tag_behavior: TypeIgnoreUnknownTagBehavior,
     no_any_return_error: bool,
@@ -378,6 +379,7 @@ impl TestEnv {
             legacy_overload_expansion: false,
             treat_all_caps_as_final: false,
             infer_param_types_from_docstring: false,
+            use_shape_comments_and_stubs: true,
             reveal_type_qualified_names: false,
             type_ignore_unknown_tag_behavior: TypeIgnoreUnknownTagBehavior::Suppress,
             no_any_return_error: false,
@@ -695,6 +697,11 @@ impl TestEnv {
         self
     }
 
+    pub fn disable_use_shape_comments_and_stubs(mut self) -> Self {
+        self.use_shape_comments_and_stubs = false;
+        self
+    }
+
     pub fn enable_infer_param_types_from_docstring(mut self) -> Self {
         self.infer_param_types_from_docstring = true;
         self
@@ -900,6 +907,7 @@ impl TestEnv {
         config.root.legacy_overload_expansion = Some(self.legacy_overload_expansion);
         config.root.treat_all_caps_as_final = Some(self.treat_all_caps_as_final);
         config.root.infer_param_types_from_docstring = Some(self.infer_param_types_from_docstring);
+        config.use_shape_comments_and_stubs = Some(self.use_shape_comments_and_stubs);
         config.reveal_type_qualified_names = self.reveal_type_qualified_names;
         if !self.replace_imports_with_any.is_empty() {
             let modules = self

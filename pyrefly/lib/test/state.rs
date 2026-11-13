@@ -107,8 +107,8 @@ fn test_use_shape_comments_and_stubs_config_reload() {
             .collect_display_errors();
         assert_eq!(
             errors.len(),
-            2,
-            "shape comments cannot yet be disabled: {errors:?}"
+            if setting == Some(false) { 1 } else { 2 },
+            "only comment diagnostics should follow the compatibility setting: {errors:?}"
         );
         state.commit_transaction(transaction, None);
     }

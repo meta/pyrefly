@@ -412,6 +412,14 @@ pub struct ConfigOverrideArgs {
     /// Deprecated no-op. Tensor shape support is derived from whether `shape_extensions` is resolvable.
     #[arg(long)]
     tensor_shapes: Option<bool>,
+    /// Use shape comments and shape-stub packages (default true). Native annotations are unaffected.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        require_equals = true,
+        num_args = 0..=1
+    )]
+    use_shape_comments_and_stubs: Option<bool>,
     /// Whether to strictly check callable subtyping for signatures with `*args: Any, **kwargs: Any`.
     /// When false (the default), callables with `*args: Any, **kwargs: Any` are treated as
     /// compatible with any signature (similar to `...` behavior).
@@ -505,6 +513,7 @@ impl ConfigOverrideArgs {
             recursion_overflow_handler,
             pytorch_efficiency_lints,
             tensor_shapes,
+            use_shape_comments_and_stubs,
             strict_callable_subtyping,
             strict_partial_subtyping,
             spec_compliant_overloads,
@@ -536,6 +545,7 @@ impl ConfigOverrideArgs {
             || recursion_overflow_handler.is_some()
             || pytorch_efficiency_lints.is_some()
             || tensor_shapes.is_some()
+            || use_shape_comments_and_stubs.is_some()
             || strict_callable_subtyping.is_some()
             || strict_partial_subtyping.is_some()
             || spec_compliant_overloads.is_some()
@@ -706,6 +716,9 @@ impl ConfigOverrideArgs {
         if let Some(x) = &self.pytorch_efficiency_lints {
             config.root.pytorch_efficiency_lints = Some(*x);
         }
+        if let Some(x) = self.use_shape_comments_and_stubs {
+            config.use_shape_comments_and_stubs = Some(x);
+        }
         if let Some(x) = &self.strict_callable_subtyping {
             config.root.strict_callable_subtyping = Some(*x);
         }
@@ -810,10 +823,21 @@ mod tests {
 
     #[test]
     fn use_shape_comments_and_stubs_flag() {
-        assert!(
-            ConfigOverrideArgs::try_parse_from(["pyrefly", "--use-shape-comments-and-stubs=false"])
-                .is_err()
-        );
+        for (flag, enabled) in [
+            ("--use-shape-comments-and-stubs=false", false),
+            ("--use-shape-comments-and-stubs=true", true),
+            ("--use-shape-comments-and-stubs", true),
+        ] {
+            let args =
+                ConfigOverrideArgs::parse_from(["pyrefly", "--skip-interpreter-query", flag]);
+            assert!(args.has_overrides());
+            let config =
+                ConfigFile::parse_config(&format!("use-shape-comments-and-stubs = {}\n", !enabled))
+                    .unwrap();
+            let (config, errors) = args.override_config(config);
+            assert!(errors.is_empty());
+            assert_eq!(config.use_shape_comments_and_stubs(), enabled);
+        }
     }
 
     #[test]

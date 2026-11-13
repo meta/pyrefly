@@ -80,7 +80,6 @@ excludes = ["src/vendored/**"]
 [[tool.pyrefly.sub-config]]
 matches = "**/tests/**"
 untyped-def-behavior = "skip-and-infer-return-any"
-use-shape-comments-and-stubs = true
 
 [tool.pyrefly.sub-config.errors]
 assert-type = true

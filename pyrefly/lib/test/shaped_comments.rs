@@ -12,9 +12,8 @@ use crate::test::util::testcase_for_macro;
 use crate::testcase;
 
 testcase!(
-    bug = "Shape comment compatibility cannot yet be disabled",
     test_shaped_comments_compatibility_opt_out,
-    shaped_env(),
+    shaped_env().disable_use_shape_comments_and_stubs(),
     r#"
 # enable-shape-type-comments
 from typing import assert_type
@@ -33,23 +32,22 @@ def native[N: IntVar](n: Int[N]) -> Int[N + 1]: ...
 def wrapped(x: Shaped[ndarray, "[N]"]) -> Shaped[ndarray, "[N + 1]"]: ...
 
 def check(x: ndarray[[3]]) -> None:
-    assert_type(commented(3), Int[4])
+    assert_type(commented(3), int)
     assert_type(native(3), Int[4])
     assert_type(wrapped(x), ndarray[[4]])
 "#,
 );
 
 testcase!(
-    bug = "Shape comment diagnostics cannot yet be disabled",
     test_shaped_comments_compatibility_opt_out_diagnostics,
-    shaped_env(),
+    shaped_env().disable_use_shape_comments_and_stubs(),
     r#"
 # enable-shape-type-comments
 from typing import assert_type
 
 def f(
-    x: int,  # shaped: [3  # E: Could not parse
-    y: int,  # shaped: .args[-1] = 3  # E: Invalid `# shaped:` selector
+    x: int,  # shaped: [3
+    y: int,  # shaped: .args[-1] = 3
 ) -> None:
     assert_type(x, int)
     assert_type(y, int)
@@ -58,10 +56,9 @@ def f(
 );
 
 testcase!(
-    bug = "Dependency shape comments cannot yet be disabled",
     test_shaped_comments_compatibility_opt_out_dependency,
     {
-        let mut env = shaped_env();
+        let mut env = shaped_env().disable_use_shape_comments_and_stubs();
         env.add_with_path(
             "library",
             "library.pyi",
@@ -73,7 +70,7 @@ testcase!(
 from typing import assert_type
 from library import f
 
-assert_type(f(), str)
+assert_type(f(), int)
 "#,
 );
 

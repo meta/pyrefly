@@ -1170,6 +1170,22 @@ valid for a parameter, is ignored without an error.
 - Default: `false`
 - Flag equivalent: `--infer-param-types-from-docstring`
 
+### `use-shape-comments-and-stubs`
+
+Enables Pyrefly-specific shape information in `# shapes:` / `# shaped:` comments
+and `{package}-shape-stubs` packages throughout the project. Set this to `false`
+to ignore both and use ordinary annotations and stubs instead. Native shape
+annotations keep their normal semantics regardless of this setting. This is a
+project-level option, not a `sub-config` setting.
+
+Dependencies outside the project may use their own default config in the IDE and
+in per-file `pyrefly check`; for per-file `check`,
+`--use-shape-comments-and-stubs=false` applies the opt-out to those dependencies too.
+
+- Type: `bool`
+- Default: `true`
+- Flag equivalent: `--use-shape-comments-and-stubs=false` to opt out
+
 ### `strict-callable-subtyping`
 
 Controls whether Pyrefly enforces strict parameter compatibility when checking

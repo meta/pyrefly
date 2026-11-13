@@ -1639,6 +1639,7 @@ impl<'a> Transaction<'a> {
                 infer_return_types: config.infer_return_types(module_data.handle.path()),
                 infer_with_first_use: config.infer_with_first_use(module_data.handle.path()),
                 tensor_shapes,
+                use_shape_comments_and_stubs: config.use_shape_comments_and_stubs(),
                 strict_callable_subtyping: config
                     .strict_callable_subtyping(module_data.handle.path()),
                 strict_partial_subtyping: config
@@ -2554,6 +2555,12 @@ impl<'a> Transaction<'a> {
         for (handle, module_data) in self.data.updated_modules.iter_unordered() {
             let config2 = self.data.state.get_config(handle);
             if config2 != *module_data.config.read() {
+                // Comment parsing must be refreshed even when import paths are unchanged.
+                if config2.use_shape_comments_and_stubs
+                    != module_data.config.read().use_shape_comments_and_stubs
+                {
+                    module_data.state.set_dirty_deps();
+                }
                 *module_data.config.write() = config2;
                 module_data.state.set_dirty_find();
                 dirty_set.insert(module_data.dupe());
@@ -2563,7 +2570,12 @@ impl<'a> Transaction<'a> {
             if self.data.updated_modules.get(handle).is_none() {
                 let config2 = self.data.state.get_config(handle);
                 if module_data.config != config2 {
+                    let compatibility_changed = config2.use_shape_comments_and_stubs
+                        != module_data.config.use_shape_comments_and_stubs;
                     let module_data = self.get_module(handle);
+                    if compatibility_changed {
+                        module_data.state.set_dirty_deps();
+                    }
                     *module_data.config.write() = config2;
                     module_data.state.set_dirty_find();
                     dirty_set.insert(module_data.dupe());
@@ -2705,6 +2717,7 @@ impl<'a> Transaction<'a> {
                 // This is a one-shot timing/diagnostic dump, so we intentionally do not
                 // store the bit on `module_data` (no later dirty.find() re-check applies).
                 tensor_shapes: self.tensor_shapes_available(&config, &m.handle, None),
+                use_shape_comments_and_stubs: config.use_shape_comments_and_stubs(),
                 strict_callable_subtyping: config.strict_callable_subtyping(m.handle.path()),
                 strict_partial_subtyping: config.strict_partial_subtyping(m.handle.path()),
                 spec_compliant_overloads: config.spec_compliant_overloads(m.handle.path()),

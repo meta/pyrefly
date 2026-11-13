@@ -79,7 +79,6 @@ excludes = ["src/vendored/**"]
 [[sub-config]]
 matches = "**/tests/**"
 untyped-def-behavior = "skip-and-infer-return-any"
-use-shape-comments-and-stubs = true
 
 [sub-config.errors]
 assert-type = true

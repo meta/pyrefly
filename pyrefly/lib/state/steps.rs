@@ -66,6 +66,7 @@ pub struct Context<'a, Lookup> {
     pub infer_return_types: InferReturnTypes,
     pub infer_with_first_use: bool,
     pub tensor_shapes: bool,
+    pub use_shape_comments_and_stubs: bool,
     pub strict_callable_subtyping: bool,
     pub strict_partial_subtyping: bool,
     pub spec_compliant_overloads: bool,
@@ -588,6 +589,7 @@ impl Step {
             ctx.infer_return_types,
             ctx.treat_all_caps_as_final,
             ctx.infer_param_types_from_docstring,
+            ctx.use_shape_comments_and_stubs,
         );
         Arc::new(Answers::new(
             bindings,

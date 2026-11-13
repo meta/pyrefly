@@ -1106,11 +1106,16 @@ impl Bindings {
         infer_return_types: InferReturnTypes,
         treat_all_caps_as_final: bool,
         infer_param_types_from_docstring: bool,
+        use_shape_comments_and_stubs: bool,
     ) -> Self {
         let module_range = x.range;
         let pytest_info = PytestBindingInfo::from_module(&x);
         let errors = ErrorCollector::new(module_info.dupe(), error_style);
-        let shape_comments = ShapeComments::new(&x, &module_info, &errors);
+        let shape_comments = if use_shape_comments_and_stubs {
+            ShapeComments::new(&x, &module_info, &errors)
+        } else {
+            ShapeComments::default()
+        };
         let mut builder = BindingsBuilder {
             module_info: module_info.dupe(),
             annotated_metadata_ranges: Vec::new(),

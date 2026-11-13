@@ -655,6 +655,9 @@ pub struct ConfigFile {
     #[serde(skip)]
     pub reveal_type_qualified_names: bool,
 
+    /// Project-wide choice of shape comments and shape-stub packages. Native annotations are unaffected.
+    pub use_shape_comments_and_stubs: Option<bool>,
+
     /// The list of directories where imports are
     /// imported from, including type checked files.
     /// Does not include command-line overrides or the import root!
@@ -863,6 +866,7 @@ impl Default for ConfigFile {
             },
             search_path_from_args: Vec::new(),
             reveal_type_qualified_names: false,
+            use_shape_comments_and_stubs: None,
             search_path_from_file: Vec::new(),
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -1326,6 +1330,12 @@ impl ConfigFile {
             module,
             ConfigBase::get_replace_untyped_imports_with_any,
         )
+    }
+
+    /// Whether to use shape comments and shape-stub packages throughout this project.
+    pub fn use_shape_comments_and_stubs(&self) -> bool {
+        self.use_shape_comments_and_stubs
+            .expect("the value must be set in `ConfigFile::configure()`")
     }
 
     pub fn check_unannotated_defs(&self, path: &ModulePath) -> bool {
@@ -1896,6 +1906,10 @@ impl ConfigFile {
                 configure_errors
                     .push(error.context(format!("In sub config matching {}", sub.matches)));
             }
+        }
+
+        if self.use_shape_comments_and_stubs.is_none() {
+            self.use_shape_comments_and_stubs = Some(true);
         }
 
         let mut configure_source_db = |build_system: &mut BuildSystem| {
@@ -2837,6 +2851,7 @@ mod tests {
                 project_excludes: Globs::new(vec!["tests/untyped/**".to_owned()]).unwrap(),
                 search_path_from_args: Vec::new(),
                 reveal_type_qualified_names: false,
+                use_shape_comments_and_stubs: None,
                 search_path_from_file: vec![PathBuf::from("../..")],
                 disable_search_path_heuristics: false,
                 enable_fallback_search_path: false,
@@ -3256,6 +3271,7 @@ mod tests {
             project_excludes: Globs::new(vec!["tests/untyped/**".to_owned()]).unwrap(),
             search_path_from_args: Vec::new(),
             reveal_type_qualified_names: false,
+            use_shape_comments_and_stubs: None,
             search_path_from_file: vec![PathBuf::from("../..")],
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -3350,6 +3366,7 @@ mod tests {
             },
             search_path_from_args: Vec::new(),
             reveal_type_qualified_names: false,
+            use_shape_comments_and_stubs: None,
             search_path_from_file: search_path,
             disable_search_path_heuristics: false,
             enable_fallback_search_path: false,
@@ -4213,16 +4230,31 @@ output-format = "omit-errors"
 
     #[test]
     fn test_use_shape_comments_and_stubs() {
-        let mut config = ConfigFile::parse_config("use-shape-comments-and-stubs = false").unwrap();
-        assert!(config.configure().is_empty());
-        assert!(
-            config
-                .root
-                .extras
-                .0
-                .contains_key("use-shape-comments-and-stubs"),
-            "the compatibility option is not yet recognized"
-        );
+        let mut defaults = ConfigFile::default();
+        assert!(defaults.configure().is_empty());
+        assert!(defaults.use_shape_comments_and_stubs());
+
+        for enabled in [false, true] {
+            let mut config = ConfigFile::parse_config(&format!(
+                "use-shape-comments-and-stubs = {enabled}\n\
+                 [[sub-config]]\n\
+                 matches = '**/override/**'\n\
+                 use-shape-comments-and-stubs = {}\n",
+                !enabled
+            ))
+            .unwrap();
+            assert!(config.configure().is_empty());
+            assert_eq!(config.use_shape_comments_and_stubs(), enabled);
+            assert!(config.root.extras.0.is_empty());
+            // A sub-config cannot select a different interface for the same module.
+            assert!(
+                config.sub_configs[0]
+                    .settings
+                    .extras
+                    .0
+                    .contains_key("use-shape-comments-and-stubs")
+            );
+        }
     }
 
     #[test]
@@ -6093,6 +6125,7 @@ bad-override = "error"
         let mut config = ConfigFile {
             search_path_from_args: vec![mylib_dir.clone()],
             reveal_type_qualified_names: false,
+            use_shape_comments_and_stubs: None,
             import_root: Some(root.path().to_path_buf()),
             interpreters: Interpreters {
                 skip_interpreter_query: true,
