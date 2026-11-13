@@ -95,11 +95,7 @@ use crate::types::literal::Lit;
 use crate::types::types::CalleeKind;
 use crate::types::types::Type;
 
-/// Names that CPython's `typing._get_protocol_attrs` excludes from the runtime
-/// attribute set of a protocol on every version that provides `typing.Protocol`.
-/// Names whose exclusion depends on the version or on a prefix are handled in
-/// `is_excluded_runtime_attribute`.
-///
+/// Attributes excluded by `typing._get_protocol_attrs` at runtime.
 /// Static membership is a separate question: see `ProtocolMetadata::members`.
 const RUNTIME_EXCLUDED_ATTRIBUTES: &[&str] = &[
     "_MutableMapping__marker",
@@ -122,20 +118,12 @@ const RUNTIME_EXCLUDED_ATTRIBUTES: &[&str] = &[
 
 /// Whether CPython's `typing._get_protocol_attrs` excludes `name` from the runtime
 /// attribute set of a protocol on `version`.
-///
-/// The match arms cover the names a class body can declare directly. Names that
-/// are injected by the runtime, the compiler, or a decorator, such as
-/// `__static_attributes__`, `__non_callable_proto_members__`, and `__final__`,
-/// are omitted: gating them would add micro-version windows for names that
-/// ordinary code does not write. An explicit write therefore keeps the name in
-/// the runtime set and produces a residual false positive, which is accepted.
 fn is_excluded_runtime_attribute(name: &Name, version: PythonVersion) -> bool {
     let name = name.as_str();
     if RUNTIME_EXCLUDED_ATTRIBUTES.contains(&name) {
         return true;
     }
-    // CPython skips `_abc_*` when collecting runtime protocol attributes; ABCMeta
-    // injects those names into class dictionaries.
+    // ABCMeta injects `_abc_*`s into class dictionaries, but they will be ignored.
     if name.starts_with("_abc_") {
         return true;
     }

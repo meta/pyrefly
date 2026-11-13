@@ -703,9 +703,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 // Unsafe overlap requires the class to be statically
                                 // incompatible with the protocol. A name outside `members`
                                 // is not part of the protocol's static contract, so it
-                                // cannot contribute to an incompatibility. Slot-only names
-                                // land here because the runtime member set carries
-                                // presence, not a protocol-side type.
+                                // cannot contribute to an incompatibility.
                                 if !class_info_protocol.members.contains(field_name) {
                                     continue;
                                 }
