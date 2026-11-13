@@ -23,10 +23,12 @@ use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
 
+use crate::class::Class;
 use crate::class::ClassType;
 use crate::dimension::gradual_size;
 use crate::env::TypeEnv;
 use crate::heap::TypeHeap;
+use crate::identity::IdentityIgnored;
 use crate::stdlib::Stdlib;
 use crate::type_var::PreInferenceVariance;
 use crate::type_var::Restriction;
@@ -167,6 +169,8 @@ pub struct Quantified {
     pub kind: QuantifiedKind,
     pub default: Option<Type>,
     pub restriction: Restriction,
+    /// The bound before recursive TArgs truncation, used only for attribute lookup.
+    untruncated_restriction: IdentityIgnored<Option<Restriction>>,
     /// The *declared* variance of this type parameter, as specified by the user.
     /// For function type parameters, variance has no meaning.
     /// We store it here for convenience of our variance inference and checking
@@ -186,6 +190,31 @@ impl Quantified {
             restriction,
             ..self
         }
+    }
+
+    pub fn with_untruncated_restriction(mut self, restriction: Restriction) -> Self {
+        self.untruncated_restriction = IdentityIgnored(Some(restriction));
+        self
+    }
+
+    pub fn attribute_lookup_restriction(&self) -> &Restriction {
+        self.untruncated_restriction
+            .0
+            .as_ref()
+            .unwrap_or(&self.restriction)
+    }
+
+    pub fn attribute_lookup_class_type(&self, class: &Class) -> Option<ClassType> {
+        let mut result = None;
+        self.attribute_lookup_restriction().visit(&mut |ty| {
+            if result.is_none()
+                && let Type::ClassType(class_type) = ty
+                && class_type.class_object() == class
+            {
+                result = Some(class_type.clone());
+            }
+        });
+        result
     }
 
     pub fn with_needs_finalization(self) -> Self {
@@ -299,6 +328,7 @@ impl Quantified {
             kind,
             default,
             restriction,
+            untruncated_restriction: IdentityIgnored(None),
             variance,
             owner: None,
             needs_finalization: false,
