@@ -8,7 +8,7 @@ from __future__ import annotations
 import jax
 import jax.nn as jnn
 import jax.numpy as jnp
-from shape_extensions import assert_shape, Int, IntVar
+from shape_extensions import assert_shape, Int, IntTuple, IntVar
 
 N = IntVar("N")
 M = IntVar("M")
@@ -169,6 +169,15 @@ def test_logsumexp_and_logmeanexp() -> None:
     assert_shape(res.shape, (4,))
     assert_shape(sign.shape, (4,))
 
+    dyn_axis: int | list[int] = -1
+    assert_shape(jnn.logsumexp(x, dyn_axis).shape, IntTuple, runtime=(3,))
+    dyn_res, dyn_sign = jnn.logsumexp(x, dyn_axis, return_sign=True)
+    assert_shape(dyn_res.shape, IntTuple, runtime=(3,))
+    assert_shape(dyn_sign.shape, IntTuple, runtime=(3,))
+
+    jitted_lse = jax.jit(jnn.logsumexp, static_argnames=("axis",))(x, -1)
+    assert_shape((jitted_lse - jnp.sum(x, -1)).shape, IntTuple, runtime=(3,))
+
     assert_shape(jnn.logmeanexp(x).shape, ())
     assert_shape(jnn.logmeanexp(x, 0).shape, (4,))
     assert_shape(jnn.logmeanexp(x, -1).shape, (3,))
@@ -201,3 +210,5 @@ def test_initializers() -> None:
     assert_shape(jnn.initializers.ones(key, (2, 5)).shape, (2, 5))
     init = jnn.initializers.normal()
     assert_shape(init(key, (4, 4), jnp.float32).shape, (4, 4))
+    trunc_init = jnn.initializers.truncated_normal(stddev=0.02, lower=-2.0, upper=2.0)
+    assert_shape(trunc_init(key, (3, 5), jnp.float32).shape, (3, 5))

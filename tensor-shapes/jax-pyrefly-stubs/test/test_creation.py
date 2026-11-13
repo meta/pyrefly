@@ -95,6 +95,24 @@ def test_like_constructors() -> None:
     assert_shape(jnp.full_like(x23, 7.0, shape=(4, 5)).shape, (4, 5))
     assert_shape(jnp.full_like(x23, 7.0, shape=(2, 3, 4, 5)).shape, (2, 3, 4, 5))
 
+    sds = jax.ShapeDtypeStruct((2, 3), jnp.float32)
+    assert_shape(jnp.empty_like(sds).shape, IntTuple, runtime=(2, 3))
+    assert_shape(jnp.empty_like(sds, shape=()).shape, ())
+    assert_shape(jnp.empty_like(sds, shape=4).shape, (4,))
+    assert_shape(jnp.empty_like(sds, shape=(4, 5)).shape, (4, 5))
+    assert_shape(jnp.zeros_like(sds).shape, IntTuple, runtime=(2, 3))
+    assert_shape(jnp.zeros_like(sds, shape=()).shape, ())
+    assert_shape(jnp.zeros_like(sds, shape=4).shape, (4,))
+    assert_shape(jnp.zeros_like(sds, shape=(4, 5)).shape, (4, 5))
+    assert_shape(jnp.ones_like(sds).shape, IntTuple, runtime=(2, 3))
+    assert_shape(jnp.ones_like(sds, shape=()).shape, ())
+    assert_shape(jnp.ones_like(sds, shape=4).shape, (4,))
+    assert_shape(jnp.ones_like(sds, shape=(4, 5)).shape, (4, 5))
+    assert_shape(jnp.full_like(sds, 7.0).shape, IntTuple, runtime=(2, 3))
+    assert_shape(jnp.full_like(sds, 7.0, shape=()).shape, ())
+    assert_shape(jnp.full_like(sds, 7.0, shape=4).shape, (4,))
+    assert_shape(jnp.full_like(sds, 7.0, shape=(4, 5)).shape, (4, 5))
+
 
 def test_non_tuple_shapes_are_gradual() -> None:
     # A tuple is exact at any rank. Other sequences remain gradual because only

@@ -107,22 +107,18 @@ def logsumexp[
     _Array[reduce_shape(Shape, Axis, KeepDims)],
 ]: ...
 @overload
-def logsumexp[
-    Shape: _Shape = [],
-](
-    a: _ArrayLike[Shape],
-    axis: Sequence[int] = ...,
+def logsumexp(
+    a: _ArrayLike[Any],
+    axis: Sequence[int] | int | None = None,
     b: _ArrayLike[Any] | None = None,
     keepdims: bool = False,
     return_sign: Literal[False] = False,
     where: Any = None,
 ) -> _Array[IntTuple]: ...
 @overload
-def logsumexp[
-    Shape: _Shape = [],
-](
-    a: _ArrayLike[Shape],
-    axis: Sequence[int] = ...,
+def logsumexp(
+    a: _ArrayLike[Any],
+    axis: Sequence[int] | int | None = None,
     b: _ArrayLike[Any] | None = None,
     keepdims: bool = False,
     return_sign: Literal[True] = ...,
