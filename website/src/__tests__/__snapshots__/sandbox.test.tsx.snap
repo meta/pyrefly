@@ -36,6 +36,17 @@ exports[`Sandbox Component render sandbox correctly 1`] = `
         />
         Parameter hints
       </label>
+      <select
+        aria-label="Select Pyrefly version"
+        id="pyrefly-version-selector"
+        title="Loading the Pyrefly version list"
+      >
+        <option
+          value=""
+        >
+          Latest (bundled build)
+        </option>
+      </select>
       <a
         href="https://github.com/facebook/pyrefly/commit/123456789abcdef"
         id="pyrefly-build"
