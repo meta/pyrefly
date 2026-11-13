@@ -153,7 +153,7 @@ def expand_dims_shape(shape: IntTuple, axis: int) -> IntTuple:
     if axis < 0:
         norm_axis = axis + output_rank
     else:
-        norm_axis = axis + 0
+        norm_axis = axis
     return dsl.IntTuple(
         (
             1
