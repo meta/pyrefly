@@ -769,7 +769,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .into_ty()
     }
 
-    /// Infer the normal type with an optional root-local iteration-element output.
+    /// Infer the normal type and observe elements of non-empty, unprojected list/set/dict displays.
+    /// The observation keeps string and bytes literals; other expressions leave it unset.
     /// This entry point has no type-form context, expected-type check, or argument cache.
     pub(super) fn expr_infer_for_iteration(
         &self,
@@ -1711,16 +1712,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ty.promote(self.stdlib)
     }
 
+    fn observe_iteration_element(&self, ty: &Type, elements: Option<&mut Vec<Type>>) {
+        if let Some(elements) = elements {
+            elements.push(self.distribute_over_union(ty, |ty| match ty {
+                // String and bytes literals retain the length of the value being unpacked.
+                Type::Literal(lit) if matches!(lit.value, Lit::Str(_) | Lit::Bytes(_)) => {
+                    ty.clone()
+                }
+                _ => ty.clone().promote(self.stdlib),
+            }));
+        }
+    }
+
     fn dict_key_infer_with_hint(
         &self,
         x: &Expr,
         hint: Option<HintRef>,
         errors: &ErrorCollector,
         hint_coercion: HintCoercion,
-        _iteration_keys: Option<&mut Vec<Type>>,
+        iteration_keys: Option<&mut Vec<Type>>,
     ) -> Type {
         let has_hint = hint.is_some();
-        let key_ty = self.expr_infer_with_hint_promote(x, hint, errors, hint_coercion);
+        let ty = self.expr_infer_with_hint(x, hint, errors);
+        self.observe_iteration_element(&ty, iteration_keys);
+        let key_ty = self.promote_with_hint(ty, x.range(), hint, hint_coercion);
         if has_hint {
             key_ty
         } else if matches!(key_ty, Type::LiteralString(_)) {
@@ -2303,7 +2318,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         key_hint: Option<Type>,
         value_hint: Option<Type>,
         errors: &ErrorCollector,
-        _iteration_element: Option<&Cell<Option<Type>>>,
+        iteration_element: Option<&Cell<Option<Type>>>,
     ) -> Type {
         if items.is_empty() {
             let key_ty = key_hint.unwrap_or_else(|| {
@@ -2341,6 +2356,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 .any(|x| x.key.is_some() && !x.value.is_none_literal_expr());
             let mut key_tys = Vec::new();
             let mut value_tys = Vec::new();
+            let mut iteration_keys = iteration_element.map(|_| Vec::with_capacity(items.len()));
             items.iter().for_each(|x| match &x.key {
                 Some(key) => {
                     let key_t = self.dict_key_infer_with_hint(
@@ -2353,7 +2369,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         HintCoercion::new(hint.as_ref(), &|| {
                             TypeCheckContext::of_kind(TypeCheckKind::DictKey)
                         }),
-                        None,
+                        iteration_keys.as_mut(),
                     );
                     let value_t = self.expr_infer_with_hint_promote(
                         &x.value,
@@ -2397,6 +2413,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 None => {
                     let ty = self.expr_infer(&x.value, errors);
+                    let mapping_types = iteration_keys
+                        .as_ref()
+                        .and_then(|_| self.unwrap_mapping_for_unpacking(&ty));
+                    if let Some((key, _)) = &mapping_types
+                        && let Some(keys) = &mut iteration_keys
+                    {
+                        keys.push(key.clone());
+                    }
                     // If the unpacked value is an anonymous typed dict, merge its fields.
                     // Later fields override earlier ones with the same name.
                     if can_create_anonymous_typed_dict
@@ -2409,7 +2433,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 value_tys.push(field.ty.clone());
                             }
                         }
-                    } else if let Some((key_t, value_t)) = self.unwrap_mapping_for_unpacking(&ty) {
+                    } else if let Some((key_t, value_t)) =
+                        mapping_types.or_else(|| self.unwrap_mapping_for_unpacking(&ty))
+                    {
                         // Non-anonymous-typed-dict unpacking disables anonymous typed dict creation
                         can_create_anonymous_typed_dict = false;
                         if !key_t.is_error() {
@@ -2432,15 +2458,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         }
                     } else {
                         can_create_anonymous_typed_dict = false;
-                        self.error(
+                        let ty = self.error(
                             errors,
                             x.value.range(),
                             ErrorKind::InvalidArgument,
                             format!("Expected a mapping, got {}", self.for_display(ty)),
                         );
+                        if let Some(keys) = &mut iteration_keys {
+                            keys.push(ty);
+                        }
                     }
                 }
             });
+            if let Some(element) = iteration_element
+                && let Some(keys) = iteration_keys
+            {
+                element.set(Some(self.unions(keys)));
+            }
             let any_field_has_open_placeholder = typed_dict_fields_map.values().any(|field| {
                 field
                     .ty
@@ -3288,7 +3322,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         elts: &[Expr],
         elt_hint: Option<HintRef>,
         errors: &ErrorCollector,
-        _iteration_element: Option<&Cell<Option<Type>>>,
+        iteration_element: Option<&Cell<Option<Type>>>,
     ) -> Vec<Type> {
         let star_hint = LazyCell::new(|| {
             elt_hint.map(|hint| {
@@ -3298,18 +3332,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 )
             })
         });
-        elts.map(|x| match x {
+        let mut iteration_types = iteration_element.map(|_| Vec::with_capacity(elts.len()));
+        let elem_tys = elts.map(|x| match x {
             Expr::Starred(ExprStarred { value, .. }) => {
-                let unpacked_ty = self.expr_infer_with_hint_promote(
-                    value,
-                    HintRef::with_ty_opt(elt_hint, star_hint.as_ref()),
-                    errors,
+                let hint = HintRef::with_ty_opt(elt_hint, star_hint.as_ref());
+                // Only starred expansion carries the root observation into a child display.
+                let (unpacked_ty, observed) = if iteration_element.is_some() {
+                    self.expr_infer_for_iteration(value, errors)
+                } else {
+                    (self.expr_infer_with_hint(value, hint, errors), None)
+                };
+                let unpacked_ty = self.promote_with_hint(
+                    unpacked_ty,
+                    value.range(),
+                    hint,
                     HintCoercion::BestEffort,
                 );
                 if let Some(iterable_ty) = self.unwrap_iterable(&unpacked_ty) {
+                    self.observe_iteration_element(
+                        observed.as_ref().unwrap_or(&iterable_ty),
+                        iteration_types.as_mut(),
+                    );
                     iterable_ty
                 } else {
-                    self.error(
+                    let ty = self.error(
                         errors,
                         x.range(),
                         ErrorKind::NotIterable,
@@ -3317,11 +3363,23 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             "Expected an iterable, got `{}`",
                             self.for_display(unpacked_ty)
                         ),
-                    )
+                    );
+                    self.observe_iteration_element(&ty, iteration_types.as_mut());
+                    ty
                 }
             }
-            _ => self.expr_infer_with_hint_promote(x, elt_hint, errors, HintCoercion::BestEffort),
-        })
+            _ => {
+                let ty = self.expr_infer_with_hint(x, elt_hint, errors);
+                self.observe_iteration_element(&ty, iteration_types.as_mut());
+                self.promote_with_hint(ty, x.range(), elt_hint, HintCoercion::BestEffort)
+            }
+        });
+        if let Some(element) = iteration_element
+            && let Some(types) = iteration_types
+        {
+            element.set(Some(self.unions(types)));
+        }
+        elem_tys
     }
 
     fn is_enum_class_type(&self, ty: &Type) -> bool {
