@@ -175,20 +175,18 @@ def f(obj: A[object], int_: A[int]):
 );
 
 testcase!(
-    bug = "Unpacked `*args` should make a TypeVarTuple contravariant",
     test_infer_contravariant_from_unpacked_varargs,
     r#"
 class A[*Ts]:
     def put(self, *args: *Ts) -> None: ...
 
 def f(obj: A[object], int_: A[int]):
-    x: A[int] = obj  # E: `A[object]` is not assignable to `A[int]`
+    x: A[int] = obj
     y: A[object] = int_  # E: `A[int]` is not assignable to `A[object]`
 "#,
 );
 
 testcase!(
-    bug = "A returned callable with unpacked parameters should make a TypeVarTuple contravariant",
     test_infer_contravariant_from_returned_callable,
     r#"
 from typing import Callable
@@ -197,13 +195,12 @@ class A[*Ts]:
     def get(self) -> Callable[[*Ts], None]: ...
 
 def f(obj: A[object], int_: A[int]):
-    x: A[int] = obj  # E: `A[object]` is not assignable to `A[int]`
+    x: A[int] = obj
     y: A[object] = int_  # E: `A[int]` is not assignable to `A[object]`
 "#,
 );
 
 testcase!(
-    bug = "Declared TypeVarTuple variance should be checked against unpacked `*args`",
     test_covariant_type_var_tuple_used_in_unpacked_varargs,
     r#"
 from typing import Generic, TypeVarTuple
@@ -211,12 +208,11 @@ from typing import Generic, TypeVarTuple
 Ts_co = TypeVarTuple("Ts_co", covariant=True)
 
 class A(Generic[*Ts_co]):
-    def put(self, *args: *Ts_co) -> None: ...
+    def put(self, *args: *Ts_co) -> None: ...  # E: `Ts_co` is covariant but is used in contravariant position
 "#,
 );
 
 testcase!(
-    bug = "Declared TypeVarTuple variance should be checked against a returned tuple",
     test_contravariant_type_var_tuple_used_in_returned_tuple,
     r#"
 from typing import Generic, TypeVarTuple
@@ -224,6 +220,6 @@ from typing import Generic, TypeVarTuple
 Ts_contra = TypeVarTuple("Ts_contra", contravariant=True)
 
 class A(Generic[*Ts_contra]):
-    def get(self) -> tuple[*Ts_contra]: ...
+    def get(self) -> tuple[*Ts_contra]: ...  # E: `Ts_contra` is contravariant but is used in covariant position
 "#,
 );

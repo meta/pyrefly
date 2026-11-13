@@ -46,7 +46,6 @@ use crate::types::types::Type;
 // - Concatenate
 // - Intersect (Our variance inference algorithm is not defined on this. Unclear to me yet what to do on this type.)
 // - Forall (I suspect that we should not visit this, since the forall type is related to a function, and variance makes no sense in the absence of a class definition)
-// - Unpack (potentially just visit the inner type recursively?)
 // - SpecialForm
 // - ParamSpecValue
 // - Args and Kwargs
@@ -422,6 +421,9 @@ fn on_type(
         }
         Type::Tuple(t) => {
             handle_tuple_type(t, path, on_edge, on_var);
+        }
+        Type::Unpack(inner) => {
+            on_type(path, inner, on_edge, on_var);
         }
         Type::Int(dim) => {
             // Symbolic integer expressions contain types, all invariant.
@@ -928,7 +930,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ///
     /// The check is shallow: a TypeVar or ParamSpec is checked when it fills the entire
     /// position. A ParamSpec is also checked when it is a direct argument of the
-    /// annotation's top-level callable or class.
+    /// annotation's top-level callable or class. A TypeVarTuple is checked when it is
+    /// unpacked directly into `*args` or the annotation's top-level tuple.
     fn check_annotation_variance(
         &self,
         ty: &Type,
@@ -938,6 +941,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) {
         match ty {
             Type::Quantified(q) => {
+                check_typevar(q.name(), position, q.variance(), range, violations);
+            }
+            Type::Unpack(inner) => {
+                self.check_annotation_variance(inner, position, range, violations);
+            }
+            Type::Tuple(Tuple::Unpacked(parts))
+                if let (_, Type::Quantified(q), _) = parts.parts() =>
+            {
                 check_typevar(q.name(), position, q.variance(), range, violations);
             }
             Type::ClassType(cls) => {

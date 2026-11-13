@@ -90,11 +90,7 @@
   "generics_typevartuple_overloads.py": [],
   "generics_typevartuple_specialization.py": [],
   "generics_typevartuple_unpack.py": [],
-  "generics_typevartuple_variance.py": [
-    "Line 79: Expected 1 errors",
-    "Line 90: Expected 1 errors",
-    "Line 108: Unexpected errors ['`InferredContravariantTypeVarTupleOld[object]` is not assignable to `InferredContravariantTypeVarTupleOld[int]`']"
-  ],
+  "generics_typevartuple_variance.py": [],
   "generics_upper_bound.py": [],
   "generics_variance.py": [],
   "generics_variance_inference.py": [],

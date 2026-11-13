@@ -8376,6 +8376,17 @@
     },
     {
       "code": -2,
+      "column": 9,
+      "concise_description": "Type variable `InTs` is contravariant but is used in covariant position",
+      "description": "Type variable `InTs` is contravariant but is used in covariant position",
+      "line": 79,
+      "name": "invalid-variance",
+      "severity": "error",
+      "stop_column": 14,
+      "stop_line": 79
+    },
+    {
+      "code": -2,
       "column": 52,
       "concise_description": "`ContravariantTypeVarTupleOld[int]` is not assignable to `ContravariantTypeVarTupleOld[object]`",
       "description": "`ContravariantTypeVarTupleOld[int]` is not assignable to `ContravariantTypeVarTupleOld[object]`",
@@ -8384,6 +8395,17 @@
       "severity": "error",
       "stop_column": 87,
       "stop_line": 83
+    },
+    {
+      "code": -2,
+      "column": 9,
+      "concise_description": "Type variable `OutTs` is covariant but is used in contravariant position",
+      "description": "Type variable `OutTs` is covariant but is used in contravariant position",
+      "line": 90,
+      "name": "invalid-variance",
+      "severity": "error",
+      "stop_column": 13,
+      "stop_line": 90
     },
     {
       "code": -2,
@@ -8406,17 +8428,6 @@
       "severity": "error",
       "stop_column": 109,
       "stop_line": 107
-    },
-    {
-      "code": -2,
-      "column": 63,
-      "concise_description": "`InferredContravariantTypeVarTupleOld[object]` is not assignable to `InferredContravariantTypeVarTupleOld[int]`",
-      "description": "`InferredContravariantTypeVarTupleOld[object]` is not assignable to `InferredContravariantTypeVarTupleOld[int]`",
-      "line": 108,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 109,
-      "stop_line": 108
     },
     {
       "code": -2,
