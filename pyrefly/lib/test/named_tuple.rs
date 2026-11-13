@@ -42,6 +42,23 @@ del p[0]  # E: Cannot delete item in `Pair`
     "#,
 );
 
+// https://github.com/meta/pyrefly/issues/5630
+testcase!(
+    test_named_tuple_star_unpack,
+    r#"
+from typing import NamedTuple, assert_type, Literal
+class Key(NamedTuple):
+    name: str
+    version: int
+
+def test(key: Key, values: dict[tuple[str, int, int], str]) -> None:
+    values[*key, 0]
+    assert_type((*key, 0), tuple[str, int, Literal[0]])
+    assert_type((0, *key), tuple[Literal[0], str, int])
+    assert_type((*key,), tuple[str, int])
+    "#,
+);
+
 testcase!(
     test_named_tuple_functional_attr_types,
     r#"

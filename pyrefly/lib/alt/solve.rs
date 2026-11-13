@@ -1107,7 +1107,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    fn has_named_tuple_iter_override(&self, cls: &ClassType) -> bool {
+    pub(crate) fn has_named_tuple_iter_override(&self, cls: &ClassType) -> bool {
         if self
             .get_metadata_for_class(cls.class_object())
             .named_tuple_metadata()

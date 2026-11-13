@@ -2022,6 +2022,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             match elt {
                 Expr::Starred(ExprStarred { value, .. }) => {
                     let ty = self.expr_infer(value, errors);
+                    // Unpacking a `NamedTuple` uses its underlying tuple's elements; the
+                    // iterable fallback below would only recover their joined type.
+                    let ty = if let Type::ClassType(cls) | Type::SelfType(cls) = &ty
+                        && !self.has_named_tuple_iter_override(cls)
+                        && let Some(tuple) = self.as_tuple(cls)
+                    {
+                        self.heap.mk_tuple(tuple)
+                    } else {
+                        ty
+                    };
                     match ty {
                         Type::Tuple(Tuple::Concrete(elts)) => {
                             if unbounded.is_empty() {
