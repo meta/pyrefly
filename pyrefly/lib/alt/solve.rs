@@ -5604,7 +5604,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 vec![Iterable::OfType(key)]
             }
             _ => {
-                let iterable = self.expr_infer(e, errors);
+                let (iterable, _) = self.expr_infer_for_iteration(e, errors);
                 self.iterate(&iterable, e.range(), errors, None)
             }
         }
