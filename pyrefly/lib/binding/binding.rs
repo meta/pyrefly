@@ -736,6 +736,9 @@ impl Keyed for KeyDjangoRelations {
     {
         TextRange::default()
     }
+    fn try_to_anykey(&self) -> Option<AnyExportedKey> {
+        Some(self.to_anykey())
+    }
 }
 impl Exported for KeyDjangoRelations {
     fn to_anykey(&self) -> AnyExportedKey {

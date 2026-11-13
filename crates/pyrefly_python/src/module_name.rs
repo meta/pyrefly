@@ -142,8 +142,8 @@ impl Serialize for ModuleName {
 
 impl<'de> Deserialize<'de> for ModuleName {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s: &str = Deserialize::deserialize(deserializer)?;
-        Ok(ModuleName::from_str(s))
+        let s = String::deserialize(deserializer)?;
+        Ok(ModuleName::from_str(&s))
     }
 }
 
@@ -618,7 +618,24 @@ fn path_parts_form_valid_module_name(parts: &[impl AsRef<str>], is_init: bool) -
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+    use serde_json::from_str;
+    use serde_json::from_value;
+
     use super::*;
+
+    #[test]
+    fn test_deserialize_module_name() {
+        let expected = ModuleName::from_str("app.books.models");
+        assert_eq!(
+            from_str::<ModuleName>(r#""app.books.models""#).unwrap(),
+            expected
+        );
+        assert_eq!(
+            from_value::<ModuleName>(Value::String("app.books.models".to_owned())).unwrap(),
+            expected
+        );
+    }
 
     #[test]
     fn test_first_component() {
