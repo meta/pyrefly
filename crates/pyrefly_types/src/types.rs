@@ -11,6 +11,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::mem;
+use std::slice;
 use std::sync::Arc;
 
 use dupe::Dupe;
@@ -2352,6 +2353,14 @@ impl Type {
         match self {
             Type::Int(Int::Literal(n)) => Some(*n),
             _ => None,
+        }
+    }
+
+    /// Borrow the top-level union members, or a singleton slice for a non-union type.
+    pub fn as_unions(&self) -> &[Type] {
+        match self {
+            Type::Union(union) => &union.members,
+            _ => slice::from_ref(self),
         }
     }
 
