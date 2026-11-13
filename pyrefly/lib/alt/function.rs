@@ -64,6 +64,7 @@ use crate::alt::types::decorated_function::UndecoratedFunction;
 use crate::alt::unwrap::HintRef;
 use crate::binding::binding::AnnotationTarget;
 use crate::binding::binding::Binding;
+use crate::binding::binding::BindingUndecoratedFunction;
 use crate::binding::binding::FunctionDefData;
 use crate::binding::binding::FunctionParameter;
 use crate::binding::binding::Key;
@@ -301,10 +302,7 @@ impl DecoratorParamHints {
 }
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
-    fn decorator_param_hints(
-        &self,
-        decorators: &[(Type, TextRange)],
-    ) -> Option<DecoratorParamHints> {
+    fn decorator_param_hints(&self, decorators: &[(Type, usize)]) -> Option<DecoratorParamHints> {
         decorators.iter().rev().find_map(|(decorator_ty, _)| {
             decorator_ty
                 .callable_first_param(self.heap)
@@ -318,6 +316,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
+    /// The range of the name in the `def` statement of an undecorated function.
+    fn function_name_range(&self, idx: Idx<KeyUndecoratedFunction>) -> TextRange {
+        self.bindings().get(idx).def.name.range()
+    }
+
     pub fn solve_function_binding(
         &self,
         idx: Idx<KeyDecoratedFunction>,
@@ -326,11 +329,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Type {
         let function_binding = self.bindings().get(idx);
         let undecorated = self.get_idx(function_binding.undecorated_idx);
+        let undecorated_range = self.function_name_range(function_binding.undecorated_idx);
         let def_ty = self.get_idx(idx);
         if !function_binding.is_contiguous {
             self.error(
                 errors,
-                undecorated.id_range(),
+                undecorated_range,
                 ErrorKind::InvalidOverload,
                 "@overload signatures must be immediately followed by another @overload or the implementation".to_owned(),
             );
@@ -340,7 +344,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if function_binding.successor.is_none() {
                 // This is the last definition in the chain. We should produce an overload type.
                 let mut acc = Vec1::new((
-                    undecorated.id_range(),
+                    undecorated_range,
                     (*def_ty).clone(),
                     undecorated.metadata.clone(),
                 ));
@@ -348,15 +352,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 while let Some(predecessor_idx) = self.step_pred(predecessor) {
                     let predecessor_binding = self.bindings().get(predecessor_idx);
                     let predecessor_undecorated = self.get_idx(predecessor_binding.undecorated_idx);
+                    let predecessor_range =
+                        self.function_name_range(predecessor_binding.undecorated_idx);
                     if predecessor_undecorated.metadata.flags.is_overload {
                         let predecessor_ty = self.get_idx(predecessor_idx);
                         acc.push((
-                            predecessor_undecorated.id_range(),
+                            predecessor_range,
                             (*predecessor_ty).clone(),
                             predecessor_undecorated.metadata.clone(),
                         ));
                     } else {
-                        impl_before_overload_range = Some(predecessor_undecorated.id_range());
+                        impl_before_overload_range = Some(predecessor_range);
                         break;
                     }
                 }
@@ -438,13 +444,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 let predecessor_ty = self.get_idx(predecessor_idx);
                 acc.push((
-                    predecessor_undecorated.id_range(),
+                    self.function_name_range(predecessor_binding.undecorated_idx),
                     (*predecessor_ty).clone(),
                     predecessor_undecorated.metadata.clone(),
                 ));
             }
             acc.reverse();
-            self.check_decorator_consistency_with_implementation(&acc, undecorated, errors);
+            self.check_decorator_consistency_with_implementation(
+                &acc,
+                undecorated,
+                undecorated_range,
+                errors,
+            );
             if let Ok(defs) = Vec1::try_from_vec(acc) {
                 if defs.len() == 1 {
                     self.error(
@@ -559,54 +570,59 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ..Default::default()
         };
         let mut found_class_property = false;
-        let decorators = Box::from_iter(decorators.iter().filter_map(|k| {
-            let decorator = self.get_idx(*k);
-            let range = self.bindings().idx_to_key(*k).range();
-            let keep = match self.get_special_decorator(decorator) {
-                // Filter `@disjoint_base` out before generic decorator application,
-                // otherwise it would produce a misleading bad-specialization error.
-                Some(SpecialDecorator::DisjointBase) => {
-                    self.error(
-                        errors,
-                        range,
-                        ErrorKind::BadFunctionDefinition,
-                        "`@disjoint_base` cannot be applied to a function".to_owned(),
-                    );
-                    false
-                }
-                Some(special_decorator) => {
-                    if is_top_level_function {
-                        self.check_top_level_function_decorator(&special_decorator, range, errors);
-                    }
-                    !self.set_flag_from_special_decorator(&mut flags, &special_decorator)
-                }
-                None => {
-                    if is_class_property_decorator_type(&decorator.ty) {
-                        found_class_property = true;
-                    }
-                    if matches!(
-                        &decorator.ty,
-                        Type::Any(AnyStyle::Implicit | AnyStyle::Explicit)
-                    ) {
+        let decorators =
+            Box::from_iter(decorators.iter().enumerate().filter_map(|(position, k)| {
+                let decorator = self.get_idx(*k);
+                let range = self.bindings().idx_to_key(*k).range();
+                let keep = match self.get_special_decorator(decorator) {
+                    // Filter `@disjoint_base` out before generic decorator application,
+                    // otherwise it would produce a misleading bad-specialization error.
+                    Some(SpecialDecorator::DisjointBase) => {
                         self.error(
                             errors,
                             range,
-                            ErrorKind::UntypedFunctionDecorator,
-                            format!(
-                                "Untyped function decorator obscures the type of function `{}`",
-                                def.name
-                            ),
+                            ErrorKind::BadFunctionDefinition,
+                            "`@disjoint_base` cannot be applied to a function".to_owned(),
                         );
+                        false
                     }
-                    true
+                    Some(special_decorator) => {
+                        if is_top_level_function {
+                            self.check_top_level_function_decorator(
+                                &special_decorator,
+                                range,
+                                errors,
+                            );
+                        }
+                        !self.set_flag_from_special_decorator(&mut flags, &special_decorator)
+                    }
+                    None => {
+                        if is_class_property_decorator_type(&decorator.ty) {
+                            found_class_property = true;
+                        }
+                        if matches!(
+                            &decorator.ty,
+                            Type::Any(AnyStyle::Implicit | AnyStyle::Explicit)
+                        ) {
+                            self.error(
+                                errors,
+                                range,
+                                ErrorKind::UntypedFunctionDecorator,
+                                format!(
+                                    "Untyped function decorator obscures the type of function `{}`",
+                                    def.name
+                                ),
+                            );
+                        }
+                        true
+                    }
+                };
+                if keep {
+                    Some((decorator.ty.clone(), position))
+                } else {
+                    None
                 }
-            };
-            if keep {
-                Some((decorator.ty.clone(), range))
-            } else {
-                None
-            }
-        }));
+            }));
 
         let mut decorator_param_hints = self.decorator_param_hints(&decorators);
         let mut parent_param_hints = if flags.is_override {
@@ -831,7 +847,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         UndecoratedFunction {
             def_index,
-            identifier: ShortIdentifier::new(&def.name),
             metadata,
             decorators,
             tparams,
@@ -846,9 +861,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub fn decorated_function_type(
         &self,
         def: &UndecoratedFunction,
-        stmt: &FunctionDefData,
+        binding: &BindingUndecoratedFunction,
         errors: &ErrorCollector,
     ) -> Type {
+        let stmt = &binding.def;
         let ret = self
             .get(&Key::ReturnType(ShortIdentifier::new(&stmt.name)))
             .ty()
@@ -895,7 +911,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             self.error(
                 errors,
-                def.id_range(),
+                stmt.name.range(),
                 ErrorKind::AbstractMethodWithImplementation,
                 format!(
                     "`{}` is decorated with `@abstractmethod` but has an implementation",
@@ -938,7 +954,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             if matches!(&ret, Type::TypeGuard(_) | Type::TypeIs(_)) {
                 self.validate_type_guard_positional_argument_count(
                     &def.params,
-                    def.id_range(),
+                    stmt.name.range(),
                     &def.defining_cls,
                     def.metadata.flags.is_staticmethod,
                     errors,
@@ -1046,7 +1062,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         cls,
                         &stmt.name.id,
                         &callable,
-                        def.id_range(),
+                        stmt.name.range(),
                         allow_subclass_receiver,
                         errors,
                     );
@@ -1055,7 +1071,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         cls,
                         &stmt.name.id,
                         &callable,
-                        def.id_range(),
+                        stmt.name.range(),
                         allow_subclass_receiver,
                         errors,
                     );
@@ -1105,17 +1121,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
         .forall(tparams);
         ty = self.move_return_tparams_of_type(ty);
-        for (decorator, range) in def.decorators.iter().rev() {
+        for (decorator, position) in def.decorators.iter().rev() {
+            let range = self
+                .bindings()
+                .idx_to_key(binding.decorators[*position])
+                .range();
             // Blame only the decorator that turns a known type into an unknown one. A decorator
             // whose own type is `Any` is reported where the decorators are collected, and a
             // decorator applied to an already-unknown type did not cause it.
             let was_known = !ty.is_any() && !ty.has_top_level_implicit_any();
-            ty =
-                self.apply_function_decorator(decorator.clone(), ty, &def.metadata, *range, errors);
+            ty = self.apply_function_decorator(decorator.clone(), ty, &def.metadata, range, errors);
             if was_known && !decorator.is_any() && ty.has_top_level_implicit_any() {
                 self.error(
                     errors,
-                    *range,
+                    range,
                     ErrorKind::UntypedFunctionDecorator,
                     format!(
                         "Untyped function decorator obscures the type of function `{}`",
@@ -1135,7 +1154,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             &ty,
             DispatcherDef {
                 params: &def.params,
-                id_range: def.id_range(),
+                id_range: stmt.name.range(),
                 defining_cls: def.defining_cls.as_ref(),
                 is_staticmethod: def.metadata.flags.is_staticmethod,
             },
@@ -2713,6 +2732,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         overloads: &[(TextRange, Type, FuncMetadata)],
         def: &UndecoratedFunction,
+        def_range: TextRange,
         errors: &ErrorCollector,
     ) {
         let is_static_method = def.metadata.flags.is_staticmethod
@@ -2756,7 +2776,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if def.metadata.flags.is_staticmethod != is_static_method {
             self.error(
                     errors,
-                    def.id_range(),
+                    def_range,
                     ErrorKind::InvalidOverload,
                     "If `@staticmethod` is present on any overload or the implementation, it should be on every overload and the implementation.".to_owned(),
                 );
@@ -2764,7 +2784,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if def.metadata.flags.is_classmethod != is_class_method {
             self.error(
                     errors,
-                    def.id_range(),
+                    def_range,
                     ErrorKind::InvalidOverload,
                     "If `@classmethod` is present on any overload or the implementation, it should be on every overload and the implementation.".to_owned(),
                 );

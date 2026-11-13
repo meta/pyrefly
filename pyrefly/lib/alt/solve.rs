@@ -7770,7 +7770,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Type {
         let b = self.bindings().get(x.undecorated_idx);
         let def = self.get_idx(x.undecorated_idx);
-        self.decorated_function_type(def, &b.def, errors)
+        self.decorated_function_type(def, b, errors)
     }
 
     pub fn solve_undecorated_function(

@@ -183,14 +183,10 @@ impl PysaModuleIndex {
         let mut func_def_to_function_ref = HashMap::new();
 
         for idx in context.bindings().keys::<KeyUndecoratedFunctionRange>() {
-            let key = context.bindings().idx_to_key(idx);
-            let func_def_index = key.0;
-            if let Some(answer) = context.answers.get_idx(idx) {
-                let short_identifier = answer.0;
-                if let Some(function_ref) = short_identifier_to_function_ref.get(&short_identifier)
-                {
-                    func_def_to_function_ref.insert(func_def_index, function_ref.clone());
-                }
+            let func_def_index = context.bindings().idx_to_key(idx).0;
+            let short_identifier = context.bindings().get(idx).0;
+            if let Some(function_ref) = short_identifier_to_function_ref.get(&short_identifier) {
+                func_def_to_function_ref.insert(func_def_index, function_ref.clone());
             }
         }
 

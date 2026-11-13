@@ -677,7 +677,7 @@ impl Keyed for KeyUndecoratedFunction {
 }
 impl Keyed for KeyUndecoratedFunctionRange {
     type Value = BindingUndecoratedFunctionRange;
-    type Answer = UndecoratedFunctionRangeAnswer;
+    type Answer = EmptyAnswer;
     fn to_anyidx(idx: Idx<Self>) -> AnyIdx {
         AnyIdx::KeyUndecoratedFunctionRange(idx)
     }
@@ -1757,17 +1757,6 @@ pub struct KeyUndecoratedFunctionRange(pub FuncDefIndex);
 impl DisplayWith<ModuleInfo> for KeyUndecoratedFunctionRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, _: &ModuleInfo) -> fmt::Result {
         write!(f, "KeyUndecoratedFunctionRange({})", self.0)
-    }
-}
-
-/// Trivial answer type for KeyUndecoratedFunctionRange — just a copy of the
-/// binding value (the function's ShortIdentifier).
-#[derive(Clone, Debug, Visit, VisitMut, TypeEq, PartialEq, Eq)]
-pub struct UndecoratedFunctionRangeAnswer(pub ShortIdentifier);
-
-impl Display for UndecoratedFunctionRangeAnswer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "UndecoratedFunctionRangeAnswer({:?})", self.0.range())
     }
 }
 

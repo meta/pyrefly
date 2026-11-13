@@ -13,6 +13,7 @@ use dupe::Dupe;
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::callable::Callable;
 use pyrefly_types::callable::Param;
 use pyrefly_types::callable::Params;
@@ -27,7 +28,6 @@ use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::StmtFunctionDef;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
-use ruff_text_size::TextRange;
 use serde::Serialize;
 
 use crate::alt::class::class_field::ClassField;
@@ -498,8 +498,15 @@ impl DecoratedFunction<'_> {
         &self.undecorated.metadata
     }
 
-    fn id_range(&self) -> TextRange {
-        self.undecorated.identifier.range()
+    /// The name in the function's `def` statement.
+    fn identifier(&self, context: &ModuleAnswersContext) -> ShortIdentifier {
+        let bindings = context.bindings();
+        ShortIdentifier::new(
+            &bindings
+                .get(bindings.get(self.idx).undecorated_idx)
+                .def
+                .name,
+        )
     }
 
     fn defining_cls(&self) -> Option<&Class> {
@@ -569,7 +576,7 @@ impl<'a> FunctionNode<'a> {
         self.assert_in_context(context);
         match self {
             FunctionNode::DecoratedFunction(function) => {
-                let definition_binding = Key::Definition(function.undecorated.identifier);
+                let definition_binding = Key::Definition(function.identifier(context));
                 let idx = context.bindings().key_to_idx(&definition_binding);
                 context.answers.get_idx(idx).unwrap().ty().clone()
             }
@@ -587,7 +594,8 @@ impl<'a> FunctionNode<'a> {
                 match decorated_type {
                     Type::Overload(overload) => export_overload_signatures(&overload, context),
                     _ => {
-                        let return_binding = Key::ReturnType(function.undecorated.identifier);
+                        let return_binding =
+                            Key::ReturnType(function.identifier(&context.answers_context));
                         let idx = context
                             .answers_context
                             .bindings()
@@ -688,7 +696,7 @@ impl<'a> FunctionNode<'a> {
                 Some(cls) => ScopeParent::Class {
                     class_id: ClassId::from_class(cls),
                 },
-                None => get_scope_parent(context, function.id_range()),
+                None => get_scope_parent(context, function.identifier(context).range()),
             },
             FunctionNode::ClassField { class, .. } => ScopeParent::Class {
                 class_id: ClassId::from_class(class),
@@ -776,7 +784,7 @@ impl<'a> FunctionNode<'a> {
         self.assert_in_context(context);
         match self {
             FunctionNode::DecoratedFunction(function) => {
-                let range = function.id_range();
+                let range = function.identifier(context).range();
                 Ast::locate_node(&context.ast, range.start())
                     .iter()
                     .find_map(|node| match node {
@@ -860,6 +868,13 @@ pub fn export_all_functions(
 
         let current_function = function.as_function_ref(context);
         let parent = function.get_scope_parent(context);
+        let name_location = match &function {
+            FunctionNode::DecoratedFunction(f) => Some(PysaLocation::from_text_range(
+                f.identifier(context).range(),
+                &context.module_info,
+            )),
+            FunctionNode::ClassField { .. } => None,
+        };
         assert!(
             function_base_definitions
                 .0
@@ -867,12 +882,7 @@ pub fn export_all_functions(
                     current_function.function_id.clone(),
                     FunctionBaseDefinition {
                         name: current_function.function_name.clone(),
-                        name_location: match &function {
-                            FunctionNode::DecoratedFunction(f) => Some(
-                                PysaLocation::from_text_range(f.id_range(), &context.module_info),
-                            ),
-                            FunctionNode::ClassField { .. } => None,
-                        },
+                        name_location,
                         parent,
                         is_overload: function.is_overload(),
                         is_staticmethod: function.is_staticmethod(),

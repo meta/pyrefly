@@ -17,7 +17,6 @@ use pyrefly_derive::VisitMut;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
-use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::callable::Param;
 use pyrefly_types::class::Class;
 use pyrefly_types::function::Deprecation;
@@ -26,10 +25,7 @@ use pyrefly_types::keywords::TypeMap;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::type_level_dsl::ParsedTypeShapeDslFunction;
 use pyrefly_types::types::TParams;
-use ruff_python_ast::Identifier;
 use ruff_python_ast::name::Name;
-use ruff_text_size::Ranged;
-use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
 
 use crate::types::function::FuncMetadata;
@@ -40,9 +36,9 @@ use crate::types::types::Type;
 #[derive(Clone, Debug, Visit, VisitMut, TypeEq, PartialEq, Eq)]
 pub struct UndecoratedFunction {
     pub def_index: FuncDefIndex,
-    pub identifier: ShortIdentifier,
     pub metadata: FuncMetadata,
-    pub decorators: Box<[(Type, TextRange)]>,
+    /// The decorators applied to the function, with their position in its decorator list.
+    pub decorators: Box<[(Type, usize)]>,
     pub tparams: Arc<TParams>,
     pub params: Vec<Param>,
     pub paramspec: Option<Quantified>,
@@ -91,10 +87,6 @@ impl UndecoratedFunction {
     pub fn recursive() -> Self {
         UndecoratedFunction {
             def_index: FuncDefIndex(u32::MAX),
-            identifier: ShortIdentifier::new(&Identifier::new(
-                Name::default(),
-                TextRange::default(),
-            )),
             metadata: FuncMetadata::synthesized(
                 &Module::new(
                     ModuleName::from_str("__undecorated_function_recursive__"),
@@ -112,10 +104,6 @@ impl UndecoratedFunction {
             type_shape_dsl_def: None,
             resolved_param_types: SmallMap::new(),
         }
-    }
-
-    pub fn id_range(&self) -> TextRange {
-        self.identifier.range()
     }
 }
 

@@ -15,10 +15,8 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_python::qname::QName;
-use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_util::uniques::Unique;
 use ruff_python_ast::name::Name;
-use ruff_text_size::TextRange;
 use starlark_map::Hashed;
 use starlark_map::ordered_map::OrderedMap;
 use starlark_map::ordered_set::OrderedSet;
@@ -191,8 +189,11 @@ impl TypeEq for Name {}
 impl TypeEq for ModuleName {}
 impl TypeEq for ModulePath {}
 impl TypeEq for ModuleStyle {}
-impl TypeEq for TextRange {}
-impl TypeEq for ShortIdentifier {}
+// `TextRange` and `ShortIdentifier` deliberately do not implement `TypeEq`. An edit that only moves
+// code changes source ranges but no type, so an answer refers to a location by a stable position,
+// such as a decorator's position in its decorator list, and code that reports an error looks the
+// range up in the bindings. `QName` is the one exception: it holds its identifier's range, and its
+// `TypeEq` below skips it.
 
 impl TypeEq for QName {
     fn type_eq(&self, other: &Self, _: &mut TypeEqCtx) -> bool {

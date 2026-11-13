@@ -86,7 +86,6 @@ use crate::binding::binding::KeyYield;
 use crate::binding::binding::KeyYieldFrom;
 use crate::binding::binding::Keyed;
 use crate::binding::binding::NoneIfRecursive;
-use crate::binding::binding::UndecoratedFunctionRangeAnswer;
 use crate::error::collector::ErrorCollector;
 use crate::types::annotation::Annotation;
 use crate::types::type_info::TypeInfo;
@@ -368,11 +367,11 @@ impl<Ans: LookupAnswer> Solve<Ans> for KeyUndecoratedFunction {
 impl<Ans: LookupAnswer> Solve<Ans> for KeyUndecoratedFunctionRange {
     fn solve(
         _answers: &AnswersSolver<Ans>,
-        binding: &BindingUndecoratedFunctionRange,
+        _binding: &BindingUndecoratedFunctionRange,
         _range: TextRange,
         _errors: &ErrorCollector,
     ) -> SolveResult<Self> {
-        SolveResult::Answer(UndecoratedFunctionRangeAnswer(binding.0))
+        SolveResult::Answer(EmptyAnswer)
     }
 
     fn promote_recursive(_heap: &TypeHeap, _: Var) -> Self::Answer {
