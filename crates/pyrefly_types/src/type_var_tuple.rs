@@ -21,6 +21,10 @@ use ruff_python_ast::Identifier;
 use crate::equality::TypeEq;
 use crate::equality::TypeEqCtx;
 use crate::heap::TypeHeap;
+use crate::quantified::QuantifiedKind;
+use crate::quantified::TypeVarLike;
+use crate::type_var::PreInferenceVariance;
+use crate::type_var::Restriction;
 use crate::types::Type;
 
 /// Used to represent TypeVarTuple calls. Each TypeVarTuple is unique, so use the ArcId to separate them.
@@ -47,6 +51,28 @@ impl Display for TypeVarTuple {
 struct TypeVarTupleInner {
     qname: QName,
     default: Option<Type>,
+}
+
+impl TypeVarLike for TypeVarTuple {
+    fn qname(&self) -> &QName {
+        &self.0.qname
+    }
+
+    fn kind(&self) -> QuantifiedKind {
+        QuantifiedKind::TypeVarTuple
+    }
+
+    fn default(&self) -> Option<&Type> {
+        self.0.default.as_ref()
+    }
+
+    fn restriction(&self) -> &Restriction {
+        &Restriction::Unrestricted
+    }
+
+    fn variance(&self) -> PreInferenceVariance {
+        PreInferenceVariance::Invariant
+    }
 }
 
 impl TypeVarTuple {

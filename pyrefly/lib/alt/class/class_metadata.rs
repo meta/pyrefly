@@ -18,7 +18,6 @@ use pyrefly_types::annotation::Annotation;
 use pyrefly_types::callable::Params;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::quantified::Quantified;
-use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_types::typed_dict::ExtraItem;
 use pyrefly_types::typed_dict::ExtraItems;
@@ -291,24 +290,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if let Some(metaclass) = &mut calculated_metaclass {
             for targ in metaclass.get_mut().targs_mut().as_mut().iter_mut() {
                 if targ.contains_type_variable() {
-                    targ.transform_mut(&mut |ty| match ty {
-                        Type::Quantified(q) => *ty = q.as_gradual_type(),
-                        Type::TypeVar(t) => {
-                            *ty = Quantified::as_gradual_type_helper(t.kind(), t.default())
+                    targ.transform_mut(&mut |ty| {
+                        if let Type::Quantified(q) = ty {
+                            *ty = q.as_gradual_type();
+                        } else if let Some(x) = ty.as_type_var_like() {
+                            *ty = Quantified::as_gradual_type_helper(x.kind(), x.default());
                         }
-                        Type::TypeVarTuple(t) => {
-                            *ty = Quantified::as_gradual_type_helper(
-                                QuantifiedKind::TypeVarTuple,
-                                t.default(),
-                            )
-                        }
-                        Type::ParamSpec(p) => {
-                            *ty = Quantified::as_gradual_type_helper(
-                                QuantifiedKind::ParamSpec,
-                                p.default(),
-                            )
-                        }
-                        _ => {}
                     });
                 }
             }

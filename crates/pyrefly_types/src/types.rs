@@ -59,6 +59,7 @@ use crate::module::ModuleType;
 use crate::named_ints::NamedInts;
 use crate::param_spec::ParamSpec;
 use crate::quantified::Quantified;
+use crate::quantified::TypeVarLike;
 use crate::sentinel::Sentinel;
 use crate::series::SeriesSchema;
 use crate::shaped_array::IntTuple;
@@ -2378,6 +2379,17 @@ impl Type {
                 Ordering::Less => Type::union(vec![x, Type::None]),
                 Ordering::Greater => Type::union(vec![Type::None, x]),
             }
+        }
+    }
+
+    /// The legacy type variable that this type refers to, if it is a `TypeVar`, `ParamSpec`, or
+    /// `TypeVarTuple` that has not been resolved to a `Quantified`.
+    pub fn as_type_var_like(&self) -> Option<&dyn TypeVarLike> {
+        match self {
+            Type::TypeVar(t) => Some(t),
+            Type::ParamSpec(p) => Some(p),
+            Type::TypeVarTuple(t) => Some(t),
+            _ => None,
         }
     }
 

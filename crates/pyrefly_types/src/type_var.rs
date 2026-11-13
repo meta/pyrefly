@@ -27,6 +27,7 @@ use crate::equality::TypeEqCtx;
 use crate::heap::TypeHeap;
 use crate::quantified::Quantified;
 use crate::quantified::QuantifiedKind;
+use crate::quantified::TypeVarLike;
 use crate::simplify::unions;
 use crate::stdlib::Stdlib;
 use crate::types::Type;
@@ -180,6 +181,28 @@ struct TypeVarInner {
     default: Option<Type>,
     /// The variance if known, or None for infer_variance=True
     variance: PreInferenceVariance,
+}
+
+impl TypeVarLike for TypeVar {
+    fn qname(&self) -> &QName {
+        &self.0.qname
+    }
+
+    fn kind(&self) -> QuantifiedKind {
+        self.0.kind
+    }
+
+    fn default(&self) -> Option<&Type> {
+        self.0.default.as_ref()
+    }
+
+    fn restriction(&self) -> &Restriction {
+        &self.0.restriction
+    }
+
+    fn variance(&self) -> PreInferenceVariance {
+        self.0.variance
+    }
 }
 
 impl TypeVar {
