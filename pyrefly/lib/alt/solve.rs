@@ -3880,14 +3880,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if reflected_of_generated_on_cls.is_empty() {
             return;
         }
-        let base_generators = class_bases.iter_with_ranges().filter_map(|(base, range)| {
-            let base = base.class_object();
-            self.get_metadata_for_class(base).dataclass_metadata()?;
-            let generator = reflected_of_generated_on_cls
-                .iter()
-                .find_map(|reflected| generator_for(base, reflected))?;
-            Some((generator, range))
-        });
+        let base_generators = class_bases
+            .iter_with_positions()
+            .filter_map(|(base, position)| {
+                let base = base.class_object();
+                self.get_metadata_for_class(base).dataclass_metadata()?;
+                let generator = reflected_of_generated_on_cls
+                    .iter()
+                    .find_map(|reflected| generator_for(base, reflected))?;
+                Some((generator, self.class_base_range(cls, position)))
+            });
         for (generator, range) in base_generators {
             errors
                 .error_builder(

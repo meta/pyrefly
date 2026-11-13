@@ -1243,6 +1243,20 @@ class A:
 "#,
 );
 
+// The error is at the `@total_ordering` decorator, not at another decorator of the class.
+testcase!(
+    test_total_ordering_no_rich_cmp_among_decorators,
+    r#"
+from functools import total_ordering
+from typing import final
+
+@final
+@total_ordering  # E: Class `A` must define at least one of the rich comparison methods.
+class A:
+    pass
+"#,
+);
+
 // `total_ordering` only fills in methods the class doesn't already have, including methods
 // generated on an ancestor dataclass.
 testcase!(

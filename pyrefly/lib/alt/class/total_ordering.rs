@@ -68,7 +68,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let total_ordering_metadata = metadata.total_ordering_metadata().unwrap();
             self.error(
                 errors,
-                total_ordering_metadata.location,
+                self.class_decorator_range(cls, total_ordering_metadata.decorator),
                 ErrorKind::MissingAttribute,
                 format!(
                     "Class `{}` must define at least one of the rich comparison methods.",

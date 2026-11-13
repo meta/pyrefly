@@ -808,7 +808,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut violations = Vec::new();
 
         // Check base classes deeply using on_type for traversal
-        for (base_type, range) in class_bases.iter_with_ranges() {
+        for (base_type, position) in class_bases.iter_with_positions() {
+            let range = self.class_base_range(class, position);
             let mut on_var =
                 |name: &Name, state: InferenceState, declared: PreInferenceVariance| {
                     // An unresolved path establishes no position to validate. Treating it as

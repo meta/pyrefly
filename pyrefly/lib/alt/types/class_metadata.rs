@@ -23,7 +23,6 @@ use pyrefly_util::display::commas_iter;
 use pyrefly_util::visit::Visit as VisitTrait;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::name::Name;
-use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 use vec1::Vec1;
@@ -788,8 +787,8 @@ pub struct ProtocolMetadata {
 
 #[derive(Clone, Debug, TypeEq, PartialEq, Eq)]
 pub struct TotalOrderingMetadata {
-    /// Location of the decorator for `@total_ordering`.
-    pub location: TextRange,
+    /// The position of the `@total_ordering` decorator in the class's decorator list.
+    pub decorator: usize,
 }
 
 /// A struct representing a class's ancestors, in method resolution order (MRO)

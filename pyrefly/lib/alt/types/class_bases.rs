@@ -9,13 +9,12 @@ use std::fmt;
 use std::sync::LazyLock;
 
 use dupe::Dupe;
+use pyrefly_derive::TypeEq;
 use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::class::ClassType;
-use pyrefly_types::equality::TypeEq;
-use pyrefly_types::equality::TypeEqCtx;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::type_info::TypeInfo;
@@ -52,12 +51,14 @@ use crate::types::types::Type;
 ///
 /// The reason this is tracked separately from `ClassMetadata` is to avoid the possibility of
 /// cycles when type arguments of the base classes may depend on the class itself.
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, TypeEq, Default)]
 pub struct ClassBases {
     /// The direct base types in the base class list
     base_types: Box<[ClassType]>,
-    /// Source ranges for each base type (parallel array, same length as base_types)
-    base_ranges: Box<[TextRange]>,
+    /// The position of each base type in the class's base class list (parallel array, same length
+    /// as base_types), or `None` for the synthesized TypedDict fallback. Consumers look up the
+    /// source range in the class's bindings, so an edit that moves the class leaves this unchanged.
+    base_positions: Box<[Option<u32>]>,
     /// The first tuple ancestor, if there is one in the inheritance tree.
     ///
     /// This is recursively computed, not just a direct tuple base. We throw an error and keep only
@@ -70,20 +71,10 @@ pub struct ClassBases {
 
 static RECURSIVE_CLASS_BASES: LazyLock<ClassBases> = LazyLock::new(|| ClassBases {
     base_types: Box::new([]),
-    base_ranges: Box::new([]),
+    base_positions: Box::new([]),
     tuple_ancestor: None,
     has_pydantic_strict_metadata: false,
 });
-
-/// Manual TypeEq implementation that ignores base_ranges.
-/// TextRange contains source positions which shouldn't affect interface equality.
-impl TypeEq for ClassBases {
-    fn type_eq(&self, other: &Self, ctx: &mut TypeEqCtx) -> bool {
-        TypeEq::type_eq(&self.base_types, &other.base_types, ctx)
-            && TypeEq::type_eq(&self.tuple_ancestor, &other.tuple_ancestor, ctx)
-            && self.has_pydantic_strict_metadata == other.has_pydantic_strict_metadata
-    }
-}
 
 impl ClassBases {
     pub fn recursive() -> &'static Self {
@@ -98,9 +89,13 @@ impl ClassBases {
         self.base_types.iter()
     }
 
-    /// Iterate over base types with their source ranges.
-    pub fn iter_with_ranges(&self) -> impl Iterator<Item = (&ClassType, TextRange)> {
-        self.base_types.iter().zip(self.base_ranges.iter().copied())
+    /// Iterate over the base types that appear in the class's base class list, with their
+    /// position in that list. `AnswersSolver::class_base_range` gives the source range.
+    pub fn iter_with_positions(&self) -> impl Iterator<Item = (&ClassType, usize)> {
+        self.base_types
+            .iter()
+            .zip(&self.base_positions)
+            .filter_map(|(base, position)| Some((base, (*position)? as usize)))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -459,9 +454,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let fake_error_collector = ErrorCollector::new(self.module().dupe(), ErrorStyle::Never);
         let mut has_pydantic_strict_metadata = false;
 
-        let base_types_with_ranges = bases
+        let base_types_with_positions = bases
             .iter()
-            .filter_map(|x| match x {
+            .enumerate()
+            .filter_map(|(base_position, x)| match x {
                 BaseClass::BaseClassExpr(x) => {
                     let (mut ty, base_has_strict) = self.base_class_expr_untype(
                         x,
@@ -476,7 +472,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     if !is_new_type {
                         self.check_legacy_typevar_scoping(&mut ty, x.range(), errors);
                     }
-                    Some((ty, x.range()))
+                    Some((ty, base_position))
                 }
                 BaseClass::Call(x) => {
                     let mut ty = self.expr_untype(
@@ -486,17 +482,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     );
                     self.quantify_call_base_legacy_typevars(&mut ty, x.range());
                     self.check_legacy_typevar_scoping(&mut ty, x.range(), errors);
-                    Some((ty, x.range()))
+                    Some((ty, base_position))
                 }
                 BaseClass::NamedTuple(..) => Some((
                     self.heap
                         .mk_class_type(self.stdlib.named_tuple_fallback().clone()),
-                    x.range(),
+                    base_position,
                 )),
                 BaseClass::SynthesizedBase(class_idx, _) => {
                     self.get_idx(*class_idx).0.as_ref().map(|cls| {
                         let ct = self.promote_nontypeddict_silently_to_classtype(cls);
-                        (self.heap.mk_class_type(ct), x.range())
+                        (self.heap.mk_class_type(ct), base_position)
                     })
                 }
                 BaseClass::TypeOf(inner_expr, _) => {
@@ -512,12 +508,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             let class_obj = c.class_object();
                             let metadata = self.get_metadata_for_class(class_obj);
                             let metaclass_ct = metadata.metaclass(self.stdlib);
-                            Some((self.heap.mk_class_type(metaclass_ct.clone()), x.range()))
+                            Some((self.heap.mk_class_type(metaclass_ct.clone()), base_position))
                         }
                         None => {
                             // X is an instance. type(X) = its class.
                             match ty.ty() {
-                                Type::ClassType(_) => Some((ty.into_ty(), x.range())),
+                                Type::ClassType(_) => Some((ty.into_ty(), base_position)),
                                 _ => None,
                             }
                         }
@@ -530,7 +526,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             })
             .collect::<Vec<_>>();
 
-        let mut tuple_ancestor = base_types_with_ranges.iter().find_map(|(ty, _)| {
+        let mut tuple_ancestor = base_types_with_positions.iter().find_map(|(ty, _)| {
             if let Type::Tuple(tuple) = ty {
                 Some(tuple.clone())
             } else {
@@ -538,25 +534,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         });
 
-        let base_type_base_and_range = base_types_with_ranges
+        let base_type_base_and_position = base_types_with_positions
             .into_iter()
-            .filter_map(|base_type_and_range| {
+            .filter_map(|base_type_and_position| {
                 // Return Ok() if the base class is valid, or Err() if it is not.
-                match base_type_and_range {
-                    (Type::ClassType(c), range) => {
+                match base_type_and_position {
+                    (Type::ClassType(c), base_position) => {
                         let bases = self.get_base_types_for_class(c.class_object());
                         // Propagate has_strict from parent class
                         if bases.has_pydantic_strict_metadata {
                             has_pydantic_strict_metadata = true;
                         }
-                        Some((c, bases, range))
+                        Some((c, bases, base_position))
                     }
-                    (Type::Tuple(tuple), range) => {
+                    (Type::Tuple(tuple), base_position) => {
                         let class_ty = self.erase_tuple_type(tuple);
                         let bases = self.get_base_types_for_class(class_ty.class_object());
-                        Some((class_ty, bases, range))
+                        Some((class_ty, bases, base_position))
                     }
-                    (Type::TypedDict(typed_dict), range) => {
+                    (Type::TypedDict(typed_dict), base_position) => {
                         if is_new_type {
                             // Error will be reported in `class_metadata_of`
                             None
@@ -573,7 +569,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                         inner.targs().clone(),
                                     ),
                                     self.get_base_types_for_class(inner.class_object()),
-                                    range,
+                                    base_position,
                                 )),
                                 TypedDict::Anonymous(_) => {
                                     // Anonymous TypedDict cannot be used as a base class
@@ -582,14 +578,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             }
                         }
                     }
-                    (Type::Type(f), range) if f.is_any() => {
+                    (Type::Type(f), base_position) if f.is_any() => {
                         // `type[Any]` is equivalent to `type` or `Type`
                         let class = self.stdlib.builtins_type().clone();
                         let bases = self
                             .get_base_types_for_class(self.stdlib.builtins_type().class_object());
-                        Some((class, bases, range))
+                        Some((class, bases, base_position))
                     }
-                    (Type::Union(union), range) if !is_new_type => {
+                    (Type::Union(union), base_position) if !is_new_type => {
                         let mut class_type = None;
                         let mut has_dynamic_base = false;
                         for member in &union.members {
@@ -606,7 +602,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         }
                         class_type.filter(|_| has_dynamic_base).map(|class_type| {
                             let bases = self.get_base_types_for_class(class_type.class_object());
-                            (class_type, bases, range)
+                            (class_type, bases, base_position)
                         })
                     }
                     (_, _) => None,
@@ -614,9 +610,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             })
             .collect::<Vec<_>>();
 
-        let mut base_class_types_with_ranges = base_type_base_and_range
+        let mut base_class_types_with_positions = base_type_base_and_position
             .into_iter()
-            .map(|(base_class_type, base_class_bases, range)| {
+            .map(|(base_class_type, base_class_bases, base_position)| {
                 if is_new_type
                     && base_class_type
                         .targs()
@@ -626,7 +622,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     self.error(
                         errors,
-                        range,
+                        bases[base_position].range(),
                         ErrorKind::InvalidArgument,
                         "Second argument to NewType cannot be an unbound generic".to_owned(),
                     );
@@ -636,16 +632,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     tuple_ancestor = Some(base_tuple_ancestor.clone());
                 }
-                (base_class_type, range)
+                (base_class_type, Some(base_position as u32))
             })
             .collect::<Vec<_>>();
 
         // `object` ends every MRO, so a class that lists any other base after an explicit `object`
         // has no consistent MRO. An `Any` base is not in this list, so it never triggers the error.
-        if let Some(position) = base_class_types_with_ranges
+        if let Some(position) = base_class_types_with_positions
             .iter()
             .position(|(ty, _)| ty.is(KnownClass::Object))
-            && position + 1 < base_class_types_with_ranges.len()
+            && position + 1 < base_class_types_with_positions.len()
         {
             self.error(
                 errors,
@@ -661,27 +657,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // An explicit `object` base is dropped, so `class C(object)` has the same bases as
         // `class C`. The MRO leaves `object` out of every class's ancestors and puts it last, so a
         // stored `object` would be linearized ahead of the bases that follow it.
-        base_class_types_with_ranges.retain(|(ty, _)| !ty.is(KnownClass::Object));
+        base_class_types_with_positions.retain(|(ty, _)| !ty.is(KnownClass::Object));
 
         let metadata = self.get_metadata_for_class(cls);
-        if metadata.is_typed_dict() && base_class_types_with_ranges.is_empty() {
+        if metadata.is_typed_dict() && base_class_types_with_positions.is_empty() {
             // This is a "fallback" class that contains attributes that are available on all TypedDict subclasses.
             // Note that this also makes those attributes available on *instances* of said subclasses; this is
             // desirable for methods but problematic for fields like `__total__` that should be available on the class
             // but not the instance. For now, we make all fields available on both classes and instances.
-            base_class_types_with_ranges.push((
-                self.stdlib.typed_dict_fallback().clone(),
-                TextRange::default(),
-            ));
+            base_class_types_with_positions.push((self.stdlib.typed_dict_fallback().clone(), None));
         }
 
         // Unzip into separate arrays
-        let (base_types, base_ranges): (Vec<_>, Vec<_>) =
-            base_class_types_with_ranges.into_iter().unzip();
+        let (base_types, base_positions): (Vec<_>, Vec<_>) =
+            base_class_types_with_positions.into_iter().unzip();
 
         ClassBases {
             base_types: base_types.into_boxed_slice(),
-            base_ranges: base_ranges.into_boxed_slice(),
+            base_positions: base_positions.into_boxed_slice(),
             tuple_ancestor,
             has_pydantic_strict_metadata,
         }

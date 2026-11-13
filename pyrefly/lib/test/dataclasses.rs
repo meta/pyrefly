@@ -1334,6 +1334,26 @@ InheritsGe(1) >= 3
     "#,
 );
 
+// The error is at the base it is about, not at another base of the class.
+testcase!(
+    test_parent_dataclass_with_order_among_bases,
+    r#"
+from dataclasses import dataclass
+@dataclass(order=True)
+class D:
+    x: int
+
+class Other:
+    pass
+
+class C(
+    Other,
+    D,  # E: Cannot safely extend dataclass `D` with `order=True`
+):
+    pass
+    "#,
+);
+
 testcase!(
     test_parent_dataclass_with_order_overridden,
     r#"

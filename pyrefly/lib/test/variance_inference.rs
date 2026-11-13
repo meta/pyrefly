@@ -565,6 +565,25 @@ class ContraToContraToContra_WithTA(
 "#,
 );
 
+// The error is at the base it is about. A `Generic[...]` base is not a base type, so it must not
+// shift the bases after it.
+testcase!(
+    test_variance_enforcement_in_base_after_generic,
+    r#"
+from typing import TypeVar, Generic
+
+T = TypeVar("T")
+T_co = TypeVar("T_co", covariant=True)
+
+class Inv(Generic[T]): ...
+
+class C(
+    Generic[T_co],
+    Inv[T_co],  # E: Type variable `T_co` is covariant but is used in invariant position
+): ...
+"#,
+);
+
 testcase!(
     test_protocols_variance_conformance,
     r#"

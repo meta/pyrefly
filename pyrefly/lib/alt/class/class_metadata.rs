@@ -504,17 +504,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 true
             }
         });
-        let total_ordering_metadata = decorators.iter().find_map(|(decorator, decorator_range)| {
-            decorator.ty.callee_kind().and_then(|kind| {
-                if kind == CalleeKind::Function(FunctionKind::TotalOrdering) {
-                    Some(TotalOrderingMetadata {
-                        location: *decorator_range,
-                    })
-                } else {
-                    None
-                }
+        let total_ordering_metadata = decorators
+            .iter()
+            .position(|(decorator, _)| {
+                decorator.ty.callee_kind()
+                    == Some(CalleeKind::Function(FunctionKind::TotalOrdering))
             })
-        });
+            .map(|decorator| TotalOrderingMetadata { decorator });
 
         // If this class inherits from a dataclass_transform-ed class or uses a metaclass decorated
         // with @dataclass_transform, record the defaults that we should use for dataclass parameters.

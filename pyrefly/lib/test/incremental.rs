@@ -1522,8 +1522,8 @@ class A:
 }
 
 /// The location of a class's `@total_ordering` decorator moves when an edit above the class changes
-/// the length of the file. It only says where to report errors, but the move recomputes a module
-/// that uses the class.
+/// the length of the file. It only says where to report errors, so a module that uses the class is
+/// not recomputed.
 #[test]
 fn test_edit_above_total_ordering() {
     let mut i = Incremental::new();
@@ -1549,8 +1549,7 @@ class A:
     i.check(&["main", "foo"], &["main", "foo"]);
 
     i.set("foo", &foo("100000"));
-    // `main` reads nothing that changed.
-    i.check(&["main", "foo"], &["foo", "main"]);
+    i.check(&["main", "foo"], &["foo"]);
 }
 
 /// Test that when a function's return type changes, callers that import only

@@ -16,6 +16,8 @@ use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::special_form::SpecialForm;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::name::Name;
+use ruff_text_size::Ranged;
+use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
 
 use crate::alt::answers::LookupAnswer;
@@ -129,6 +131,35 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     pub fn get_base_types_for_class(&self, cls: &Class) -> &ClassBases {
         self.get_from_class(cls, &KeyClassBaseType(cls.index()))
             .unwrap_or(ClassBases::recursive())
+    }
+
+    /// The source range of the decorator at `position` in the decorator list of `cls`, which must
+    /// be defined in this module. Answers store the position rather than the range, so that an
+    /// edit that only moves the class leaves them unchanged.
+    pub fn class_decorator_range(&self, cls: &Class, position: usize) -> TextRange {
+        assert_eq!(
+            cls.module_path(),
+            self.module().path(),
+            "a class's decorator and base ranges are looked up in the module that defines it",
+        );
+        let bindings = self.bindings();
+        let metadata = bindings.get(bindings.key_to_idx(&KeyClassMetadata(cls.index())));
+        bindings.idx_to_key(metadata.decorators[position]).range()
+    }
+
+    /// The source range of the base at `position` in the base class list of `cls`, which must be
+    /// defined in this module. See `class_decorator_range`.
+    pub fn class_base_range(&self, cls: &Class, position: usize) -> TextRange {
+        assert_eq!(
+            cls.module_path(),
+            self.module().path(),
+            "a class's decorator and base ranges are looked up in the module that defines it",
+        );
+        let bindings = self.bindings();
+        bindings
+            .get(bindings.key_to_idx(&KeyClassBaseType(cls.index())))
+            .bases[position]
+            .range()
     }
 
     pub fn get_mro_for_class(&self, cls: &Class) -> &ClassMro {
