@@ -984,10 +984,15 @@ fn join_types_impl(
             let joined_ty = union_types(types);
             // If `base_ty` is a subset of a single member of the join, that member is at least
             // as precise, so keep the join. This matters when the subset check is vacuous:
-            // `type[object]` is assignable to `type[C]` if `C` extends `Any`.
-            let within_one_member = || match &joined_ty {
-                Type::Union(u) => u.members.iter().any(|ty| is_subset_eq(&base_ty, ty)),
-                _ => true,
+            // `type[object]` is assignable to `type[C]` if `C` extends `Any`. It doesn't hold
+            // for types containing `Any`, which every type is a subset of.
+            let within_one_member = || {
+                !base_ty.any(Type::is_any)
+                    && !joined_ty.any(Type::is_any)
+                    && match &joined_ty {
+                        Type::Union(u) => u.members.iter().any(|ty| is_subset_eq(&base_ty, ty)),
+                        _ => true,
+                    }
             };
             if is_subset_eq(&base_ty, &joined_ty) && !within_one_member() {
                 base_ty

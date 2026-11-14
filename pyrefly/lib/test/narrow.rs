@@ -5331,6 +5331,15 @@ def covering_branches(x: bool) -> None:
     # The branches are `Literal[True]` and `Literal[False]`, which together cover `bool`.
     if x or not x:
         reveal_type(x)  # E: revealed type: bool
+
+blocked: list[str] = []
+
+def takes_int(x: int) -> None: ...
+
+def base_contains_any(x: int | Any | None) -> None:
+    if x is None or x in blocked:
+        return
+    takes_int(x)
     "#,
 );
 
