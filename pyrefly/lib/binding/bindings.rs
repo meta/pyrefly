@@ -417,6 +417,13 @@ table! {
     pub struct BindingTable(pub BindingEntry)
 }
 
+/// A literal slot occurrence and the class whose field binding declares it.
+#[derive(Debug)]
+pub struct SlotEntry {
+    pub name: Identifier,
+    pub class_idx: Idx<KeyClass>,
+}
+
 #[derive(Debug)]
 pub struct Bindings {
     module_info: ModuleInfo,
@@ -435,6 +442,7 @@ pub struct Bindings {
     docstring_type_ranges: Vec<TextRange>,
     /// Each entry records an `__all__` name and its range without string delimiters.
     dunder_all_entries: Vec<Identifier>,
+    dunder_slots_entries: Vec<SlotEntry>,
     scope_trace: Option<ScopeTrace>,
     /// Names `del`eted at module scope; retained outside the LSP `scope_trace`.
     module_deletes: SmallSet<Name>,
@@ -697,6 +705,7 @@ impl Bindings {
             docstring_type_ranges: Vec::new(),
             scope_trace: None,
             dunder_all_entries: Vec::new(),
+            dunder_slots_entries: Vec::new(),
             module_deletes: SmallSet::new(),
             unset_nodes: UnsetNodes::default(),
             global_declarations: SmallSet::new(),
@@ -952,6 +961,16 @@ impl Bindings {
         } else {
             None
         }
+    }
+
+    pub fn dunder_slots_entries(&self) -> &[SlotEntry] {
+        &self.dunder_slots_entries
+    }
+
+    pub fn dunder_slots_entry_at(&self, position: TextSize) -> Option<&SlotEntry> {
+        self.dunder_slots_entries
+            .iter()
+            .find(|entry| entry.name.range.contains_inclusive(position))
     }
 
     pub fn dunder_all_entries(&self) -> &[Identifier] {
@@ -1306,7 +1325,7 @@ impl Bindings {
                 classes: builder.django_relation_classes.into_boxed_slice(),
             },
         );
-        Self {
+        let mut bindings = Self {
             module_info,
             parse_errors,
             binding_errors: builder.errors.finish(),
@@ -1317,6 +1336,7 @@ impl Bindings {
             annotated_metadata_ranges: merge_ranges(builder.annotated_metadata_ranges),
             docstring_type_ranges: merge_ranges(builder.docstring_type_ranges),
             dunder_all_entries,
+            dunder_slots_entries: Vec::new(),
             scope_trace: if enable_trace {
                 Some(scope_trace)
             } else {
@@ -1341,7 +1361,28 @@ impl Bindings {
             subsequently_initialized: builder.subsequently_initialized,
             promote_ranges: builder.promote_ranges,
             functools_wrapper_mutation,
-        }
+        };
+        bindings.dunder_slots_entries = bindings
+            .keys::<KeyClassField>()
+            .flat_map(|idx| {
+                let field = bindings.get(idx);
+                if field.name != *dunder::SLOTS {
+                    return Vec::new();
+                }
+                field
+                    .explicit_slots()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(name, range)| {
+                        Some(SlotEntry {
+                            name: Identifier::new(name, range?),
+                            class_idx: field.class_idx,
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        bindings
     }
 
     fn should_emit_semantic_syntax_error(error: &SemanticSyntaxError) -> bool {

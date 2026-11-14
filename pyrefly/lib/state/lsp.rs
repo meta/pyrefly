@@ -383,56 +383,6 @@ fn definition_matcher(
     }
 }
 
-/// Identify a literal slot name and the class definition that owns it.
-fn dunder_slots_entry(covering_nodes: &[AnyNodeRef]) -> Option<(ShortIdentifier, Name)> {
-    let literal = covering_nodes.iter().find_map(|node| match node {
-        AnyNodeRef::ExprStringLiteral(literal) => Some(literal),
-        _ => None,
-    })?;
-    let value = covering_nodes.iter().find_map(|node| match node {
-        AnyNodeRef::StmtAssign(assign)
-            if assign
-                .targets
-                .iter()
-                .any(|target| matches!(target, Expr::Name(name) if name.id == *dunder::SLOTS)) =>
-        {
-            Some(assign.value.as_ref())
-        }
-        AnyNodeRef::StmtAnnAssign(assign)
-            if matches!(assign.target.as_ref(), Expr::Name(name) if name.id == *dunder::SLOTS) =>
-        {
-            assign.value.as_deref()
-        }
-        _ => None,
-    })?;
-    let is_entry = match value {
-        Expr::StringLiteral(value) => value.range() == literal.range(),
-        Expr::Tuple(tuple) => tuple.elts.iter().any(|elt| elt.range() == literal.range()),
-        Expr::List(list) => list.elts.iter().any(|elt| elt.range() == literal.range()),
-        Expr::Dict(dict) => dict.items.iter().any(|item| {
-            item.key
-                .as_ref()
-                .is_some_and(|key| key.range() == literal.range())
-        }),
-        _ => false,
-    };
-    if !is_entry {
-        return None;
-    }
-    let Some(AnyNodeRef::StmtClassDef(class)) = covering_nodes.iter().find(|node| {
-        matches!(
-            node,
-            AnyNodeRef::StmtClassDef(_) | AnyNodeRef::StmtFunctionDef(_)
-        )
-    }) else {
-        return None;
-    };
-    Some((
-        ShortIdentifier::new(&class.name),
-        Name::new(literal.value.to_str()),
-    ))
-}
-
 /// Parses a forward-reference string such as `"list[Foo]"` into the expression the binder
 /// built from it. Only strings whose source text is exactly their value are parsed: escapes
 /// or implicit concatenation shift the ranges of the names parsed from a string.
@@ -1551,6 +1501,9 @@ impl<'a> Transaction<'a> {
                     .get_solutions(handle)?
                     .get_hashed_opt(Hashed::new(&KeyExport(name)))
                     .cloned();
+            }
+            if let Some(ty) = self.dunder_slots_entry_type(handle, position) {
+                return Some(ty);
             }
             return self
                 .type_from_match_wildcard_at_impl(handle, position)
@@ -3015,26 +2968,24 @@ impl<'a> Transaction<'a> {
     }
 
     /// Return the instance attribute type named by a literal `__slots__` entry.
-    pub(crate) fn dunder_slots_entry_type(
-        &self,
-        handle: &Handle,
-        ast: &ModModule,
-        position: TextSize,
-    ) -> Option<Type> {
-        let (class, name) = dunder_slots_entry(&Ast::locate_node(ast, position))?;
+    fn dunder_slots_entry_type(&self, handle: &Handle, position: TextSize) -> Option<Type> {
         let answers = self.get_answers(handle)?;
-        let idx = answers
-            .bindings()
-            .key_to_idx_hashed_opt(Hashed::new(&Key::Definition(class)))?;
-        let Type::ClassDef(class) = answers.get_type_at(idx)? else {
-            return None;
-        };
+        let entry = answers.bindings().dunder_slots_entry_at(position)?;
         self.ad_hoc_solve(handle, "dunder_slots_entry_type", |solver| {
-            solver
-                .completions(solver.instantiate(&class), Some(&name), true, false)
-                .into_iter()
-                .find(|attribute| attribute.name == name)
-                .and_then(|attribute| attribute.ty)
+            let class = solver.get_idx(entry.class_idx).0.as_ref()?;
+            let instance = solver.instantiate(class);
+            if !solver.has_attr(&instance, &entry.name.id) {
+                return None;
+            }
+            Some(solver.type_of_attr_get(
+                &instance,
+                &entry.name.id,
+                entry.name.range,
+                &solver.error_swallower(),
+                ErrorKind::MissingAttribute,
+                None,
+                "dunder_slots_entry_type",
+            ))
         })?
     }
 
@@ -3194,15 +3145,21 @@ impl<'a> Transaction<'a> {
             {
                 return Ok(vec1![definition]);
             }
-            if let Some((class, name)) = dunder_slots_entry(&covering_nodes)
-                && let Some(answers) = self.get_answers(handle)
-                && let Some(idx) = answers
-                    .bindings()
-                    .key_to_idx_hashed_opt(Hashed::new(&Key::Definition(class)))
-                && let Some(class_type) = answers.get_type_at(idx)
+            if let Some(answers) = self.get_answers(handle)
+                && let Some(entry) = answers.bindings().dunder_slots_entry_at(position)
+                && let Some(class_type) = self
+                    .ad_hoc_solve(handle, "dunder_slots_definition", |solver| {
+                        Some(Type::ClassDef(
+                            solver.get_idx(entry.class_idx).0.as_ref()?.dupe(),
+                        ))
+                    })
+                    .flatten()
             {
                 return self.find_attribute_definition_for_base_type(
-                    handle, preference, class_type, &name,
+                    handle,
+                    preference,
+                    class_type,
+                    &entry.name.id,
                 );
             }
         }

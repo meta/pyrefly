@@ -93,7 +93,6 @@ fn hover_dunder_slots_assignment_forms() {
         "__slots__ = [\"foo\"]",
         "__slots__ = {\"foo\": \"Field documentation.\"}",
         "__slots__: tuple[str, ...] = (\"foo\",)",
-        "names = __slots__ = (\"foo\",)",
     ] {
         let code = format!(
             "class C:\n    {assignment}\n    def __init__(self) -> None:\n        self.foo: int = 1\n"
@@ -150,6 +149,7 @@ fn hover_dunder_slots_keeps_unresolved_and_unrelated_literal_types() {
         "class C:\n    __slots__ = (\"foo\",)\n",
         "class C:\n    __slots__ = {\"foo\": \"foo\"}\n    def __init__(self):\n        self.foo: int = 1\n",
         "class C:\n    def __init__(self):\n        __slots__ = (\"foo\",)\n        self.foo: int = 1\n",
+        "class C:\n    names = __slots__ = (\"foo\",)\n    def __init__(self):\n        self.foo: int = 1\n",
         "class C:\n    names = (\"foo\",)\n    def __init__(self):\n        self.foo: int = 1\n",
     ] {
         let (state, handle) = TestEnv::one("main", code).to_state();
