@@ -36,7 +36,6 @@ use pyrefly_util::gas::Gas;
 use pyrefly_util::suggest::Candidate;
 use pyrefly_util::suggest::Search;
 use pyrefly_util::visit::Visit;
-use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
@@ -959,6 +958,12 @@ impl Bindings {
         &self.dunder_all_entries
     }
 
+    /// Return the final local binding for an export, preserving local import aliases.
+    pub fn dunder_all_binding(&self, name: &Name) -> Option<&Key> {
+        let export = self.key_to_idx_hashed_opt(Hashed::new(&KeyExport(name.clone())))?;
+        Some(self.idx_to_key(self.get(export).key_idx()))
+    }
+
     /// Within the LSP, check if a key exists.
     /// It may not exist within `if False:` or `if sys.version == 0:` style code.
     pub fn is_valid_key(&self, k: &Key) -> bool {
@@ -1119,20 +1124,8 @@ impl Bindings {
         let module_range = x.range;
         let dunder_all_entries = exports
             .dunder_all_names()
-            .into_iter()
-            .flatten()
-            .filter_map(|(range, name)| {
-                Ast::locate_node(&x, range.start())
-                    .into_iter()
-                    .find_map(|node| match node {
-                        AnyNodeRef::ExprStringLiteral(literal) if literal.range() == range => {
-                            Some(Identifier::new(
-                                name.clone(),
-                                literal.as_single_part_string()?.content_range(),
-                            ))
-                        }
-                        _ => None,
-                    })
+            .filter_map(|(_, name, content_range)| {
+                Some(Identifier::new(name.clone(), content_range?))
             })
             .collect();
         let pytest_info = PytestBindingInfo::from_module(&x);

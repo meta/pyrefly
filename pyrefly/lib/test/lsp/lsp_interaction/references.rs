@@ -45,6 +45,11 @@ fn references_dunder_all_uses_open_buffer_binding() {
             ]))
             .unwrap();
     }
+    interaction
+        .client
+        .definition("main.py", 2, 13)
+        .expect_definition_response_from_root("main.py", 1, 0, 1, 3)
+        .unwrap();
     interaction.shutdown().unwrap();
 }
 

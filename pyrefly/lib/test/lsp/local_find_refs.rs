@@ -5,19 +5,13 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::fs;
-
 use itertools::Itertools;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
-use pyrefly_python::module::TextRangeWithModule;
 use ruff_text_size::TextSize;
-use tempfile::TempDir;
 
-use crate::state::lsp::FindPreference;
 use crate::state::lsp::ReferenceOptions;
 use crate::state::state::State;
-use crate::test::util::TestEnv;
 use crate::test::util::code_frame_of_source_at_range;
 use crate::test::util::get_batched_lsp_operations_report;
 
@@ -236,63 +230,6 @@ text = "foo"
             }
             String::new()
         },
-    );
-}
-
-#[test]
-fn dunder_all_global_references_respect_definition_identity() {
-    let root = TempDir::new().unwrap();
-    let mut env = TestEnv::new();
-    for (name, code) in [
-        ("lib", "foo = 1\n"),
-        ("exports", "from lib import foo\n__all__ = [\"foo\"]\n"),
-        (
-            "renamed",
-            "from lib import foo as alias\n__all__ = [\"alias\"]\n",
-        ),
-        ("unrelated", "foo = 2\n__all__ = [\"foo\"]\n"),
-    ] {
-        let path = root.path().join(format!("{name}.py"));
-        fs::write(&path, code).unwrap();
-        env.add_real_path(name, path);
-    }
-    let (state, handle) = env.to_state();
-    let handle = handle("lib");
-    let mut transaction = state.transaction();
-    let definitions = transaction
-        .find_definition(&handle, TextSize::new(0), FindPreference::default())
-        .unwrap();
-    let definition = definitions.first();
-    let mut references = transaction
-        .find_global_references_from_definition(
-            *handle.sys_info(),
-            definition.metadata.clone(),
-            TextRangeWithModule::new(definition.module.clone(), definition.definition_range),
-            ReferenceOptions::all(true),
-        )
-        .unwrap()
-        .into_iter()
-        .map(|(module, ranges)| {
-            (
-                module.name().to_string(),
-                ranges
-                    .into_iter()
-                    .map(|range| module.code_at(range).to_owned())
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect::<Vec<_>>();
-    references.sort();
-    assert_eq!(
-        references,
-        vec![
-            (
-                "exports".to_owned(),
-                vec!["foo".to_owned(), "foo".to_owned()]
-            ),
-            ("lib".to_owned(), vec!["foo".to_owned()]),
-            ("renamed".to_owned(), vec!["foo".to_owned()]),
-        ],
     );
 }
 

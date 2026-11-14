@@ -74,7 +74,6 @@ use crate::solver::solver::VarRecurser;
 use crate::state::errors::ModuleRanges;
 use crate::state::ide::IntermediateDefinition;
 use crate::state::ide::key_to_intermediate_definition;
-use crate::state::lsp::dunder_all_binding;
 use crate::state::state::ModuleChanges;
 use crate::table;
 use crate::table_for_each;
@@ -1530,7 +1529,7 @@ impl Answers {
             let mut index = index.lock();
             // Retain export occurrences so unopened reverse dependencies need no AST or answers.
             for entry in bindings.dunder_all_entries() {
-                if let Some(key) = dunder_all_binding(bindings, &entry.id)
+                if let Some(key) = bindings.dunder_all_binding(&entry.id)
                     && let Some(IntermediateDefinition::NamedImport(_, module, name, None)) =
                         key_to_intermediate_definition(bindings, key)
                 {

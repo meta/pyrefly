@@ -87,7 +87,6 @@ use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
 use crate::binding::binding::KeyExport;
-use crate::binding::bindings::Bindings;
 use crate::binding::metadata::BindingsMetadata;
 use crate::config::error_kind::ErrorKind;
 use crate::error::error::ErrorQuickFix;
@@ -381,12 +380,6 @@ fn definition_matcher(
             || (candidate_name == definition_name
                 && module.to_lsp_position(candidate_range.start()).line == definition_line)
     }
-}
-
-/// Connect an export name to its final local binding, including local import aliases.
-pub(crate) fn dunder_all_binding<'a>(bindings: &'a Bindings, name: &Name) -> Option<&'a Key> {
-    let export = bindings.key_to_idx_hashed_opt(Hashed::new(&KeyExport(name.clone())))?;
-    Some(bindings.idx_to_key(bindings.get(export).key_idx()))
 }
 
 /// Parses a forward-reference string such as `"list[Foo]"` into the expression the binder
@@ -2156,12 +2149,12 @@ impl<'a> Transaction<'a> {
     /// a different file, because the interface then describes that other module. Resolution can
     /// also find no executable and fall back to the interface, for example for a `-stubs` package;
     /// the interface is still used then. Open files have in-memory module paths, so the file
-    /// paths are compared rather than the module paths.
-    fn find_corresponding_interface_definition(
+    /// paths are compared rather than the module paths. The result includes the docstring range.
+    pub(crate) fn find_corresponding_interface_definition(
         &self,
         sys_info: SysInfo,
         definition: &TextRangeWithModule,
-    ) -> Option<TextRangeWithModule> {
+    ) -> Option<(TextRangeWithModule, Option<TextRange>)> {
         if definition.module.path().style() != ModuleStyle::Executable {
             return None;
         }
@@ -2194,9 +2187,12 @@ impl<'a> Transaction<'a> {
         }
         let context = AttributeContext::from_module(&definition.module, definition.range)?;
         let name = Name::new(definition.module.code_at(definition.range));
-        let (interface_module, range, _) =
+        let (interface_module, range, docstring_range) =
             self.find_declaration_in_module(&interface_handle, &context, &name)?;
-        Some(TextRangeWithModule::new(interface_module, range))
+        Some((
+            TextRangeWithModule::new(interface_module, range),
+            docstring_range,
+        ))
     }
 
     /// Find the declaration of `name` in the scope that `context` describes, within the module
@@ -2939,18 +2935,11 @@ impl<'a> Transaction<'a> {
         let exports = self.get_exports_data(handle);
         let (_entry_range, name) = exports.dunder_all_name_at(position)?;
 
-        let definition = match preference.import_behavior {
-            ImportBehavior::JumpThroughEverything => self
-                .resolve_named_import(handle, module_info.name(), name.clone(), preference)
-                .map(|(handle, _, export)| (handle, export)),
-            // Reference queries start from the checked binding and preserve local aliases.
-            ImportBehavior::StopAtEverything | ImportBehavior::StopAtRenamedImports => {
-                let answers = self.get_answers(handle)?;
-                let key = dunder_all_binding(answers.bindings(), &name)?;
+        let answers = self.get_answers(handle)?;
+        if let Some(key) = answers.bindings().dunder_all_binding(&name)
+            && let Some((definition_handle, export)) =
                 self.find_export_for_key(handle, key, preference).ok()?
-            }
-        };
-        if let Some((definition_handle, export)) = definition {
+        {
             let definition_module = self.get_module_info(&definition_handle)?;
             return Some(FindDefinitionItemWithDocstring {
                 metadata: DefinitionMetadata::VariableOrAttribute(export.symbol_kind),
@@ -4681,7 +4670,7 @@ impl<'a> Transaction<'a> {
 
             // Also block rename if the stub that consumers are checked against cannot be edited,
             // because renaming the definition without that stub would break its consumers.
-            if let Some(interface) = self.find_corresponding_interface_definition(
+            if let Some((interface, _)) = self.find_corresponding_interface_definition(
                 *handle.sys_info(),
                 &TextRangeWithModule::new(module, definition_range),
             ) && (interface.module.path().is_bundled()
@@ -5182,7 +5171,9 @@ impl<'a> Transaction<'a> {
                 let bindings = answers.bindings();
                 references.extend(bindings.dunder_all_entries().iter().filter_map(|entry| {
                     (entry.id == *expected_name
-                        && dunder_all_binding(bindings, &entry.id).is_some_and(is_valid_key))
+                        && bindings
+                            .dunder_all_binding(&entry.id)
+                            .is_some_and(is_valid_key))
                     .then_some(entry.range)
                 }));
             }
@@ -5731,6 +5722,7 @@ impl<'a> RdepTransaction for Transaction<'a> {
         definition: &TextRangeWithModule,
     ) -> Option<TextRangeWithModule> {
         self.find_corresponding_interface_definition(sys_info, definition)
+            .map(|(definition, _)| definition)
     }
 
     fn local_references_from_definition(
@@ -5775,6 +5767,7 @@ impl<'a> RdepTransaction for CancellableTransaction<'a> {
     ) -> Option<TextRangeWithModule> {
         self.as_ref()
             .find_corresponding_interface_definition(sys_info, definition)
+            .map(|(definition, _)| definition)
     }
 
     fn local_references_from_definition(
