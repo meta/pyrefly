@@ -5,12 +5,75 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
+
 use lsp_types::Uri;
 use pyrefly_lsp_test::object_model::InitializeSettings;
 use pyrefly_lsp_test::object_model::LspInteraction;
 use serde_json::json;
+use tempfile::TempDir;
 
 use crate::test::lsp::lsp_interaction::util::get_test_files_root;
+
+#[test]
+fn hover_dunder_all_uses_open_buffer_export() {
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("main.pyi"), "value: bytes\n").unwrap();
+    fs::write(
+        root.path().join("main.py"),
+        "value = 1\n__all__ = ['value']\n",
+    )
+    .unwrap();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("main.py");
+    interaction.client.did_change(
+        "main.py",
+        "\nvalue = 1\nvalue = 'final'\n__all__ = ['value']\n",
+    );
+    interaction
+        .client
+        .hover("main.py", 3, 13)
+        .expect_hover_response_with_markup(|value| {
+            value.is_some_and(|text| text.contains("(variable) value: str"))
+        })
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn hover_dunder_all_uses_unopened_dependency_export() {
+    for with_stub in [false, true] {
+        let root = TempDir::new().unwrap();
+        fs::write(root.path().join("dep.py"), "value: int = 1\n").unwrap();
+        if with_stub {
+            fs::write(root.path().join("dep.pyi"), "value: str\n").unwrap();
+        }
+        fs::write(
+            root.path().join("main.py"),
+            "from dep import value as public\n__all__ = ['public']\n",
+        )
+        .unwrap();
+        let mut interaction = LspInteraction::new();
+        interaction.set_root(root.path().to_path_buf());
+        interaction.initialize(Default::default()).unwrap();
+        interaction.client.did_open("main.py");
+        let expected = if with_stub {
+            "value: str"
+        } else {
+            "value: int"
+        };
+        interaction
+            .client
+            .hover("main.py", 1, 13)
+            .expect_hover_response_with_markup(|value| {
+                value.is_some_and(|text| text.contains(expected))
+            })
+            .unwrap();
+        interaction.shutdown().unwrap();
+    }
+}
 
 #[test]
 fn test_hover_basic() {
