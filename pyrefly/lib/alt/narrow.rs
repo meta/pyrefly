@@ -26,7 +26,6 @@ use pyrefly_types::type_info::JoinStyle;
 use pyrefly_types::typed_dict::ExtraItems;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::visit::Visit;
-use ruff_python_ast::Arguments;
 use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprBinOp;
@@ -54,10 +53,14 @@ use crate::alt::types::instance::Instance;
 use crate::binding::binding::Key;
 use crate::binding::binding::MatchCaseNegations;
 use crate::binding::narrow::AtomicNarrowOp;
+use crate::binding::narrow::CallCandidate;
 use crate::binding::narrow::FacetOrigin;
 use crate::binding::narrow::FacetSubject;
+use crate::binding::narrow::GuardNarrowing;
+use crate::binding::narrow::GuardSubject;
 use crate::binding::narrow::NarrowOp;
 use crate::binding::narrow::NarrowSource;
+use crate::binding::narrow::NarrowingCall;
 use crate::binding::narrow::NarrowingSubject;
 use crate::error::collector::ErrorCollector;
 use crate::error::style::ErrorStyle;
@@ -98,6 +101,16 @@ fn synthesize_int_slice(idx: i64) -> Expr {
 }
 
 /// Append `facet` to an existing facet chain, or start a new one.
+/// Whether a recorded candidate argument is the one that standard call resolution
+/// identified as supplying the `TypeGuard`/`TypeIs` designated parameter. A positional
+/// candidate (`kw == None`) stands for the call's first positional argument.
+fn candidate_matches(candidate: &CallCandidate, subject: &GuardSubject) -> bool {
+    match subject {
+        GuardSubject::Keyword(name) => candidate.kw.as_ref() == Some(name),
+        GuardSubject::Positional(index) => candidate.kw.is_none() && *index == 0,
+    }
+}
+
 fn extend_facet_chain(resolved_chain: Option<&FacetChain>, facet: FacetKind) -> Vec1<FacetKind> {
     match resolved_chain {
         Some(chain) => {
@@ -683,13 +696,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     fn resolve_narrowing_call(
         &self,
-        func: &Expr,
-        args: &Arguments,
+        call: &NarrowingCall,
+        candidates: &[CallCandidate],
         errors: &ErrorCollector,
     ) -> Option<AtomicNarrowOp> {
-        let func_ty = self.expr_infer(func, errors);
-        if args.args.len() > 1 {
-            let second_arg = &args.args[1];
+        let func_ty = self.expr_infer(&call.func, errors);
+        if call.args.args.len() > 1 {
+            let second_arg = &call.args.args[1];
             let op = match func_ty.callee_kind() {
                 Some(CalleeKind::Function(FunctionKind::IsInstance)) => Some(
                     AtomicNarrowOp::IsInstance(second_arg.clone(), NarrowSource::Call),
@@ -703,12 +716,67 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 return op;
             }
         }
-        if func_ty.is_typeis() {
-            Some(AtomicNarrowOp::TypeIs(func_ty.clone(), args.clone()))
-        } else if func_ty.is_typeguard() {
-            Some(AtomicNarrowOp::TypeGuard(func_ty.clone(), args.clone()))
-        } else {
-            None
+        // Cheaply reject callees that cannot produce a `TypeGuard`/`TypeIs` result before
+        // paying for full call resolution.
+        if !func_ty.is_typeis() && !func_ty.is_typeguard() {
+            return None;
+        }
+        let CallTargetLookup::Ok(call_target) = self.as_call_target(func_ty.clone()) else {
+            return None;
+        };
+        let args = call.args.args.map(CallArg::expr_maybe_starred);
+        let keywords = call.args.keywords.map(CallKeyword::new);
+        // The resolution errors are recorded in this throwaway collector, and dropped with
+        // it because they are reported by the own inference of the call. Recording them
+        // lets a call that does not go through cleanly be detected here.
+        let thrown_away_errors = self.error_collector();
+        let outcome = self.call_infer(
+            *call_target,
+            &args,
+            &keywords,
+            call.args.range(),
+            &thrown_away_errors,
+            None,
+            None,
+            None,
+        );
+        // A keyword-supplied candidate argument only narrows when the call goes through
+        // cleanly: a call that reports any error (for example a keyword bound to a
+        // positional-only parameter) raises `TypeError` at runtime and does not narrow.
+        if !thrown_away_errors.is_empty() && candidates.iter().any(|c| c.kw.is_some()) {
+            return None;
+        }
+        // The narrowed type and the guarded argument come from the same call resolution; a
+        // call whose resolution lands on a non-guard result (for example through overloads)
+        // does not narrow.
+        match outcome.ty {
+            Type::TypeIs(narrowed) => {
+                let target = if func_ty.callee_kind()
+                    == Some(CalleeKind::Function(FunctionKind::Callable))
+                {
+                    // `callable` is annotated as `TypeIs[Callable[..., object]]` which is
+                    // too conservative and prone to false positives, see
+                    // https://github.com/facebook/pyrefly/issues/911
+                    self.heap.mk_callable_ellipsis(self.heap.mk_any_implicit())
+                } else {
+                    *narrowed
+                };
+                Some(AtomicNarrowOp::TypeIs(Box::new(GuardNarrowing {
+                    narrowed: target,
+                    func_ty,
+                    args: call.args.clone(),
+                    subject: outcome.guard_subject,
+                })))
+            }
+            Type::TypeGuard(narrowed) => {
+                Some(AtomicNarrowOp::TypeGuard(Box::new(GuardNarrowing {
+                    narrowed: *narrowed,
+                    func_ty,
+                    args: call.args.clone(),
+                    subject: outcome.guard_subject,
+                })))
+            }
+            _ => None,
         }
     }
 
@@ -1618,6 +1686,112 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
+    /// Apply one facet-aware narrow: resolve the facet chain, narrow the facet type,
+    /// record it on the subject, and narrow the subject itself through the facet when
+    /// applicable (a facet narrow of the last facet element also filters the subject).
+    fn narrow_by_facet(
+        &self,
+        type_info: &TypeInfo,
+        facet_subject: &FacetSubject,
+        op: &AtomicNarrowOp,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) -> TypeInfo {
+        let Some(resolved_chain) = self.resolve_facet_chain(facet_subject.chain.clone()) else {
+            return type_info.clone();
+        };
+        match (facet_subject.origin, resolved_chain.facets().as_slice()) {
+            (FacetOrigin::GetMethod, _)
+                if !self.supports_dict_get_subject(type_info, facet_subject, range) =>
+            {
+                return type_info.clone();
+            }
+            (FacetOrigin::MatchSubject, [FacetKind::Index(index)]) => {
+                let index = usize::try_from(*index)
+                    .expect("Match subject indices are nonnegative tuple positions");
+                // Keep element constraints in the evaluated tuple's type so that
+                // joining alternatives preserves their correlation across cases.
+                // For example, excluding (None, None) leaves a union of tuples
+                // with either the first or the second element known to be present.
+                let ty = self.distribute_over_union(type_info.ty(), |ty| match ty {
+                    Type::Tuple(Tuple::Concrete(elements)) if index < elements.len() => {
+                        match self.atomic_narrow(&elements[index], op, range, errors) {
+                            narrowed @ Type::Never(_) => narrowed,
+                            narrowed => {
+                                let mut elements = elements.clone();
+                                elements[index] = narrowed;
+                                self.heap.mk_concrete_tuple(elements)
+                            }
+                        }
+                    }
+                    _ => ty.clone(),
+                });
+                return type_info.clone().with_ty(ty);
+            }
+            _ => {}
+        }
+        let ty = self.atomic_narrow(
+            &self.get_facet_chain_type(type_info, &resolved_chain, range),
+            op,
+            range,
+            errors,
+        );
+        // A match-arm negation may build on a facet narrow from an earlier arm.
+        // If the accumulated facet is impossible, the whole subject is impossible.
+        if facet_subject.origin == FacetOrigin::MatchSubject
+            && facet_subject.allow_never_collapse
+            && ty.is_never()
+        {
+            return type_info.clone().with_ty(ty);
+        }
+        let mut narrowed = type_info.with_narrow(resolved_chain.facets(), ty);
+        // For certain types of narrows, we can also narrow the parent of the current subject
+        // If `.get()` on a dict or TypedDict is falsy, the key may not be present at all
+        // We should invalidate any existing narrows
+        if let Some((last, prefix)) = resolved_chain.facets().split_last() {
+            match Vec1::try_from(prefix) {
+                Ok(prefix_facets) => {
+                    let prefix_chain = FacetChain::new(prefix_facets);
+                    let base_ty = self.get_facet_chain_type(type_info, &prefix_chain, range);
+                    let dict_get_key_falsy =
+                        matches!(op, AtomicNarrowOp::IsFalsy) && matches!(last, FacetKind::Key(_));
+                    if dict_get_key_falsy {
+                        narrowed.update_for_assignment(resolved_chain.facets(), None);
+                    } else if let Some(narrowed_ty) = self.atomic_narrow_for_facet(
+                        &base_ty,
+                        last,
+                        op,
+                        facet_subject.allow_never_collapse,
+                        range,
+                        errors,
+                    ) && narrowed_ty != base_ty
+                    {
+                        narrowed = narrowed.with_narrow(prefix_chain.facets(), narrowed_ty);
+                    }
+                }
+                _ => {
+                    let base_ty = type_info.ty();
+                    let dict_get_key_falsy =
+                        matches!(op, AtomicNarrowOp::IsFalsy) && matches!(last, FacetKind::Key(_));
+                    if dict_get_key_falsy {
+                        narrowed.update_for_assignment(resolved_chain.facets(), None);
+                    } else if let Some(narrowed_ty) = self.atomic_narrow_for_facet(
+                        base_ty,
+                        last,
+                        op,
+                        facet_subject.allow_never_collapse,
+                        range,
+                        errors,
+                    ) && narrowed_ty != *base_ty
+                    {
+                        narrowed = narrowed.clone().with_ty(narrowed_ty);
+                    }
+                }
+            };
+        }
+        narrowed
+    }
+
     pub(crate) fn atomic_narrow(
         &self,
         ty: &Type,
@@ -1627,6 +1801,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Type {
         match op {
             AtomicNarrowOp::Placeholder => ty.clone(),
+            // Call narrowing is applied in `narrow`, which selects the guarded argument
+            // before producing any facet effect; `atomic_narrow` is only reached for the
+            // instantiated `TypeIs`/`TypeGuard` forms.
+            AtomicNarrowOp::Call(..) | AtomicNarrowOp::NotCall(..) => ty.clone(),
             AtomicNarrowOp::MatchSubjectElement(subject, index) => {
                 let element = self.get_facet_chain_type(
                     self.get_idx(*subject),
@@ -1995,89 +2173,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             AtomicNarrowOp::NotHasKey(_) => ty.clone(),
             AtomicNarrowOp::GetAttr(_, _) => ty.clone(),
             AtomicNarrowOp::NotGetAttr(_, _) => ty.clone(),
-            AtomicNarrowOp::TypeGuard(t, arguments) => {
-                if let CallTargetLookup::Ok(call_target) = self.as_call_target(t.clone()) {
-                    let args = arguments.args.map(CallArg::expr_maybe_starred);
-                    let kws = arguments.keywords.map(CallKeyword::new);
-                    // This error is raised elsewhere, swallow here to avoid duplicate errors
-                    let swallowed_errors = self.error_swallower();
-                    let ret = self
-                        .call_infer(
-                            *call_target,
-                            &args,
-                            &kws,
-                            range,
-                            &swallowed_errors,
-                            None,
-                            None,
-                            None,
-                        )
-                        .ty;
-                    if let Type::TypeGuard(t) = ret {
-                        return *t;
-                    }
-                }
-                ty.clone()
+            // The call was already resolved when the op was produced; the narrowed type is
+            // instantiated and carries the identified guarded argument.
+            AtomicNarrowOp::TypeGuard(narrowing) => narrowing.narrowed.clone(),
+            AtomicNarrowOp::NotTypeGuard(_) => ty.clone(),
+            AtomicNarrowOp::TypeIs(narrowing) => {
+                self.narrow_typeis(ty, &narrowing.narrowed, range, errors)
             }
-            AtomicNarrowOp::NotTypeGuard(_, _) => ty.clone(),
-            AtomicNarrowOp::TypeIs(t, arguments) => {
-                let is_builtin_callable =
-                    t.callee_kind() == Some(CalleeKind::Function(FunctionKind::Callable));
-                if let CallTargetLookup::Ok(call_target) = self.as_call_target(t.clone()) {
-                    let args = arguments.args.map(CallArg::expr_maybe_starred);
-                    let kws = arguments.keywords.map(CallKeyword::new);
-                    // This error is raised elsewhere, swallow here to avoid duplicate errors
-                    let swallowed_errors = self.error_swallower();
-                    let ret = self
-                        .call_infer(
-                            *call_target,
-                            &args,
-                            &kws,
-                            range,
-                            &swallowed_errors,
-                            None,
-                            None,
-                            None,
-                        )
-                        .ty;
-                    if let Type::TypeIs(t) = ret {
-                        let target = if is_builtin_callable {
-                            // `callable` is annotated as `TypeIs[Callable[..., object]]` which is
-                            // too conservative and prone to false positives, see
-                            // https://github.com/facebook/pyrefly/issues/911
-                            self.heap.mk_callable_ellipsis(self.heap.mk_any_implicit())
-                        } else {
-                            *t
-                        };
-                        return self.narrow_typeis(ty, &target, range, errors);
-                    }
-                }
-                ty.clone()
-            }
-            AtomicNarrowOp::NotTypeIs(t, arguments) => {
-                if let CallTargetLookup::Ok(call_target) = self.as_call_target(t.clone()) {
-                    let args = arguments.args.map(CallArg::expr_maybe_starred);
-                    let kws = arguments.keywords.map(CallKeyword::new);
-                    // This error is raised elsewhere, swallow here to avoid duplicate errors
-                    let swallowed_errors = self.error_swallower();
-                    let ret = self
-                        .call_infer(
-                            *call_target,
-                            &args,
-                            &kws,
-                            range,
-                            &swallowed_errors,
-                            None,
-                            None,
-                            None,
-                        )
-                        .ty;
-                    if let Type::TypeIs(t) = ret {
-                        return self.subtract(ty, &t);
-                    }
-                }
-                ty.clone()
-            }
+            AtomicNarrowOp::NotTypeIs(narrowing) => self.subtract(ty, &narrowing.narrowed),
             AtomicNarrowOp::IsTruthy | AtomicNarrowOp::IsFalsy => {
                 let boolval = matches!(op, AtomicNarrowOp::IsTruthy);
                 // Do not emit errors here: the narrowed range doesn't always correspond to a valid expression
@@ -2162,17 +2265,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         }
                         _ => t.clone(),
                     })
-                } else {
-                    ty.clone()
-                }
-            }
-            AtomicNarrowOp::Call(func, args) | AtomicNarrowOp::NotCall(func, args) => {
-                if let Some(resolved_op) = self.resolve_narrowing_call(func, args, errors) {
-                    if matches!(op, AtomicNarrowOp::Call(..)) {
-                        self.atomic_narrow(ty, &resolved_op, range, errors)
-                    } else {
-                        self.atomic_narrow(ty, &resolved_op.negate(), range, errors)
-                    }
                 } else {
                     ty.clone()
                 }
@@ -2473,6 +2565,60 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     type_info.with_narrow(&facets, narrowed_ty)
                 }
             }
+            NarrowOp::Atomic(
+                None,
+                op @ (AtomicNarrowOp::Call(..) | AtomicNarrowOp::NotCall(..)),
+            ) => {
+                let (call, candidates, is_call) = match op {
+                    AtomicNarrowOp::Call(call, candidates) => (call, candidates, true),
+                    AtomicNarrowOp::NotCall(call, candidates) => (call, candidates, false),
+                    _ => unreachable!("matched above"),
+                };
+                let Some(resolved_atomic) = self.resolve_narrowing_call(call, candidates, errors)
+                else {
+                    return type_info.clone();
+                };
+                // Standard call resolution identified the argument that supplies the
+                // guarded parameter. Only the recorded candidates matching that argument
+                // contribute; the other candidates of the same call are absent effects, not
+                // operands to AND or OR, so both polarities narrow consistently. Calls
+                // without an identified argument (isinstance-style narrowing of the first
+                // positional argument) apply to every candidate.
+                let selected: Vec<&CallCandidate> = match resolved_atomic.guard_subject() {
+                    Some(subject) => candidates
+                        .iter()
+                        .filter(|candidate| candidate_matches(candidate, subject))
+                        .collect(),
+                    None => candidates.iter().collect(),
+                };
+                if selected.is_empty() {
+                    return type_info.clone();
+                }
+                let mut narrowed_info = type_info.clone();
+                for candidate in selected {
+                    let atomic = if is_call {
+                        resolved_atomic.clone()
+                    } else {
+                        resolved_atomic.negate()
+                    };
+                    match &candidate.facet {
+                        None => {
+                            let ty = self.atomic_narrow(
+                                &self.force_for_narrowing(type_info.ty(), range, errors),
+                                &atomic,
+                                range,
+                                errors,
+                            );
+                            narrowed_info = self.rebase_type_info(&narrowed_info, ty);
+                        }
+                        Some(facet) => {
+                            narrowed_info =
+                                self.narrow_by_facet(&narrowed_info, facet, &atomic, range, errors);
+                        }
+                    }
+                }
+                narrowed_info
+            }
             NarrowOp::Atomic(None, op) => {
                 let ty = self.atomic_narrow(
                     &self.force_for_narrowing(type_info.ty(), range, errors),
@@ -2483,119 +2629,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.rebase_type_info(type_info, ty)
             }
             NarrowOp::Atomic(Some(facet_subject), op) => {
-                let Some(resolved_chain) = self.resolve_facet_chain(facet_subject.chain.clone())
-                else {
+                if matches!(op, AtomicNarrowOp::Call(..) | AtomicNarrowOp::NotCall(..)) {
+                    // Call narrowing is applied in the `None` facet arm above, which
+                    // selects the guarded argument before any facet effect is produced.
                     return type_info.clone();
-                };
-                let Some(op_for_narrow) = (match op {
-                    AtomicNarrowOp::Call(func, args) => {
-                        self.resolve_narrowing_call(func.as_ref(), args, errors)
-                    }
-                    AtomicNarrowOp::NotCall(func, args) => self
-                        .resolve_narrowing_call(func.as_ref(), args, errors)
-                        .map(|resolved_op| resolved_op.negate()),
-                    _ => Some(op.clone()),
-                }) else {
-                    return type_info.clone();
-                };
-                match (facet_subject.origin, resolved_chain.facets().as_slice()) {
-                    (FacetOrigin::GetMethod, _)
-                        if !self.supports_dict_get_subject(type_info, facet_subject, range) =>
-                    {
-                        return type_info.clone();
-                    }
-                    (FacetOrigin::MatchSubject, [FacetKind::Index(index)]) => {
-                        let index = usize::try_from(*index)
-                            .expect("Match subject indices are nonnegative tuple positions");
-                        // Keep element constraints in the evaluated tuple's type so that
-                        // joining alternatives preserves their correlation across cases.
-                        // For example, excluding (None, None) leaves a union of tuples
-                        // with either the first or the second element known to be present.
-                        let ty = self.distribute_over_union(type_info.ty(), |ty| match ty {
-                            Type::Tuple(Tuple::Concrete(elements)) if index < elements.len() => {
-                                match self.atomic_narrow(
-                                    &elements[index],
-                                    &op_for_narrow,
-                                    range,
-                                    errors,
-                                ) {
-                                    narrowed @ Type::Never(_) => narrowed,
-                                    narrowed => {
-                                        let mut elements = elements.clone();
-                                        elements[index] = narrowed;
-                                        self.heap.mk_concrete_tuple(elements)
-                                    }
-                                }
-                            }
-                            _ => ty.clone(),
-                        });
-                        return type_info.clone().with_ty(ty);
-                    }
-                    _ => {}
                 }
-                let ty = self.atomic_narrow(
-                    &self.get_facet_chain_type(type_info, &resolved_chain, range),
-                    &op_for_narrow,
-                    range,
-                    errors,
-                );
-                // A match-arm negation may build on a facet narrow from an earlier arm.
-                // If the accumulated facet is impossible, the whole subject is impossible.
-                if facet_subject.origin == FacetOrigin::MatchSubject
-                    && facet_subject.allow_never_collapse
-                    && ty.is_never()
-                {
-                    return type_info.clone().with_ty(ty);
-                }
-                let mut narrowed = type_info.with_narrow(resolved_chain.facets(), ty);
-                // For certain types of narrows, we can also narrow the parent of the current subject
-                // If `.get()` on a dict or TypedDict is falsy, the key may not be present at all
-                // We should invalidate any existing narrows
-                if let Some((last, prefix)) = resolved_chain.facets().split_last() {
-                    match Vec1::try_from(prefix) {
-                        Ok(prefix_facets) => {
-                            let prefix_chain = FacetChain::new(prefix_facets);
-                            let base_ty =
-                                self.get_facet_chain_type(type_info, &prefix_chain, range);
-                            let dict_get_key_falsy =
-                                matches!(op_for_narrow, AtomicNarrowOp::IsFalsy)
-                                    && matches!(last, FacetKind::Key(_));
-                            if dict_get_key_falsy {
-                                narrowed.update_for_assignment(resolved_chain.facets(), None);
-                            } else if let Some(narrowed_ty) = self.atomic_narrow_for_facet(
-                                &base_ty,
-                                last,
-                                &op_for_narrow,
-                                facet_subject.allow_never_collapse,
-                                range,
-                                errors,
-                            ) && narrowed_ty != base_ty
-                            {
-                                narrowed = narrowed.with_narrow(prefix_chain.facets(), narrowed_ty);
-                            }
-                        }
-                        _ => {
-                            let base_ty = type_info.ty();
-                            let dict_get_key_falsy =
-                                matches!(op_for_narrow, AtomicNarrowOp::IsFalsy)
-                                    && matches!(last, FacetKind::Key(_));
-                            if dict_get_key_falsy {
-                                narrowed.update_for_assignment(resolved_chain.facets(), None);
-                            } else if let Some(narrowed_ty) = self.atomic_narrow_for_facet(
-                                base_ty,
-                                last,
-                                &op_for_narrow,
-                                facet_subject.allow_never_collapse,
-                                range,
-                                errors,
-                            ) && narrowed_ty != *base_ty
-                            {
-                                narrowed = narrowed.clone().with_ty(narrowed_ty);
-                            }
-                        }
-                    };
-                }
-                narrowed
+                self.narrow_by_facet(type_info, facet_subject, op, range, errors)
             }
             NarrowOp::And(ops) => {
                 let mut ops_iter = ops.iter();

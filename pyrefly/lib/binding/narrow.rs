@@ -6,6 +6,7 @@
  */
 
 use std::fmt;
+use std::sync::Arc;
 
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
@@ -49,8 +50,8 @@ use crate::types::facet::UnresolvedFacetChain;
 use crate::types::facet::UnresolvedFacetKind;
 use crate::types::types::Type;
 
-assert_words!(AtomicNarrowOp, 9);
-assert_words!(NarrowOp, 11);
+assert_words!(AtomicNarrowOp, 8);
+assert_words!(NarrowOp, 10);
 
 /// Indicates where an isinstance-style narrow operation originated from.
 /// This determines whether validation needs to happen during narrowing.
@@ -60,6 +61,49 @@ pub enum NarrowSource {
     Call,
     /// From a match pattern - needs validation during narrowing.
     Pattern,
+}
+
+/// A call that is recorded as a possible `TypeGuard`/`TypeIs` guard.
+#[derive(Clone, Debug)]
+pub struct NarrowingCall {
+    pub func: Box<Expr>,
+    pub args: Arguments,
+}
+
+/// The actual argument that supplies the designated parameter of a `TypeGuard`/`TypeIs`
+/// result, as identified by standard call resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GuardSubject {
+    /// A positional argument, indexed from the first argument after the receiver.
+    Positional(usize),
+    /// A named keyword argument.
+    Keyword(Name),
+}
+
+/// A resolved `TypeGuard`/`TypeIs` call: the instantiated guard argument that the subject
+/// narrows to, plus the original call for display.
+#[derive(Clone, Debug)]
+pub struct GuardNarrowing {
+    /// The instantiated argument of the guard result that the subject narrows to.
+    pub narrowed: Type,
+    /// The original callee, for display.
+    pub func_ty: Type,
+    pub args: Arguments,
+    /// The guarded argument identified by standard call resolution, when it identified one.
+    /// `None` means the narrowing is declined (or, for isinstance-style narrowing, that
+    /// every candidate applies).
+    pub subject: Option<GuardSubject>,
+}
+
+/// One actual argument of a narrowing call that may be the subject its guard result
+/// constrains.
+#[derive(Clone, Debug)]
+pub struct CallCandidate {
+    /// The keyword supplying the candidate argument, or `None` for the first positional
+    /// argument.
+    pub kw: Option<Name>,
+    /// The facet subject of the candidate's value expression, when it is not a plain name.
+    pub facet: Option<FacetSubject>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,10 +122,22 @@ pub enum AtomicNarrowOp {
     NotHasAttr(Name),
     GetAttr(Name, Option<Box<Expr>>),
     NotGetAttr(Name, Option<Box<Expr>>),
-    TypeGuard(Type, Arguments),
-    NotTypeGuard(Type, Arguments),
-    TypeIs(Type, Arguments),
-    NotTypeIs(Type, Arguments),
+    /// A `TypeGuard`/`TypeIs` call resolved by standard call resolution. Standard
+    /// resolution identifies which actual argument supplies the guarded parameter
+    /// (`GuardNarrowing::subject`); only the candidate matching that argument contributes
+    /// a narrow, and the other candidates of the same call contribute nothing in either
+    /// polarity.
+    TypeGuard(Box<GuardNarrowing>),
+    NotTypeGuard(Box<GuardNarrowing>),
+    TypeIs(Box<GuardNarrowing>),
+    NotTypeIs(Box<GuardNarrowing>),
+    /// A call that may narrow the type of one of its arguments via a `TypeGuard`/`TypeIs`
+    /// result. Each candidate describes one actual argument: its keyword name (`None` for
+    /// the first positional argument) and the facet subject of its value expression, if
+    /// any. The call is shared because one call can produce candidates for several
+    /// subjects, and cloning the call AST for each of them is quadratic.
+    Call(Arc<NarrowingCall>, Vec<CallCandidate>),
+    NotCall(Arc<NarrowingCall>, Vec<CallCandidate>),
     // type(x) == y or type(x) is y
     TypeEq(Expr),
     TypeNotEq(Expr),
@@ -116,9 +172,7 @@ pub enum AtomicNarrowOp {
     /// Used to narrow to mapping types (types that extend typing.Mapping)
     IsMapping,
     IsNotMapping,
-    /// (func, args) for a function call that may narrow the type of its first argument.
-    Call(Box<Expr>, Arguments),
-    NotCall(Box<Expr>, Arguments),
+
     /// A narrow op applies to a name; these operations mean we are narrowing to the case
     /// when that name evaluates to a truthy or falsy value.
     IsTruthy,
@@ -162,8 +216,8 @@ impl NarrowOp {
                     | AtomicNarrowOp::IsNotSubclass(_)
                     | AtomicNarrowOp::TypeEq(_)
                     | AtomicNarrowOp::TypeNotEq(_)
-                    | AtomicNarrowOp::Call(_, _)
-                    | AtomicNarrowOp::NotCall(_, _)
+                    | AtomicNarrowOp::Call(..)
+                    | AtomicNarrowOp::NotCall(..)
                     | AtomicNarrowOp::IsTruthy
                     | AtomicNarrowOp::IsFalsy
                     | AtomicNarrowOp::MatchSubjectElement(_, _)
@@ -223,17 +277,37 @@ impl DisplayWith<ModuleInfo> for AtomicNarrowOp {
             AtomicNarrowOp::NotGetAttr(attr, None) => {
                 write!(f, "NotGetAttr({attr}, None)")
             }
-            AtomicNarrowOp::TypeGuard(t, arguments) => {
-                write!(f, "TypeGuard({t}, {})", arguments.display_with(ctx))
+            AtomicNarrowOp::TypeGuard(narrowing) => {
+                write!(
+                    f,
+                    "TypeGuard({}, {})",
+                    narrowing.func_ty,
+                    narrowing.args.display_with(ctx)
+                )
             }
-            AtomicNarrowOp::NotTypeGuard(t, arguments) => {
-                write!(f, "NotTypeGuard({t}, {})", arguments.display_with(ctx))
+            AtomicNarrowOp::NotTypeGuard(narrowing) => {
+                write!(
+                    f,
+                    "NotTypeGuard({}, {})",
+                    narrowing.func_ty,
+                    narrowing.args.display_with(ctx)
+                )
             }
-            AtomicNarrowOp::TypeIs(t, arguments) => {
-                write!(f, "TypeIs({t}, {})", arguments.display_with(ctx))
+            AtomicNarrowOp::TypeIs(narrowing) => {
+                write!(
+                    f,
+                    "TypeIs({}, {})",
+                    narrowing.func_ty,
+                    narrowing.args.display_with(ctx)
+                )
             }
-            AtomicNarrowOp::NotTypeIs(t, arguments) => {
-                write!(f, "NotTypeIs({t}, {})", arguments.display_with(ctx))
+            AtomicNarrowOp::NotTypeIs(narrowing) => {
+                write!(
+                    f,
+                    "NotTypeIs({}, {})",
+                    narrowing.func_ty,
+                    narrowing.args.display_with(ctx)
+                )
             }
             AtomicNarrowOp::TypeEq(expr) => write!(f, "TypeEq({})", expr.display_with(ctx)),
             AtomicNarrowOp::TypeNotEq(expr) => write!(f, "TypeNotEq({})", expr.display_with(ctx)),
@@ -256,17 +330,17 @@ impl DisplayWith<ModuleInfo> for AtomicNarrowOp {
             AtomicNarrowOp::IsNotSequence => write!(f, "IsNotSequence"),
             AtomicNarrowOp::IsMapping => write!(f, "IsMapping"),
             AtomicNarrowOp::IsNotMapping => write!(f, "IsNotMapping"),
-            AtomicNarrowOp::Call(expr, arguments) => write!(
+            AtomicNarrowOp::Call(call, _) => write!(
                 f,
                 "Call({}, {})",
-                expr.display_with(ctx),
-                arguments.display_with(ctx)
+                call.func.display_with(ctx),
+                call.args.display_with(ctx)
             ),
-            AtomicNarrowOp::NotCall(expr, arguments) => write!(
+            AtomicNarrowOp::NotCall(call, _) => write!(
                 f,
                 "NotCall({}, {})",
-                expr.display_with(ctx),
-                arguments.display_with(ctx)
+                call.func.display_with(ctx),
+                call.args.display_with(ctx)
             ),
             AtomicNarrowOp::IsTruthy => write!(f, "IsTruthy"),
             AtomicNarrowOp::IsFalsy => write!(f, "IsFalsy"),
@@ -370,38 +444,61 @@ impl AtomicNarrowOp {
             Self::IsNotSequence => Some(format!("not isinstance({subject}, Sequence)")),
             Self::IsMapping => Some(format!("isinstance({subject}, Mapping)")),
             Self::IsNotMapping => Some(format!("not isinstance({subject}, Mapping)")),
-            Self::Call(expr, arguments) => {
-                let func = snippet(expr.range())?;
-                let args = snippet(arguments.range()).unwrap_or_default();
+            Self::Call(call, _) => {
+                let func = snippet(call.func.range())?;
+                let args = snippet(call.args.range()).unwrap_or_default();
                 Some(format!("{func}{args}"))
             }
-            Self::NotCall(expr, arguments) => {
-                let func = snippet(expr.range())?;
-                let args = snippet(arguments.range()).unwrap_or_default();
+            Self::NotCall(call, _) => {
+                let func = snippet(call.func.range())?;
+                let args = snippet(call.args.range()).unwrap_or_default();
                 Some(format!("not {func}{args}"))
             }
             Self::IsTruthy => Some(subject.to_owned()),
             Self::IsFalsy => Some(format!("not {subject}")),
             Self::PolarsColumnMutation(_) => None,
-            Self::TypeGuard(_, arguments) => Some(format!(
+            Self::TypeGuard(narrowing) => Some(format!(
                 "TypeGuard{}",
-                snippet(arguments.range()).unwrap_or_default()
+                snippet(narrowing.args.range()).unwrap_or_default()
             )),
-            Self::NotTypeGuard(_, arguments) => Some(format!(
+            Self::NotTypeGuard(narrowing) => Some(format!(
                 "not TypeGuard{}",
-                snippet(arguments.range()).unwrap_or_default()
+                snippet(narrowing.args.range()).unwrap_or_default()
             )),
-            Self::TypeIs(_, arguments) => Some(format!(
+            Self::TypeIs(narrowing) => Some(format!(
                 "TypeIs{}",
-                snippet(arguments.range()).unwrap_or_default()
+                snippet(narrowing.args.range()).unwrap_or_default()
             )),
-            Self::NotTypeIs(_, arguments) => Some(format!(
+            Self::NotTypeIs(narrowing) => Some(format!(
                 "not TypeIs{}",
-                snippet(arguments.range()).unwrap_or_default()
+                snippet(narrowing.args.range()).unwrap_or_default()
             )),
             Self::Placeholder => None,
             Self::MatchSubjectElement(_, _) => None,
             Self::ClassCoverageGate(_) | Self::ClassCoverageGateNeg(_) => None,
+        }
+    }
+
+    /// The type the subject narrows to.
+    pub fn narrowed_type(&self) -> &Type {
+        match self {
+            Self::TypeIs(narrowing)
+            | Self::NotTypeIs(narrowing)
+            | Self::TypeGuard(narrowing)
+            | Self::NotTypeGuard(narrowing) => &narrowing.narrowed,
+            _ => unreachable!("guard narrowing accessor on non-guard op"),
+        }
+    }
+
+    /// The guarded argument identified by standard call resolution for this narrowing
+    /// call, when it identified one.
+    pub fn guard_subject(&self) -> Option<&GuardSubject> {
+        match self {
+            Self::TypeIs(narrowing)
+            | Self::NotTypeIs(narrowing)
+            | Self::TypeGuard(narrowing)
+            | Self::NotTypeGuard(narrowing) => narrowing.subject.as_ref(),
+            _ => None,
         }
     }
 
@@ -435,14 +532,14 @@ impl AtomicNarrowOp {
             Self::IsNotSequence => Self::IsSequence,
             Self::IsMapping => Self::IsNotMapping,
             Self::IsNotMapping => Self::IsMapping,
-            Self::TypeGuard(ty, args) => Self::NotTypeGuard(ty.clone(), args.clone()),
-            Self::NotTypeGuard(ty, args) => Self::TypeGuard(ty.clone(), args.clone()),
-            Self::TypeIs(ty, args) => Self::NotTypeIs(ty.clone(), args.clone()),
-            Self::NotTypeIs(ty, args) => Self::TypeIs(ty.clone(), args.clone()),
+            Self::TypeGuard(narrowing) => Self::NotTypeGuard(narrowing.clone()),
+            Self::NotTypeGuard(narrowing) => Self::TypeGuard(narrowing.clone()),
+            Self::TypeIs(narrowing) => Self::NotTypeIs(narrowing.clone()),
+            Self::NotTypeIs(narrowing) => Self::TypeIs(narrowing.clone()),
             Self::TypeEq(v) => Self::TypeNotEq(v.clone()),
             Self::TypeNotEq(v) => Self::TypeEq(v.clone()),
-            Self::Call(f, args) => Self::NotCall(f.clone(), args.clone()),
-            Self::NotCall(f, args) => Self::Call(f.clone(), args.clone()),
+            Self::Call(call, candidates) => Self::NotCall(call.clone(), candidates.clone()),
+            Self::NotCall(call, candidates) => Self::Call(call.clone(), candidates.clone()),
             Self::IsTruthy => Self::IsFalsy,
             Self::IsFalsy => Self::IsTruthy,
             Self::PolarsColumnMutation(kind) => Self::PolarsColumnMutation(kind.clone()),
@@ -915,6 +1012,53 @@ impl NarrowOps {
         }
     }
 
+    /// Records one candidate argument for a narrowing call.
+    ///
+    /// Candidates whose value expressions share a subject root share the entry for that
+    /// root: the answers phase selects the candidate that standard call resolution
+    /// identifies as the guarded argument, and the other candidates of the same call
+    /// contribute nothing in either polarity. Candidates of different calls on the same
+    /// subject are separate predicates and combine with AND.
+    fn add_call_candidate(
+        &mut self,
+        call: &Arc<NarrowingCall>,
+        kw: Option<Name>,
+        value: &Expr,
+        range: TextRange,
+    ) {
+        for subject in expr_to_subjects(value) {
+            let (name, facet) = match subject {
+                NarrowingSubject::Name(name) => (name, None),
+                NarrowingSubject::Facets(name, facets) => (name, Some(facets)),
+            };
+            let candidate = CallCandidate {
+                kw: kw.clone(),
+                facet,
+            };
+            match self.0.entry(name) {
+                Entry::Occupied(mut entry) => {
+                    let (op, _) = entry.get_mut();
+                    if let NarrowOp::Atomic(_, AtomicNarrowOp::Call(existing_call, candidates)) = op
+                        && Arc::ptr_eq(existing_call, call)
+                    {
+                        candidates.push(candidate);
+                    } else {
+                        op.and(NarrowOp::Atomic(
+                            None,
+                            AtomicNarrowOp::Call(call.clone(), vec![candidate]),
+                        ));
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert((
+                        NarrowOp::Atomic(None, AtomicNarrowOp::Call(call.clone(), vec![candidate])),
+                        range,
+                    ));
+                }
+            }
+        }
+    }
+
     pub fn negate(&self) -> Self {
         Self(
             self.0
@@ -1331,14 +1475,31 @@ impl NarrowOps {
                     func,
                     arguments: args @ Arguments { args: posargs, .. },
                 },
-            ) if !posargs.is_empty() => {
-                // This may be a function call that narrows the type of its first argument. Record
-                // it as a possible narrowing operation that we'll resolve in the answers phase.
-                Self::from_single_narrow_op(
-                    &posargs[0],
-                    AtomicNarrowOp::Call(Box::new((**func).clone()), args.clone()),
-                    test.range(),
-                )
+            ) if !posargs.is_empty() || !args.keywords.is_empty() => {
+                // This may be a function call whose `TypeGuard`/`TypeIs` result narrows one of
+                // its arguments. Standard call resolution identifies the guarded argument in
+                // the answers phase; record one candidate per actual argument here. Candidates
+                // whose value expressions share a subject root share the entry for that root,
+                // so a call contributes at most one narrow per subject in either polarity.
+                let call = Arc::new(NarrowingCall {
+                    func: Box::new((**func).clone()),
+                    args: args.clone(),
+                });
+                let mut narrow_ops = Self::new();
+                if let Some(first) = posargs.first() {
+                    narrow_ops.add_call_candidate(&call, None, first, test.range());
+                }
+                for keyword in &args.keywords {
+                    if let Some(kw_name) = &keyword.arg {
+                        narrow_ops.add_call_candidate(
+                            &call,
+                            Some(kw_name.id.clone()),
+                            &keyword.value,
+                            test.range(),
+                        );
+                    }
+                }
+                narrow_ops
             }
             Expr::Named(named) => {
                 let mut target_narrow = Self::from_single_narrow_op(

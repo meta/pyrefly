@@ -1677,6 +1677,194 @@ def f(x: Cat | Dog):
 );
 
 testcase!(
+    test_p3_minimal,
+    r#"
+from typing import assert_type, TypeIs
+
+
+def is_str_on_value(value: object, other_parameter: object) -> TypeIs[str]:
+    return isinstance(value, str)
+
+
+def both_args_are_value(value: str | int) -> None:
+    if is_str_on_value(value=value, other_parameter=value):
+        assert_type(value, str)
+    else:
+        assert_type(value, int)
+    "#,
+);
+
+testcase!(
+    test_typeguard_keyword_argument,
+    r#"
+from typing import TypeGuard, TypeIs, assert_type, overload
+
+def is_str(x: str | None) -> TypeGuard[str]:
+    return x is not None
+
+def is_str_is(x: str | None) -> TypeIs[str]:
+    return x is not None
+
+def need_str(x: str) -> None: ...
+
+def kw_guard(x: str | None) -> None:
+    if is_str(x=x):
+        assert_type(x, str)
+    else:
+        assert_type(x, str | None)
+
+def kw_is(x: str | None) -> None:
+    if is_str_is(x=x):
+        need_str(x)
+    else:
+        assert_type(x, None)
+
+def kw_is_not(x: str | None) -> None:
+    if not is_str_is(x=x):
+        assert_type(x, None)
+    else:
+        need_str(x)
+
+def kw_not(x: str | None) -> None:
+    if not is_str(x=x):
+        need_str(x)  # E: Argument `str | None` is not assignable to parameter `x` with type `str` in function `need_str`
+    else:
+        assert_type(x, str)
+
+# A keyword that binds a later parameter does not narrow that keyword's value.
+def guard2(y: object, x: str | None) -> TypeGuard[str]:
+    return x is not None
+
+def kw_second(y: object, x: str | None) -> None:
+    if guard2(y, x=x):
+        need_str(y)
+        need_str(x)  # E: Argument `str | None` is not assignable to parameter `x` with type `str` in function `need_str`
+
+# A keyword cannot bind a positional-only first parameter.
+def guard_po(x: str | None, /) -> TypeGuard[str]:
+    return x is not None
+
+def kw_po(x: str | None) -> None:
+    if guard_po(x=x):  # E: Expected argument `x` to be positional
+        need_str(x)  # E: Argument `str | None` is not assignable to parameter `x` with type `str` in function `need_str`
+
+# Methods: the bound receiver is skipped when finding the guarded parameter.
+class Guards:
+    def is_str(self, x: str | None) -> TypeGuard[str]:
+        return x is not None
+
+def kw_method(g: Guards, x: str | None) -> None:
+    if g.is_str(x=x):
+        need_str(x)
+
+# An unbound method call supplies the receiver explicitly. The receiver is never the
+# argument the guard result constrains, so it is not narrowed with either spelling, and
+# the value argument is narrowed through its keyword.
+def kw_unbound(g: Guards, x: str | None) -> None:
+    if Guards.is_str(self=g, x=x):
+        g.upper()  # E: Object of class `Guards` has no attribute `upper`
+        need_str(x)
+        assert_type(g, Guards)
+
+def kw_unbound_positional(g: Guards, x: str | None) -> None:
+    if Guards.is_str(g, x):
+        g.upper()  # E: Object of class `Guards` has no attribute `upper`
+        assert_type(g, Guards)
+
+# Overloads: the guarded argument comes from the signature the call resolves to.
+@overload
+def oguard(x: int) -> TypeGuard[int]: ...
+@overload
+def oguard(x: str | None) -> TypeGuard[str]: ...
+def oguard(x: int | str | None) -> bool:
+    return x is not None
+
+def kw_overload(x: str | None) -> None:
+    if oguard(x=x):
+        need_str(x)
+
+# Attributes narrow like facets.
+class Box:
+    field: str | None
+
+def kw_facet(b: Box) -> None:
+    if is_str(x=b.field):
+        need_str(b.field)
+
+# Loops and asserts work like `if`.
+def kw_while(x: str | None) -> None:
+    while is_str(x=x):
+        need_str(x)
+
+def kw_assert(x: str | None) -> None:
+    assert is_str(x=x)
+    need_str(x)
+    "#,
+);
+
+// The guarded argument comes from the signature the call resolves to; the other
+// signature's subject is untouched.
+testcase!(
+    test_typeguard_keyword_overload_subject,
+    r#"
+from typing import Literal, TypeGuard, assert_type, overload
+
+@overload
+def guard(a: object, b: object, *, mode: Literal["a"]) -> TypeGuard[str]: ...
+@overload
+def guard(b: object, a: object, *, mode: Literal["b"]) -> TypeGuard[int]: ...
+def guard(*args: object, **kwargs: object) -> bool:
+    key = "a" if kwargs.get("mode") == "a" else "b"
+    value = kwargs[key] if key in kwargs else args[0]
+    return isinstance(value, str if key == "a" else int)
+
+def unsafe(a: object, b: object) -> None:
+    if guard(a=a, b=b, mode="b"):
+        assert_type(a, object)
+        assert_type(b, int)
+    "#,
+);
+
+testcase!(
+    test_typeguard_keyword_single_narrow_per_call,
+    r#"
+from typing import TypeGuard, TypeIs, assert_type
+
+def is_str_on_value(value: object, other_parameter: object) -> TypeIs[str]:
+    return isinstance(value, str)
+
+def both_args_are_value(value: str | int) -> None:
+    # `value` supplies both the guarded parameter and another parameter. The call is a
+    # single predicate, so both branches narrow (the old AND-of-candidates code lost the
+    # negative narrowing here).
+    if is_str_on_value(value=value, other_parameter=value):
+        assert_type(value, str)
+    else:
+        assert_type(value, int)
+
+    "#,
+);
+
+testcase!(
+    test_typeguard_keyword_overload_disagree_subject,
+    r#"
+from typing import TypeGuard, assert_type, overload
+
+@overload
+def guard(a: object, b: object) -> TypeGuard[str]: ...
+@overload
+def guard(b: object, a: object) -> TypeGuard[str]: ...
+def guard(*args: object, **kwargs: object) -> bool:
+    raise AssertionError
+
+def ambiguous(a: object, b: object) -> None:
+    if guard(a=a, b=b):
+        assert_type(a, str)
+        assert_type(b, object)
+    "#,
+);
+
+testcase!(
     test_typeis,
     r#"
 from typing import TypeIs, assert_type

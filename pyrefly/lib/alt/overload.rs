@@ -43,6 +43,7 @@ use crate::alt::callable::CallWithTypes;
 use crate::alt::callable::ReturnTypeResolutionError;
 use crate::alt::expr::TypeOrExpr;
 use crate::alt::unwrap::HintRef;
+use crate::binding::narrow::GuardSubject;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorContext;
@@ -74,6 +75,9 @@ struct CalledOverload<'f> {
     defaults_used: SmallSet<Quantified>,
     /// Maps each argument's position to the parameter it was matched against.
     argmap: ArgMap,
+    /// The argument supplying this overload's `TypeGuard`/`TypeIs` designated parameter,
+    /// identified by the same call resolution that produced `res`.
+    guard_subject: Option<GuardSubject>,
 }
 
 impl CalledOverload<'_> {
@@ -319,6 +323,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         overloads: Vec1<TargetWithTParams<Function>>,
         metadata: &FuncMetadata,
+        receiver_offset: usize,
         self_obj: Option<Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -330,7 +335,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         hint: Option<HintRef>,
         // If we're constructing a class, its type arguments. A successful call will fill these in.
         ctor_targs: Option<&mut TArgs>,
-    ) -> (Type, Callable, OverloadTable) {
+    ) -> (Type, Callable, OverloadTable, Option<GuardSubject>) {
         // There may be Expr values in args and keywords.
         // If we infer them for each overload, we may end up inferring them multiple times.
         // If those overloads contain nested overloads, then we can easily end up with O(2^n) perf.
@@ -371,6 +376,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     return_type_errors: Vec::new(),
                     defaults_used: SmallSet::new(),
                     argmap: ArgMap::new(),
+                    guard_subject: None,
                 },
                 false,
             ),
@@ -380,6 +386,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let (mut closest_overload, mut matched) = self.find_closest_overload(
                     &arity_compatible_overloads,
                     metadata,
+                    receiver_offset,
                     self_obj.as_ref(),
                     &args,
                     &keywords,
@@ -409,6 +416,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         let (cur_closest, cur_matched) = self.find_closest_overload(
                             &arity_compatible_overloads,
                             metadata,
+                            receiver_offset,
                             self_obj.as_ref(),
                             cur_args,
                             cur_keywords,
@@ -444,6 +452,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         // table of solutions describes the call any more.
                         let table = OverloadTable::default();
                         let argmap = first_overload.argmap.clone();
+                        // The alternatives agree on the return, so they may also agree on the
+                        // guarded argument; when they disagree, decline to narrow.
+                        let guard_subject = if matched_overloads
+                            .iter()
+                            .all(|o| o.guard_subject == first_overload.guard_subject)
+                        {
+                            first_overload.guard_subject.clone()
+                        } else {
+                            None
+                        };
                         let arg_errors = self.error_collector();
                         let specialization_errors = first_overload.specialization_errors.clone();
                         let return_type_errors = matched_overloads
@@ -469,6 +487,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             specialization_errors,
                             return_type_errors,
                             defaults_used,
+                            guard_subject,
                         };
                         matched = true;
                         break;
@@ -565,6 +584,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 closest_overload.res,
                 closest_overload.func.1.signature.clone(),
                 closest_overload.table,
+                closest_overload.guard_subject,
             )
         } else {
             if let Ok(specialization_errors) =
@@ -594,6 +614,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.heap.mk_any_error(),
                 closest_overload.func.1.signature.clone(),
                 OverloadTable::default(),
+                None,
             )
         }
     }
@@ -868,6 +889,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         overloads: &Vec1<&'c TargetWithTParams<Function>>,
         metadata: &FuncMetadata,
+        receiver_offset: usize,
         self_obj: Option<&Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -887,6 +909,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             let mut called_overload = self.call_overload(
                 callable,
                 metadata,
+                receiver_offset,
                 self_obj,
                 args,
                 keywords,
@@ -1031,6 +1054,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             let res = self.call_overload(
                                 o.func,
                                 metadata,
+                                receiver_offset,
                                 self_obj,
                                 &materialized_args,
                                 &materialized_keywords,
@@ -1063,6 +1087,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let contextual_overload = self.call_overload(
                     overload.func,
                     metadata,
+                    receiver_offset,
                     self_obj,
                     args,
                     keywords,
@@ -1159,6 +1184,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callable: &'c TargetWithTParams<Function>,
         metadata: &FuncMetadata,
+        receiver_offset: usize,
         self_obj: Option<&Type>,
         args: &[CallArg],
         keywords: &[CallKeyword],
@@ -1176,25 +1202,33 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         let arg_errors = self.error_collector();
         let call_errors = self.error_collector();
-        let (res, specialization_errors, return_type_errors, argmap, defaults_used, table) = self
-            .callable_infer(
-                callable.1.signature.clone(),
-                Some(&metadata.kind),
-                tparams,
-                self_obj.cloned(),
-                args,
-                keywords,
-                arguments_range,
-                &arg_errors,
-                &call_errors,
-                // We intentionally drop the context here, as arg errors don't need it,
-                // and if there are any call errors, we'll log a "No matching overloads"
-                // error with the necessary context.
-                None,
-                hint,
-                contextually_opaque_defaults,
-                overload_ctor_targs.as_mut(),
-            );
+        let (
+            res,
+            specialization_errors,
+            return_type_errors,
+            argmap,
+            defaults_used,
+            table,
+            guard_subject,
+        ) = self.callable_infer(
+            callable.1.signature.clone(),
+            Some(&metadata.kind),
+            receiver_offset,
+            tparams,
+            self_obj.cloned(),
+            args,
+            keywords,
+            arguments_range,
+            &arg_errors,
+            &call_errors,
+            // We intentionally drop the context here, as arg errors don't need it,
+            // and if there are any call errors, we'll log a "No matching overloads"
+            // error with the necessary context.
+            None,
+            hint,
+            contextually_opaque_defaults,
+            overload_ctor_targs.as_mut(),
+        );
         if !call_errors.has_hard()
             && specialization_errors.is_empty()
             && callable
@@ -1226,6 +1260,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return_type_errors,
             defaults_used,
             argmap,
+            guard_subject,
         }
     }
 }
