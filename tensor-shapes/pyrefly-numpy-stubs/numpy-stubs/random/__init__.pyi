@@ -426,6 +426,132 @@ class Generator(_NumpyGenerator):
         scale: _ArrayLikeFloat_co = 1.0,
         size: None = None,
     ) -> _ArrayF64 | Any: ...
+    @overload
+    def uniform(
+        self, /, low: _FloatLike_co = 0.0, high: _FloatLike_co = 1.0, size: None = None
+    ) -> float: ...
+    # With `size`, the result has exactly that shape, and NumPy raises if `low` or
+    # `high` does not broadcast to it.
+    @overload
+    def uniform[N: IntVar](
+        self, /, low: _ArrayLikeFloat_co, high: _ArrayLikeFloat_co, size: Int[N]
+    ) -> ndarray[[N], dtype[float64]]: ...
+    @overload
+    def uniform[Shape: IntTuple](
+        self, /, low: _ArrayLikeFloat_co, high: _ArrayLikeFloat_co, size: Shape
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    @overload
+    def uniform[N: IntVar](
+        self,
+        /,
+        low: _ArrayLikeFloat_co = 0.0,
+        high: _ArrayLikeFloat_co = 1.0,
+        *,
+        size: Int[N],
+    ) -> ndarray[[N], dtype[float64]]: ...
+    @overload
+    def uniform[Shape: IntTuple](
+        self,
+        /,
+        low: _ArrayLikeFloat_co = 0.0,
+        high: _ArrayLikeFloat_co = 1.0,
+        *,
+        size: Shape,
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    # Without `size`, the result has the broadcast shape of `low` and `high`.
+    @overload
+    def uniform[LowShape: IntTuple = [], HighShape: IntTuple = []](
+        self,
+        /,
+        low: ndarray[LowShape] | float = 0.0,
+        high: ndarray[HighShape] | float = 1.0,
+        size: None = None,
+    ) -> ndarray[broadcast(LowShape, HighShape), dtype[float64]]: ...
+    @overload
+    def uniform(
+        self, /, low: _ArrayLikeFloat_co, high: _ArrayLikeFloat_co, size: _ShapeLike
+    ) -> _ArrayF64: ...
+    @overload
+    def uniform(
+        self, /, low: _ArrayLikeFloat_co, high: _NDArrayLikeFloat, size: None = None
+    ) -> _ArrayF64: ...
+    @overload
+    def uniform(
+        self,
+        /,
+        low: _ArrayLikeFloat_co = 0.0,
+        high: _ArrayLikeFloat_co = 1.0,
+        *,
+        size: _ShapeLike,
+    ) -> _ArrayF64: ...
+    @overload
+    def uniform(
+        self,
+        /,
+        low: _ArrayLikeFloat_co = 0.0,
+        *,
+        high: _NDArrayLikeFloat,
+        size: None = None,
+    ) -> _ArrayF64: ...
+    @overload
+    def uniform(
+        self,
+        /,
+        low: _NDArrayLikeFloat,
+        high: _ArrayLikeFloat_co = 1.0,
+        size: None = None,
+    ) -> _ArrayF64: ...
+    @overload
+    def uniform(
+        self,
+        /,
+        low: _ArrayLikeFloat_co = 0.0,
+        high: _ArrayLikeFloat_co = 1.0,
+        size: None = None,
+    ) -> _ArrayF64 | Any: ...
+    @overload
+    def exponential(
+        self, /, scale: _FloatLike_co = 1.0, size: None = None
+    ) -> float: ...
+    # With `size`, the result has exactly that shape, and NumPy raises if `scale`
+    # does not broadcast to it.
+    @overload
+    def exponential[N: IntVar](
+        self, /, scale: _ArrayLikeFloat_co, size: Int[N]
+    ) -> ndarray[[N], dtype[float64]]: ...
+    @overload
+    def exponential[Shape: IntTuple](
+        self, /, scale: _ArrayLikeFloat_co, size: Shape
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    @overload
+    def exponential[N: IntVar](
+        self, /, scale: _ArrayLikeFloat_co = 1.0, *, size: Int[N]
+    ) -> ndarray[[N], dtype[float64]]: ...
+    @overload
+    def exponential[Shape: IntTuple](
+        self, /, scale: _ArrayLikeFloat_co = 1.0, *, size: Shape
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    # Without `size`, the result has the shape of `scale`.
+    @overload
+    def exponential[Shape: IntTuple](
+        self, /, scale: ndarray[Shape], size: None = None
+    ) -> ndarray[Shape, dtype[float64]]: ...
+    @overload
+    def exponential(
+        self, /, scale: _ArrayLikeFloat_co = 1.0, *, size: _ShapeLike
+    ) -> _ArrayF64: ...
+    @overload
+    def exponential(
+        self, /, scale: _ArrayLikeFloat_co, size: _ShapeLike
+    ) -> _ArrayF64: ...
+    @overload
+    def exponential(
+        self, /, scale: _NDArrayLikeFloat, size: None = None
+    ) -> _ArrayF64: ...
+    @overload
+    def exponential(
+        self, /, scale: _ArrayLikeFloat_co, size: None = None
+    ) -> _ArrayF64 | Any: ...
 
 def default_rng(
     seed: _ArrayLikeInt_co

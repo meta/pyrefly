@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-from typing import Any, assert_type
+from typing import assert_type
 
 import numpy as np
-from shape_extensions import assert_shape, IntTuple
+from shape_extensions import assert_shape
 
 
 def test_pairwise_distance_comparison() -> None:
@@ -22,14 +22,11 @@ def test_pairwise_distance_comparison() -> None:
     deltas = positions[:, None, :] - positions[None, :, :]
     deltas -= size * np.round(deltas / size)
     squared_distances = (deltas**2).sum(-1)
-    # `deltas` has a gradual rank, so `np.round` may produce a scalar and returns `Any`.
-    assert_type(squared_distances, Any)
+    assert_type(squared_distances, np.ndarray[[300, 300], np.dtype[np.float64]])
     assert isinstance(squared_distances, np.ndarray)
-    assert_shape(squared_distances.shape, IntTuple, runtime=(count, count))
+    assert_shape(squared_distances.shape, (300, 300))
     assert squared_distances.dtype == np.dtype(np.float64)
     nearby = squared_distances < radius * radius
-
-    # Comparisons with unknown shapes also match the scalar overload returning Any.
-    assert_type(nearby, Any)
-    assert_shape(nearby.shape, IntTuple, runtime=(count, count))
+    assert_type(nearby, np.ndarray[[300, 300], np.dtype[np.bool_]])
+    assert_shape(nearby.shape, (300, 300))
     assert nearby.dtype == np.bool_

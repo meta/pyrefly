@@ -153,6 +153,84 @@ def check_normal_symbolic_shapes[N: IntVar, M: IntVar](
     assert_type(rng.normal(loc, scale), np.ndarray[[N, M], np.dtype[np.float64]])
 
 
+def check_uniform_and_exponential_return_float_without_size() -> None:
+    rng = np.random.default_rng(0)
+    assert_type(rng.uniform(), float)
+    assert_type(rng.uniform(1.0, 2.0), float)
+    assert_type(rng.exponential(), float)
+    assert_type(rng.exponential(2.0), float)
+
+
+def test_uniform_and_exponential_int_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.uniform(size=5)
+    assert_type(result, np.ndarray[[5], np.dtype[np.float64]])
+    assert_shape(result.shape, (5,))
+    assert_shape(rng.uniform(0.0, 1.0, 5).shape, (5,))
+    assert_shape(rng.exponential(size=5).shape, (5,))
+    assert_shape(rng.exponential(2.0, 5).shape, (5,))
+
+
+def test_uniform_and_exponential_tuple_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.exponential(2.0, (2, 3))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.exponential(size=(2, 3)).shape, (2, 3))
+    assert_shape(rng.uniform(0.0, 1.0, (2, 3)).shape, (2, 3))
+    assert_shape(rng.uniform(size=(2, 3)).shape, (2, 3))
+
+
+def test_uniform_and_exponential_array_parameters_with_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.uniform(np.zeros(3), 1.0, size=(2, 3))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.exponential(np.ones(3), size=(2, 3)).shape, (2, 3))
+
+
+def test_uniform_array_parameters_without_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.uniform(np.zeros(3), np.ones((2, 1)))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.uniform(np.zeros(3)).shape, (3,))
+    assert_shape(rng.uniform(high=np.ones((2, 1))).shape, (2, 1))
+
+
+def test_exponential_array_scale_without_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.exponential(np.ones((2, 3)))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.float64]])
+    assert_shape(result.shape, (2, 3))
+
+
+def test_uniform_and_exponential_list_size_and_parameters() -> None:
+    rng = np.random.default_rng(0)
+    assert_shape(rng.uniform(size=[2, 3]).shape, IntTuple, runtime=(2, 3))
+    assert_shape(rng.exponential(size=[2, 3]).shape, IntTuple, runtime=(2, 3))
+    assert_shape(rng.exponential([1.0, 2.0]).shape, IntTuple, runtime=(2,))
+
+
+def test_uniform_mismatched_parameters() -> None:
+    rng = np.random.default_rng(0)
+    with assert_raises(ValueError):
+        rng.uniform(np.zeros(3), np.ones(2))  # E: Cannot broadcast
+
+
+def check_uniform_and_exponential_symbolic_shapes[N: IntVar, M: IntVar](
+    n: Int[N],
+    low: np.ndarray[[N, 1]],
+    high: np.ndarray[[M]],
+    scale: np.ndarray[[N, M]],
+) -> None:
+    rng = np.random.default_rng(0)
+    assert_type(rng.uniform(size=n), np.ndarray[[N], np.dtype[np.float64]])
+    assert_type(rng.uniform(low, high), np.ndarray[[N, M], np.dtype[np.float64]])
+    assert_type(rng.exponential(size=n), np.ndarray[[N], np.dtype[np.float64]])
+    assert_type(rng.exponential(scale), np.ndarray[[N, M], np.dtype[np.float64]])
+
+
 def test_multivariate_normal_without_size() -> None:
     rng = np.random.default_rng(0)
     result = rng.multivariate_normal(np.zeros(3), np.eye(3))
