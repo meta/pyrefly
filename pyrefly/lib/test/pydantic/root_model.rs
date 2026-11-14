@@ -350,3 +350,24 @@ def serialize(d: InnerModelDict) -> OuterModel:
     return OuterModel(data=d)
     "#,
 );
+
+pydantic_testcase!(
+    test_root_model_config_strict,
+    r#"
+from pydantic import ConfigDict, RootModel
+
+class Text(RootModel[str]):
+    model_config = ConfigDict(strict=True)
+
+class Text2(RootModel[str], strict=True): ...
+
+class Child(Text): ...
+
+class Lax(RootModel[str]): ...
+
+Text(b"hello")  # E: Argument `Literal[b'hello']` is not assignable to parameter `root` with type `str`
+Text2(b"hello")  # E: Argument `Literal[b'hello']` is not assignable to parameter `root` with type `str`
+Child(b"hello")  # E: Argument `Literal[b'hello']` is not assignable to parameter `root` with type `str`
+Lax(b"hello")
+"#,
+);
