@@ -1,5 +1,19 @@
 # Simple CLI tests
 
+## Check reports source database query failures
+
+The executable exists, but its version output is not a source database.
+
+```scrut
+$ mkdir "$TMPDIR/check-sourcedb" && \
+> printf 'value = 1\n' > "$TMPDIR/check-sourcedb/core.py" && \
+> printf 'skip-interpreter-query = true\n[build-system]\ntype = "custom"\ncommand = %s\n' \
+>     "$("$JQ" -nc --arg bin "$PYREFLY" '[$bin, "--version"]')" > "$TMPDIR/check-sourcedb/pyrefly.toml" && \
+> if "$PYREFLY" check --threads 1 "$TMPDIR/check-sourcedb/core.py" > "$TMPDIR/check-sourcedb/stdout.txt" 2> "$TMPDIR/check-sourcedb/stderr.txt"; then exit 1; fi && \
+> grep -q 'TargetManifestDatabase' "$TMPDIR/check-sourcedb/stderr.txt"
+[0]
+```
+
 ## No errors on the empty file
 
 ```scrut {output_stream: stderr}

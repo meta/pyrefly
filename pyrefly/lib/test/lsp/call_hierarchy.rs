@@ -5,17 +5,58 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
+use std::path::Path;
+
 use itertools::Itertools as _;
+use lsp_types::Position;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::module::TextRangeWithModule;
 use ruff_text_size::TextSize;
 use vec1::Vec1;
 
+use crate::lsp::non_wasm::call_hierarchy::transform_outgoing_calls;
+use crate::lsp::non_wasm::module_helpers::module_info_to_uri;
 use crate::state::lsp::FindPreference;
 use crate::state::state::State;
+use crate::test::util::TestEnv;
 use crate::test::util::code_frame_of_source_at_range;
 use crate::test::util::get_batched_lsp_operations_report;
+
+#[test]
+fn outgoing_call_hierarchy_uses_the_bundled_callee_uri() {
+    let env = TestEnv::one(
+        "main",
+        "import json\n\ndef encode() -> str:\n    return json.dumps({})\n",
+    );
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let mut transaction = state.cancellable_transaction();
+    let module = transaction.as_ref().get_module_info(&handle).unwrap();
+    let position = module.from_lsp_position(Position::new(2, 4), None);
+    let callees = transaction
+        .find_global_outgoing_calls_from_function_definition(&handle, position)
+        .unwrap();
+    let calls = transform_outgoing_calls(callees, &module, None);
+    let call = calls
+        .iter()
+        .find(|call| call.to.name == "dumps")
+        .expect("encode calls json.dumps");
+    assert_ne!(Some(call.to.uri.clone()), module_info_to_uri(&module, None));
+    let path = call.to.uri.to_file_path().unwrap();
+    assert!(
+        path.ends_with(Path::new("json").join("__init__.pyi")),
+        "{}",
+        path.display()
+    );
+    let source = fs::read_to_string(path).unwrap();
+    let definition = source
+        .lines()
+        .nth(call.to.selection_range.start.line as usize)
+        .unwrap();
+    assert!(definition.contains("def dumps("), "{definition}");
+}
 
 fn format_call_site(
     label: &str,

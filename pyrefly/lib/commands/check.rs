@@ -1339,7 +1339,13 @@ impl Handles {
             config_finder.add_errors(warnings);
         }
         // TODO(connernilsen): wire in force logic
-        let reloaded_source_dbs = ConfigFile::query_source_db(&configs, false, None).reloaded;
+        let outcome = ConfigFile::query_source_db(&configs, false, None);
+        let sourcedb_errors = outcome
+            .error
+            .map(|error| ConfigError::error(anyhow::anyhow!(error)))
+            .into_iter()
+            .collect();
+        let reloaded_source_dbs = outcome.reloaded;
         let result = configs
             .iter()
             .flat_map(|(c, files)| files.iter().map(|p| c.handle_from_module_path(p.dupe())))
@@ -1353,7 +1359,7 @@ impl Handles {
                     .is_some_and(|db| reloaded_source_dbs.contains(db))
             })
             .collect();
-        (result, reloaded_configs, Vec::new())
+        (result, reloaded_configs, sourcedb_errors)
     }
 
     /// Removals need no `covers` check because a path the include set does not cover is

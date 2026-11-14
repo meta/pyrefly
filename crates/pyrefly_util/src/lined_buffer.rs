@@ -15,6 +15,7 @@ use std::ops::Range;
 use std::str::Lines;
 use std::sync::Arc;
 
+use anyhow::ensure;
 use parse_display::Display;
 use ruff_notebook::Notebook;
 use ruff_python_ast::Expr;
@@ -318,6 +319,18 @@ impl LinedBuffer {
         // LSP positions cannot address a line terminator, including CRLF or a lone CR.
         let content_end = self.buffer.line_end(line_start);
         std::cmp::min(requested, content_end)
+    }
+
+    /// Convert an LSP position without accepting clamped positions or split UTF-16 characters.
+    pub fn try_from_lsp_position(&self, position: lsp_types::Position) -> anyhow::Result<TextSize> {
+        let offset = self.from_lsp_position(position, None);
+        ensure!(
+            self.to_lsp_position(offset, None) == position,
+            "invalid source position: line {}, UTF-16 column {}",
+            u64::from(position.line) + 1,
+            u64::from(position.character) + 1,
+        );
+        Ok(offset)
     }
 
     /// Translates an LSP position to a text range.
@@ -763,6 +776,34 @@ mod tests {
                 lined_buffer.to_lsp_position(offset, None).character,
                 expected_character,
             );
+        }
+    }
+
+    #[test]
+    fn test_try_from_lsp_position() {
+        for (source, line, character, offset) in [
+            ("", 0, 0, Some(0)),
+            ("abc", 0, 3, Some(3)),
+            ("abc", 0, 4, None),
+            ("abc", 1, 0, None),
+            ("abc\r\ndef", 0, 3, Some(3)),
+            ("abc\r\ndef", 0, 4, None),
+            ("abc\r\ndef", 1, 0, Some(5)),
+            ("abc\rdef", 1, 1, Some(5)),
+            ("é🐍\nx", 0, 1, Some(2)),
+            ("é🐍\nx", 0, 2, None),
+            ("é🐍\nx", 0, 3, Some(6)),
+            ("é🐍\nx", 0, 4, None),
+            ("é🐍\nx", 1, 1, Some(8)),
+            ("x\n", 1, 0, Some(2)),
+            ("x\n", 2, 0, None),
+        ] {
+            let buffer = LinedBuffer::new(Arc::new(source.to_owned()));
+            let actual = buffer.try_from_lsp_position(lsp_types::Position::new(line, character));
+            match offset {
+                Some(offset) => assert_eq!(actual.unwrap(), TextSize::new(offset), "{source:?}"),
+                None => assert!(actual.is_err(), "{source:?}:{line}:{character}"),
+            }
         }
     }
 
