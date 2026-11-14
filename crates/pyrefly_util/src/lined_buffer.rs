@@ -322,15 +322,10 @@ impl LinedBuffer {
     }
 
     /// Convert an LSP position without accepting clamped positions or split UTF-16 characters.
-    pub fn try_from_lsp_position(
-        &self,
-        position: lsp_types::Position,
-        notebook_and_cell: Option<(&Notebook, usize)>,
-    ) -> anyhow::Result<TextSize> {
-        let offset = self.from_lsp_position(position, notebook_and_cell);
+    pub fn try_from_lsp_position(&self, position: lsp_types::Position) -> anyhow::Result<TextSize> {
+        let offset = self.from_lsp_position(position, None);
         ensure!(
-            self.to_lsp_position(offset, notebook_and_cell.map(|(notebook, _)| notebook))
-                == position,
+            self.to_lsp_position(offset, None) == position,
             "invalid source position: line {}, UTF-16 column {}",
             u64::from(position.line) + 1,
             u64::from(position.character) + 1,
@@ -804,8 +799,7 @@ mod tests {
             ("x\n", 2, 0, None),
         ] {
             let buffer = LinedBuffer::new(Arc::new(source.to_owned()));
-            let actual =
-                buffer.try_from_lsp_position(lsp_types::Position::new(line, character), None);
+            let actual = buffer.try_from_lsp_position(lsp_types::Position::new(line, character));
             match offset {
                 Some(offset) => assert_eq!(actual.unwrap(), TextSize::new(offset), "{source:?}"),
                 None => assert!(actual.is_err(), "{source:?}:{line}:{character}"),

@@ -66,7 +66,7 @@ pub struct QueryArgs {
     query: Query,
 
     /// Explicitly set the Pyrefly configuration to use.
-    #[arg(long, short, global = true, value_name = "FILE")]
+    #[arg(long, short, value_name = "FILE")]
     config: Option<PathBuf>,
 
     /// Configuration override options.
@@ -206,12 +206,7 @@ impl QueryArgs {
         files.push(target_path.clone());
         let handles = Handles::new(files);
         let (handles, _, sourcedb_errors) = handles.all(&config_finder);
-        if !sourcedb_errors.is_empty() {
-            for error in sourcedb_errors {
-                error.print();
-            }
-            return Err(anyhow::anyhow!("failed to query sourcedb"));
-        }
+        add_config_errors(&config_finder, sourcedb_errors)?;
         add_config_errors(&config_finder, config_finder.errors())?;
         config_finder.print_errors();
         let target = handles
@@ -245,7 +240,7 @@ impl QueryArgs {
         );
         let position = module
             .lined_buffer()
-            .try_from_lsp_position(lsp_position, None)
+            .try_from_lsp_position(lsp_position)
             .with_context(|| format!("cannot query `{}`", target_path.display()))?;
 
         match self.query {

@@ -42,6 +42,8 @@ $ cd "$TMPDIR/query project" && root=$(pwd -P) && \
 > "$JQ" -c --arg root "$root" 'map(.uri |= ltrimstr("file://" + ($root | @uri | gsub("%2F"; "/")) + "/")) | map([.uri, .range.start.line, .range.start.character, .range.end.line, .range.end.character])' nested.json && \
 > printf 'project-includes = ["core.py"]\nskip-interpreter-query = true\n' > project/explicit.toml && \
 > "$PYREFLY" --threads 1 query find-references project/core.py 4 5 --include-declaration --config project/explicit.toml > explicit.json && \
+> "$PYREFLY" --threads 1 query --config project/explicit.toml find-references project/core.py 4 5 --include-declaration > explicit-before.json && \
+> cmp explicit.json explicit-before.json && \
 > "$JQ" -e --slurpfile all references.json '. == $all[0][2:3]' explicit.json
 [["project/nested/inner.py",0,0,0,5],["project/nested/inner.py",1,6,1,11]]
 true
@@ -128,7 +130,8 @@ $ cd "$TMPDIR/query project" && root=$(pwd -P) && \
 $ cd "$TMPDIR/query project" && \
 > printf 'invalid JSON\n' > project/manifest.json && \
 > if "$PYREFLY" --threads 1 query find-references project/core.py 4 5 > failed.json 2> error.txt; then exit 1; fi && \
-> test ! -s failed.json && grep -q 'failed to query sourcedb' error.txt && \
+> test ! -s failed.json && grep -q 'TargetManifestDatabase' error.txt && \
+> grep -q 'Fatal configuration error' error.txt && \
 > cp saved.toml project/pyrefly.toml
 [0]
 ```
