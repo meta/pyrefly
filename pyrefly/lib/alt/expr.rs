@@ -2412,7 +2412,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                 }
                 None => {
-                    let ty = self.expr_infer(&x.value, errors);
+                    // Propagate the key and value hints into the unpacked operand so compound
+                    // expressions keep literal key types; without them the keys widen to `str`.
+                    let ty = if let (Some(key_hint), Some(value_hint)) = (&key_hint, &value_hint) {
+                        let mapping_hint = self.heap.mk_class_type(
+                            self.stdlib.mapping(key_hint.clone(), value_hint.clone()),
+                        );
+                        self.expr_infer_with_hint(
+                            &x.value,
+                            Some(HintRef::soft(&mapping_hint)),
+                            errors,
+                        )
+                    } else {
+                        self.expr_infer(&x.value, errors)
+                    };
                     let mapping_types = iteration_keys
                         .as_ref()
                         .and_then(|_| self.unwrap_mapping_for_unpacking(&ty));
