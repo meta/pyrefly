@@ -86,6 +86,7 @@ use crate::alt::attr::AttrInfo;
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
+use crate::binding::binding::KeyExport;
 use crate::binding::metadata::BindingsMetadata;
 use crate::config::error_kind::ErrorKind;
 use crate::error::error::ErrorQuickFix;
@@ -1494,6 +1495,12 @@ impl<'a> Transaction<'a> {
             context,
         }) = self.identifier_at(handle, position)
         else {
+            if let Some((_, name)) = self.get_exports_data(handle).dunder_all_name_at(position) {
+                return self
+                    .get_solutions(handle)?
+                    .get_hashed_opt(Hashed::new(&KeyExport(name)))
+                    .cloned();
+            }
             return self
                 .type_from_match_wildcard_at_impl(handle, position)
                 .or_else(|| self.type_from_expression_at_impl(handle, position, false));
@@ -2142,12 +2149,12 @@ impl<'a> Transaction<'a> {
     /// a different file, because the interface then describes that other module. Resolution can
     /// also find no executable and fall back to the interface, for example for a `-stubs` package;
     /// the interface is still used then. Open files have in-memory module paths, so the file
-    /// paths are compared rather than the module paths.
-    fn find_corresponding_interface_definition(
+    /// paths are compared rather than the module paths. The result includes the docstring range.
+    pub(crate) fn find_corresponding_interface_definition(
         &self,
         sys_info: SysInfo,
         definition: &TextRangeWithModule,
-    ) -> Option<TextRangeWithModule> {
+    ) -> Option<(TextRangeWithModule, Option<TextRange>)> {
         if definition.module.path().style() != ModuleStyle::Executable {
             return None;
         }
@@ -2180,9 +2187,12 @@ impl<'a> Transaction<'a> {
         }
         let context = AttributeContext::from_module(&definition.module, definition.range)?;
         let name = Name::new(definition.module.code_at(definition.range));
-        let (interface_module, range, _) =
+        let (interface_module, range, docstring_range) =
             self.find_declaration_in_module(&interface_handle, &context, &name)?;
-        Some(TextRangeWithModule::new(interface_module, range))
+        Some((
+            TextRangeWithModule::new(interface_module, range),
+            docstring_range,
+        ))
     }
 
     /// Find the declaration of `name` in the scope that `context` describes, within the module
@@ -2925,8 +2935,10 @@ impl<'a> Transaction<'a> {
         let exports = self.get_exports_data(handle);
         let (_entry_range, name) = exports.dunder_all_name_at(position)?;
 
-        if let Some((definition_handle, _, export)) =
-            self.resolve_named_import(handle, module_info.name(), name.clone(), preference)
+        let answers = self.get_answers(handle)?;
+        if let Some(key) = answers.bindings().dunder_all_binding(&name)
+            && let Some((definition_handle, export)) =
+                self.find_export_for_key(handle, key, preference).ok()?
         {
             let definition_module = self.get_module_info(&definition_handle)?;
             return Some(FindDefinitionItemWithDocstring {
@@ -4658,7 +4670,7 @@ impl<'a> Transaction<'a> {
 
             // Also block rename if the stub that consumers are checked against cannot be edited,
             // because renaming the definition without that stub would break its consumers.
-            if let Some(interface) = self.find_corresponding_interface_definition(
+            if let Some((interface, _)) = self.find_corresponding_interface_definition(
                 *handle.sys_info(),
                 &TextRangeWithModule::new(module, definition_range),
             ) && (interface.module.path().is_bundled()
@@ -5135,19 +5147,18 @@ impl<'a> Transaction<'a> {
     ) -> Option<Vec<TextRange>> {
         let mut references = Vec::new();
         if let Some(mod_module) = self.get_ast(handle) {
-            let is_valid_use = |x: &ExprName| {
-                if x.id() == expected_name
-                    && let Some((def_handle, Export { location, .. })) = self
-                        .find_export_for_key(
-                            handle,
-                            &Key::BoundName(ShortIdentifier::expr_name(x)),
-                            FindPreference {
-                                import_behavior: ImportBehavior::StopAtRenamedImports,
-                                prefer_pyi: false,
-                                ..Default::default()
-                            },
-                        )
-                        .unwrap_or(None)
+            let is_valid_key = |key: &Key| {
+                if let Some((def_handle, Export { location, .. })) = self
+                    .find_export_for_key(
+                        handle,
+                        key,
+                        FindPreference {
+                            import_behavior: ImportBehavior::StopAtRenamedImports,
+                            prefer_pyi: false,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_or(None)
                     && def_handle.path() == handle.path()
                     && location == definition_range
                 {
@@ -5155,6 +5166,20 @@ impl<'a> Transaction<'a> {
                 } else {
                     false
                 }
+            };
+            if let Some(answers) = self.get_answers(handle) {
+                let bindings = answers.bindings();
+                references.extend(bindings.dunder_all_entries().iter().filter_map(|entry| {
+                    (entry.id == *expected_name
+                        && bindings
+                            .dunder_all_binding(&entry.id)
+                            .is_some_and(is_valid_key))
+                    .then_some(entry.range)
+                }));
+            }
+            let is_valid_use = |x: &ExprName| {
+                x.id() == expected_name
+                    && is_valid_key(&Key::BoundName(ShortIdentifier::expr_name(x)))
             };
             let module_info = self.get_module_info(handle);
             // Only strings that mention the name can hold a forward reference to it.
@@ -5697,6 +5722,7 @@ impl<'a> RdepTransaction for Transaction<'a> {
         definition: &TextRangeWithModule,
     ) -> Option<TextRangeWithModule> {
         self.find_corresponding_interface_definition(sys_info, definition)
+            .map(|(definition, _)| definition)
     }
 
     fn local_references_from_definition(
@@ -5741,6 +5767,7 @@ impl<'a> RdepTransaction for CancellableTransaction<'a> {
     ) -> Option<TextRangeWithModule> {
         self.as_ref()
             .find_corresponding_interface_definition(sys_info, definition)
+            .map(|(definition, _)| definition)
     }
 
     fn local_references_from_definition(

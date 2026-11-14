@@ -1527,6 +1527,19 @@ impl Answers {
         // the preallocated solutions table represents a complete result set.
         if let Some(index) = &self.index {
             let mut index = index.lock();
+            // Retain export occurrences so unopened reverse dependencies need no AST or answers.
+            for entry in bindings.dunder_all_entries() {
+                if let Some(key) = bindings.dunder_all_binding(&entry.id)
+                    && let Some(IntermediateDefinition::NamedImport(_, module, name, None)) =
+                        key_to_intermediate_definition(bindings, key)
+                {
+                    index
+                        .externally_defined_variable_references
+                        .entry((module, name))
+                        .or_default()
+                        .push(entry.range);
+                }
+            }
             // Index bindings with external definitions.
             for idx in bindings.keys::<Key>() {
                 let key = bindings.idx_to_key(idx);

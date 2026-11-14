@@ -42,8 +42,7 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
     }
 }
 
-// BUG: Hover shows string literal types for __all__ and __slots__ entries.
-// It should show (variable) foo: int and (attribute) bar: str (issue #4344).
+// BUG: Hover shows a string literal type for the __slots__ entry (issue #4344).
 #[test]
 fn hover_symbol_literals() {
     let code = r#"
@@ -58,14 +57,22 @@ class C:
     def __init__(self) -> None:
         self.bar: str = ""
 "#;
-    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+        match get_hover(&state.transaction(), handle, position, false) {
+            Some(Hover {
+                contents: Contents::MarkupContent(markup),
+                ..
+            }) => markup.value,
+            _ => "None".to_owned(),
+        }
+    });
     assert_eq!(
         r#"
 # main.py
 3 | __all__ = ["foo"]
                  ^
 ```python
-(variable) foo: Literal['foo']
+(variable) foo: int
 ```
 
 7 |     __slots__ = ("bar",)
@@ -77,6 +84,52 @@ Literal['bar']
         .trim(),
         report.trim(),
     );
+}
+
+#[test]
+fn hover_dunder_all_reexport_entries() {
+    let code = r#"
+from lib import foo
+__all__ = ["foo"]
+#            ^
+__all__.append("foo")
+#                ^
+__all__.extend(["foo"])
+#                 ^
+__all__.remove("foo")
+#                ^
+"#;
+    get_batched_lsp_operations_report(
+        &[("main", code), ("lib", "foo: int = 1\n")],
+        |state, handle, position| {
+            let report = get_test_report(state, handle, position);
+            assert!(report.contains("(variable) foo: int"), "got: {report}");
+            report
+        },
+    );
+}
+
+#[test]
+fn hover_dunder_all_class_entry() {
+    let code = r#"
+class C: ...
+__all__ = ["C"]
+#          ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(report.contains("(class) C: type[C]"), "got: {report}");
+}
+
+#[test]
+fn hover_string_matching_dunder_all_entry() {
+    let code = r#"
+foo: int = 1
+value = "foo"
+#         ^
+__all__ = ["foo"]
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(report.contains("Literal['foo']"), "got: {report}");
 }
 
 fn get_test_report_at_verbosity(
