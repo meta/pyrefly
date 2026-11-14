@@ -269,3 +269,83 @@ def check_random_and_standard_cauchy_symbolic_size[N: IntVar, M: IntVar](
     rng = np.random.default_rng(0)
     assert_type(rng.random(n), np.ndarray[[N], np.dtype[np.float64]])
     assert_type(rng.standard_cauchy((n, m)), np.ndarray[[N, M], np.dtype[np.float64]])
+
+
+def check_integers_return_scalars_without_size() -> None:
+    rng = np.random.default_rng(0)
+    assert_type(rng.integers(10), np.int64)
+    assert_type(rng.integers(0, 10), np.int64)
+    assert_type(rng.integers(0, 10, dtype=np.uint8), np.uint8)
+
+
+def test_integers_int_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.integers(0, 10, size=5)
+    assert_type(result, np.ndarray[[5], np.dtype[np.int64]])
+    assert_shape(result.shape, (5,))
+    assert_shape(rng.integers(0, 10, 5).shape, (5,))
+    assert_shape(rng.integers(10, size=5).shape, (5,))
+    assert_shape(rng.integers(0, 10, 5, endpoint=True).shape, (5,))
+
+
+def test_integers_tuple_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.integers(0, 10, (2, 3))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.int64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.integers(10, size=(2, 3)).shape, (2, 3))
+
+
+def test_integers_dtype() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.integers(0, 10, (2, 3), dtype=np.int32)
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.int32]])
+    assert_shape(result.shape, (2, 3))
+    mask = rng.integers(0, 2, size=4, dtype=np.bool_)
+    assert_type(mask, np.ndarray[[4], np.dtype[np.bool_]])
+    assert_shape(mask.shape, (4,))
+    named = rng.integers(0, 10, size=4, dtype="int64")
+    assert_type(named, np.ndarray[[4], np.dtype[np.int64]])
+    assert_shape(named.shape, (4,))
+
+
+def test_integers_array_bounds_with_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.integers(np.full(3, 5), size=(2, 3))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.int64]])
+    assert_shape(result.shape, (2, 3))
+
+
+def test_integers_array_bounds_without_size() -> None:
+    rng = np.random.default_rng(0)
+    result = rng.integers(np.zeros(3, dtype=np.int64), np.full((2, 1), 5))
+    assert_type(result, np.ndarray[[2, 3], np.dtype[np.int64]])
+    assert_shape(result.shape, (2, 3))
+    assert_shape(rng.integers(np.full(3, 5)).shape, (3,))
+    assert_shape(rng.integers(0, np.full((2, 1), 5)).shape, (2, 1))
+
+
+def test_integers_unshaped_arguments() -> None:
+    rng = np.random.default_rng(0)
+    assert_shape(rng.integers(10, size=[2, 3]).shape, IntTuple, runtime=(2, 3))
+    assert_shape(
+        rng.integers(10, size=(2, 3), dtype=int).shape, IntTuple, runtime=(2, 3)
+    )
+
+
+def test_integers_mismatched_bounds() -> None:
+    rng = np.random.default_rng(0)
+    with assert_raises(ValueError):
+        rng.integers(np.full(3, 5), np.full(2, 9))  # E: Cannot broadcast
+
+
+def check_integers_symbolic_shapes[N: IntVar, M: IntVar](
+    n: Int[N], low: np.ndarray[[N, 1]], high: np.ndarray[[M]]
+) -> None:
+    rng = np.random.default_rng(0)
+    assert_type(rng.integers(10, size=n), np.ndarray[[N], np.dtype[np.int64]])
+    assert_type(rng.integers(low, high), np.ndarray[[N, M], np.dtype[np.int64]])
+    assert_type(
+        rng.integers(10, size=(n, n), dtype=np.int16),
+        np.ndarray[[N, N], np.dtype[np.int16]],
+    )
