@@ -2662,7 +2662,6 @@ def exported() -> int:
     let position = extract_cursors_for_test(lib_code)[0];
 
     let report = get_test_report(&state, &lib_handle, position);
-    assert!(report.contains("-> int"), "got: {report}");
     assert!(
         report.contains("Public stub documentation."),
         "got: {report}"

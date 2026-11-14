@@ -1631,6 +1631,7 @@ pub fn get_hover_with_verbosity(
                 })
         });
 
+    let fallback_name_from_type = fallback_hover_name_from_type(&type_);
     let keyword_argument_identifier = keyword_argument_identifier(transaction, handle, position);
     let definition = transaction
         .find_definition(
@@ -1654,7 +1655,6 @@ pub fn get_hover_with_verbosity(
                     item.module.code_at(item.definition_range) == identifier.id.as_str()
                 })
         });
-    let fallback_name_from_type = fallback_hover_name_from_type(&type_);
     let interface_definition = definition.as_ref().and_then(|executable| {
         if keyword_argument_identifier.is_some() {
             return None;

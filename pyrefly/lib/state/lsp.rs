@@ -1490,17 +1490,17 @@ impl<'a> Transaction<'a> {
         position: TextSize,
         coerce_callees: bool,
     ) -> Option<Type> {
-        if let Some((_, name)) = self.get_exports_data(handle).dunder_all_name_at(position) {
-            return self
-                .get_solutions(handle)?
-                .get_hashed_opt(Hashed::new(&KeyExport(name)))
-                .cloned();
-        }
         let Some(IdentifierWithContext {
             identifier,
             context,
         }) = self.identifier_at(handle, position)
         else {
+            if let Some((_, name)) = self.get_exports_data(handle).dunder_all_name_at(position) {
+                return self
+                    .get_solutions(handle)?
+                    .get_hashed_opt(Hashed::new(&KeyExport(name)))
+                    .cloned();
+            }
             return self
                 .type_from_match_wildcard_at_impl(handle, position)
                 .or_else(|| self.type_from_expression_at_impl(handle, position, false));
