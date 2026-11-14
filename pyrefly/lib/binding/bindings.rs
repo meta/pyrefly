@@ -433,6 +433,8 @@ pub struct Bindings {
     annotated_metadata_ranges: Vec<TextRange>,
     /// Ranges of the types that were read from docstrings, sorted and non-overlapping.
     docstring_type_ranges: Vec<TextRange>,
+    /// Each entry records an `__all__` name and its range without string delimiters.
+    dunder_all_entries: Vec<Identifier>,
     scope_trace: Option<ScopeTrace>,
     /// Names `del`eted at module scope; retained outside the LSP `scope_trace`.
     module_deletes: SmallSet<Name>,
@@ -694,6 +696,7 @@ impl Bindings {
             annotated_metadata_ranges: Vec::new(),
             docstring_type_ranges: Vec::new(),
             scope_trace: None,
+            dunder_all_entries: Vec::new(),
             module_deletes: SmallSet::new(),
             unset_nodes: UnsetNodes::default(),
             global_declarations: SmallSet::new(),
@@ -951,6 +954,16 @@ impl Bindings {
         }
     }
 
+    pub fn dunder_all_entries(&self) -> &[Identifier] {
+        &self.dunder_all_entries
+    }
+
+    /// Return the final local binding for an export, preserving local import aliases.
+    pub fn dunder_all_binding(&self, name: &Name) -> Option<&Key> {
+        let export = self.key_to_idx_hashed_opt(Hashed::new(&KeyExport(name.clone())))?;
+        Some(self.idx_to_key(self.get(export).key_idx()))
+    }
+
     /// Within the LSP, check if a key exists.
     /// It may not exist within `if False:` or `if sys.version == 0:` style code.
     pub fn is_valid_key(&self, k: &Key) -> bool {
@@ -1109,6 +1122,12 @@ impl Bindings {
         use_shape_comments_and_stubs: bool,
     ) -> Self {
         let module_range = x.range;
+        let dunder_all_entries = exports
+            .dunder_all_names()
+            .filter_map(|(_, name, content_range)| {
+                Some(Identifier::new(name.clone(), content_range?))
+            })
+            .collect();
         let pytest_info = PytestBindingInfo::from_module(&x);
         let errors = ErrorCollector::new(module_info.dupe(), error_style);
         let shape_comments = if use_shape_comments_and_stubs {
@@ -1297,6 +1316,7 @@ impl Bindings {
             module_ranges,
             annotated_metadata_ranges: merge_ranges(builder.annotated_metadata_ranges),
             docstring_type_ranges: merge_ranges(builder.docstring_type_ranges),
+            dunder_all_entries,
             scope_trace: if enable_trace {
                 Some(scope_trace)
             } else {

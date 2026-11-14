@@ -38,6 +38,29 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
 }
 
 #[test]
+fn dunder_all_entry_uses_exported_type_definition() {
+    let code = r#"
+class Exported: ...
+value: Exported = Exported()
+__all__ = ["value"]
+#            ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+4 | __all__ = ["value"]
+                 ^
+Type Definition Result:
+2 | class Exported: ...
+          ^^^^^^^^
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
 fn function_goes_to_its_own_def() {
     let code = r#"
 def f(x: list[int], y: str) -> bytes: ...
