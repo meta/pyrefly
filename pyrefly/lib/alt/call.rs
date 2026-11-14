@@ -61,6 +61,7 @@ use crate::alt::unwrap::HintRef;
 use crate::alt::unwrap::MAX_HINT_WIDTH;
 use crate::binding::binding::Key;
 use crate::binding::binding::LambdaParamId;
+use crate::binding::narrow::GuardSubject;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorContext;
@@ -173,6 +174,10 @@ pub struct IntersectionCallTarget {
 pub struct CallOutcome {
     pub ty: Type,
     pub overload_table: OverloadTable,
+    /// The argument supplying the designated parameter of a `TypeGuard`/`TypeIs` result,
+    /// identified by the same call resolution that produced `ty`; `None` when the call
+    /// has no guard result or no single argument could be identified.
+    pub guard_subject: Option<GuardSubject>,
 }
 
 impl CallOutcome {
@@ -180,6 +185,7 @@ impl CallOutcome {
         Self {
             ty,
             overload_table: OverloadTable::default(),
+            guard_subject: None,
         }
     }
 }
@@ -1493,6 +1499,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let CallOutcome {
                     ty: ret,
                     overload_table,
+                    ..
                 } = self.call_infer_with_callee_range(
                     self.dunder_new_call_target(
                         new_method.clone(),
@@ -2045,6 +2052,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             ) => self.call_infer_inner(
                 signature,
                 Some(&metadata.kind),
+                1,
                 tparams.as_deref(),
                 metadata.flags.unresolved_imports,
                 Some(obj),
@@ -2061,6 +2069,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             CallTarget::Callable(TargetWithTParams(tparams, callable)) => self.call_infer_inner(
                 callable,
                 None,
+                0,
                 tparams.as_deref(),
                 None,
                 None,
@@ -2083,6 +2092,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             )) => self.call_infer_inner(
                 callable,
                 Some(&metadata.kind),
+                Self::receiver_param_count(&metadata),
                 tparams.as_deref(),
                 metadata.flags.unresolved_imports,
                 None,
@@ -2097,9 +2107,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 ctor_targs,
             ),
             CallTarget::FunctionOverload(overloads, metadata) => {
-                let (ty, _callable, overload_table) = self.call_overloads(
+                let (ty, _callable, overload_table, guard_subject) = self.call_overloads(
                     overloads,
                     &metadata,
+                    Self::receiver_param_count(&metadata),
                     None,
                     args,
                     keywords,
@@ -2111,12 +2122,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     hint,
                     ctor_targs,
                 );
-                CallOutcome { ty, overload_table }
+                CallOutcome {
+                    ty,
+                    overload_table,
+                    guard_subject,
+                }
             }
             CallTarget::BoundMethodOverload(obj, overloads, meta) => {
-                let (ty, _callable, overload_table) = self.call_overloads(
+                let (ty, _callable, overload_table, guard_subject) = self.call_overloads(
                     overloads,
                     &meta,
+                    1,
                     Some(obj),
                     args,
                     keywords,
@@ -2128,13 +2144,17 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     hint,
                     ctor_targs,
                 );
-                CallOutcome { ty, overload_table }
+                CallOutcome {
+                    ty,
+                    overload_table,
+                    guard_subject,
+                }
             }
             CallTarget::Union(targets) => {
                 let call = CallWithTypes::new();
                 let args = call.vec_call_arg(args, self, errors);
                 let keywords = call.vec_call_keyword(keywords, self, errors);
-                let ty = self.unions(targets.into_map(|t| {
+                let outcomes = targets.into_map(|t| {
                     let ctor_targs = None; // hack
                     self.call_infer_with_callee_range(
                         t,
@@ -2149,9 +2169,29 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         hint,
                         ctor_targs,
                     )
-                    .ty
-                }));
-                CallOutcome::of_ty(ty)
+                });
+                let ty = self.unions(
+                    outcomes
+                        .iter()
+                        .map(|outcome| outcome.ty.clone())
+                        .collect::<Vec<_>>(),
+                );
+                // Applicable alternatives that agree on the guarded argument keep it; when
+                // they disagree, no guarded argument is identified and nothing narrows.
+                let first = outcomes[0].guard_subject.clone();
+                let guard_subject = if outcomes
+                    .iter()
+                    .all(|outcome| outcome.guard_subject == first)
+                {
+                    first
+                } else {
+                    None
+                };
+                CallOutcome {
+                    ty,
+                    overload_table: OverloadTable::default(),
+                    guard_subject,
+                }
             }
             CallTarget::Intersect(targets) => self.call_intersection(
                 targets,
@@ -2184,6 +2224,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let CallOutcome {
             ty: res,
             overload_table,
+            guard_subject,
         } = outcome;
         let res = if let Some((func_metadata, wrapped)) = wrapped_arg.as_ref()
             && func_metadata.kind == FunctionKind::FunctoolsWraps
@@ -2251,7 +2292,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         CallOutcome {
             ty: res,
             overload_table,
+            guard_subject,
         }
+    }
+
+    /// The number of leading receiver parameters of the function, when it is known to be
+    /// a method: the receiver occupies `params[0]` whether it is bound by attribute access
+    /// or supplied explicitly. Returns 0 for non-methods and, together with the caller's
+    /// guard-subject computation, declines to narrow when the information is unavailable.
+    fn receiver_param_count(metadata: &FuncMetadata) -> usize {
+        if metadata.flags.is_staticmethod {
+            return 0;
+        }
+        let defined_in_class = match &metadata.kind {
+            FunctionKind::Def(id) => id.cls.is_some(),
+            FunctionKind::Synthesized(symbol) => symbol.cls.is_some(),
+            _ => false,
+        };
+        usize::from(defined_in_class)
     }
 
     fn constructor_witness_matches(&self, witness: &Type, class: &ClassType) -> bool {
@@ -2591,9 +2649,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .snapshot_reachable_vars(&roots.iter().collect::<Vec<_>>());
         let lambda_snapshot = self.snapshot_lambda_param_types();
         let errors = self.error_collector();
-        let (_, specialization_errors, _, probe_args, _, _) = self.callable_infer(
+        let (_, specialization_errors, _, probe_args, _, _, _) = self.callable_infer(
             probe,
             None,
+            0,
             tparams,
             self_obj.cloned(),
             args,
@@ -2664,6 +2723,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callable: Callable,
         callable_name: Option<&FunctionKind>,
+        receiver_offset: usize,
         tparams: Option<&TParams>,
         declared_unresolved_imports: Option<bool>,
         self_obj: Option<Type>,
@@ -2700,6 +2760,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let res_no_hint = self.callable_infer(
             callable,
             callable_name,
+            receiver_offset,
             tparams,
             self_obj,
             args,
@@ -2723,6 +2784,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let res_with_hint = self.callable_infer(
                     callable,
                     callable_name,
+                    receiver_offset,
                     tparams,
                     self_obj,
                     args,
@@ -2783,8 +2845,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         {
             *targs = chosen_targs;
         }
-        let (ty, specialization_errors, return_type_errors, _expected_types, _, overload_table) =
-            chosen_res;
+        let (
+            ty,
+            specialization_errors,
+            return_type_errors,
+            _expected_types,
+            _,
+            overload_table,
+            guard_subject,
+        ) = chosen_res;
         if let Ok(errors) = Vec1::try_from_vec(specialization_errors) {
             self.add_specialization_errors(errors, arguments_range, call_errors, context);
         }
@@ -2798,7 +2867,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             // Keep probe failures out of the real call's contextual typing and operator dispatch.
             self.warn_unresolved_import_signature(return_errors, arguments_range, input_errors);
         }
-        CallOutcome { ty, overload_table }
+        CallOutcome {
+            ty,
+            overload_table,
+            guard_subject,
+        }
     }
 
     pub fn call_infer(

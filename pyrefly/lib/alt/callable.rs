@@ -54,6 +54,7 @@ use crate::alt::shape_extension::shape_extension_vars;
 use crate::alt::solve::Iterable;
 use crate::alt::unwrap::HintRef;
 use crate::alt::unwrap::MAX_HINT_WIDTH;
+use crate::binding::narrow::GuardSubject;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorContext;
@@ -939,6 +940,51 @@ impl ArgMap {
     ) -> Option<MatchedParam> {
         self.arg_to_param
             .insert(argument, MatchedParam::new(ty, name))
+    }
+}
+
+/// Identify which argument supplies a `TypeGuard`/`TypeIs` function's designated
+/// parameter: the first non-receiver positional-or-keyword parameter. The
+/// argument-to-parameter mapping comes from `callable_infer_params`, so keyword binding
+/// and keyword order follow the standard call logic; `receiver_offset` skips the receiver
+/// parameter of a method independently of how the receiver was supplied.
+///
+/// Returns `None` when no single argument can be identified: the signature is gradual,
+/// the designated parameter is missing or not keyword-passable, or it was supplied by a
+/// default or a `**kwargs` splat rather than one definite argument.
+fn guarded_param_subject(
+    params: &ParamList,
+    receiver_offset: usize,
+    has_self_arg: bool,
+    argmap: &ArgMap,
+    keywords: &[CallKeyword],
+) -> Option<GuardSubject> {
+    let designated = params
+        .items()
+        .get(receiver_offset)
+        .and_then(|param| match param {
+            Param::Pos(name, _, _) | Param::PosOnly(Some(name), _, _) => Some(name),
+            // Positional-only parameters without a name can't be looked up, and a
+            // `TypeGuard`/`TypeIs` designation never lands on other parameter kinds.
+            _ => None,
+        })?;
+    let (argument, _) = argmap
+        .arg_to_param
+        .iter()
+        .find(|(_, matched)| matched.name.as_ref() == Some(designated))?;
+    match argument {
+        ArgumentKey::Positional(index) => {
+            // The receiver argument itself is never the designated parameter.
+            (*index)
+                .checked_sub(usize::from(has_self_arg))
+                .map(GuardSubject::Positional)
+        }
+        ArgumentKey::Keyword(index) => {
+            let kw = keywords.get(*index)?;
+            kw.arg
+                .filter(|id| &id.id == designated)
+                .map(|id| GuardSubject::Keyword(id.id.clone()))
+        }
     }
 }
 
@@ -2473,6 +2519,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callable: Callable,
         callable_name: Option<&FunctionKind>,
+        receiver_offset: usize,
         tparams: Option<&TParams>,
         self_obj: Option<Type>,
         args: &[CallArg],
@@ -2491,6 +2538,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ArgMap,
         SmallSet<Quantified>,
         OverloadTable,
+        Option<GuardSubject>,
     ) {
         let hint = HintRef::filter_for_call(hint, tparams);
         self.callable_infer_with_hint(
@@ -2502,6 +2550,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 self.callable_infer_inner(
                     callable,
                     callable_name,
+                    receiver_offset,
                     tparams,
                     self_obj,
                     args,
@@ -2523,6 +2572,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callable: Callable,
         callable_name: Option<&FunctionKind>,
+        receiver_offset: usize,
         tparams: Option<&TParams>,
         mut self_obj: Option<Type>,
         mut args: &[CallArg],
@@ -2541,6 +2591,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ArgMap,
         SmallSet<Quantified>,
         OverloadTable,
+        Option<GuardSubject>,
     ) {
         let call_boundary = CallBoundary::new();
         let call_context = call_boundary
@@ -2649,21 +2700,32 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             arguments_range,
         });
         let self_arg = self_obj.as_ref().map(|ty| CallArg::ty(ty, arguments_range));
-        let argmap = match callable.params {
-            Params::List(params) | Params::Partial(params) => self.callable_infer_params(
-                callable_name,
-                &params,
-                None,
-                self_arg,
-                &mut self_qs,
-                args,
-                keywords,
-                arguments_range,
-                arg_errors,
-                call_errors,
-                context,
-                &call_context,
-            ),
+        let has_self_arg = self_arg.is_some();
+        let (argmap, guard_subject) = match callable.params {
+            Params::List(params) | Params::Partial(params) => {
+                let argmap = self.callable_infer_params(
+                    callable_name,
+                    &params,
+                    None,
+                    self_arg,
+                    &mut self_qs,
+                    args,
+                    keywords,
+                    arguments_range,
+                    arg_errors,
+                    call_errors,
+                    context,
+                    &call_context,
+                );
+                let guard_subject = guarded_param_subject(
+                    &params,
+                    receiver_offset,
+                    has_self_arg,
+                    &argmap,
+                    keywords,
+                );
+                (argmap, guard_subject)
+            }
             Params::Ellipsis | Params::Materialization => {
                 // Deal with Callable[..., R]
                 for arg in self_arg.iter().chain(args.iter()) {
@@ -2672,48 +2734,70 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 for keyword in keywords {
                     keyword.value.infer(self, arg_errors);
                 }
-                ArgMap::new()
+                (ArgMap::new(), None)
             }
             Params::ParamSpec(concatenate, p) => {
                 let p = self.solver().expand(p);
                 match p {
-                    Type::ParamSpecValue(params) => self.callable_infer_params(
-                        callable_name,
-                        &params.prepend_types(&concatenate),
-                        None,
-                        self_arg,
-                        &mut self_qs,
-                        args,
-                        keywords,
-                        arguments_range,
-                        arg_errors,
-                        call_errors,
-                        context,
-                        &call_context,
-                    ),
+                    Type::ParamSpecValue(params) => {
+                        let matched = params.prepend_types(&concatenate);
+                        let argmap = self.callable_infer_params(
+                            callable_name,
+                            &matched,
+                            None,
+                            self_arg,
+                            &mut self_qs,
+                            args,
+                            keywords,
+                            arguments_range,
+                            arg_errors,
+                            call_errors,
+                            context,
+                            &call_context,
+                        );
+                        let guard_subject = guarded_param_subject(
+                            &matched,
+                            receiver_offset,
+                            has_self_arg,
+                            &argmap,
+                            keywords,
+                        );
+                        (argmap, guard_subject)
+                    }
                     // This can happen with a signature like `(f: Callable[P, None], *args: P.args, **kwargs: P.kwargs)`.
                     // Before we match an argument to `f`, we don't know what `P` is, so we don't have an answer for the Var yet.
                     // Use to_subset_param to preserve Pos vs PosOnly: prefix params from a
                     // function definition should remain keyword-passable in direct calls.
-                    Type::Var(var) => self.callable_infer_params(
-                        callable_name,
-                        &ParamList::new(
+                    Type::Var(var) => {
+                        let matched = ParamList::new(
                             concatenate
                                 .iter()
                                 .map(|p| p.to_param_preserve_name())
                                 .collect(),
-                        ),
-                        Some(var),
-                        self_arg,
-                        &mut self_qs,
-                        args,
-                        keywords,
-                        arguments_range,
-                        arg_errors,
-                        call_errors,
-                        context,
-                        &call_context,
-                    ),
+                        );
+                        let argmap = self.callable_infer_params(
+                            callable_name,
+                            &matched,
+                            Some(var),
+                            self_arg,
+                            &mut self_qs,
+                            args,
+                            keywords,
+                            arguments_range,
+                            arg_errors,
+                            call_errors,
+                            context,
+                            &call_context,
+                        );
+                        let guard_subject = guarded_param_subject(
+                            &matched,
+                            receiver_offset,
+                            has_self_arg,
+                            &argmap,
+                            keywords,
+                        );
+                        (argmap, guard_subject)
+                    }
                     Type::Quantified(q) => {
                         if let Some((args, keywords)) = self.paramspec_forwarding(
                             &q,
@@ -2725,9 +2809,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             call_errors,
                             context,
                         ) {
-                            self.callable_infer_params(
+                            let matched = ParamList::new_types(concatenate.into_vec());
+                            let argmap = self.callable_infer_params(
                                 callable_name,
-                                &ParamList::new_types(concatenate.into_vec()),
+                                &matched,
                                 None,
                                 self_arg,
                                 &mut self_qs,
@@ -2738,12 +2823,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 call_errors,
                                 context,
                                 &call_context,
-                            )
+                            );
+                            let guard_subject = guarded_param_subject(
+                                &matched,
+                                receiver_offset,
+                                has_self_arg,
+                                &argmap,
+                                keywords,
+                            );
+                            (argmap, guard_subject)
                         } else {
-                            ArgMap::new()
+                            (ArgMap::new(), None)
                         }
                     }
-                    Type::Any(_) | Type::Ellipsis => ArgMap::new(),
+                    Type::Any(_) | Type::Ellipsis => (ArgMap::new(), None),
                     _ => {
                         // This could well be our error, but not really sure
                         self.error_with_context(
@@ -2753,7 +2846,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             format!("Unexpected ParamSpec type: `{}`", self.for_display(p)),
                             context,
                         );
-                        ArgMap::new()
+                        (ArgMap::new(), None)
                     }
                 }
             }
@@ -2792,6 +2885,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             argmap,
             defaults_used,
             overload_table,
+            guard_subject,
         )
     }
 }
