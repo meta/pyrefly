@@ -86,6 +86,7 @@ use crate::alt::attr::AttrInfo;
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
+use crate::binding::binding::KeyExport;
 use crate::binding::metadata::BindingsMetadata;
 use crate::config::error_kind::ErrorKind;
 use crate::error::error::ErrorQuickFix;
@@ -112,6 +113,7 @@ use crate::state::state::Transaction;
 use crate::state::state::TransactionHandle;
 use crate::types::module::ModuleType;
 use crate::types::type_var::Restriction;
+use crate::types::types::AnyStyle;
 use crate::types::types::Type;
 
 mod dict_completions;
@@ -1494,6 +1496,15 @@ impl<'a> Transaction<'a> {
             context,
         }) = self.identifier_at(handle, position)
         else {
+            if let Some((_, name)) = self.get_exports_data(handle).dunder_all_name_at(position) {
+                return self
+                    .get_solutions(handle)?
+                    .get_hashed_opt(Hashed::new(&KeyExport(name)))
+                    .cloned();
+            }
+            if let Some(ty) = self.dunder_slots_entry_type(handle, position) {
+                return Some(ty);
+            }
             return self
                 .type_from_match_wildcard_at_impl(handle, position)
                 .or_else(|| self.type_from_expression_at_impl(handle, position, false));
@@ -2023,7 +2034,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// The references in `references_by_module` that point at the definition at `definition_range`
-    /// in `module`. Both `Index` attribute reference maps are keyed and shaped alike, so they share
+    /// in `module`. The `Index` attribute reference maps are keyed and shaped alike, so they share
     /// this scan.
     fn recorded_attribute_references(
         &self,
@@ -2142,12 +2153,12 @@ impl<'a> Transaction<'a> {
     /// a different file, because the interface then describes that other module. Resolution can
     /// also find no executable and fall back to the interface, for example for a `-stubs` package;
     /// the interface is still used then. Open files have in-memory module paths, so the file
-    /// paths are compared rather than the module paths.
-    fn find_corresponding_interface_definition(
+    /// paths are compared rather than the module paths. The result includes the docstring range.
+    pub(crate) fn find_corresponding_interface_definition(
         &self,
         sys_info: SysInfo,
         definition: &TextRangeWithModule,
-    ) -> Option<TextRangeWithModule> {
+    ) -> Option<(TextRangeWithModule, Option<TextRange>)> {
         if definition.module.path().style() != ModuleStyle::Executable {
             return None;
         }
@@ -2180,9 +2191,12 @@ impl<'a> Transaction<'a> {
         }
         let context = AttributeContext::from_module(&definition.module, definition.range)?;
         let name = Name::new(definition.module.code_at(definition.range));
-        let (interface_module, range, _) =
+        let (interface_module, range, docstring_range) =
             self.find_declaration_in_module(&interface_handle, &context, &name)?;
-        Some(TextRangeWithModule::new(interface_module, range))
+        Some((
+            TextRangeWithModule::new(interface_module, range),
+            docstring_range,
+        ))
     }
 
     /// Find the declaration of `name` in the scope that `context` describes, within the module
@@ -2925,8 +2939,10 @@ impl<'a> Transaction<'a> {
         let exports = self.get_exports_data(handle);
         let (_entry_range, name) = exports.dunder_all_name_at(position)?;
 
-        if let Some((definition_handle, _, export)) =
-            self.resolve_named_import(handle, module_info.name(), name.clone(), preference)
+        let answers = self.get_answers(handle)?;
+        if let Some(key) = answers.bindings().dunder_all_binding(&name)
+            && let Some((definition_handle, export)) =
+                self.find_export_for_key(handle, key, preference).ok()?
         {
             let definition_module = self.get_module_info(&definition_handle)?;
             return Some(FindDefinitionItemWithDocstring {
@@ -2949,6 +2965,28 @@ impl<'a> Transaction<'a> {
         }
 
         None
+    }
+
+    /// Return the instance attribute type named by a literal `__slots__` entry.
+    fn dunder_slots_entry_type(&self, handle: &Handle, position: TextSize) -> Option<Type> {
+        let answers = self.get_answers(handle)?;
+        let entry = answers.bindings().dunder_slots_entry_at(position)?;
+        self.ad_hoc_solve(handle, "dunder_slots_entry_type", |solver| {
+            let class = solver.get_idx(entry.class_idx).0.as_ref()?;
+            let instance = solver.instantiate(class);
+            if !solver.has_attr(&instance, &entry.name.id) {
+                return None;
+            }
+            Some(solver.type_of_attr_get(
+                &instance,
+                &entry.name.id,
+                entry.name.range,
+                &solver.error_swallower(),
+                ErrorKind::MissingAttribute,
+                None,
+                "dunder_slots_entry_type",
+            ))
+        })?
     }
 
     fn find_definition_for_keyword_argument(
@@ -3106,6 +3144,23 @@ impl<'a> Transaction<'a> {
                 self.find_definition_for_dunder_all_entry(handle, position, preference)
             {
                 return Ok(vec1![definition]);
+            }
+            if let Some(answers) = self.get_answers(handle)
+                && let Some(entry) = answers.bindings().dunder_slots_entry_at(position)
+                && let Some(class_type) = self
+                    .ad_hoc_solve(handle, "dunder_slots_definition", |solver| {
+                        Some(Type::ClassDef(
+                            solver.get_idx(entry.class_idx).0.as_ref()?.dupe(),
+                        ))
+                    })
+                    .flatten()
+            {
+                return self.find_attribute_definition_for_base_type(
+                    handle,
+                    preference,
+                    class_type,
+                    &entry.name.id,
+                );
             }
         }
 
@@ -4630,18 +4685,49 @@ impl<'a> Transaction<'a> {
 
     pub fn prepare_rename(&self, handle: &Handle, position: TextSize) -> Option<TextRange> {
         let identifier_context = self.identifier_at(handle, position);
+        let answers = self.get_answers(handle)?;
+        let bindings = answers.bindings();
+        let dunder_all_entry = bindings
+            .dunder_all_entries()
+            .iter()
+            .find(|entry| entry.range.contains_inclusive(position));
+        // A string can be renamed only when it identifies an editable, resolved binding.
+        if let Some(entry) = dunder_all_entry {
+            let key = bindings.dunder_all_binding(&entry.id)?;
+            if matches!(
+                bindings.get(bindings.key_to_idx(key)),
+                Binding::Any(AnyStyle::Error)
+            ) {
+                return None;
+            }
+        }
+        let symbol_literal_range = dunder_all_entry.map(|entry| entry.range).or_else(|| {
+            bindings
+                .dunder_slots_entry_at(position)
+                .map(|entry| entry.name.range)
+        });
 
         let definitions = self
             .find_definition(
                 handle,
                 position,
                 FindPreference {
+                    import_behavior: ImportBehavior::StopAtRenamedImports,
                     resolve_call_dunders: false,
                     ..Default::default()
                 },
             )
             .map(Vec1::into_vec)
             .unwrap_or_default();
+
+        if symbol_literal_range.is_some()
+            && (definitions.is_empty()
+                || definitions
+                    .iter()
+                    .any(|definition| definition.module.path().is_bundled()))
+        {
+            return None;
+        }
 
         for FindDefinitionItemWithDocstring {
             module,
@@ -4658,7 +4744,7 @@ impl<'a> Transaction<'a> {
 
             // Also block rename if the stub that consumers are checked against cannot be edited,
             // because renaming the definition without that stub would break its consumers.
-            if let Some(interface) = self.find_corresponding_interface_definition(
+            if let Some((interface, _)) = self.find_corresponding_interface_definition(
                 *handle.sys_info(),
                 &TextRangeWithModule::new(module, definition_range),
             ) && (interface.module.path().is_bundled()
@@ -4675,6 +4761,7 @@ impl<'a> Transaction<'a> {
                 self.setattr_name_literal_at(handle, position)
                     .map(|(name, _)| name.range)
             })
+            .or(symbol_literal_range)
     }
 
     pub fn find_local_references(
@@ -4868,6 +4955,10 @@ impl<'a> Transaction<'a> {
         let definition_name = Name::new(module.code_at(definition_range));
         let is_parameter_definition =
             definition_metadata.symbol_kind() == Some(SymbolKind::Parameter);
+        let is_attribute = matches!(
+            definition_metadata,
+            DefinitionMetadata::Attribute | DefinitionMetadata::VariableOrAttribute(_)
+        );
         let mut references = if handle.path() != module.path() {
             self.local_references_from_external_definition(handle, definition_range, module)?
         } else {
@@ -4879,11 +4970,7 @@ impl<'a> Transaction<'a> {
                 options.include_declaration,
             )?
         };
-        if matches!(
-            definition_metadata,
-            DefinitionMetadata::Attribute | DefinitionMetadata::VariableOrAttribute(_)
-        ) && let Some(answers) = self.get_answers(handle)
-        {
+        if is_attribute && let Some(answers) = self.get_answers(handle) {
             let literals = answers
                 .bindings()
                 .setattr_name_literals()
@@ -4915,6 +5002,18 @@ impl<'a> Transaction<'a> {
                 module,
                 definition_range,
                 &definition_name,
+            ));
+        }
+        if is_attribute
+            && let Some(index) = self
+                .get_solutions(handle)
+                .and_then(|solutions| solutions.get_index())
+        {
+            references.extend(self.recorded_attribute_references(
+                handle,
+                &index.lock().slot_references,
+                module,
+                definition_range,
             ));
         }
         references.sort_by_key(|range| range.start());
@@ -5135,19 +5234,18 @@ impl<'a> Transaction<'a> {
     ) -> Option<Vec<TextRange>> {
         let mut references = Vec::new();
         if let Some(mod_module) = self.get_ast(handle) {
-            let is_valid_use = |x: &ExprName| {
-                if x.id() == expected_name
-                    && let Some((def_handle, Export { location, .. })) = self
-                        .find_export_for_key(
-                            handle,
-                            &Key::BoundName(ShortIdentifier::expr_name(x)),
-                            FindPreference {
-                                import_behavior: ImportBehavior::StopAtRenamedImports,
-                                prefer_pyi: false,
-                                ..Default::default()
-                            },
-                        )
-                        .unwrap_or(None)
+            let is_valid_key = |key: &Key| {
+                if let Some((def_handle, Export { location, .. })) = self
+                    .find_export_for_key(
+                        handle,
+                        key,
+                        FindPreference {
+                            import_behavior: ImportBehavior::StopAtRenamedImports,
+                            prefer_pyi: false,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_or(None)
                     && def_handle.path() == handle.path()
                     && location == definition_range
                 {
@@ -5155,6 +5253,20 @@ impl<'a> Transaction<'a> {
                 } else {
                     false
                 }
+            };
+            if let Some(answers) = self.get_answers(handle) {
+                let bindings = answers.bindings();
+                references.extend(bindings.dunder_all_entries().iter().filter_map(|entry| {
+                    (entry.id == *expected_name
+                        && bindings
+                            .dunder_all_binding(&entry.id)
+                            .is_some_and(is_valid_key))
+                    .then_some(entry.range)
+                }));
+            }
+            let is_valid_use = |x: &ExprName| {
+                x.id() == expected_name
+                    && is_valid_key(&Key::BoundName(ShortIdentifier::expr_name(x)))
             };
             let module_info = self.get_module_info(handle);
             // Only strings that mention the name can hold a forward reference to it.
@@ -5697,6 +5809,7 @@ impl<'a> RdepTransaction for Transaction<'a> {
         definition: &TextRangeWithModule,
     ) -> Option<TextRangeWithModule> {
         self.find_corresponding_interface_definition(sys_info, definition)
+            .map(|(definition, _)| definition)
     }
 
     fn local_references_from_definition(
@@ -5741,6 +5854,7 @@ impl<'a> RdepTransaction for CancellableTransaction<'a> {
     ) -> Option<TextRangeWithModule> {
         self.as_ref()
             .find_corresponding_interface_definition(sys_info, definition)
+            .map(|(definition, _)| definition)
     }
 
     fn local_references_from_definition(

@@ -155,9 +155,9 @@ impl Display for Exports {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for x in self.definitions.dunder_all.entries.iter() {
             match x {
-                DunderAllEntry::Name(_, x) => writeln!(f, "export {x}")?,
+                DunderAllEntry::Name(_, x, _) => writeln!(f, "export {x}")?,
                 DunderAllEntry::Module(_, x) => writeln!(f, "from {x} import *")?,
-                DunderAllEntry::Remove(_, x) => writeln!(f, "unexport {x}")?,
+                DunderAllEntry::Remove(_, x, _) => writeln!(f, "unexport {x}")?,
             }
         }
         Ok(())
@@ -241,7 +241,7 @@ impl Exports {
             let mut result = SmallSet::new();
             for x in &self.definitions.dunder_all.entries {
                 match x {
-                    DunderAllEntry::Name(_, x) => {
+                    DunderAllEntry::Name(_, x, _) => {
                         // An empty entry names nothing importable, and the binding pass
                         // does not export empty names, so exporting one here would
                         // promise an export that never exists.
@@ -269,7 +269,7 @@ impl Exports {
                             }
                         }
                     }
-                    DunderAllEntry::Remove(_, x) => {
+                    DunderAllEntry::Remove(_, x, _) => {
                         // This is O(n), but we'd appreciate the determism, and remove is rare in `__all__`.
                         result.shift_remove(x);
                     }
@@ -375,21 +375,27 @@ impl Exports {
 
     /// If `position` is inside a user-specified `__all__` string entry, return its range and name.
     pub fn dunder_all_name_at(&self, position: TextSize) -> Option<(TextRange, Name)> {
-        if self.definitions.dunder_all.kind != DunderAllKind::Specified {
-            return None;
-        }
-        self.definitions
-            .dunder_all
-            .entries
-            .iter()
-            .find_map(|entry| match entry {
-                DunderAllEntry::Name(range, name) | DunderAllEntry::Remove(range, name)
-                    if range.contains_inclusive(position) =>
-                {
-                    Some((*range, name.clone()))
-                }
-                _ => None,
-            })
+        self.dunder_all_names().find_map(|(range, name, _)| {
+            range
+                .contains_inclusive(position)
+                .then(|| (range, name.clone()))
+        })
+    }
+
+    /// Return expression ranges, names, and content ranges from a user-specified `__all__`.
+    pub fn dunder_all_names(&self) -> impl Iterator<Item = (TextRange, &Name, Option<TextRange>)> {
+        let entries = if self.definitions.dunder_all.kind == DunderAllKind::Specified {
+            self.definitions.dunder_all.entries.as_slice()
+        } else {
+            &[]
+        };
+        entries.iter().filter_map(|entry| match entry {
+            DunderAllEntry::Name(range, name, content_range)
+            | DunderAllEntry::Remove(range, name, content_range) => {
+                Some((*range, name, *content_range))
+            }
+            DunderAllEntry::Module(_, _) => None,
+        })
     }
 
     /// Whether `name` is defined in this module as a `Final` whose type is declared rather than
@@ -453,10 +459,10 @@ impl Exports {
 
         for entry in &definitions.dunder_all.entries {
             match entry {
-                DunderAllEntry::Name(_, name) => {
+                DunderAllEntry::Name(_, name, _) => {
                     names.insert(name.clone());
                 }
-                DunderAllEntry::Remove(_, name) => {
+                DunderAllEntry::Remove(_, name, _) => {
                     names.shift_remove(name);
                 }
                 DunderAllEntry::Module(..) => {}
@@ -476,10 +482,10 @@ impl Exports {
 
         for entry in &definitions.dunder_all.entries {
             match entry {
-                DunderAllEntry::Name(_, name) => {
+                DunderAllEntry::Name(_, name, _) => {
                     names.insert(name.clone());
                 }
-                DunderAllEntry::Remove(_, name) => {
+                DunderAllEntry::Remove(_, name, _) => {
                     names.shift_remove(name);
                 }
                 DunderAllEntry::Module(..) => {}
@@ -503,7 +509,7 @@ impl Exports {
         }
         let mut invalid = Vec::new();
         for entry in &self.definitions.dunder_all.entries {
-            if let DunderAllEntry::Name(range, name) = entry {
+            if let DunderAllEntry::Name(range, name, _) = entry {
                 // Check if name exists in definitions
                 if self.definitions.definitions.contains_key(name) {
                     continue;

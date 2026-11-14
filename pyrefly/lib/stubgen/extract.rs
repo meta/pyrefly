@@ -1021,10 +1021,10 @@ fn resolve_dunder_all(body: &[Stmt], module_info: &Module) -> Option<HashSet<Nam
     let mut names = HashSet::new();
     for entry in &defs.dunder_all.entries {
         match entry {
-            DunderAllEntry::Name(_, name) => {
+            DunderAllEntry::Name(_, name, _) => {
                 names.insert(name.clone());
             }
-            DunderAllEntry::Remove(_, name) => {
+            DunderAllEntry::Remove(_, name, _) => {
                 names.remove(name);
             }
             DunderAllEntry::Module(..) => {
