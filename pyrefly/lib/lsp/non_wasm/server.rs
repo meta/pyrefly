@@ -5307,6 +5307,7 @@ impl Server {
                 &handle,
                 range,
                 import_format,
+                lsp_config.and_then(|c| c.inlay_hints).unwrap_or_default(),
                 Some(&self.lsp_thread_pool),
             ) {
                 actions.extend(quickfixes.into_iter().filter_map(|(title, edits)| {

@@ -5072,7 +5072,7 @@ output-format = "omit-errors"
         // File contents should still be relative to the location of the config file, not src/.
         assert_eq!(
             config.project_includes,
-            Globs::new(vec![root.path().join("**/*").to_string_lossy().to_string()]).unwrap(),
+            Globs::new_with_root(root.path(), vec!["**/*".to_owned()]).unwrap(),
         );
         assert_eq!(
             config.search_path().cloned().collect::<Vec<_>>(),
@@ -5895,15 +5895,14 @@ matches = "generated/**"
         let (config, errors) = ConfigFile::from_file(&child);
 
         assert!(errors.is_empty());
-        let shared_glob = |pattern: &str| {
-            Globs::new(vec![shared.join(pattern).to_string_lossy().into_owned()]).unwrap()
-        };
+        let shared_glob =
+            |pattern: &str| Globs::new_with_root(&shared, vec![pattern.to_owned()]).unwrap();
         assert_eq!(config.project_includes, shared_glob("base/**/*.py"));
         assert_eq!(config.search_path_from_file, vec![shared.join("stubs")]);
         assert_eq!(config.coverage.includes, Some(shared_glob("covered")));
         assert_eq!(
             config.sub_configs[0].matches,
-            Glob::new(shared.join("generated/**").to_string_lossy().into_owned()).unwrap()
+            Glob::new_with_root(&shared, "generated/**".to_owned()).unwrap()
         );
         assert_eq!(
             config.python_environment.site_package_path,
@@ -5939,13 +5938,7 @@ search-path = []
         assert!(errors.is_empty());
         assert_eq!(
             config.project_includes,
-            Globs::new(vec![
-                root.path()
-                    .join("child/**/*.py")
-                    .to_string_lossy()
-                    .to_string()
-            ])
-            .unwrap()
+            Globs::new_with_root(root.path(), vec!["child/**/*.py".to_owned()]).unwrap()
         );
         assert!(config.search_path_from_file.is_empty());
     }

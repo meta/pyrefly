@@ -3805,6 +3805,7 @@ impl<'a> Transaction<'a> {
         handle: &Handle,
         range: TextRange,
         import_format: ImportFormat,
+        inlay_hint_config: InlayHintConfig,
         custom_thread_pool: Option<&ThreadPool>,
     ) -> Option<Vec<(String, Vec<(Module, TextRange, String)>)>> {
         let module_info = self.get_module_info(handle)?;
@@ -4078,6 +4079,17 @@ impl<'a> Transaction<'a> {
                 }
                 _ => {}
             }
+        }
+        if let Some(actions) =
+            quick_fixes::insert_inferred_annotation::insert_inferred_annotation_code_actions(
+                self,
+                handle,
+                range,
+                import_format,
+                inlay_hint_config,
+            )
+        {
+            multi_actions.extend(actions);
         }
         if let Some(answers) = self.get_answers(handle) {
             let bindings = answers.bindings();

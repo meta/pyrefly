@@ -21,6 +21,7 @@ use ruff_python_ast::ExprDict;
 use ruff_python_ast::ExprList;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::ParameterWithDefault;
+use ruff_python_ast::Stmt;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
@@ -119,6 +120,30 @@ impl<'a> Transaction<'a> {
         inlay_hint_config: InlayHintConfig,
         import_format: ImportFormat,
     ) -> Option<Vec<InlayHintData>> {
+        self.inlay_hints_impl(handle, inlay_hint_config, import_format, None)
+    }
+
+    /// Inlay hints whose annotated declaration overlaps `range`.
+    ///
+    /// Types outside `range` are not rendered. Code actions use this so a cursor
+    /// request does not format every hint in the file.
+    pub fn inlay_hints_in_range(
+        &self,
+        handle: &Handle,
+        inlay_hint_config: InlayHintConfig,
+        import_format: ImportFormat,
+        range: TextRange,
+    ) -> Option<Vec<InlayHintData>> {
+        self.inlay_hints_impl(handle, inlay_hint_config, import_format, Some(range))
+    }
+
+    fn inlay_hints_impl(
+        &self,
+        handle: &Handle,
+        inlay_hint_config: InlayHintConfig,
+        import_format: ImportFormat,
+        limit: Option<TextRange>,
+    ) -> Option<Vec<InlayHintData>> {
         let is_interesting = |e: &Expr, ty: &Type, class_name: Option<&Name>| {
             !ty.is_any()
                 && match e {
@@ -186,40 +211,49 @@ impl<'a> Transaction<'a> {
                     edits,
                 }
             };
+        // `None` keeps every hint. An empty cursor includes the insertion point at
+        // the end of the declaration. A nonempty selection uses half-open overlap,
+        // so a declaration that only touches the selection's exclusive end is left out.
+        let in_selection = |target: TextRange| match limit {
+            None => true,
+            Some(selection) if selection.is_empty() => {
+                selection.start() >= target.start() && selection.start() <= target.end()
+            }
+            Some(selection) => selection.start() < target.end() && target.start() < selection.end(),
+        };
         let mut res = Vec::new();
         for idx in bindings.keys::<Key>() {
             match bindings.idx_to_key(idx) {
                 Key::ReturnType(id) if inlay_hint_config.function_return_types => {
-                    match bindings.get(bindings.key_to_idx(&Key::Definition(*id))) {
-                        Binding::Function { decorated_idx, .. } => {
-                            if matches!(&bindings.get(idx), Binding::ReturnType(ret) if !ret.kind.has_return_annotation())
-                                && let Some(mut ty) = answers.get_type_at(idx)
-                                && !ty.is_any()
+                    if let Binding::Function { decorated_idx, .. } =
+                        bindings.get(bindings.key_to_idx(&Key::Definition(*id)))
+                    {
+                        let fun = bindings.get(bindings.get(*decorated_idx).undecorated_idx);
+                        let is_async = fun.def.is_async;
+                        let position = fun.def.parameters.range.end();
+                        // The header runs from the name through the parameter list, so a
+                        // cursor in the body does not offer the return annotation.
+                        let header = TextRange::new(fun.def.name.range.start(), position);
+                        if in_selection(header)
+                            && matches!(&bindings.get(idx), Binding::ReturnType(ret) if !ret.kind.has_return_annotation())
+                            && let Some(mut ty) = answers.get_type_at(idx)
+                            && !ty.is_any()
+                        {
+                            if is_async
+                                && let Some(Some((_, _, return_ty))) =
+                                    self.ad_hoc_solve(handle, "inlay_hint_coroutine", |solver| {
+                                        solver.unwrap_coroutine(&ty)
+                                    })
                             {
-                                let fun =
-                                    bindings.get(bindings.get(*decorated_idx).undecorated_idx);
-                                if fun.def.is_async
-                                    && let Some(Some((_, _, return_ty))) = self.ad_hoc_solve(
-                                        handle,
-                                        "inlay_hint_coroutine",
-                                        |solver| solver.unwrap_coroutine(&ty),
-                                    )
-                                {
-                                    ty = return_ty;
-                                }
-                                res.push(make_type_hint(
-                                    " -> ",
-                                    fun.def.parameters.range.end(),
-                                    &ty,
-                                    true,
-                                ));
+                                ty = return_ty;
                             }
+                            res.push(make_type_hint(" -> ", position, &ty, true));
                         }
-                        _ => {}
                     }
                 }
                 key @ Key::Definition(_)
                     if inlay_hint_config.variable_types
+                        && in_selection(key.range())
                         && let Some(ty) = answers.get_type_at(idx) =>
                 {
                     let declaration_type = answers.get_class_field_type_at_definition(idx);
@@ -247,7 +281,14 @@ impl<'a> Transaction<'a> {
                         // receiver case, could mislead users into
                         // annotating with the RHS-derived type. The same
                         // applies to receiver-bearing unpacked rebinds.
-                        Binding::NameAssign(x) if !x.is_pinned() => (Some(&*x.expr), false),
+                        Binding::NameAssign(x) if !x.is_pinned() => {
+                            // `global` and `nonlocal` names cannot take an annotated assignment.
+                            if self.capture_forbids_annotation(handle, key.range().start(), &x.name)
+                            {
+                                insertable = false;
+                            }
+                            (Some(&*x.expr), false)
+                        }
                         Binding::Expr(None, e) => {
                             // Expression-bound names, such as walrus targets, cannot be annotated inline.
                             insertable = false;
@@ -303,6 +344,9 @@ impl<'a> Transaction<'a> {
         if inlay_hint_config.variable_types {
             for field_idx in bindings.keys::<KeyClassField>() {
                 let field = bindings.get(field_idx);
+                if !in_selection(field.range) {
+                    continue;
+                }
                 if let ClassFieldDefinition::DefinedInMethod {
                     values,
                     annotation: None,
@@ -354,6 +398,7 @@ impl<'a> Transaction<'a> {
             res.extend(
                 self.add_inlay_hints_for_positional_function_args(handle)
                     .into_iter()
+                    .filter(|(pos, _)| in_selection(TextRange::empty(*pos)))
                     .map(|(pos, text)| InlayHintData {
                         position: pos,
                         label_parts: vec![(text.clone(), None)],
@@ -366,6 +411,33 @@ impl<'a> Transaction<'a> {
         }
 
         Some(res)
+    }
+
+    /// `global` and `nonlocal` names cannot take an annotated assignment in that scope.
+    fn capture_forbids_annotation(&self, handle: &Handle, position: TextSize, name: &Name) -> bool {
+        fn declared(stmts: &[Stmt], position: TextSize, name: &Name) -> Option<bool> {
+            for stmt in stmts {
+                let body = match stmt {
+                    Stmt::FunctionDef(func) if func.range().contains(position) => {
+                        func.body.as_slice()
+                    }
+                    Stmt::ClassDef(class) if class.range().contains(position) => {
+                        class.body.as_slice()
+                    }
+                    _ => continue,
+                };
+                return Some(declared(body, position, name).unwrap_or_else(|| {
+                    body.iter().any(|stmt| match stmt {
+                        Stmt::Global(global) => global.names.iter().any(|id| id.id == *name),
+                        Stmt::Nonlocal(nonlocal) => nonlocal.names.iter().any(|id| id.id == *name),
+                        _ => false,
+                    })
+                }));
+            }
+            None
+        }
+        self.get_ast(handle)
+            .is_some_and(|ast| declared(&ast.body, position, name).unwrap_or(false))
     }
 
     /// Helper to extract the element expression from an unpacked source.

@@ -6,6 +6,7 @@
  */
 
 use pretty_assertions::assert_eq;
+use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
 use crate::state::lsp::AllOffPartial;
@@ -1745,4 +1746,38 @@ class MyClass:
     assert_eq!(hints.len(), 1);
     // NewType is a callable alias, so `type[N]` is not a valid annotation to insert.
     assert!(hints[0].edits.is_none());
+}
+
+#[test]
+fn test_inlay_hints_in_range_limits_to_the_selection() {
+    let code = "\
+def f() -> int:
+    return 1
+
+yyy = f()
+zzz = f()
+";
+    let files = [("main", code)];
+    let (handles, state) = mk_multi_file_state_assert_no_errors(&files, Require::Exports);
+    let handle = handles.get("main").unwrap();
+    let transaction = state.transaction();
+    let all = transaction
+        .inlay_hints(handle, Default::default(), Default::default())
+        .unwrap();
+    let start = code.find("zzz").unwrap();
+    let zzz = TextRange::new(
+        TextSize::try_from(start).unwrap(),
+        TextSize::try_from(start + 3).unwrap(),
+    );
+    let limited = transaction
+        .inlay_hints_in_range(handle, Default::default(), Default::default(), zzz)
+        .unwrap();
+    assert!(all.len() > limited.len());
+    assert_eq!(limited.len(), 1);
+    let label: String = limited[0]
+        .label_parts
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect();
+    assert_eq!(label, ": int");
 }
