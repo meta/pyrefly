@@ -394,3 +394,33 @@ assert_type(frozendict(x=1), frozendict[str, int])
 assert_type(frozendict({"x": 1}, y=2), frozendict[str, int])
 "#,
 );
+
+// https://github.com/pyrefly-org/pyrefly/issues/5632
+testcase!(
+    test_dict_unpack_conditional_literalstring_keys,
+    r#"
+from typing import Literal, LiteralString, Mapping
+
+def direct(value: str) -> Mapping[LiteralString, str]:
+    return {**{"left": value}}
+
+def conditional(value: str, condition: bool) -> Mapping[LiteralString, str]:
+    return {**({"left": value} if condition else {"right": value})}
+
+def without_unpacking(value: str, condition: bool) -> Mapping[LiteralString, str]:
+    return {"left": value} if condition else {"right": value}
+
+def bad_value(value: str, condition: bool) -> Mapping[LiteralString, str]:
+    return {**({"left": value} if condition else {"right": 1})}  # E: Returned type `dict[str, int | str]` is not assignable to declared return type `Mapping[LiteralString, str]`
+
+def union_of_dicts(
+    c: dict[Literal["left"], str] | dict[Literal["right"], str],
+) -> Mapping[LiteralString, str]:
+    return {**c}
+
+def non_literal_key(
+    key: str, value: str, condition: bool
+) -> Mapping[LiteralString, str]:
+    return {**({key: value} if condition else {"right": value})}  # E: Returned type `dict[str, str]` is not assignable to declared return type `Mapping[LiteralString, str]`
+"#,
+);
