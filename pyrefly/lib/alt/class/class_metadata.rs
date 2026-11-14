@@ -5,8 +5,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::iter;
-
 use dupe::Dupe;
 use dupe::IterDupedExt;
 use itertools::Itertools;
@@ -69,7 +67,6 @@ use crate::binding::base_class::BaseClassGeneric;
 use crate::binding::base_class::BaseClassGenericKind;
 use crate::binding::binding::Binding;
 use crate::binding::binding::ClassFieldDefinition;
-use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
 use crate::binding::binding::KeyClassField;
@@ -710,33 +707,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return ExplicitSlots::Absent;
         };
         let binding = self.bindings().get::<KeyClassField>(idx);
-        let ClassFieldDefinition::AssignedInBody { value, .. } = &binding.definition else {
+        let Some(entries) = binding.explicit_slots() else {
             return ExplicitSlots::Unknown;
         };
-        let ExprOrBinding::Expr(expr) = value.as_ref() else {
-            return ExplicitSlots::Unknown;
-        };
-
-        fn name_of(expr: &Expr) -> Option<Name> {
-            match expr {
-                Expr::StringLiteral(s) => Some(Name::new(s.value.to_str())),
-                _ => None,
-            }
-        }
-        let names: Option<SmallSet<Name>> = match expr {
-            Expr::Tuple(t) => t.elts.iter().map(name_of).collect(),
-            Expr::List(l) => l.elts.iter().map(name_of).collect(),
-            Expr::Dict(d) => d
-                .items
-                .iter()
-                .map(|item| item.key.as_ref().and_then(name_of))
-                .collect(),
-            Expr::StringLiteral(s) => Some(iter::once(Name::new(s.value.to_str())).collect()),
-            _ => return ExplicitSlots::Unknown,
-        };
-        let Some(names) = names else {
-            return ExplicitSlots::Unknown;
-        };
+        let names: SmallSet<Name> = entries.into_iter().map(|(name, _)| name).collect();
         // A metaclass other than `type` or `ABCMeta` may remove names from the namespace before it
         // creates the class.
         if cls.module().path().is_interface()

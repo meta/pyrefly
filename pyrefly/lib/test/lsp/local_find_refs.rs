@@ -101,8 +101,6 @@ References:
     );
 }
 
-// BUG: References omit __all__ entries.
-// Every cursor should find the definition and both string entries (issue #4344).
 #[test]
 fn dunder_all_entries_are_symbol_references() {
     let code = r#"
@@ -124,25 +122,118 @@ __all__.remove("foo")
 References:
 2 | foo = 1
     ^^^
+4 | __all__ = ["foo"]
+                ^^^
+6 | __all__.remove("foo")
+                    ^^^
 
 4 | __all__ = ["foo"]
                  ^
 References:
 2 | foo = 1
     ^^^
+4 | __all__ = ["foo"]
+                ^^^
+6 | __all__.remove("foo")
+                    ^^^
 
 6 | __all__.remove("foo")
                      ^
 References:
 2 | foo = 1
     ^^^
+4 | __all__ = ["foo"]
+                ^^^
+6 | __all__.remove("foo")
+                    ^^^
 "#
         .trim(),
         report.trim(),
     );
 }
 
-// BUG: A __slots__ entry is disconnected from references to its attribute.
+#[test]
+fn dunder_all_references_use_string_contents() {
+    let code = r#"
+foo = 1
+# ^
+__all__ = ["foo", r"foo", """foo"""]
+__all__.append("foo")
+__all__.extend(["foo"])
+__all__.remove("foo")
+other = "foo"
+def f():
+    foo = 2
+    return foo
+"#;
+    get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+        let transaction = state.transaction();
+        let module = transaction.get_module_info(handle).unwrap();
+        for include_declaration in [false, true] {
+            let references = transaction.find_local_references(
+                handle,
+                position,
+                ReferenceOptions::all(include_declaration),
+            );
+            let expected_lines = if include_declaration {
+                vec![1, 3, 3, 3, 4, 5, 6]
+            } else {
+                vec![3, 3, 3, 4, 5, 6]
+            };
+            assert_eq!(
+                references
+                    .iter()
+                    .map(|range| module.to_lsp_range(*range).start.line)
+                    .collect::<Vec<_>>(),
+                expected_lines,
+            );
+            for range in references {
+                assert_eq!(module.code_at(range), "foo");
+            }
+        }
+        String::new()
+    });
+}
+
+#[test]
+fn dunder_all_references_respect_import_aliases() {
+    let code = r#"
+from lib import foo as alias
+#                      ^
+from other import foo
+#                 ^
+__all__ = ["alias", "foo"]
+alias
+foo
+text = "foo"
+"#;
+    get_batched_lsp_operations_report(
+        &[("main", code), ("lib", "foo = 1\n"), ("other", "foo = 2\n")],
+        |state, handle, position| {
+            let transaction = state.transaction();
+            let module = transaction.get_module_info(handle).unwrap();
+            let references =
+                transaction.find_local_references(handle, position, ReferenceOptions::all(true));
+            let lines = references
+                .iter()
+                .map(|range| module.to_lsp_range(*range).start.line)
+                .collect::<Vec<_>>();
+            let expected_name = if module.to_lsp_position(position).line == 1 {
+                assert_eq!(lines, vec![1, 5, 6]);
+                "alias"
+            } else {
+                assert_eq!(lines, vec![3, 5, 7]);
+                "foo"
+            };
+            for range in references {
+                assert_eq!(module.code_at(range), expected_name);
+            }
+            String::new()
+        },
+    );
+}
+
+// BUG: References omit __slots__ entries.
 // Both cursors should find the slots entry, assignment, and read of self.foo (issue #4344).
 #[test]
 fn dunder_slots_entries_are_attribute_references() {
@@ -167,7 +258,10 @@ class C:
 3 |     __slots__ = ("foo",)
                        ^
 References:
-
+7 |         self.foo = 1
+                 ^^^
+11 |         return self.foo
+                         ^^^
 
 7 |         self.foo = 1
                  ^

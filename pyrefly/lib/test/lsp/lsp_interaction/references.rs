@@ -20,6 +20,125 @@ use tempfile::TempDir;
 use crate::test::lsp::lsp_interaction::util::get_test_files_root;
 use crate::test::lsp::lsp_interaction::util::wait_for_disk_invalidation;
 
+#[test]
+fn references_dunder_all_uses_open_buffer_binding() {
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("dep.py"), "foo = 42\n").unwrap();
+    fs::write(root.path().join("main.py"), "foo = 1\n__all__ = ['foo']\n").unwrap();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("main.py");
+    interaction.client.did_change(
+        "main.py",
+        "from dep import foo\nfoo = 1\n__all__ = ['foo']\nfoo\ndef f():\n    foo = 2\n    return foo\n",
+    );
+    let uri = Uri::from_file_path(root.path().join("main.py")).unwrap();
+    for (line, column) in [(1, 1), (2, 13), (3, 1)] {
+        interaction
+            .client
+            .references("main.py", line, column, true)
+            .expect_response(json!([
+                {"uri": uri, "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}}},
+                {"uri": uri, "range": {"start": {"line": 2, "character": 12}, "end": {"line": 2, "character": 15}}},
+                {"uri": uri, "range": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 3}}},
+            ]))
+            .unwrap();
+    }
+    interaction
+        .client
+        .definition("main.py", 2, 13)
+        .expect_definition_response_from_root("main.py", 1, 0, 1, 3)
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn references_dunder_all_preserves_alias_with_unopened_stub() {
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("dep.py"), "\nfoo: int = 1\n").unwrap();
+    fs::write(root.path().join("dep.pyi"), "foo: str\n").unwrap();
+    fs::write(
+        root.path().join("main.py"),
+        "from dep import foo as alias\nfrom dep import foo\n__all__ = ['alias', 'foo']\nalias\nfoo\n",
+    )
+    .unwrap();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction.initialize(Default::default()).unwrap();
+    interaction.client.did_open("main.py");
+    let uri = Uri::from_file_path(root.path().join("main.py")).unwrap();
+    for (line, column) in [(0, 23), (2, 13), (3, 1)] {
+        interaction
+            .client
+            .references("main.py", line, column, true)
+            .expect_response(json!([
+                {"uri": uri, "range": {"start": {"line": 0, "character": 23}, "end": {"line": 0, "character": 28}}},
+                {"uri": uri, "range": {"start": {"line": 2, "character": 12}, "end": {"line": 2, "character": 17}}},
+                {"uri": uri, "range": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 5}}},
+            ]))
+            .unwrap();
+    }
+    interaction
+        .client
+        .references("main.py", 2, 21, false)
+        .expect_response(json!([
+            {"uri": uri, "range": {"start": {"line": 0, "character": 16}, "end": {"line": 0, "character": 19}}},
+            {"uri": uri, "range": {"start": {"line": 1, "character": 16}, "end": {"line": 1, "character": 19}}},
+            {"uri": uri, "range": {"start": {"line": 2, "character": 21}, "end": {"line": 2, "character": 24}}},
+            {"uri": uri, "range": {"start": {"line": 4, "character": 0}, "end": {"line": 4, "character": 3}}},
+        ]))
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn references_dunder_all_in_unopened_reexports() {
+    let root = TempDir::new().unwrap();
+    for (file, code) in [
+        ("dep.py", "foo = 1\n"),
+        ("exports.py", "from dep import foo\n__all__ = ['foo']\n"),
+        (
+            "renamed.py",
+            "from dep import foo as alias\n__all__ = ['alias']\n",
+        ),
+        ("other.py", "foo = 2\n__all__ = ['foo']\n"),
+    ] {
+        fs::write(root.path().join(file), code).unwrap();
+    }
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![(
+                "test".to_owned(),
+                Uri::from_file_path(root.path()).unwrap(),
+            )]),
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.client.did_open("dep.py");
+    let exports_uri = Uri::from_file_path(root.path().join("exports.py")).unwrap();
+    let renamed_uri = Uri::from_file_path(root.path().join("renamed.py")).unwrap();
+    interaction
+        .client
+        .references("dep.py", 0, 1, false)
+        .expect_response(json!([
+            {"uri": exports_uri, "range": {"start": {"line": 0, "character": 16}, "end": {"line": 0, "character": 19}}},
+            {"uri": exports_uri, "range": {"start": {"line": 1, "character": 12}, "end": {"line": 1, "character": 15}}},
+            {"uri": renamed_uri, "range": {"start": {"line": 0, "character": 16}, "end": {"line": 0, "character": 19}}},
+        ]))
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
 // https://github.com/meta/pyrefly/issues/5485
 #[test]
 fn test_references_to_class_member_after_defining_file_shifts() {

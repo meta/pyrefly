@@ -277,10 +277,11 @@ pub enum DunderAllKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DunderAllEntry {
-    Name(TextRange, Name),
+    /// The optional content range excludes the delimiters of a single string literal.
+    Name(TextRange, Name, Option<TextRange>),
     Module(TextRange, ModuleName),
     // We have to have this explicitly, as you might remove something in a Module
-    Remove(TextRange, Name),
+    Remove(TextRange, Name, Option<TextRange>),
 }
 
 /// The `__all__` variable contents with tracking of whether it was user-specified.
@@ -349,9 +350,11 @@ impl DunderAllEntry {
 
     fn as_item(x: &Expr) -> Option<Self> {
         match x {
-            Expr::StringLiteral(x) => {
-                Some(DunderAllEntry::Name(x.range, Name::new(x.value.to_str())))
-            }
+            Expr::StringLiteral(x) => Some(DunderAllEntry::Name(
+                x.range,
+                Name::new(x.value.to_str()),
+                x.as_single_part_string().map(|part| part.content_range()),
+            )),
             _ => None,
         }
     }
@@ -505,7 +508,7 @@ impl Definitions {
             {
                 self.dunder_all
                     .entries
-                    .push(DunderAllEntry::Name(def.range, name.clone()));
+                    .push(DunderAllEntry::Name(def.range, name.clone(), None));
             }
         }
     }
@@ -526,7 +529,7 @@ impl Definitions {
             if let Some(def) = self.definitions.get(name) {
                 self.dunder_all
                     .entries
-                    .push(DunderAllEntry::Name(def.range, name.clone()))
+                    .push(DunderAllEntry::Name(def.range, name.clone(), None))
             }
         }
     }
@@ -986,13 +989,14 @@ impl DefinitionsBuilder {
                             }
                         },
                         "remove" => {
-                            if let Some(DunderAllEntry::Name(range, remove)) =
+                            if let Some(DunderAllEntry::Name(range, remove, content_range)) =
                                 DunderAllEntry::as_item(&arguments.args[0])
                             {
-                                self.inner
-                                    .dunder_all
-                                    .entries
-                                    .push(DunderAllEntry::Remove(range, remove));
+                                self.inner.dunder_all.entries.push(DunderAllEntry::Remove(
+                                    range,
+                                    remove,
+                                    content_range,
+                                ));
                             }
                         }
                         _ => {}
@@ -1245,9 +1249,12 @@ mod tests {
 
     fn unrange(x: &mut DunderAllEntry) {
         match x {
-            DunderAllEntry::Name(range, _)
-            | DunderAllEntry::Module(range, _)
-            | DunderAllEntry::Remove(range, _) => {
+            DunderAllEntry::Name(range, _, content_range)
+            | DunderAllEntry::Remove(range, _, content_range) => {
+                *range = TextRange::default();
+                *content_range = None;
+            }
+            DunderAllEntry::Module(range, _) => {
                 *range = TextRange::default();
             }
         }
@@ -1420,6 +1427,42 @@ def bar(x: str) -> str: ...
     }
 
     #[test]
+    fn test_all_content_ranges() {
+        let source = "__all__ = [r'foo', \"\"\"bar\"\"\", 'ba' 'z']\n__all__.remove('foo')\n";
+        let defs = Definitions::new(
+            &Ast::parse(source, PySourceType::Python).0.body,
+            ModuleName::from_str("main"),
+            false,
+            SysInfo::default(),
+        );
+        let entries = defs
+            .dunder_all
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                DunderAllEntry::Name(range, name, content_range)
+                | DunderAllEntry::Remove(range, name, content_range) => (
+                    &source[*range],
+                    name.as_str(),
+                    content_range.map(|range| &source[range]),
+                ),
+                DunderAllEntry::Module(..) => {
+                    unreachable!("The fixture contains only string entries")
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec![
+                ("r'foo'", "foo", Some("foo")),
+                ("\"\"\"bar\"\"\"", "bar", Some("bar")),
+                ("'ba' 'z'", "baz", None),
+                ("'foo'", "foo", Some("foo")),
+            ],
+        );
+    }
+
+    #[test]
     fn test_all() {
         let defs = calculate_unranged_definitions_with_defaults(
             r#"
@@ -1442,10 +1485,10 @@ __all__.remove('r')
         assert_eq!(defs.dunder_all.kind, DunderAllKind::Specified);
 
         let loc = TextRange::default();
-        let a = &DunderAllEntry::Name(loc, Name::new_static("a"));
-        let b = &DunderAllEntry::Name(loc, Name::new_static("b"));
+        let a = &DunderAllEntry::Name(loc, Name::new_static("a"), None);
+        let b = &DunderAllEntry::Name(loc, Name::new_static("b"), None);
         let foo = &DunderAllEntry::Module(loc, ModuleName::from_str("foo"));
-        let r = &DunderAllEntry::Remove(loc, Name::new_static("r"));
+        let r = &DunderAllEntry::Remove(loc, Name::new_static("r"), None);
         assert_eq!(
             defs.dunder_all.entries.map(|x| x),
             vec![a, b, a, b, foo, a, b, foo, a, r]
@@ -1483,8 +1526,8 @@ __all__: list[str] = ["a", "b"]
         assert_definition_names(&defs, &["a", "b", "__all__"]);
         assert_eq!(defs.dunder_all.kind, DunderAllKind::Specified);
         let loc = TextRange::default();
-        let a = &DunderAllEntry::Name(loc, Name::new_static("a"));
-        let b = &DunderAllEntry::Name(loc, Name::new_static("b"));
+        let a = &DunderAllEntry::Name(loc, Name::new_static("a"), None);
+        let b = &DunderAllEntry::Name(loc, Name::new_static("b"), None);
         assert_eq!(defs.dunder_all.entries.map(|x| x), vec![a, b]);
     }
 
@@ -1521,8 +1564,8 @@ __all__ = ["a"] + ["b"]
         );
         assert_eq!(defs.dunder_all.kind, DunderAllKind::Specified);
         let loc = TextRange::default();
-        let a = &DunderAllEntry::Name(loc, Name::new_static("a"));
-        let b = &DunderAllEntry::Name(loc, Name::new_static("b"));
+        let a = &DunderAllEntry::Name(loc, Name::new_static("a"), None);
+        let b = &DunderAllEntry::Name(loc, Name::new_static("b"), None);
         assert_eq!(defs.dunder_all.entries.map(|x| x), vec![a, b]);
     }
 
@@ -1536,7 +1579,7 @@ __all__ = ["a"] + foo.__all__
         );
         assert_eq!(defs.dunder_all.kind, DunderAllKind::Specified);
         let loc = TextRange::default();
-        let a = &DunderAllEntry::Name(loc, Name::new_static("a"));
+        let a = &DunderAllEntry::Name(loc, Name::new_static("a"), None);
         let foo = &DunderAllEntry::Module(loc, ModuleName::from_str("foo"));
         assert_eq!(defs.dunder_all.entries.map(|x| x), vec![a, foo]);
     }
@@ -1552,7 +1595,7 @@ __all__ = [*foo.__all__, "a"]
         assert_eq!(defs.dunder_all.kind, DunderAllKind::Specified);
         let loc = TextRange::default();
         let foo = &DunderAllEntry::Module(loc, ModuleName::from_str("foo"));
-        let a = &DunderAllEntry::Name(loc, Name::new_static("a"));
+        let a = &DunderAllEntry::Name(loc, Name::new_static("a"), None);
         assert_eq!(defs.dunder_all.entries.map(|x| x), vec![foo, a]);
     }
 

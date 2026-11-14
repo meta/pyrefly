@@ -27,6 +27,7 @@ use pyrefly_python::ignore::Ignore;
 use pyrefly_python::ignore::Tool;
 use pyrefly_python::ignore::TypeIgnoreUnknownTagBehavior;
 use pyrefly_python::module::Module;
+use pyrefly_python::module::TextRangeWithModule;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_types::callable::Callable;
@@ -1655,7 +1656,7 @@ pub fn get_hover_with_verbosity(
                     item.module.code_at(item.definition_range) == identifier.id.as_str()
                 })
         });
-    let interface_definition = definition.as_ref().and_then(|executable| {
+    let interface_docstring = definition.as_ref().and_then(|executable| {
         if keyword_argument_identifier.is_some() {
             return None;
         }
@@ -1676,6 +1677,22 @@ pub fn get_hover_with_verbosity(
                 interface.module.path().is_interface()
                     && executable.metadata.symbol_kind() == interface.metadata.symbol_kind()
                     && executable.display_name == interface.display_name
+            })
+            .and_then(|interface| {
+                interface
+                    .docstring_range
+                    .map(|range| Docstring(range, interface.module))
+            })
+            .or_else(|| {
+                let (interface, docstring_range) = transaction
+                    .find_corresponding_interface_definition(
+                        *handle.sys_info(),
+                        &TextRangeWithModule::new(
+                            executable.module.dupe(),
+                            executable.definition_range,
+                        ),
+                    )?;
+                Some(Docstring(docstring_range?, interface.module))
             })
     });
     let hover_constructor_dunder = definition
@@ -1700,11 +1717,7 @@ pub fn get_hover_with_verbosity(
     } else {
         (None, fallback_name_from_type, None)
     };
-    let docstring = interface_definition
-        .and_then(|item| {
-            item.docstring_range
-                .map(|range| Docstring(range, item.module))
-        })
+    let docstring = interface_docstring
         .and_then(nonempty_docstring)
         .or_else(|| fallback_docstring.and_then(nonempty_docstring))
         .or_else(|| docstring_for_class_object_type(transaction, handle, &type_));

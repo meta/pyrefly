@@ -3727,6 +3727,38 @@ pub struct BindingClassField {
     pub definition: ClassFieldDefinition,
 }
 
+impl BindingClassField {
+    /// Extract literal slot names and their editable content ranges from the checked field.
+    pub fn explicit_slots(&self) -> Option<Vec<(Name, Option<TextRange>)>> {
+        let ClassFieldDefinition::AssignedInBody { value, .. } = &self.definition else {
+            return None;
+        };
+        let ExprOrBinding::Expr(expr) = value.as_ref() else {
+            return None;
+        };
+        let name_of = |expr: &Expr| match expr {
+            Expr::StringLiteral(literal) => Some((
+                Name::new(literal.value.to_str()),
+                literal
+                    .as_single_part_string()
+                    .map(|part| part.content_range()),
+            )),
+            _ => None,
+        };
+        match expr {
+            Expr::Tuple(tuple) => tuple.elts.iter().map(name_of).collect(),
+            Expr::List(list) => list.elts.iter().map(name_of).collect(),
+            Expr::Dict(dict) => dict
+                .items
+                .iter()
+                .map(|item| item.key.as_ref().and_then(name_of))
+                .collect(),
+            Expr::StringLiteral(_) => Some(vec![name_of(expr)?]),
+            _ => None,
+        }
+    }
+}
+
 impl DisplayWith<Bindings> for BindingClassField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Bindings) -> fmt::Result {
         write!(
