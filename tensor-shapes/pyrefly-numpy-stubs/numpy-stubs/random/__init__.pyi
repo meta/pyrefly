@@ -12,9 +12,13 @@ from numpy._shapes import (
 from numpy._typing import (
     _ArrayLikeFloat_co,
     _ArrayLikeInt_co,
+    _DTypeLike,
     _FloatLike_co,
+    _Int64Codes,
     _ShapeLike,
     ArrayLike,
+    DTypeLike,
+    NDArray,
 )
 from numpy.random._generator import (
     _ArrayF32,
@@ -22,6 +26,7 @@ from numpy.random._generator import (
     _DTypeLikeF32,
     _DTypeLikeF64,
     _DTypeLikeFloat,
+    _DTypeLikeI64,
     _MethodExp,
     _NDArrayLikeFloat,
     Generator as _NumpyGenerator,
@@ -99,7 +104,7 @@ from numpy.random.mtrand import (
 )
 from shape_extensions import broadcast, Int, IntTuple, IntVar
 
-from .. import dtype, float32, float64, ndarray
+from .. import bool as _bool, dtype, float32, float64, int64, integer, ndarray
 
 @overload
 def randn() -> float: ...
@@ -165,6 +170,156 @@ class Generator(_NumpyGenerator):
     ) -> ndarray[Shape, dtype[float64]]: ...
     @overload
     def standard_cauchy(self, size: _ShapeLike) -> _ArrayF64: ...
+    @overload
+    def integers[AnyIntT: (bool, int)](
+        self,
+        low: int,
+        high: int | None = None,
+        size: None = None,
+        *,
+        dtype: type[AnyIntT],
+        endpoint: bool = False,
+    ) -> AnyIntT: ...
+    @overload
+    def integers[ScalarT: integer | _bool](
+        self,
+        low: int,
+        high: int | None = None,
+        size: None = None,
+        *,
+        dtype: _DTypeLike[ScalarT],
+        endpoint: bool = False,
+    ) -> ScalarT: ...
+    @overload
+    def integers(
+        self,
+        low: int,
+        high: int | None = None,
+        size: None = None,
+        dtype: _DTypeLikeI64 = ...,
+        endpoint: bool = False,
+    ) -> int64: ...
+    @overload
+    def integers(
+        self,
+        low: int,
+        high: int | None = None,
+        size: None = None,
+        dtype: DTypeLike | None = ...,
+        endpoint: bool = False,
+    ) -> Any: ...
+    # With `size`, the result has exactly that shape, and NumPy raises if `low` or
+    # `high` does not broadcast to it. Without `dtype`, `ScalarT` defaults to `int64`.
+    @overload
+    def integers[N: IntVar, ScalarT: integer | _bool = int64](
+        self,
+        low: _ArrayLikeInt_co,
+        high: _ArrayLikeInt_co | None,
+        size: Int[N],
+        dtype: _DTypeLike[ScalarT] | _Int64Codes = ...,
+        endpoint: bool = False,
+    ) -> ndarray[[N], dtype[ScalarT]]: ...
+    @overload
+    def integers[Shape: IntTuple, ScalarT: integer | _bool = int64](
+        self,
+        low: _ArrayLikeInt_co,
+        high: _ArrayLikeInt_co | None,
+        size: Shape,
+        dtype: _DTypeLike[ScalarT] | _Int64Codes = ...,
+        endpoint: bool = False,
+    ) -> ndarray[Shape, dtype[ScalarT]]: ...
+    @overload
+    def integers[N: IntVar, ScalarT: integer | _bool = int64](
+        self,
+        low: _ArrayLikeInt_co,
+        high: _ArrayLikeInt_co | None = None,
+        *,
+        size: Int[N],
+        dtype: _DTypeLike[ScalarT] | _Int64Codes = ...,
+        endpoint: bool = False,
+    ) -> ndarray[[N], dtype[ScalarT]]: ...
+    @overload
+    def integers[Shape: IntTuple, ScalarT: integer | _bool = int64](
+        self,
+        low: _ArrayLikeInt_co,
+        high: _ArrayLikeInt_co | None = None,
+        *,
+        size: Shape,
+        dtype: _DTypeLike[ScalarT] | _Int64Codes = ...,
+        endpoint: bool = False,
+    ) -> ndarray[Shape, dtype[ScalarT]]: ...
+    # Without `size`, the result has the broadcast shape of `low` and `high`.
+    @overload
+    def integers[
+        LowShape: IntTuple = [],
+        HighShape: IntTuple = [],
+        ScalarT: integer | _bool = int64,
+    ](
+        self,
+        low: ndarray[LowShape] | int,
+        high: ndarray[HighShape] | int | None = None,
+        size: None = None,
+        dtype: _DTypeLike[ScalarT] | _Int64Codes = ...,
+        endpoint: bool = False,
+    ) -> ndarray[broadcast(LowShape, HighShape), dtype[ScalarT]]: ...
+    @overload
+    def integers[ScalarT: integer | _bool](
+        self,
+        low: _ArrayLikeInt_co,
+        high: _ArrayLikeInt_co | None = None,
+        *,
+        size: _ShapeLike,
+        dtype: _DTypeLike[ScalarT],
+        endpoint: bool = False,
+    ) -> NDArray[ScalarT]: ...
+    @overload
+    def integers(
+        self,
+        low: _ArrayLikeInt_co,
+        high: _ArrayLikeInt_co | None = None,
+        *,
+        size: _ShapeLike,
+        dtype: _DTypeLikeI64 = ...,
+        endpoint: bool = False,
+    ) -> NDArray[int64]: ...
+    @overload
+    def integers(
+        self,
+        low: _ArrayLikeInt_co,
+        high: _ArrayLikeInt_co | None = None,
+        *,
+        size: _ShapeLike,
+        dtype: DTypeLike | None = ...,
+        endpoint: bool = False,
+    ) -> ndarray: ...
+    @overload
+    def integers[ScalarT: integer | _bool](
+        self,
+        low: _ArrayLikeInt_co,
+        high: _ArrayLikeInt_co | None = None,
+        size: _ShapeLike | None = None,
+        *,
+        dtype: _DTypeLike[ScalarT],
+        endpoint: bool = False,
+    ) -> NDArray[ScalarT] | Any: ...
+    @overload
+    def integers(
+        self,
+        low: _ArrayLikeInt_co,
+        high: _ArrayLikeInt_co | None = None,
+        size: _ShapeLike | None = None,
+        dtype: _DTypeLikeI64 = ...,
+        endpoint: bool = False,
+    ) -> NDArray[int64] | Any: ...
+    @overload
+    def integers(
+        self,
+        low: _ArrayLikeInt_co,
+        high: _ArrayLikeInt_co | None = None,
+        size: _ShapeLike | None = None,
+        dtype: DTypeLike | None = ...,
+        endpoint: bool = False,
+    ) -> ndarray | Any: ...
     @overload
     def multivariate_normal[MeanShape: IntTuple, CovShape: IntTuple](
         self,
