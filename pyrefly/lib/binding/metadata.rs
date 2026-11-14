@@ -13,7 +13,6 @@
 
 use pyrefly_types::class::ClassDefIndex;
 use pyrefly_types::class::ClassFields;
-use ruff_python_ast::name::Name;
 
 /// Metadata for a single class definition, populated during binding.
 #[derive(Debug, Clone, Default)]
@@ -67,10 +66,5 @@ impl BindingsMetadata {
 
     pub fn get_class_mut(&mut self, idx: ClassDefIndex) -> &mut ClassMetadata {
         &mut self.classes[idx.0 as usize]
-    }
-
-    /// Return whether any class in this module defines a field with this name.
-    pub fn has_class_field(&self, name: &Name) -> bool {
-        self.classes.iter().any(|class| class.fields.contains(name))
     }
 }

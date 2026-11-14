@@ -139,6 +139,48 @@ fn references_dunder_all_in_unopened_reexports() {
     interaction.shutdown().unwrap();
 }
 
+#[test]
+fn references_dunder_slots_in_unopened_subclass() {
+    let root = TempDir::new().unwrap();
+    for (file, code) in [
+        ("base.py", "class Base:\n    foo: int\n"),
+        (
+            "child.py",
+            "from base import Base\nclass Child(Base):\n    __slots__ = ['foo']\n",
+        ),
+        (
+            "other.py",
+            "from base import Base\nclass Other:\n    __slots__ = ['foo']\n    foo: str\n",
+        ),
+    ] {
+        fs::write(root.path().join(file), code).unwrap();
+    }
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![(
+                "test".to_owned(),
+                Uri::from_file_path(root.path()).unwrap(),
+            )]),
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.client.did_open("base.py");
+    let child_uri = Uri::from_file_path(root.path().join("child.py")).unwrap();
+    interaction.client.references("base.py", 1, 5, false).expect_response(json!([
+        {"uri": child_uri, "range": {"start": {"line": 2, "character": 18}, "end": {"line": 2, "character": 21}}},
+    ])).unwrap();
+    interaction.shutdown().unwrap();
+}
+
 // https://github.com/meta/pyrefly/issues/5485
 #[test]
 fn test_references_to_class_member_after_defining_file_shifts() {

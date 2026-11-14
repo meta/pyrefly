@@ -2034,7 +2034,7 @@ impl<'a> Transaction<'a> {
     }
 
     /// The references in `references_by_module` that point at the definition at `definition_range`
-    /// in `module`. Both `Index` attribute reference maps are keyed and shaped alike, so they share
+    /// in `module`. The `Index` attribute reference maps are keyed and shaped alike, so they share
     /// this scan.
     fn recorded_attribute_references(
         &self,
@@ -5000,45 +5000,16 @@ impl<'a> Transaction<'a> {
             ));
         }
         if is_attribute
-            && self
-                .get_bindings_metadata(handle)
-                .is_some_and(|metadata| metadata.has_class_field(&dunder::SLOTS))
-            && let Some(ast) = self.get_ast(handle)
+            && let Some(index) = self
+                .get_solutions(handle)
+                .and_then(|solutions| solutions.get_index())
         {
-            fn collect(expr: &Expr, name: &Name, ranges: &mut Vec<TextRange>) {
-                if let Expr::StringLiteral(literal) = expr
-                    && literal.value.to_str() == name.as_str()
-                    && let Some(part) = literal.as_single_part_string()
-                {
-                    ranges.push(part.content_range());
-                }
-                expr.recurse(&mut |expr| collect(expr, name, ranges));
-            }
-            let mut literals = Vec::new();
-            ast.visit(&mut |expr| collect(expr, &definition_name, &mut literals));
-            let matches_definition = definition_matcher(module, definition_range);
-            for range in literals {
-                if dunder_slots_entry(&Ast::locate_node(&ast, range.start())).is_some()
-                    && let Ok(definitions) = self.find_definition(
-                        handle,
-                        range.start(),
-                        FindPreference {
-                            import_behavior: ImportBehavior::StopAtRenamedImports,
-                            resolve_call_dunders: false,
-                            ..Default::default()
-                        },
-                    )
-                    && definitions.iter().any(|definition| {
-                        definition.module.path().as_path() == module.path().as_path()
-                            && matches_definition(
-                                definition.definition_range,
-                                definition.module.code_at(definition.definition_range),
-                            )
-                    })
-                {
-                    references.push(range);
-                }
-            }
+            references.extend(self.recorded_attribute_references(
+                handle,
+                &index.lock().slot_references,
+                module,
+                definition_range,
+            ));
         }
         references.sort_by_key(|range| range.start());
         references.dedup();
@@ -6079,23 +6050,6 @@ fn find_global_references_from_definition_impl<T: RdepTransaction>(
             // Keyword argument references require each candidate's AST and bindings to resolve the
             // callee and refine the argument back to this parameter.
             transaction.run_for_handles(&candidate_handles, Require::Everything)?;
-        } else if matches!(
-            definition_kind,
-            DefinitionMetadata::Attribute | DefinitionMetadata::VariableOrAttribute(_)
-        ) {
-            // Slot strings require the candidate's class bindings for attribute resolution.
-            let slots_handles = candidate_handles
-                .iter()
-                .filter(|handle| {
-                    transaction
-                        .bindings_metadata(handle)
-                        .is_some_and(|metadata| metadata.has_class_field(&dunder::SLOTS))
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if !slots_handles.is_empty() {
-                transaction.run_for_handles(&slots_handles, Require::Everything)?;
-            }
         }
         results.extend(process_candidate_handles_with_definition_impl(
             transaction,

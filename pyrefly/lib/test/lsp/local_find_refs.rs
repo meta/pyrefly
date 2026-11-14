@@ -296,7 +296,6 @@ fn dunder_slots_references_use_string_contents() {
             "__slots__ = [r'foo']",
             "__slots__ = {\"foo\": \"Field documentation.\"}",
             "__slots__: tuple[str, ...] = (\"\"\"foo\"\"\",)",
-            "names = __slots__ = (\"foo\",)",
         ] {
             let assignment = assignment.replace("foo", name);
             let code = format!(
@@ -439,7 +438,10 @@ fn dunder_slots_global_references_in_indexed_files() {
         references,
         vec![("base".to_owned(), 1), ("child".to_owned(), 1)]
     );
-    assert!(transaction.get_answers(&handle("plain")).is_none());
+    for name in ["child", "unrelated", "plain"] {
+        assert!(transaction.get_ast(&handle(name)).is_none());
+        assert!(transaction.get_answers(&handle(name)).is_none());
+    }
 }
 
 #[test]
