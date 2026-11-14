@@ -27,6 +27,7 @@ use crate::alt::answers::Answers;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers::Solutions;
 use crate::binding::bindings::Bindings;
+use crate::config::base::ClassDecoratorBehavior;
 use crate::config::base::InferReturnTypes;
 use crate::config::base::RecursionLimitConfig;
 use crate::error::collector::ErrorCollector;
@@ -64,6 +65,7 @@ pub struct Context<'a, Lookup> {
     pub lookup: &'a Lookup,
     pub check_unannotated_defs: bool,
     pub infer_return_types: InferReturnTypes,
+    pub class_decorator_behavior: ClassDecoratorBehavior,
     pub infer_with_first_use: bool,
     pub tensor_shapes: bool,
     pub use_shape_comments_and_stubs: bool,
@@ -562,6 +564,7 @@ impl Step {
         exports: Arc<Exports>,
     ) -> Arc<Answers> {
         let solver = Solver::new(SolverConfig {
+            class_decorator_behavior: ctx.class_decorator_behavior,
             infer_with_first_use: ctx.infer_with_first_use,
             tensor_shapes: ctx.tensor_shapes,
             strict_callable_subtyping: ctx.strict_callable_subtyping,

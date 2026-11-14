@@ -8607,6 +8607,62 @@ def named_variadic(x: Float[Array, "*batch channels"]) -> None:
 );
 
 testcase!(
+    test_shape_vars_decorator_preserves_class,
+    shape_extensions_env(),
+    r#"
+import shape_extensions as se
+from shape_extensions import shape_vars
+from shape_extensions import shape_vars as array_metadata
+from typing import assert_type
+
+@shape_vars("N")
+class Direct:
+    value: int = 1
+
+@array_metadata("N")
+class Alias:
+    value: int = 1
+
+@se.shape_vars("N")
+class Qualified:
+    value: int = 1
+
+assert_type(Direct().value, int)
+assert_type(Alias().value, int)
+assert_type(Qualified().value, int)
+
+def check_shapes(direct: Direct[3], alias: Alias[3], qualified: Qualified[3]) -> None:
+    assert_type(direct.value, int)
+    assert_type(alias.value, int)
+    assert_type(qualified.value, int)
+
+# Invalid bare metadata decorators still preserve the class during recovery.
+@shape_vars  # E: `@shape_vars` requires a declaration string
+class Bare:
+    value: int = 1
+
+assert_type(Bare, type[Bare])
+assert_type(Bare().value, int)
+"#,
+);
+
+testcase!(
+    test_shape_vars_decorator_name_is_not_metadata,
+    shape_extensions_env(),
+    r#"
+from typing import Callable, assert_type
+
+# Only the special export is metadata, not an unrelated function with the same name.
+def shape_vars(declaration: str) -> Callable[[type], int]: ...
+
+@shape_vars("N")
+class Ordinary: ...
+
+assert_type(Ordinary, int)
+"#,
+);
+
+testcase!(
     test_assert_type_gradual_shape_not_equivalent_to_concrete,
     shape_extensions_env(),
     r#"
