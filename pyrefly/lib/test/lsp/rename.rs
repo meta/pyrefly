@@ -19,6 +19,7 @@ use ruff_text_size::TextSize;
 use tempfile::TempDir;
 
 use crate::state::lsp::FindPreference;
+use crate::state::lsp::ImportBehavior;
 use crate::state::lsp::ReferenceOptions;
 use crate::state::require::Require;
 use crate::state::state::State;
@@ -91,6 +92,7 @@ fn replace_paired_references(
             &source_handle,
             TextSize::try_from(position).unwrap(),
             FindPreference {
+                import_behavior: ImportBehavior::StopAtRenamedImports,
                 resolve_call_dunders: false,
                 ..Default::default()
             },
@@ -361,8 +363,7 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
     )
 }
 
-// BUG: prepare_rename returns None for __all__ and __slots__ entries.
-// It should return the range of foo or bar inside the quotes (issue #4344).
+// BUG: prepare_rename returns None for the __slots__ entry (issue #4344).
 #[test]
 fn prepare_rename_symbol_literals() {
     let code = r#"
@@ -378,17 +379,26 @@ class C:
         self.bar = 1
 "#;
     let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
-        format!(
-            "Rename range: {:?}",
-            state.transaction().prepare_rename(handle, position)
-        )
+        let transaction = state.transaction();
+        match transaction.prepare_rename(handle, position) {
+            Some(range) => {
+                let module = transaction.get_module_info(handle).unwrap();
+                format!(
+                    "Rename range:\n{}",
+                    code_frame_of_source_at_range(module.contents(), range)
+                )
+            }
+            None => "Rename range: None".to_owned(),
+        }
     });
     assert_eq!(
         r#"
 # main.py
 3 | __all__ = ["foo"]
                  ^
-Rename range: None
+Rename range:
+3 | __all__ = ["foo"]
+                ^^^
 
 7 |     __slots__ = ("bar",)
                        ^
@@ -396,6 +406,76 @@ Rename range: None
 "#
         .trim(),
         report.trim(),
+    );
+}
+
+#[test]
+fn test_prepare_rename_dunder_all_entries() {
+    for name in ["foo", "café", "变量"] {
+        let source = format!(
+            "{name} = 1\n__all__ = [\"{name}\", r'{name}', \"\"\"{name}\"\"\"]\n__all__.append(\"{name}\")\n__all__.extend([\"{name}\"])\n__all__.remove(\"{name}\")\n"
+        );
+        let (state, handle) = TestEnv::one("main", &source).to_state();
+        let handle = handle("main");
+        let transaction = state.transaction();
+        for (start, text) in source.match_indices(name).skip(1) {
+            let range = TextRange::at(TextSize::try_from(start).unwrap(), TextSize::of(text));
+            for position in [range.start(), range.end()] {
+                assert_eq!(transaction.prepare_rename(&handle, position), Some(range));
+            }
+            assert_eq!(
+                rename_local_symbol(&source, start),
+                source.replace(name, "renamed"),
+            );
+        }
+    }
+}
+
+#[test]
+fn test_prepare_rename_dunder_all_rejects_invalid_targets() {
+    for (source, literal) in [
+        ("foo = 1\n__all__ = [\"foo\"]\ntext = \"foo\"\n", "\"foo\""),
+        ("__all__ = [\"missing\"]\n", "\"missing\""),
+        ("foo = 1\n__all__ = [\"f\" \"oo\"]\n", "\"f\""),
+        ("from math import sin\n__all__ = [\"sin\"]\n", "\"sin\""),
+    ] {
+        let (state, handle) = TestEnv::one("main", source).to_state();
+        let handle = handle("main");
+        let position = TextSize::try_from(source.rfind(literal).unwrap() + 1).unwrap();
+        assert_eq!(state.transaction().prepare_rename(&handle, position), None);
+    }
+}
+
+#[test]
+fn test_prepare_rename_dunder_all_import_alias() {
+    let source = "from math import sin as alias\n__all__ = [\"alias\"]\nalias(0.0)\n";
+    let (state, handle) = TestEnv::one("main", source).to_state();
+    let handle = handle("main");
+    let position = source.find("\"alias\"").unwrap() + 1;
+    let range = TextRange::at(TextSize::try_from(position).unwrap(), TextSize::of("alias"));
+    assert_eq!(
+        state.transaction().prepare_rename(&handle, range.start()),
+        Some(range),
+    );
+    assert_eq!(
+        rename_local_symbol(source, position),
+        source.replace("alias", "renamed"),
+    );
+}
+
+#[test]
+fn test_rename_dunder_all_updates_source_stub_and_consumers() {
+    let source = "foo = 1\n__all__ = ['foo']\n";
+    let stub = "foo: int\n__all__ = ['foo']\n";
+    let consumer = "from lib import foo\n__all__ = ['foo']\nfoo\n";
+    let position = source.find("'foo'").unwrap() + 1;
+    assert_eq!(
+        rename_paired_symbol(source, stub, consumer, None, position),
+        vec![
+            ("consumer.py".to_owned(), consumer.replace("foo", "renamed")),
+            ("lib.py".to_owned(), source.replace("foo", "renamed")),
+            ("lib.pyi".to_owned(), stub.replace("foo", "renamed")),
+        ],
     );
 }
 
