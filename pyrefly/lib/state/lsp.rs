@@ -113,6 +113,7 @@ use crate::state::state::Transaction;
 use crate::state::state::TransactionHandle;
 use crate::types::module::ModuleType;
 use crate::types::type_var::Restriction;
+use crate::types::types::AnyStyle;
 use crate::types::types::Type;
 
 mod dict_completions;
@@ -380,18 +381,6 @@ fn definition_matcher(
             || (candidate_name == definition_name
                 && module.to_lsp_position(candidate_range.start()).line == definition_line)
     }
-}
-
-/// Return the content range of a single string literal with the given expression range.
-fn string_literal_content_range(ast: &ModModule, range: TextRange) -> Option<TextRange> {
-    Ast::locate_node(ast, range.start())
-        .into_iter()
-        .find_map(|node| match node {
-            AnyNodeRef::ExprStringLiteral(literal) if literal.range() == range => {
-                Some(literal.as_single_part_string()?.content_range())
-            }
-            _ => None,
-        })
 }
 
 /// Parses a forward-reference string such as `"list[Foo]"` into the expression the binder
@@ -4654,18 +4643,29 @@ impl<'a> Transaction<'a> {
 
     pub fn prepare_rename(&self, handle: &Handle, position: TextSize) -> Option<TextRange> {
         let identifier_context = self.identifier_at(handle, position);
-        let dunder_all_entry = self.get_exports_data(handle).dunder_all_name_at(position);
+        let answers = self.get_answers(handle)?;
+        let bindings = answers.bindings();
+        let dunder_all_entry = bindings
+            .dunder_all_entries()
+            .iter()
+            .find(|entry| entry.range.contains_inclusive(position));
+        // A string can be renamed only when it identifies an editable, resolved binding.
+        if let Some(entry) = dunder_all_entry {
+            let key = bindings.dunder_all_binding(&entry.id)?;
+            if matches!(
+                bindings.get(bindings.key_to_idx(key)),
+                Binding::Any(AnyStyle::Error)
+            ) {
+                return None;
+            }
+        }
 
         let definitions = self
             .find_definition(
                 handle,
                 position,
                 FindPreference {
-                    import_behavior: if dunder_all_entry.is_some() {
-                        ImportBehavior::StopAtRenamedImports
-                    } else {
-                        ImportBehavior::JumpThroughEverything
-                    },
+                    import_behavior: ImportBehavior::StopAtRenamedImports,
                     resolve_call_dunders: false,
                     ..Default::default()
                 },
@@ -4675,15 +4675,9 @@ impl<'a> Transaction<'a> {
 
         if dunder_all_entry.is_some()
             && (definitions.is_empty()
-                || definitions.iter().any(|definition| {
-                    let handle = handle
-                        .for_module(definition.module.name(), definition.module.path().dupe());
-                    definition.module.path().is_bundled()
-                        || self
-                            .get_exports_data(&handle)
-                            .dunder_all_name_at(definition.definition_range.start())
-                            .is_some()
-                }))
+                || definitions
+                    .iter()
+                    .any(|definition| definition.module.path().is_bundled()))
         {
             return None;
         }
@@ -4720,11 +4714,7 @@ impl<'a> Transaction<'a> {
                 self.setattr_name_literal_at(handle, position)
                     .map(|(name, _)| name.range)
             })
-            .or_else(|| {
-                let (range, _) = dunder_all_entry?;
-                let ast = self.get_ast(handle)?;
-                string_literal_content_range(&ast, range)
-            })
+            .or_else(|| dunder_all_entry.map(|entry| entry.range))
     }
 
     pub fn find_local_references(
